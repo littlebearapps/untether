@@ -755,6 +755,20 @@ async def _notify_live_listeners(
             )
 
 
+def _expire_session_wakeups(session_id: str) -> None:
+    """#925 review: expire the session's pending Untether wake-up entries at
+    a ``wake_cap`` close (cron entries untouched; no-op with the kill
+    switch). Never raises — a scheduler error must not block the close."""
+    try:
+        from .. import loop_scheduler
+
+        loop_scheduler.expire_wakeups_for_session(session_id, reason="wake_cap")
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "loop.wake_cap_expire_failed", session_id=session_id, exc_info=True
+        )
+
+
 async def close_live_session(
     session_id: str,
     reason: str,
@@ -806,6 +820,11 @@ async def close_live_session(
         live.close_hooks = candidates if count else []
         live.close_hook_count = count
         live.close_hook_procs = None if shells is None else len(shells)
+    if reason == "wake_cap":
+        # #925 review: the pending wake-up dies with the process — and so
+        # must its Untether wake-up entry, or its timer resumes the session
+        # and the chain restarts at zero (the notice says it was cancelled).
+        _expire_session_wakeups(session_id)
     tasks = live_task_descriptions(live.state)
     live.close_tasks = list(tasks)
     logger.info(

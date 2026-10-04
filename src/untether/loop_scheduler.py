@@ -70,6 +70,7 @@ __all__ = [
     "clear_cron_suppressed",
     "cron_suppressed_until",
     "entry_summary",
+    "expire_wakeups_for_session",
     "install",
     "is_do_not_resume",
     "mark_cron_suppressed",
@@ -570,6 +571,31 @@ def cancel_pending_for_chat(
             scoped=thread_filter is not None,
         )
     return cancelled
+
+
+def expire_wakeups_for_session(session_id: str, *, reason: str = "wake_cap") -> int:
+    """#925 review: expire ``session_id``'s pending ScheduleWakeup entries.
+
+    A Loop-on ScheduleWakeup longer than the inline threshold also registers
+    an Untether wake-up entry. When the wake cap closes the session, that
+    entry would otherwise resume it later and restart the chain at zero, so
+    the cap never stops anything. Cron entries (``kind == "cron"``) keep
+    their own caps and are untouched. Each expiry logs ``loop.expired`` and
+    is persisted. No-op with ``[loop] own_schedule = false`` (the wake cap is
+    off then). Returns the number expired.
+    """
+    if not own_schedule_enabled():
+        return 0
+    expired = 0
+    for entry in list(_PENDING_BY_TOKEN.values()):
+        if (
+            entry.kind == "wakeup"
+            and entry.resume_token == session_id
+            and not entry.cancelled
+        ):
+            _expire(entry, reason=reason)
+            expired += 1
+    return expired
 
 
 def _drop_indexes(entry: _LoopEntry) -> None:

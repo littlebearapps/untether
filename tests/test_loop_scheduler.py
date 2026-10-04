@@ -1535,3 +1535,96 @@ class TestSuppressionPersistence:
             tg.cancel_scope.cancel()
         assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(until)
         assert loop_scheduler._DO_NOT_RESUME_AT["S"] == pytest.approx(at)
+
+
+# ── #925 review: the wake cap also expires Untether wake-up entries ─────
+
+
+class TestExpireWakeupsForSession:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @staticmethod
+    def _wakeup(session_id: str, tool_use_id: str, chat_id: int = 360) -> str:
+        return loop_scheduler.register_pending_wakeup(
+            session_id=session_id,
+            tool_use_id=tool_use_id,
+            delay_seconds=600.0,
+            prompt="check again",
+            chat_id=chat_id,
+        )
+
+    async def test_expires_only_this_sessions_wakeups(self, tmp_path: Path):
+        from structlog.testing import capture_logs
+
+        state_path = tmp_path / "active_loops.json"
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            try:
+                mine = self._wakeup("sess-cap", "tu-w1")
+                other = self._wakeup("sess-other", "tu-w2")
+                cron = _register_simple_cron(
+                    chat_id=360, session_id="sess-cap", tool_use_id="tu-c1"
+                )
+                with capture_logs() as logs:
+                    count = loop_scheduler.expire_wakeups_for_session(
+                        "sess-cap", reason="wake_cap"
+                    )
+                assert count == 1
+                tokens = {e.token for e in loop_scheduler.pending_for_chat(360)}
+                assert tokens == {other, cron}
+                assert loop_scheduler.next_fire_for_session("sess-cap") is not None
+                expired = [e for e in logs if e["event"] == "loop.expired"]
+                assert [(e["token"], e["reason"]) for e in expired] == [
+                    (mine, "wake_cap")
+                ]
+                # Persisted: the expired wake-up is gone from the state file.
+                assert mine.encode() not in state_path.read_bytes()
+                assert cron.encode() in state_path.read_bytes()
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_unknown_session_is_noop(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                self._wakeup("sess-a", "tu-a")
+                assert loop_scheduler.expire_wakeups_for_session("sess-zzz") == 0
+                assert loop_scheduler.active_count() == 1
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_noop_when_own_schedule_false(self, monkeypatch):
+        monkeypatch.setattr(loop_scheduler, "own_schedule_enabled", lambda: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                self._wakeup("sess-ks", "tu-ks")
+                assert loop_scheduler.expire_wakeups_for_session("sess-ks") == 0
+                assert loop_scheduler.active_count() == 1
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_expired_wakeup_never_fires(self, monkeypatch):
+        recorder = RunJobRecorder()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="sess-fire",
+                    tool_use_id="tu-fire",
+                    delay_seconds=0.2,
+                    prompt="wake",
+                    chat_id=361,
+                )
+                loop_scheduler.expire_wakeups_for_session("sess-fire")
+                await loop_scheduler._fire(token)
+                await anyio.sleep(0.4)
+                assert recorder.calls == []
+            finally:
+                tg.cancel_scope.cancel()

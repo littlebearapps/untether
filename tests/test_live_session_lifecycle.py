@@ -1988,3 +1988,51 @@ async def test_native_cron_fire_closes_session_cron_suppressed(
     marked = _events(logs, "loop.cron_suppressed_marked")
     assert marked and marked[0]["source"] == "native_fire"
     assert loop_scheduler.cron_suppressed_until(SID) is not None
+
+
+@pytest.mark.usefixtures("_loop_cleanup")
+@pytest.mark.parametrize(
+    ("reason", "expect_expired"),
+    [("wake_cap", True), ("idle_no_tasks", False)],
+)
+async def test_wake_cap_close_expires_pending_untether_wakeups(
+    monkeypatch: pytest.MonkeyPatch, reason: str, expect_expired: bool
+) -> None:
+    """#925 review: a Loop-on ScheduleWakeup > 300 s also has an Untether
+    wake-up entry. A ``wake_cap`` close must expire it (the notice says the
+    pending wake-up was cancelled) or its timer resumes the session and the
+    chain restarts at 0. Cron entries and other closes are untouched."""
+    from untether import loop_scheduler
+
+    monkeypatch.setattr(loop_scheduler, "own_schedule_enabled", lambda: True)
+
+    async def _noop(*_a: Any, **_k: Any) -> None:
+        return None
+
+    sid = "sess-wake-cap-expire"
+    async with anyio.create_task_group() as tg:
+        loop_scheduler.install(tg, _noop, SimpleNamespace(), 1)
+        try:
+            loop_scheduler.register_pending_wakeup(
+                session_id=sid,
+                tool_use_id="tu-wake",
+                delay_seconds=900.0,
+                prompt="again",
+                chat_id=77,
+            )
+            cron = loop_scheduler.register_pending_cron(
+                session_id=sid,
+                tool_use_id="tu-cron",
+                cron_expression="*/5 * * * *",
+                prompt="check",
+                recurring=True,
+                chat_id=77,
+            )
+            _install_live(sid, _idle_state())
+            assert await close_live_session(sid, reason, notice=True, only_if_idle=True)
+            kinds = sorted(e.kind for e in loop_scheduler.pending_for_chat(77))
+            assert kinds == (["cron"] if expect_expired else ["cron", "wakeup"])
+            assert cron in {e.token for e in loop_scheduler.pending_for_chat(77)}
+        finally:
+            claude_mod._LIVE_SESSIONS.pop(sid, None)
+            tg.cancel_scope.cancel()
