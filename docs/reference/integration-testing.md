@@ -470,12 +470,16 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all supported engines), U6, U7 |
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
-| Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1 |
-| Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
-| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6 |
+| Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1, R20-922a…c (usage-credits cap latch) |
+| Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7, R20-919a…d + R20-920a…e (approval reminders) |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
+| Claude hooks / `--include-hook-events` (`runners/claude.py` hook frames, SDK hook callbacks) | RC14-6, R17-828, R20-923, R20-925a/d/h (hook callbacks on every control-channel spawn) |
+| Loop scheduling (`loop_scheduler.py`, `telegram/loop.py`, `[loop]` settings, Claude CronCreate/CronDelete/ScheduleWakeup handling) | R20-925a…m, R20-926a…c, R17-01d, U6, Q16 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
-| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5, R15-6, R17-13a/b, R17-16 |
-| Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache), R17-18a…d (content-keyed watcher) |
+| Outbox delivery (`telegram/outbox_delivery.py`, `[transports.telegram.files] outbox_*`) | R20-924a…g, T3, U1 (Claude, Codex), U4, B-RESUME |
+| Control channel (`claude_control.py`, `orphan_approvals.py`) | C1-C6, T8, S9, R15-5, R15-6, R17-13a/b, R17-16, R20-929a…f |
+| Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache), R17-18a…d (content-keyed watcher), R20-925g/m (`[loop] own_schedule`), R20-924e (`outbox_stale_policy`) |
+| Service detection / restart hints (`service_manager.py`, `telegram/loop.py` reload notices, preamble) | R20-927a…d |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9, R17-06a…d, R17-07a…e, R17-08a/b |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
@@ -1240,3 +1244,132 @@ Two parts have no live scenario:
 | R19-903 | `/config` → Loop mode → On → Ask mode → Off | Loop stays on (check `telegram_chat_prefs_state.json`: `loop_enabled: true`). Clear both afterwards | `config.ask_questions.set` |
 | R19-900 | `[engines.claude] extra_args = ["--max-budget-usd", "0.60"]` (restart) → a prompt that launches a 40 s background Agent and then reads many files | the `error · claude … error_max_budget_usd` final arrives before the session closes | `final.error_delivered_early`, then `claude.live_session.closed close_reason=error` |
 | R19-904 | Reply to a bot final asking "what error subtype and cost are shown in the message I'm replying to?" (no tools); then reply to a plain bot message asking for an exact quote | the answer quotes text that exists only in the replied message | `subprocess.stdin.payload_sent` payload larger than the preamble plus the prompt |
+
+## rc20 scenarios (0.35.5rc20)
+
+These run on the dev bot only (`@untether_dev_bot`), driven from an lba-1 terminal session. The Claude chat is `ut-dev: Claude Code` `-5284581592` (`test-projects/test-claude/`); the Codex chat is `-4929463515`.
+- Back up `~/.untether-dev/untether.toml` before R20-925/926, R20-927, R20-924e and R20-928c, and restore it afterwards. Restart dev only from a terminal, never from a bot session.
+- Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "<pattern>"`.
+- **CLI 2.1.289 gotcha:** Claude Code refuses a bare foreground `sleep N` (N ≳ 30). Where a recipe needs a long foreground command, ask for `for i in $(seq 1 N); do sleep 1; done` instead.
+- Test hooks for R20-923 and R20-929 go in `test-projects/test-claude/.claude/settings.local.json` (written with the Write tool; the repo guard blocks writing a `.claude/settings.json`). Remove them afterwards.
+
+Two parts have no live scenario:
+- **#922's real cap** needs an account that is genuinely at its Fable share. R20-922a replays the verbatim result offline instead; R20-922c is Nathan's call.
+- **#927 on macOS** is log-only (decision 38): after the Mac rollout, `service.detected manager=launchd unit=com.littlebearapps.untether`.
+
+### #925 / #926 — Loop mode owns Claude's schedules
+
+Setup: `[loop] max_iterations = 2`, `max_total_duration_hours = 1`. Logs: `grep -E "loop\.|hook_callback|scheduled_wakeup|live_session.stdin_closed|cron_suppressed|native_cron_fire|wake_cap"`. The 925a prompt: `[r20] Use the CronCreate tool to create a recurring cron with cron expression "*/1 * * * *" and prompt "[r20] reply with the word tick". Then reply in one line.`
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-925a | Loop **on**, `/new`, the 925a prompt | Reply says Untether scheduled it. ~1 min later `⏰ /loop · iter 1/2` + "tick"; then `iter 2/2` + "tick"; then nothing for 5 min | `control_response.hook_callback callback_id=ut_loop_cron_create decision=deny`, `loop.cli_job_denied loop_mode=on`, `loop.scheduled`; per fire `loop.live_session_closed_for_fire` (or none if already idle-closed) then `loop.fired_ok`; `loop.expired reason=max_iterations iterations_completed=2`. **No** `claude.turn.started reason=scheduled_wakeup`, **no** `fire_skipped_subprocess_alive` |
+| R20-925b | After 925a: `[r20] reply with the word after` | First and only reply "after"; no "tick", no `🔔 Claude continued` | `runner.start resume=<sid>`, one `claude.turn.started` |
+| R20-925c | `/new`, 925a with `max_iterations = 3`; just before a minute boundary send a 90 s prompt (`for i in $(seq 1 90); do sleep 1; done`) | The iteration due during the busy run is skipped (or runs once after); never two ticks back-to-back | During the 90 s turn: `loop.iteration_skipped_previous_running`. `loop.fire_deferred_session_busy` (debug) only for live-idle sessions with background work, closing sessions or limbo |
+| R20-925d | While a loop is active: `[r20] call CronDelete with id <token from the log>` | Claude reports the CLI's "No scheduled job with id …" error (expected on CLI 2.1.289, which checks the id before hooks; the CronCreate deny reason tells it not to retry) and says the loop is stopped; no further iterations | `loop.cancelled reason=cron_delete` from the `tool_use` observer; usually no `callback_id=ut_loop_cron_delete` (the hook stays as a fallback for a CLI that runs hooks first). A foreign token logs `loop.cron_delete_foreign_token` and stops nothing |
+| R20-925e | R17-01d recipe, Loop **on**, a 6-minute self-paced wait, 2 iterations | One `⏰ Scheduled wake-up` per wait; no duplicate `⏰ /loop · iter` after the session closes | `hold_extended source=scheduled_wakeup`; `loop.expired reason=cli_fired_live` |
+| ~~R20-925f~~ | Retired (13b amendment 4) — replaced by R20-925h | | |
+| R20-925g | Kill switch, Loop on: `[loop] own_schedule = false` (hot reload), `/new`, the 925a prompt, `/new` after 2 ticks | rc19-like native ticks. Restore `true` | no `hook_callback`; `loop.scheduled` only |
+| R20-925h | Loop **off**, `/new`, the 925a prompt | Claude says scheduling is off and mentions Loop mode / `/at`; no ticks for 3 min | `hook_callback … decision=deny`, `loop.cli_job_denied loop_mode=off`, no `loop.scheduled`, no `claude.turn.started reason=scheduled_wakeup` |
+| R20-925i | Loop off: `remind me in 3 minutes to say hello` | Declined with the `/at` suggestion; then `/at 3m say hello` fires once | `loop.cli_job_denied loop_mode=off`; `at.scheduled` / `at.fired` |
+| R20-925j | Loop off, `/new`, `every 2 minutes print the time, 5 iterations, using ScheduleWakeup` | Two `⏰ Scheduled wake-up` messages (one more is possible if a wake lands inside the 60 s idle grace), then `⏰ Self-paced wake-up limit reached (2 wake-ups) …`; nothing further | `claude.live_session.wake_cap turns=2 cap=2`, `stdin_closed reason=wake_cap`; in a Loop-on chat a pending long wake-up also logs `loop.expired reason=wake_cap` |
+| R20-925k | Legacy native job: `own_schedule = false`; Loop off; `/new`; the 925a prompt (native `*/1`); after one tick `/cancel`. Set `own_schedule = true`; send `[r20] reply with the word legacy` | **Up to two** ticks (the first can come before "legacy"). If a second fire lands while the session is open it is caught; otherwise the next resume repeats the pattern until one is. After a catch the session closes at idle; the next message runs with no ticks for 3 min and shows the `ℹ️ Claude's scheduling is off in this session …` note row | `claude.turn.native_cron_fire suppress=True`, `loop.cron_suppressed_marked source=native_fire`, `stdin_closed reason=cron_suppressed`; the next `runner.start` has `CLAUDE_CODE_DISABLE_CRON=***`, `claude.cron_suppressed` |
+| R20-925l | Loop off, a self-paced 3-min wait pending, then `/new` | No wake-up ever arrives | `stdin_closed reason=new`; no later `scheduled_wakeup` |
+| R20-925m | Kill switch, Loop off: `own_schedule = false`, the 925a prompt, `/new` after one tick | rc19 behaviour (native tick). Restore `true` | no `hook_callback`, no `wake_cap` |
+| R20-926a | `[loop] max_iterations = 5`, Loop on. `/new`; the 925a prompt; wait for `iter 1/5`; `/cancel`; `[r20] reply with the word next` | `❌ cancelled 1 active loop.`; first reply exactly "next"; no ticks for 3 min | `loop.cancelled reason=user_cancel`; **no** `loop.cron_suppressed_marked`; `runner.start resume=<sid>` without `CLAUDE_CODE_DISABLE_CRON` |
+| R20-926b | Same session: CronCreate `*/2` with prompt "[r20] reply with the word tock" | `⏰ /loop · iter 1/5` + "tock" within ~2 min | `loop.fired_ok` for the new token; **no** `loop.expired reason=do_not_resume` |
+| R20-926c | Residual session (opportunistic; one dev stop/start from a terminal). (1) Loop off + `own_schedule = false`, `/new`, the 925a prompt → native job (session `S`); `/cancel` after one tick. (2) Stop dev; back up `~/.untether-dev/active_loops.json`; set `"do_not_resume": ["<S>"]` with no `do_not_resume_at` key; start dev. (3) `own_schedule = true`; `[r20] reply with the word quiet` | First reply "quiet"; progress shows `ℹ️ Claude's scheduling is off in this session …`; no ticks for 3 min | `loop.cron_suppressed_marked source=restore_v1`; `claude.cron_suppressed session_id=<S>`; `runner.start` args contain `CLAUDE_CODE_DISABLE_CRON=***` |
+
+Regression with the hooks on: U1–U4, U6, C1–C6, B-LIVE-1/2/7, R17-01d (a single self-paced wake still fires with Loop off), Q16 `/ping`. Soak on staging (lba-1) for 24 h before the other 4 hosts. Negative grep over 30 min: `Traceback|hook_callback.*error|initialize: hooks must|loop.hook_decision_failed|loop.restore.entry_invalid|loop.persist_failed` must be empty. Clean-up: restore the config and `active_loops.json` backups, Loop mode off, `/new`.
+
+### #919 / #920 — approval reminders
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-919a | `ask me with AskUserQuestion whether to use TypeScript or JavaScript, with both as options, then wait for my answer`; don't answer for 10.5 min | `⏳ Waiting for your answer (10 min) — tap an option above or reply with your answer. The session is paused, not stuck.` / `❓ <question>` / `/cancel to stop.` — no `warning:`, `(running)` or `Last:` | `subprocess.approval_pending … reason=pending_approval last_action='warning:❓ …(running)'` (raw form kept) |
+| R20-919b | `/planmode on`, `plan creating /tmp/r20-919b.txt containing hi, then exit plan mode`; leave Approve Plan for 10.5 min | `⏳ Waiting for you to approve the plan (10 min) — tap a button above. …` | as R20-919a |
+| R20-919c | `/planmode off`, `create /tmp/r20-919c.txt containing hi` (Write outside the project); leave it 10.5 min | `⏳ Waiting for your approval to use Write (10 min) — tap Approve or Deny above. …` | `progress_edits.keyboard_attach tool_name=Write` |
+| R20-919d | S1 recipe (`kill -STOP` the engine PID, later `kill -CONT`) | The `Last:` line shows a plain title (no `tool:`/`note:` prefix, no `(running)`) | `progress_edits.stall_detected … last_action='tool:…'` (raw) |
+| R20-920a | R20-919a recipe; wait 10.5 min for the reminder, then tap an option | Within ≤ 30 s the reminder is gone (`get_history` no longer lists its id); the run completes; nothing pointing "above" remains | `progress_edits.approval_reminder_sent request_kind=question replaced=False` → `progress_edits.approval_reminder_retired reason=resolved deleted=True` |
+| R20-920b | Repeat the wait; after the reminder send `/cancel` | Reminder deleted with the run's ephemeral clean-up; `cancelled` final | `approval_reminder_retired reason=run_end deleted=True` |
+| R20-920c | R20-919c recipe; after the reminder tap **Deny** | Reminder gone ≤ 30 s | `reason=resolved` |
+| R20-920d | Optional (~12 min): B-LIVE-7 recipe, but leave the wake turn's ExitPlanMode keyboard 10.5 min, then Approve | Reminder sent on the wake turn and removed after Approve or at turn close | `approval_reminder_sent` then `retired reason=resolved` or `run_end` |
+| R20-920e | Optional (41 min): leave an AskUserQuestion for 41 min, then answer | Reminders at 10 and 40 min only; exactly one visible (the 40-min one replaced the 10-min one); no `(warned` suffix | two `approval_reminder_sent` ~1800 s apart, the second `replaced=True`; nothing at 33/36/39 min |
+
+### #929 — a background agent's approval while the session is idle
+
+Setup (dev-only hook, Write tool): `test-projects/test-claude/.claude/settings.local.json` →
+`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"jq -r .tool_input.command | grep -q R20ASK && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"R20 test hook: confirm this command\"}}' || true"}]}]}}`.
+Prompt P: *"Launch ONE background agent (Agent tool, run_in_background: true) that first runs `sleep 20`, then runs the Bash command `echo R20ASK-929`, then replies 'agent done'. End your turn immediately after launching it."*
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-929a | `/new`, `/planmode off`, send P; after the launch final, wait | ~20–30 s after the final a **pushed** `🔐 A background agent needs your approval` / `🤖 <agent desc>` / `Permission Request [CanUseTool] - tool: Bash (command=`echo R20ASK-929`)` / `🪝 R20 test hook: confirm this command` / `The agent is paused until you answer.` with ✅ Approve / ❌ Deny. Tap Approve → toast; the surface is gone within ≤ 30 s; later `🔔 Background task finished — …` | `control_request.received tool_name=Bash agent_id=a… decision_reason_type=hook` → `approval_surface.sent source=event` → `claude_control.sent approved=True` → `approval_surface.retired reason=resolved deleted=True`; **zero** `control_request.unanswerable` |
+| R20-929b | Repeat, tap Deny | Surface removed; the agent reports the denial in its 🔔 wake | `claude_control.sent approved=False`; `retired reason=resolved` |
+| R20-929c | Incident mirror: `/config` → permission mode **auto**, Diff preview **on**; `/new`, send P | Same surface as R20-929a | `control_request.received permission_mode=auto … decision_reason_type=hook`, `approval_surface.sent` |
+| R20-929d | Repeat R20-929a but `/cancel` while the surface is up | Session closes; surface deleted; a stale copy's tap toasts `No longer needed` / expired | `approval_surface.retired reason=run_end` (or `completed` after `cancelled_by_cli`) |
+| R20-929e | Optional (~11 min): repeat R20-929a, leave it 10.5 min | Re-sent at 10 min as `⏳ Still waiting for your approval (10 min) — a background agent is paused until you answer.`, the old copy deleted — one surface visible; tapping the new one works | `approval_surface.sent reposts=1 replaced=True` |
+| R20-929f | Run in a **default**-mode chat (not `auto`, whose classifier allows the Write): `/planmode off`, P with step 2 "use the Write tool to create /tmp/r20-929f.txt containing x" | Surface for `tool: Write` with the diff preview; Approve → file written | `approval_surface.sent tool_name=Write` |
+
+A request rescued after the 30 s grace (`approval_surface.sent source=rescue`) must show the command or key input above Approve / Deny, not just the tool name. Regression: C1 (in-turn Write keyboard on the progress message, **no** `approval_surface.sent`), C4 (AskUserQuestion), B-LIVE-1/2, B-LIVE-7 / R15-6b (wake-turn ExitPlanMode keyboard on the wake turn's message, no surface). Restore `/config` and remove the hook afterwards.
+
+### #923 / #928 — hook-rewake labels and no-query results
+
+Run with RC14-6 / R17-828 (one hooks setup).
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-923 | In `settings.local.json` add `PostToolUse`, matcher `Bash`: `{"type":"command","asyncRewake":true,"if":"Bash(echo R20REWAKE*)","command":"sleep 20; echo 'R20 finding: test' >&2; exit 2"}`. Send: *"Launch ONE background agent (run_in_background) that runs `sleep 15`, then the Bash command `echo R20REWAKE`, then `sleep 60`, then reports 'agent done'. End your turn immediately."* | ≈35 s later one **pushed** `🪝 Hook feedback — PostToolUse` mentioning the finding; ≈1 min later `🔔 Background task finished — <agent>` | `claude.hook.blocking_exit hook_event=PostToolUse turn_open=False rewake_candidate=True held_s≈20`, then `claude.turn.hook_rewake attributed=open_idle` (with `gap_s`), then `claude.turn.started reason=hook_rewake`. If no parent turn opens within 3 s (the subagent took the wake), record it and ask Nathan (05 decision 3, default keep). Negative control R17-828 → `rewake_candidate=False`, no `hook_rewake`; positive control RC14-6 → `rewake_signal started_turn=1` → `hook_rewake attributed=open` |
+| R20-928a | *"Launch ONE background agent (run_in_background) that runs `sleep 20` and then replies 'R20 tail done'. End your turn immediately."* | Turn-1 final, then ≈25 s later one pushed `🔔 Background task finished — <agent>`; no other message; no empty `💬` status row | `grep -E "claude.turn.(started\|completed\|no_query)\|runner.completed\|live_turn.no_query_dropped"` → one `claude.turn.no_query` (`opened=False` = case R, `opened=True` = case I — record which); every live `claude.turn.completed` has `origin_kind=` and the wake turn shows `task-notification`; **zero** `runner.completed … num_turns=0 … answer_len=0` and zero `claude.turn.completed num_turns=0 … reason=unknown`. A `claude.turn.completed num_turns=0 reason=unknown origin_kind=<other\|None>` means tails lack the origin — stop (06 decision 3) |
+| R20-928b | *"Start two background Bash jobs (run_in_background): `sleep 20; echo A` and `sleep 35; echo B`. Tell me each output when it finishes. End your turn."* | Two **pushed** `🔔 Background task finished` messages (A, then B) | no `claude.turn.task_end_paired` after a `claude.turn.no_query`; B's `live_turn.started` has `push=True` |
+| R20-928c | `[progress] consolidate_wake_turns = false` (hot reload), repeat R20-928a | No empty `🔔 Claude continued` message | as R20-928a. Restore the setting |
+
+Tiers: U1–U4 (Claude), B-LIVE-1/2/3/5/6, RC14-6, R17-828, R17-821 if reproducible, plus a Stop-at-limit smoke (R19-896) with a follow-up after a wake.
+
+### #921 — cancel racing a queued follow-up
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-921a | (1) `/queue` (bare). (2) `Run this in the FOREGROUND (not background): for i in $(seq 1 45); do sleep 1; done; echo first-done. Then say done.` (3) ~10 s later `reply with the single word QUEUED-OK` — it shows `⏳ Queued …`. (4) ~10 s later `/cancel` (reply to the first run's progress message) | First run `cancelled · claude`. **No** `⚠️ The session ended before this message ran — please send it again.` anywhere. Within a few seconds the follow-up answers `QUEUED-OK` (a resumed run in the same session) | `cancel.requested`, `claude.live_session.steer_window_closed reason=cancel`, `claude.live_session.inject_unavailable user_msg_id=<3>`, `claude.live_session.followup_requeued`, then `handle.incoming user_msg_id=<3>` and `runner.completed ok=True`. **Absent:** `followup_not_run` |
+| R20-921b | As R20-921a but `/steer` first, and send step 3 after the loop has started (it folds or steers), then `/cancel`. `/queue` afterwards | No "send it again". Either the steer folded into the cancelled turn (`↪️ Steered…` ack) or it runs after the cancel | no `followup_not_run`; no `followup_settle_timeout` |
+
+Regression: B-LIVE-3, RC12-7, RC13-5(c), RC14-1, R19-896d. Post-rollout fleet check (7 days): `followup_not_run` only without a preceding `inject_unavailable` for the same `user_msg_id` within 5 s; a `followup_settle_timeout` is a finding only with `live_owner_present=False`.
+
+### #922 — usage-credits cap wording
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-922a | Offline replay (no bot, zero tokens): feed the channelo verbatim result line (`is_error: true`, `result: "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue."`), then `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}` through `decode_stream_json_line` + `translate_claude_event` in a `uv run python` snippet | Latch armed; the rejection's title is `⛔ Fable limit reached — may not clear on a timer; switch with /model or manage usage credits on claude.ai` | `claude.rate_limit_action_required_latched model=Fable kind=model source=result_text`, then `claude.rate_limit_event retry_after_source=action_required action_model=Fable` |
+| R20-922b | Claude chat: U1 | Normal run; no false-positive latch | `runner.completed ok=True`; no `rate_limit_action_required_latched` |
+| R20-922c | Gated (Nathan's call): only on an account genuinely at its Fable share, any prompt on a Fable model | Error final plus the latch | as R20-922a but `source=api_error api_error=model_requires_usage_credits api_error_status=429` |
+
+### #927 — restart hints name the running service
+
+Preflight: `grep -c '^watch_config = true' ~/.untether-dev/untether.toml` = 1; back up the config to `~/.untether-dev/untether.toml.bak-r20-927`.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-927a | Restart dev from a terminal | Normal startup message | `service.detected manager=systemd-user unit=untether-dev exec_pid_match=True` |
+| R20-927b | Flip `[transports.telegram] message_overflow` (`split`↔`trim`) with the Edit tool; save | (1) ``🔄 Setting `message_overflow` changed — restart required to take effect. To apply: run `systemctl --user restart untether-dev` (or send `/restart`).`` (2) the `⚠️ Restart required …` notice whose "To apply," clause names `untether-dev`. Neither names the bare staging unit | `config.reload.transport_config_changed … restart_required=True`, `config.reload.restart_notify.sent` |
+| R20-927c | `[triggers] enabled = false` → `true`; save | `⚠️ Restart required …` listing `triggers.enabled`, naming `untether-dev` | `config.reload.restart_required key=triggers.enabled` |
+| R20-927d | Restore the backup (a second notice is expected), then run U1 in the Claude chat | U1 passes | `preamble.applied source=default`; the restored config's sha256 matches the backup |
+
+Multi-instance (log only): a terminal restart of `untether-dev-hf` logs `service.detected … unit=untether-dev-hf`. Zero-token generic check from a plain ssh terminal: `.venv/bin/python -c "from untether.service_manager import restart_hint; print(restart_hint())"` prints ``restart Untether's service (or send `/restart` if a service manager keeps it running)``.
+
+### #924 — the outbox sends only this run's files
+
+Dev config already has `[transports.telegram.files] enabled = true` + `watch_config = true`. **Create stale files ≥ 30 s before the prompt** (ctime can't be backdated). Outbox: `test-projects/test-claude/.untether-outbox/`.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R20-924a | Shell: 3 files `r20-old-{1,2,3}.md` in the outbox; wait 30 s. Claude: `What is 2+2? Don't create or change any files.` | Final; **no documents**; one `📎 3 older files were already in .untether-outbox/ …` notice naming them + `.skipped/`; the files are now in `.untether-outbox/.skipped/` | `outbox.stale count=3 … archived=True`; no `outbox.sent` |
+| R20-924b | One stale file, wait 30 s. `Write a file .untether-outbox/r20-fresh.md containing "fresh".` | `r20-fresh.md` delivered; stale notice for the one old file | `outbox.sent file=.untether-outbox/r20-fresh.md`, `outbox.stale count=1` |
+| R20-924c | `Run exactly: printf x > r20-mv.md && touch -d 2020-01-01 r20-mv.md && mkdir -p .untether-outbox && mv r20-mv.md .untether-outbox/` | `r20-mv.md` **is delivered** (ctime rule) | `outbox.sent file=.untether-outbox/r20-mv.md` |
+| R20-924d | `Start a background Bash task: sleep 20 && echo bg > .untether-outbox/r20-bg.md, then tell me you started it.` Wait for the wake turn | File delivered after the wake turn's final | `live_turn.started reason=task_finished…` then `outbox.sent file=.untether-outbox/r20-bg.md` |
+| R20-924e | `outbox_stale_policy = "send"` (hot reload), repeat the 924a setup, wait 30 s, same prompt | The 3 old files **are** sent; revert the config | `config.reload.transport_config_hot_reloaded keys=['files']`; `outbox.sent` ×3; no `outbox.stale` |
+| R20-924f | `Create 12 small files r20-n01.md … r20-n12.md in .untether-outbox/.` | 10 documents; `📎 2 more files weren't sent (limit outbox_max_files = 10): … — moved to .untether-outbox/.skipped/.` | `outbox.overflow count=2 max_files=10 archived=True` |
+| R20-924g | Gated, Mac, read-only: on `mac`, `cd /tmp && echo x>a && touch -t 202001010000 a; stat -f '%m %c' a; mkdir -p o && mv a o/; stat -f '%m %c' o/a` | — | ctime after `mv` is now (APFS rename updates ctime); if not, note it in the docs and keep the rule |
+
+Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untether-outbox/.skipped` after R20-924a (returns `.skipped.zip` with the 3 files), B-RESUME and U4. Clean up the outbox afterwards. No WARNING/ERROR `outbox.` lines (`outbox.stale_archive_failed` must be 0); a symlinked or out-of-project outbox logs `outbox.outside_root` and is never scanned.
+
+**Required for rc20:** Tier 7 + Tier 1 (Claude, Codex, OpenCode) + Tier 2 C1–C6 + B-LIVE-1…7 + R20-* (every row above, plus the regressions each subsection names). R20-922c and R20-924g are gated; R20-926c is opportunistic; R20-920d/e and R20-929e are optional.
