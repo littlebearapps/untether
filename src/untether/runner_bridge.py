@@ -2167,6 +2167,17 @@ class ProgressEdits:
         self.thread_id = thread_id
         self._approval_notified: bool = False
         self._approval_notify_ref: MessageRef | None = None
+        # #920: the pending-approval stall reminder is owned like
+        # ``_approval_notify_ref``: one visible copy (a refire replaces it),
+        # deleted once its request resolves or the run/turn ends.
+        self._approval_reminder_ref: MessageRef | None = None
+        self._approval_reminder_request_id: str | None = None
+        # #920: reminder-specific "first reminder already sent" flag. Picks
+        # the 10-min vs 30-min approval threshold; reset whenever no approval
+        # is pending so each approval in a run gets its own 10-min reminder.
+        # (``_last_approval_pending_emit_at`` stays the #526 log-pacing clock,
+        # shared with the rate-limit / api-retry / compacting waits.)
+        self._approval_first_reminder_sent: bool = False
         # #591: set once the final answer has been (or is about to be)
         # delivered ahead of subprocess exit. Suppresses further progress
         # repaints and the #470 post-result closing message so neither can
@@ -2500,6 +2511,15 @@ class ProgressEdits:
             # Heartbeat tick — cheap (no proc_diag, just dict scans).
             self._heartbeat_tick()
             await self._flush_pending_closing_message()
+            # #920: retire a reminder whose request was answered or replaced.
+            # Before the live-idle ``continue`` below, so a run-level monitor
+            # standing down while live-idle still cleans up.
+            try:
+                await self._maybe_retire_approval_reminder()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug(
+                    "progress_edits.approval_reminder_retire_failed", exc_info=True
+                )
 
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
@@ -2549,7 +2569,10 @@ class ProgressEdits:
                 # get a visible "no action needed" message in the same
                 # window as a normal stall), subsequent reminders gated
                 # by the 1800 s refire threshold.
-                if self._last_approval_pending_emit_at == 0.0:
+                # #920: a reminder-specific flag, not the shared #526
+                # log-pacing clock (a prior rate-limit wait set that one and
+                # pushed the first approval reminder out to 30 min).
+                if not self._approval_first_reminder_sent:
                     threshold = self._STALL_THRESHOLD_APPROVAL_FIRST
                 else:
                     threshold = self._STALL_THRESHOLD_APPROVAL
@@ -2670,10 +2693,16 @@ class ProgressEdits:
             )
 
             now = self.clock()
-            if (
-                self._stall_warned
-                and (now - self._last_stall_warn_at) < self._stall_repeat_seconds
-            ):
+            # #920: an approval wait repeats every 30 min (as documented),
+            # not every ``stall_repeat_seconds`` once past the 30-min mark —
+            # elapsed never resets while the request waits. Paced here, not
+            # in the send block, so paced ticks don't bump ``stall_warn_count``.
+            repeat_s = (
+                self._STALL_THRESHOLD_APPROVAL
+                if threshold_reason == "pending_approval"
+                else self._stall_repeat_seconds
+            )
+            if self._stall_warned and (now - self._last_stall_warn_at) < repeat_s:
                 continue
 
             self._stall_warned = True
@@ -3157,6 +3186,9 @@ class ProgressEdits:
                 # _genuinely_stuck predicate below can reference it safely
                 # from every branch.
                 _tool_name: str | None = None
+                # #919/#920: set by the pending_approval branch below.
+                _approval_info: _PendingRequestInfo | None = None
+                _is_approval_reminder = False
                 if mcp_hung:
                     self._count_stall_warning()
                     logger.warning(
@@ -3215,6 +3247,7 @@ class ProgressEdits:
                     # everything; no ``Last:`` line (it only repeated the
                     # request, in its internal log form).
                     _approval_info = self._pending_request_info()
+                    _is_approval_reminder = True
                     parts = [_approval_reminder_headline(_approval_info, mins)]
                     if (
                         _approval_info is not None
@@ -3288,6 +3321,9 @@ class ProgressEdits:
                     parts.append(f"Last: {_disp}")
                 parts.append("/cancel to stop.")
                 text = "\n".join(parts)
+                if _is_approval_reminder:
+                    await self._send_approval_reminder(text, _approval_info, mins)
+                    continue
                 try:
                     await self.transport.send(
                         channel_id=self.channel_id,
@@ -4439,6 +4475,92 @@ class ProgressEdits:
 
         bg_tg.start_soon(_do_send)
 
+    async def _send_approval_reminder(
+        self, text: str, info: _PendingRequestInfo | None, mins: int
+    ) -> None:
+        """#920: send (or replace) the one pending-approval reminder.
+
+        ``SendOptions.replace`` makes the outbox delete the previous copy only
+        after the new one landed, so a failed send never leaves zero
+        reminders; on a failed send the previous ref is kept.
+        """
+        self._approval_first_reminder_sent = True
+        previous = self._approval_reminder_ref
+        try:
+            ref = await self.transport.send(
+                channel_id=self.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(thread_id=self.thread_id, replace=previous),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_edits.stall_notify_failed", exc_info=True)
+            return
+        if ref is None:
+            return
+        self._approval_reminder_ref = ref
+        self._approval_reminder_request_id = info.request_id if info else None
+        logger.info(
+            "progress_edits.approval_reminder_sent",
+            channel_id=self.channel_id,
+            request_kind=info.kind if info else "unknown",
+            request_id=self._approval_reminder_request_id,
+            mins=mins,
+            replaced=previous is not None,
+            message_id=ref.message_id,
+        )
+
+    async def _retire_approval_reminder(self, reason: str) -> None:
+        """#920: delete the pending-approval reminder (edit it to "no longer
+        waiting" if the delete fails, e.g. a > 48 h old message)."""
+        ref = self._approval_reminder_ref
+        if ref is None:
+            return
+        request_id = self._approval_reminder_request_id
+        self._approval_reminder_ref = None
+        self._approval_reminder_request_id = None
+        if reason in ("resolved", "superseded"):
+            self._approval_first_reminder_sent = False
+        deleted = False
+        try:
+            deleted = bool(await self.transport.delete(ref=ref))
+        except Exception:  # noqa: BLE001
+            deleted = False
+        if not deleted:
+            with contextlib.suppress(Exception):
+                await self.transport.edit(
+                    ref=ref, message=RenderedMessage(text="✅ No longer waiting.")
+                )
+        logger.info(
+            "progress_edits.approval_reminder_retired",
+            channel_id=self.channel_id,
+            request_id=request_id,
+            reason=reason,
+            deleted=deleted,
+            message_id=ref.message_id,
+        )
+
+    async def _maybe_retire_approval_reminder(self) -> None:
+        """#920: heartbeat check — retire the reminder once its request is
+        answered (``resolved``) or replaced by a newer one (``superseded``)."""
+        if not self._has_pending_approval():
+            self._approval_first_reminder_sent = False
+            await self._retire_approval_reminder("resolved")
+            return
+        rid = self._approval_reminder_request_id
+        if self._approval_reminder_ref is None or rid is None:
+            return
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "control_request_snapshot", None)
+        if not callable(probe):
+            return
+        try:
+            live_ids = {snap.request_id for snap in probe()}
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
+            return
+        if rid not in live_ids:
+            await self._retire_approval_reminder("superseded")
+
     async def delete_ephemeral(self) -> None:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
@@ -4453,6 +4575,8 @@ class ProgressEdits:
                     error_type=exc.__class__.__name__,
                 )
             self._approval_notify_ref = None
+        # #920: then the pending-approval reminder (run end / turn close).
+        await self._retire_approval_reminder("run_end")
         # Safety-net: delete any outline messages not already cleaned up
         # (e.g. run cancelled while outline is visible).
         # Also remove from the module-level registry to avoid stale entries.

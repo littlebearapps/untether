@@ -11812,3 +11812,386 @@ async def test_919_log_field_keeps_raw_form() -> None:
     assert pending[0]["last_action"] == (
         "warning:❓ Which of these should I set up? (Pick any.) (running)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #920 approval reminder lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _fast_920(edits, *, first=0.1, repeat=1000.0) -> None:
+    edits._stall_check_interval = 0.002
+    edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_SECONDS = 10_000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = first
+    edits._STALL_THRESHOLD_APPROVAL = repeat
+
+
+def _reminders_920(transport) -> list[dict]:
+    return [
+        c
+        for c in transport.send_calls
+        if c["message"].text.startswith("⏳ Waiting for")
+    ]
+
+
+async def _run_920(edits, steps) -> None:
+    """Run the monitor while ``steps`` (a list of callables / sleeps) execute."""
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for step in steps:
+                if callable(step):
+                    step()
+                else:
+                    await anyio.sleep(step)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_920_reminder_ref_tracked() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1", kind="tool", tool_name="Write")])
+    _fast_920(edits)
+    with structlog.testing.capture_logs() as logs:
+        await _run_920(edits, [lambda: clock.set(100.2), 0.05])
+    (reminder,) = _reminders_920(transport)
+    assert edits._approval_reminder_ref == reminder["ref"]
+    assert edits._approval_reminder_request_id == "r-1"
+    assert reminder["options"].replace is None
+    sent = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_sent"
+    ]
+    assert sent and sent[0]["request_kind"] == "tool"
+    assert sent[0]["request_id"] == "r-1" and sent[0]["replaced"] is False
+
+
+@pytest.mark.anyio
+async def test_920_reminder_deleted_when_resolved() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits)
+
+    def _resolve() -> None:
+        holder["snaps"] = []
+        holder["awaiting"] = False
+        edits.tracker.note_event(
+            action_completed("ctrl.1", "warning", "resolved", True)
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        await _run_920(edits, [lambda: clock.set(100.2), 0.03, _resolve, 0.03])
+    (reminder,) = _reminders_920(transport)
+    assert reminder["ref"] in transport.delete_calls
+    assert edits._approval_reminder_ref is None
+    assert edits._approval_reminder_request_id is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert len(retired) == 1
+    assert retired[0]["reason"] == "resolved" and retired[0]["deleted"] is True
+
+
+@pytest.mark.anyio
+async def test_920_reminder_deleted_on_delete_ephemeral() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    notify_ref = MessageRef(channel_id=123, message_id=50)
+    reminder_ref = MessageRef(channel_id=123, message_id=51)
+    edits._approval_notify_ref = notify_ref
+    edits._approval_reminder_ref = reminder_ref
+    edits._approval_reminder_request_id = "r-1"
+    with structlog.testing.capture_logs() as logs:
+        await edits.delete_ephemeral()
+    assert transport.delete_calls[:2] == [notify_ref, reminder_ref]
+    assert edits._approval_notify_ref is None
+    assert edits._approval_reminder_ref is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert retired and retired[0]["reason"] == "run_end"
+
+
+@pytest.mark.anyio
+async def test_920_reminder_superseded_by_new_request() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="ExitPlanMode", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1", tool_name="ExitPlanMode")])
+    _fast_920(edits)
+
+    async def _new_request() -> None:
+        holder["snaps"] = [_snap_919("r-2", tool_name="Write")]
+        await edits.on_event(
+            _tool_action_919(action_id="ctrl.2", tool_name="Write", request_id="r-2")
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.2)
+                await anyio.sleep(0.03)
+                await _new_request()
+                await anyio.sleep(0.03)
+                clock.set(100.4)  # past the new request's own first threshold
+                await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    reminders = _reminders_920(transport)
+    assert len(reminders) == 2
+    assert "approve the plan" in reminders[0]["message"].text
+    assert "approval to use Write" in reminders[1]["message"].text
+    assert reminders[0]["ref"] in transport.delete_calls
+    assert edits._approval_reminder_request_id == "r-2"
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert [e["reason"] for e in retired] == ["superseded"]
+
+
+@pytest.mark.anyio
+async def test_920_refire_replaces_previous() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=0.5)
+    await _run_920(
+        edits,
+        [lambda: clock.set(100.2), 0.03, lambda: clock.set(100.8), 0.03],
+    )
+    first, second = _reminders_920(transport)
+    assert second["options"].replace == first["ref"]
+    assert edits._approval_reminder_ref == second["ref"]
+
+
+@pytest.mark.anyio
+async def test_920_cadence_every_30_min() -> None:
+    """Regression: after 30 min the reminder repeated every 3 min."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    edits._stall_check_interval = 0.001
+    edits._heartbeat_interval = 0.001
+    edits._stall_repeat_seconds = 180.0
+    sent_at: list[float] = []
+    orig_send = transport.send
+
+    async def _send(**kwargs):
+        if kwargs["message"].text.startswith("⏳ Waiting for"):
+            sent_at.append(clock())
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+
+    steps: list[Any] = []
+    for t in range(0, 3001, 30):
+        steps.append(lambda t=t: clock.set(float(t)))
+        steps.append(0.004)
+    await _run_920(edits, steps)
+
+    assert len(sent_at) == 2, sent_at
+    assert 600 <= sent_at[0] < 660
+    assert 2400 <= sent_at[1] < 2460
+    assert edits._stall_warn_count == 2
+
+
+@pytest.mark.anyio
+async def test_920_second_approval_gets_first_threshold() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=1000.0)
+
+    def _resolve_a() -> None:
+        holder["snaps"] = []
+        holder["awaiting"] = False
+        edits.tracker.note_event(
+            action_completed("ctrl.1", "warning", "resolved", True)
+        )
+
+    async def _approval_b() -> None:
+        holder["snaps"] = [_snap_919("r-2", tool_name="Bash")]
+        holder["awaiting"] = True
+        await edits.on_event(
+            _tool_action_919(action_id="ctrl.2", tool_name="Bash", request_id="r-2")
+        )
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.03)
+            _resolve_a()
+            await anyio.sleep(0.03)
+            await _approval_b()
+            clock.set(100.5)  # B's age 0.3 s: past FIRST (0.1), not refire
+            await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    reminders = _reminders_920(transport)
+    assert len(reminders) == 2
+    assert "approval to use Bash" in reminders[1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_920_rate_limit_wait_does_not_delay_first_approval_reminder() -> None:
+    """The shared #526 log-pacing clock no longer selects the threshold."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    # An earlier rate-limit wait logged ``subprocess.approval_pending``.
+    edits._last_approval_pending_emit_at = 50.0
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=1000.0)
+    await _run_920(edits, [lambda: clock.set(100.2), 0.05])
+    assert len(_reminders_920(transport)) == 1
+
+
+@pytest.mark.anyio
+async def test_920_delete_failure_falls_back_to_edit() -> None:
+    transport = FakeTransport()
+
+    async def _delete(*, ref):
+        transport.delete_calls.append(ref)
+        return False
+
+    transport.delete = _delete  # type: ignore[method-assign]
+    edits = _make_edits(transport, _KeyboardPresenter())
+    ref = MessageRef(channel_id=123, message_id=77)
+    edits._approval_reminder_ref = ref
+    edits._approval_reminder_request_id = "r-1"
+    with structlog.testing.capture_logs() as logs:
+        await edits._retire_approval_reminder("resolved")
+    assert [c["message"].text for c in transport.edit_calls if c["ref"] == ref] == [
+        "✅ No longer waiting."
+    ]
+    assert edits._approval_reminder_ref is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert retired[0]["deleted"] is False
+
+
+@pytest.mark.anyio
+async def test_920_send_failure_keeps_previous_ref() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=0.5)
+    orig_send = transport.send
+    state = {"fail": False}
+
+    async def _send(**kwargs):
+        if state["fail"] and kwargs["message"].text.startswith("⏳ Waiting for"):
+            return None
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+
+    def _fail() -> None:
+        state["fail"] = True
+        clock.set(100.8)
+
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03, _fail, 0.03])
+    (first,) = _reminders_920(transport)
+    assert edits._approval_reminder_ref == first["ref"]
+
+
+@pytest.mark.anyio
+async def test_920_genuine_stall_not_tracked() -> None:
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.002
+    edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    await edits.on_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="note", title="thinking"),
+            phase="completed",
+            ok=True,
+        )
+    )
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03])
+    assert any("No progress" in c["message"].text for c in transport.send_calls)
+    assert edits._approval_reminder_ref is None
+    before = list(transport.delete_calls)
+    await edits.delete_ephemeral()
+    assert transport.delete_calls == before
+
+
+@pytest.mark.anyio
+async def test_920_retire_runs_while_live_idle() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = True
+    holder = _with_snaps_919(edits, [], awaiting=False)
+    edits.stream.engine_state.live_mode = True
+    edits.stream.engine_state.completed_turns = 1
+    edits.stream.engine_state.turn_open = False
+    ref = MessageRef(channel_id=123, message_id=88)
+    edits._approval_reminder_ref = ref
+    edits._approval_reminder_request_id = "r-1"
+    edits._approval_first_reminder_sent = True
+    _fast_920(edits)
+    assert holder["awaiting"] is False
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03])
+    assert ref in transport.delete_calls
+    assert edits._approval_reminder_ref is None
+    assert edits._approval_first_reminder_sent is False
+
+
+@pytest.mark.anyio
+async def test_920_retire_probe_error_does_not_kill_monitor() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, RuntimeError("boom"))
+    edits._approval_reminder_ref = MessageRef(channel_id=123, message_id=90)
+    edits._approval_reminder_request_id = "r-1"
+    _fast_920(edits, first=0.1, repeat=0.1)
+    ticks = {"n": 0}
+    orig = edits._heartbeat_tick
+
+    def _count() -> None:
+        ticks["n"] += 1
+        orig()
+
+    edits._heartbeat_tick = _count  # type: ignore[method-assign]
+    await _run_920(edits, [lambda: clock.set(100.2), 0.04])
+    assert ticks["n"] >= 3
+    # Still pending (probe error is not "resolved"): the ref survives and
+    # the refire replaced it.
+    assert edits._approval_reminder_ref is not None
