@@ -87,6 +87,15 @@ bash_check "gh pr merge 99 --squash"                      deny
 bash_check "gh pr merge --squash"                         deny
 bash_check "gh workflow run release.yml --ref v9.9.9"     ask
 bash_check "gh workflow run ci.yml"                       allow
+bash_check "gh pr merge 1 --squash && gh pr merge 2 --squash --admin" deny
+bash_check "gh -R littlebearapps/untether pr merge 2 --squash --admin" ask
+bash_check "gh --repo=littlebearapps/untether pr merge 3 --squash --admin" deny
+bash_check "gh -R littlebearapps/untether pr merge 1 --squash" allow
+bash_check "gh -R littlebearapps/untether workflow run release.yml" ask
+bash_check "gh -R littlebearapps/untether release create v9.9.9" deny
+bash_check "gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'" deny
+bash_check "gh api graphql -f query='mutation { createRef(input:{}) { clientMutationId } }'" deny
+bash_check "gh api graphql -f query='{ viewer { login } }'" allow
 bash_check "gh api repos/o/r/pulls/2/merge -X PUT"        deny
 bash_check "gh api repos/o/r/releases -f tag_name=v1"     deny
 bash_check "gh api repos/o/r/pulls/2"                     allow

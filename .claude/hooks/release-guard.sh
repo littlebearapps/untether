@@ -15,6 +15,9 @@ trap 'echo "release-guard.sh: internal error at line $LINENO — blocked to be s
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 [ -z "$COMMAND" ] && echo '{}' && exit 0
+# gh's global repo flag can sit before the subcommand (`gh -R o/r pr merge 2`).
+# Drop it so every gh check below sees `gh <subcommand>`.
+COMMAND=$(echo "$COMMAND" | sed -E 's/\bgh(\s+(-R|--repo)(=|\s+)[^[:space:]]+)+/gh/g')
 
 BLOCKED=false
 REASON=""
@@ -93,6 +96,13 @@ if echo "$COMMAND" | grep -qPi '\bgh\s+api\b' && \
    echo "$COMMAND" | grep -qP '(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)\b'; then
   BLOCKED=true
   REASON="gh api writes to merge, release, tag or ref endpoints are blocked. Use gh pr merge <number>."
+fi
+
+# The GraphQL API reaches the same operations without a REST path.
+if echo "$COMMAND" | grep -qPi '\bgh\s+api\s+graphql\b' && \
+   echo "$COMMAND" | grep -qPi '\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRefs?|deleteRef|createRelease|updateRelease)\b'; then
+  BLOCKED=true
+  REASON="gh api graphql merge, release or ref mutations are blocked. Use gh pr merge <number>."
 fi
 
 # ── Manually dispatching the release pipeline — ask first ────────
