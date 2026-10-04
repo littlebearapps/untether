@@ -83,9 +83,11 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 - Claude Code **MUST NOT** push to `master`/`main`, merge PRs targeting `master`, create `v*` tags, or run `gh release`.
   Allowed: push feature branches, `gh pr create --base dev`, `gh pr merge <n> --squash` **only when base = `dev`**.
 - Nathan's merge of the `dev`→`master` PR is the single release gate (auto-tag → `release.yml` → PyPI → fleet rollout).
-- Real boundary: GitHub branch ruleset + CODEOWNERS (`* @littlebearapps/core`). The guard scripts in `.claude/hooks/`
-  are **not wired** (2026-10-03): Claude Code reads hooks only from `settings*.json` / plugins, never `.claude/hooks.json`, so no hook
-  will stop you; obey these rules yourself. **Never edit `.claude/hooks.json` or the guard scripts.**
+- Real boundary: GitHub branch ruleset + CODEOWNERS (`* @littlebearapps/core`). Locally, the guard hooks registered in
+  `.claude/settings.json` ([#915](https://github.com/littlebearapps/untether/issues/915)) deny master/main pushes, tags,
+  releases and non-`dev` merges, and ask before a non-dev Untether restart. They're a tripwire, not a boundary — obey the
+  rules regardless, and never work around a block. **Never edit `.claude/settings.json` or the guard scripts**
+  (`.claude/hooks/release-guard*.sh`, `help-faq-protect.sh`); personal settings go in `.claude/settings.local.json`.
 - `docs/faq/faq.md` backs the marketing-site FAQPage schema: **never delete or move it**; editing is encouraged.
 
 ## Release workflow (summary — full rules in `.claude/rules/release-discipline.md`)

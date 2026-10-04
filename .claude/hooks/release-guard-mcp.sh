@@ -6,6 +6,8 @@
 # DO NOT MODIFY — protected by release-guard-protect.sh
 
 set -euo pipefail
+# Fail closed: an internal error exits 2, which blocks the call (exit 1 would let it through).
+trap 'echo "release-guard-mcp.sh: internal error at line $LINENO — blocked to be safe" >&2; exit 2' ERR
 
 INPUT=$(cat)
 

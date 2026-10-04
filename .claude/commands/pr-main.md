@@ -22,8 +22,8 @@ release). Key points:
   --base master` is **allowed** (creating a PR is not a push/merge/tag/release).
   `gh pr merge` to master, `git push master`, `git tag v*`, and `gh release
   create` are **forbidden**. So `/pr-main` may OPEN the release PR but may **never**
-  merge/tag/release it. The local guard hook is not wired (Claude Code never loads
-  `.claude/hooks.json`), so nothing local will stop you — the rule is on you.
+  merge/tag/release it. The local guard hooks (#915) block these, but the rule is
+  on you regardless — never work around a block.
 - **The version-bump commit lands on `dev`** (pushing to `dev` is allowed;
   `master` is not). The PR is `dev`→`master`.
 - **`fleet-rollout.sh` is the operator's step** — `/pr-main` never runs it. The
@@ -72,7 +72,7 @@ release). Key points:
 
 Per `.claude/rules/help-faq.md`, scan the collapsed changelog against
 `docs/faq/faq.md`; update any user-visible surface answer that the release
-changes. (Edit/Write allowed; never `rm`/`mv`/`>` it — the guard hook is not wired.)
+changes. (Edit/Write allowed; never `rm`/`mv`/`>` it — `help-faq-protect.sh` blocks that.)
 
 ### M-5. Confirm the attestation marker (advisory)
 

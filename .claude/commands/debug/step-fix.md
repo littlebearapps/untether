@@ -21,9 +21,9 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
 - **NEVER restart `untether.service` (staging) to test code changes.** Restart
   `untether-dev.service` instead. Restarting staging during dev is *always*
   wrong (see `dev-workflow.md`).
-- **NEVER edit guard scripts or `.claude/hooks.json`.** Only Nathan changes them
-  outside Claude Code. (They are not wired — Claude Code never loads
-  `.claude/hooks.json` — so nothing will stop you; obey the rule anyway.)
+- **NEVER edit guard scripts or `.claude/settings.json`.** Only Nathan changes
+  them outside Claude Code. The guard blocks Edit/Write on them; never work
+  around a block.
 
 The release pipeline is single-gate: `dev` push → TestPyPI; Nathan
 squash-merges a stable version PR to `master` → auto-tag → release.yml
@@ -55,9 +55,8 @@ Follow the area's rule file:
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
   cleanup, outline gate, tap claims, plan re-arm).
-- `.claude/hooks.json` defines a prompt hook with the area's contract reminders
-  for runner, schema and telegram edits, but it is not wired; read the area rule
-  yourself.
+- No hook injects the area's contract reminders for runner, schema and telegram
+  edits; read the area rule yourself.
 
 ### 3. Run targeted tests
 

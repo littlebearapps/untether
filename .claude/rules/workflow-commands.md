@@ -48,9 +48,10 @@ pushing on. Record the redirect in the run summary.
 2. **Release-guard obedience.** Never `git push`/merge to `master`/`main`, never
    `git tag`, never `gh release create`. Every PR targets **`dev`**.
    `gh pr merge <n> --squash` is allowed **only** when base = `dev`. The local guard
-   hooks are not wired (Claude Code never loads `.claude/hooks.json`), so no hook
-   will stop you; the real authorization boundary is the GitHub branch
-   ruleset + CODEOWNERS. Never edit `hooks.json` or the guard scripts. See `.claude/rules/release-discipline.md`.
+   hooks (registered in `.claude/settings.json`, #915) block these, but they're a
+   tripwire — the real authorization boundary is the GitHub branch
+   ruleset + CODEOWNERS. Never edit `.claude/settings.json` or the guard scripts,
+   and never work around a block. See `.claude/rules/release-discipline.md`.
 
 3. **Dev/staging separation.** Never restart `untether.service` (staging) to test
    code — always `untether-dev.service`. Respect hot-reload: never

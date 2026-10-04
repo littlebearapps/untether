@@ -30,8 +30,8 @@ Capture **0–3** *process* learnings — how the work went, not what the code d
 
 | Command | May write | May NEVER write |
 |---|---|---|
-| `/kaizen` | exactly ONE `gh issue comment` on the collector (idempotent) | code · `.claude/rules/*` · `hooks.json` · `CLAUDE.md` |
-| `/kaizen-review` | strike a bullet (edit collector comment) · draft into `incoming/kaizen-runs/` · open a GH issue | apply any edit to `.claude/rules/*` · `hooks.json` · `CLAUDE.md` · code |
+| `/kaizen` | exactly ONE `gh issue comment` on the collector (idempotent) | code · `.claude/rules/*` · `.claude/settings.json` · `CLAUDE.md` |
+| `/kaizen-review` | strike a bullet (edit collector comment) · draft into `incoming/kaizen-runs/` · open a GH issue | apply any edit to `.claude/rules/*` · `.claude/settings.json` · `CLAUDE.md` · code |
 
 Promotion is **propose-only**: `/kaizen-review` drafts a pytest/doc/rule-draft +
 files an issue; a human (or `/implement`) applies it later. Nothing authoritative

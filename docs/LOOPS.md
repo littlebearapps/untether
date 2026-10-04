@@ -66,7 +66,7 @@ Intentionally NOT built
   /dq-spot-check  — no warehouse / no DQ patterns
   /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [cost_budget]), not a command
   /issue-triage   — covered by A1 + A2
-  /context-health — covered by the context-quality rule (the context-drift hooks in .claude/hooks.json are not wired)
+  /context-health — covered by the context-quality rule (the context-drift hook scripts in .claude/hooks/ are not registered)
 ```
 
 The delivery model is **three boundaries, not five stages** —
@@ -138,7 +138,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Trigger:** weekly (human-gated); monthly `--monthly` health sample.
 - **Driver:** `/kaizen-review` (propose-only).
 - **Output:** approval packets → on Accept, a propose-only artefact (pytest/doc/rule draft + GH issue) and the source bullet struck.
-- **Authority:** propose only. Never auto-edits `.claude/rules/`, `hooks.json`, `CLAUDE.md`, or code.
+- **Authority:** propose only. Never auto-edits `.claude/rules/`, `.claude/settings.json`, `CLAUDE.md`, or code.
 
 ### L9 · `/handover` — interruption stop-state  ·  Status: **available**
 

@@ -22,7 +22,7 @@ points:
   allowed **only** with base = `dev` (the one merge Claude may do). Never
   push/merge to `master`, never `git tag`, never `gh release create`, never
   `--no-verify`. The GitHub branch ruleset + CODEOWNERS is the real gate; the
-  local guard hooks are not wired, so nothing local will stop you.
+  local guard hooks (#915) are a tripwire — never work around a block.
 - **Dev/staging separation.** Never `systemctl restart` staging or dev from
   inside this session (hot-reload drain drops the final message).
 - **Confirm-gated + idempotent.** Surface the drafted PR body and wait for a tap;
@@ -75,7 +75,7 @@ manifest:
   `.claude/rules/help-faq.md`; if a user-visible surface changed (engine support,
   auth/billing, privacy/data flow, approval semantics, cost budgets, voice,
   install/update paths), edit the FAQ in this branch. Edit/Write only — never `rm`/`mv`/`>` it
-  (the `help-faq-protect.sh` guard is not wired, so nothing stops you).
+  (the `help-faq-protect.sh` guard blocks that).
 - **Context-doc reconciliation** — if a runner/schema/telegram surface changed,
   update `docs/reference/test-catalog.md` (and `feature-catalog.md` for a new
   feature) + the relevant `docs/reference/*` per
