@@ -198,7 +198,7 @@ def test_informational_notice_present(cli_blob: mmap.mmap) -> None:
         "in _translate_informational (D-15)"
     )
     m = re.search(
-        rb"`\$\{\w{1,4}\(\w{1,4}\)\}('s safeguards stopped the response above"
+        rb"`\$\{[\w$]{1,4}\([\w$]{1,4}\)\}('s safeguards stopped the response above"
         rb"[^`]{0,80})`",
         cli_blob,
     )
