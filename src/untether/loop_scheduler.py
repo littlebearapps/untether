@@ -1,8 +1,8 @@
 """Untether-side scheduler for /loop and ScheduleWakeup (#289, #925, #926).
 
 The #289 premise — "Claude Code's session-scoped scheduler dies when the
-``claude --print`` subprocess exits" (CLI 2.1.129, Probe 1 in
-`docs/plans/2026-05-06-289-loop-and-cron-interception.md`) — no longer
+``claude --print`` subprocess exits" (CLI 2.1.129, Probe 1 in the #289
+planning notes) — no longer
 holds: live sessions (#776) keep the process and its headless scheduler
 running between turns, and CLI 2.1.289 resurrects session-only CronCreate
 jobs on ``--resume`` and fires them at once
