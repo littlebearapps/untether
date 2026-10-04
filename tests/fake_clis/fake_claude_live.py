@@ -786,6 +786,41 @@ def scenario_scheduled_wakeup(first: dict) -> None:
     serve_followups()
 
 
+def scenario_wake_chain(first: dict) -> None:
+    """#925 §14.4: a dynamic /loop — every wake turn schedules the next
+    wake-up, until stdin closes (at most 5 wake turns)."""
+    init()
+    tool_use("ScheduleWakeup", "toolu_wk0", {"delaySeconds": 60, "prompt": "WAKE"})
+    tool_result("toolu_wk0", "Next wakeup scheduled for 19:15:00 (in 60s).")
+    result("scheduled", turns=2)
+    for n in range(1, 6):
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        lifecycle(f"wake-cmd-{n}", "started")
+        init()
+        tool_use(
+            "ScheduleWakeup", f"toolu_wk{n}", {"delaySeconds": 60, "prompt": "WAKE"}
+        )
+        tool_result(f"toolu_wk{n}", "Next wakeup scheduled for 19:16:00 (in 60s).")
+        result(f"WOKE {n}", turns=2)
+    serve_followups()
+
+
+def scenario_native_cron_fire(first: dict) -> None:
+    """#925 §14.3: a CLI cron job (no ScheduleWakeup in this process) fires
+    between turns — the native-fire detector's case."""
+    init()
+    text("FIRST")
+    result("FIRST")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    lifecycle("cron-fire-unknown", "started")
+    init()
+    text("TICK")
+    result("TICK")
+    serve_followups()
+
+
 def scenario_followup(first: dict) -> None:
     init()
     text("FIRST")
@@ -2624,6 +2659,8 @@ _SCENARIOS = {
     "agent_orphans_bg_task": scenario_agent_orphans_bg_task,
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
+    "wake_chain": scenario_wake_chain,  # #925
+    "native_cron_fire": scenario_native_cron_fire,  # #925
     "followup": scenario_followup,
     "compact_followup": scenario_compact_followup,
     "auto_compact_mid_turn": scenario_auto_compact_mid_turn,

@@ -5515,6 +5515,20 @@ def _live_closing_notice(
     )
 
 
+def _wake_cap_notice(cap: Any) -> str:
+    """#925 §14.4: a self-paced wake-up chain hit ``[loop] max_iterations``
+    and the session closed, dropping the pending wake-up."""
+    count = (
+        f" ({cap} wake-ups)"
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+        else ""
+    )
+    return (
+        f"\N{ALARM CLOCK} Self-paced wake-up limit reached{count} — the "
+        "pending wake-up was cancelled. Reply to continue."
+    )
+
+
 def _live_closed_notice(quarantined: bool) -> str:
     """#829: the silent follow-up once a close that stopped tasks has ended —
     whether the next message continues the same session."""
@@ -7146,6 +7160,22 @@ async def handle_message(
         if hooks and hook_count is not None and hook_count <= 0:
             hooks = []  # #812: nothing was still running
         if not tasks and not hooks:
+            if payload.get("reason") == "wake_cap":
+                # #925 §14.4: say why the self-paced loop stopped.
+                try:
+                    await cfg.transport.send(
+                        channel_id=incoming.channel_id,
+                        message=RenderedMessage(
+                            text=_wake_cap_notice(payload.get("wake_cap"))
+                        ),
+                        options=SendOptions(
+                            reply_to=turn_router.last_reply_to,
+                            notify=True,
+                            thread_id=incoming.thread_id,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("live_session.notice_failed", exc_info=True)
             return
         raw_hold = payload.get("max_hold_s")
         text = _live_closing_notice(

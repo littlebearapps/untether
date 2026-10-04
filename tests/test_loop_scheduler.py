@@ -9,6 +9,7 @@ freeze.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -566,11 +567,10 @@ class TestFirePath:
             finally:
                 tg.cancel_scope.cancel()
 
-    async def test_fire_skips_when_session_alive(self, monkeypatch):
-        """Race avoidance — if the originating subprocess is alive, skip
-        and re-arm a redundancy retry."""
+    async def test_fire_defers_while_session_alive_not_closeable(self, monkeypatch):
+        """#925: an alive session that can't be closed (not live-idle) defers
+        the fire; a cancel ends the retry without a run."""
         recorder = RunJobRecorder()
-        # Patch is_session_alive to claim our session is still alive.
         from untether.runners import claude as claude_mod
 
         monkeypatch.setattr(
@@ -578,20 +578,18 @@ class TestFirePath:
             "is_session_alive",
             lambda sid: sid == "sess-alive",
         )
-        # Short redundancy interval so the retry-task cleanup is quick
-        # (default is 30s — would slow the test for no benefit).
-        monkeypatch.setattr(loop_scheduler, "_redundancy_check_interval", lambda: 0)
+        monkeypatch.setattr(loop_scheduler, "_redundancy_check_interval", lambda: 0.01)
         async with anyio.create_task_group() as tg:
             loop_scheduler.install(tg, recorder, FakeTransport(), 1)
             try:
                 token = _register_simple_cron(chat_id=84, session_id="sess-alive")
-                await loop_scheduler._fire(token)
+                tg.start_soon(loop_scheduler._fire, token)
+                await anyio.sleep(0.05)
                 assert recorder.calls == []
-                # Entry preserved — redundancy retry scheduled.
                 assert token in loop_scheduler._PENDING_BY_TOKEN
-                # Cancel the entry so the redundancy retry exits immediately
-                # when it wakes up.
                 loop_scheduler.cancel_by_token(token)
+                await anyio.sleep(0.03)
+                assert recorder.calls == []
             finally:
                 tg.cancel_scope.cancel()
 
@@ -819,3 +817,425 @@ class TestDoNotResume:
         loop_scheduler.mark_do_not_resume("sess-y")
         loop_scheduler.mark_do_not_resume("sess-y")
         assert loop_scheduler.is_do_not_resume("sess-y")
+
+
+# ── #925: Untether owns the schedule (rc20) ─────────────────────────────
+
+
+def _patch_live(
+    monkeypatch,
+    *,
+    alive=lambda sid: True,
+    accepting=lambda sid: False,
+    closeable=lambda sid: False,
+    close_result=True,
+    closes: list | None = None,
+    interval: float = 0.01,
+):
+    """Stub the live-session probes the fire path consults."""
+    monkeypatch.setattr(loop_scheduler, "_is_session_alive_safe", alive)
+    monkeypatch.setattr(loop_scheduler, "_is_session_accepting_safe", accepting)
+    monkeypatch.setattr(loop_scheduler, "_live_session_loop_closeable_safe", closeable)
+
+    async def _close(sid):
+        if closes is not None:
+            closes.append(sid)
+        return close_result(sid) if callable(close_result) else close_result
+
+    monkeypatch.setattr(loop_scheduler, "_close_live_session_for_fire", _close)
+    monkeypatch.setattr(loop_scheduler, "_redundancy_check_interval", lambda: interval)
+
+
+class TestRegisterIdempotent:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_register_is_idempotent_per_tool_use_id(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                first = _register_simple_cron(chat_id=300, tool_use_id="tu-dup")
+                second = _register_simple_cron(chat_id=300, tool_use_id="tu-dup")
+                assert first == second
+                assert loop_scheduler.active_count() == 1
+                assert loop_scheduler.token_for_tool_use("tu-dup") == first
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cancelled_tool_use_id_is_not_reused(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                first = _register_simple_cron(chat_id=301, tool_use_id="tu-again")
+                loop_scheduler.cancel_by_token(first)
+                assert loop_scheduler.token_for_tool_use("tu-again") is None
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_entry_summary(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=302, prompt="tick")
+                summary = loop_scheduler.entry_summary(token)
+                assert summary is not None
+                assert summary["prompt"] == "tick"
+                assert summary["cron_expression"] == "*/5 * * * *"
+                assert summary["max_iterations"] == 20
+                assert loop_scheduler.entry_summary("ut_loop_nope") is None
+            finally:
+                tg.cancel_scope.cancel()
+
+
+class TestLiveFirePath:
+    """#925 D-D: firing while a process still owns the session."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_cron_alive_closeable_closes_session_then_fires(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        closes: list[str] = []
+        _patch_live(monkeypatch, closeable=lambda sid: True, closes=closes)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=310, session_id="sess-live")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                with capture_logs() as logs:
+                    await loop_scheduler._fire(token)
+                assert closes == ["sess-live"]
+                assert len(recorder.calls) == 1
+                assert entry.iteration_count == 1
+                assert any(
+                    e["event"] == "loop.live_session_closed_for_fire" for e in logs
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cron_alive_busy_defers_then_skips_at_next_fire(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        _patch_live(monkeypatch)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=311, session_id="sess-busy")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                generation = entry.generation
+                # The next cron fire lands 50 ms from now.
+                monkeypatch.setattr(
+                    loop_scheduler,
+                    "_next_cron_fire",
+                    lambda _expr: time.monotonic() + 0.05,
+                )
+                with capture_logs() as logs:
+                    await loop_scheduler._fire(token)
+                assert recorder.calls == []
+                assert entry.iteration_count == 0
+                assert entry.generation == generation + 1  # re-armed
+                assert token in loop_scheduler._PENDING_BY_TOKEN
+                events = [e["event"] for e in logs]
+                assert "loop.iteration_skipped_session_busy" in events
+                assert "loop.fire_deferred_session_busy" in events
+                assert "loop.fire_skipped_subprocess_alive" not in events
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cron_alive_busy_then_idle_fires_once(self, monkeypatch):
+        recorder = RunJobRecorder()
+        probes: list[str] = []
+
+        def closeable(sid):
+            probes.append(sid)
+            return len(probes) >= 2  # busy on the first probe, idle after
+
+        _patch_live(monkeypatch, closeable=closeable)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=312, session_id="s")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                await loop_scheduler._fire(token)
+                assert len(recorder.calls) == 1
+                assert entry.iteration_count == 1
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cron_close_refused_falls_back_to_busy_retry(self, monkeypatch):
+        """§13 amendment 2: a refused close (a follow-up got in first) is
+        busy — never spawn the iteration then."""
+        recorder = RunJobRecorder()
+        closes: list[str] = []
+        _patch_live(
+            monkeypatch,
+            closeable=lambda sid: True,
+            close_result=False,
+            closes=closes,
+        )
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=313, session_id="s")
+                monkeypatch.setattr(
+                    loop_scheduler,
+                    "_next_cron_fire",
+                    lambda _expr: time.monotonic() + 0.05,
+                )
+                await loop_scheduler._fire(token)
+                assert recorder.calls == []
+                assert len(closes) >= 1
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_wakeup_alive_expires_cli_fired_live(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        _patch_live(monkeypatch, accepting=lambda sid: True)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="s-wake",
+                    tool_use_id="tw",
+                    delay_seconds=600,
+                    prompt="check",
+                    chat_id=314,
+                )
+                with capture_logs() as logs:
+                    await loop_scheduler._fire(token)
+                assert recorder.calls == []
+                assert token not in loop_scheduler._PENDING_BY_TOKEN
+                expired = [e for e in logs if e["event"] == "loop.expired"]
+                assert expired and expired[0]["reason"] == "cli_fired_live"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_wakeup_dead_still_fires(self, monkeypatch):
+        recorder = RunJobRecorder()
+        _patch_live(monkeypatch, alive=lambda sid: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="s-dead",
+                    tool_use_id="tw2",
+                    delay_seconds=600,
+                    prompt="check",
+                    chat_id=315,
+                )
+                await loop_scheduler._fire(token)
+                assert len(recorder.calls) == 1
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_wakeup_alive_but_not_accepting_still_fires_after_exit(
+        self, monkeypatch
+    ):
+        """§13 amendment 3: a process in limbo / closing can't fire the wake
+        itself — retry and fire once it has exited."""
+        recorder = RunJobRecorder()
+        alive_probes: list[str] = []
+
+        def alive(sid):
+            alive_probes.append(sid)
+            return len(alive_probes) < 3
+
+        _patch_live(monkeypatch, alive=alive, accepting=lambda sid: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="s-limbo",
+                    tool_use_id="tw3",
+                    delay_seconds=600,
+                    prompt="check",
+                    chat_id=316,
+                )
+                await loop_scheduler._fire(token)
+                assert len(recorder.calls) == 1
+                assert token not in loop_scheduler._PENDING_BY_TOKEN  # one-shot
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_max_iterations_enforced_across_live_closes(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        _patch_live(monkeypatch, closeable=lambda sid: True)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_cron(
+                    session_id="s-cap",
+                    tool_use_id="tcap",
+                    cron_expression="* * * * *",
+                    prompt="tick",
+                    recurring=True,
+                    chat_id=317,
+                    max_iterations=2,
+                )
+                with capture_logs() as logs:
+                    for _ in range(3):
+                        await loop_scheduler._fire(token)
+                assert len(recorder.calls) == 2
+                expired = [e for e in logs if e["event"] == "loop.expired"]
+                assert expired[0]["reason"] == "max_iterations"
+                assert expired[0]["iterations_completed"] == 2
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_duration_cap_enforced_while_session_busy(self, monkeypatch):
+        recorder = RunJobRecorder()
+        _patch_live(monkeypatch)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=318, session_id="s")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                done = anyio.Event()
+
+                async def run_fire():
+                    await loop_scheduler._fire(token)
+                    done.set()
+
+                tg.start_soon(run_fire)
+                await anyio.sleep(0.03)
+                # The loop has now run past max_total_duration_hours.
+                entry.created_at_wallclock -= 5 * 3600
+                with anyio.fail_after(2):
+                    await done.wait()
+                assert recorder.calls == []
+                assert token not in loop_scheduler._PENDING_BY_TOKEN
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_busy_retry_never_double_fires_after_rearm(self, monkeypatch):
+        """§13 amendment 4: a retry still asleep when the entry is re-armed
+        (generation bump) bails instead of firing an extra iteration."""
+        recorder = RunJobRecorder()
+        idle = {"value": False}
+        _patch_live(monkeypatch, closeable=lambda sid: idle["value"])
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=319, session_id="s")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                done = anyio.Event()
+
+                async def run_fire():
+                    await loop_scheduler._fire(token)
+                    done.set()
+
+                tg.start_soon(run_fire)
+                await anyio.sleep(0.03)
+                entry.generation += 1  # re-armed elsewhere
+                idle["value"] = True
+                with anyio.fail_after(2):
+                    await done.wait()
+                assert recorder.calls == []
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_chat_busy_skips_before_live_check(self, monkeypatch):
+        """§13 amendment 1: an open turn makes the chat busy, so the fire is
+        skipped (``iteration_skipped_previous_running``) before D-D runs."""
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        probes: list[str] = []
+        _patch_live(monkeypatch, closeable=lambda sid: probes.append(sid) or True)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, recorder, FakeTransport(), 1, is_chat_busy=lambda _c: True
+            )
+            try:
+                token = _register_simple_cron(chat_id=320, session_id="s")
+                with capture_logs() as logs:
+                    await loop_scheduler._fire(token)
+                assert recorder.calls == []
+                assert probes == []
+                assert any(
+                    e["event"] == "loop.iteration_skipped_previous_running"
+                    for e in logs
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+
+class TestCancelReason:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_cancel_by_token_logs_reason(self):
+        from structlog.testing import capture_logs
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=330)
+                other = _register_simple_cron(chat_id=331)
+                with capture_logs() as logs:
+                    loop_scheduler.cancel_by_token(token, reason="cron_delete")
+                    loop_scheduler.cancel_by_token(other)
+                reasons = [e["reason"] for e in logs if e["event"] == "loop.cancelled"]
+                assert reasons == ["cron_delete", "user_cancel"]
+            finally:
+                tg.cancel_scope.cancel()
+
+
+class TestBindSuppression:
+    """#925 D-E: a CLI-accepted job marks its session cron-suppressed."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_bind_upstream_id_marks_cron_suppressed(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                _register_simple_cron(
+                    chat_id=340, session_id="sess-bind", tool_use_id="tu-bind"
+                )
+                assert loop_scheduler.cron_suppressed_until("sess-bind") is None
+                loop_scheduler.bind_upstream_id("tu-bind", "abcd1234")
+                until = loop_scheduler.cron_suppressed_until("sess-bind")
+                assert until is not None
+                assert until - time.time() == pytest.approx(
+                    loop_scheduler.CLI_CRON_MAX_AGE_S, abs=60
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_bind_upstream_id_no_suppression_when_own_schedule_false(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(loop_scheduler, "own_schedule_enabled", lambda: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                _register_simple_cron(
+                    chat_id=341, session_id="sess-ks", tool_use_id="tu-ks"
+                )
+                loop_scheduler.bind_upstream_id("tu-ks", "abcd1234")
+                assert loop_scheduler.cron_suppressed_until("sess-ks") is None
+                entry = loop_scheduler.pending_for_chat(341)[0]
+                assert entry.upstream_cron_id == "abcd1234"
+            finally:
+                tg.cancel_scope.cancel()

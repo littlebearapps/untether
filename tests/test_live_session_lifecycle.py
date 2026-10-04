@@ -1792,3 +1792,199 @@ async def test_876_auto_backgrounded_task_holds_the_live_session(
     )
     assert len(closes) == 1 and logs.index(ended) < logs.index(closes[0])
     assert not quarantine.is_quarantined("claude", SID)
+
+
+# ---------------------------------------------------------------------------
+# #925 (rc20): loop fires close a clean-idle session; wake cap; native fires
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _loop_cleanup():
+    from untether import loop_scheduler
+
+    loop_scheduler.uninstall()
+    yield
+    loop_scheduler.uninstall()
+
+
+def _install_live(session_id: str, state: ClaudeStreamState) -> LiveSession:
+    """A registered live session around ``state`` (no process)."""
+    live = LiveSession(session_id=session_id, state=state, stdin=_NullStdin(), pid=None)
+    claude_mod._LIVE_SESSIONS[session_id] = live
+    return live
+
+
+class _NullStdin:
+    async def send(self, _data: bytes) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _idle_state() -> ClaudeStreamState:
+    state = ClaudeStreamState()
+    state.completed_turns = 1
+    state.turn_open = False
+    return state
+
+
+async def test_live_session_loop_closeable_matrix() -> None:
+    from untether.runners.claude import live_session_loop_closeable
+
+    sid = "sess-closeable"
+    try:
+        assert live_session_loop_closeable(sid) is False  # no live session
+        state = _idle_state()
+        live = _install_live(sid, state)
+        assert live_session_loop_closeable(sid) is True  # idle clean
+
+        state.turn_open = True  # turn open
+        assert live_session_loop_closeable(sid) is False
+        state.turn_open = False
+
+        state.live_bg_bashes.add("toolu_bg")  # background work
+        state.bg_bash_deadlines["toolu_bg"] = time.monotonic() + 60
+        assert live_session_loop_closeable(sid) is False
+        state.live_bg_bashes.clear()
+        state.bg_bash_deadlines.clear()
+
+        state.pending_wakeup_until = time.monotonic() + 60  # pending wake-up
+        assert live_session_loop_closeable(sid) is False
+        state.pending_wakeup_until = None
+
+        claude_mod._REQUEST_TO_SESSION["req-closeable"] = sid  # approval
+        assert live_session_loop_closeable(sid) is False
+        claude_mod._REQUEST_TO_SESSION.pop("req-closeable", None)
+
+        state.awaiting_injected["cmd-x"] = time.monotonic()  # follow-up written
+        assert live_session_loop_closeable(sid) is False
+        state.awaiting_injected.clear()
+
+        live.budget_stopped = True  # not accepting
+        assert live_session_loop_closeable(sid) is False
+        live.budget_stopped = False
+
+        live.closing = True  # closing
+        assert live_session_loop_closeable(sid) is False
+        live.closing = False
+
+        assert live_session_loop_closeable(sid) is True
+    finally:
+        claude_mod._LIVE_SESSIONS.pop(sid, None)
+        claude_mod._REQUEST_TO_SESSION.pop("req-closeable", None)
+
+
+async def test_live_session_loop_closeable_pending_async_hook(monkeypatch) -> None:
+    from untether.runners.claude import live_session_loop_closeable
+
+    sid = "sess-hooked"
+    try:
+        _install_live(sid, _idle_state())
+        monkeypatch.setattr(claude_mod, "has_pending_async_hooks", lambda _s: True)
+        assert live_session_loop_closeable(sid) is False
+    finally:
+        claude_mod._LIVE_SESSIONS.pop(sid, None)
+
+
+async def test_loop_fire_close_is_stopped_clean() -> None:
+    """``loop_fire`` is an Untether-initiated clean close: a SIGINT exit
+    after it isn't quarantined (#829 B2)."""
+    from untether.runners.claude import _STOPPED_CLEAN_REASONS
+
+    assert "loop_fire" in _STOPPED_CLEAN_REASONS
+    sid = "sess-loop-fire"
+    try:
+        live = _install_live(sid, _idle_state())
+        assert await close_live_session(sid, "loop_fire", only_if_idle=True)
+        assert live.close_reason == "loop_fire"
+        assert claude_mod._may_stop_clean(live)
+    finally:
+        claude_mod._LIVE_SESSIONS.pop(sid, None)
+
+
+@pytest.mark.usefixtures("_loop_cleanup")
+async def test_wake_cap_stops_pending_wakeup_hold_at_max_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§14.4 + 13b amendment 5: at ``max_iterations`` wake turns the pending
+    wake-up stops holding the session; it closes at idle (``wake_cap``,
+    with a notice). At most cap + 1 wake turns run."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    real_caps = claude_mod._loop_caps
+    monkeypatch.setattr(
+        claude_mod, "_loop_caps", lambda: {**real_caps(), "max_iterations": 2}
+    )
+    notices: list[tuple[str, dict]] = []
+
+    async def on_event(evt: Any) -> None:
+        if isinstance(evt, CompletedEvent):
+            add_live_session_listener(
+                SID, lambda kind, payload: notices.append((kind, payload))
+            )
+
+    with capture_logs() as logs:
+        runner, events = await _run("wake_chain", on_event=on_event, wake_s=1.0)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert 2 <= len(finals) <= 3
+    state = _engine_state(runner)
+    assert state.live_close_reason == "wake_cap"
+    (cap_log,) = _events(logs, "claude.live_session.wake_cap")
+    assert cap_log["cap"] == 2
+    assert cap_log["turns"] >= 2
+    closing = [p for k, p in notices if k == "closing"]
+    assert closing and closing[0]["reason"] == "wake_cap"
+    assert closing[0]["wake_cap"] == 2
+
+
+@pytest.mark.usefixtures("_loop_cleanup")
+async def test_wake_cap_disabled_when_own_schedule_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the kill switch off a wake chain is held as before (rc19)."""
+    from untether import loop_scheduler
+
+    _settings(monkeypatch)
+    monkeypatch.setattr(loop_scheduler, "own_schedule_enabled", lambda: False)
+    real_caps = claude_mod._loop_caps
+    monkeypatch.setattr(
+        claude_mod, "_loop_caps", lambda: {**real_caps(), "max_iterations": 1}
+    )
+
+    async def stop_after_three(evt: Any) -> None:
+        if (
+            isinstance(evt, TurnEvent)
+            and evt.phase == "completed"
+            and evt.answer == "WOKE 3"
+        ):
+            await close_live_session(SID, "cancel")
+
+    runner, events = await _run("wake_chain", on_event=stop_after_three, wake_s=0.4)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals][:3] == ["WOKE 1", "WOKE 2", "WOKE 3"]
+    assert _engine_state(runner).wake_cap is None
+
+
+@pytest.mark.usefixtures("_loop_cleanup")
+async def test_native_cron_fire_closes_session_cron_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§14.3: a CLI cron fire (no ScheduleWakeup in this process) marks the
+    session suppressed and closes it once the fire's turn is idle."""
+    from structlog.testing import capture_logs
+
+    from untether import loop_scheduler
+
+    _settings(monkeypatch, post_result_limbo_grace=5.0)
+    with capture_logs() as logs:
+        runner, events = await _run("native_cron_fire", wake_s=0.3)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["TICK"]
+    assert _engine_state(runner).live_close_reason == "cron_suppressed"
+    assert _events(logs, "claude.turn.native_cron_fire")
+    marked = _events(logs, "loop.cron_suppressed_marked")
+    assert marked and marked[0]["source"] == "native_fire"
+    assert loop_scheduler.cron_suppressed_until(SID) is not None

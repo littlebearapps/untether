@@ -661,6 +661,24 @@ def is_session_accepting(session_id: str) -> bool:
     return live is not None and live.accepting_input
 
 
+def live_session_loop_closeable(session_id: str) -> bool:
+    """#925 D-D: a due loop iteration may close this live session to resume
+    it — accepting input, not closing, clean idle (no open turn, follow-up,
+    native task or background work), no pending ScheduleWakeup, approval /
+    ask or background hook. ``close_live_session(..., only_if_idle=True)``
+    re-checks the turn under the injection lock."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None or live.closing or not live.accepting_input:
+        return False
+    state = live.state
+    return (
+        _is_clean_idle(live)
+        and not _has_pending_wakeup(state)
+        and not any(v == session_id for v in _REQUEST_TO_SESSION.values())
+        and not has_pending_async_hooks(state)
+    )
+
+
 def stop_live_session_input(session_id: str) -> bool:
     """#896: refuse any further input into ``session_id`` (synchronous).
 
@@ -821,6 +839,9 @@ async def close_live_session(
             # re-arm switched off, that the hold limit was reached).
             payload["max_hold_s"] = live.state.bg_max_hold_s
             payload["rearm_on_progress"] = live.state.bg_hold_rearm_on_progress
+        if reason == "wake_cap":
+            # #925 §14.4: the notice names the cap.
+            payload["wake_cap"] = live.state.wake_cap
         if hook_notice:
             payload["hooks"] = hooks
             payload["hook_count"] = live.close_hook_count
@@ -842,7 +863,19 @@ _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 # transcript complete, resumable — P0 G7-G9). ``abs_cap`` closes mid-turn and
 # ``error`` follows a failed run: both keep the forced-teardown quarantine.
 _STOPPED_CLEAN_REASONS = frozenset(
-    {"max_hold", "cancel", "new", "drain", "options_changed", "budget_stop"}
+    {
+        "max_hold",
+        "cancel",
+        "new",
+        "drain",
+        "options_changed",
+        "budget_stop",
+        # #925: a due loop iteration closes a clean-idle session to resume
+        # it; the self-paced wake-up cap; a native cron fire was caught.
+        "loop_fire",
+        "wake_cap",
+        "cron_suppressed",
+    }
 )
 
 
@@ -1721,6 +1754,14 @@ class ClaudeStreamState:
     auto_approve_queue: list[str] = field(default_factory=list)
     # Auto-deny queue: (request_id, message) pairs for rate-limited denials
     auto_deny_queue: list[tuple[str, str]] = field(default_factory=list)
+    # #925: answers to Untether's own PreToolUse hook callbacks
+    # (``_LOOP_HOOK_IDS``): (request_id, callback_id, hook output, decision),
+    # written by ``_drain_hook_callbacks`` after the same line.
+    hook_callback_queue: list[tuple[str, str, dict[str, Any], str]] = field(
+        default_factory=list
+    )
+    # #925: this spawn's ``initialize`` registered those hooks.
+    loop_hooks_registered: bool = False
     # Whether the control channel initialization handshake has been sent
     control_init_sent: bool = False
     # Track last tool_use_id for mapping control requests to tool actions
@@ -1973,6 +2014,19 @@ class ClaudeStreamState:
     # #872: the delay that wake-up announced ("in 94s"), for the
     # ``hold_extended`` log — set and cleared with ``pending_wakeup_until``.
     pending_wakeup_delay_s: float | None = None
+    # #925 §14.3: a ScheduleWakeup tool_use was seen in this process — a
+    # wake turn without one can only be a CLI cron fire (native-fire
+    # detector, ``_open_followup_turn``).
+    schedule_wakeup_seen: bool = False
+    # #925 §14.4: consecutive self-paced wake turns (``scheduled_wakeup``,
+    # not a cron fire) since the last user follow-up, and the cap (``[loop]
+    # max_iterations``; None = no cap: ``-p`` mode or ``own_schedule =
+    # false``). Per process — every spawn starts at 0.
+    wake_chain_turns: int = 0
+    wake_cap: int | None = None
+    # #925 §14.3: a native CronCreate job fired in this process; the
+    # lifecycle closes the session (``cron_suppressed``) once it is idle.
+    cron_suppress_close_pending: bool = False
     # #776: why the live session's stdin was closed (idle_no_tasks /
     # max_hold / abs_cap / cancel / new / drain); None while still open.
     live_close_reason: str | None = None
@@ -5148,6 +5202,7 @@ def _register_background_handle(
         state.bg_agent_deadlines[tool_id] = time.monotonic() + BG_AGENT_MAX_KEEP_S
     elif tool_name == "ScheduleWakeup":
         state.background_observed = True
+        state.schedule_wakeup_seen = True  # #925 native-fire detector
         # #481: the actual Claude Code ScheduleWakeup tool schema (per
         # #289 / claude-agent-sdk-python) emits ``delaySeconds`` as the
         # canonical field. Earlier versions of this code read
@@ -5397,35 +5452,16 @@ def _observe_loop_tool_use(
     from .. import loop_scheduler
 
     if tool_name == "CronCreate":
-        # Probe 5: input field is `cron`, NOT `cron_expression`.  Lenient
-        # fallback to `cron_expression`/`schedule` in case the upstream
-        # schema gains aliases later.
-        cron_expr = (
-            raw_input.get("cron")
-            or raw_input.get("cron_expression")
-            or raw_input.get("schedule")
+        # #925: shared with the PreToolUse hook (idempotent per tool_use_id,
+        # either order — G4).
+        _token, error = _register_cron_from_input(
+            state, tool_id, raw_input, session_id=session_id
         )
-        prompt = raw_input.get("prompt") or raw_input.get("text") or ""
-        recurring = bool(raw_input.get("recurring", True))
-        if not cron_expr or not prompt:
-            return
-        try:
-            loop_scheduler.register_pending_cron(
-                session_id=session_id,
-                tool_use_id=tool_id,
-                cron_expression=str(cron_expr),
-                prompt=str(prompt),
-                recurring=recurring,
-                chat_id=int(chat_id),
-                thread_id=thread_id,
-                fallback_first_user_message=state.first_user_message_text,
-                **_loop_caps(),
-            )
-        except loop_scheduler.LoopSchedulerError as exc:
+        if error is not None and error != _LOOP_MISSING_INPUT:
             logger.warning(
                 "loop.observe.cron_register_failed",
                 session=session_id,
-                error=str(exc),
+                error=error,
             )
     elif tool_name == "ScheduleWakeup":
         # Probe 5: minimum delaySeconds = 60 (runtime clamps shorter values).
@@ -5467,14 +5503,290 @@ def _observe_loop_tool_use(
     elif tool_name == "CronDelete":
         # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
         upstream_id = raw_input.get("id") or raw_input.get("taskId")
-        if upstream_id:
-            loop_scheduler.cancel_by_upstream_id(str(upstream_id))
+        if not upstream_id:
+            return
+        if str(upstream_id).startswith(_LOOP_TOKEN_PREFIX):
+            # #925: an Untether loop token. With the hook registered the
+            # callback stops it (and tells the model); this is the hook-less
+            # path (``-p`` mode), where the CLI answers "No scheduled job".
+            if not state.loop_hooks_registered:
+                loop_scheduler.cancel_by_token(str(upstream_id), reason="cron_delete")
+            return
+        loop_scheduler.cancel_by_upstream_id(str(upstream_id))
+
+
+# ── Untether owns the schedule: PreToolUse hook callbacks (#925) ────────
+
+_LOOP_HOOK_CRON_CREATE = "ut_loop_cron_create"
+_LOOP_HOOK_CRON_DELETE = "ut_loop_cron_delete"
+_LOOP_HOOK_IDS = frozenset({_LOOP_HOOK_CRON_CREATE, _LOOP_HOOK_CRON_DELETE})
+_LOOP_HOOK_TIMEOUT_S = 30
+_LOOP_TOKEN_PREFIX = "ut_loop_"
+_LOOP_MISSING_INPUT = "missing cron expression or prompt"
+_LOOP_PROMPT_EXCERPT = 80
+# #925 §14.3 (D1 = A): the model-facing text when Loop mode is off. Must
+# never match ``_LOOP_CRON_ID_RE`` (a test enforces it).
+_LOOP_OFF_DENY_REASON = (
+    "Scheduling is off in this chat (Untether Loop mode is off), so nothing "
+    "was scheduled. Tell the user: to run this on a schedule they can turn on "
+    "Loop mode with /config → Loop mode (Untether then runs it with limits); "
+    "for a one-off delay they can send /at <delay> <prompt>. Do not retry with "
+    "CronCreate, ScheduleWakeup or a sleep loop."
+)
+
+
+def _loop_hooks_config() -> dict[str, Any] | None:
+    """#925 (D1 = A): the ``initialize.hooks`` for every control-channel
+    spawn — exact-name PreToolUse matchers for CronCreate / CronDelete,
+    answered by :func:`_loop_hook_decision`. Loop mode is read when the
+    callback arrives, not here; ``[loop] own_schedule = false`` → None
+    (rc19: no hooks)."""
+    from ..loop_scheduler import own_schedule_enabled
+
+    if not own_schedule_enabled():
+        return None
+    return {
+        "PreToolUse": [
+            {
+                "matcher": "CronCreate",
+                "hookCallbackIds": [_LOOP_HOOK_CRON_CREATE],
+                "timeout": _LOOP_HOOK_TIMEOUT_S,
+            },
+            {
+                "matcher": "CronDelete",
+                "hookCallbackIds": [_LOOP_HOOK_CRON_DELETE],
+                "timeout": _LOOP_HOOK_TIMEOUT_S,
+            },
+        ]
+    }
+
+
+def _register_cron_from_input(
+    state: ClaudeStreamState,
+    tool_use_id: str,
+    raw_input: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Register a CronCreate as an Untether loop with the ``[loop]`` caps.
+
+    Shared by the assistant ``tool_use`` observer and the PreToolUse hook
+    (#925); idempotent per ``tool_use_id``. Returns ``(token, None)`` or
+    ``(None, error)``."""
+    from .. import loop_scheduler
+    from ..utils.paths import get_run_channel_id, get_run_thread_id
+
+    chat_id = get_run_channel_id()
+    if chat_id is None:
+        return None, "not in a chat"
+    if session_id is None:
+        session_id = state.factory.resume.value if state.factory.resume else None
+    if not session_id:
+        return None, "session not started"
+    # Probe 5: input field is `cron`, NOT `cron_expression`.  Lenient
+    # fallback to `cron_expression`/`schedule` in case the upstream
+    # schema gains aliases later.
+    cron_expr = (
+        raw_input.get("cron")
+        or raw_input.get("cron_expression")
+        or raw_input.get("schedule")
+    )
+    prompt = raw_input.get("prompt") or raw_input.get("text") or ""
+    recurring = bool(raw_input.get("recurring", True))
+    if not cron_expr or not prompt:
+        return None, _LOOP_MISSING_INPUT
+    try:
+        token = loop_scheduler.register_pending_cron(
+            session_id=session_id,
+            tool_use_id=tool_use_id,
+            cron_expression=str(cron_expr),
+            prompt=str(prompt),
+            recurring=recurring,
+            chat_id=int(chat_id),
+            # #826: record the run's topic so /new and /cancel in another
+            # forum topic leave this loop alone.
+            thread_id=get_run_thread_id(),
+            fallback_first_user_message=state.first_user_message_text,
+            **_loop_caps(),
+        )
+    except loop_scheduler.LoopSchedulerError as exc:
+        return None, str(exc)
+    return token, None
+
+
+def _loop_schedule_text(cron_expression: str | None) -> str:
+    """A short human form of a loop's cron expression for the deny reason."""
+    expr = (cron_expression or "").strip()
+    fields = expr.split()
+    if len(fields) == 5 and fields[1:] == ["*", "*", "*", "*"]:
+        if fields[0] in ("*", "*/1"):
+            return "every minute"
+        if fields[0].startswith("*/") and fields[0][2:].isdigit():
+            return f"every {int(fields[0][2:])} minutes"
+    from ..triggers.describe import describe_cron
+
+    described = describe_cron(expr) if expr else expr
+    return f'cron "{expr}"' if described == expr else described
+
+
+def _no_bind_match(text: str) -> str:
+    """Keep ``_LOOP_CRON_ID_RE`` from matching model-facing text (a prompt
+    quoting "job deadbeef" would otherwise mis-bind an upstream id)."""
+    return _LOOP_CRON_ID_RE.sub(lambda m: f"job #{m.group(1)}", text)
+
+
+def _loop_deny_reason(token: str) -> str:
+    """#925 D-C: tell the model Untether runs the schedule (Loop mode on)."""
+    from .. import loop_scheduler
+
+    summary = loop_scheduler.entry_summary(token) or {}
+    prompt = " ".join(str(summary.get("prompt") or "").split())
+    if len(prompt) > _LOOP_PROMPT_EXCERPT:
+        prompt = prompt[: _LOOP_PROMPT_EXCERPT - 1] + "…"
+    if summary.get("recurring", True):
+        limits = (
+            f"at most {summary.get('max_iterations')} iterations / "
+            f"{summary.get('max_total_duration_hours')} h"
+        )
+    else:
+        limits = "runs once"
+    reason = (
+        "Untether is running this schedule instead of Claude Code (Loop mode): "
+        f"loop {token}, {_loop_schedule_text(summary.get('cron_expression'))}, "
+        f'prompt "{prompt}", {limits}. Each iteration arrives later as a new '
+        "user message. Nothing was scheduled in this session, so CronList will "
+        "not show it. Do not retry with CronCreate, ScheduleWakeup or a sleep "
+        "loop. Tell the user it is scheduled and that /cancel stops it; to stop "
+        f'it yourself, call CronDelete with id "{token}".'
+    )
+    return _no_bind_match(reason)
+
+
+def _hook_deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _loop_could_not_schedule(error: str) -> dict[str, Any]:
+    """#925 D4: fail closed — Loop mode never leaves an uncapped native job."""
+    return _hook_deny(
+        _no_bind_match(
+            f"Untether could not schedule this ({error}). Nothing was "
+            "scheduled; tell the user."
+        )
+    )
+
+
+def _loop_hook_decision(
+    state: ClaudeStreamState,
+    request: claude_schema.ControlHookCallbackRequest,
+) -> tuple[dict[str, Any], str]:
+    """#925: answer one of Untether's PreToolUse hook callbacks. Returns the
+    hook output (``{}`` = no opinion, the tool runs) and ``deny`` /
+    ``passthrough`` for the log.
+
+    - ``ut_loop_cron_create``: kill switch off → passthrough. Loop mode off
+      (read now: per-chat override, else the live global ``[loop]
+      enabled``) → deny with Loop-mode / ``/at`` guidance (§14.3), nothing
+      registered. Loop mode on → register as an Untether loop with caps and
+      deny with :func:`_loop_deny_reason`; a registration error denies too
+      (fail closed, D4).
+    - ``ut_loop_cron_delete``: a ``ut_loop_`` id → stop that Untether loop
+      and deny (the CLI holds no such job); any other id → passthrough, so a
+      real CLI job is deleted natively and its transcript marker stops the
+      resume scan (F3).
+    """
+    from .. import loop_scheduler
+    from ..utils.paths import get_run_channel_id
+
+    hook_input = request.input if isinstance(request.input, dict) else {}
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    session_id = state.factory.resume.value if state.factory.resume else None
+    if not session_id:
+        raw_sid = hook_input.get("session_id")
+        session_id = str(raw_sid) if raw_sid else None
+    if request.callback_id == _LOOP_HOOK_CRON_DELETE:
+        target = str(tool_input.get("id") or "")
+        if not target.startswith(_LOOP_TOKEN_PREFIX):
+            return {}, "passthrough"
+        if loop_scheduler.cancel_by_token(target, reason="cron_delete"):
+            reason = f"Untether stopped loop {target}."
+        else:
+            reason = f"No active Untether loop {target}."
+        return _hook_deny(reason), "deny"
+    # ut_loop_cron_create
+    if not loop_scheduler.own_schedule_enabled():
+        return {}, "passthrough"
+    chat_id = get_run_channel_id()
+    if not _loop_enabled_for_chat(chat_id):
+        logger.info(
+            "loop.cli_job_denied",
+            session=session_id,
+            chat_id=chat_id,
+            loop_mode="off",
+            recurring=bool(tool_input.get("recurring", True)),
+        )
+        return _hook_deny(_LOOP_OFF_DENY_REASON), "deny"
+    tool_use_id = request.tool_use_id or str(hook_input.get("tool_use_id") or "")
+    if not tool_use_id:
+        return _loop_could_not_schedule("no tool_use_id"), "deny"
+    token, error = _register_cron_from_input(
+        state, tool_use_id, tool_input, session_id=session_id
+    )
+    if token is None:
+        logger.warning(
+            "loop.cli_job_denied",
+            session=session_id,
+            chat_id=chat_id,
+            loop_mode="on",
+            error=error,
+        )
+        return _loop_could_not_schedule(error or "unknown error"), "deny"
+    logger.info(
+        "loop.cli_job_denied",
+        session=session_id,
+        chat_id=chat_id,
+        loop_mode="on",
+        token=token,
+    )
+    return _hook_deny(_loop_deny_reason(token)), "deny"
+
+
+def _loop_hook_decision_safe(
+    state: ClaudeStreamState,
+    request: claude_schema.ControlHookCallbackRequest,
+) -> tuple[dict[str, Any], str]:
+    """Never leave a hook callback unanswered (the CronCreate would block
+    for the hook timeout). A throwing CronCreate decision still denies
+    (§13 amendment 5, fail closed); CronDelete falls back to passthrough."""
+    try:
+        return _loop_hook_decision(state, request)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "loop.hook_decision_failed",
+            callback_id=request.callback_id,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+            exc_info=True,
+        )
+        if request.callback_id == _LOOP_HOOK_CRON_CREATE:
+            return _loop_could_not_schedule("internal error"), "deny"
+        return {}, "passthrough"
 
 
 def _observe_loop_tool_result(
     state: ClaudeStreamState,
     tool_use_id: str,
     result_content: object,
+    *,
+    is_error: bool = False,
 ) -> None:
     """Observe ``CronCreate`` ``tool_result`` events and bind the upstream
     8-character cron ID to the matching pending entry (#289).
@@ -5482,8 +5794,11 @@ def _observe_loop_tool_result(
     Sibling of :func:`_clear_background_handle`.  Does nothing if no
     matching entry exists (e.g. master toggle was off when tool_use was
     observed).  Idempotent — bind_upstream_id is a no-op for unknown
-    tool_use_ids.
+    tool_use_ids. #925: an error result (a hook-denied CronCreate) never
+    binds — the CLI holds no job for it.
     """
+    if is_error:
+        return
     if not isinstance(result_content, str):
         # tool_result.content can be list[dict] for multi-block results.
         # CronCreate / ScheduleWakeup return free-form strings, so anything
@@ -7271,6 +7586,74 @@ def _turn_plan_deferred(
     return agents
 
 
+# #925 §14.3 / 13b amendment 2: whether the native-fire detector may mark a
+# session cron-suppressed (else it only logs ``claude.turn.native_cron_fire``).
+# Fleet false-positive check clean 2026-10-04: 0/8 sessions (all 5 hosts, 7
+# days: every ``scheduled_wakeup`` turn had a ScheduleWakeup / CronCreate
+# tool_use in its transcript).
+_NATIVE_FIRE_SUPPRESSION_ENABLED = True
+
+
+def _note_wake_turn(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    reason: str,
+    detail: dict[str, Any],
+) -> None:
+    """#925 §14.3/§14.4: count self-paced wake turns and catch native cron
+    fires as a turn opens.
+
+    A ``scheduled_wakeup`` turn in a process that never saw a ScheduleWakeup
+    tool_use can only be a CLI cron job firing (a legacy Loop-off job the
+    CLI resurrected — the hook can't stop those). It is tagged
+    ``source=cron`` and, with ``own_schedule`` on, the session is marked
+    cron-suppressed for the CLI's 7-day window and closed once idle, so
+    later spawns run with CLAUDE_CODE_DISABLE_CRON=1. It misses the first
+    resurrected fire (the run's own first turn, F4): up to two stray fires
+    per legacy session. Other wake turns count toward the wake cap; a user
+    follow-up resets it."""
+    if reason == "followup":
+        state.wake_chain_turns = 0
+        return
+    if reason != "scheduled_wakeup":
+        return
+    session_id = factory.resume.value if factory.resume else None
+    if state.schedule_wakeup_seen:
+        state.wake_chain_turns += 1
+        logger.debug(
+            "loop.native_fire_ambiguous",
+            session_id=session_id,
+            turn=state.turn + 1,
+            wake_chain_turns=state.wake_chain_turns,
+        )
+        return
+    detail["source"] = "cron"
+    from .. import loop_scheduler
+
+    own = loop_scheduler.own_schedule_enabled()
+    suppress = own and _NATIVE_FIRE_SUPPRESSION_ENABLED and session_id is not None
+    logger.info(
+        "claude.turn.native_cron_fire",
+        session_id=session_id,
+        turn=state.turn + 1,
+        suppress=suppress,
+    )
+    if suppress and session_id is not None:
+        loop_scheduler.mark_cron_suppressed(
+            session_id,
+            "native",
+            until=time.time() + loop_scheduler.CLI_CRON_MAX_AGE_S,
+            source="native_fire",
+        )
+        state.cron_suppress_close_pending = True
+
+
+def _wake_cap_reached(state: ClaudeStreamState) -> bool:
+    """#925 §14.4: the self-paced wake-up chain has hit ``[loop]
+    max_iterations`` in this process."""
+    return state.wake_cap is not None and state.wake_chain_turns >= state.wake_cap
+
+
 def _open_followup_turn(
     state: ClaudeStreamState, factory: EventFactory
 ) -> UntetherEvent:
@@ -7350,6 +7733,7 @@ def _open_followup_turn(
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
         state.pending_wakeup_delay_s = None
+    _note_wake_turn(state, factory, reason, detail)  # #925
     if reason == "followup" and command_uuid is not None:
         state.awaiting_injected.pop(command_uuid, None)
     # #383 C4: this turn runs unplanned because the approved plan's agents
@@ -8128,7 +8512,12 @@ def _translate_claude_event_base(
                 )
                 # #289 bind upstream cron ID so CronDelete observations
                 # later in the session can target the right loop entry.
-                _observe_loop_tool_result(state, tool_use_id, content.content)
+                _observe_loop_tool_result(
+                    state,
+                    tool_use_id,
+                    content.content,
+                    is_error=bool(getattr(content, "is_error", False)),
+                )
                 action = state.pending_actions.pop(tool_use_id, None)
                 if action is None:
                     action = Action(
@@ -8369,11 +8758,26 @@ def _translate_claude_event_base(
             # The other three (initialize, hook_callback, interrupt) are
             # protocol housekeeping with no payload that Untether interprets.
             #
+            # #925 exception: hook callbacks Untether registered itself
+            # (``_LOOP_HOOK_IDS``, the CronCreate / CronDelete PreToolUse
+            # hooks sent in ``initialize``) are intercepted just below and
+            # DO read ``input`` (the tool input) to decide. Every other
+            # ``hook_callback`` keeps the payload-blind auto-approve.
+            #
             # Acceptance: changes to either subtype's semantics in upstream
             # Claude Code MUST trigger a re-audit. Tests in
             # tests/test_claude_control.py::TestAutoApproveSafetyInvariant
             # lock in the expectation that auto-approve runs without
             # invoking any callback that observes the payload.
+            if (
+                isinstance(request, claude_schema.ControlHookCallbackRequest)
+                and request.callback_id in _LOOP_HOOK_IDS
+            ):
+                output, decision = _loop_hook_decision_safe(state, request)
+                state.hook_callback_queue.append(
+                    (request_id, request.callback_id, output, decision)
+                )
+                return []
             _AUTO_APPROVE_TYPES = (
                 claude_schema.ControlInitializeRequest,
                 claude_schema.ControlHookCallbackRequest,
@@ -9472,10 +9876,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if effective_mode is not None:
             # SDK-style control channel: send init handshake + user message.
             # The CLI reads both from stdin (no -p mode).
+            # #925: Untether's CronCreate / CronDelete PreToolUse hooks ride
+            # on every control-channel spawn (unless `own_schedule = false`).
+            hooks = _loop_hooks_config()
+            if isinstance(state, ClaudeStreamState):
+                state.loop_hooks_registered = hooks is not None
             init_request = {
                 "type": "control_request",
                 "request_id": f"init_{id(self)}",
-                "request": {"subtype": "initialize", "hooks": None},
+                "request": {"subtype": "initialize", "hooks": hooks},
             }
             user_message = {
                 "type": "user",
@@ -9584,6 +9993,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             claude_cli_permission_mode(self._effective_permission_mode()) == "plan"
         )
         state.resumed = resume is not None
+        if requested_mode is not None:
+            from .. import loop_scheduler
+
+            # #925 §14.4: self-paced wake-up chains stop after
+            # ``[loop] max_iterations`` (per process; off with the kill switch).
+            if loop_scheduler.own_schedule_enabled():
+                state.wake_cap = _loop_caps()["max_iterations"]
         # #289 capture the first user message so loop observers can fall back
         # to it when ScheduleWakeup uses the <<autonomous-loop-dynamic>>
         # sentinel.  For resumed runs this is the resume prompt (still better
@@ -9761,6 +10177,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 yield evt
             # Drain auto-approve and auto-deny queues after EVERY line, even if no events
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
+            await self._drain_hook_callbacks(state, stdin=session_stdin)  # #925
             await self._drain_auto_approve(state, stdin=session_stdin)
             await self._drain_auto_deny(state, stdin=session_stdin)
             # #383 backstop: a re-arm the pre-yield drain couldn't write.
@@ -9778,6 +10195,53 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # carries the #505 protection instead (post-exit drain + close).
             if stream.did_emit_completed and not stream.followup_turns:
                 break
+
+    async def _drain_hook_callbacks(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """#925: answer Untether's own PreToolUse hook callbacks. The
+        response payload IS the hook output (``{}`` = no opinion, or a
+        ``hookSpecificOutput`` deny)."""
+        if not state.hook_callback_queue:
+            return
+        pipe = stdin or self._proc_stdin
+        queued = list(state.hook_callback_queue)
+        state.hook_callback_queue.clear()
+        for req_id, callback_id, output, decision in queued:
+            response = {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": req_id,
+                    "response": output,
+                },
+            }
+            payload = (json.dumps(response) + "\n").encode()
+            try:
+                if pipe is not None:
+                    await _locked_send(pipe, payload)
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                else:
+                    logger.warning(
+                        "control_response.hook_callback_failed",
+                        request_id=req_id,
+                        callback_id=callback_id,
+                    )
+                    continue
+                logger.info(
+                    "control_response.hook_callback",
+                    request_id=req_id,
+                    callback_id=callback_id,
+                    decision=decision,
+                )
+            except (OSError, anyio.ClosedResourceError) as e:
+                logger.warning(
+                    "control_response.hook_callback_failed",
+                    request_id=req_id,
+                    callback_id=callback_id,
+                    error=str(e),
+                )
 
     async def _drain_auto_approve(
         self, state: ClaudeStreamState, *, stdin: Any = None
@@ -10179,9 +10643,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 else:
                     state.hook_procs_gone_since = None
                 hooks_pending = live.idle and has_pending_async_hooks(state)
+                # #925 §14.4: at the wake cap a pending wake-up no longer
+                # holds the session — it closes at idle (``wake_cap``).
+                wake_capped = _wake_cap_reached(state) and _has_pending_wakeup(state)
                 live_work = (
                     has_live_background_work(state)
-                    or _has_pending_wakeup(state)
+                    or (_has_pending_wakeup(state) and not wake_capped)
                     or hooks_pending
                 )
                 if hooks_pending and not state.hook_hold_logged:
@@ -10230,6 +10697,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     # A pending approval / ask pauses every timer.
                     live.idle_since = now
                     live.hold_started = now
+                    continue
+                if state.cron_suppress_close_pending and _is_clean_idle(live):
+                    # #925 §14.3: a native cron job fired in this process;
+                    # end it so the CLI's scheduler stops (later spawns run
+                    # with CLAUDE_CODE_DISABLE_CRON=1).
+                    state.cron_suppress_close_pending = False
+                    await close_live_session(sid, "cron_suppressed", only_if_idle=True)
                     continue
                 if live.idle_since is None:
                     live.idle_since = now
@@ -10303,6 +10777,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                     continue
                 if now - live.idle_since >= idle_grace_s:
+                    if wake_capped:
+                        run_logger.info(
+                            "claude.live_session.wake_cap",
+                            session_id=sid,
+                            turns=state.wake_chain_turns,
+                            cap=state.wake_cap,
+                        )
+                        await close_live_session(
+                            sid, "wake_cap", notice=True, only_if_idle=True
+                        )
+                        continue
                     await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
         except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
             cancelled = True

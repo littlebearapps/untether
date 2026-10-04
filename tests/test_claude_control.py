@@ -2076,6 +2076,12 @@ class TestAutoApproveSafetyInvariant:
     for the full audit. These tests fail loudly if the auto-approve path
     starts inspecting payloads (which would signal that the trust model has
     shifted and the audit needs to be revisited).
+
+    #925 (rc20): the one sanctioned exception is the pair of PreToolUse hook
+    callbacks Untether registers itself (``_LOOP_HOOK_IDS``) — those are
+    intercepted before auto-approve and do read ``input``. Every other
+    ``hook_callback`` stays payload-blind
+    (``test_unknown_hook_callback_id_still_auto_approved``).
     """
 
     def test_mcp_message_payload_not_inspected(self) -> None:
@@ -2195,6 +2201,69 @@ class TestAutoApproveSafetyInvariant:
                 "the safety invariant in runners/claude.py requires silent "
                 "auto-approve — re-audit if this fails."
             )
+
+    def test_unknown_hook_callback_id_still_auto_approved(self) -> None:
+        """#925 §13 amendment 6: only Untether's own hook callbacks
+        (``_LOOP_HOOK_IDS``) are intercepted and read ``input``; any other
+        ``hook_callback`` keeps the payload-blind auto-approve."""
+        state, _ = _make_state_with_session()
+        event = _decode_event(
+            {
+                "type": "control_request",
+                "request_id": "req-sdk-hook",
+                "request": {
+                    "subtype": "hook_callback",
+                    "callback_id": "hook_0",
+                    "input": {"tool_name": "CronCreate", "tool_input": {}},
+                },
+            }
+        )
+        assert (
+            translate_claude_event(
+                event, title="claude", state=state, factory=state.factory
+            )
+            == []
+        )
+        assert "req-sdk-hook" in state.auto_approve_queue
+        assert state.hook_callback_queue == []
+
+
+@pytest.mark.anyio
+async def test_drain_hook_callbacks_writes_exact_control_response() -> None:
+    """#925: the hook output IS the control_response payload (G1 shape),
+    written before the auto-approve drain on the same line."""
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    provided = AsyncMock(name="provided_stdin")
+    state = ClaudeStreamState()
+    deny = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Untether stopped loop ut_loop_1234abcd.",
+        }
+    }
+    state.hook_callback_queue.append(("req-h1", "ut_loop_cron_delete", deny, "deny"))
+    state.hook_callback_queue.append(
+        ("req-h2", "ut_loop_cron_delete", {}, "passthrough")
+    )
+    state.auto_approve_queue.append("req-a1")
+
+    await runner._drain_hook_callbacks(state, stdin=provided)
+    await runner._drain_auto_approve(state, stdin=provided)
+
+    sent = [json.loads(call.args[0].decode()) for call in provided.send.await_args_list]
+    assert sent[0] == {
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": "req-h1", "response": deny},
+    }
+    assert sent[1]["response"] == {
+        "subtype": "success",
+        "request_id": "req-h2",
+        "response": {},
+    }
+    assert sent[2]["response"]["request_id"] == "req-a1"
+    assert state.hook_callback_queue == []
 
 
 # ===========================================================================

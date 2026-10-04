@@ -1,21 +1,36 @@
-"""Untether-side scheduler for /loop and ScheduleWakeup (#289).
+"""Untether-side scheduler for /loop and ScheduleWakeup (#289, #925, #926).
 
-Claude Code's session-scoped scheduler dies when the ``claude --print``
-subprocess exits — verified empirically against ``claude`` 2.1.129/2.1.132
-in `docs/plans/2026-05-06-289-loop-and-cron-interception.md` (Probe 1).
-This module observes ``CronCreate`` / ``ScheduleWakeup`` / ``CronDelete``
-tool_use events at the JSONL layer (wired in :mod:`untether.runners.claude`),
-captures the user's intent (cron expression + prompt OR delay + prompt),
-and at each fire interval spawns ``claude --resume <session_id>`` with the
-original prompt re-issued as a fresh user turn.
+The #289 premise — "Claude Code's session-scoped scheduler dies when the
+``claude --print`` subprocess exits" (CLI 2.1.129, Probe 1 in
+`docs/plans/2026-05-06-289-loop-and-cron-interception.md`) — no longer
+holds: live sessions (#776) keep the process and its headless scheduler
+running between turns, and CLI 2.1.289 resurrects session-only CronCreate
+jobs on ``--resume`` and fires them at once
+(`docs/findings/2026-10-04-claude-session-cron-resume-and-host-controls.md`
+F1-F4).
+
+So in Loop-mode chats Untether **owns** the schedule (#925): an SDK
+PreToolUse hook callback (:mod:`untether.runners.claude`) declines Claude's
+``CronCreate`` and registers it here instead, so the CLI never holds a job
+it could fire uncapped or resurrect. Each due iteration spawns
+``claude --resume <session_id>`` with the original prompt re-issued as a
+fresh user turn — closing a clean-idle live session first — and the
+``[loop]`` caps apply to every iteration. ``ScheduleWakeup`` entries (waits
+longer than ``inline_threshold_seconds``) fire here only once the session
+has gone; a live session fires its own wake-up (``cli_fired_live``).
+
+Residual CLI jobs (``-p`` chats, ``[loop] own_schedule = false``, pre-rc20
+state) are tracked as *cron suppression* records (#926): a later
+control-channel spawn resuming that session gets
+``CLAUDE_CODE_DISABLE_CRON=1`` until the CLI's own 7-day resurrect window
+has passed.
 
 State is persisted to ``active_loops.json`` (sibling to the config file)
 via :func:`untether.utils.json_state.atomic_write_json` so loops survive
 Untether restarts.
 
-Default OFF — opt-in per-chat via ``/config → 🔁 Loop mode``. When the
-toggle is OFF (the default) the observer never reaches this module so
-behaviour matches the pre-#289 baseline.
+Loop mode is off by default — opt-in per chat via ``/config → 🔁 Loop
+mode``.
 """
 
 from __future__ import annotations
@@ -31,6 +46,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import anyio
+import anyio.lowlevel
 from anyio.abc import TaskGroup
 
 from .context import RunContext
@@ -43,6 +59,7 @@ from .utils.json_state import atomic_write_json
 logger = get_logger(__name__)
 
 __all__ = [
+    "CLI_CRON_MAX_AGE_S",
     "STATE_FILENAME",
     "LoopSchedulerError",
     "active_count",
@@ -50,17 +67,30 @@ __all__ = [
     "cancel_by_token",
     "cancel_by_upstream_id",
     "cancel_pending_for_chat",
+    "clear_cron_suppressed",
+    "cron_suppressed_until",
+    "entry_summary",
     "install",
     "is_do_not_resume",
+    "mark_cron_suppressed",
     "mark_do_not_resume",
     "next_fire_for_session",
+    "own_schedule_enabled",
     "pending_for_chat",
     "register_pending_cron",
     "register_pending_wakeup",
+    "token_for_tool_use",
     "uninstall",
 ]
 
 STATE_FILENAME = "active_loops.json"
+
+# #926: the CLI resurrects a session-only CronCreate job on ``--resume`` for
+# as long as it is younger than ``recurringMaxAgeMs`` (default 604800000 ms
+# = 7 days; drift-probed in tests/test_claude_cli_schema_drift.py). Remote
+# config can change it — ``0`` means no age limit — which is a documented
+# residual: suppression records still lapse after this window.
+CLI_CRON_MAX_AGE_S = 7 * 86_400
 
 LoopKind = Literal["cron", "wakeup"]
 RunJobFn = Callable[..., Awaitable[None]]
@@ -122,6 +152,14 @@ _PENDING_BY_UPSTREAM_ID: dict[str, str] = {}
 # disk alongside _PENDING entries.
 _DO_NOT_RESUME: set[str] = set()
 
+# #926: sessions that may still hold a CLI-side cron job the CLI would
+# resurrect on ``--resume`` — session → {upstream job id → until}. While a
+# record is unexpired, a control-channel spawn resuming the session gets
+# ``CLAUDE_CODE_DISABLE_CRON=1`` (``runners/claude.py``). ``"native"`` and
+# ``"legacy"`` are placeholder ids (real ids are 8 hex chars) for jobs whose
+# id Untether never saw; those clear only by expiry.
+_CRON_SUPPRESSED: dict[str, dict[str, float]] = {}
+
 
 class LoopSchedulerError(Exception):
     """Raised when scheduling a loop cannot proceed."""
@@ -181,6 +219,7 @@ def uninstall() -> None:
     _PENDING_BY_TOOL_USE_ID.clear()
     _PENDING_BY_UPSTREAM_ID.clear()
     _DO_NOT_RESUME.clear()
+    _CRON_SUPPRESSED.clear()
 
 
 # ── Registration ────────────────────────────────────────────────────────
@@ -309,8 +348,22 @@ def _register(
     max_iterations: int,
     max_total_duration_hours: int,
 ) -> str:
-    """Shared body for ``register_pending_cron`` / ``register_pending_wakeup``."""
+    """Shared body for ``register_pending_cron`` / ``register_pending_wakeup``.
+
+    #925: idempotent per ``tool_use_id`` — the PreToolUse hook callback and
+    the assistant ``tool_use`` observer can both see one CronCreate, in
+    either order (G4), and must share one entry.
+    """
     assert _TASK_GROUP is not None  # caller guards
+    existing = token_for_tool_use(tool_use_id)
+    if existing is not None:
+        logger.debug(
+            "loop.register_duplicate",
+            token=existing,
+            tool_use_id=tool_use_id,
+            kind=kind,
+        )
+        return existing
     token = f"ut_loop_{secrets.token_hex(4)}"
     trigger_source = f"loop:{token}"
     if context is None:
@@ -359,12 +412,60 @@ def _register(
     return token
 
 
+def token_for_tool_use(tool_use_id: str) -> str | None:
+    """#925: the live (not cancelled) entry registered for ``tool_use_id``."""
+    token = _PENDING_BY_TOOL_USE_ID.get(tool_use_id)
+    if token is None:
+        return None
+    entry = _PENDING_BY_TOKEN.get(token)
+    if entry is None or entry.cancelled:
+        return None
+    return token
+
+
+def entry_summary(token: str) -> dict[str, Any] | None:
+    """#925: what the hook's model-facing deny reason says about a loop."""
+    entry = _PENDING_BY_TOKEN.get(token)
+    if entry is None:
+        return None
+    return {
+        "token": entry.token,
+        "kind": entry.kind,
+        "cron_expression": entry.cron_expression,
+        "recurring": entry.recurring,
+        "prompt": entry.prompt,
+        "max_iterations": entry.max_iterations,
+        "max_total_duration_hours": entry.max_total_duration_hours,
+    }
+
+
+def own_schedule_enabled() -> bool:
+    """#925: ``[loop] own_schedule`` (the kill switch), read live so it
+    hot-reloads. Falls back to the default (True) when settings can't load —
+    a config error must not silently hand schedules back to the CLI."""
+    try:
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return True
+        settings, _ = result
+        return bool(settings.loop.own_schedule)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def bind_upstream_id(tool_use_id: str, upstream_id: str) -> None:
     """Bind the upstream 8-char cron ID to a previously-registered entry.
 
     Called from the tool_result decode site after parsing the result text
     via the ``\\bjob ([0-9a-f]{8})\\b`` regex.  No-op if no matching entry
     (e.g. registration was rejected or the master toggle was off).
+
+    #925 D-E: a bound id means the CLI *accepted* the job (a ``-p`` chat, a
+    spawn without the hook), so it would resurrect on ``--resume``; the
+    session is marked cron-suppressed until the job ages out. Not with
+    ``[loop] own_schedule = false`` (§13 amendment 7: rc19 behaviour).
     """
     token = _PENDING_BY_TOOL_USE_ID.get(tool_use_id)
     if token is None:
@@ -374,15 +475,26 @@ def bind_upstream_id(tool_use_id: str, upstream_id: str) -> None:
         return
     entry.upstream_cron_id = upstream_id
     _PENDING_BY_UPSTREAM_ID[upstream_id] = token
+    if entry.kind == "cron" and own_schedule_enabled():
+        _mark_cron_suppressed(
+            entry.resume_token,
+            upstream_id,
+            until=entry.created_at_wallclock + CLI_CRON_MAX_AGE_S,
+            source="cli_accepted",
+        )
     _persist()
 
 
 # ── Cancellation ────────────────────────────────────────────────────────
 
 
-def cancel_by_token(token: str) -> bool:
+def cancel_by_token(token: str, *, reason: str = "user_cancel") -> bool:
     """Cancel a single loop by its Untether-side token.  Returns ``True``
     if a matching pending entry was cancelled, ``False`` otherwise.
+
+    ``reason``: ``user_cancel`` (``/cancel``, ``/new``) or ``cron_delete``
+    (Claude's CronDelete of the loop, #925).
+
     """
     entry = _PENDING_BY_TOKEN.get(token)
     if entry is None or entry.cancelled:
@@ -397,7 +509,7 @@ def cancel_by_token(token: str) -> bool:
         token=token,
         chat_id=entry.chat_id,
         session=entry.resume_token,
-        reason="user_cancel",
+        reason=reason,
         iterations_completed=entry.iteration_count,
     )
     return True
@@ -408,7 +520,7 @@ def cancel_by_upstream_id(upstream_id: str) -> bool:
     token = _PENDING_BY_UPSTREAM_ID.get(upstream_id)
     if token is None:
         return False
-    return cancel_by_token(token)
+    return cancel_by_token(token, reason="cron_delete")
 
 
 def cancel_pending_for_chat(
@@ -507,6 +619,84 @@ def mark_do_not_resume(session_id: str) -> None:
     _persist()
 
 
+# ── Cron suppression (#926) ─────────────────────────────────────────────
+
+
+def _mark_cron_suppressed(
+    session_id: str, upstream_id: str, *, until: float, source: str
+) -> bool:
+    """Record without persisting (restore batches its write)."""
+    if not session_id or until <= time.time():
+        return False
+    ids = _CRON_SUPPRESSED.setdefault(session_id, {})
+    previous = ids.get(upstream_id)
+    if previous is not None and previous >= until:
+        return False
+    ids[upstream_id] = until
+    logger.info(
+        "loop.cron_suppressed_marked",
+        session=session_id,
+        upstream_id=upstream_id,
+        until=until,
+        source=source,
+    )
+    return True
+
+
+def mark_cron_suppressed(
+    session_id: str, upstream_id: str, *, until: float, source: str
+) -> bool:
+    """#926: ``session_id`` may hold CLI job ``upstream_id`` until ``until``
+    (wall clock). Later control-channel spawns resuming it run with
+    ``CLAUDE_CODE_DISABLE_CRON=1``. Keeps the later ``until`` when marked
+    twice. Returns whether anything changed. Persisted."""
+    changed = _mark_cron_suppressed(session_id, upstream_id, until=until, source=source)
+    if changed:
+        _persist()
+    return changed
+
+
+def clear_cron_suppressed(session_id: str, upstream_id: str) -> bool:
+    """#926: drop one job id (a native CronDelete of it was observed)."""
+    ids = _CRON_SUPPRESSED.get(session_id)
+    if not ids or upstream_id not in ids:
+        return False
+    del ids[upstream_id]
+    if not ids:
+        _CRON_SUPPRESSED.pop(session_id, None)
+    _persist()
+    logger.info(
+        "loop.cron_suppressed_cleared", session=session_id, upstream_id=upstream_id
+    )
+    return True
+
+
+def cron_suppressed_until(session_id: str) -> float | None:
+    """#926: the latest unexpired suppression for ``session_id`` (wall
+    clock), or None. Expired ids are pruned."""
+    ids = _CRON_SUPPRESSED.get(session_id)
+    if not ids:
+        return None
+    now = time.time()
+    for upstream_id in [k for k, until in ids.items() if until <= now]:
+        del ids[upstream_id]
+    if not ids:
+        _CRON_SUPPRESSED.pop(session_id, None)
+        return None
+    return max(ids.values())
+
+
+def _prune_sentinels(now: float | None = None) -> None:
+    """Drop cron-suppression records past their window."""
+    now = time.time() if now is None else now
+    for sid in list(_CRON_SUPPRESSED):
+        ids = _CRON_SUPPRESSED[sid]
+        for upstream_id in [k for k, until in ids.items() if until <= now]:
+            del ids[upstream_id]
+        if not ids:
+            del _CRON_SUPPRESSED[sid]
+
+
 # ── Fire path ───────────────────────────────────────────────────────────
 
 
@@ -536,29 +726,22 @@ async def _fire(token: str) -> None:
 
     Sequence:
     1. Validate entry still pending (not cancelled, not over caps).
-    2. Drop-on-busy: if another run is in flight for our chat, log and
-       skip.  Mirrors upstream's "no catch-up" semantic.
-    3. Race avoidance: if the originating subprocess is still alive, sleep
-       ``redundancy_check_interval`` and re-arm.
-    4. Honour the do-not-resume sentinel.
+    2. Honour the do-not-resume sentinel.
+    3. Drop-on-busy: if another run is in flight for our chat (a run that
+       is not a live-idle session), log and skip.  Mirrors upstream's "no
+       catch-up" semantic.
+    4. A process still owns the session (#925 D-D,
+       :func:`_fire_past_live_session`): a clean-idle live session is
+       closed so the iteration can resume it; a wake-up a live session
+       will fire itself is expired (``cli_fired_live``); otherwise retry,
+       bounded by the next cron fire.
     5. Spawn the iteration via :func:`_spawn_loop_iteration`.
     6. Re-arm next fire (recurring) or expire (one-shot).
     """
     entry = _PENDING_BY_TOKEN.get(token)
     if entry is None or entry.cancelled:
         return
-    now_wallclock = time.time()
-    if now_wallclock >= entry.expires_at_wallclock:
-        _expire(entry, reason="expired_7d")
-        return
-    if entry.iteration_count >= entry.max_iterations:
-        _expire(entry, reason="max_iterations")
-        return
-    if (
-        now_wallclock - entry.created_at_wallclock
-        >= entry.max_total_duration_hours * 3600
-    ):
-        _expire(entry, reason="max_total_duration")
+    if _expire_if_over_caps(entry):
         return
     if is_do_not_resume(entry.resume_token):
         _expire(entry, reason="do_not_resume")
@@ -573,18 +756,117 @@ async def _fire(token: str) -> None:
         # Still re-arm — we want to try the next interval.
         _rearm_or_expire(entry)
         return
-    # Race avoidance — skip if the originating subprocess is still alive
-    # (control_request awaiting Telegram input, or any other reason).
     if _is_session_alive_safe(entry.resume_token):
-        logger.info(
-            "loop.fire_skipped_subprocess_alive",
-            token=token,
-            session=entry.resume_token,
-        )
-        await _redundancy_sleep_then_retry(token)
+        await _fire_past_live_session(entry)
         return
     await _spawn_loop_iteration(entry)
     _rearm_or_expire(entry)
+
+
+def _expire_if_over_caps(entry: _LoopEntry) -> bool:
+    """Expire ``entry`` when a ``[loop]`` cap is reached; True if it was."""
+    now_wallclock = time.time()
+    if now_wallclock >= entry.expires_at_wallclock:
+        _expire(entry, reason="expired_7d")
+        return True
+    if entry.iteration_count >= entry.max_iterations:
+        _expire(entry, reason="max_iterations")
+        return True
+    if (
+        now_wallclock - entry.created_at_wallclock
+        >= entry.max_total_duration_hours * 3600
+    ):
+        _expire(entry, reason="max_total_duration")
+        return True
+    return False
+
+
+def _busy_retry_deadline(entry: _LoopEntry) -> float | None:
+    """#925: a recurring cron stops retrying once its next fire is due (that
+    iteration is skipped, upstream's "no catch-up"). One-shots and wake-ups
+    keep retrying, bounded by the caps re-checked on every attempt."""
+    if entry.kind != "cron" or not entry.recurring or entry.cron_expression is None:
+        return None
+    return _next_cron_fire(entry.cron_expression)
+
+
+async def _fire_past_live_session(entry: _LoopEntry) -> None:
+    """#925 D-D: fire an iteration while a process still owns the session.
+
+    One loop inside this ``_fire`` call (§13 amendment 4): it bails as soon
+    as the entry is cancelled, expired or re-armed (``generation``), so a
+    retry can never fire an extra iteration.
+
+    - The session went away → spawn as normal.
+    - ``wakeup`` and the session accepts input → the live session fires the
+      CLI's own wake-up (it holds for it, #872): expire ``cli_fired_live``.
+      A process that isn't accepting (limbo, ``-p``, closing) can't fire it
+      (§13 amendment 3), so keep retrying and fire once it has exited.
+    - ``cron`` and the live session is clean-idle → close it (``loop_fire``)
+      and spawn the iteration; a refused close (a follow-up got in first,
+      §13 amendment 2) counts as busy.
+    - Busy (background work, approval, closing, limbo): retry every
+      ``redundancy_check_interval``; a recurring cron skips this iteration
+      once its next fire is due (``loop.iteration_skipped_session_busy``).
+    """
+    token = entry.token
+    generation = entry.generation
+    session_id = entry.resume_token
+    deadline = _busy_retry_deadline(entry)
+    interval = max(0.0, float(_redundancy_check_interval()))
+    deferred_logged = False
+    while True:
+        current = _PENDING_BY_TOKEN.get(token)
+        if current is not entry or entry.cancelled or entry.generation != generation:
+            return
+        if _expire_if_over_caps(entry):
+            return
+        chat_busy = _IS_CHAT_BUSY is not None and _IS_CHAT_BUSY(entry.chat_id)
+        if not _is_session_alive_safe(session_id):
+            if not chat_busy:
+                await _spawn_loop_iteration(entry)
+                _rearm_or_expire(entry)
+                return
+        elif entry.kind == "wakeup":
+            if _is_session_accepting_safe(session_id):
+                _expire(entry, reason="cli_fired_live")
+                return
+        elif (
+            not chat_busy
+            and _live_session_loop_closeable_safe(session_id)
+            and await _close_live_session_for_fire(session_id)
+        ):
+            logger.info(
+                "loop.live_session_closed_for_fire",
+                token=token,
+                session=session_id,
+                iteration=entry.iteration_count + 1,
+            )
+            await _spawn_loop_iteration(entry)
+            _rearm_or_expire(entry)
+            return
+        if deadline is not None and time.monotonic() + interval >= deadline:
+            logger.info(
+                "loop.iteration_skipped_session_busy",
+                token=token,
+                session=session_id,
+                iteration=entry.iteration_count + 1,
+            )
+            _rearm_or_expire(entry)
+            return
+        if not deferred_logged:
+            deferred_logged = True
+            logger.debug(
+                "loop.fire_deferred_session_busy",
+                token=token,
+                session=session_id,
+                kind=entry.kind,
+                retry_s=interval,
+            )
+        with anyio.move_on_after(interval):
+            await entry.cancel_event.wait()
+        # Yield even with a zero interval so a cancel can land.
+        await anyio.lowlevel.checkpoint()
 
 
 async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
@@ -690,15 +972,6 @@ def _rearm_or_expire(entry: _LoopEntry) -> None:
         _TASK_GROUP.start_soon(_arm_timer, entry.token, entry.generation)
 
 
-async def _redundancy_sleep_then_retry(token: str) -> None:
-    """Sleep redundancy_check_interval then re-fire.  Bounded to avoid
-    runaway spinning if the subprocess never exits."""
-    interval = _redundancy_check_interval()
-    await anyio.sleep(interval)
-    if _TASK_GROUP is not None:
-        _TASK_GROUP.start_soon(_fire, token)
-
-
 def _expire(entry: _LoopEntry, *, reason: str) -> None:
     """Mark an entry as fired/cancelled and drop from indexes.  Logs once."""
     if entry.cancelled and reason != "do_not_resume":
@@ -728,6 +1001,35 @@ def _is_session_alive_safe(session_id: str) -> bool:
     except ImportError:
         return False
     return is_session_alive(session_id)
+
+
+def _is_session_accepting_safe(session_id: str) -> bool:
+    """#925: a live session can take input (and so fire the CLI's own
+    wake-up). Lazy import, like :func:`_is_session_alive_safe`."""
+    try:
+        from .runners.claude import is_session_accepting
+    except ImportError:
+        return False
+    return is_session_accepting(session_id)
+
+
+def _live_session_loop_closeable_safe(session_id: str) -> bool:
+    """#925: the live session sits clean-idle and may be closed to fire."""
+    try:
+        from .runners.claude import live_session_loop_closeable
+    except ImportError:
+        return False
+    return live_session_loop_closeable(session_id)
+
+
+async def _close_live_session_for_fire(session_id: str) -> bool:
+    """#925: close a clean-idle live session (``loop_fire``) so the
+    iteration can resume it. False when the close was refused."""
+    try:
+        from .runners.claude import close_live_session
+    except ImportError:
+        return False
+    return await close_live_session(session_id, "loop_fire", only_if_idle=True)
 
 
 def _redundancy_check_interval() -> int:
@@ -786,10 +1088,15 @@ def _persist() -> None:
     """
     if _STATE_PATH is None:
         return
+    _prune_sentinels()
+    # #925: an additive key under schema_version 1 (an rc19 reader ignores it).
     payload: dict[str, Any] = {
         "schema_version": 1,
         "entries": [_serialize_entry(e) for e in _PENDING_BY_TOKEN.values()],
         "do_not_resume": sorted(_DO_NOT_RESUME),
+        "cron_suppressed": {
+            sid: dict(ids) for sid, ids in sorted(_CRON_SUPPRESSED.items())
+        },
     }
     try:
         atomic_write_json(_STATE_PATH, payload)
@@ -915,11 +1222,11 @@ def _restore_from_disk(path: Path) -> None:
         return
     if not isinstance(raw, dict):
         return
-    do_not_resume = raw.get("do_not_resume", [])
-    if isinstance(do_not_resume, list):
-        _DO_NOT_RESUME.update(str(s) for s in do_not_resume)
+    migrated = _restore_sentinels(raw)
     entries = raw.get("entries", [])
     if not isinstance(entries, list):
+        if migrated:
+            _persist()
         return
     restored = 0
     for raw_entry in entries:
@@ -933,8 +1240,47 @@ def _restore_from_disk(path: Path) -> None:
         _PENDING_BY_TOOL_USE_ID[entry.tool_use_id] = entry.token
         if entry.upstream_cron_id is not None:
             _PENDING_BY_UPSTREAM_ID[entry.upstream_cron_id] = entry.token
+            # #926 D-4: a restored entry the CLI had accepted may still be
+            # resurrectable — suppress it if nothing records it yet. Applied
+            # even with ``own_schedule = false`` (it protects pre-rc20 jobs).
+            if entry.kind == "cron" and entry.upstream_cron_id not in (
+                _CRON_SUPPRESSED.get(entry.resume_token) or {}
+            ):
+                migrated |= _mark_cron_suppressed(
+                    entry.resume_token,
+                    entry.upstream_cron_id,
+                    until=entry.created_at_wallclock + CLI_CRON_MAX_AGE_S,
+                    source="restore",
+                )
         if _TASK_GROUP is not None:
             _TASK_GROUP.start_soon(_arm_timer, entry.token, entry.generation)
         restored += 1
     if restored:
         logger.info("loop.restored", path=str(path), count=restored)
+    if migrated:
+        _persist()
+
+
+def _restore_sentinels(raw: dict[str, Any]) -> bool:
+    """Load the do-not-resume sentinel and the cron-suppression records.
+    Returns True when state changed that should be written back."""
+    now = time.time()
+    do_not_resume = raw.get("do_not_resume", [])
+    if isinstance(do_not_resume, list):
+        _DO_NOT_RESUME.update(str(s) for s in do_not_resume)
+    suppressed = raw.get("cron_suppressed")
+    if isinstance(suppressed, dict):
+        for sid, ids in suppressed.items():
+            if not isinstance(ids, dict):
+                continue
+            for upstream_id, until in ids.items():
+                try:
+                    until_f = float(until)
+                except (TypeError, ValueError):
+                    continue
+                if until_f > now:
+                    _CRON_SUPPRESSED.setdefault(str(sid), {})[str(upstream_id)] = (
+                        until_f
+                    )
+    _prune_sentinels(now)
+    return False

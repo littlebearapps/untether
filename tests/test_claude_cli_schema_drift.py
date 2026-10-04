@@ -1229,3 +1229,55 @@ def test_928_no_query_dispatch_paths_present(cli_blob: mmap.mmap) -> None:
             "dispatch paths; re-verify #928's `_is_no_query_result` (last green "
             "on CLI 2.1.289)"
         )
+
+
+# --- #925 (rc20) ---
+# Untether owns Loop-mode schedules through SDK PreToolUse hook callbacks
+# (`docs/findings/2026-10-04-claude-session-cron-resume-and-host-controls.md`
+# F3/F8; live probe G1 on CLI 2.1.289). Zero-token string probes.
+
+
+def _require_bytes(blob: mmap.mmap, needles: tuple[bytes, ...], why: str) -> None:
+    missing = [n.decode() for n in needles if blob.find(n) == -1]
+    if missing:
+        pytest.fail(
+            f"installed CLI lost {missing} — {why} "
+            "(last green on CLI 2.1.289; see the 2026-10-04 cron findings note)"
+        )
+
+
+def test_925_hook_callback_protocol_present(cli_blob: mmap.mmap) -> None:
+    """``initialize.hooks`` callback registration, the ``hook_callback``
+    request, the PreToolUse deny output and the ``hook error:`` text the
+    denied tool_result carries (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (
+            b"hookCallbackIds",
+            b'subtype:"hook_callback"',
+            b"permissionDecision",
+            b"hook error: ",
+        ),
+        "#925's CronCreate/CronDelete hooks can no longer decline the job",
+    )
+
+
+def test_925_cron_tools_and_bind_text_present(cli_blob: mmap.mmap) -> None:
+    """The tools the hooks match by exact name, and the result text
+    ``_LOOP_CRON_ID_RE`` binds (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b'"CronCreate"', b'"CronDelete"', b"Scheduled recurring job"),
+        "the hook matchers / upstream id binding no longer match the CLI",
+    )
+
+
+def test_925_session_cron_resurrection_present(cli_blob: mmap.mmap) -> None:
+    """F3: ``--resume`` resurrects session crons unless a CronDelete marker
+    exists. If this disappears the resume behaviour changed — re-evaluate
+    #925 D-E and #926's suppression (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b"resume: resurrected", b"deletedCronIds"),
+        "session-cron resurrection on --resume changed",
+    )
