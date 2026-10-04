@@ -1448,6 +1448,26 @@ def _control_reason_text(request: Any) -> str | None:
     return line or None
 
 
+def _tool_input_details(tool_input: Any) -> str:
+    """``(file_path=`x`, command=`y`)`` for an approval title, or ``""``.
+
+    #871/#418: the title is markdown — a raw value lost its backticks
+    (`x` → x) and a heredoc's newline split the title, so each value is a
+    one-line code span whose fence outruns any inner backtick. #929: the
+    standalone rescue surface reuses this, so Approve always says what it
+    allows.
+    """
+    if not isinstance(tool_input, dict) or not tool_input:
+        return ""
+    key_params = []
+    for key in ["file_path", "path", "command", "pattern"]:
+        if key in tool_input:
+            value = inline_code(str(tool_input[key]), width=50)
+            if value:
+                key_params.append(f"{key}={value}")
+    return f"({', '.join(key_params)})" if key_params else ""
+
+
 @dataclass(frozen=True, slots=True)
 class ControlRequestSnapshot:
     """One control request still registered for a user answer (#684).
@@ -1456,7 +1476,7 @@ class ControlRequestSnapshot:
     ``kind``: ``tool`` | ``ask`` | ``outline_hold`` | ``synthetic`` (``da:``).
     ``answerable_by_text``: a text reply in the chat routes to it (a pending
     AskUserQuestion). ``writer_ok``: a live stdin writer exists for the
-    session.
+    session. ``input_details``: the tool's key parameters, for a title.
     """
 
     request_id: str
@@ -1466,6 +1486,9 @@ class ControlRequestSnapshot:
     kind: str
     answerable_by_text: bool
     writer_ok: bool
+    # #929: the key parameters Approve would allow (``_tool_input_details``),
+    # so a rescued request with no tracked action still says what it is.
+    input_details: str = ""
 
 
 @dataclass(slots=True)
@@ -2302,6 +2325,9 @@ class ClaudeStreamState:
                     kind=kind,
                     answerable_by_text=rid in _PENDING_ASK_REQUESTS,
                     writer_ok=writer_ok,
+                    input_details=""
+                    if synthetic
+                    else _tool_input_details(_REQUEST_TO_INPUT.get(rid)),
                 )
             )
         return snaps
@@ -8541,19 +8567,8 @@ def _translate_claude_event_base(
                 tool_input = getattr(request, "input", {})
                 details = f"tool: {tool_name}"
                 # Include key input parameters if available
-                if tool_input:
-                    key_params = []
-                    for key in ["file_path", "path", "command", "pattern"]:
-                        if key in tool_input:
-                            # #871/#418: the title is markdown — a raw value
-                            # lost its backticks (`x` → x) and a heredoc's
-                            # newline split the title. A one-line code span
-                            # whose fence outruns any inner backtick.
-                            value = inline_code(str(tool_input[key]), width=50)
-                            if value:
-                                key_params.append(f"{key}={value}")
-                    if key_params:
-                        details += f" ({', '.join(key_params)})"
+                if key_params := _tool_input_details(tool_input):
+                    details += f" {key_params}"
                 # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)
                 run_opts = get_run_options()
                 if run_opts is None or run_opts.diff_preview is not False:

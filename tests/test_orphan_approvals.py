@@ -134,12 +134,14 @@ def _snap(
     answerable_by_text: bool = False,
     writer_ok: bool = True,
     tool_name: str = "Bash",
+    input_details: str = "",
 ) -> ControlRequestSnapshot:
     return ControlRequestSnapshot(
         request_id=request_id,
         session_id="sess-929",
         age_s=age_s,
         tool_name=tool_name,
+        input_details=input_details,
         kind=kind,
         answerable_by_text=answerable_by_text,
         writer_ok=writer_ok,
@@ -410,6 +412,19 @@ async def test_rescue_builds_synthetic_approve_deny() -> None:
     assert "Bash" in call["message"].text
     (sent,) = _events(logs, "approval_surface.sent")
     assert sent["source"] == "rescue"
+
+
+async def test_rescue_without_tracked_action_shows_what_approve_allows() -> None:
+    """Security review: a rescued tool request with no tracked action must say
+    what Approve allows (the same key parameters as the in-turn title), not
+    just the tool name."""
+    surface, transport, _ = _surface()
+    snap = _snap("r-9", input_details="(command=`rm -rf build`)")
+    assert surface.rescue(snap) is True
+    await surface.flush()
+    (call,) = transport.send_calls
+    assert "rm -rf build" in call["message"].text
+    assert "Bash" in call["message"].text
 
 
 def test_rescue_da_callback_within_64_bytes() -> None:

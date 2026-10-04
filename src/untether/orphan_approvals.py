@@ -257,9 +257,15 @@ class OrphanApprovalSurface:
         elif getattr(snap, "kind", "") in ("outline_hold", "synthetic"):
             title = "Plan approval"
         else:
+            # Security review: without a tracked action, still say what
+            # Approve allows — the same key parameters as the in-turn title
+            # (already markdown code spans).
+            details = _opt_str(getattr(snap, "input_details", None))
             title = "Permission Request" + (
                 f" - tool: {escape_markdown(tool_name)}" if tool_name else ""
             )
+            if details:
+                title += f" {details}"
         self._entries[request_id] = _Entry(
             request_id=request_id,
             action_id=_opt_str(str(getattr(action, "id", "") or ""))

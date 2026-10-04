@@ -3534,6 +3534,9 @@ def test_684_snapshot_kinds_and_flags() -> None:
 
     snaps = {s.request_id: s for s in state.control_request_snapshot(now=1e9)}
     assert snaps["r-tool"].kind == "tool" and snaps["r-tool"].tool_name == "Bash"
+    # #929 security review: the rescue surface shows what Approve allows.
+    assert "touch x" in snaps["r-tool"].input_details
+    assert snaps["r-q"].input_details == ""
     assert snaps["r-q"].kind == "ask" and snaps["r-q"].answerable_by_text
     assert snaps["r-h"].kind == "outline_hold"
     assert snaps["da:sess-snap"].kind == "synthetic"
