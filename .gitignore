@@ -18,7 +18,6 @@ docs/promotion/
 docs/prompts/
 docs/research/
 .envrc
-.claude/settings.json
 .claude/plans/
 .untether-outbox/
 launch/

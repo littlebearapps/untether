@@ -6,7 +6,7 @@ session. **When you add or substantially change a test file, update its entry he
 
 ## Test files
 
-5829 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+5859 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Every `test_*.py` file in `tests/` is listed below. Counts come from `uv run pytest --collect-only -q`. The detailed entries come first in their original order; the remaining files follow, grouped by area, under **Other test files**.
 
@@ -200,3 +200,10 @@ Helpers (not collected): `conftest.py` (shared fixtures plus the #808 isolation 
 - `test_loop_scheduler.py` — 43 tests: loop scheduler (#289) — cron/wake-up registration, upstream id binding, cancellation, next fire, fire-path skips (cancelled, max iterations, busy chat, live session), persistence across restarts, do-not-resume sentinel; #826 `cancel_pending_for_chat(thread_filter=)` drops only the matching topic (default still chat-wide), loop fire notice + run go to the entry's thread
 - `test_session_stats.py` — 26 tests: `SessionStatsStore` record/aggregate/persist, triggered vs manual breakdown (#271); [#897](https://github.com/littlebearapps/untether/issues/897) `roll_up()` folds day buckets older than 90 days into each engine's `archive` bucket at load, `/stats all` totals identical before and after, `today`/`week` ignore the archive, idempotent and merges into an existing archive, old-format files load unchanged, atomic save, runs once per new local day from `record_run`, non-date keys skipped, `session_stats.rolled_up` only when something folded
 - `test_usage_cache.py` — 9 tests: subscription-usage fetch cache — 60 s TTL, stale-while-error, error propagation, cache stats (#410)
+
+## Hook tests (bash, not pytest, not in CI)
+
+Run with `bash <file>`; they need `jq` and stub `gh` (no network).
+
+- `.claude/hooks/tests/test-release-guard.sh` — 104 checks: `release-guard.sh` / `-protect` / `-mcp` deny/ask/allow matrix (master pushes, tags, releases, `gh api` REST + GraphQL writes, the exact-form PR-merge allowlist + untether-checkout check, ask-gated release merges with head = `dev` + green CI, `gh -R` stripping, workflow dispatch asks, non-dev restart asks, settings.json / `disableAllHooks` protection with path normalisation) and the `.claude/settings.json` registration ([#915](https://github.com/littlebearapps/untether/issues/915), [#917](https://github.com/littlebearapps/untether/issues/917))
+- `.claude/hooks/tests/test-kaizen-stop-nudge.sh` — 10 checks: Stop-nudge skip/fire conditions (stop_hook_active, `UNTETHER_SESSION`, edit threshold, friction, already-ran)

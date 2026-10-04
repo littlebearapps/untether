@@ -5,7 +5,7 @@
 #          on files known to trigger Claude Code's API content filter (HTTP 400).
 #          HIGH-risk files are blocked with a fetch-from-URL suggestion.
 #          MEDIUM-risk files pass through with a chunked-writing advisory.
-# Installed by: /context-guard install
+# Installed by: /context-guard install — registered in .claude/settings.json (PreToolUse Write)
 #
 # Claude Code only — OpenCode, Codex CLI, Cursor, and other tools
 # do not support Claude Code hooks.

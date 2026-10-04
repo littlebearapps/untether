@@ -2,7 +2,7 @@
 # context-drift-check.sh
 # Hook: PostToolUse (Bash, matching git commit)
 # Purpose: Detect stale AI context files after commits
-# Installed by: /contextdocs:context-guard install
+# Installed by: /contextdocs:context-guard install — NOT registered in .claude/settings.json (inactive)
 #
 # Claude Code only — OpenCode, Codex CLI, Cursor, and other tools
 # do not support Claude Code hooks.

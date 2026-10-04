@@ -5,7 +5,7 @@
 #          when structural files (commands, skills, rules, config) were modified
 #          but context docs (CLAUDE.md, AGENTS.md, etc.) were not.
 # Tier: 1 (Nudge) — advisory, does not force; Claude can still stop
-# Installed by: /contextdocs:context-guard install
+# Installed by: /contextdocs:context-guard install — NOT registered in .claude/settings.json (inactive)
 #
 # Claude Code only — OpenCode, Codex CLI, Cursor, and other tools
 # do not support Claude Code hooks.

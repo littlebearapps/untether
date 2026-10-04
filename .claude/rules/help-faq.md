@@ -26,11 +26,10 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
   Removing it silently breaks the docs-sync mapping (`build-error` per
   the issue's "Coordinated mapping" note) and regresses the FAQPage
   schema on the next deploy.
-- `.claude/hooks/help-faq-protect.sh` (a PreToolUse Bash hook listed in
-  `.claude/hooks.json`) is meant to block `rm`, `git rm`, `mv`-away and
-  shell-redirect (`>`) truncation, but it is **not wired** — Claude Code never
-  loads `.claude/hooks.json` — so nothing stops you: obey the rule yourself.
-  Append (`>>`) and Edit/Write are fine — the FAQ is meant to evolve.
+- `.claude/hooks/help-faq-protect.sh` (a PreToolUse Bash hook registered in
+  `.claude/settings.json`) blocks `rm`, `git rm`, `mv`-away and
+  shell-redirect (`>`) truncation. Append (`>>`) and Edit/Write are fine —
+  the FAQ is meant to evolve.
 - To genuinely retire the FAQ, raise an issue first to coordinate the
   matching mapping removal in `littlebearapps/littlebearapps.com`.
 

@@ -24,8 +24,7 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules),
 - **If a code change is in flight → STOP and route to `/pr-dev`.** Do not split
   docs for a code change into a separate PR — that fragments delivery.
 - **FAQ must stay put.** Edit/Write/append `docs/faq/faq.md` freely, but never
-  `rm`/`mv`/`>` it. The `help-faq-protect.sh` hook meant to block that is not
-  wired (Claude Code never loads `.claude/hooks.json`), so the rule is on you.
+  `rm`/`mv`/`>` it (the `help-faq-protect.sh` hook blocks that).
 - **Confirm-gated + idempotent.** Surface the drafted edits and wait for a tap;
   re-running must not duplicate a CHANGELOG entry or FAQ Q/A.
 
@@ -34,7 +33,7 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules),
 | Situation | Command |
 |---|---|
 | Delivering code + its docs | `/pr-dev` (docs folded in) |
-| A doc drifted with no code change (stale FAQ, missing CHANGELOG link, out-of-date `## Tests`) | `/docs` |
+| A doc drifted with no code change (stale FAQ, missing CHANGELOG link, out-of-date `docs/reference/test-catalog.md`) | `/docs` |
 | Reconciling `docs/reference/*` after a runner/schema change already merged | `/docs` |
 
 ## Flow

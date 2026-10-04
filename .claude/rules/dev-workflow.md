@@ -20,6 +20,9 @@ scripts/staging.sh reset && systemctl --user restart untether              # PyP
 scripts/staging.sh rollback && systemctl --user restart untether           # roll back
 ```
 
+`release-guard.sh` lets the `staging.sh install` line through and asks before any other non-dev Untether restart
+(`reset`, `rollback`, a bare restart, or a fleet host over SSH).
+
 ## Fleet (5 hosts: lba-1 staging, nsd, channelo, sl, mac)
 
 The dev/staging rules apply per host; the fleet scripts wrap them.

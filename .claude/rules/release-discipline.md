@@ -24,7 +24,7 @@ paths:
 3. Every changelog entry must link to a GitHub issue: `[#N](https://github.com/littlebearapps/untether/issues/N)`
 4. Run `uv lock` to sync the lockfile
 5. **Run integration tests against `@untether_dev_bot`** — see below and `docs/reference/integration-testing.md`
-6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. Never delete, move or truncate it (`help-faq-protect.sh` is meant to block Bash `rm`/`mv`/`>` but is not wired — Claude Code never loads `.claude/hooks.json`); Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. Never delete, move or truncate it (`help-faq-protect.sh` blocks Bash `rm`/`mv`/`>`); Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 
 ## Semantic versioning
 
@@ -77,8 +77,13 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 - rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
 - Commit message convention: `chore: staging X.Y.ZrcN`
 - Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`
-- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. The master PR review is the only manual approval — no PyPI environment gate, no manual tag step.
+- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. Nathan's explicit approval of the release is the only manual gate (he merges, or Claude via `/pr-main X.Y.Z --merge` and the guard asks him to confirm, #917) — no PyPI environment gate, no manual tag step.
 - See `docs/reference/dev-instance.md` for the full staging workflow.
+
+## Release guard
+
+Rules: `CLAUDE.md` §Release guard. Hooks: registered in `.claude/settings.json` ([#915](https://github.com/littlebearapps/untether/issues/915),
+[#917](https://github.com/littlebearapps/untether/issues/917)). Tests: `bash .claude/hooks/tests/test-release-guard.sh`.
 
 ## Fleet rollout (rc and stable)
 
@@ -130,7 +135,7 @@ gh issue list --repo littlebearapps/untether \
 
 ## Dependabot alerts track `master`
 
-- Dependabot alerts are raised against the **default branch's** `uv.lock` (`master` = latest PyPI), so a fix merged to `dev` leaves the alert open until Nathan's dev→master stable merge. That's expected, not a failure.
+- Dependabot alerts are raised against the **default branch's** `uv.lock` (`master` = latest PyPI), so a fix merged to `dev` leaves the alert open until the dev→master stable merge. That's expected, not a failure.
 - Verify dev-lock fixes with `uv sync --frozen --all-groups && uv run --no-sync pip-audit --skip-editable` (what CI runs), not the alert list. A dated, commented `--ignore-vuln` with an issue link is the only escape hatch.
 - Shipped CVE fixes also need a `pyproject.toml` floor, not just a lock bump: `pip install -U` / `pipx upgrade` keep an older dependency that still satisfies the published `Requires-Dist`.
 - Dependabot uses the `uv` ecosystem with version updates targeting `dev`. Keep Dependabot *security updates* disabled: they always open PRs against `master`, which breaks the release guard.

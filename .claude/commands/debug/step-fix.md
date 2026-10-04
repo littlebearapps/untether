@@ -14,20 +14,22 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
   master` is blocked.
 - **NEVER create tags.** `git tag v*` is blocked. `auto-tag-on-master.yml`
   creates tags from stable PR merges.
-- **NEVER merge PRs to master.** `gh pr merge` to master is blocked.
+- **NEVER merge PRs to master from a fix.** Only `/pr-main X.Y.Z --merge` does,
+  after Nathan approves the release (the guard asks him to confirm).
 - **NEVER run `gh release create`.** Release publishing is automated.
 - **NEVER use `--no-verify`, `--no-gpg-sign`, or any hook-skip flag.** Hooks
   block guard-script edits too.
 - **NEVER restart `untether.service` (staging) to test code changes.** Restart
   `untether-dev.service` instead. Restarting staging during dev is *always*
   wrong (see `dev-workflow.md`).
-- **NEVER edit guard scripts or `.claude/hooks.json`.** Only Nathan changes them
-  outside Claude Code. (They are not wired — Claude Code never loads
-  `.claude/hooks.json` — so nothing will stop you; obey the rule anyway.)
+- **NEVER edit guard scripts or `.claude/settings.json`.** Only Nathan changes
+  them outside Claude Code. The guard blocks Edit/Write on them; never work
+  around a block.
 
-The release pipeline is single-gate: `dev` push → TestPyPI; Nathan
-squash-merges a stable version PR to `master` → auto-tag → release.yml
-publishes to PyPI. The master PR review IS the release approval.
+The release pipeline is single-gate: `dev` push → TestPyPI; a stable version
+PR squash-merged to `master` (by Nathan, or by `/pr-main --merge` on his
+explicit go) → auto-tag → release.yml publishes to PyPI. Nathan's approval IS
+the release gate.
 
 ## The 7-step implementation checklist
 
@@ -55,9 +57,8 @@ Follow the area's rule file:
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
   cleanup, outline gate, tap claims, plan re-arm).
-- `.claude/hooks.json` defines a prompt hook with the area's contract reminders
-  for runner, schema and telegram edits, but it is not wired; read the area rule
-  yourself.
+- No hook injects the area's contract reminders for runner, schema and telegram
+  edits; read the area rule yourself.
 
 ### 3. Run targeted tests
 
@@ -134,8 +135,8 @@ EOF
 )"
 ```
 
-The PR targets `dev`. If you accidentally target `master`,
-`release-guard-mcp.sh` blocks the merge.
+The PR targets `dev`. If you accidentally target `master`, `release-guard.sh`
+denies a `master` merge whose head isn't `dev` (`release-guard-mcp.sh` covers MCP merges).
 
 ### 8. Apply `needs-verification` to the issue
 
@@ -169,12 +170,13 @@ EOF
 - **Restarting staging from inside an active session.** The 120s drain
   timeout drops your final response. See `feedback_agent_self_restart_pattern`.
   Use `untether-dev.service` and let hot-reload pick up config changes.
-- **Editing `.claude/hooks.json` or guard scripts.** Forbidden. Don't try.
+- **Editing `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`,
+  `help-faq-protect.sh`). Forbidden. Don't try.
 - **Skipping the test step.** There is no local pre-commit hook, so nothing
   stops a broken commit until CI. Run tests locally first; never `--no-verify`.
-- **Committing files with secrets.** `secret-warning` hook fires on
-  `git add`/`commit`. If it warns, fix the file before continuing — never
-  bypass.
+- **Committing files with secrets.** No hook in this repo scans for them —
+  check staged files before committing, and never bypass a warning from CI
+  secret scanning.
 - **Adding boilerplate to a tiny fix.** Don't add docstrings, don't refactor,
   don't add comments unless they explain a non-obvious why.
 - **Forgetting the FAQ touch-up check.** If the fix changes user-visible

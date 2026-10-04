@@ -120,8 +120,8 @@ uv run ruff format --check src/ tests/
 # CHANGELOG validation (if version bumped)
 python3 scripts/validate_release.py
 
-# Confirm no settings.json or hooks.json drift
-git status .claude/hooks.json .claude/settings.json 2>/dev/null
+# Confirm no hook-registration or guard-script drift
+git status .claude/settings.json .claude/hooks/ 2>/dev/null
 ```
 
 ## 7. Note `needs-verification` on the issue
