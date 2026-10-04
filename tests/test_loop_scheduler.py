@@ -1628,3 +1628,100 @@ class TestExpireWakeupsForSession:
                 assert recorder.calls == []
             finally:
                 tg.cancel_scope.cancel()
+
+
+# ── #925 review: CronDelete ownership ───────────────────────────────────
+
+
+class TestCancelOwned:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_owner_session_cancels(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=370, session_id="sess-own")
+                assert loop_scheduler.cancel_owned_by_token(
+                    token, session_id="sess-own", chat_id=370
+                )
+                assert loop_scheduler.active_count() == 0
+            finally:
+                tg.cancel_scope.cancel()
+
+    @pytest.mark.parametrize(
+        ("session_id", "chat_id"),
+        [("sess-intruder", 370), ("sess-intruder", 999), (None, 370), (None, None)],
+    )
+    async def test_foreign_or_unknown_caller_refused(self, session_id, chat_id):
+        from structlog.testing import capture_logs
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=370, session_id="sess-own")
+                with capture_logs() as logs:
+                    assert not loop_scheduler.cancel_owned_by_token(
+                        token, session_id=session_id, chat_id=chat_id
+                    )
+                assert loop_scheduler.active_count() == 1
+                assert not loop_scheduler.is_do_not_resume("sess-own")
+                events = [e["event"] for e in logs]
+                assert "loop.cron_delete_foreign_token" in events
+                assert "loop.cancelled" not in events
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_unknown_token_returns_false_without_foreign_log(self):
+        from structlog.testing import capture_logs
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                with capture_logs() as logs:
+                    assert not loop_scheduler.cancel_owned_by_token(
+                        "ut_loop_deadbeef", session_id="s", chat_id=1
+                    )
+                assert not [
+                    e for e in logs if e["event"] == "loop.cron_delete_foreign_token"
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_unbound_entry_falls_back_to_chat(self):
+        """An entry with no session bound belongs to its chat."""
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=371, session_id="sess-x")
+                loop_scheduler._PENDING_BY_TOKEN[token].resume_token = ""
+                assert not loop_scheduler.cancel_owned_by_token(
+                    token, session_id="sess-y", chat_id=999
+                )
+                assert loop_scheduler.cancel_owned_by_token(
+                    token, session_id="sess-y", chat_id=371
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_upstream_id_cancel_scoped_to_session(self):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                _register_simple_cron(
+                    chat_id=372, session_id="sess-own", tool_use_id="tu-up"
+                )
+                loop_scheduler.bind_upstream_id("tu-up", "abcd1234")
+                assert not loop_scheduler.cancel_by_upstream_id(
+                    "abcd1234", session_id="sess-intruder"
+                )
+                assert loop_scheduler.active_count() == 1
+                assert loop_scheduler.cancel_by_upstream_id(
+                    "abcd1234", session_id="sess-own"
+                )
+                assert loop_scheduler.active_count() == 0
+            finally:
+                tg.cancel_scope.cancel()

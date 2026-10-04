@@ -66,6 +66,7 @@ __all__ = [
     "bind_upstream_id",
     "cancel_by_token",
     "cancel_by_upstream_id",
+    "cancel_owned_by_token",
     "cancel_pending_for_chat",
     "clear_cron_suppressed",
     "cron_suppressed_until",
@@ -527,16 +528,69 @@ def cancel_by_token(token: str, *, reason: str = "user_cancel") -> bool:
     return True
 
 
-def cancel_by_upstream_id(upstream_id: str) -> bool:
+def _owned_by(
+    entry: _LoopEntry, *, session_id: str | None, chat_id: int | None
+) -> bool:
+    """#925 review: a loop belongs to the session that created it (or, with
+    no session bound, to its chat)."""
+    if entry.resume_token:
+        return session_id is not None and entry.resume_token == session_id
+    return chat_id is not None and entry.chat_id == chat_id
+
+
+def _log_foreign(
+    entry: _LoopEntry, *, token: str, session_id: str | None, chat_id: int | None
+) -> None:
+    logger.warning(
+        "loop.cron_delete_foreign_token",
+        token=token,
+        session=session_id,
+        chat_id=chat_id,
+        owner_chat_id=entry.chat_id,
+    )
+
+
+def cancel_owned_by_token(
+    token: str,
+    *,
+    session_id: str | None,
+    chat_id: int | None,
+    reason: str = "cron_delete",
+) -> bool:
+    """#925 review: Claude's CronDelete of a ``ut_loop_*`` id stops the loop
+    only when it belongs to the calling session (or, for an entry with no
+    session bound, the calling chat). A token learned from another chat or
+    session is refused and logged ``loop.cron_delete_foreign_token``.
+    Returns ``True`` only when this call cancelled the loop."""
+    entry = _PENDING_BY_TOKEN.get(token)
+    if entry is None or entry.cancelled:
+        return False
+    if not _owned_by(entry, session_id=session_id, chat_id=chat_id):
+        _log_foreign(entry, token=token, session_id=session_id, chat_id=chat_id)
+        return False
+    return cancel_by_token(token, reason=reason)
+
+
+def cancel_by_upstream_id(upstream_id: str, *, session_id: str | None = None) -> bool:
     """Cancel a loop by its upstream 8-char cron ID (CronDelete observed).
 
     #926: the native CronDelete leaves the transcript marker the CLI's
     resume scan honours, so that id no longer needs suppressing. Cleared
-    **after** the cancel, which marks it (§13 amendment 1)."""
+    **after** the cancel, which marks it (§13 amendment 1).
+
+    #925 review: with ``session_id`` (the observing session) an entry bound
+    to another session is left alone — that CLI job isn't this session's."""
     token = _PENDING_BY_UPSTREAM_ID.get(upstream_id)
     if token is None:
         return False
     entry = _PENDING_BY_TOKEN.get(token)
+    if (
+        entry is not None
+        and session_id is not None
+        and not _owned_by(entry, session_id=session_id, chat_id=None)
+    ):
+        _log_foreign(entry, token=token, session_id=session_id, chat_id=None)
+        return False
     session_id = entry.resume_token if entry is not None else None
     cancelled = cancel_by_token(token, reason="cron_delete")
     if session_id is not None:

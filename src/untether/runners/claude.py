@@ -5572,9 +5572,15 @@ def _observe_loop_tool_use(
             # callback stops it (and tells the model); this is the hook-less
             # path (``-p`` mode), where the CLI answers "No scheduled job".
             if not state.loop_hooks_registered:
-                loop_scheduler.cancel_by_token(str(upstream_id), reason="cron_delete")
+                # #925 review: only this session's own loops.
+                loop_scheduler.cancel_owned_by_token(
+                    str(upstream_id),
+                    session_id=session_id,
+                    chat_id=int(chat_id),
+                    reason="cron_delete",
+                )
             return
-        loop_scheduler.cancel_by_upstream_id(str(upstream_id))
+        loop_scheduler.cancel_by_upstream_id(str(upstream_id), session_id=session_id)
 
 
 # ── Untether owns the schedule: PreToolUse hook callbacks (#925) ────────
@@ -5759,7 +5765,8 @@ def _loop_hook_decision(
       deny with :func:`_loop_deny_reason`; a registration error denies too
       (fail closed, D4).
     - ``ut_loop_cron_delete``: a ``ut_loop_`` id → stop that Untether loop
-      and deny (the CLI holds no such job); any other id → passthrough, so a
+      if this session owns it, and deny either way (the CLI holds no such
+      job); any other id → passthrough, so a
       real CLI job is deleted natively and its transcript marker stops the
       resume scan (F3).
     """
@@ -5778,10 +5785,18 @@ def _loop_hook_decision(
         target = str(tool_input.get("id") or "")
         if not target.startswith(_LOOP_TOKEN_PREFIX):
             return {}, "passthrough"
-        if loop_scheduler.cancel_by_token(target, reason="cron_delete"):
+        # #925 review: only a loop this session owns (a token learned from
+        # another chat must not stop it). Foreign and unknown tokens get the
+        # same answer, so the model learns nothing about other sessions.
+        if loop_scheduler.cancel_owned_by_token(
+            target,
+            session_id=session_id,
+            chat_id=get_run_channel_id(),
+            reason="cron_delete",
+        ):
             reason = f"Untether stopped loop {target}."
         else:
-            reason = f"No active Untether loop {target}."
+            reason = f"No active Untether loop {target} in this session."
         return _hook_deny(reason), "deny"
     # ut_loop_cron_create
     if not loop_scheduler.own_schedule_enabled():

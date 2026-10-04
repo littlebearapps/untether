@@ -9017,7 +9017,7 @@ class TestLoopHookOwnership:
             factory=state.factory,
         )
         assert _deny_reason(state.hook_callback_queue[1][2]) == (
-            f"No active Untether loop {token}."
+            f"No active Untether loop {token} in this session."
         )
 
     @pytest.mark.parametrize("loop_mode", [True, False])
@@ -9108,6 +9108,102 @@ class TestLoopHookOwnership:
             factory=state.factory,
         )
         assert loop_scheduler.active_count() == 0
+
+    # ── #925 review: CronDelete only stops this session's own loops ──────
+
+    @pytest.mark.parametrize(
+        ("owner_session", "owner_chat"),
+        [("sess-other", 9250), ("sess-other", 4242)],
+        ids=["same-chat-other-session", "other-chat"],
+    )
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_foreign_token_denied(
+        self, owner_session: str, owner_chat: int
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()  # caller: sess-925 in chat 9250
+        state.loop_hooks_registered = True
+        token = loop_scheduler.register_pending_cron(
+            session_id=owner_session,
+            tool_use_id="tu-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=owner_chat,
+        )
+        with capture_logs() as logs:
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete", "CronDelete", {"id": token}
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        assert loop_scheduler.active_count() == 1
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        # Same text as an unknown token: the model learns nothing about
+        # another session's loops.
+        assert _deny_reason(output) == (
+            f"No active Untether loop {token} in this session."
+        )
+        foreign = [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+        assert foreign and foreign[0]["token"] == token
+        assert not [e for e in logs if e["event"] == "loop.cancelled"]
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_foreign_token_not_cancelled(self) -> None:
+        """``-p`` mode (no hooks): a token from another session is ignored."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        token = loop_scheduler.register_pending_cron(
+            session_id="sess-other",
+            tool_use_id="tu-p-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronDelete", "tu-p-fd", {"id": token})),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_foreign_upstream_id_not_cancelled(
+        self,
+    ) -> None:
+        """A CLI job id bound to another session's loop isn't this
+        session's to stop (the CLI would answer "No scheduled job")."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        loop_scheduler.register_pending_cron(
+            session_id="sess-other",
+            tool_use_id="tu-up-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+        loop_scheduler.bind_upstream_id("tu-up-foreign", "abcdef12")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event("CronDelete", "tu-up-fd", {"id": "abcdef12"})
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
 
     @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
     async def test_denied_cron_create_tool_result_does_not_bind(self) -> None:
