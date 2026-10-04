@@ -145,12 +145,13 @@ _PENDING_BY_CHAT: dict[int, set[str]] = defaultdict(set)
 _PENDING_BY_TOOL_USE_ID: dict[str, str] = {}
 _PENDING_BY_UPSTREAM_ID: dict[str, str] = {}
 
-# Sessions that have been cancelled via /cancel — the do-not-resume sentinel
-# (issue #289 design doc §5c).  ``_fire`` refuses to spawn for any session in
-# this set so an upstream session-scoped cron that survives in the JSONL
-# transcript can never be re-fired by us if the user cancels.  Persisted to
-# disk alongside _PENDING entries.
-_DO_NOT_RESUME: set[str] = set()
+# The do-not-resume sentinel (issue #289 design doc §5c), scoped per loop
+# since #926: session → wall-clock time of its latest cancel. ``_fire``
+# refuses to spawn an entry created at or before that time, so a loop
+# registered *after* a cancel in the same session fires normally. Records
+# older than ``CLI_CRON_MAX_AGE_S`` are pruned. Persisted alongside the
+# entries (``do_not_resume`` stays a list for rc19 readers).
+_DO_NOT_RESUME_AT: dict[str, float] = {}
 
 # #926: sessions that may still hold a CLI-side cron job the CLI would
 # resurrect on ``--resume`` — session → {upstream job id → until}. While a
@@ -218,7 +219,7 @@ def uninstall() -> None:
     _PENDING_BY_CHAT.clear()
     _PENDING_BY_TOOL_USE_ID.clear()
     _PENDING_BY_UPSTREAM_ID.clear()
-    _DO_NOT_RESUME.clear()
+    _DO_NOT_RESUME_AT.clear()
     _CRON_SUPPRESSED.clear()
 
 
@@ -495,6 +496,9 @@ def cancel_by_token(token: str, *, reason: str = "user_cancel") -> bool:
     ``reason``: ``user_cancel`` (``/cancel``, ``/new``) or ``cron_delete``
     (Claude's CronDelete of the loop, #925).
 
+    #926: the do-not-resume sentinel is per loop (cancel time), and an entry
+    the CLI had accepted (``upstream_cron_id``) leaves its session
+    cron-suppressed, so the cancelled job can't come back on ``--resume``.
     """
     entry = _PENDING_BY_TOKEN.get(token)
     if entry is None or entry.cancelled:
@@ -502,7 +506,14 @@ def cancel_by_token(token: str, *, reason: str = "user_cancel") -> bool:
     entry.cancelled = True
     entry.cancel_event.set()
     _drop_indexes(entry)
-    _DO_NOT_RESUME.add(entry.resume_token)
+    _DO_NOT_RESUME_AT[entry.resume_token] = time.time()
+    if entry.upstream_cron_id is not None and own_schedule_enabled():
+        _mark_cron_suppressed(
+            entry.resume_token,
+            entry.upstream_cron_id,
+            until=entry.created_at_wallclock + CLI_CRON_MAX_AGE_S,
+            source="cancel",
+        )
     _persist()
     logger.info(
         "loop.cancelled",
@@ -516,11 +527,20 @@ def cancel_by_token(token: str, *, reason: str = "user_cancel") -> bool:
 
 
 def cancel_by_upstream_id(upstream_id: str) -> bool:
-    """Cancel a loop by its upstream 8-char cron ID (CronDelete observed)."""
+    """Cancel a loop by its upstream 8-char cron ID (CronDelete observed).
+
+    #926: the native CronDelete leaves the transcript marker the CLI's
+    resume scan honours, so that id no longer needs suppressing. Cleared
+    **after** the cancel, which marks it (§13 amendment 1)."""
     token = _PENDING_BY_UPSTREAM_ID.get(upstream_id)
     if token is None:
         return False
-    return cancel_by_token(token, reason="cron_delete")
+    entry = _PENDING_BY_TOKEN.get(token)
+    session_id = entry.resume_token if entry is not None else None
+    cancelled = cancel_by_token(token, reason="cron_delete")
+    if session_id is not None:
+        clear_cron_suppressed(session_id, upstream_id)
+    return cancelled
 
 
 def cancel_pending_for_chat(
@@ -601,22 +621,27 @@ def next_fire_for_session(session_id: str) -> float | None:
 
 
 def is_do_not_resume(session_id: str) -> bool:
-    """Return ``True`` if ``session_id`` has the do-not-resume sentinel set.
+    """Return ``True`` if ``session_id`` has a do-not-resume sentinel set.
 
-    The fire path consults this before spawning a ``--resume`` subprocess
-    so cancelled loops cannot be revived even if the upstream session-scoped
-    cron survives in the JSONL transcript.  ``/continue`` is a separate
-    user-initiated action and does NOT consult this set (handover default).
+    Since #926 the sentinel only blocks loops created at or before the
+    cancel (:func:`_blocked_by_cancel`).  ``/continue`` is a separate
+    user-initiated action and does NOT consult it (handover default).
     """
-    return session_id in _DO_NOT_RESUME
+    return session_id in _DO_NOT_RESUME_AT
 
 
 def mark_do_not_resume(session_id: str) -> None:
-    """Mark ``session_id`` as do-not-resume.  Idempotent.  Persisted."""
-    if session_id in _DO_NOT_RESUME:
+    """Mark ``session_id`` as do-not-resume (now).  Idempotent.  Persisted."""
+    if session_id in _DO_NOT_RESUME_AT:
         return
-    _DO_NOT_RESUME.add(session_id)
+    _DO_NOT_RESUME_AT[session_id] = time.time()
     _persist()
+
+
+def _blocked_by_cancel(entry: _LoopEntry) -> bool:
+    """#926: the entry predates a cancel in its session."""
+    cancelled_at = _DO_NOT_RESUME_AT.get(entry.resume_token)
+    return cancelled_at is not None and entry.created_at_wallclock <= cancelled_at
 
 
 # ── Cron suppression (#926) ─────────────────────────────────────────────
@@ -687,8 +712,12 @@ def cron_suppressed_until(session_id: str) -> float | None:
 
 
 def _prune_sentinels(now: float | None = None) -> None:
-    """Drop cron-suppression records past their window."""
+    """#926: drop cancel sentinels and suppression records past their window."""
     now = time.time() if now is None else now
+    for sid in [
+        s for s, at in _DO_NOT_RESUME_AT.items() if now - at >= CLI_CRON_MAX_AGE_S
+    ]:
+        del _DO_NOT_RESUME_AT[sid]
     for sid in list(_CRON_SUPPRESSED):
         ids = _CRON_SUPPRESSED[sid]
         for upstream_id in [k for k, until in ids.items() if until <= now]:
@@ -726,7 +755,7 @@ async def _fire(token: str) -> None:
 
     Sequence:
     1. Validate entry still pending (not cancelled, not over caps).
-    2. Honour the do-not-resume sentinel.
+    2. Honour the per-loop do-not-resume sentinel (#926).
     3. Drop-on-busy: if another run is in flight for our chat (a run that
        is not a live-idle session), log and skip.  Mirrors upstream's "no
        catch-up" semantic.
@@ -743,7 +772,7 @@ async def _fire(token: str) -> None:
         return
     if _expire_if_over_caps(entry):
         return
-    if is_do_not_resume(entry.resume_token):
+    if _blocked_by_cancel(entry):
         _expire(entry, reason="do_not_resume")
         return
     if _IS_CHAT_BUSY is not None and _IS_CHAT_BUSY(entry.chat_id):
@@ -1089,11 +1118,13 @@ def _persist() -> None:
     if _STATE_PATH is None:
         return
     _prune_sentinels()
-    # #925: an additive key under schema_version 1 (an rc19 reader ignores it).
+    # #926: additive keys under schema_version 1 — ``do_not_resume`` stays a
+    # list so an rc19 reader (rollback) still loads the file.
     payload: dict[str, Any] = {
         "schema_version": 1,
         "entries": [_serialize_entry(e) for e in _PENDING_BY_TOKEN.values()],
-        "do_not_resume": sorted(_DO_NOT_RESUME),
+        "do_not_resume": sorted(_DO_NOT_RESUME_AT),
+        "do_not_resume_at": dict(sorted(_DO_NOT_RESUME_AT.items())),
         "cron_suppressed": {
             sid: dict(ids) for sid, ids in sorted(_CRON_SUPPRESSED.items())
         },
@@ -1262,12 +1293,32 @@ def _restore_from_disk(path: Path) -> None:
 
 
 def _restore_sentinels(raw: dict[str, Any]) -> bool:
-    """Load the do-not-resume sentinel and the cron-suppression records.
-    Returns True when state changed that should be written back."""
+    """#926: load the cancel sentinels and suppression records.
+
+    A v1 file (rc19: a ``do_not_resume`` list, no ``do_not_resume_at``)
+    records cancels that always left a CLI job behind, so each session gets
+    a cancel time of now **and** a 7-day suppression (``source=restore_v1``,
+    logged once per session — §13 amendment 3 accepts the over-suppression
+    of ScheduleWakeup-only cancels). Returns True when a migration changed
+    state that should be written back."""
     now = time.time()
-    do_not_resume = raw.get("do_not_resume", [])
-    if isinstance(do_not_resume, list):
-        _DO_NOT_RESUME.update(str(s) for s in do_not_resume)
+    migrated = False
+    stamped = raw.get("do_not_resume_at")
+    if isinstance(stamped, dict):
+        for sid, at in stamped.items():
+            try:
+                _DO_NOT_RESUME_AT[str(sid)] = float(at)
+            except (TypeError, ValueError):
+                continue
+    else:
+        legacy = raw.get("do_not_resume", [])
+        if isinstance(legacy, list):
+            for sid in (str(s) for s in legacy):
+                _DO_NOT_RESUME_AT[sid] = now
+                _mark_cron_suppressed(
+                    sid, "legacy", until=now + CLI_CRON_MAX_AGE_S, source="restore_v1"
+                )
+                migrated = True
     suppressed = raw.get("cron_suppressed")
     if isinstance(suppressed, dict):
         for sid, ids in suppressed.items():
@@ -1283,4 +1334,4 @@ def _restore_sentinels(raw: dict[str, Any]) -> bool:
                         until_f
                     )
     _prune_sentinels(now)
-    return False
+    return migrated

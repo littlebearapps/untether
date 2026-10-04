@@ -1281,3 +1281,28 @@ def test_925_session_cron_resurrection_present(cli_blob: mmap.mmap) -> None:
         (b"resume: resurrected", b"deletedCronIds"),
         "session-cron resurrection on --resume changed",
     )
+
+
+# --- #926 (rc20) ---
+
+
+def test_926_disable_cron_env_present(cli_blob: mmap.mmap) -> None:
+    """F6: the env var suppressed sessions are resumed with (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b"CLAUDE_CODE_DISABLE_CRON",),
+        "#926's resume suppression no longer switches the CLI scheduler off",
+    )
+
+
+def test_926_recurring_max_age_default(cli_blob: mmap.mmap) -> None:
+    """The 7-day resurrect window ``loop_scheduler.CLI_CRON_MAX_AGE_S``
+    mirrors (CLI 2.1.289). Fails loudly if the default moves."""
+    from untether.loop_scheduler import CLI_CRON_MAX_AGE_S
+
+    assert CLI_CRON_MAX_AGE_S * 1000 == 604800000
+    _require_bytes(
+        cli_blob,
+        (b"recurringMaxAgeMs:604800000",),
+        "the CLI's session-cron max age moved — update CLI_CRON_MAX_AGE_S",
+    )

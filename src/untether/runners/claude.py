@@ -2027,6 +2027,11 @@ class ClaudeStreamState:
     # #925 §14.3: a native CronCreate job fired in this process; the
     # lifecycle closes the session (``cron_suppressed``) once it is idle.
     cron_suppress_close_pending: bool = False
+    # #926: this spawn resumes a session that may hold a CLI cron job, so it
+    # runs with CLAUDE_CODE_DISABLE_CRON=1 (wall-clock until), and the
+    # init note row has been shown (once per process).
+    cron_suppressed_until: float | None = None
+    cron_suppressed_noted: bool = False
     # #776: why the live session's stdin was closed (idle_no_tasks /
     # max_hold / abs_cap / cancel / new / drain); None while still open.
     live_close_reason: str | None = None
@@ -3834,6 +3839,44 @@ def _permission_mode_mismatch_rows(
             title=title,
             ok=True,
             level="warning",
+            detail=detail,
+        ),
+    ]
+
+
+_CRON_SUPPRESSED_NOTE = (
+    "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} Claude's scheduling is off "
+    "in this session \N{EM DASH} an earlier scheduled task is still recorded in "
+    "it and would restart. /new starts a session that can schedule again."
+)
+
+
+def _cron_suppressed_rows(
+    *, state: ClaudeStreamState, factory: EventFactory
+) -> list[UntetherEvent]:
+    """#926: one info ``note`` row per process when this spawn runs with
+    CLAUDE_CODE_DISABLE_CRON=1 because its session may hold a resurrectable
+    CLI cron job. Gated on the suppression record (not the env value), and
+    on per-process state, so live follow-up turns' inits don't repeat it."""
+    if state.cron_suppressed_until is None or state.cron_suppressed_noted:
+        return []
+    state.cron_suppressed_noted = True
+    state.note_seq += 1
+    action_id = f"claude.cron_suppressed.{state.note_seq}"
+    detail: dict[str, Any] = {"until": state.cron_suppressed_until}
+    return [
+        factory.action_started(
+            action_id=action_id,
+            kind="note",
+            title=_CRON_SUPPRESSED_NOTE,
+            detail=detail,
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=_CRON_SUPPRESSED_NOTE,
+            ok=True,
+            level="info",
             detail=detail,
         ),
     ]
@@ -8350,6 +8393,7 @@ def _translate_claude_event_base(
             mismatch_rows = _permission_mode_mismatch_rows(
                 event, state=state, factory=factory
             )
+            mismatch_rows += _cron_suppressed_rows(state=state, factory=factory)
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -9948,6 +9992,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
+        # #926: this spawn resumes a session that may still hold a CLI cron
+        # job the CLI would resurrect and fire — switch its scheduler off.
+        # Assignment, not setdefault: an inherited value must not re-enable
+        # it. Re-checked here so an expired record stops applying.
+        until = getattr(state, "cron_suppressed_until", None)
+        if until is not None and until > time.time():
+            env["CLAUDE_CODE_DISABLE_CRON"] = "1"
+            logger.info(
+                "claude.cron_suppressed",
+                session_id=(
+                    state.factory.resume.value
+                    if getattr(state, "factory", None) and state.factory.resume
+                    else None
+                ),
+                until=until,
+            )
         return env
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
@@ -9996,6 +10056,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if requested_mode is not None:
             from .. import loop_scheduler
 
+            # #926: a resumed control-channel spawn of a session that may
+            # hold a resurrectable CLI cron job runs with
+            # CLAUDE_CODE_DISABLE_CRON=1 (``env``) and shows a note row.
+            if resume is not None and not resume.is_continue:
+                state.cron_suppressed_until = loop_scheduler.cron_suppressed_until(
+                    resume.value
+                )
             # #925 §14.4: self-paced wake-up chains stop after
             # ``[loop] max_iterations`` (per process; off with the kill switch).
             if loop_scheduler.own_schedule_enabled():

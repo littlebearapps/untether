@@ -1239,3 +1239,299 @@ class TestBindSuppression:
                 assert entry.upstream_cron_id == "abcd1234"
             finally:
                 tg.cancel_scope.cancel()
+
+
+# ── #926: per-loop cancel sentinel + cron suppression (rc20) ───────────
+
+
+class TestScopedCancelSentinel:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_loop_registered_after_cancel_fires(self, monkeypatch):
+        """The 04:27:00 evidence: a loop created after /cancel in the same
+        session must fire, not expire ``do_not_resume``."""
+        from structlog.testing import capture_logs
+
+        recorder = RunJobRecorder()
+        monkeypatch.setattr(loop_scheduler, "_is_session_alive_safe", lambda s: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                first = _register_simple_cron(
+                    chat_id=400, session_id="S", tool_use_id="tu-a"
+                )
+                loop_scheduler.cancel_by_token(first)
+                await anyio.sleep(0.01)  # a later wall-clock instant
+                second = _register_simple_cron(
+                    chat_id=400, session_id="S", tool_use_id="tu-b"
+                )
+                with capture_logs() as logs:
+                    await loop_scheduler._fire(second)
+                assert len(recorder.calls) == 1
+                assert any(e["event"] == "loop.fired_ok" for e in logs)
+                assert not any(
+                    e["event"] == "loop.expired" and e["reason"] == "do_not_resume"
+                    for e in logs
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_entry_created_before_cancel_is_blocked(self):
+        recorder = RunJobRecorder()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=401, session_id="S2")
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                loop_scheduler._DO_NOT_RESUME_AT["S2"] = entry.created_at_wallclock + 1
+                await loop_scheduler._fire(token)
+                assert recorder.calls == []
+                assert token not in loop_scheduler._PENDING_BY_TOKEN
+            finally:
+                tg.cancel_scope.cancel()
+
+    def test_sentinel_pruned_after_7_days(self):
+        old = time.time() - loop_scheduler.CLI_CRON_MAX_AGE_S - 10
+        loop_scheduler._DO_NOT_RESUME_AT["old"] = old
+        loop_scheduler._DO_NOT_RESUME_AT["new"] = time.time()
+        loop_scheduler._prune_sentinels()
+        assert not loop_scheduler.is_do_not_resume("old")
+        assert loop_scheduler.is_do_not_resume("new")
+
+    def test_is_do_not_resume_truthiness_unchanged(self):
+        assert not loop_scheduler.is_do_not_resume("s")
+        loop_scheduler.mark_do_not_resume("s")
+        assert loop_scheduler.is_do_not_resume("s")
+        at = loop_scheduler._DO_NOT_RESUME_AT["s"]
+        loop_scheduler.mark_do_not_resume("s")  # idempotent: time kept
+        assert loop_scheduler._DO_NOT_RESUME_AT["s"] == at
+
+
+class TestCronSuppression:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_cancel_without_upstream_id_does_not_suppress(self):
+        """The post-#925 normal case: the CronCreate was declined, so the
+        CLI holds nothing and the resumed session keeps scheduling."""
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(chat_id=410, session_id="S")
+                loop_scheduler.cancel_by_token(token)
+                assert loop_scheduler.cron_suppressed_until("S") is None
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cancel_with_upstream_id_suppresses_until_created_plus_7d(
+        self, monkeypatch
+    ):
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(
+                    chat_id=411, session_id="S", tool_use_id="tu-up"
+                )
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                # Bind with suppression off so only the cancel marks it.
+                monkeypatch.setattr(
+                    loop_scheduler, "own_schedule_enabled", lambda: False
+                )
+                loop_scheduler.bind_upstream_id("tu-up", "6a9af2cb")
+                assert loop_scheduler.cron_suppressed_until("S") is None
+                monkeypatch.setattr(
+                    loop_scheduler, "own_schedule_enabled", lambda: True
+                )
+                loop_scheduler.cancel_by_token(token)
+                assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(
+                    entry.created_at_wallclock + loop_scheduler.CLI_CRON_MAX_AGE_S
+                )
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cancel_marks_nothing_when_own_schedule_false(self, monkeypatch):
+        """§13 amendment 4 (#926): the kill switch marks no suppression."""
+        monkeypatch.setattr(loop_scheduler, "own_schedule_enabled", lambda: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                token = _register_simple_cron(
+                    chat_id=412, session_id="S", tool_use_id="tu-ks"
+                )
+                loop_scheduler.bind_upstream_id("tu-ks", "6a9af2cb")
+                loop_scheduler.cancel_by_token(token)
+                assert loop_scheduler.cron_suppressed_until("S") is None
+            finally:
+                tg.cancel_scope.cancel()
+
+    def test_native_cron_delete_clears_that_id_only(self):
+        now = time.time()
+        loop_scheduler.mark_cron_suppressed(
+            "S", "aaaa1111", until=now + 100, source="t"
+        )
+        loop_scheduler.mark_cron_suppressed("S", "bbbb2222", until=now + 50, source="t")
+        assert loop_scheduler.clear_cron_suppressed("S", "aaaa1111")
+        assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(now + 50)
+        assert loop_scheduler.clear_cron_suppressed("S", "bbbb2222")
+        assert loop_scheduler.cron_suppressed_until("S") is None
+        assert not loop_scheduler.clear_cron_suppressed("S", "bbbb2222")
+
+    async def test_native_cron_delete_via_cancel_by_upstream_id_ends_unsuppressed(
+        self,
+    ):
+        """§13 amendment 1: the clear runs after the cancel's mark."""
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                _register_simple_cron(chat_id=413, session_id="S", tool_use_id="tu-d")
+                loop_scheduler.bind_upstream_id("tu-d", "6a9af2cb")
+                assert loop_scheduler.cron_suppressed_until("S") is not None
+                assert loop_scheduler.cancel_by_upstream_id("6a9af2cb")
+                assert loop_scheduler.cron_suppressed_until("S") is None
+            finally:
+                tg.cancel_scope.cancel()
+
+    def test_suppression_expires_and_prunes(self):
+        now = time.time()
+        loop_scheduler._CRON_SUPPRESSED["S"] = {"aaaa1111": now - 1}
+        assert loop_scheduler.cron_suppressed_until("S") is None
+        assert "S" not in loop_scheduler._CRON_SUPPRESSED
+        # A past ``until`` is never recorded.
+        assert not loop_scheduler.mark_cron_suppressed(
+            "S", "x", until=now - 1, source="t"
+        )
+
+    def test_mark_keeps_the_later_until(self):
+        now = time.time()
+        loop_scheduler.mark_cron_suppressed("S", "id", until=now + 100, source="t")
+        assert not loop_scheduler.mark_cron_suppressed(
+            "S", "id", until=now + 50, source="t"
+        )
+        assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(now + 100)
+
+    def test_native_placeholder_suppression_expires_only_by_time(self, monkeypatch):
+        """#926 §14 item 1 / §13b amendment 1: the detector's ``native``
+        placeholder can't be named by a CronDelete — only time clears it.
+        Independent of whether the detector is live."""
+        now = time.time()
+        loop_scheduler.mark_cron_suppressed(
+            "S", "native", until=now + 100, source="native_fire"
+        )
+        assert not loop_scheduler.cancel_by_upstream_id("native")
+        assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(now + 100)
+        monkeypatch.setattr(loop_scheduler.time, "time", lambda: now + 101)
+        assert loop_scheduler.cron_suppressed_until("S") is None
+
+
+class TestSuppressionPersistence:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    async def test_v1_list_migrates_to_sentinel_and_suppression(self, tmp_path):
+        import json
+
+        from structlog.testing import capture_logs
+
+        state_path = tmp_path / "active_loops.json"
+        state_path.write_text(
+            json.dumps(
+                {"schema_version": 1, "entries": [], "do_not_resume": ["S1", "S2"]}
+            )
+        )
+        with capture_logs() as logs:
+            async with anyio.create_task_group() as tg:
+                loop_scheduler.install(
+                    tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+                )
+                tg.cancel_scope.cancel()
+        assert loop_scheduler.is_do_not_resume("S1")
+        until = loop_scheduler.cron_suppressed_until("S2")
+        assert until is not None
+        assert until - time.time() == pytest.approx(
+            loop_scheduler.CLI_CRON_MAX_AGE_S, abs=60
+        )
+        marks = [e for e in logs if e["event"] == "loop.cron_suppressed_marked"]
+        assert sorted(m["session"] for m in marks) == ["S1", "S2"]
+        assert {m["source"] for m in marks} == {"restore_v1"}
+        # Written back in the new shape, so a second restart doesn't re-migrate.
+        raw = json.loads(state_path.read_text())
+        assert set(raw["do_not_resume_at"]) == {"S1", "S2"}
+
+    async def test_restored_entry_with_upstream_id_marks_suppression(self, tmp_path):
+        state_path = tmp_path / "active_loops.json"
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            try:
+                _register_simple_cron(chat_id=420, session_id="S", tool_use_id="tu-r")
+                loop_scheduler.bind_upstream_id("tu-r", "6a9af2cb")
+            finally:
+                tg.cancel_scope.cancel()
+        # Simulate a pre-rc20 file: the entry has an upstream id, no record.
+        import json
+
+        raw = json.loads(state_path.read_text())
+        raw.pop("cron_suppressed", None)
+        raw.pop("do_not_resume_at", None)
+        state_path.write_text(json.dumps(raw))
+        loop_scheduler.uninstall()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            tg.cancel_scope.cancel()
+        assert loop_scheduler.cron_suppressed_until("S") is not None
+
+    async def test_written_file_keeps_do_not_resume_list_for_rc19_reader(
+        self, tmp_path
+    ):
+        import json
+
+        state_path = tmp_path / "active_loops.json"
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            try:
+                token = _register_simple_cron(chat_id=421, session_id="S")
+                loop_scheduler.cancel_by_token(token)
+            finally:
+                tg.cancel_scope.cancel()
+        raw = json.loads(state_path.read_text())
+        assert raw["schema_version"] == 1
+        assert isinstance(raw["do_not_resume"], list)
+        assert raw["do_not_resume"] == ["S"]
+        assert isinstance(raw["do_not_resume_at"], dict)
+
+    async def test_round_trip_suppression(self, tmp_path):
+        state_path = tmp_path / "active_loops.json"
+        until = time.time() + 1000
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            loop_scheduler.mark_cron_suppressed(
+                "S", "abcd1234", until=until, source="t"
+            )
+            loop_scheduler.mark_do_not_resume("S")
+            tg.cancel_scope.cancel()
+        at = loop_scheduler._DO_NOT_RESUME_AT["S"]
+        loop_scheduler.uninstall()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, _noop_run_job, FakeTransport(), 1, state_path=state_path
+            )
+            tg.cancel_scope.cancel()
+        assert loop_scheduler.cron_suppressed_until("S") == pytest.approx(until)
+        assert loop_scheduler._DO_NOT_RESUME_AT["S"] == pytest.approx(at)

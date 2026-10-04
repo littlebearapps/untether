@@ -9342,3 +9342,132 @@ class TestNativeFireAndWakeCap:
                 assert "CLAUDE_CODE_DISABLE_CRON" not in env
         finally:
             reset_run_channel_id(chat_token)
+
+
+# ───── #926 (rc20) — resume suppressed sessions with DISABLE_CRON ───────
+
+
+class TestCronSuppressedSpawn:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        from untether import loop_scheduler
+
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @staticmethod
+    def _suppress(session_id: str, seconds: float = 3600.0) -> None:
+        from untether import loop_scheduler
+
+        loop_scheduler.mark_cron_suppressed(
+            session_id, "6a9af2cb", until=time.time() + seconds, source="test"
+        )
+
+    def test_env_sets_disable_cron_for_suppressed_resume(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        resume = ResumeToken(engine="claude", value="sess-sup")
+        state = runner.new_state("hi", resume)
+        assert state.cron_suppressed_until is not None
+        env = runner.env(state=state)
+        assert env is not None
+        assert env["CLAUDE_CODE_DISABLE_CRON"] == "1"
+
+    def test_env_no_disable_cron_fresh_session(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", None)
+        env = runner.env(state=state) or {}
+        assert "CLAUDE_CODE_DISABLE_CRON" not in env
+
+    def test_env_no_disable_cron_unsuppressed_resume(self) -> None:
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="clean"))
+        assert state.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_env_no_disable_cron_p_mode(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude")  # no permission mode → -p
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="sess-sup"))
+        assert state.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_disable_cron_overrides_inherited_value(self, monkeypatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_DISABLE_CRON", "0")
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="sess-sup"))
+        assert runner.env(state=state)["CLAUDE_CODE_DISABLE_CRON"] == "1"
+
+    def test_env_disable_cron_stops_after_suppression_expiry(self) -> None:
+        """§13 amendment 5: only while ``cron_suppressed_until > now``."""
+        from untether import loop_scheduler
+
+        self._suppress("sess-exp", seconds=3600)
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        resume = ResumeToken(engine="claude", value="sess-exp")
+        state = runner.new_state("hi", resume)
+        assert runner.env(state=state)["CLAUDE_CODE_DISABLE_CRON"] == "1"
+        # The record lapses: a later spawn runs with the scheduler on, and a
+        # stale state value no longer applies either.
+        loop_scheduler._CRON_SUPPRESSED["sess-exp"] = {"6a9af2cb": time.time() - 1}
+        later = runner.new_state("hi", resume)
+        assert later.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=later) or {})
+        state.cron_suppressed_until = time.time() - 1
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_cron_suppressed_note_emitted_once_at_init(self) -> None:
+        state = ClaudeStreamState()
+        state.cron_suppressed_until = time.time() + 3600
+        init = _decode_event(
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "sess-note",
+                "cwd": "/tmp",
+                "model": "claude",
+                "tools": [],
+                "permissionMode": "plan",
+            }
+        )
+        first = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        notes = [
+            e
+            for e in first
+            if isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+        ]
+        assert len(notes) == 2  # started + completed
+        assert notes[-1].level == "info"
+        assert "/new" in notes[-1].action.title
+        again = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        assert not any(
+            isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+            for e in again
+        )
+
+    def test_no_note_without_suppression(self) -> None:
+        state = ClaudeStreamState()
+        init = _decode_event(
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "sess-none",
+                "cwd": "/tmp",
+                "model": "claude",
+                "tools": [],
+            }
+        )
+        events = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        assert not any(
+            isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+            for e in events
+        )
