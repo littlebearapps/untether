@@ -1426,6 +1426,28 @@ def pending_control_requests_for_session(session_id: str | None) -> int:
     return pending
 
 
+_CONTROL_REASON_MAX_CHARS = 200
+
+
+def _control_reason_type(request: Any) -> str | None:
+    """#929: ``decision_reason_type`` of a ``can_use_tool`` request
+    (``hook`` / ``classifier`` / ``mode`` / ``rule`` / …), or None."""
+    value = getattr(request, "decision_reason_type", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _control_reason_text(request: Any) -> str | None:
+    """#929: the request's ``decision_reason`` — first non-empty line, at most
+    200 chars. Hook / classifier text meant for the user; never logged."""
+    value = getattr(request, "decision_reason", None)
+    if not isinstance(value, str):
+        return None
+    line = next((ln.strip() for ln in value.splitlines() if ln.strip()), "")
+    if len(line) > _CONTROL_REASON_MAX_CHARS:
+        line = line[: _CONTROL_REASON_MAX_CHARS - 1] + "…"
+    return line or None
+
+
 @dataclass(frozen=True, slots=True)
 class ControlRequestSnapshot:
     """One control request still registered for a user answer (#684).
@@ -8151,6 +8173,10 @@ def _translate_claude_event_base(
                     session_id=factory.resume.value if factory.resume else None,
                     permission_mode=state.effective_permission_mode,
                     unattended=state.unattended_trigger,  # #835
+                    # #929: which agent asks and why (type only — never the
+                    # reason text, #822 "name only").
+                    agent_id=getattr(request, "agent_id", None),
+                    decision_reason_type=_control_reason_type(request),
                 )
 
             # #793: record every ExitPlanMode plan body against its request;
@@ -8672,9 +8698,22 @@ def _translate_claude_event_base(
             state.note_seq += 1
             action_id = f"claude.control.{state.note_seq}"
 
-            # Map the preceding tool_use_id to this control action for cleanup
-            if state.last_tool_use_id:
-                state.control_action_for_tool[state.last_tool_use_id] = action_id
+            # Map the request's tool call to this control action for cleanup.
+            # #929: the CLI names the call (``tool_use_id``); the newest
+            # tool_use from any agent can be a parallel sibling's, whose
+            # result would then strip a still-pending approval. A native id
+            # this state never saw as a tool_use (the sandbox network ask
+            # sends a generated one no tool_result carries) falls back to the
+            # old mapping; completion then comes via the #229 reconcile.
+            native_tool_use_id = getattr(request, "tool_use_id", None)
+            tool_key = (
+                native_tool_use_id
+                if isinstance(native_tool_use_id, str)
+                and native_tool_use_id in state.pending_actions
+                else state.last_tool_use_id
+            )
+            if tool_key:
+                state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)
             state.request_to_action[request_id] = action_id
 
@@ -8818,6 +8857,15 @@ def _translate_claude_event_base(
                 detail["ask_question"] = ask_question
             if ask_flow_created:
                 detail["ask_flow"] = True
+            # #929: who asks and why — read by the bridge's standalone
+            # approval surface for a request that arrives while live-idle.
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                if agent_id := getattr(request, "agent_id", None):
+                    detail["agent_id"] = agent_id
+                if reason_type := _control_reason_type(request):
+                    detail["decision_reason_type"] = reason_type
+                if reason := _control_reason_text(request):
+                    detail["decision_reason"] = reason
 
             return [
                 *reconciled_events,

@@ -1140,3 +1140,46 @@ def test_922_cap_builder_tags_api_error(cli_blob: mmap.mmap) -> None:
         b'apiError:"long_context_credits_required"',
     ):
         assert cli_blob.find(literal) != -1, f"{literal!r} missing from the CLI"
+
+
+# --- #929 (rc20) ---------------------------------------------------------------
+
+# Review amendment 1: ``[^}]`` can't cross the ``...r.mcpInfo&&{mcp_server:…}``
+# spread between the subtype and the reason fields, so the window is
+# ``[\s\S]``. The CLI has several ``can_use_tool`` builders (the sandbox
+# network ask carries no ``decision_reason_type``); any occurrence matching is
+# enough.
+_929_REASON_RE = re.compile(
+    rb'subtype:"can_use_tool"[\s\S]{0,1500}?decision_reason_type:'
+)
+_929_IDS_RE = re.compile(
+    rb'subtype:"can_use_tool"[\s\S]{0,1500}?tool_use_id:[\w$]+,agent_id:'
+)
+
+
+def test_929_can_use_tool_carries_agent_and_tool_use_id(cli_blob: mmap.mmap) -> None:
+    """#929: the stage-6 ``can_use_tool`` request names its own tool call and
+    agent (the bridge maps the approval by ``tool_use_id`` and labels the
+    standalone approval message by ``agent_id``) and why it asks."""
+    assert _929_REASON_RE.search(cli_blob) is not None, (
+        "can_use_tool no longer sends decision_reason_type — the #929 surface "
+        "loses its hook-reason line (last green on CLI "
+        f"{PROBED_CLI_VERSION})"
+    )
+    assert _929_IDS_RE.search(cli_blob) is not None, (
+        "can_use_tool no longer sends tool_use_id + agent_id together — #929's "
+        "per-request mapping falls back to the newest tool_use and the "
+        f"surface to its generic copy (last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_929_local_agent_task_id_is_agent_id(cli_blob: mmap.mmap) -> None:
+    """#929 (best-effort): a background agent's task id is its ``agentId``,
+    so ``can_use_tool.agent_id`` looks up ``ClaudeStreamState.tasks``. If this
+    drifts the surface falls back to the generic label and the latest-turn
+    reply anchor."""
+    if re.search(rb'type:"local_agent",status:"running",agentId:', cli_blob) is None:
+        pytest.skip(
+            "local_agent task registration shape moved — re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )

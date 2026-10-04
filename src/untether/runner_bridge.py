@@ -24,11 +24,13 @@ from .background_status import (
     live_shown,
     register_live_count_source,
     render_background_block,
+    task_label,
     unregister_live_count_source,
     wake_fold_decision,
 )
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
+from .events import EventFactory
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import (
@@ -40,6 +42,7 @@ from .model import (
     TurnEvent,
     UntetherEvent,
 )
+from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import (
@@ -319,6 +322,9 @@ def build_control_surface_probe(
         turn_edits = getattr(current, "edits", None)
         if turn_edits is not None:
             callbacks |= control_callbacks_in(turn_edits.last_rendered)
+        # #929: buttons on the standalone approval messages count too.
+        if edits.orphan_approvals is not None:
+            callbacks |= edits.orphan_approvals.callbacks()
         if edits.has_outline_messages or (
             turn_edits is not None and turn_edits.has_outline_messages
         ):
@@ -2260,6 +2266,11 @@ class ProgressEdits:
         self.control_surface_probe: Callable[[], frozenset[str]] | None = None
         self._detect_unanswerable: bool = True
         self._unanswerable_warned: set[str] = set()
+        # #929: standalone pushed approval messages for requests with no
+        # visible keyboard (a background agent asking while live-idle). Owned
+        # by the run-level edits; follow-up turn edits get a read-only
+        # reference so their approval state ignores surfaced requests.
+        self.orphan_approvals: OrphanApprovalSurface | None = None
 
     @property
     def has_outline_messages(self) -> bool:
@@ -2520,6 +2531,13 @@ class ProgressEdits:
                 logger.debug(
                     "progress_edits.approval_reminder_retire_failed", exc_info=True
                 )
+            # #929: then the standalone approval surfaces (retire answered,
+            # retry failed sends, re-post due) — fixed order after #920's
+            # retire (review amendment 5), also before the live-idle continue.
+            try:
+                await self._sync_orphan_approvals()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.orphan_sync_failed", exc_info=True)
 
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
@@ -2681,6 +2699,12 @@ class ProgressEdits:
                         threshold_reason=threshold_reason,
                         run_level=self.run_level,
                         pid=self.pid,
+                        # #929: requests shown on standalone approval messages.
+                        orphan_approvals=(
+                            self.orphan_approvals.surfaced_count
+                            if self.orphan_approvals is not None
+                            else 0
+                        ),
                     )
                 continue
 
@@ -3593,10 +3617,14 @@ class ProgressEdits:
         live message of the run and no text-reply route (``no_keyboard``), or
         no stdin writer for the session (``no_session_writer``).
 
-        Detect-only: no auto-deny, no registry change, no chat message, and
-        the live-session hold is untouched (decisions D3/D4). Run-level only:
-        this monitor lives for the whole run (pre-result, follow-up turns,
-        live idle) and reads the run's own stream (#510).
+        Never auto-denies and leaves the registry and the live-session hold
+        untouched (decisions D3/D4). #929: before the WARN, a request waiting
+        past ``_ORPHAN_RESCUE_GRACE_S`` with no button visible anywhere (other
+        than other standalone surfaces) is *rescued* — queued on the run's
+        standalone approval surface, sent on the next tick. The kill switch
+        ``detect_unanswerable_control_requests`` disables both. Run-level
+        only: this monitor lives for the whole run (pre-result, follow-up
+        turns, live idle) and reads the run's own stream (#510).
         """
         if not (self.run_level and self._detect_unanswerable):
             return
@@ -3605,17 +3633,40 @@ class ProgressEdits:
             probe = getattr(es, "control_request_snapshot", None)
             if not callable(probe):
                 return
+            all_snaps = list(probe())
+            if not all_snaps:
+                return
+            surface = self.control_surface_probe
+            visible = surface() if surface is not None else None
+            orphans = self.orphan_approvals
+            if orphans is not None and visible is not None:
+                # Other surfaces' buttons answer only their own request.
+                others = visible - orphans.callbacks()
+                if not others:
+                    owned = orphans.request_ids()
+                    for snap in all_snaps:
+                        if (
+                            snap.age_s >= self._ORPHAN_RESCUE_GRACE_S
+                            and snap.writer_ok
+                            and not snap.answerable_by_text
+                            and snap.request_id not in owned
+                        ):
+                            orphans.rescue(
+                                snap,
+                                action=self._tracked_action_for_request(
+                                    snap.request_id
+                                ),
+                            )
             snaps = [
                 snap
-                for snap in probe()
+                for snap in all_snaps
                 if snap.request_id not in self._unanswerable_warned
                 and snap.age_s >= self._STALL_THRESHOLD_TOOL
             ]
             if not snaps:
                 return
-            surface = self.control_surface_probe
-            visible = surface() if surface is not None else None
             live_idle = self._is_live_session_idle()
+            rescued = orphans.request_ids() if orphans is not None else frozenset()
             for snap in snaps:
                 reasons: list[str] = []
                 if not snap.writer_ok:
@@ -3639,6 +3690,8 @@ class ProgressEdits:
                     live_idle=live_idle,
                     holds_live_session=live_idle,
                     visible_buttons=len(visible or ()),
+                    # #929: queued / shown on a standalone approval message.
+                    rescued=snap.request_id in rescued,
                     pid=self.pid,
                 )
         except Exception as exc:  # noqa: BLE001 - monitor loop must not die
@@ -3661,18 +3714,109 @@ class ProgressEdits:
         predicate meaningful for engines with no control channel.
         """
         es = getattr(self.stream, "engine_state", None) if self.stream else None
-        probe = getattr(es, "awaiting_user_approval", None)
-        if callable(probe):
-            try:
-                if probe():
+        excluded = self._surfaced_request_ids()
+        if excluded:
+            # #929 (review amendment 4): a request shown on the run's
+            # standalone approval surface is a background agent's wait, not
+            # this turn's — it must not turn this turn's genuine stall into a
+            # silent expected wait. Only other requests count.
+            snaps = self._control_snapshots()
+            if snaps is not None:
+                if any(s.request_id not in excluded for s in snaps):
                     return True
-            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
-                logger.debug("progress_edits.approval_probe_failed", error=str(exc))
+            else:
+                excluded = frozenset()
+        if not excluded:
+            probe = getattr(es, "awaiting_user_approval", None)
+            if callable(probe):
+                try:
+                    if probe():
+                        return True
+                except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                    logger.debug("progress_edits.approval_probe_failed", error=str(exc))
         for action_state in reversed(list(self.tracker._actions.values())):
             if not action_state.completed:
-                return bool(action_state.action.detail.get("inline_keyboard"))
+                detail = action_state.action.detail
+                if excluded and detail.get("request_id") in excluded:
+                    return False
+                return bool(detail.get("inline_keyboard"))
             break  # only check the most recent
         return False
+
+    def _control_snapshots(self) -> list[Any] | None:
+        """The engine's pending control requests, or None when the engine has
+        no registry (non-Claude) or the probe failed."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "control_request_snapshot", None)
+        if not callable(probe):
+            return None
+        try:
+            return list(probe())
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
+            return None
+
+    def _surfaced_request_ids(self) -> frozenset[str]:
+        """#929: requests a follow-up / wake turn's edits must ignore — they
+        live on the run's standalone approval surface. The run-level edits
+        never exclude (a pre-result wait on a surfaced request is still this
+        run's wait)."""
+        if self.run_level or self.orphan_approvals is None:
+            return frozenset()
+        return self.orphan_approvals.request_ids()
+
+    def _tracked_action_for_request(self, request_id: str) -> Any:
+        """#929: the newest uncompleted tracked action for ``request_id``."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            if action_state.action.detail.get("request_id") == request_id:
+                return action_state.action
+        return None
+
+    def _feed_orphan_completions(self) -> None:
+        """#929: complete the run-level tracker's action for each retired
+        surface, so ``_has_pending_approval()``'s presentation fallback can't
+        stay True on a stale action (a background agent's tool_result never
+        reaches this tracker while live-idle)."""
+        orphans = self.orphan_approvals
+        if orphans is None:
+            return
+        factory = EventFactory(self.tracker.engine)
+        for action_id, reason in orphans.drain_retired_actions():
+            if reason == "completed":
+                continue  # the completion event itself already did it
+            self.tracker.note_event(
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="warning",
+                    title="Permission resolved",
+                    ok=True,
+                )
+            )
+
+    async def _flush_orphans(self) -> None:
+        """#929: event-path send / retire of standalone approval surfaces."""
+        if self.orphan_approvals is None:
+            return
+        try:
+            await self.orphan_approvals.flush()
+            self._feed_orphan_completions()
+        except Exception:  # noqa: BLE001 - never break the render loop
+            logger.debug("progress_edits.orphan_flush_failed", exc_info=True)
+
+    async def _sync_orphan_approvals(self) -> None:
+        """#929 heartbeat: retire surfaces whose request is no longer
+        registered, retry failed sends, re-post due ones. Run-level only."""
+        if not self.run_level or self.orphan_approvals is None:
+            return
+        snaps = self._control_snapshots()
+        if snaps is None:
+            # No registry / probe failure: never read that as "all answered".
+            await self.orphan_approvals.flush()
+        else:
+            await self.orphan_approvals.sync({s.request_id for s in snaps})
+        self._feed_orphan_completions()
 
     def _ask_question_text(self, request_id: str | None) -> str | None:
         """#919: the outstanding question of a pending AskUserQuestion.
@@ -3706,15 +3850,12 @@ class ProgressEdits:
         wins — the one whose buttons are visible), else the newest uncompleted
         tracked action carrying an inline keyboard.
         """
-        es = getattr(self.stream, "engine_state", None) if self.stream else None
-        probe = getattr(es, "control_request_snapshot", None)
-        snaps: list[Any] = []
-        if callable(probe):
-            try:
-                snaps = list(probe())
-            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
-                logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
-                snaps = []
+        # #929: requests on the run's standalone approval surface are not
+        # this turn's to remind about — remind about the newest other one.
+        excluded = self._surfaced_request_ids()
+        snaps = [
+            s for s in (self._control_snapshots() or []) if s.request_id not in excluded
+        ]
         if snaps:
             snap = min(snaps, key=lambda s: s.age_s)
             tool_name = snap.tool_name or None
@@ -3744,6 +3885,8 @@ class ProgressEdits:
                 continue
             rid = detail.get("request_id")
             rid = rid if isinstance(rid, str) and rid else None
+            if rid is not None and rid in excluded:
+                continue
             tool_name = detail.get("tool_name") or None
             if detail.get("ask_question"):
                 return _PendingRequestInfo(
@@ -4094,6 +4237,9 @@ class ProgressEdits:
             # render can't overwrite the final message.
             if self._finalizing:
                 self.rendered_seq = self.event_seq
+                # #929: surface a request that has nowhere else to render.
+                if self.orphan_approvals is not None and self.orphan_approvals.has_work:
+                    bg_tg.start_soon(self._flush_orphans)
                 continue
 
             # Debounce: never delay the first render; after that, batch events.
@@ -4339,6 +4485,9 @@ class ProgressEdits:
     # deliberations.
     _STALL_THRESHOLD_APPROVAL_FIRST: float = 600.0
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # refire threshold after first
+    # #929: how long a registered request may sit with no visible button
+    # before the rescue path surfaces it on a standalone message.
+    _ORPHAN_RESCUE_GRACE_S: float = 30.0
     # How long a dead, already-answered run's process must stay dead before
     # the #650 silent reap: longer than a bounded Telegram delivery
     # (twice the client's 30 s message timeout) still holding the stream.
@@ -4378,6 +4527,22 @@ class ProgressEdits:
             _ask_rid = evt.action.detail.get("request_id")
             if isinstance(_ask_rid, str) and _ask_rid:
                 register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
+        # #929: a keyboard action reaching the run-level edits after the run's
+        # final was delivered (``_finalizing``) has no visible host — the
+        # turn router took no turn for it (a background agent asking while
+        # the live session is idle). Hand it to the standalone surface; the
+        # ``_run_loop`` wakeup below flushes it. Completions retire surfaces.
+        orphans = self.orphan_approvals
+        if orphans is not None and isinstance(evt, ActionEvent):
+            if evt.phase == "completed":
+                orphans.note_completed(str(evt.action.id))
+            elif (
+                evt.phase == "started"
+                and self.run_level
+                and self._finalizing
+                and evt.action.detail.get("inline_keyboard")
+            ):
+                orphans.offer(evt.action)
         if self.progress_ref is None:
             return
         now = self.clock()
@@ -4549,16 +4714,10 @@ class ProgressEdits:
         rid = self._approval_reminder_request_id
         if self._approval_reminder_ref is None or rid is None:
             return
-        es = getattr(self.stream, "engine_state", None) if self.stream else None
-        probe = getattr(es, "control_request_snapshot", None)
-        if not callable(probe):
+        snaps = self._control_snapshots()
+        if snaps is None:
             return
-        try:
-            live_ids = {snap.request_id for snap in probe()}
-        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
-            logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
-            return
-        if rid not in live_ids:
+        if rid not in {snap.request_id for snap in snaps}:
             await self._retire_approval_reminder("superseded")
 
     async def delete_ephemeral(self) -> None:
@@ -4577,6 +4736,14 @@ class ProgressEdits:
             self._approval_notify_ref = None
         # #920: then the pending-approval reminder (run end / turn close).
         await self._retire_approval_reminder("run_end")
+        # #929: then (run-level only — turn edits share the reference) the
+        # standalone approval surfaces; the session is closing, and closing
+        # stdin rejects their requests.
+        if self.run_level and self.orphan_approvals is not None:
+            try:
+                await self.orphan_approvals.aclose("run_end")
+            except Exception:  # noqa: BLE001
+                logger.debug("progress_edits.orphan_close_failed", exc_info=True)
         # Safety-net: delete any outline messages not already cleaned up
         # (e.g. run cancelled while outline is visible).
         # Also remove from the module-level registry to avoid stale entries.
@@ -4943,6 +5110,10 @@ async def run_runner_with_cancel(
         stall_suppressions=suppression_summary,
         # #684: requests flagged by the detect-only unanswerable canary.
         unanswerable_control_requests=len(edits._unanswerable_warned),
+        # #929: standalone approval messages sent (incl. re-posts).
+        approval_surfaces=getattr(
+            getattr(edits, "orphan_approvals", None), "sent_total", 0
+        ),
         # #695: both events carry the model so a single grep over either
         # answers "which model ran this session?".
         **_model_log_fields(edits.tracker.meta),
@@ -7134,6 +7305,9 @@ async def handle_message(
         turn_edits._heartbeat_interval = progress_cfg.heartbeat_interval
         turn_edits.stream = edits.stream
         turn_edits.pid = edits.pid
+        # #929: read-only — the turn ignores surfaced requests and never
+        # offers (``run_level`` is False); only the run-level edits retire.
+        turn_edits.orphan_approvals = edits.orphan_approvals
         if running_task is not None:
             turn_edits.cancel_event = running_task.cancel_requested
         ctx.edits = turn_edits
@@ -7291,6 +7465,38 @@ async def handle_message(
     )
 
     edits.control_surface_probe = build_control_surface_probe(edits, turn_router)
+
+    # #929: standalone approval messages for requests with no visible host.
+    def _orphan_task(agent_id: str | None) -> Any:
+        if not agent_id:
+            return None
+        tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
+        return tasks.get(agent_id) if isinstance(tasks, dict) else None
+
+    def _orphan_label(agent_id: str | None) -> str | None:
+        task = _orphan_task(agent_id)
+        return task_label(task) if task is not None else None
+
+    def _orphan_anchor(agent_id: str | None) -> MessageRef | None:
+        # #795 pattern: reply to the prompt whose turn launched the agent;
+        # else the message the live session's latest turn answered (never
+        # turn 1's progress ref — the final may have replaced it).
+        task = _orphan_task(agent_id)
+        origin = getattr(task, "origin_turn", None) if task is not None else None
+        if isinstance(origin, int) and not isinstance(origin, bool):
+            return turn_router.anchor_for_turn(origin)
+        return turn_router.last_reply_to
+
+    edits.orphan_approvals = OrphanApprovalSurface(
+        transport=cfg.transport,
+        channel_id=incoming.channel_id,
+        thread_id=incoming.thread_id,
+        clock=clock,
+        label_for=_orphan_label,
+        anchor_for=_orphan_anchor,
+        first_s=edits._STALL_THRESHOLD_APPROVAL_FIRST,
+        repeat_s=edits._STALL_THRESHOLD_APPROVAL,
+    )
 
     def _bg_session_idle() -> bool:
         # The live session sits between turns: no wake / follow-up turn is

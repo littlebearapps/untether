@@ -4055,3 +4055,244 @@ def test_822_keyboard_detail_has_tool_name() -> None:
         and e.action.detail.get("request_type") == "DiscussApproval"
     ]
     assert synth and synth[0].action.detail["tool_name"] == "ExitPlanMode"
+
+
+# ===========================================================================
+# #929 — background agent approval: native fields + tool_use_id mapping
+# ===========================================================================
+
+_929_SECRET = "R929-SECRET-REASON"
+
+
+def _929_request(
+    request_id: str,
+    tool_name: str = "Bash",
+    *,
+    tool_use_id: str | None = None,
+    agent_id: str | None = None,
+    reason_type: str | None = None,
+    reason: str | None = None,
+    **tool_input: Any,
+):
+    request: dict[str, Any] = {
+        "subtype": "can_use_tool",
+        "tool_name": tool_name,
+        "input": dict(tool_input),
+    }
+    if tool_use_id is not None:
+        request["tool_use_id"] = tool_use_id
+    if agent_id is not None:
+        request["agent_id"] = agent_id
+    if reason_type is not None:
+        request["decision_reason_type"] = reason_type
+    if reason is not None:
+        request["decision_reason"] = reason
+    return _decode_event(
+        {"type": "control_request", "request_id": request_id, "request": request}
+    )
+
+
+def _929_tool_result(tool_use_id: str):
+    return _decode_event(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "ok",
+                    }
+                ]
+            },
+        }
+    )
+
+
+def _929_seen_tool(state: ClaudeStreamState, tool_use_id: str) -> None:
+    from untether.model import Action
+
+    state.pending_actions[tool_use_id] = Action(
+        id=tool_use_id, kind="command", title="Bash", detail={}
+    )
+    state.last_tool_use_id = tool_use_id
+
+
+def test_929_can_use_tool_decodes_agent_fields() -> None:
+    evt = _929_request(
+        "r-929",
+        tool_use_id="toolu_1",
+        agent_id="a1c1",
+        reason_type="hook",
+        reason="confirm this",
+        command="ls",
+    )
+    req = evt.request
+    assert isinstance(req, claude_schema.ControlCanUseToolRequest)
+    assert req.tool_use_id == "toolu_1"
+    assert req.agent_id == "a1c1"
+    assert req.decision_reason_type == "hook"
+    assert req.decision_reason == "confirm this"
+
+    bare = _929_request("r-929b", command="ls").request
+    assert bare.tool_use_id is None and bare.agent_id is None
+    assert bare.decision_reason is None and bare.decision_reason_type is None
+
+
+def test_929_unexpected_reason_shape_still_decodes() -> None:
+    """A non-string reason must never fail the request's decode (a dropped
+    control_request would hang the session)."""
+    evt = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "r-929s",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {},
+                "decision_reason": {"nested": True},
+                "decision_reason_type": 7,
+            },
+        }
+    )
+    assert isinstance(evt.request, claude_schema.ControlCanUseToolRequest)
+
+
+def test_929_detail_carries_agent_and_reason() -> None:
+    state, factory = _make_state_with_session("sess-929d")
+    state.prompting_mode = True
+    reason = "x" * 300 + "\nsecond line"
+    events = translate_claude_event(
+        _929_request(
+            "r-929d", agent_id="a1c1", reason_type="hook", reason=reason, command="ls"
+        ),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    detail = events[0].action.detail
+    assert detail["agent_id"] == "a1c1"
+    assert detail["decision_reason_type"] == "hook"
+    assert "\n" not in detail["decision_reason"]
+    assert len(detail["decision_reason"]) <= 200
+    assert detail["decision_reason"].endswith("…")
+
+
+def test_929_detail_omits_absent_fields() -> None:
+    state, factory = _make_state_with_session("sess-929e")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _929_request("r-929e", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    detail = events[0].action.detail
+    for key in ("agent_id", "decision_reason_type", "decision_reason"):
+        assert key not in detail
+
+
+def test_929_received_log_names_agent_not_reason() -> None:
+    from structlog.testing import capture_logs
+
+    state, factory = _make_state_with_session("sess-929l")
+    state.prompting_mode = True
+    with capture_logs() as logs:
+        translate_claude_event(
+            _929_request(
+                "r-929l",
+                agent_id="a1c1",
+                reason_type="hook",
+                reason=_929_SECRET,
+                command="ls",
+            ),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    (received,) = _events_named(logs, "control_request.received")
+    assert received["agent_id"] == "a1c1"
+    assert received["decision_reason_type"] == "hook"
+    for record in logs:
+        assert _929_SECRET not in str(record), record
+
+
+def test_929_approval_mapped_by_native_tool_use_id() -> None:
+    state, factory = _make_state_with_session("sess-929m")
+    state.prompting_mode = True
+    _929_seen_tool(state, "toolu_mine")
+    _929_seen_tool(state, "toolu_sibling")  # newest tool_use: a sibling's
+    events = translate_claude_event(
+        _929_request("r-929m", tool_use_id="toolu_mine", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    action_id = _started_action_id(events)
+    assert state.control_action_for_tool == {"toolu_mine": action_id}
+
+    out = translate_claude_event(
+        _929_tool_result("toolu_sibling"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    resolved = [
+        e
+        for e in out
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.id == action_id
+    ]
+    assert resolved == []  # the sibling's result no longer strips the approval
+
+
+def test_929_mapping_falls_back_to_last_tool_use_id() -> None:
+    state, factory = _make_state_with_session("sess-929f")
+    state.prompting_mode = True
+    _929_seen_tool(state, "toolu_last")
+    events = translate_claude_event(
+        _929_request("r-929f", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert state.control_action_for_tool == {"toolu_last": _started_action_id(events)}
+
+
+def test_929_mapping_falls_back_for_unknown_native_id() -> None:
+    """Review amendment 2: the sandbox network ask sends a generated
+    ``tool_use_id`` that no tool_result ever carries."""
+    state, factory = _make_state_with_session("sess-929u")
+    state.prompting_mode = True
+    _929_seen_tool(state, "toolu_last")
+    events = translate_claude_event(
+        _929_request("r-929u", tool_use_id="synthetic-net-1", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert state.control_action_for_tool == {"toolu_last": _started_action_id(events)}
+
+
+def test_929_live_idle_request_emits_action_without_turn() -> None:
+    """Pins design A's routing assumption: a control request while the live
+    session is idle yields the keyboard action and opens no turn."""
+    from untether.model import TurnEvent
+
+    state, factory = _make_state_with_session("sess-929t")
+    state.prompting_mode = True
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open = False
+    events = translate_claude_event(
+        _929_request("r-929t", agent_id="a1c1", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert not any(isinstance(e, TurnEvent) for e in events)
+    started = [e for e in events if isinstance(e, ActionEvent) and e.phase == "started"]
+    assert len(started) == 1
+    assert started[0].action.detail.get("inline_keyboard")
+    assert state.turn_open is False

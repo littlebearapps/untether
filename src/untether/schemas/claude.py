@@ -331,6 +331,17 @@ class ControlCanUseToolRequest(
     input: dict[str, Any]
     permission_suggestions: list[Any] | None = None
     blocked_path: str | None = None
+    # #929: the request's own tool call and (for a subagent) its agent id —
+    # ``agent_id`` equals the ``task_started.task_id`` of a background agent.
+    # ``decision_reason*``: why the CLI asks (``hook`` / ``classifier`` / …);
+    # hook text is meant for the user. All optional (the sandbox network ask
+    # sends a synthetic ``tool_use_id`` and no reason). The reason fields are
+    # typed loosely so an unexpected shape can never fail the request's decode
+    # (a dropped control_request hangs the session); the runner coerces them.
+    tool_use_id: str | None = None
+    agent_id: str | None = None
+    decision_reason: Any = None
+    decision_reason_type: Any = None
 
 
 class ControlInitializeRequest(

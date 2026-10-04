@@ -12195,3 +12195,415 @@ async def test_920_retire_probe_error_does_not_kill_monitor() -> None:
     # Still pending (probe error is not "resolved"): the ref survives and
     # the refire replaced it.
     assert edits._approval_reminder_ref is not None
+
+
+# ---------------------------------------------------------------------------
+# #929 background agent approval while live-idle (standalone surface)
+# ---------------------------------------------------------------------------
+
+_CB_929 = [
+    [
+        {"text": "✅ Approve", "callback_data": "claude_control:approve:r-1"},
+        {"text": "❌ Deny", "callback_data": "claude_control:deny:r-1"},
+    ]
+]
+
+
+def _kb_action_929(request_id="r-1", action_id="claude.control.1", **extra):
+    from untether.model import Action, ActionEvent
+
+    detail: dict[str, Any] = {
+        "request_id": request_id,
+        "request_type": "CanUseTool",
+        "tool_name": "Bash",
+        "agent_id": "a1c1",
+        "decision_reason_type": "hook",
+        "decision_reason": "R20 test hook: confirm this command",
+        "inline_keyboard": {
+            "buttons": [
+                [
+                    {
+                        "text": "✅ Approve",
+                        "callback_data": f"claude_control:approve:{request_id}",
+                    },
+                    {
+                        "text": "❌ Deny",
+                        "callback_data": f"claude_control:deny:{request_id}",
+                    },
+                ]
+            ]
+        },
+        **extra,
+    }
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: Bash (command=`echo R20ASK`)",
+            detail=detail,
+        ),
+        phase="started",
+    )
+
+
+def _edits_929(
+    *,
+    run_level=True,
+    finalizing=True,
+    snaps=(),
+    turn_open=False,
+    surface=None,
+):
+    from untether.orphan_approvals import OrphanApprovalSurface
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = run_level
+    edits._finalizing = finalizing
+    holder: dict[str, Any] = {"snaps": list(snaps), "awaiting": bool(snaps)}
+
+    def _snapshot(now=None):
+        current = holder["snaps"]
+        if isinstance(current, Exception):
+            raise current
+        return list(current)
+
+    es = _make_engine_state(
+        control_request_snapshot=_snapshot,
+        awaiting_user_approval=lambda: holder["awaiting"],
+        live_mode=True,
+        completed_turns=1,
+        turn_open=turn_open,
+        tasks={},
+    )
+    edits.stream = _make_stream(engine_state=es)
+    edits.orphan_approvals = surface or OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=clock,
+        label_for=lambda agent_id: None,
+        anchor_for=lambda agent_id: None,
+    )
+    return edits, transport, clock, holder
+
+
+def _surface_sends_929(transport) -> list[dict]:
+    return [
+        c for c in transport.send_calls if "needs your approval" in c["message"].text
+    ]
+
+
+async def _drive_929(edits, *steps) -> None:
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for step in steps:
+                if callable(step):
+                    result = step()
+                    if hasattr(result, "__await__"):
+                        await result
+                else:
+                    await anyio.sleep(step)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_929_live_idle_approval_surfaced() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1", tool_name="Bash")])
+    edits._heartbeat_interval = edits._stall_check_interval = 10.0
+    evt = _kb_action_929()
+    with structlog.testing.capture_logs() as logs:
+        await _drive_929(edits, 0.01, lambda: edits.on_event(evt), 0.05)
+    (sent,) = _surface_sends_929(transport)
+    assert sent["message"].extra["reply_markup"] == {"inline_keyboard": _CB_929}
+    assert sent["options"].notify is True
+    assert "🪝 R20 test hook: confirm this command" in sent["message"].text
+    assert transport.edit_calls == []  # no progress repaint
+    (log,) = [e for e in logs if e.get("event") == "approval_surface.sent"]
+    assert log["source"] == "event" and log["agent_id"] == "a1c1"
+
+
+@pytest.mark.anyio
+async def test_929_not_surfaced_while_progress_live() -> None:
+    edits, transport, _, _ = _edits_929(finalizing=False, snaps=[_snap_919("r-1")])
+    edits._heartbeat_interval = edits._stall_check_interval = 10.0
+    evt = _kb_action_929()
+    await _drive_929(edits, 0.01, lambda: edits.on_event(evt), 0.05)
+    assert _surface_sends_929(transport) == []
+    assert transport.edit_calls  # the progress message carries the keyboard
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_turn_edits_never_offer() -> None:
+    edits, _, _, _ = _edits_929(run_level=False, finalizing=True)
+    await edits.on_event(_kb_action_929())
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_no_unanswerable_when_surfaced() -> None:
+    """The incident regression: a surfaced request aged past the tool
+    threshold has visible buttons, so the #684 canary stays quiet."""
+    from types import SimpleNamespace
+
+    from untether.runner_bridge import build_control_surface_probe
+
+    edits, transport, _, _ = _edits_929(snaps=[_snap_919("r-1", age_s=700.0)])
+    edits.control_surface_probe = build_control_surface_probe(
+        edits, SimpleNamespace(current=None)
+    )
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    assert len(_surface_sends_929(transport)) == 1
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert [e for e in logs if e.get("event") == "control_request.unanswerable"] == []
+    assert edits.orphan_approvals.request_ids() == frozenset({"r-1"})
+
+
+def _rescue_edits_929(snap, *, visible=frozenset()):
+    edits, transport, clock, holder = _edits_929(snaps=[snap])
+    edits.control_surface_probe = lambda: frozenset(visible)
+    return edits, transport
+
+
+@pytest.mark.anyio
+async def test_929_rescue_after_grace() -> None:
+    edits, transport = _rescue_edits_929(_snap_919("r-9", age_s=31.0, tool_name="Bash"))
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset({"r-9"})
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    rows = sent["message"].extra["reply_markup"]["inline_keyboard"]
+    assert [b["callback_data"] for row in rows for b in row] == [
+        "claude_control:approve:r-9",
+        "claude_control:deny:r-9",
+    ]
+
+
+@pytest.mark.anyio
+async def test_929_rescue_uses_tracked_action() -> None:
+    edits, transport = _rescue_edits_929(_snap_919("r-1", age_s=31.0))
+    edits.tracker.note_event(_kb_action_929())  # keyboard action, no host
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    assert "A background agent needs your approval" in sent["message"].text
+
+
+def test_929_rescue_not_before_grace() -> None:
+    edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=10.0))
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_skips_no_writer() -> None:
+    from untether.runners.claude import ControlRequestSnapshot
+
+    snap = ControlRequestSnapshot(
+        request_id="r-9",
+        session_id="s",
+        age_s=40.0,
+        tool_name="Bash",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=False,
+    )
+    edits, _ = _rescue_edits_929(snap)
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_skipped_while_buttons_visible() -> None:
+    edits, _ = _rescue_edits_929(
+        _snap_919("r-9", age_s=40.0), visible={"claude_control:approve:r-other"}
+    )
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_disabled_by_detect_kill_switch() -> None:
+    edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=40.0))
+    edits._detect_unanswerable = False
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_heartbeat_retires_after_tap() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+    # The tap answers the request: the registry drops it.
+    holder["snaps"] = []
+    holder["awaiting"] = False
+    with structlog.testing.capture_logs() as logs:
+        await edits._sync_orphan_approvals()
+    assert sent["ref"] in transport.delete_calls
+    (retired,) = [e for e in logs if e.get("event") == "approval_surface.retired"]
+    assert retired["reason"] == "resolved"
+    # The run-level tracker's stale action was completed.
+    assert edits._has_pending_approval() is False
+
+
+@pytest.mark.anyio
+async def test_929_probe_error_does_not_retire() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    holder["snaps"] = RuntimeError("boom")
+    await edits._sync_orphan_approvals()
+    assert transport.delete_calls == []
+    assert edits.orphan_approvals.surfaced_count == 1
+
+
+@pytest.mark.anyio
+async def test_929_cancel_completion_retires_immediately() -> None:
+    edits, transport, _, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+    await edits.on_event(
+        action_completed("claude.control.1", "warning", "⏹️ withdrawn", True)
+    )
+    await edits._flush_orphans()
+    assert sent["ref"] in transport.delete_calls
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_delete_ephemeral_retires_run_level_only() -> None:
+    edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+
+    turn_edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    turn_edits.orphan_approvals = edits.orphan_approvals
+    await turn_edits.delete_ephemeral()
+    assert sent["ref"] not in transport.delete_calls
+    assert edits.orphan_approvals.surfaced_count == 1
+
+    with structlog.testing.capture_logs() as logs:
+        await edits.delete_ephemeral()
+    assert sent["ref"] in transport.delete_calls
+    (retired,) = [e for e in logs if e.get("event") == "approval_surface.retired"]
+    assert retired["reason"] == "run_end"
+
+
+@pytest.mark.anyio
+async def test_929_live_idle_suppression_unchanged() -> None:
+    edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    edits._stall_check_interval = edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    with structlog.testing.capture_logs() as logs:
+        await _drive_929(edits, lambda: clock.set(100.5), 0.05)
+    assert not any(c["message"].text.startswith("⏳") for c in transport.send_calls)
+    (log,) = [
+        e for e in logs if e.get("event") == "progress_edits.stall_live_idle_suppressed"
+    ]
+    assert log["orphan_approvals"] == 1
+    assert log["threshold_reason"] == "pending_approval"
+
+
+@pytest.mark.anyio
+async def test_929_wake_turn_stall_not_masked_by_surfaced_orphan() -> None:
+    """Review amendment 4: a surfaced background request must not turn the
+    wake turn's genuine stall into a silent expected wait."""
+    from untether.model import Action, ActionEvent
+
+    run_edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-orphan")])
+    await run_edits.on_event(_kb_action_929("r-orphan"))
+    await run_edits._flush_orphans()
+
+    turn_edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    turn_edits.stream = run_edits.stream
+    turn_edits.stream.engine_state.turn_open = True
+    turn_edits.orphan_approvals = run_edits.orphan_approvals
+    assert turn_edits._has_pending_approval() is False
+    turn_edits._stall_check_interval = turn_edits._heartbeat_interval = 0.002
+    turn_edits._STALL_THRESHOLD_SECONDS = 0.05
+    turn_edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    await turn_edits.on_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(id="n1", kind="note", title="thinking"),
+            phase="completed",
+            ok=True,
+        )
+    )
+    await _drive_929(turn_edits, lambda: clock.set(100.5), 0.05)
+    stalls = [
+        c["message"].text
+        for c in transport.send_calls
+        if c["message"].text.startswith("⏳")
+    ]
+    assert stalls
+    assert all("Waiting for" not in t for t in stalls)
+    assert any("No progress" in t for t in stalls)
+
+
+def test_929_reminder_targets_newest_unsurfaced_request() -> None:
+    from untether.orphan_approvals import OrphanApprovalSurface
+
+    transport = FakeTransport()
+    surface = OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=_FakeClock(),
+        label_for=lambda a: None,
+        anchor_for=lambda a: None,
+    )
+    surface.offer(_kb_action_929("r-orphan").action)
+    edits, _, _, _ = _edits_929(
+        run_level=False,
+        turn_open=True,
+        snaps=[
+            _snap_919("r-orphan", age_s=10.0, tool_name="Bash"),
+            _snap_919("r-mine", age_s=900.0, tool_name="Write"),
+        ],
+        surface=surface,
+    )
+    assert edits._has_pending_approval() is True
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.request_id, info.tool_name) == ("r-mine", "Write")
+
+
+@pytest.mark.anyio
+async def test_929_non_claude_engine_noop() -> None:
+    edits, transport, _, _ = _edits_929()
+    edits.stream = None
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
+async def test_929_session_summary_counts_surfaces() -> None:
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="ok"),
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    (summary,) = [e for e in logs if e.get("event") == "session.summary"]
+    assert summary["approval_surfaces"] == 0
