@@ -28,7 +28,8 @@ bundle. See `docs/LOOPS.md` for the loop registry and
 | net-new capability — **build** an approved phase | `/implement` |
 | **validate** a target enough for its risk | `/qa` |
 | finalise a branch → **PR to `dev`** (→ TestPyPI) | `/pr-dev` |
-| prepare a **stable release** → open `dev`→`master` PR | `/pr-main` (stops at Nathan's merge) |
+| prepare a **stable release** → open `dev`→`master` PR | `/pr-main` (stops at the open PR) |
+| **release** it → merge + verify PyPI, after Nathan's explicit go | `/pr-main X.Y.Z --merge` |
 | capture a **process learning** | `/kaizen` |
 | **pausing** mid-work | `/handover` |
 
@@ -45,13 +46,14 @@ pushing on. Record the redirect in the run summary.
    bullets); never re-paste a full plan body (see
    `feedback_telegram_summary_brevity`).
 
-2. **Release-guard obedience.** Never `git push`/merge to `master`/`main`, never
-   `git tag`, never `gh release create`. Every PR targets **`dev`**.
-   `gh pr merge <n> --squash` is allowed **only** when base = `dev`. The local guard
-   hooks (registered in `.claude/settings.json`, #915) block these, but they're a
-   tripwire — the real authorization boundary is the GitHub branch
-   ruleset + CODEOWNERS. Never edit `.claude/settings.json` or the guard scripts,
-   and never work around a block. See `.claude/rules/release-discipline.md`.
+2. **Release-guard obedience.** Never `git push` to `master`/`main`, never
+   `git tag`, never `gh release create`. Every PR targets **`dev`** except the
+   `/pr-main` release PR. `gh pr merge <n> --squash` is allowed when base = `dev`.
+   The `dev`→`master` merge is allowed **only** in `/pr-main X.Y.Z --merge`, after
+   Nathan explicitly approves that version — the guard (#915/#917) then checks
+   head = `dev` + green CI and asks him to confirm. No other command merges to
+   `master`. Never infer approval, never edit `.claude/settings.json` or the guard
+   scripts, and never work around a block or a declined prompt. See `.claude/rules/release-discipline.md`.
 
 3. **Dev/staging separation.** Never restart `untether.service` (staging) to test
    code — always `untether-dev.service`. Respect hot-reload: never
@@ -89,7 +91,7 @@ pushing on. Record the redirect in the run summary.
 | `/implement` | yes (approved phase) | no | no | no |
 | `/qa` | no | no | no | no |
 | `/pr-dev` | no | to `dev` | to `dev` only (`--merge` + confirm) | no |
-| `/pr-main` | version bump + changelog + lock | opens `dev`→`master` PR | no | no |
+| `/pr-main` | version bump + changelog + lock | opens `dev`→`master` PR | `--merge` only, after Nathan's go (guard asks) | via the merge (pipeline tags + publishes) |
 | `/kaizen` | no (one comment) | no | no | no |
 | `/kaizen-review` | no (propose-only) | no | no | no |
 | `/handover` | handover doc only | no | no | no |
@@ -99,5 +101,7 @@ Advisory reviewer agents (`debug-reviewer` · `delivery-reviewer` · `qa-reviewe
 under `.claude/agents/`) are **non-authoring** — read-only verdicts, no code, no
 filing, no merge.
 
-The one action reserved for Nathan across the whole suite: **merging the
-`dev`→`master` PR** (→ auto-tag → PyPI → `fleet-rollout.sh`).
+The one decision reserved for Nathan across the whole suite: **approving a
+release**. Claude may merge the `dev`→`master` PR (→ auto-tag → PyPI →
+`fleet-rollout.sh`) only via `/pr-main X.Y.Z --merge` after his explicit go,
+and the guard asks him to confirm the merge itself.

@@ -14,7 +14,8 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
   master` is blocked.
 - **NEVER create tags.** `git tag v*` is blocked. `auto-tag-on-master.yml`
   creates tags from stable PR merges.
-- **NEVER merge PRs to master.** `gh pr merge` to master is blocked.
+- **NEVER merge PRs to master from a fix.** Only `/pr-main X.Y.Z --merge` does,
+  after Nathan approves the release (the guard asks him to confirm).
 - **NEVER run `gh release create`.** Release publishing is automated.
 - **NEVER use `--no-verify`, `--no-gpg-sign`, or any hook-skip flag.** Hooks
   block guard-script edits too.
@@ -25,9 +26,10 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
   them outside Claude Code. The guard blocks Edit/Write on them; never work
   around a block.
 
-The release pipeline is single-gate: `dev` push → TestPyPI; Nathan
-squash-merges a stable version PR to `master` → auto-tag → release.yml
-publishes to PyPI. The master PR review IS the release approval.
+The release pipeline is single-gate: `dev` push → TestPyPI; a stable version
+PR squash-merged to `master` (by Nathan, or by `/pr-main --merge` on his
+explicit go) → auto-tag → release.yml publishes to PyPI. Nathan's approval IS
+the release gate.
 
 ## The 7-step implementation checklist
 

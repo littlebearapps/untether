@@ -16,11 +16,21 @@ INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 [ -z "$COMMAND" ] && echo '{}' && exit 0
 # gh's global repo flag can sit before the subcommand (`gh -R o/r pr merge 2`).
-# Drop it so every gh check below sees `gh <subcommand>`.
-COMMAND=$(echo "$COMMAND" | sed -E 's/\bgh(\s+(-R|--repo)(=|\s+)[^[:space:]]+)+/gh/g')
+# Drop it so every gh check below sees `gh <subcommand>`. The value must be a
+# plain [HOST/]OWNER/REPO followed by whitespace, so the strip can never
+# swallow shell syntax (`gh -R x;git push origin master`).
+GH_REPO_RE="(\s+(-R|--repo)(=|\s+)[\"']?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,2}[\"']?)+"
+COMMAND=$(printf '%s' "$COMMAND" | sed -E "s#\bgh${GH_REPO_RE}(\s|\$)#gh\5#g")
 
 BLOCKED=false
 REASON=""
+
+# Any other `gh -R/--repo <value>` before the subcommand ($VAR, odd quoting,
+# shell metacharacters) can't be checked reliably — fail closed.
+if printf '%s' "$COMMAND" | grep -qP '\bgh\s+(-R|--repo)\b'; then
+  BLOCKED=true
+  REASON="gh -R/--repo with a value that isn't a plain owner/repo is blocked. Use a literal owner/repo, or put -R after the subcommand."
+fi
 ASK=false
 ASK_REASON=""
 

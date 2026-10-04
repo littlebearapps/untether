@@ -35,7 +35,7 @@ Delivery loops (net-new capability)
   L2   /implement     approved phase → feature branch, TDD, stop before PR         [available]
   L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [available]
   L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [available]
-  L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [available]
+  L4b  /pr-main       release-prep → open dev→master PR → STOP; --merge on Nathan's go → PyPI [available]
 
 Production loops (defects)
   L5   /debug         8-step investigate (sweep / targeted) — fleet-aware          [available]
@@ -124,7 +124,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Trigger:** `dev` is green + ahead of `master` and a stable `X.Y.Z` is decided.
 - **Driver:** `/pr-main`.
 - **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the opened `dev`→`master` PR (release body), then **STOP**.
-- **Authority:** everything Claude *may* do up to the operator boundary. Never merges to master, tags, `gh release create`, or runs `fleet-rollout.sh`. The master merge is Nathan's single release gate.
+- **Authority:** prepares and opens the release PR, then stops. `--merge` merges it only after Nathan explicitly approves that version; the guard checks head = `dev` + green CI and asks him to confirm (#917). Never tags or runs `gh release create` (the pipeline does); runs `fleet-rollout.sh` only once PyPI has the version and Nathan says so.
 
 ### L7 · `/kaizen` — capture a process learning  ·  Status: **available**
 

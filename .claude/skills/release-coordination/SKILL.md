@@ -41,7 +41,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 fleet rollout  →  7. Tag & publish
 ```
 
-Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when Nathan merges a stable version to `master`.
+Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when a stable version is merged to `master` (by Nathan, or by Claude via `/pr-main X.Y.Z --merge` after his explicit approval).
 
 **Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
 Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
@@ -336,19 +336,19 @@ systemctl --user restart untether
 
 ## Phase 7: Merge to master (single-gate release)
 
-The release flow uses a single approval gate: **the master PR review IS the release approval**. Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) to master, everything else is automatic.
+The release flow uses a single approval gate: **Nathan's explicit approval of the release**. Once a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) is squash-merged to master, everything else is automatic.
 
 ### Claude Code's role
 
-- Prepare the version bump on a feature branch (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`)
-- Open a PR from `dev` → `master` with a release summary
-- Wait for CI to go green
-- Hand off to Nathan with a one-line instruction: "merge PR #N when ready"
+- Prepare the version bump (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`) and open the `dev` → `master` PR (`/pr-main X.Y.Z`)
+- Wait for CI to go green, then ask Nathan whether to release
+- Only on his explicit go for that version: `/pr-main X.Y.Z --merge` → `gh pr merge <n> --squash --admin`. The guard checks head = `dev` + green CI and asks him to confirm ([#917](https://github.com/littlebearapps/untether/issues/917))
+- Verify auto-tag → `release.yml` → PyPI, then run `scripts/fleet-rollout.sh X.Y.Z` when he says so
 
 ### Nathan's role
 
-- Review the PR on GitHub
-- Squash-merge to master in the GitHub UI
+- Review the PR and approve the release (or squash-merge it himself in the GitHub UI)
+- Confirm the guard's permission prompt when Claude merges
 
 That's it. No tag creation, no PyPI environment approval. The git tag and PyPI publish happen automatically:
 

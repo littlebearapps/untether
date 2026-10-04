@@ -96,6 +96,13 @@ bash_check "gh -R littlebearapps/untether release create v9.9.9" deny
 bash_check "gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'" deny
 bash_check "gh api graphql -f query='mutation { createRef(input:{}) { clientMutationId } }'" deny
 bash_check "gh api graphql -f query='{ viewer { login } }'" allow
+bash_check "gh -R x;git push origin master"               deny
+bash_check "gh -R a/b&&git push origin master"            deny
+bash_check "gh -R x;gh release create v9.9.9"             deny
+bash_check "gh -R \$REPO pr merge 2 --squash --admin"     deny
+bash_check "gh -R \"littlebearapps/untether\" pr merge 2 --squash --admin" ask
+bash_check "gh -R github.com/littlebearapps/untether pr merge 2 --squash --admin" ask
+bash_check "gh pr view 2 -R littlebearapps/untether"      allow
 bash_check "gh api repos/o/r/pulls/2/merge -X PUT"        deny
 bash_check "gh api repos/o/r/releases -f tag_name=v1"     deny
 bash_check "gh api repos/o/r/pulls/2"                     allow

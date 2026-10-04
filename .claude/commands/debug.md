@@ -320,7 +320,7 @@ posting (default: print only, do not post).
   relevant to the issue. If you can't SSH to a host, log it as a partial scope
   and continue — never silently drop a host.
 - **Stay in the dev branch model.** Feature branch → PR to `dev`. Never feature
-  → master directly. Squash-merge to `dev` is allowed; merging to master is
-  Nathan's only.
+  → master directly. Squash-merge to `dev` is allowed; merging to master
+  happens only in `/pr-main X.Y.Z --merge`, after Nathan approves the release.
 
 End of /debug command file. See companion files for step detail.
