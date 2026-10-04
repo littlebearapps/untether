@@ -155,6 +155,7 @@ Outbox delivery reuses the same security rules as `/file get`:
 - **Deny globs** — files matching `deny_globs` (by default `.git/**`, `.env` and `.env.*` files, `.envrc`, keys and certificates, `.ssh/**`, `.netrc`, `.npmrc`, `.pypirc`) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
 - **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
 - **Symlinks** — every symlink in the outbox is skipped (reported as `symlink`), wherever it points
+- **Outbox location** — `outbox_dir` must be a relative path without `..`; an outbox that resolves outside the project (for example a symlinked `.untether-outbox`) is never scanned or archived (#924)
 - **Empty files** — zero-byte files are skipped too
 - **Older files** — files left in the outbox by earlier sessions (or by agents running outside Untether) are never attached to an unrelated answer; they're moved to `.untether-outbox/.skipped/` with one notice (#924). Set `outbox_stale_policy = "send"` to restore the old send-everything behaviour
 - **File count** — capped at `outbox_max_files` per delivery (default 10); extra files are listed in a notice and moved to `.untether-outbox/.skipped/` rather than being sent with a later run

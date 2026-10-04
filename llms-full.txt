@@ -2308,6 +2308,8 @@ See the [v0.35.5 changelog entry](https://github.com/littlebearapps/untether/blo
 - **`auto` permission mode renamed `plan-auto` (breaking).** `/planmode auto` now selects Claude Code's own classifier-gated auto mode. Per-chat settings migrate automatically; if `untether.toml` sets `permission_mode = "auto"` and you want the old behaviour, change it to `"plan-auto"`. See [Plan mode](plan-mode.md). ([#741](https://github.com/littlebearapps/untether/issues/741))
 - **`/planmode off` (Accept edits) now asks before shell commands.** Prompting modes (`acceptEdits`, `default`, `manual`) previously approved every tool silently. Anything the mode doesn't cover now shows Approve / Deny buttons unless your Claude Code settings allow it. Crons and webhooks can't wait for a tap — see the next point. ([#749](https://github.com/littlebearapps/untether/issues/749))
 - **Unattended cron and webhook runs deny instead of waiting (breaking, Claude).** A tool approval, plan approval or question in a cron or webhook run is denied at once and listed in the run's final (`🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`, logged as `permission.unattended_deny`). Crons in `plan` or a prompting mode, **including crons with no `permission_mode`** (they inherit the chat's `/planmode`, then the engine default `plan`), now end with a plan or a report instead of doing the work. Give every Claude cron that should act on its own an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`); webhooks follow the chat's `/planmode`. The startup message lists the crons this affects. A reply to an unattended run continues with normal buttons, and `/at` runs still ask. See [Webhooks and cron](webhooks-and-cron.md). ([#835](https://github.com/littlebearapps/untether/issues/835), [#836](https://github.com/littlebearapps/untether/issues/836))
+- **With Loop mode off, Claude can no longer schedule tasks itself (breaking, Claude).** Claude Code's own recurring and timed tasks ran uncapped while a session was open and came back on every resume. Untether now declines them: with Loop mode off, Claude tells you scheduling is off and points you to Loop mode or `/at`; with Loop mode on, Untether runs the schedule itself with the `[loop]` caps. Chains of self-paced wake-ups stop after `[loop] max_iterations` in both modes. `[loop] own_schedule = false` restores the old behaviour; remove that key before downgrading to 0.35.5rc19 or earlier, which refuse it. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode). ([#925](https://github.com/littlebearapps/untether/issues/925), [#926](https://github.com/littlebearapps/untether/issues/926))
+- **The outbox only sends files written during the run.** Files left in `.untether-outbox/` by an earlier session are moved once to `.untether-outbox/.skipped/` with a single notice instead of being attached to the next answer, and files over `outbox_max_files` are reported and moved aside too. Set `[transports.telegram.files] outbox_stale_policy = "send"` for the old behaviour. See [File transfer](file-transfer.md#agent-initiated-delivery-outbox). ([#924](https://github.com/littlebearapps/untether/issues/924))
 - **`/new` and `/cancel` in a forum topic only touch that topic.** `/new` in General no longer cancels every topic's runs, and a no-reply `/cancel` in one topic can't stop another topic's run. Cron and webhook runs belong to General. See [Topics](topics.md#reset-a-topic-session). ([#826](https://github.com/littlebearapps/untether/issues/826))
 - **`/export` sends a file.** The transcript arrives as a `.md` or `.json` document instead of an inline message cut at 3,000 characters. See [Export sessions](export-sessions.md). ([#418](https://github.com/littlebearapps/untether/issues/418))
 - **Claude sessions stay open after the answer while background work runs.** Background-task, Monitor and scheduled-wake-up turns arrive as their own messages, and follow-ups go into the same session instead of a fresh one. Set `[watchdog] live_sessions = false` to restore the old behaviour. See [Troubleshooting](troubleshooting.md#messages-arrive-after-the-run-finished). ([#776](https://github.com/littlebearapps/untether/issues/776))
@@ -4042,6 +4044,7 @@ Outbox delivery reuses the same security rules as `/file get`:
 - **Deny globs** — files matching `deny_globs` (by default `.git/**`, `.env` and `.env.*` files, `.envrc`, keys and certificates, `.ssh/**`, `.netrc`, `.npmrc`, `.pypirc`) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
 - **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
 - **Symlinks** — every symlink in the outbox is skipped (reported as `symlink`), wherever it points
+- **Outbox location** — `outbox_dir` must be a relative path without `..`; an outbox that resolves outside the project (for example a symlinked `.untether-outbox`) is never scanned or archived (#924)
 - **Empty files** — zero-byte files are skipped too
 - **Older files** — files left in the outbox by earlier sessions (or by agents running outside Untether) are never attached to an unrelated answer; they're moved to `.untether-outbox/.skipped/` with one notice (#924). Set `outbox_stale_policy = "send"` to restore the old send-everything behaviour
 - **File count** — capped at `outbox_max_files` per delivery (default 10); extra files are listed in a notice and moved to `.untether-outbox/.skipped/` rather than being sent with a later run
@@ -6548,16 +6551,18 @@ For the full list of patterns and hints, see the [Error Reference](../reference/
 
 ## Loop didn't fire / loop fired too many times
 
-Loop mode (`/config → 🔁 Loop mode`) gates Untether's observation of Claude Code's `/loop` and `ScheduleWakeup` tools. ([#289](https://github.com/littlebearapps/untether/issues/289))
+Loop mode (`/config → 🔁 Loop mode`) decides whether Claude can schedule repeated runs. With it on, Untether runs Claude Code's `/loop` schedules itself, with the `[loop]` caps; with it off, Claude can't schedule recurring or timed tasks. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `/loop` registered during the turn but no fires happened afterwards | Loop mode toggle is OFF (the default) | `/config → 🔁 Loop mode → 🔁 On` |
-| Loop stopped after 20 iterations | Hit the iteration cap (`max_iterations`) | Restart the loop with a fresh `/loop`. The cap is fixed at 20 for now: `[loop] max_iterations` is accepted in `untether.toml` but not applied yet |
+| Claude says scheduling is off, or points you to Loop mode or `/at` | Loop mode is off (the default), so Untether declined Claude's `CronCreate` | `/config → 🔁 Loop mode → 🔁 On`, then ask again; for a one-off delay use `/at <delay> <prompt>` |
+| Loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
+| `⏰ Self-paced wake-up limit reached` and the session closed | A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) hit `[loop] max_iterations` in a row, in either Loop mode | Send a message to carry on (it resets the count), or raise `max_iterations` |
+| A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.35.5rc20, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
 | Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
 | Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
-| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
+| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.35.5rc20 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
 | Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
 
 ## Related
@@ -6770,11 +6775,12 @@ When enabled, Untether watches the config file for changes and reloads most sett
 **Hot-reloadable** (applied immediately):
 
 - Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`, need a restart)
-- Telegram bridge: `voice_transcription`, `[files]` (except the outbox settings, which currently need a restart), `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
+- Telegram bridge: `voice_transcription`, `[files]` (the `outbox_*` settings apply from the next delivery, [#924](https://github.com/littlebearapps/untether/issues/924)), `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
 - `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `heartbeat_interval`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481), [#777](https://github.com/littlebearapps/untether/issues/777), [#819](https://github.com/littlebearapps/untether/issues/819)); `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of an open Claude session ([#863](https://github.com/littlebearapps/untether/issues/863))
 - `[watchdog]` keys: `tool_timeout`, `mcp_tool_timeout`, `claude_stream_idle_timeout_ms`, `post_result_idle_timeout`, `post_result_idle_enabled`, `bash_grace_seconds` (re-read per run); the live-session keys `post_result_bg_max_hold`, `bg_hold_rearm_on_progress`, `bg_hold_declared_waits` and `rearm_plan_mode` are read when a Claude session starts, so an open session keeps the old value until it closes
 - `followup_mode` (the default for [steer follow-ups](steer-follow-ups.md))
+- `[loop]` keys: `enabled` is read each time Claude tries to schedule, the caps when a loop is created, and `own_schedule` when a Claude session starts ([#925](https://github.com/littlebearapps/untether/issues/925))
 - Trigger pause/resume: in-memory only, toggled via `/config → ⏰ Triggers` ([#294](https://github.com/littlebearapps/untether/issues/294)) — restart auto-resumes
 - `[footer]` and `[cost_budget]` settings (re-read per call)
 - Engine defaults, budget, cost/usage display flags
@@ -7957,7 +7963,7 @@ Notes:
 - A message that starts with a dot instead of a slash and names a command (`.new`, `.cancel`) isn't sent to the agent: Untether replies ``Did you mean `/new`? …`` so you can resend it ([#523](https://github.com/littlebearapps/untether/issues/523)).
 - `/continue` uses the engine's native "continue" flag: `--continue` (Claude, OpenCode, Pi), `resume --last` (Codex), or `--resume latest` (Gemini, deprecated).
 - Long-running tools (Bash, BashOutput, ScheduleWakeup, Monitor, …) surface a heartbeat-driven elapsed-time tail (`▸ Bash · 3m 47s · npm run build`) on the progress message after ~60s, regardless of `/verbose` state ([#481](https://github.com/littlebearapps/untether/issues/481)). Tune via `[progress] heartbeat_interval`.
-- Loop mode (Claude only): there is no `/loop` Telegram command — it's a Claude Code feature. Untether observes Claude's `ScheduleWakeup` and `CronCreate` tool calls and re-fires iterations after the subprocess exits. Off by default; opt in per chat via `/config` → 🔁 **Loop mode**. Cost alerts come from `[cost_budget]` (checked after each fire), runaway-safety caps from `[loop]` ([#289](https://github.com/littlebearapps/untether/issues/289)).
+- Loop mode (Claude only): there is no `/loop` Telegram command — it's a Claude Code feature. With Loop mode on, Untether declines Claude's own `CronCreate` and runs the schedule itself, firing each iteration with `claude --resume`; with it off, Claude can't schedule recurring or timed tasks and points you to Loop mode or `/at` ([#925](https://github.com/littlebearapps/untether/issues/925)). Self-paced `ScheduleWakeup` chains stop after `[loop] max_iterations` in both modes. Off by default; opt in per chat via `/config` → 🔁 **Loop mode**. Cost alerts come from `[cost_budget]` (checked after each fire), runaway-safety caps from `[loop]` ([#289](https://github.com/littlebearapps/untether/issues/289)).
 
 ## CLI
 
@@ -8044,7 +8050,9 @@ of that file are seen.
 
 Editing a field marked 🔄 (**restart-required**) posts a warning to the project
 chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
-effect.") and logs `config.reload.transport_config_changed`. Other Telegram
+effect.", followed by a "To apply:" line naming the service that's actually
+running, [#927](https://github.com/littlebearapps/untether/issues/927)) and logs
+`config.reload.transport_config_changed`. Other Telegram
 transport changes apply without a message and log
 `config.reload.transport_config_hot_reloaded`.
 
@@ -8074,11 +8082,12 @@ restart.
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
 | `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
-To restart:
+To restart, send `/restart` in Telegram (when a service manager relaunches Untether), or restart the service
+directly. The restart notice names the unit or launchd label of the instance that's running; the default is:
 
 ```sh
-systemctl --user restart untether        # staging
-systemctl --user restart untether-dev    # dev
+systemctl --user restart untether                         # Linux (systemd), default unit
+launchctl kickstart -k gui/$(id -u)/<your-launchd-label>  # macOS (launchd)
 ```
 
 ## `transports.telegram`
@@ -8142,7 +8151,7 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `allowed_user_ids` | int[] | `[]` | Allowed senders for file transfer; empty allows private chats (group usage requires admin). |
 | `deny_globs` | string[] | see below | Glob denylist for `/file put` / `/file get`, `/browse` and the outbox. `**` matches any number of directories, including none, so `**/*.pem` also denies a root-level `key.pem`, and `**/.env.*` a root-level `.env.example` ([#831](https://github.com/littlebearapps/untether/issues/831)). A bare name such as `.env` matches at any depth. Setting the key **replaces** the whole default list. |
 | `outbox_enabled` | bool | `true` | Enable agent-initiated file delivery via `.untether-outbox/`. Requires `enabled = true`. |
-| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
+| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute or contain `..`). An outbox that resolves outside the project, including through a symlinked path component, is never scanned or archived (`outbox.outside_root` warning, [#924](https://github.com/littlebearapps/untether/issues/924)). |
 | `outbox_max_files` | int (1–50) | `10` | Max files sent per delivery. Extra files are reported in a notice and moved to `.untether-outbox/.skipped/` (never sent with a later run) ([#924](https://github.com/littlebearapps/untether/issues/924)). |
 | `outbox_cleanup` | bool | `true` | Delete sent files and remove empty outbox directory after delivery. |
 | `outbox_notify_skipped` | bool | `true` | ([#524](https://github.com/littlebearapps/untether/issues/524)) Notify the user when a non-deliverable outbox entry (a subdirectory, or a deny-globbed / oversize file) is skipped and archived to `.untether-outbox/.skipped/`, rather than dropping it silently. |
@@ -8996,6 +9005,7 @@ These variables are set (or removed) automatically by Untether in the engine sub
 | `CLAUDE_ENABLE_STREAM_WATCHDOG` | Claude runner | Defaults to `1` (turns on Claude Code's own stream watchdog — [#322](https://github.com/littlebearapps/untether/issues/322)). A value already in Untether's environment wins. |
 | `MCP_TOOL_TIMEOUT` | Claude runner | Defaults to `120000` (ms). A value already in Untether's environment wins. |
 | `MAX_MCP_OUTPUT_TOKENS` | Claude runner | Defaults to `12000`. A value already in Untether's environment wins. |
+| `CLAUDE_CODE_DISABLE_CRON` | Claude runner | Set to `1` (overriding any inherited value) when Untether resumes a session that may still hold a Claude Code scheduled task from before v0.35.5rc20, a `-p` chat or `[loop] own_schedule = false`, for up to 7 days, so the CLI can't restart that task. Logged as `claude.cron_suppressed` ([#926](https://github.com/littlebearapps/untether/issues/926)). Not set otherwise. |
 | `ANTHROPIC_API_KEY` | Claude runner | **Removed** from the Claude subprocess environment unless `[claude] use_api_billing = true`, so Claude Code uses its subscription login. |
 | `NO_COLOR`, `CI` | Pi runner | Default to `1` so Pi's output carries no ANSI codes. A value already in Untether's environment wins. |
 
@@ -9816,6 +9826,7 @@ The bridge MUST enforce:
 * **Deny globs** — files matching configured deny patterns (e.g. `*.env`, `.git/**`) MUST NOT be delivered
 * **Max files** — at most `outbox_max_files` files per delivery (default: 10); files beyond the cap SHOULD be reported to the user rather than left for a later run
 * **Size limit** — individual file size MUST NOT exceed the Telegram Bot API file upload limit (50 MB)
+* **Containment** — the outbox directory MUST resolve inside the project root; an outbox that is absolute, contains `..`, or reaches outside the root (including through a symlinked path component) MUST NOT be scanned, delivered from or archived
 * **Flat scan** — only files in the top-level outbox directory are delivered as files; subdirectories are skipped (and reported when `outbox_notify_skipped` is `true`, the default) unless `outbox_deliver_directories = "zip"` (default `"off"`), which sends each skipped directory as one zip after applying the same deny globs
 
 ### 12.3 Cleanup (SHOULD)
@@ -9836,7 +9847,7 @@ The bridge SHOULD deliver only entries that entered or changed in the outbox dur
 - Require wrapping generators to close inner generators in the same task (§5.5) and per-run stream/PID binding (§5.6).
 - Add `is_continue` to the `ResumeToken` schema (§3.2), transport-stored resume tokens (§3.4), and correct the OpenCode resume line to `opencode --session <id>` (§3.1).
 - Align §10 (flock lock, v0.35.4), §11.3 (store format) and §12.2 (directory zip delivery, v0.35.4) with the implementation.
-- Add outbox freshness (§12.4): deliver only entries written during the run; quarantine and report older ones. Files over `outbox_max_files` are reported (§12.2).
+- Add outbox freshness (§12.4): deliver only entries written during the run; quarantine and report older ones. Files over `outbox_max_files` are reported, and the outbox must resolve inside the project root (§12.2).
 
 ### v0.35.0 (2026-03-18)
 
@@ -10379,7 +10390,7 @@ Quick definitions for terms used throughout the Untether documentation.
 :   The footer at the bottom of a final message showing which engine, model, and permission mode were used (e.g. `sonnet · plan`), plus cost if available.
 
 **Outbox**
-:   Untether's internal message queue. All Telegram writes (sends, edits, deletes) pass through the outbox, which handles rate limiting and message coalescing automatically.
+:   Untether's internal message queue. All Telegram writes (sends, edits, deletes) pass through the outbox, which handles rate limiting and message coalescing automatically. Not to be confused with `.untether-outbox/`, the folder agents write files into for [delivery to Telegram](../how-to/file-transfer.md#agent-initiated-delivery-outbox).
 
 ## Configuration
 
@@ -10399,6 +10410,9 @@ Quick definitions for terms used throughout the Untether documentation.
 
 **Delayed run**
 :   A one-shot run scheduled via `/at <duration> <prompt>`. The prompt executes after the specified delay (60 seconds to 24 hours). Pending delays are held in memory and lost on restart. Per-chat cap of 20.
+
+**Loop mode**
+:   A per-chat setting (`/config → 🔁 Loop mode`, off by default) that lets Claude Code schedule repeated runs. With it on, Untether runs Claude's `/loop` schedules itself, within the `[loop]` caps; with it off, Claude can't schedule recurring or timed tasks and points you to Loop mode or `/at`. See [Schedule tasks](../how-to/schedule-tasks.md#loop-mode).
 
 **Webhook action**
 :   A lightweight action a webhook performs without spawning an agent run. Available actions: `file_write` (save POST body to disk), `http_forward` (relay payload to another URL), and `notify_only` (send a Telegram message). The default action (`agent_run`) starts a full agent session.
@@ -17982,7 +17996,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
 | `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
-| `loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `loop_scheduler.py` | Loop mode: runs Claude's `/loop` schedules (declined `CronCreate` calls) and long `ScheduleWakeup`s with the `[loop]` caps, plus the cancel and cron-suppression records; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `orphan_approvals.py` | Pushed standalone Approve / Deny message for a background agent's approval request that arrives while a Claude session is idle; re-sent after 10 min, then every 30 min, and removed once answered. |
 
 ## Domain model and events
 
@@ -18061,6 +18076,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `config.py` | Raw TOML read/write (merge/update without clobbering extra sections) and project config types. |
 | `config_watch.py` | Watches `untether.toml` and triggers hot-reload (when `watch_config = true`). |
 | `config_reload_notification.py` | Formats the Telegram notice after a reload ("No restart needed" / "Restart required"). |
+| `service_manager.py`, `sdnotify.py` | Detects the systemd unit or launchd label running Untether so restart notices name the right service ([#927](https://github.com/littlebearapps/untether/issues/927)); systemd readiness / stopping notifications (`READY=1`, `STOPPING=1`). |
 | `lockfile.py` | Single-instance lock (`untether.lock`) so two processes can't poll the same bot. |
 | `runtime_loader.py` | Builds the runtime (engines, router, projects) from settings at startup and on reload. |
 | `config_migrations.py` | One-time edits to on-disk config (e.g. legacy Telegram key migration). |

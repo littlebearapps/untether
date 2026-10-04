@@ -48,7 +48,9 @@ of that file are seen.
 
 Editing a field marked 🔄 (**restart-required**) posts a warning to the project
 chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
-effect.") and logs `config.reload.transport_config_changed`. Other Telegram
+effect.", followed by a "To apply:" line naming the service that's actually
+running, [#927](https://github.com/littlebearapps/untether/issues/927)) and logs
+`config.reload.transport_config_changed`. Other Telegram
 transport changes apply without a message and log
 `config.reload.transport_config_hot_reloaded`.
 
@@ -78,11 +80,12 @@ restart.
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
 | `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
-To restart:
+To restart, send `/restart` in Telegram (when a service manager relaunches Untether), or restart the service
+directly. The restart notice names the unit or launchd label of the instance that's running; the default is:
 
 ```sh
-systemctl --user restart untether        # staging
-systemctl --user restart untether-dev    # dev
+systemctl --user restart untether                         # Linux (systemd), default unit
+launchctl kickstart -k gui/$(id -u)/<your-launchd-label>  # macOS (launchd)
 ```
 
 ## `transports.telegram`
@@ -146,7 +149,7 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `allowed_user_ids` | int[] | `[]` | Allowed senders for file transfer; empty allows private chats (group usage requires admin). |
 | `deny_globs` | string[] | see below | Glob denylist for `/file put` / `/file get`, `/browse` and the outbox. `**` matches any number of directories, including none, so `**/*.pem` also denies a root-level `key.pem`, and `**/.env.*` a root-level `.env.example` ([#831](https://github.com/littlebearapps/untether/issues/831)). A bare name such as `.env` matches at any depth. Setting the key **replaces** the whole default list. |
 | `outbox_enabled` | bool | `true` | Enable agent-initiated file delivery via `.untether-outbox/`. Requires `enabled = true`. |
-| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
+| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute or contain `..`). An outbox that resolves outside the project, including through a symlinked path component, is never scanned or archived (`outbox.outside_root` warning, [#924](https://github.com/littlebearapps/untether/issues/924)). |
 | `outbox_max_files` | int (1–50) | `10` | Max files sent per delivery. Extra files are reported in a notice and moved to `.untether-outbox/.skipped/` (never sent with a later run) ([#924](https://github.com/littlebearapps/untether/issues/924)). |
 | `outbox_cleanup` | bool | `true` | Delete sent files and remove empty outbox directory after delivery. |
 | `outbox_notify_skipped` | bool | `true` | ([#524](https://github.com/littlebearapps/untether/issues/524)) Notify the user when a non-deliverable outbox entry (a subdirectory, or a deny-globbed / oversize file) is skipped and archived to `.untether-outbox/.skipped/`, rather than dropping it silently. |

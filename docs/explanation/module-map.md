@@ -27,7 +27,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
 | `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
-| `loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `loop_scheduler.py` | Loop mode: runs Claude's `/loop` schedules (declined `CronCreate` calls) and long `ScheduleWakeup`s with the `[loop]` caps, plus the cancel and cron-suppression records; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `orphan_approvals.py` | Pushed standalone Approve / Deny message for a background agent's approval request that arrives while a Claude session is idle; re-sent after 10 min, then every 30 min, and removed once answered. |
 
 ## Domain model and events
 
@@ -106,6 +107,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `config.py` | Raw TOML read/write (merge/update without clobbering extra sections) and project config types. |
 | `config_watch.py` | Watches `untether.toml` and triggers hot-reload (when `watch_config = true`). |
 | `config_reload_notification.py` | Formats the Telegram notice after a reload ("No restart needed" / "Restart required"). |
+| `service_manager.py`, `sdnotify.py` | Detects the systemd unit or launchd label running Untether so restart notices name the right service ([#927](https://github.com/littlebearapps/untether/issues/927)); systemd readiness / stopping notifications (`READY=1`, `STOPPING=1`). |
 | `lockfile.py` | Single-instance lock (`untether.lock`) so two processes can't poll the same bot. |
 | `runtime_loader.py` | Builds the runtime (engines, router, projects) from settings at startup and on reload. |
 | `config_migrations.py` | One-time edits to on-disk config (e.g. legacy Telegram key migration). |

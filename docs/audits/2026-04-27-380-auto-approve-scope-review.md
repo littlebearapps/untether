@@ -3,7 +3,7 @@
 **Audit date:** 2026-04-27
 **Author:** Claude (Untether agent, supervised by @npschram)
 **Issue:** [#380](https://github.com/littlebearapps/untether/issues/380)
-**Cross-ref:** [Audit 2026-04-20 §ASI02](./agent-orchestration-security-audit-2026-04-20.md), `[security] priority: high`
+**Cross-ref:** Audit 2026-04-20 §ASI02 (internal, not in this repo), `[security] priority: high`
 
 ## Scope
 
