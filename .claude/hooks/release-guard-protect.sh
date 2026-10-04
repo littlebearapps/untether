@@ -33,7 +33,7 @@ case "$FILE_PATH" in
     deny "🛑 RELEASE GUARD: This file is protected.\n\nRelease guard hooks can only be edited manually by Nathan.\nProtected: .claude/hooks/release-guard*.sh"
     ;;
   */help-faq-protect.sh)
-    deny "🛑 HELP-FAQ PROTECTION: This hook script is protected.\n\nThe FAQ-protect hook can only be edited manually by Nathan to prevent silent removal of docs/faq/index.md (issue #477).\nProtected: .claude/hooks/help-faq-protect.sh"
+    deny "🛑 HELP-FAQ PROTECTION: This hook script is protected.\n\nThe FAQ-protect hook can only be edited manually by Nathan to prevent silent removal of docs/faq/faq.md (issue #477).\nProtected: .claude/hooks/help-faq-protect.sh"
     ;;
   "$HOME/.claude/settings.json")
     : # user-level settings — only the disableAllHooks check below applies
