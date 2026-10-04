@@ -199,7 +199,9 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
 | MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
 | Child processes / subagents running | 15 min (`subagent_timeout`) | `⏳ Waiting for child processes (…)` or `⏳ Child processes idle (…)` |
-| Pending user approval | 10 min, then every 30 min | `⏳ Awaiting your approval (N min) — tap a button above to proceed (no action needed otherwise)` |
+| Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
+
+The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan".
 
 **If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
 

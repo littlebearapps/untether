@@ -2858,7 +2858,10 @@ async def test_stall_fires_after_approval_threshold() -> None:
             id="ctrl.1",
             kind="warning",
             title="Permission Request [CanUseTool] - tool: Bash",
-            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+            detail={
+                "tool_name": "Bash",
+                "inline_keyboard": {"buttons": [[{"text": "Approve"}]]},
+            },
         ),
         phase="started",
     )
@@ -2879,12 +2882,16 @@ async def test_stall_fires_after_approval_threshold() -> None:
     assert edits._stall_warn_count >= 1
     # #494-C: message text differentiates from the generic stall copy
     approval_msgs = [
-        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+        c
+        for c in transport.send_calls
+        if "⏳ Waiting for your approval" in c["message"].text
     ]
     assert len(approval_msgs) >= 1, (
-        f"Expected at least one 'Awaiting your approval' message, got: "
+        f"Expected at least one approval reminder, got: "
         f"{[c['message'].text for c in transport.send_calls]}"
     )
+    # #919: names the tool it is waiting on
+    assert "approval to use Bash" in approval_msgs[0]["message"].text
     # And it must NOT contain the generic "No progress" copy or the
     # alarming "session may be stuck" suffix.
     assert "No progress" not in approval_msgs[0]["message"].text
@@ -3044,7 +3051,10 @@ async def test_first_approval_reminder_uses_lower_threshold() -> None:
             id="ctrl.1",
             kind="warning",
             title="Permission Request [CanUseTool] - tool: ExitPlanMode",
-            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+            detail={
+                "tool_name": "ExitPlanMode",
+                "inline_keyboard": {"buttons": [[{"text": "Approve"}]]},
+            },
         ),
         phase="started",
     )
@@ -3061,19 +3071,19 @@ async def test_first_approval_reminder_uses_lower_threshold() -> None:
         tg.start_soon(edits.run)
         tg.start_soon(drive)
 
-    # The chat-side reminder fired with the reworded copy quoted from
-    # the audit's recommended text (covers the "tap a button above"
-    # affordance + the "no action needed otherwise" reassurance).
+    # The chat-side reminder fired with the reworded copy (covers the "tap
+    # a button above" affordance + the #919 "paused, not stuck" reassurance).
     approval_msgs = [
-        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+        c for c in transport.send_calls if "⏳ Waiting for" in c["message"].text
     ]
     assert len(approval_msgs) >= 1, (
         f"Expected reworded approval reminder, saw: "
         f"{[c['message'].text[:80] for c in transport.send_calls]}"
     )
     msg_text = approval_msgs[0]["message"].text
+    assert "approve the plan" in msg_text
     assert "tap a button above" in msg_text
-    assert "no action needed" in msg_text
+    assert "paused, not stuck" in msg_text
 
 
 @pytest.mark.anyio
@@ -11382,4 +11392,423 @@ def test_900_stream_idle_retry_default_off() -> None:
             usage=None,
         )
         is False
+    )
+
+
+# ---------------------------------------------------------------------------
+# #919 approval reminder copy
+# ---------------------------------------------------------------------------
+
+
+def _info_919(kind, *, request_id="r-1", tool_name=None, question=None, text=True):
+    from untether.runner_bridge import _PendingRequestInfo
+
+    return _PendingRequestInfo(
+        kind=kind,
+        request_id=request_id,
+        tool_name=tool_name,
+        question=question,
+        answerable_by_text=text,
+    )
+
+
+def _ask_action_919(
+    *,
+    action_id="ctrl.ask",
+    request_id="r-1",
+    title="❓ Which of these should I set up? (Pick any.)",
+    ask_question="Which of these should I set up? (Pick any.)",
+):
+    from untether.model import Action, ActionEvent
+
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=title,
+            detail={
+                "request_id": request_id,
+                "request_type": "CanUseTool",
+                "tool_name": "AskUserQuestion",
+                "ask_question": ask_question,
+                "inline_keyboard": {"buttons": [[{"text": "A"}], [{"text": "B"}]]},
+            },
+        ),
+        phase="started",
+    )
+
+
+def _tool_action_919(
+    *, action_id="ctrl.1", request_id="r-1", tool_name="Write", request_type=None
+):
+    from untether.model import Action, ActionEvent
+
+    detail: dict[str, Any] = {
+        "request_id": request_id,
+        "request_type": request_type or "CanUseTool",
+        "inline_keyboard": {"buttons": [[{"text": "Approve"}, {"text": "Deny"}]]},
+    }
+    if tool_name is not None:
+        detail["tool_name"] = tool_name
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=f"Permission Request [CanUseTool] - tool: {tool_name}",
+            detail=detail,
+        ),
+        phase="started",
+    )
+
+
+def _snap_919(
+    request_id="r-1", *, age_s=30.0, kind="tool", tool_name="Write", text=False
+):
+    from untether.runners.claude import ControlRequestSnapshot
+
+    return ControlRequestSnapshot(
+        request_id=request_id,
+        session_id="sess-919",
+        age_s=age_s,
+        tool_name=tool_name,
+        kind=kind,
+        answerable_by_text=text,
+        writer_ok=True,
+    )
+
+
+def _with_snaps_919(edits, snaps, *, awaiting=True):
+    holder = {"snaps": snaps, "awaiting": awaiting}
+
+    def _snapshot(now=None):
+        current = holder["snaps"]
+        if isinstance(current, Exception):
+            raise current
+        return list(current)
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(
+            control_request_snapshot=_snapshot,
+            awaiting_user_approval=lambda: holder["awaiting"],
+        )
+    )
+    return holder
+
+
+def test_919_headline_question_kind() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("question", question="Q?"), 10)
+    assert "Waiting for your answer (10 min)" in text
+    assert "reply with your answer" in text
+    assert "paused, not stuck" in text
+    assert "approval" not in text
+
+
+def test_919_headline_question_not_text_answerable() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("question", text=False), 10)
+    assert "Waiting for your answer (10 min)" in text
+    assert "reply" not in text
+
+
+def test_919_headline_plan_kind() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("plan"), 12)
+    assert "Waiting for you to approve the plan (12 min)" in text
+    assert "answer" not in text
+
+
+def test_919_headline_tool_named() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("tool", tool_name="Write"), 10)
+    assert "Waiting for your approval to use Write (10 min)" in text
+    assert "tap Approve or Deny above" in text
+    long_name = "mcp__" + "x" * 55
+    text = _approval_reminder_headline(_info_919("tool", tool_name=long_name), 10)
+    assert long_name not in text
+    assert ("approval to use " + long_name[:39] + "…") in text
+
+
+@pytest.mark.parametrize("which", ["tool_unnamed", "unknown", "none"])
+def test_919_headline_tool_unnamed_and_unknown(which) -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    if which == "tool_unnamed":
+        value = _info_919("tool", tool_name="")
+    elif which == "unknown":
+        value = _info_919("unknown")
+    else:
+        value = None
+    text = _approval_reminder_headline(value, 11)
+    assert text.startswith(
+        "⏳ Waiting for your approval (11 min) — tap a button above."
+    )
+
+
+@pytest.mark.anyio
+async def test_919_info_from_snapshot_ask() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _ask_action_919(title="❓ Which?\nmore", ask_question="Which?\nmore")
+    )
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    info = edits._pending_request_info()
+    assert info is not None
+    assert info.kind == "question"
+    assert info.question == "Which?"
+    assert info.request_id == "r-1"
+    assert info.answerable_by_text is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "tool_name"),
+    [
+        ("outline_hold", "ExitPlanMode"),
+        ("synthetic", "DiscussApproval"),
+        ("tool", "ExitPlanMode"),
+    ],
+)
+def test_919_info_snapshot_plan_variants(kind, tool_name) -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(edits, [_snap_919(kind=kind, tool_name=tool_name)])
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+
+def test_919_info_snapshot_tool_kind() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(edits, [_snap_919(kind="tool", tool_name="Write")])
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.kind, info.tool_name, info.request_id) == ("tool", "Write", "r-1")
+
+
+def test_919_info_newest_snapshot_wins() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(
+        edits,
+        [
+            _snap_919("r-old", age_s=900.0, kind="ask", tool_name="AskUserQuestion"),
+            _snap_919("r-new", age_s=30.0, kind="tool", tool_name="Bash"),
+        ],
+    )
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.kind, info.request_id, info.tool_name) == ("tool", "r-new", "Bash")
+
+
+@pytest.mark.anyio
+async def test_919_info_fallback_without_engine_state() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_ask_action_919(title="❓ Q", ask_question="Q"))
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "question" and info.question == "Q"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="ExitPlanMode"))
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _tool_action_919(tool_name=None, request_type="DiscussApproval")
+    )
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="Bash"))
+    info = edits._pending_request_info()
+    assert info is not None and (info.kind, info.tool_name) == ("tool", "Bash")
+
+
+@pytest.mark.anyio
+async def test_919_info_probe_raises_falls_back() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="Write"))
+    _with_snaps_919(edits, RuntimeError("boom"))
+    info = edits._pending_request_info()
+    assert info is not None and (info.kind, info.tool_name) == ("tool", "Write")
+
+
+@pytest.mark.anyio
+async def test_919_question_text_follows_flow_title() -> None:
+    """#709 keeps the title on the outstanding question; the detail stays Q1."""
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _ask_action_919(
+            title="❓ Question 2 of 3: Pick a colour", ask_question="First question"
+        )
+    )
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    info = edits._pending_request_info()
+    assert info is not None and info.question == "Pick a colour"
+
+
+def test_919_trim_line() -> None:
+    from untether.runner_bridge import _trim_line
+
+    assert _trim_line("  hello\nworld", 80) == "hello"
+    assert _trim_line("x" * 100, 10) == "x" * 9 + "…"
+    assert _trim_line("", 10) == ""
+
+
+async def _drive_reminder_919(edits, clock, *, end=100.2) -> None:
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 1000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
+    edits._STALL_THRESHOLD_APPROVAL = 1000.0
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(end)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_919_reminder_ask_no_internal_leak() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_ask_action_919())
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    await _drive_reminder_919(edits, clock)
+
+    texts = [c["message"].text for c in transport.send_calls]
+    reminders = [t for t in texts if "Waiting for your answer" in t]
+    assert reminders, texts
+    text = reminders[0]
+    assert "❓ Which of these should I set up? (Pick any.)" in text
+    assert "The session is paused, not stuck." in text
+    assert "/cancel to stop." in text
+    for leak in ("warning:", "(running)", "Last:", "Awaiting your approval"):
+        assert leak not in text
+
+
+@pytest.mark.anyio
+async def test_919_reminder_no_warned_suffix() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_repeat_seconds = 0.0
+    await edits.on_event(_tool_action_919(tool_name="Write"))
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 1000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
+    edits._STALL_THRESHOLD_APPROVAL = 0.1
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.03)
+            clock.set(100.5)
+            await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    reminders = [
+        c["message"].text
+        for c in transport.send_calls
+        if "Waiting for your approval" in c["message"].text
+    ]
+    assert len(reminders) >= 2
+    assert all("(warned" not in t for t in reminders)
+
+
+@pytest.mark.anyio
+async def test_919_genuine_stall_last_line_display() -> None:
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    await edits.on_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="tool", title="Bash\nsecond line"),
+            phase="started",
+        )
+    )
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    texts = [c["message"].text for c in transport.send_calls]
+    stalls = [t for t in texts if t.startswith("⏳")]
+    assert stalls, texts
+    text = stalls[0]
+    assert "Last: Bash" in text
+    assert "second line" not in text
+    assert "tool:Bash" not in text
+    assert "(running)" not in text
+
+
+def test_919_last_action_display_strips_and_truncates() -> None:
+    from untether.model import Action, ActionEvent
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    assert edits._last_action_display() is None
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="note", title="  " + "y" * 120),
+            phase="started",
+        )
+    )
+    disp = edits._last_action_display()
+    assert disp is not None and len(disp) == 80 and disp.endswith("…")
+    assert not disp.startswith("note:")
+
+
+@pytest.mark.anyio
+async def test_919_log_field_keeps_raw_form() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_ask_action_919())
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    with structlog.testing.capture_logs() as logs:
+        await _drive_reminder_919(edits, clock)
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending
+    assert pending[0]["last_action"] == (
+        "warning:❓ Which of these should I set up? (Pick any.) (running)"
     )

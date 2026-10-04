@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import re
 import signal as _signal
 import threading
 import time
@@ -2080,6 +2081,59 @@ async def _send_or_edit_message(
     return sent, False
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingRequestInfo:
+    """#919: what the pending control request is, for the reminder copy.
+
+    ``kind``: ``question`` (AskUserQuestion), ``plan`` (ExitPlanMode / Pause
+    & Outline hold / ``da:`` discuss approval), ``tool`` (any other tool
+    permission, incl. hook callbacks with no tool name) or ``unknown``.
+    """
+
+    kind: str
+    request_id: str | None = None
+    tool_name: str | None = None
+    question: str | None = None
+    answerable_by_text: bool = True
+
+
+_ASK_TITLE_PREFIX_RE = re.compile(r"^❓\s*(?:Question \d+ of \d+:\s*)?")
+
+
+def _trim_line(text: str, limit: int) -> str:
+    """#919: first line of ``text``, stripped, truncated to ``limit`` chars
+    (``…`` included)."""
+    line = (text or "").strip().split("\n", 1)[0].strip()
+    if len(line) > limit:
+        return line[: max(0, limit - 1)] + "…"
+    return line
+
+
+def _approval_reminder_headline(info: _PendingRequestInfo | None, mins: int) -> str:
+    """#919: user-facing headline for the pending-approval stall reminder."""
+    tail = "The session is paused, not stuck."
+    kind = info.kind if info is not None else "unknown"
+    if kind == "question":
+        how = (
+            "tap an option above or reply with your answer"
+            if info is None or info.answerable_by_text
+            else "tap an option above"
+        )
+        return f"⏳ Waiting for your answer ({mins} min) — {how}. {tail}"
+    if kind == "plan":
+        return (
+            f"⏳ Waiting for you to approve the plan ({mins} min) — tap a "
+            f"button above. {tail}"
+        )
+    tool = _trim_line(info.tool_name or "", 40) if info is not None else ""
+    if kind == "tool" and tool:
+        return (
+            f"⏳ Waiting for your approval to use {tool} ({mins} min) — tap "
+            f"Approve or Deny above. {tail}"
+        )
+    return f"⏳ Waiting for your approval ({mins} min) — tap a button above. {tail}"
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -2715,8 +2769,8 @@ class ProgressEdits:
             # deliberating on an approval, demote the WARN to a different
             # structured INFO (``subprocess.approval_pending``) and pace it
             # to once per 30 minutes. The chat-side rendering below still
-            # emits the friendly "⏳ Awaiting your approval (N min)" copy
-            # (#494-C) — operators just stop getting warn-filter spam for
+            # emits the friendly "⏳ Waiting for your … (N min)" copy
+            # (#494-C, #919) — operators just stop getting warn-filter spam for
             # what is by definition not a hang. The daemon
             # (``untether-issue-watcher``) and ``/monitor`` are configured
             # to treat WARNs as auto-fileable, so this also stops
@@ -3156,10 +3210,18 @@ class ProgressEdits:
                     # users cancelling at ~13 min because the original copy
                     # didn't make the "tap a button" affordance explicit
                     # enough — they assumed the session had hung.
-                    parts = [
-                        f"⏳ Awaiting your approval ({mins} min) — tap a "
-                        "button above to proceed (no action needed otherwise)"
-                    ]
+                    # #919: say what is pending (an answer, a plan approval
+                    # or a named tool's approval) instead of "approval" for
+                    # everything; no ``Last:`` line (it only repeated the
+                    # request, in its internal log form).
+                    _approval_info = self._pending_request_info()
+                    parts = [_approval_reminder_headline(_approval_info, mins)]
+                    if (
+                        _approval_info is not None
+                        and _approval_info.kind == "question"
+                        and _approval_info.question
+                    ):
+                        parts.append(f"❓ {_approval_info.question}")
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -3197,7 +3259,12 @@ class ProgressEdits:
                         parts = [f"⏳ Still working ({mins} min, CPU active)"]
                     else:
                         parts = [f"⏳ No progress for {mins} min"]
-                if self._stall_warn_count > 1:
+                # #919: an approval wait is expected, so no alarm-style
+                # repeat counter on its reminder.
+                if (
+                    self._stall_warn_count > 1
+                    and threshold_reason != "pending_approval"
+                ):
                     parts[0] += f" (warned {self._stall_warn_count}x)"
                 # "session may be stuck" — only when genuinely stuck
                 # (no tool identified, cpu not active, not MCP/frozen,
@@ -3213,13 +3280,12 @@ class ProgressEdits:
                 )
                 if _genuinely_stuck:
                     parts.append("— session may be stuck.")
-                if last_action:
-                    _summary = (
-                        last_action
-                        if len(last_action) <= 80
-                        else last_action[:77] + "..."
-                    )
-                    parts.append(f"Last: {_summary}")
+                # #919: plain action title for the chat; the raw
+                # ``kind:title (status)`` form stays in the log fields.
+                if threshold_reason != "pending_approval" and (
+                    _disp := self._last_action_display()
+                ):
+                    parts.append(f"Last: {_disp}")
                 parts.append("/cancel to stop.")
                 text = "\n".join(parts)
                 try:
@@ -3572,6 +3638,98 @@ class ProgressEdits:
             break  # only check the most recent
         return False
 
+    def _ask_question_text(self, request_id: str | None) -> str | None:
+        """#919: the outstanding question of a pending AskUserQuestion.
+
+        Prefers the action's current title — #709's ``advance_ask_action_model``
+        keeps it on the outstanding question of a multi-question flow, while
+        ``detail["ask_question"]`` stays on Q1 — then falls back to the detail.
+        """
+        match = None
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if request_id is not None and detail.get("request_id") == request_id:
+                match = action_state.action
+                break
+            if match is None and detail.get("ask_question"):
+                match = action_state.action
+        if match is None:
+            return None
+        title = _ASK_TITLE_PREFIX_RE.sub("", _trim_line(match.title or "", 400))
+        text = _trim_line(title, 80)
+        if not text:
+            text = _trim_line(str(match.detail.get("ask_question") or ""), 80)
+        return text or None
+
+    def _pending_request_info(self) -> _PendingRequestInfo | None:
+        """#919: classify the pending request the reminder is about.
+
+        Engine registry first (``control_request_snapshot()``, newest request
+        wins — the one whose buttons are visible), else the newest uncompleted
+        tracked action carrying an inline keyboard.
+        """
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "control_request_snapshot", None)
+        snaps: list[Any] = []
+        if callable(probe):
+            try:
+                snaps = list(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
+                snaps = []
+        if snaps:
+            snap = min(snaps, key=lambda s: s.age_s)
+            tool_name = snap.tool_name or None
+            if snap.kind == "ask":
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=snap.request_id,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(snap.request_id),
+                    answerable_by_text=bool(snap.answerable_by_text),
+                )
+            if (
+                snap.kind in ("outline_hold", "synthetic")
+                or tool_name == "ExitPlanMode"
+            ):
+                kind = "plan"
+            else:
+                kind = "tool"
+            return _PendingRequestInfo(
+                kind=kind, request_id=snap.request_id, tool_name=tool_name
+            )
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if not detail.get("inline_keyboard"):
+                continue
+            rid = detail.get("request_id")
+            rid = rid if isinstance(rid, str) and rid else None
+            tool_name = detail.get("tool_name") or None
+            if detail.get("ask_question"):
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=rid,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(rid),
+                )
+            if (
+                detail.get("request_type") == "DiscussApproval"
+                or tool_name == "ExitPlanMode"
+            ):
+                return _PendingRequestInfo(
+                    kind="plan", request_id=rid, tool_name=tool_name
+                )
+            if tool_name:
+                return _PendingRequestInfo(
+                    kind="tool", request_id=rid, tool_name=tool_name
+                )
+            return _PendingRequestInfo(kind="unknown", request_id=rid)
+        return None
+
     def _count_stall_warning(self) -> None:
         """Record that a genuine stall WARNING was emitted (#495).
 
@@ -3877,6 +4035,14 @@ class ProgressEdits:
             a = action_state.action
             status = "running" if not action_state.completed else "done"
             return f"{a.kind}:{a.title} ({status})"
+        return None
+
+    def _last_action_display(self) -> str | None:
+        """#919: user-facing ``Last:`` text — the newest action's title, first
+        line only, no ``kind:`` prefix and no ``(status)`` suffix. The raw
+        :meth:`_last_action_summary` form stays for log fields."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            return _trim_line(action_state.action.title or "", 80) or None
         return None
 
     async def _run_loop(self, bg_tg: anyio.abc.TaskGroup) -> None:
