@@ -2858,7 +2858,10 @@ async def test_stall_fires_after_approval_threshold() -> None:
             id="ctrl.1",
             kind="warning",
             title="Permission Request [CanUseTool] - tool: Bash",
-            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+            detail={
+                "tool_name": "Bash",
+                "inline_keyboard": {"buttons": [[{"text": "Approve"}]]},
+            },
         ),
         phase="started",
     )
@@ -2879,12 +2882,16 @@ async def test_stall_fires_after_approval_threshold() -> None:
     assert edits._stall_warn_count >= 1
     # #494-C: message text differentiates from the generic stall copy
     approval_msgs = [
-        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+        c
+        for c in transport.send_calls
+        if "⏳ Waiting for your approval" in c["message"].text
     ]
     assert len(approval_msgs) >= 1, (
-        f"Expected at least one 'Awaiting your approval' message, got: "
+        f"Expected at least one approval reminder, got: "
         f"{[c['message'].text for c in transport.send_calls]}"
     )
+    # #919: names the tool it is waiting on
+    assert "approval to use Bash" in approval_msgs[0]["message"].text
     # And it must NOT contain the generic "No progress" copy or the
     # alarming "session may be stuck" suffix.
     assert "No progress" not in approval_msgs[0]["message"].text
@@ -3044,7 +3051,10 @@ async def test_first_approval_reminder_uses_lower_threshold() -> None:
             id="ctrl.1",
             kind="warning",
             title="Permission Request [CanUseTool] - tool: ExitPlanMode",
-            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+            detail={
+                "tool_name": "ExitPlanMode",
+                "inline_keyboard": {"buttons": [[{"text": "Approve"}]]},
+            },
         ),
         phase="started",
     )
@@ -3061,19 +3071,19 @@ async def test_first_approval_reminder_uses_lower_threshold() -> None:
         tg.start_soon(edits.run)
         tg.start_soon(drive)
 
-    # The chat-side reminder fired with the reworded copy quoted from
-    # the audit's recommended text (covers the "tap a button above"
-    # affordance + the "no action needed otherwise" reassurance).
+    # The chat-side reminder fired with the reworded copy (covers the "tap
+    # a button above" affordance + the #919 "paused, not stuck" reassurance).
     approval_msgs = [
-        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+        c for c in transport.send_calls if "⏳ Waiting for" in c["message"].text
     ]
     assert len(approval_msgs) >= 1, (
         f"Expected reworded approval reminder, saw: "
         f"{[c['message'].text[:80] for c in transport.send_calls]}"
     )
     msg_text = approval_msgs[0]["message"].text
+    assert "approve the plan" in msg_text
     assert "tap a button above" in msg_text
-    assert "no action needed" in msg_text
+    assert "paused, not stuck" in msg_text
 
 
 @pytest.mark.anyio
@@ -5580,6 +5590,433 @@ async def test_surface_outbox_skipped_helper_only_overflow_entries_silent(
     )
 
     assert transport.send_calls == []
+
+
+# ── #924: run-scoped outbox delivery ─────────────────────────────────────
+
+
+def _mtime_clock(monkeypatch) -> None:
+    """Unit tests can't backdate ctime: judge freshness on mtime only so a
+    test can place a file before/after the run cutoff with ``os.utime``."""
+    monkeypatch.setattr(
+        "untether.telegram.outbox_delivery.entry_changed_at",
+        lambda st: st.st_mtime,
+    )
+
+
+def _outbox_cfg(transport, send_file, **files_kw):
+    from untether.settings import TelegramFilesSettings
+
+    return ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=TelegramFilesSettings(enabled=True, **files_kw),
+    )
+
+
+class _WritingRunner(ScriptRunner):
+    """Writes ``files`` (name → mtime) into the outbox as the run starts."""
+
+    def __init__(self, outbox, files: dict[str, float], steps=None) -> None:
+        super().__init__(steps or [Return(answer="done")], engine=CODEX_ENGINE)
+        self._outbox = outbox
+        self._files = files
+
+    async def run(self, prompt, resume):
+        for name, mtime in self._files.items():
+            p = self._outbox / name
+            p.write_text(name, encoding="utf-8")
+            os.utime(p, (mtime, mtime))
+        async for evt in super().run(prompt, resume):
+            yield evt
+
+
+@pytest.mark.anyio
+async def test_924_stale_file_not_sent_and_notice_once(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "2026-08-25-handover.md").write_text("old", encoding="utf-8")
+
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="status?"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_not_called()
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "older file" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert ".skipped" in notices[0]
+    assert "2026-08-25-handover.md" in notices[0]
+    assert "/file get .untether-outbox/.skipped" in notices[0]
+    assert (outbox / ".skipped" / "2026-08-25-handover.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_fresh_file_sent_stale_noticed(tmp_path, monkeypatch) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _mtime_clock(monkeypatch)
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    old = outbox / "old.md"
+    old.write_text("old", encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    now = time.time()
+    runner = _WritingRunner(outbox, {"fresh.md": now + 1})
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=now,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["fresh.md"]
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "older file" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert "old.md" in notices[0]
+    assert "fresh.md" not in notices[0]
+
+
+@pytest.mark.anyio
+async def test_924_policy_send_delivers_old_files(tmp_path, monkeypatch) -> None:
+    """Kill switch: ``outbox_stale_policy = "send"`` restores the old
+    deliver-everything behaviour."""
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_stale_policy="send")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["old.md"]
+    assert not any("older file" in c["message"].text for c in transport.send_calls)
+
+
+@pytest.mark.anyio
+async def test_924_notify_disabled_silences_stale_notice(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_notify_skipped=False)
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_not_called()
+    assert not any("older file" in c["message"].text for c in transport.send_calls)
+    # still quarantined (silently)
+    assert (outbox / ".skipped" / "old.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_overflow_surfaced_and_archived(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_max_files=2)
+    now = time.time()
+    outbox.mkdir()
+    runner = _WritingRunner(outbox, {f"n{i}.md": now + 1 for i in range(4)})
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=now,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert send_file.call_count == 2
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "weren't sent (limit outbox_max_files = 2)" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert "n2.md" in notices[0] and "n3.md" in notices[0]
+    assert (outbox / ".skipped" / "n3.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_auto_continue_threads_outbox_since(
+    tmp_path, monkeypatch, progress_store, quarantine_store
+) -> None:
+    """Every recovery re-entry carries the dispatch's cutoff, so files
+    subprocess 1 wrote stay fresh for subprocess 2 (and nothing older
+    becomes fresh because the child's own start time is later)."""
+    import untether.runner_bridge as rb
+
+    seen_since: list[float | None] = []
+    original = rb.handle_message
+
+    async def _spy(*args, **kwargs):
+        seen_since.append(kwargs.get("outbox_since"))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(rb, "handle_message", _spy)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=False
+    )
+    with anyio.fail_after(10):
+        await original(
+            cfg,
+            runner=_810ToolResultThenAnswerRunner(),
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            outbox_since=1234.5,
+        )
+    assert seen_since == [1234.5]
+
+
+@pytest.mark.anyio
+async def test_924_live_turn_uses_run_since_not_turn_start(
+    tmp_path, monkeypatch
+) -> None:
+    """A background task's file, written after the run started but before
+    the wake turn that reports it, is delivered after that turn (the live
+    session's cutoff is its spawn time, not the turn's start)."""
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.model import TURN_COMPLETE_MARKER, TurnEvent
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _mtime_clock(monkeypatch)
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    token_ = ResumeToken(engine="claude", value="sess-924")
+    now = time.time()
+
+    class _BgRunner(ScriptRunner):
+        async def run(self, prompt, resume):
+            async for evt in super().run(prompt, resume):
+                if isinstance(evt, TurnEvent) and evt.phase == "started":
+                    p = outbox / "r20-bg.md"
+                    p.write_text("bg", encoding="utf-8")
+                    os.utime(p, (now - 50, now - 50))  # before this turn began
+                yield evt
+
+    runner = _BgRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=token_)),
+            Emit(
+                StartedEvent(
+                    engine="claude",
+                    resume=token_,
+                    meta={"complete": TURN_COMPLETE_MARKER},
+                )
+            ),
+            Emit(
+                TurnEvent(
+                    engine="claude", phase="started", turn=2, reason="task_finished"
+                )
+            ),
+            Emit(
+                TurnEvent(
+                    engine="claude",
+                    phase="completed",
+                    turn=2,
+                    reason="task_finished",
+                    ok=True,
+                    answer="BG DONE",
+                )
+            ),
+            Return(answer="FIRST"),
+        ],
+        engine="claude",
+        resume_value=token_.value,
+    )
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    token = set_run_base_dir(tmp_path)
+    try:
+        with anyio.fail_after(10):
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+                resume_token=None,
+                outbox_since=now - 100,
+            )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["r20-bg.md"]
+
+
+def test_924_outbox_settings_hot_reload(tmp_path, monkeypatch) -> None:
+    from untether.runner_bridge import _load_outbox_settings
+    from untether.settings import TelegramFilesSettings
+
+    cfg_path = tmp_path / "live" / "untether.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "[transports.telegram.files]\n"
+        "enabled = true\n"
+        'outbox_stale_policy = "send"\n'
+        "outbox_max_files = 3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg_path))
+    frozen = TelegramFilesSettings(enabled=True)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=lambda *a: None,
+        outbox_config=frozen,
+    )
+    live = _load_outbox_settings(cfg)
+    assert live is not None
+    assert live.outbox_stale_policy == "send"
+    assert live.outbox_max_files == 3
+
+    # Outbox switched off in the live config → no delivery.
+    cfg_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "[transports.telegram.files]\n"
+        "enabled = true\n"
+        "outbox_enabled = false\n",
+        encoding="utf-8",
+    )
+    assert _load_outbox_settings(cfg) is None
+
+    # Not enabled at startup (no send callable) → None regardless.
+    cfg_off = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=False
+    )
+    assert _load_outbox_settings(cfg_off) is None
+
+
+def test_924_outbox_settings_parse_error_falls_back_to_frozen(
+    tmp_path, monkeypatch
+) -> None:
+    """Amendment 3: a half-edited (unparseable) config must not silently swap
+    in hard defaults (max_files / deny globs) mid-run."""
+    from untether.runner_bridge import _load_outbox_settings
+    from untether.settings import TelegramFilesSettings
+
+    cfg_path = tmp_path / "live" / "untether.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text("[transports.telegram\nbot_token = ", encoding="utf-8")
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg_path))
+    frozen = TelegramFilesSettings(enabled=True, outbox_max_files=7)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=lambda *a: None,
+        outbox_config=frozen,
+    )
+    assert _load_outbox_settings(cfg) is frozen
+
+    # No config file at all (tests / API users) → frozen config too.
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(tmp_path / "missing.toml"))
+    assert _load_outbox_settings(cfg) is frozen
+
+
+def test_924_format_stale_notice_wording() -> None:
+    from untether.runner_bridge import _format_outbox_stale_notice
+
+    stale = [(f"2026-09-{d:02d}-handover.md", 1_790_000_000.0 + d) for d in range(7)]
+    text = _format_outbox_stale_notice(
+        stale, archived_to=".untether-outbox/.skipped/", cleanup=True
+    )
+    assert text.startswith("📎 7 older files were already in .untether-outbox/")
+    assert "so they weren't sent:" in text
+    assert "- … and 2 more" in text
+    # newest first
+    assert text.index("2026-09-06-handover.md") < text.index("2026-09-05-handover.md")
+    assert "Moved to .untether-outbox/.skipped/" in text
+    assert "/file get .untether-outbox/.skipped" in text
+
+    left = _format_outbox_stale_notice(stale[:1], archived_to=None, cleanup=False)
+    assert left.startswith("📎 1 older file was already in .untether-outbox/")
+    assert "Left in place (outbox_cleanup is off)." in left
 
 
 # ── _should_auto_continue detection (#34142/#30333) ──
@@ -10956,3 +11393,1284 @@ def test_900_stream_idle_retry_default_off() -> None:
         )
         is False
     )
+
+
+# ---------------------------------------------------------------------------
+# #919 approval reminder copy
+# ---------------------------------------------------------------------------
+
+
+def _info_919(kind, *, request_id="r-1", tool_name=None, question=None, text=True):
+    from untether.runner_bridge import _PendingRequestInfo
+
+    return _PendingRequestInfo(
+        kind=kind,
+        request_id=request_id,
+        tool_name=tool_name,
+        question=question,
+        answerable_by_text=text,
+    )
+
+
+def _ask_action_919(
+    *,
+    action_id="ctrl.ask",
+    request_id="r-1",
+    title="❓ Which of these should I set up? (Pick any.)",
+    ask_question="Which of these should I set up? (Pick any.)",
+):
+    from untether.model import Action, ActionEvent
+
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=title,
+            detail={
+                "request_id": request_id,
+                "request_type": "CanUseTool",
+                "tool_name": "AskUserQuestion",
+                "ask_question": ask_question,
+                "inline_keyboard": {"buttons": [[{"text": "A"}], [{"text": "B"}]]},
+            },
+        ),
+        phase="started",
+    )
+
+
+def _tool_action_919(
+    *, action_id="ctrl.1", request_id="r-1", tool_name="Write", request_type=None
+):
+    from untether.model import Action, ActionEvent
+
+    detail: dict[str, Any] = {
+        "request_id": request_id,
+        "request_type": request_type or "CanUseTool",
+        "inline_keyboard": {"buttons": [[{"text": "Approve"}, {"text": "Deny"}]]},
+    }
+    if tool_name is not None:
+        detail["tool_name"] = tool_name
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=f"Permission Request [CanUseTool] - tool: {tool_name}",
+            detail=detail,
+        ),
+        phase="started",
+    )
+
+
+def _snap_919(
+    request_id="r-1", *, age_s=30.0, kind="tool", tool_name="Write", text=False
+):
+    from untether.runners.claude import ControlRequestSnapshot
+
+    return ControlRequestSnapshot(
+        request_id=request_id,
+        session_id="sess-919",
+        age_s=age_s,
+        tool_name=tool_name,
+        kind=kind,
+        answerable_by_text=text,
+        writer_ok=True,
+    )
+
+
+def _with_snaps_919(edits, snaps, *, awaiting=True):
+    holder = {"snaps": snaps, "awaiting": awaiting}
+
+    def _snapshot(now=None):
+        current = holder["snaps"]
+        if isinstance(current, Exception):
+            raise current
+        return list(current)
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(
+            control_request_snapshot=_snapshot,
+            awaiting_user_approval=lambda: holder["awaiting"],
+        )
+    )
+    return holder
+
+
+def test_919_headline_question_kind() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("question", question="Q?"), 10)
+    assert "Waiting for your answer (10 min)" in text
+    assert "reply with your answer" in text
+    assert "paused, not stuck" in text
+    assert "approval" not in text
+
+
+def test_919_headline_question_not_text_answerable() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("question", text=False), 10)
+    assert "Waiting for your answer (10 min)" in text
+    assert "reply" not in text
+
+
+def test_919_headline_plan_kind() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("plan"), 12)
+    assert "Waiting for you to approve the plan (12 min)" in text
+    assert "answer" not in text
+
+
+def test_919_headline_tool_named() -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    text = _approval_reminder_headline(_info_919("tool", tool_name="Write"), 10)
+    assert "Waiting for your approval to use Write (10 min)" in text
+    assert "tap Approve or Deny above" in text
+    long_name = "mcp__" + "x" * 55
+    text = _approval_reminder_headline(_info_919("tool", tool_name=long_name), 10)
+    assert long_name not in text
+    assert ("approval to use " + long_name[:39] + "…") in text
+
+
+@pytest.mark.parametrize("which", ["tool_unnamed", "unknown", "none"])
+def test_919_headline_tool_unnamed_and_unknown(which) -> None:
+    from untether.runner_bridge import _approval_reminder_headline
+
+    if which == "tool_unnamed":
+        value = _info_919("tool", tool_name="")
+    elif which == "unknown":
+        value = _info_919("unknown")
+    else:
+        value = None
+    text = _approval_reminder_headline(value, 11)
+    assert text.startswith(
+        "⏳ Waiting for your approval (11 min) — tap a button above."
+    )
+
+
+@pytest.mark.anyio
+async def test_919_info_from_snapshot_ask() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _ask_action_919(title="❓ Which?\nmore", ask_question="Which?\nmore")
+    )
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    info = edits._pending_request_info()
+    assert info is not None
+    assert info.kind == "question"
+    assert info.question == "Which?"
+    assert info.request_id == "r-1"
+    assert info.answerable_by_text is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "tool_name"),
+    [
+        ("outline_hold", "ExitPlanMode"),
+        ("synthetic", "DiscussApproval"),
+        ("tool", "ExitPlanMode"),
+    ],
+)
+def test_919_info_snapshot_plan_variants(kind, tool_name) -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(edits, [_snap_919(kind=kind, tool_name=tool_name)])
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+
+def test_919_info_snapshot_tool_kind() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(edits, [_snap_919(kind="tool", tool_name="Write")])
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.kind, info.tool_name, info.request_id) == ("tool", "Write", "r-1")
+
+
+def test_919_info_newest_snapshot_wins() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    _with_snaps_919(
+        edits,
+        [
+            _snap_919("r-old", age_s=900.0, kind="ask", tool_name="AskUserQuestion"),
+            _snap_919("r-new", age_s=30.0, kind="tool", tool_name="Bash"),
+        ],
+    )
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.kind, info.request_id, info.tool_name) == ("tool", "r-new", "Bash")
+
+
+@pytest.mark.anyio
+async def test_919_info_fallback_without_engine_state() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_ask_action_919(title="❓ Q", ask_question="Q"))
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "question" and info.question == "Q"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="ExitPlanMode"))
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _tool_action_919(tool_name=None, request_type="DiscussApproval")
+    )
+    info = edits._pending_request_info()
+    assert info is not None and info.kind == "plan"
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="Bash"))
+    info = edits._pending_request_info()
+    assert info is not None and (info.kind, info.tool_name) == ("tool", "Bash")
+
+
+@pytest.mark.anyio
+async def test_919_info_probe_raises_falls_back() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(_tool_action_919(tool_name="Write"))
+    _with_snaps_919(edits, RuntimeError("boom"))
+    info = edits._pending_request_info()
+    assert info is not None and (info.kind, info.tool_name) == ("tool", "Write")
+
+
+@pytest.mark.anyio
+async def test_919_question_text_follows_flow_title() -> None:
+    """#709 keeps the title on the outstanding question; the detail stays Q1."""
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    await edits.on_event(
+        _ask_action_919(
+            title="❓ Question 2 of 3: Pick a colour", ask_question="First question"
+        )
+    )
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    info = edits._pending_request_info()
+    assert info is not None and info.question == "Pick a colour"
+
+
+def test_919_trim_line() -> None:
+    from untether.runner_bridge import _trim_line
+
+    assert _trim_line("  hello\nworld", 80) == "hello"
+    assert _trim_line("x" * 100, 10) == "x" * 9 + "…"
+    assert _trim_line("", 10) == ""
+
+
+async def _drive_reminder_919(edits, clock, *, end=100.2) -> None:
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 1000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
+    edits._STALL_THRESHOLD_APPROVAL = 1000.0
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(end)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_919_reminder_ask_no_internal_leak() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_ask_action_919())
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    await _drive_reminder_919(edits, clock)
+
+    texts = [c["message"].text for c in transport.send_calls]
+    reminders = [t for t in texts if "Waiting for your answer" in t]
+    assert reminders, texts
+    text = reminders[0]
+    assert "❓ Which of these should I set up? (Pick any.)" in text
+    assert "The session is paused, not stuck." in text
+    assert "/cancel to stop." in text
+    for leak in ("warning:", "(running)", "Last:", "Awaiting your approval"):
+        assert leak not in text
+
+
+@pytest.mark.anyio
+async def test_919_reminder_no_warned_suffix() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_repeat_seconds = 0.0
+    await edits.on_event(_tool_action_919(tool_name="Write"))
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 1000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
+    edits._STALL_THRESHOLD_APPROVAL = 0.1
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.03)
+            clock.set(100.5)
+            await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    reminders = [
+        c["message"].text
+        for c in transport.send_calls
+        if "Waiting for your approval" in c["message"].text
+    ]
+    assert len(reminders) >= 2
+    assert all("(warned" not in t for t in reminders)
+
+
+@pytest.mark.anyio
+async def test_919_genuine_stall_last_line_display() -> None:
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    await edits.on_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="tool", title="Bash\nsecond line"),
+            phase="started",
+        )
+    )
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    texts = [c["message"].text for c in transport.send_calls]
+    stalls = [t for t in texts if t.startswith("⏳")]
+    assert stalls, texts
+    text = stalls[0]
+    assert "Last: Bash" in text
+    assert "second line" not in text
+    assert "tool:Bash" not in text
+    assert "(running)" not in text
+
+
+def test_919_last_action_display_strips_and_truncates() -> None:
+    from untether.model import Action, ActionEvent
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    assert edits._last_action_display() is None
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="note", title="  " + "y" * 120),
+            phase="started",
+        )
+    )
+    disp = edits._last_action_display()
+    assert disp is not None and len(disp) == 80 and disp.endswith("…")
+    assert not disp.startswith("note:")
+
+
+@pytest.mark.anyio
+async def test_919_log_field_keeps_raw_form() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_ask_action_919())
+    _with_snaps_919(
+        edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+    )
+    with structlog.testing.capture_logs() as logs:
+        await _drive_reminder_919(edits, clock)
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending
+    assert pending[0]["last_action"] == (
+        "warning:❓ Which of these should I set up? (Pick any.) (running)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #920 approval reminder lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _fast_920(edits, *, first=0.1, repeat=1000.0) -> None:
+    edits._stall_check_interval = 0.002
+    edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_SECONDS = 10_000.0
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = first
+    edits._STALL_THRESHOLD_APPROVAL = repeat
+
+
+def _reminders_920(transport) -> list[dict]:
+    return [
+        c
+        for c in transport.send_calls
+        if c["message"].text.startswith("⏳ Waiting for")
+    ]
+
+
+async def _run_920(edits, steps) -> None:
+    """Run the monitor while ``steps`` (a list of callables / sleeps) execute."""
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for step in steps:
+                if callable(step):
+                    step()
+                else:
+                    await anyio.sleep(step)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_920_reminder_ref_tracked() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1", kind="tool", tool_name="Write")])
+    _fast_920(edits)
+    with structlog.testing.capture_logs() as logs:
+        await _run_920(edits, [lambda: clock.set(100.2), 0.05])
+    (reminder,) = _reminders_920(transport)
+    assert edits._approval_reminder_ref == reminder["ref"]
+    assert edits._approval_reminder_request_id == "r-1"
+    assert reminder["options"].replace is None
+    sent = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_sent"
+    ]
+    assert sent and sent[0]["request_kind"] == "tool"
+    assert sent[0]["request_id"] == "r-1" and sent[0]["replaced"] is False
+
+
+@pytest.mark.anyio
+async def test_920_reminder_deleted_when_resolved() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits)
+
+    def _resolve() -> None:
+        holder["snaps"] = []
+        holder["awaiting"] = False
+        edits.tracker.note_event(
+            action_completed("ctrl.1", "warning", "resolved", True)
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        await _run_920(edits, [lambda: clock.set(100.2), 0.03, _resolve, 0.03])
+    (reminder,) = _reminders_920(transport)
+    assert reminder["ref"] in transport.delete_calls
+    assert edits._approval_reminder_ref is None
+    assert edits._approval_reminder_request_id is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert len(retired) == 1
+    assert retired[0]["reason"] == "resolved" and retired[0]["deleted"] is True
+
+
+@pytest.mark.anyio
+async def test_920_reminder_deleted_on_delete_ephemeral() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    notify_ref = MessageRef(channel_id=123, message_id=50)
+    reminder_ref = MessageRef(channel_id=123, message_id=51)
+    edits._approval_notify_ref = notify_ref
+    edits._approval_reminder_ref = reminder_ref
+    edits._approval_reminder_request_id = "r-1"
+    with structlog.testing.capture_logs() as logs:
+        await edits.delete_ephemeral()
+    assert transport.delete_calls[:2] == [notify_ref, reminder_ref]
+    assert edits._approval_notify_ref is None
+    assert edits._approval_reminder_ref is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert retired and retired[0]["reason"] == "run_end"
+
+
+@pytest.mark.anyio
+async def test_920_reminder_superseded_by_new_request() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="ExitPlanMode", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1", tool_name="ExitPlanMode")])
+    _fast_920(edits)
+
+    async def _new_request() -> None:
+        holder["snaps"] = [_snap_919("r-2", tool_name="Write")]
+        await edits.on_event(
+            _tool_action_919(action_id="ctrl.2", tool_name="Write", request_id="r-2")
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.2)
+                await anyio.sleep(0.03)
+                await _new_request()
+                await anyio.sleep(0.03)
+                clock.set(100.4)  # past the new request's own first threshold
+                await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    reminders = _reminders_920(transport)
+    assert len(reminders) == 2
+    assert "approve the plan" in reminders[0]["message"].text
+    assert "approval to use Write" in reminders[1]["message"].text
+    assert reminders[0]["ref"] in transport.delete_calls
+    assert edits._approval_reminder_request_id == "r-2"
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert [e["reason"] for e in retired] == ["superseded"]
+
+
+@pytest.mark.anyio
+async def test_920_refire_replaces_previous() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=0.5)
+    await _run_920(
+        edits,
+        [lambda: clock.set(100.2), 0.03, lambda: clock.set(100.8), 0.03],
+    )
+    first, second = _reminders_920(transport)
+    assert second["options"].replace == first["ref"]
+    assert edits._approval_reminder_ref == second["ref"]
+
+
+@pytest.mark.anyio
+async def test_920_cadence_every_30_min() -> None:
+    """Regression: after 30 min the reminder repeated every 3 min."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    edits._stall_check_interval = 0.001
+    edits._heartbeat_interval = 0.001
+    edits._stall_repeat_seconds = 180.0
+    sent_at: list[float] = []
+    orig_send = transport.send
+
+    async def _send(**kwargs):
+        if kwargs["message"].text.startswith("⏳ Waiting for"):
+            sent_at.append(clock())
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+
+    steps: list[Any] = []
+    for t in range(0, 3001, 30):
+        steps.append(lambda t=t: clock.set(float(t)))
+        steps.append(0.004)
+    await _run_920(edits, steps)
+
+    assert len(sent_at) == 2, sent_at
+    assert 600 <= sent_at[0] < 660
+    assert 2400 <= sent_at[1] < 2460
+    assert edits._stall_warn_count == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["ask", "tool"])
+async def test_920_repeat_reminder_not_swallowed_by_activity_suppression(
+    kind: str,
+) -> None:
+    """Live R20-920e: the 40-min repeat reminder never went out. With a
+    pending approval the open AskUserQuestion / tool row counts as a running
+    tool and the session's MCP children keep CPU busy while the main process
+    sleeps, so the tool-active (and CPU/children-active) suppression branches
+    swallowed every reminder after the first."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    if kind == "ask":
+        await edits.on_event(_ask_action_919())
+        _with_snaps_919(
+            edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+        )
+    else:
+        await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+        _with_snaps_919(edits, [_snap_919("r-1")])
+    edits._stall_check_interval = 0.001
+    edits._heartbeat_interval = 0.001
+    edits._stall_repeat_seconds = 180.0
+    edits.pid = 12345
+    sent_at: list[float] = []
+    orig_send = transport.send
+
+    async def _send(**kwargs):
+        if kwargs["message"].text.startswith("⏳ Waiting for"):
+            sent_at.append(clock())
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+    calls = 0
+
+    def sleeping_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal calls
+        calls += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000 + calls * 300,
+            cpu_stime=200 + calls * 50,
+            child_pids=[pid + 1],
+        )
+
+    steps: list[Any] = []
+    for t in range(0, 3001, 30):
+        steps.append(lambda t=t: clock.set(float(t)))
+        steps.append(0.004)
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=sleeping_cpu_diag,
+    ):
+        await _run_920(edits, steps)
+
+    assert len(sent_at) == 2, sent_at
+    assert 600 <= sent_at[0] < 660
+    assert 2400 <= sent_at[1] < 2460
+
+
+@pytest.mark.anyio
+async def test_920_second_approval_gets_first_threshold() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    holder = _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=1000.0)
+
+    def _resolve_a() -> None:
+        holder["snaps"] = []
+        holder["awaiting"] = False
+        edits.tracker.note_event(
+            action_completed("ctrl.1", "warning", "resolved", True)
+        )
+
+    async def _approval_b() -> None:
+        holder["snaps"] = [_snap_919("r-2", tool_name="Bash")]
+        holder["awaiting"] = True
+        await edits.on_event(
+            _tool_action_919(action_id="ctrl.2", tool_name="Bash", request_id="r-2")
+        )
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)
+            await anyio.sleep(0.03)
+            _resolve_a()
+            await anyio.sleep(0.03)
+            await _approval_b()
+            clock.set(100.5)  # B's age 0.3 s: past FIRST (0.1), not refire
+            await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    reminders = _reminders_920(transport)
+    assert len(reminders) == 2
+    assert "approval to use Bash" in reminders[1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_920_rate_limit_wait_does_not_delay_first_approval_reminder() -> None:
+    """The shared #526 log-pacing clock no longer selects the threshold."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    # An earlier rate-limit wait logged ``subprocess.approval_pending``.
+    edits._last_approval_pending_emit_at = 50.0
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=1000.0)
+    await _run_920(edits, [lambda: clock.set(100.2), 0.05])
+    assert len(_reminders_920(transport)) == 1
+
+
+@pytest.mark.anyio
+async def test_920_delete_failure_falls_back_to_edit() -> None:
+    transport = FakeTransport()
+
+    async def _delete(*, ref):
+        transport.delete_calls.append(ref)
+        return False
+
+    transport.delete = _delete  # type: ignore[method-assign]
+    edits = _make_edits(transport, _KeyboardPresenter())
+    ref = MessageRef(channel_id=123, message_id=77)
+    edits._approval_reminder_ref = ref
+    edits._approval_reminder_request_id = "r-1"
+    with structlog.testing.capture_logs() as logs:
+        await edits._retire_approval_reminder("resolved")
+    assert [c["message"].text for c in transport.edit_calls if c["ref"] == ref] == [
+        "✅ No longer waiting."
+    ]
+    assert edits._approval_reminder_ref is None
+    retired = [
+        e for e in logs if e.get("event") == "progress_edits.approval_reminder_retired"
+    ]
+    assert retired[0]["deleted"] is False
+
+
+@pytest.mark.anyio
+async def test_920_send_failure_keeps_previous_ref() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, [_snap_919("r-1")])
+    _fast_920(edits, first=0.1, repeat=0.5)
+    orig_send = transport.send
+    state = {"fail": False}
+
+    async def _send(**kwargs):
+        if state["fail"] and kwargs["message"].text.startswith("⏳ Waiting for"):
+            return None
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+
+    def _fail() -> None:
+        state["fail"] = True
+        clock.set(100.8)
+
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03, _fail, 0.03])
+    (first,) = _reminders_920(transport)
+    assert edits._approval_reminder_ref == first["ref"]
+
+
+@pytest.mark.anyio
+async def test_920_genuine_stall_not_tracked() -> None:
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.002
+    edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    await edits.on_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="note", title="thinking"),
+            phase="completed",
+            ok=True,
+        )
+    )
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03])
+    assert any("No progress" in c["message"].text for c in transport.send_calls)
+    assert edits._approval_reminder_ref is None
+    before = list(transport.delete_calls)
+    await edits.delete_ephemeral()
+    assert transport.delete_calls == before
+
+
+@pytest.mark.anyio
+async def test_920_retire_runs_while_live_idle() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = True
+    holder = _with_snaps_919(edits, [], awaiting=False)
+    edits.stream.engine_state.live_mode = True
+    edits.stream.engine_state.completed_turns = 1
+    edits.stream.engine_state.turn_open = False
+    ref = MessageRef(channel_id=123, message_id=88)
+    edits._approval_reminder_ref = ref
+    edits._approval_reminder_request_id = "r-1"
+    edits._approval_first_reminder_sent = True
+    _fast_920(edits)
+    assert holder["awaiting"] is False
+    await _run_920(edits, [lambda: clock.set(100.2), 0.03])
+    assert ref in transport.delete_calls
+    assert edits._approval_reminder_ref is None
+    assert edits._approval_first_reminder_sent is False
+
+
+@pytest.mark.anyio
+async def test_920_retire_probe_error_does_not_kill_monitor() -> None:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+    _with_snaps_919(edits, RuntimeError("boom"))
+    edits._approval_reminder_ref = MessageRef(channel_id=123, message_id=90)
+    edits._approval_reminder_request_id = "r-1"
+    _fast_920(edits, first=0.1, repeat=0.1)
+    ticks = {"n": 0}
+    orig = edits._heartbeat_tick
+
+    def _count() -> None:
+        ticks["n"] += 1
+        orig()
+
+    edits._heartbeat_tick = _count  # type: ignore[method-assign]
+    await _run_920(edits, [lambda: clock.set(100.2), 0.04])
+    assert ticks["n"] >= 3
+    # Still pending (probe error is not "resolved"): the ref survives and
+    # the refire replaced it.
+    assert edits._approval_reminder_ref is not None
+
+
+# ---------------------------------------------------------------------------
+# #929 background agent approval while live-idle (standalone surface)
+# ---------------------------------------------------------------------------
+
+_CB_929 = [
+    [
+        {"text": "✅ Approve", "callback_data": "claude_control:approve:r-1"},
+        {"text": "❌ Deny", "callback_data": "claude_control:deny:r-1"},
+    ]
+]
+
+
+def _kb_action_929(request_id="r-1", action_id="claude.control.1", **extra):
+    from untether.model import Action, ActionEvent
+
+    detail: dict[str, Any] = {
+        "request_id": request_id,
+        "request_type": "CanUseTool",
+        "tool_name": "Bash",
+        "agent_id": "a1c1",
+        "decision_reason_type": "hook",
+        "decision_reason": "R20 test hook: confirm this command",
+        "inline_keyboard": {
+            "buttons": [
+                [
+                    {
+                        "text": "✅ Approve",
+                        "callback_data": f"claude_control:approve:{request_id}",
+                    },
+                    {
+                        "text": "❌ Deny",
+                        "callback_data": f"claude_control:deny:{request_id}",
+                    },
+                ]
+            ]
+        },
+        **extra,
+    }
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: Bash (command=`echo R20ASK`)",
+            detail=detail,
+        ),
+        phase="started",
+    )
+
+
+def _edits_929(
+    *,
+    run_level=True,
+    finalizing=True,
+    snaps=(),
+    turn_open=False,
+    surface=None,
+):
+    from untether.orphan_approvals import OrphanApprovalSurface
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = run_level
+    edits._finalizing = finalizing
+    holder: dict[str, Any] = {"snaps": list(snaps), "awaiting": bool(snaps)}
+
+    def _snapshot(now=None):
+        current = holder["snaps"]
+        if isinstance(current, Exception):
+            raise current
+        return list(current)
+
+    es = _make_engine_state(
+        control_request_snapshot=_snapshot,
+        awaiting_user_approval=lambda: holder["awaiting"],
+        live_mode=True,
+        completed_turns=1,
+        turn_open=turn_open,
+        tasks={},
+    )
+    edits.stream = _make_stream(engine_state=es)
+    edits.orphan_approvals = surface or OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=clock,
+        label_for=lambda agent_id: None,
+        anchor_for=lambda agent_id: None,
+    )
+    return edits, transport, clock, holder
+
+
+def _surface_sends_929(transport) -> list[dict]:
+    return [
+        c for c in transport.send_calls if "needs your approval" in c["message"].text
+    ]
+
+
+async def _drive_929(edits, *steps) -> None:
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for step in steps:
+                if callable(step):
+                    result = step()
+                    if hasattr(result, "__await__"):
+                        await result
+                else:
+                    await anyio.sleep(step)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+@pytest.mark.anyio
+async def test_929_live_idle_approval_surfaced() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1", tool_name="Bash")])
+    edits._heartbeat_interval = edits._stall_check_interval = 10.0
+    evt = _kb_action_929()
+    with structlog.testing.capture_logs() as logs:
+        await _drive_929(edits, 0.01, lambda: edits.on_event(evt), 0.05)
+    (sent,) = _surface_sends_929(transport)
+    assert sent["message"].extra["reply_markup"] == {"inline_keyboard": _CB_929}
+    assert sent["options"].notify is True
+    assert "🪝 R20 test hook: confirm this command" in sent["message"].text
+    assert transport.edit_calls == []  # no progress repaint
+    (log,) = [e for e in logs if e.get("event") == "approval_surface.sent"]
+    assert log["source"] == "event" and log["agent_id"] == "a1c1"
+
+
+@pytest.mark.anyio
+async def test_929_not_surfaced_while_progress_live() -> None:
+    edits, transport, _, _ = _edits_929(finalizing=False, snaps=[_snap_919("r-1")])
+    edits._heartbeat_interval = edits._stall_check_interval = 10.0
+    evt = _kb_action_929()
+    await _drive_929(edits, 0.01, lambda: edits.on_event(evt), 0.05)
+    assert _surface_sends_929(transport) == []
+    assert transport.edit_calls  # the progress message carries the keyboard
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_turn_edits_never_offer() -> None:
+    edits, _, _, _ = _edits_929(run_level=False, finalizing=True)
+    await edits.on_event(_kb_action_929())
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_no_unanswerable_when_surfaced() -> None:
+    """The incident regression: a surfaced request aged past the tool
+    threshold has visible buttons, so the #684 canary stays quiet."""
+    from types import SimpleNamespace
+
+    from untether.runner_bridge import build_control_surface_probe
+
+    edits, transport, _, _ = _edits_929(snaps=[_snap_919("r-1", age_s=700.0)])
+    edits.control_surface_probe = build_control_surface_probe(
+        edits, SimpleNamespace(current=None)
+    )
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    assert len(_surface_sends_929(transport)) == 1
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert [e for e in logs if e.get("event") == "control_request.unanswerable"] == []
+    assert edits.orphan_approvals.request_ids() == frozenset({"r-1"})
+
+
+def _rescue_edits_929(snap, *, visible=frozenset()):
+    edits, transport, clock, holder = _edits_929(snaps=[snap])
+    edits.control_surface_probe = lambda: frozenset(visible)
+    return edits, transport
+
+
+@pytest.mark.anyio
+async def test_929_rescue_after_grace() -> None:
+    edits, transport = _rescue_edits_929(_snap_919("r-9", age_s=31.0, tool_name="Bash"))
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset({"r-9"})
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    rows = sent["message"].extra["reply_markup"]["inline_keyboard"]
+    assert [b["callback_data"] for row in rows for b in row] == [
+        "claude_control:approve:r-9",
+        "claude_control:deny:r-9",
+    ]
+
+
+@pytest.mark.anyio
+async def test_929_rescue_uses_tracked_action() -> None:
+    edits, transport = _rescue_edits_929(_snap_919("r-1", age_s=31.0))
+    edits.tracker.note_event(_kb_action_929())  # keyboard action, no host
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    assert "A background agent needs your approval" in sent["message"].text
+
+
+def test_929_rescue_not_before_grace() -> None:
+    edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=10.0))
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_skips_no_writer() -> None:
+    from untether.runners.claude import ControlRequestSnapshot
+
+    snap = ControlRequestSnapshot(
+        request_id="r-9",
+        session_id="s",
+        age_s=40.0,
+        tool_name="Bash",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=False,
+    )
+    edits, _ = _rescue_edits_929(snap)
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_skipped_while_buttons_visible() -> None:
+    edits, _ = _rescue_edits_929(
+        _snap_919("r-9", age_s=40.0), visible={"claude_control:approve:r-other"}
+    )
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+def test_929_rescue_disabled_by_detect_kill_switch() -> None:
+    edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=40.0))
+    edits._detect_unanswerable = False
+    edits._check_unanswerable_control_requests()
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_heartbeat_retires_after_tap() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+    # The tap answers the request: the registry drops it.
+    holder["snaps"] = []
+    holder["awaiting"] = False
+    with structlog.testing.capture_logs() as logs:
+        await edits._sync_orphan_approvals()
+    assert sent["ref"] in transport.delete_calls
+    (retired,) = [e for e in logs if e.get("event") == "approval_surface.retired"]
+    assert retired["reason"] == "resolved"
+    # The run-level tracker's stale action was completed.
+    assert edits._has_pending_approval() is False
+
+
+@pytest.mark.anyio
+async def test_929_probe_error_does_not_retire() -> None:
+    edits, transport, _, holder = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    holder["snaps"] = RuntimeError("boom")
+    await edits._sync_orphan_approvals()
+    assert transport.delete_calls == []
+    assert edits.orphan_approvals.surfaced_count == 1
+
+
+@pytest.mark.anyio
+async def test_929_cancel_completion_retires_immediately() -> None:
+    edits, transport, _, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+    await edits.on_event(
+        action_completed("claude.control.1", "warning", "⏹️ withdrawn", True)
+    )
+    await edits._flush_orphans()
+    assert sent["ref"] in transport.delete_calls
+    assert edits.orphan_approvals.request_ids() == frozenset()
+
+
+@pytest.mark.anyio
+async def test_929_delete_ephemeral_retires_run_level_only() -> None:
+    edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    (sent,) = _surface_sends_929(transport)
+
+    turn_edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    turn_edits.orphan_approvals = edits.orphan_approvals
+    await turn_edits.delete_ephemeral()
+    assert sent["ref"] not in transport.delete_calls
+    assert edits.orphan_approvals.surfaced_count == 1
+
+    with structlog.testing.capture_logs() as logs:
+        await edits.delete_ephemeral()
+    assert sent["ref"] in transport.delete_calls
+    (retired,) = [e for e in logs if e.get("event") == "approval_surface.retired"]
+    assert retired["reason"] == "run_end"
+
+
+@pytest.mark.anyio
+async def test_929_live_idle_suppression_unchanged() -> None:
+    edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-1")])
+    await edits.on_event(_kb_action_929())
+    await edits._flush_orphans()
+    edits._stall_check_interval = edits._heartbeat_interval = 0.002
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    with structlog.testing.capture_logs() as logs:
+        await _drive_929(edits, lambda: clock.set(100.5), 0.05)
+    assert not any(c["message"].text.startswith("⏳") for c in transport.send_calls)
+    (log,) = [
+        e for e in logs if e.get("event") == "progress_edits.stall_live_idle_suppressed"
+    ]
+    assert log["orphan_approvals"] == 1
+    assert log["threshold_reason"] == "pending_approval"
+
+
+@pytest.mark.anyio
+async def test_929_wake_turn_stall_not_masked_by_surfaced_orphan() -> None:
+    """Review amendment 4: a surfaced background request must not turn the
+    wake turn's genuine stall into a silent expected wait."""
+    from untether.model import Action, ActionEvent
+
+    run_edits, transport, clock, _ = _edits_929(snaps=[_snap_919("r-orphan")])
+    await run_edits.on_event(_kb_action_929("r-orphan"))
+    await run_edits._flush_orphans()
+
+    turn_edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    turn_edits.stream = run_edits.stream
+    turn_edits.stream.engine_state.turn_open = True
+    turn_edits.orphan_approvals = run_edits.orphan_approvals
+    assert turn_edits._has_pending_approval() is False
+    turn_edits._stall_check_interval = turn_edits._heartbeat_interval = 0.002
+    turn_edits._STALL_THRESHOLD_SECONDS = 0.05
+    turn_edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    await turn_edits.on_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(id="n1", kind="note", title="thinking"),
+            phase="completed",
+            ok=True,
+        )
+    )
+    await _drive_929(turn_edits, lambda: clock.set(100.5), 0.05)
+    stalls = [
+        c["message"].text
+        for c in transport.send_calls
+        if c["message"].text.startswith("⏳")
+    ]
+    assert stalls
+    assert all("Waiting for" not in t for t in stalls)
+    assert any("No progress" in t for t in stalls)
+
+
+def test_929_reminder_targets_newest_unsurfaced_request() -> None:
+    from untether.orphan_approvals import OrphanApprovalSurface
+
+    transport = FakeTransport()
+    surface = OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=_FakeClock(),
+        label_for=lambda a: None,
+        anchor_for=lambda a: None,
+    )
+    surface.offer(_kb_action_929("r-orphan").action)
+    edits, _, _, _ = _edits_929(
+        run_level=False,
+        turn_open=True,
+        snaps=[
+            _snap_919("r-orphan", age_s=10.0, tool_name="Bash"),
+            _snap_919("r-mine", age_s=900.0, tool_name="Write"),
+        ],
+        surface=surface,
+    )
+    assert edits._has_pending_approval() is True
+    info = edits._pending_request_info()
+    assert info is not None
+    assert (info.request_id, info.tool_name) == ("r-mine", "Write")
+
+
+@pytest.mark.anyio
+async def test_929_non_claude_engine_noop() -> None:
+    edits, transport, _, _ = _edits_929()
+    edits.stream = None
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
+async def test_929_session_summary_counts_surfaces() -> None:
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="ok"),
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    (summary,) = [e for e in logs if e.get("event") == "session.summary"]
+    assert summary["approval_surfaces"] == 0

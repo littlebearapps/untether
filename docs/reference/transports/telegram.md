@@ -443,7 +443,10 @@ deny_globs = [
 - **Outbox delivery** — after a run, files the agent left in `outbox_dir`
   (default `.untether-outbox`, up to `outbox_max_files` = 10) are sent as
   documents. Symlinks, deny-globbed and oversized files are skipped and, with
-  `outbox_notify_skipped = true` (default), reported in the chat.
+  `outbox_notify_skipped = true` (default), reported in the chat. Only entries
+  written or copied in during the run are sent (#924); older leftovers and
+  files over the cap are moved to `.untether-outbox/.skipped/` with one notice
+  (`outbox_stale_policy = "send"` restores the old behaviour).
   `outbox_deliver_directories = "zip"` bundles a directory's deliverable
   members into one `.zip`, never following symlinks and pruning deny-globbed
   subdirectories.

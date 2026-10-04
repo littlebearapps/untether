@@ -18,7 +18,12 @@ from untether.session_quarantine import QuarantineStore, set_quarantine_store
 
 pytestmark = pytest.mark.anyio
 
-_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S", "FAKE_CLAUDE_ACK_TOOL")
+_ENV = (
+    "FAKE_CLAUDE_SCENARIO",
+    "FAKE_CLAUDE_WAKE_S",
+    "FAKE_CLAUDE_ACK_TOOL",
+    "FAKE_CLAUDE_NO_QUERY_INIT",  # #928
+)
 
 
 @pytest.fixture(autouse=True)
@@ -273,3 +278,37 @@ async def test_noop_turns_after_the_report_fold_silently(
     assert "💬 Wake-up: still nothing new." in lines
     pushed = [c for c in transport.send_calls if c["options"].notify]
     assert pushed == report
+
+
+@pytest.mark.parametrize("consolidate", [True, False], ids=["fold_on", "fold_off"])
+@pytest.mark.parametrize("with_init", [False, True], ids=["case_r", "case_i"])
+async def test_928_no_query_tail_never_reaches_telegram(
+    monkeypatch: pytest.MonkeyPatch, consolidate: bool, with_init: bool
+) -> None:
+    """#928: the CLI's empty no-query result after a wake turn is neither a
+    run nor a message — with consolidation on (no empty ``💬`` row) or off
+    (no empty ``🔔 Claude continued``) — and a2's later finish still pushes
+    (the tail no longer arms the #785 pairing window)."""
+    _progress(
+        monkeypatch, show_background_tasks=True, consolidate_wake_turns=consolidate
+    )
+    if with_init:
+        os.environ["FAKE_CLAUDE_NO_QUERY_INIT"] = "1"
+    with capture_logs() as logs:
+        transport = await _drive("agent_wake_no_query_tail", wake_s=0.6)
+    assert not _sent(transport, "Claude continued")
+    assert not [c for c in transport.send_calls if not c["message"].text.strip()]
+    lines = _status_text(transport).splitlines()
+    assert not any(ln.strip() in ("💬", "↳") for ln in lines)
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert all(e.get("num_turns") != 0 for e in completed)
+    assert len(completed) == 3  # the run, a1's wake turn, a2's wake turn
+    names = [e["event"] for e in logs]
+    assert "claude.turn.task_end_paired" not in names
+    assert names.count("claude.turn.no_query") == 1
+    pushed = [
+        c
+        for c in transport.send_calls
+        if c["options"].notify and "Background task finished" in c["message"].text
+    ]
+    assert any("a2 done" in c["message"].text for c in pushed)

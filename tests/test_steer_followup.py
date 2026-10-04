@@ -201,6 +201,7 @@ def _cleanup():
         reg.pop(SID, None)
     claude_mod._PENDING_ASK_REQUESTS.clear()
     rb._FOLLOWUP_ANCHORS.clear()
+    rb._FOLLOWUP_IN_FLIGHT.clear()
     steer_mod._NOTICED.clear()
 
 
@@ -525,6 +526,92 @@ def test_unrelated_action_keeps_anchor() -> None:
     )
     rb._consume_absorbed_anchor(evt)
     assert len(rb.drain_followup_anchors(SID)) == 1
+
+
+# ── #921: a steer's anchor is in flight until the write is decided ──────────
+
+
+def _spy_steer(monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[bool]:
+    """Replace ``steer_into_session``: record whether its anchor was in flight
+    (owned by the writer, invisible to the run-end sweep) during the call."""
+    seen: list[bool] = []
+
+    async def fake(session_id: str, text: str, *, command_uuid: str, **_k: Any):
+        seen.append(command_uuid in rb._FOLLOWUP_IN_FLIGHT)
+        assert rb.drain_followup_anchors(SID) == []  # the sweep leaves it alone
+        if outcome == "raises":
+            raise RuntimeError("boom")
+        return outcome
+
+    monkeypatch.setattr(claude_mod, "steer_into_session", fake)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "options_changed",
+        "result_pending",
+        "window_closed",
+        "no_live_session",
+        "write_failed",
+        "raises",
+    ],
+)
+async def test_921_steer_fallback_settles_in_flight(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _install()
+    seen = _spy_steer(monkeypatch, outcome)
+    cfg = _cfg("steer")
+    if outcome == "raises":
+        with pytest.raises(RuntimeError, match="boom"):
+            await _steer(cfg)
+    else:
+        assert await _steer(cfg) is False
+    assert seen == [True]
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+@pytest.mark.parametrize("outcome", ["steered", "written_idle"])
+async def test_921_steer_written_anchor_not_in_flight(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _install()
+    seen = _spy_steer(monkeypatch, outcome)
+    assert await _steer(_cfg("steer")) is True
+    assert seen == [True]
+    # Kept for the turn that answers it; no longer in flight, so the run-end
+    # sweep can report it if the session dies before that turn opens.
+    (uuid_,) = rb._FOLLOWUP_ANCHORS
+    assert rb._FOLLOWUP_ANCHORS[uuid_][1].message_id == 42
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_steer_budget_refusal_registers_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether import budget_gate
+
+    _install()
+    monkeypatch.setattr(budget_gate, "daily_gate", lambda _opts=None: (5.0, 1.0))
+    assert await _steer(_cfg("steer")) is False
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_real_steer_settles_on_written_and_closed() -> None:
+    """Unpatched path: a real mid-turn steer settles written; a steer into a
+    closed window settles not-written. Neither leaves an in-flight entry."""
+    live, _pipe = _install()
+    assert await _steer(_cfg("steer")) is True
+    assert len(rb._FOLLOWUP_ANCHORS) == 1 and rb._FOLLOWUP_IN_FLIGHT == {}
+    rb._FOLLOWUP_ANCHORS.clear()
+    await claude_mod.close_steer_window(SID, "cancel")
+    assert await _steer(_cfg("steer"), user_msg_id=43) is False
+    assert rb._FOLLOWUP_ANCHORS == {} and rb._FOLLOWUP_IN_FLIGHT == {}
+    assert live.steer_closed_reason == "cancel"
 
 
 # ── /steer + /queue commands ────────────────────────────────────────────────

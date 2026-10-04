@@ -171,6 +171,8 @@ def _format_export_markdown(
     lines.append("---\n")
 
     started_rendered = False
+    # #928: where each live turn's heading starts (a dropped turn rewinds).
+    turn_heading_at: dict[object, int] = {}
     for evt in events:
         evt_type = evt.get("type", "unknown")
         if evt_type == "started":
@@ -211,7 +213,14 @@ def _format_export_markdown(
             # #418: a later turn of a live session (follow-up / wake turn).
             turn = evt.get("turn")
             label = _TURN_REASON_LABELS.get(str(evt.get("reason")), "turn")
+            turn_heading_at[turn] = len(lines)
             lines.append(f"\n## Turn {turn} ({label})")
+        elif evt_type == "turn_dropped":
+            # #928: the CLI's no-query result closed that turn — it was never
+            # a turn, so drop its heading (and anything rendered under it).
+            at = turn_heading_at.pop(evt.get("turn"), None)
+            if at is not None:
+                del lines[at:]
         elif evt_type == "completed":
             ok = evt.get("ok", False)
             answer = evt.get("answer", "")

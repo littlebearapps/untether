@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import re
 import signal as _signal
 import threading
 import time
@@ -23,11 +24,13 @@ from .background_status import (
     live_shown,
     register_live_count_source,
     render_background_block,
+    task_label,
     unregister_live_count_source,
     wake_fold_decision,
 )
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
+from .events import EventFactory
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import (
@@ -39,6 +42,7 @@ from .model import (
     TurnEvent,
     UntetherEvent,
 )
+from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import (
@@ -318,6 +322,9 @@ def build_control_surface_probe(
         turn_edits = getattr(current, "edits", None)
         if turn_edits is not None:
             callbacks |= control_callbacks_in(turn_edits.last_rendered)
+        # #929: buttons on the standalone approval messages count too.
+        if edits.orphan_approvals is not None:
+            callbacks |= edits.orphan_approvals.callbacks()
         if edits.has_outline_messages or (
             turn_edits is not None and turn_edits.has_outline_messages
         ):
@@ -414,6 +421,44 @@ def _load_auto_continue_settings():
         from .settings import AutoContinueSettings
 
         return AutoContinueSettings()
+
+
+def _load_outbox_settings(cfg: ExecBridgeConfig) -> Any | None:
+    """#924: the outbox settings to use for THIS delivery (hot-reload).
+
+    ``cfg.outbox_config`` is frozen at startup (``telegram/backend.py``) and
+    ``TelegramBridgeConfig.update_from`` never refreshes it, so every
+    ``outbox_*`` edit used to need a restart. Read per delivery instead,
+    following ``_load_auto_continue_settings`` (cheap: #506 parse cache).
+
+    - ``None`` when the outbox wasn't enabled at startup (no send callable —
+      turning ``files.enabled`` on still needs a restart) or is now disabled
+      in the live config;
+    - the frozen ``cfg.outbox_config`` when no config file is loadable (tests,
+      API users) **or the file doesn't parse** (amendment 3: a half-edited
+      toml must not silently swap in hard defaults mid-run);
+    - otherwise the live ``[transports.telegram.files]``.
+    """
+    frozen = cfg.outbox_config
+    if cfg.send_file is None or frozen is None:
+        return None
+    try:
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+    except Exception:  # noqa: BLE001
+        logger.warning("outbox_settings.load_failed", exc_info=True)
+        return frozen
+    if result is None:
+        return frozen
+    settings, _ = result
+    try:
+        files = settings.transports.telegram.files
+    except AttributeError:
+        return frozen
+    if not (files.enabled and files.outbox_enabled):
+        return None
+    return files
 
 
 def _is_signal_death(rc: int | None) -> bool:
@@ -531,12 +576,81 @@ def _format_outbox_skipped_notice(skipped: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+_OUTBOX_NOTICE_NAME_CAP = 5
+
+
+def _format_outbox_stale_notice(
+    stale: list[tuple[str, float]],
+    *,
+    archived_to: str | None,
+    cleanup: bool,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: one block for outbox entries that predate the run (not sent).
+
+    Newest first, up to 5 names, plus the count and the date range.
+    """
+    from datetime import datetime
+
+    count = len(stale)
+    noun, verb = ("file", "was") if count == 1 else ("files", "were")
+    times = [t for _, t in stale]
+    first = datetime.fromtimestamp(min(times)).strftime("%Y-%m-%d")
+    last = datetime.fromtimestamp(max(times)).strftime("%Y-%m-%d")
+    span = first if first == last else f"{first} – {last}"
+    lines = [
+        f"\U0001f4ce {count} older {noun} {verb} already in {outbox_dir}/ "
+        f"before this run ({span}), so they weren't sent:"
+    ]
+    items = sorted(stale, key=lambda kv: kv[1], reverse=True)
+    for name, _ in items[:_OUTBOX_NOTICE_NAME_CAP]:
+        lines.append(f"- {name}")
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        lines.append(f"- … and {count - _OUTBOX_NOTICE_NAME_CAP} more")
+    if archived_to is not None:
+        graveyard = archived_to.rstrip("/")
+        lines.append(
+            f"Moved to {archived_to} — /file get {graveyard} fetches them as a zip."
+        )
+    elif not cleanup:
+        lines.append("Left in place (outbox_cleanup is off).")
+    else:
+        lines.append("Left in place (moving them aside failed).")
+    return "\n".join(lines)
+
+
+def _format_outbox_overflow_notice(
+    overflow: list[str],
+    *,
+    max_files: int | None,
+    archived_to: str | None,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: fresh files beyond ``outbox_max_files`` — previously hidden."""
+    count = len(overflow)
+    noun, verb = ("file", "wasn't") if count == 1 else ("files", "weren't")
+    names = ", ".join(overflow[:_OUTBOX_NOTICE_NAME_CAP])
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        names += f" and {count - _OUTBOX_NOTICE_NAME_CAP} more"
+    where = (
+        f"moved to {archived_to}"
+        if archived_to is not None
+        else f"left in {outbox_dir}/"
+    )
+    return (
+        f"\U0001f4ce {count} more {noun} {verb} sent "
+        f"(limit outbox_max_files = {max_files}): {names} — {where}."
+    )
+
+
 async def _surface_outbox_skipped(
     cfg: ExecBridgeConfig,
     incoming: IncomingMessage,
     user_ref: MessageRef,
     skipped: list[tuple[str, str]],
     outbox_config: Any,
+    *,
+    result: Any | None = None,
 ) -> None:
     """#524 rc20 follow-up: send the 📎 Outbox skipped notice as a follow-up
     Telegram message. Extracted so the same surface fires from both the
@@ -547,15 +661,40 @@ async def _surface_outbox_skipped(
     The "..." pseudo-entry is the max-files-exceeded notice which we keep
     in logs but skip from the user-facing block (the per-file reason there
     isn't actionable).
+
+    #924: pass the delivery's ``OutboxResult`` as ``result`` to add the
+    stale-files block and the overflow block. All three blocks go out as one
+    message, all gated by ``outbox_notify_skipped``.
     """
-    if not skipped:
-        return
     if not getattr(outbox_config, "outbox_notify_skipped", True):
         return
+    blocks: list[str] = []
     notable = [(name, reason) for (name, reason) in skipped if name != "..."]
-    if not notable:
+    if notable:
+        blocks.append(_format_outbox_skipped_notice(notable))
+    if result is not None:
+        outbox_dir = getattr(result, "outbox_dir", ".untether-outbox")
+        if getattr(result, "stale", None):
+            blocks.append(
+                _format_outbox_stale_notice(
+                    result.stale,
+                    archived_to=result.stale_archived_to,
+                    cleanup=result.cleanup,
+                    outbox_dir=outbox_dir,
+                )
+            )
+        if getattr(result, "overflow", None):
+            blocks.append(
+                _format_outbox_overflow_notice(
+                    result.overflow,
+                    max_files=result.overflow_limit,
+                    archived_to=result.overflow_archived_to,
+                    outbox_dir=outbox_dir,
+                )
+            )
+    if not blocks:
         return
-    text = _format_outbox_skipped_notice(notable)
+    text = "\n\n".join(blocks)
     try:
         await cfg.transport.send(
             channel_id=incoming.channel_id,
@@ -678,15 +817,18 @@ _DEFAULT_PREAMBLE = (
     "user's requested content. Hook concerns are secondary — briefly note them "
     "AFTER the main content, never instead of it.\n\n"
     "Configuration changes (`untether.toml`):\n"
-    "- Untether hot-reloads `~/.untether/untether.toml` automatically — "
+    "- Untether hot-reloads its `untether.toml` (default "
+    "`~/.untether/untether.toml`) automatically — "
     "edits take effect within ~1 second of saving.\n"
-    "- Do NOT run `systemctl --user restart untether` after editing config. "
+    "- Do NOT restart the Untether service after editing config "
+    "(`systemctl --user restart untether`, an `untether-*` instance unit, or "
+    "`launchctl kickstart … untether`). "
     "The restart is unnecessary, and because it shuts down the very session "
     "issuing the command, the graceful drain will time out (120s) and your "
     "final answer to the user will be silently dropped.\n"
     "- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, "
-    "`message_overflow`) are flagged at reload time — if you didn't see "
-    "such a warning, no restart is needed.\n\n"
+    "`message_overflow`, turning on `[triggers] enabled`) are flagged at "
+    "reload time — if you didn't see such a warning, no restart is needed.\n\n"
     "Plan-mode requirements (when you call `ExitPlanMode`):\n"
     "- Your `plan` parameter MUST be a concise 3–5 bullet summary of your "
     "findings, decisions, or proposed changes — never just a file path. "
@@ -714,6 +856,9 @@ _DEFAULT_PREAMBLE = (
     "  - To send files to the user, write them to `.untether-outbox/`\n"
     "  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n"
     "  - Files are delivered as Telegram documents when the run completes\n"
+    "  - Only files written or copied into it during this run are sent — "
+    "older leftovers are moved aside. To resend an older file, copy it in "
+    "again.\n"
     "  - The user can also request any project file with `/file get <path>`\n"
     "  ### Next Steps\n"
     "  - [Remaining work, if any]\n"
@@ -1519,7 +1664,10 @@ def _record_export_event(
             # #418: a live session's later turns (follow-ups, wake turns).
             # The opening boundary marks the turn; the closing one carries
             # its answer, so it is recorded as that turn's ``completed``.
-            if evt.phase == "completed":
+            if evt.phase == "completed" and evt.reason == "no_query":
+                # #928: not a turn — the export drops its opening heading.
+                event_dict = {"type": "turn_dropped"}
+            elif evt.phase == "completed":
                 event_dict = {
                     "type": "completed",
                     "ok": evt.ok,
@@ -1942,6 +2090,59 @@ async def _send_or_edit_message(
     return sent, False
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingRequestInfo:
+    """#919: what the pending control request is, for the reminder copy.
+
+    ``kind``: ``question`` (AskUserQuestion), ``plan`` (ExitPlanMode / Pause
+    & Outline hold / ``da:`` discuss approval), ``tool`` (any other tool
+    permission, incl. hook callbacks with no tool name) or ``unknown``.
+    """
+
+    kind: str
+    request_id: str | None = None
+    tool_name: str | None = None
+    question: str | None = None
+    answerable_by_text: bool = True
+
+
+_ASK_TITLE_PREFIX_RE = re.compile(r"^❓\s*(?:Question \d+ of \d+:\s*)?")
+
+
+def _trim_line(text: str, limit: int) -> str:
+    """#919: first line of ``text``, stripped, truncated to ``limit`` chars
+    (``…`` included)."""
+    line = (text or "").strip().split("\n", 1)[0].strip()
+    if len(line) > limit:
+        return line[: max(0, limit - 1)] + "…"
+    return line
+
+
+def _approval_reminder_headline(info: _PendingRequestInfo | None, mins: int) -> str:
+    """#919: user-facing headline for the pending-approval stall reminder."""
+    tail = "The session is paused, not stuck."
+    kind = info.kind if info is not None else "unknown"
+    if kind == "question":
+        how = (
+            "tap an option above or reply with your answer"
+            if info is None or info.answerable_by_text
+            else "tap an option above"
+        )
+        return f"⏳ Waiting for your answer ({mins} min) — {how}. {tail}"
+    if kind == "plan":
+        return (
+            f"⏳ Waiting for you to approve the plan ({mins} min) — tap a "
+            f"button above. {tail}"
+        )
+    tool = _trim_line(info.tool_name or "", 40) if info is not None else ""
+    if kind == "tool" and tool:
+        return (
+            f"⏳ Waiting for your approval to use {tool} ({mins} min) — tap "
+            f"Approve or Deny above. {tail}"
+        )
+    return f"⏳ Waiting for your approval ({mins} min) — tap a button above. {tail}"
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -1975,6 +2176,17 @@ class ProgressEdits:
         self.thread_id = thread_id
         self._approval_notified: bool = False
         self._approval_notify_ref: MessageRef | None = None
+        # #920: the pending-approval stall reminder is owned like
+        # ``_approval_notify_ref``: one visible copy (a refire replaces it),
+        # deleted once its request resolves or the run/turn ends.
+        self._approval_reminder_ref: MessageRef | None = None
+        self._approval_reminder_request_id: str | None = None
+        # #920: reminder-specific "first reminder already sent" flag. Picks
+        # the 10-min vs 30-min approval threshold; reset whenever no approval
+        # is pending so each approval in a run gets its own 10-min reminder.
+        # (``_last_approval_pending_emit_at`` stays the #526 log-pacing clock,
+        # shared with the rate-limit / api-retry / compacting waits.)
+        self._approval_first_reminder_sent: bool = False
         # #591: set once the final answer has been (or is about to be)
         # delivered ahead of subprocess exit. Suppresses further progress
         # repaints and the #470 post-result closing message so neither can
@@ -2057,6 +2269,11 @@ class ProgressEdits:
         self.control_surface_probe: Callable[[], frozenset[str]] | None = None
         self._detect_unanswerable: bool = True
         self._unanswerable_warned: set[str] = set()
+        # #929: standalone pushed approval messages for requests with no
+        # visible keyboard (a background agent asking while live-idle). Owned
+        # by the run-level edits; follow-up turn edits get a read-only
+        # reference so their approval state ignores surfaced requests.
+        self.orphan_approvals: OrphanApprovalSurface | None = None
 
     @property
     def has_outline_messages(self) -> bool:
@@ -2308,6 +2525,22 @@ class ProgressEdits:
             # Heartbeat tick — cheap (no proc_diag, just dict scans).
             self._heartbeat_tick()
             await self._flush_pending_closing_message()
+            # #920: retire a reminder whose request was answered or replaced.
+            # Before the live-idle ``continue`` below, so a run-level monitor
+            # standing down while live-idle still cleans up.
+            try:
+                await self._maybe_retire_approval_reminder()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug(
+                    "progress_edits.approval_reminder_retire_failed", exc_info=True
+                )
+            # #929: then the standalone approval surfaces (retire answered,
+            # retry failed sends, re-post due) — fixed order after #920's
+            # retire (review amendment 5), also before the live-idle continue.
+            try:
+                await self._sync_orphan_approvals()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.orphan_sync_failed", exc_info=True)
 
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
@@ -2357,7 +2590,10 @@ class ProgressEdits:
                 # get a visible "no action needed" message in the same
                 # window as a normal stall), subsequent reminders gated
                 # by the 1800 s refire threshold.
-                if self._last_approval_pending_emit_at == 0.0:
+                # #920: a reminder-specific flag, not the shared #526
+                # log-pacing clock (a prior rate-limit wait set that one and
+                # pushed the first approval reminder out to 30 min).
+                if not self._approval_first_reminder_sent:
                     threshold = self._STALL_THRESHOLD_APPROVAL_FIRST
                 else:
                     threshold = self._STALL_THRESHOLD_APPROVAL
@@ -2466,6 +2702,12 @@ class ProgressEdits:
                         threshold_reason=threshold_reason,
                         run_level=self.run_level,
                         pid=self.pid,
+                        # #929: requests shown on standalone approval messages.
+                        orphan_approvals=(
+                            self.orphan_approvals.surfaced_count
+                            if self.orphan_approvals is not None
+                            else 0
+                        ),
                     )
                 continue
 
@@ -2478,10 +2720,16 @@ class ProgressEdits:
             )
 
             now = self.clock()
-            if (
-                self._stall_warned
-                and (now - self._last_stall_warn_at) < self._stall_repeat_seconds
-            ):
+            # #920: an approval wait repeats every 30 min (as documented),
+            # not every ``stall_repeat_seconds`` once past the 30-min mark —
+            # elapsed never resets while the request waits. Paced here, not
+            # in the send block, so paced ticks don't bump ``stall_warn_count``.
+            repeat_s = (
+                self._STALL_THRESHOLD_APPROVAL
+                if threshold_reason == "pending_approval"
+                else self._stall_repeat_seconds
+            )
+            if self._stall_warned and (now - self._last_stall_warn_at) < repeat_s:
                 continue
 
             self._stall_warned = True
@@ -2577,8 +2825,8 @@ class ProgressEdits:
             # deliberating on an approval, demote the WARN to a different
             # structured INFO (``subprocess.approval_pending``) and pace it
             # to once per 30 minutes. The chat-side rendering below still
-            # emits the friendly "⏳ Awaiting your approval (N min)" copy
-            # (#494-C) — operators just stop getting warn-filter spam for
+            # emits the friendly "⏳ Waiting for your … (N min)" copy
+            # (#494-C, #919) — operators just stop getting warn-filter spam for
             # what is by definition not a hang. The daemon
             # (``untether-issue-watcher``) and ``/monitor`` are configured
             # to treat WARNs as auto-fileable, so this also stops
@@ -2828,7 +3076,14 @@ class ProgressEdits:
             # event so journalctl can audit which rule fired. The
             # heartbeat bump keeps the elapsed-time tail current
             # without resetting stall counters.
-            if not frozen_escalate and _post_result_idle:
+            # #920 (live R20-920e): an approval wait is not a stall — its
+            # reminder must not be swallowed by the activity suppressions
+            # below. The open AskUserQuestion / tool row counts as a running
+            # tool and MCP children keep CPU busy while the main process
+            # sleeps, which silenced every reminder after the first.
+            _approval_wait = threshold_reason == "pending_approval"
+            _notify_anyway = frozen_escalate or _approval_wait
+            if not _notify_anyway and _post_result_idle:
                 self._bump_stall_suppression("post_result")
                 logger.info(
                     "progress_edits.stall_post_result_suppressed",
@@ -2838,7 +3093,7 @@ class ProgressEdits:
                     pid=self.pid,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _wakeup_state is not None:
+            elif not _notify_anyway and _wakeup_state is not None:
                 soonest, count = _wakeup_state
                 logger.info(
                     "progress_edits.stall_schedule_wakeup_suppressed",
@@ -2850,7 +3105,7 @@ class ProgressEdits:
                     wakeup_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _monitor_state is not None:
+            elif not _notify_anyway and _monitor_state is not None:
                 soonest, count = _monitor_state
                 logger.info(
                     "progress_edits.stall_monitor_active_suppressed",
@@ -2862,7 +3117,7 @@ class ProgressEdits:
                     monitor_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_grace:
+            elif not _notify_anyway and _bash_grace:
                 logger.info(
                     "progress_edits.stall_bash_grace_suppressed",
                     channel_id=self.channel_id,
@@ -2872,7 +3127,7 @@ class ProgressEdits:
                     bash_grace_seconds=self._bash_grace_seconds,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_fresh:
+            elif not _notify_anyway and _bash_fresh:
                 logger.info(
                     "progress_edits.stall_long_bash_suppressed",
                     channel_id=self.channel_id,
@@ -2882,7 +3137,7 @@ class ProgressEdits:
                     freshness_threshold_s=round(threshold / 2.0, 1),
                 )
                 self._bump_heartbeat()
-            elif cpu_active is True and not frozen_escalate and not main_sleeping:
+            elif cpu_active is True and not _notify_anyway and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
@@ -2906,6 +3161,7 @@ class ProgressEdits:
                 and main_sleeping
                 and _tool_running
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Tool subprocess actively working — first warning already
                 # sent, suppress repeats until CPU goes idle.  The ring
@@ -2934,6 +3190,7 @@ class ProgressEdits:
                 and main_sleeping
                 and self._has_active_children(diag)
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Subagent child processes actively working — first warning
                 # already sent, suppress repeats.  Similar to tool-active
@@ -2965,6 +3222,9 @@ class ProgressEdits:
                 # _genuinely_stuck predicate below can reference it safely
                 # from every branch.
                 _tool_name: str | None = None
+                # #919/#920: set by the pending_approval branch below.
+                _approval_info: _PendingRequestInfo | None = None
+                _is_approval_reminder = False
                 if mcp_hung:
                     self._count_stall_warning()
                     logger.warning(
@@ -3018,10 +3278,19 @@ class ProgressEdits:
                     # users cancelling at ~13 min because the original copy
                     # didn't make the "tap a button" affordance explicit
                     # enough — they assumed the session had hung.
-                    parts = [
-                        f"⏳ Awaiting your approval ({mins} min) — tap a "
-                        "button above to proceed (no action needed otherwise)"
-                    ]
+                    # #919: say what is pending (an answer, a plan approval
+                    # or a named tool's approval) instead of "approval" for
+                    # everything; no ``Last:`` line (it only repeated the
+                    # request, in its internal log form).
+                    _approval_info = self._pending_request_info()
+                    _is_approval_reminder = True
+                    parts = [_approval_reminder_headline(_approval_info, mins)]
+                    if (
+                        _approval_info is not None
+                        and _approval_info.kind == "question"
+                        and _approval_info.question
+                    ):
+                        parts.append(f"❓ {_approval_info.question}")
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -3059,7 +3328,12 @@ class ProgressEdits:
                         parts = [f"⏳ Still working ({mins} min, CPU active)"]
                     else:
                         parts = [f"⏳ No progress for {mins} min"]
-                if self._stall_warn_count > 1:
+                # #919: an approval wait is expected, so no alarm-style
+                # repeat counter on its reminder.
+                if (
+                    self._stall_warn_count > 1
+                    and threshold_reason != "pending_approval"
+                ):
                     parts[0] += f" (warned {self._stall_warn_count}x)"
                 # "session may be stuck" — only when genuinely stuck
                 # (no tool identified, cpu not active, not MCP/frozen,
@@ -3075,15 +3349,17 @@ class ProgressEdits:
                 )
                 if _genuinely_stuck:
                     parts.append("— session may be stuck.")
-                if last_action:
-                    _summary = (
-                        last_action
-                        if len(last_action) <= 80
-                        else last_action[:77] + "..."
-                    )
-                    parts.append(f"Last: {_summary}")
+                # #919: plain action title for the chat; the raw
+                # ``kind:title (status)`` form stays in the log fields.
+                if threshold_reason != "pending_approval" and (
+                    _disp := self._last_action_display()
+                ):
+                    parts.append(f"Last: {_disp}")
                 parts.append("/cancel to stop.")
                 text = "\n".join(parts)
+                if _is_approval_reminder:
+                    await self._send_approval_reminder(text, _approval_info, mins)
+                    continue
                 try:
                     await self.transport.send(
                         channel_id=self.channel_id,
@@ -3353,10 +3629,14 @@ class ProgressEdits:
         live message of the run and no text-reply route (``no_keyboard``), or
         no stdin writer for the session (``no_session_writer``).
 
-        Detect-only: no auto-deny, no registry change, no chat message, and
-        the live-session hold is untouched (decisions D3/D4). Run-level only:
-        this monitor lives for the whole run (pre-result, follow-up turns,
-        live idle) and reads the run's own stream (#510).
+        Never auto-denies and leaves the registry and the live-session hold
+        untouched (decisions D3/D4). #929: before the WARN, a request waiting
+        past ``_ORPHAN_RESCUE_GRACE_S`` with no button visible anywhere (other
+        than other standalone surfaces) is *rescued* — queued on the run's
+        standalone approval surface, sent on the next tick. The kill switch
+        ``detect_unanswerable_control_requests`` disables both. Run-level
+        only: this monitor lives for the whole run (pre-result, follow-up
+        turns, live idle) and reads the run's own stream (#510).
         """
         if not (self.run_level and self._detect_unanswerable):
             return
@@ -3365,17 +3645,40 @@ class ProgressEdits:
             probe = getattr(es, "control_request_snapshot", None)
             if not callable(probe):
                 return
+            all_snaps = list(probe())
+            if not all_snaps:
+                return
+            surface = self.control_surface_probe
+            visible = surface() if surface is not None else None
+            orphans = self.orphan_approvals
+            if orphans is not None and visible is not None:
+                # Other surfaces' buttons answer only their own request.
+                others = visible - orphans.callbacks()
+                if not others:
+                    owned = orphans.request_ids()
+                    for snap in all_snaps:
+                        if (
+                            snap.age_s >= self._ORPHAN_RESCUE_GRACE_S
+                            and snap.writer_ok
+                            and not snap.answerable_by_text
+                            and snap.request_id not in owned
+                        ):
+                            orphans.rescue(
+                                snap,
+                                action=self._tracked_action_for_request(
+                                    snap.request_id
+                                ),
+                            )
             snaps = [
                 snap
-                for snap in probe()
+                for snap in all_snaps
                 if snap.request_id not in self._unanswerable_warned
                 and snap.age_s >= self._STALL_THRESHOLD_TOOL
             ]
             if not snaps:
                 return
-            surface = self.control_surface_probe
-            visible = surface() if surface is not None else None
             live_idle = self._is_live_session_idle()
+            rescued = orphans.request_ids() if orphans is not None else frozenset()
             for snap in snaps:
                 reasons: list[str] = []
                 if not snap.writer_ok:
@@ -3399,6 +3702,8 @@ class ProgressEdits:
                     live_idle=live_idle,
                     holds_live_session=live_idle,
                     visible_buttons=len(visible or ()),
+                    # #929: queued / shown on a standalone approval message.
+                    rescued=snap.request_id in rescued,
                     pid=self.pid,
                 )
         except Exception as exc:  # noqa: BLE001 - monitor loop must not die
@@ -3421,18 +3726,200 @@ class ProgressEdits:
         predicate meaningful for engines with no control channel.
         """
         es = getattr(self.stream, "engine_state", None) if self.stream else None
-        probe = getattr(es, "awaiting_user_approval", None)
-        if callable(probe):
-            try:
-                if probe():
+        excluded = self._surfaced_request_ids()
+        if excluded:
+            # #929 (review amendment 4): a request shown on the run's
+            # standalone approval surface is a background agent's wait, not
+            # this turn's — it must not turn this turn's genuine stall into a
+            # silent expected wait. Only other requests count.
+            snaps = self._control_snapshots()
+            if snaps is not None:
+                if any(s.request_id not in excluded for s in snaps):
                     return True
-            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
-                logger.debug("progress_edits.approval_probe_failed", error=str(exc))
+            else:
+                excluded = frozenset()
+        if not excluded:
+            probe = getattr(es, "awaiting_user_approval", None)
+            if callable(probe):
+                try:
+                    if probe():
+                        return True
+                except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                    logger.debug("progress_edits.approval_probe_failed", error=str(exc))
         for action_state in reversed(list(self.tracker._actions.values())):
             if not action_state.completed:
-                return bool(action_state.action.detail.get("inline_keyboard"))
+                detail = action_state.action.detail
+                if excluded and detail.get("request_id") in excluded:
+                    return False
+                return bool(detail.get("inline_keyboard"))
             break  # only check the most recent
         return False
+
+    def _control_snapshots(self) -> list[Any] | None:
+        """The engine's pending control requests, or None when the engine has
+        no registry (non-Claude) or the probe failed."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "control_request_snapshot", None)
+        if not callable(probe):
+            return None
+        try:
+            return list(probe())
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
+            return None
+
+    def _surfaced_request_ids(self) -> frozenset[str]:
+        """#929: requests a follow-up / wake turn's edits must ignore — they
+        live on the run's standalone approval surface. The run-level edits
+        never exclude (a pre-result wait on a surfaced request is still this
+        run's wait)."""
+        if self.run_level or self.orphan_approvals is None:
+            return frozenset()
+        return self.orphan_approvals.request_ids()
+
+    def _tracked_action_for_request(self, request_id: str) -> Any:
+        """#929: the newest uncompleted tracked action for ``request_id``."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            if action_state.action.detail.get("request_id") == request_id:
+                return action_state.action
+        return None
+
+    def _feed_orphan_completions(self) -> None:
+        """#929: complete the run-level tracker's action for each retired
+        surface, so ``_has_pending_approval()``'s presentation fallback can't
+        stay True on a stale action (a background agent's tool_result never
+        reaches this tracker while live-idle)."""
+        orphans = self.orphan_approvals
+        if orphans is None:
+            return
+        factory = EventFactory(self.tracker.engine)
+        for action_id, reason in orphans.drain_retired_actions():
+            if reason == "completed":
+                continue  # the completion event itself already did it
+            self.tracker.note_event(
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="warning",
+                    title="Permission resolved",
+                    ok=True,
+                )
+            )
+
+    async def _flush_orphans(self) -> None:
+        """#929: event-path send / retire of standalone approval surfaces."""
+        if self.orphan_approvals is None:
+            return
+        try:
+            await self.orphan_approvals.flush()
+            self._feed_orphan_completions()
+        except Exception:  # noqa: BLE001 - never break the render loop
+            logger.debug("progress_edits.orphan_flush_failed", exc_info=True)
+
+    async def _sync_orphan_approvals(self) -> None:
+        """#929 heartbeat: retire surfaces whose request is no longer
+        registered, retry failed sends, re-post due ones. Run-level only."""
+        if not self.run_level or self.orphan_approvals is None:
+            return
+        snaps = self._control_snapshots()
+        if snaps is None:
+            # No registry / probe failure: never read that as "all answered".
+            await self.orphan_approvals.flush()
+        else:
+            await self.orphan_approvals.sync({s.request_id for s in snaps})
+        self._feed_orphan_completions()
+
+    def _ask_question_text(self, request_id: str | None) -> str | None:
+        """#919: the outstanding question of a pending AskUserQuestion.
+
+        Prefers the action's current title — #709's ``advance_ask_action_model``
+        keeps it on the outstanding question of a multi-question flow, while
+        ``detail["ask_question"]`` stays on Q1 — then falls back to the detail.
+        """
+        match = None
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if request_id is not None and detail.get("request_id") == request_id:
+                match = action_state.action
+                break
+            if match is None and detail.get("ask_question"):
+                match = action_state.action
+        if match is None:
+            return None
+        title = _ASK_TITLE_PREFIX_RE.sub("", _trim_line(match.title or "", 400))
+        text = _trim_line(title, 80)
+        if not text:
+            text = _trim_line(str(match.detail.get("ask_question") or ""), 80)
+        return text or None
+
+    def _pending_request_info(self) -> _PendingRequestInfo | None:
+        """#919: classify the pending request the reminder is about.
+
+        Engine registry first (``control_request_snapshot()``, newest request
+        wins — the one whose buttons are visible), else the newest uncompleted
+        tracked action carrying an inline keyboard.
+        """
+        # #929: requests on the run's standalone approval surface are not
+        # this turn's to remind about — remind about the newest other one.
+        excluded = self._surfaced_request_ids()
+        snaps = [
+            s for s in (self._control_snapshots() or []) if s.request_id not in excluded
+        ]
+        if snaps:
+            snap = min(snaps, key=lambda s: s.age_s)
+            tool_name = snap.tool_name or None
+            if snap.kind == "ask":
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=snap.request_id,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(snap.request_id),
+                    answerable_by_text=bool(snap.answerable_by_text),
+                )
+            if (
+                snap.kind in ("outline_hold", "synthetic")
+                or tool_name == "ExitPlanMode"
+            ):
+                kind = "plan"
+            else:
+                kind = "tool"
+            return _PendingRequestInfo(
+                kind=kind, request_id=snap.request_id, tool_name=tool_name
+            )
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if not detail.get("inline_keyboard"):
+                continue
+            rid = detail.get("request_id")
+            rid = rid if isinstance(rid, str) and rid else None
+            if rid is not None and rid in excluded:
+                continue
+            tool_name = detail.get("tool_name") or None
+            if detail.get("ask_question"):
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=rid,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(rid),
+                )
+            if (
+                detail.get("request_type") == "DiscussApproval"
+                or tool_name == "ExitPlanMode"
+            ):
+                return _PendingRequestInfo(
+                    kind="plan", request_id=rid, tool_name=tool_name
+                )
+            if tool_name:
+                return _PendingRequestInfo(
+                    kind="tool", request_id=rid, tool_name=tool_name
+                )
+            return _PendingRequestInfo(kind="unknown", request_id=rid)
+        return None
 
     def _count_stall_warning(self) -> None:
         """Record that a genuine stall WARNING was emitted (#495).
@@ -3741,6 +4228,14 @@ class ProgressEdits:
             return f"{a.kind}:{a.title} ({status})"
         return None
 
+    def _last_action_display(self) -> str | None:
+        """#919: user-facing ``Last:`` text — the newest action's title, first
+        line only, no ``kind:`` prefix and no ``(status)`` suffix. The raw
+        :meth:`_last_action_summary` form stays for log fields."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            return _trim_line(action_state.action.title or "", 80) or None
+        return None
+
     async def _run_loop(self, bg_tg: anyio.abc.TaskGroup) -> None:
         while True:
             while self.rendered_seq == self.event_seq:
@@ -3754,6 +4249,9 @@ class ProgressEdits:
             # render can't overwrite the final message.
             if self._finalizing:
                 self.rendered_seq = self.event_seq
+                # #929: surface a request that has nowhere else to render.
+                if self.orphan_approvals is not None and self.orphan_approvals.has_work:
+                    bg_tg.start_soon(self._flush_orphans)
                 continue
 
             # Debounce: never delay the first render; after that, batch events.
@@ -3999,6 +4497,9 @@ class ProgressEdits:
     # deliberations.
     _STALL_THRESHOLD_APPROVAL_FIRST: float = 600.0
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # refire threshold after first
+    # #929: how long a registered request may sit with no visible button
+    # before the rescue path surfaces it on a standalone message.
+    _ORPHAN_RESCUE_GRACE_S: float = 30.0
     # How long a dead, already-answered run's process must stay dead before
     # the #650 silent reap: longer than a bounded Telegram delivery
     # (twice the client's 30 s message timeout) still holding the stream.
@@ -4038,6 +4539,22 @@ class ProgressEdits:
             _ask_rid = evt.action.detail.get("request_id")
             if isinstance(_ask_rid, str) and _ask_rid:
                 register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
+        # #929: a keyboard action reaching the run-level edits after the run's
+        # final was delivered (``_finalizing``) has no visible host — the
+        # turn router took no turn for it (a background agent asking while
+        # the live session is idle). Hand it to the standalone surface; the
+        # ``_run_loop`` wakeup below flushes it. Completions retire surfaces.
+        orphans = self.orphan_approvals
+        if orphans is not None and isinstance(evt, ActionEvent):
+            if evt.phase == "completed":
+                orphans.note_completed(str(evt.action.id))
+            elif (
+                evt.phase == "started"
+                and self.run_level
+                and self._finalizing
+                and evt.action.detail.get("inline_keyboard")
+            ):
+                orphans.offer(evt.action)
         if self.progress_ref is None:
             return
         now = self.clock()
@@ -4135,6 +4652,86 @@ class ProgressEdits:
 
         bg_tg.start_soon(_do_send)
 
+    async def _send_approval_reminder(
+        self, text: str, info: _PendingRequestInfo | None, mins: int
+    ) -> None:
+        """#920: send (or replace) the one pending-approval reminder.
+
+        ``SendOptions.replace`` makes the outbox delete the previous copy only
+        after the new one landed, so a failed send never leaves zero
+        reminders; on a failed send the previous ref is kept.
+        """
+        self._approval_first_reminder_sent = True
+        previous = self._approval_reminder_ref
+        try:
+            ref = await self.transport.send(
+                channel_id=self.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(thread_id=self.thread_id, replace=previous),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_edits.stall_notify_failed", exc_info=True)
+            return
+        if ref is None:
+            return
+        self._approval_reminder_ref = ref
+        self._approval_reminder_request_id = info.request_id if info else None
+        logger.info(
+            "progress_edits.approval_reminder_sent",
+            channel_id=self.channel_id,
+            request_kind=info.kind if info else "unknown",
+            request_id=self._approval_reminder_request_id,
+            mins=mins,
+            replaced=previous is not None,
+            message_id=ref.message_id,
+        )
+
+    async def _retire_approval_reminder(self, reason: str) -> None:
+        """#920: delete the pending-approval reminder (edit it to "no longer
+        waiting" if the delete fails, e.g. a > 48 h old message)."""
+        ref = self._approval_reminder_ref
+        if ref is None:
+            return
+        request_id = self._approval_reminder_request_id
+        self._approval_reminder_ref = None
+        self._approval_reminder_request_id = None
+        if reason in ("resolved", "superseded"):
+            self._approval_first_reminder_sent = False
+        deleted = False
+        try:
+            deleted = bool(await self.transport.delete(ref=ref))
+        except Exception:  # noqa: BLE001
+            deleted = False
+        if not deleted:
+            with contextlib.suppress(Exception):
+                await self.transport.edit(
+                    ref=ref, message=RenderedMessage(text="✅ No longer waiting.")
+                )
+        logger.info(
+            "progress_edits.approval_reminder_retired",
+            channel_id=self.channel_id,
+            request_id=request_id,
+            reason=reason,
+            deleted=deleted,
+            message_id=ref.message_id,
+        )
+
+    async def _maybe_retire_approval_reminder(self) -> None:
+        """#920: heartbeat check — retire the reminder once its request is
+        answered (``resolved``) or replaced by a newer one (``superseded``)."""
+        if not self._has_pending_approval():
+            self._approval_first_reminder_sent = False
+            await self._retire_approval_reminder("resolved")
+            return
+        rid = self._approval_reminder_request_id
+        if self._approval_reminder_ref is None or rid is None:
+            return
+        snaps = self._control_snapshots()
+        if snaps is None:
+            return
+        if rid not in {snap.request_id for snap in snaps}:
+            await self._retire_approval_reminder("superseded")
+
     async def delete_ephemeral(self) -> None:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
@@ -4149,6 +4746,16 @@ class ProgressEdits:
                     error_type=exc.__class__.__name__,
                 )
             self._approval_notify_ref = None
+        # #920: then the pending-approval reminder (run end / turn close).
+        await self._retire_approval_reminder("run_end")
+        # #929: then (run-level only — turn edits share the reference) the
+        # standalone approval surfaces; the session is closing, and closing
+        # stdin rejects their requests.
+        if self.run_level and self.orphan_approvals is not None:
+            try:
+                await self.orphan_approvals.aclose("run_end")
+            except Exception:  # noqa: BLE001
+                logger.debug("progress_edits.orphan_close_failed", exc_info=True)
         # Safety-net: delete any outline messages not already cleaned up
         # (e.g. run cancelled while outline is visible).
         # Also remove from the module-level registry to avoid stale entries.
@@ -4515,6 +5122,10 @@ async def run_runner_with_cancel(
         stall_suppressions=suppression_summary,
         # #684: requests flagged by the detect-only unanswerable canary.
         unanswerable_control_requests=len(edits._unanswerable_warned),
+        # #929: standalone approval messages sent (incl. re-posts).
+        approval_surfaces=getattr(
+            getattr(edits, "orphan_approvals", None), "sent_total", 0
+        ),
         # #695: both events carry the model so a single grep over either
         # answers "which model ran this session?".
         **_model_log_fields(edits.tracker.meta),
@@ -4533,12 +5144,15 @@ async def run_runner_with_cancel(
 
 def _hook_summary_fields(stream: Any) -> dict[str, Any]:
     """#812: ``hooks_started`` for engines that track hook lifecycle frames
-    (Claude with ``--include-hook-events``); absent for the rest."""
+    (Claude with ``--include-hook-events``); #928: ``no_query_results``
+    (the CLI's empty no-query results absorbed). Absent for the rest."""
     engine_state = getattr(stream, "engine_state", None)
-    started = getattr(engine_state, "hooks_started", None)
-    if isinstance(started, int) and not isinstance(started, bool):
-        return {"hooks_started": started}
-    return {}
+    fields: dict[str, Any] = {}
+    for key in ("hooks_started", "no_query_results"):
+        value = getattr(engine_state, key, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            fields[key] = value
+    return fields
 
 
 def sync_resume_token(
@@ -4681,14 +5295,85 @@ async def close_idle_live_sessions(
 _FOLLOWUP_ANCHORS: dict[str, tuple[str, MessageRef, MessageRef | None]] = {}
 
 
+@dataclass(slots=True)
+class _InFlightFollowup:
+    session_id: str
+    settled: anyio.Event = field(default_factory=anyio.Event)
+    written: bool | None = None
+
+
+# #921: anchors whose write into the live session is still being decided
+# (``inject_when_idle`` waiting for the turn to end, or a steer waiting for
+# the lock). The writer owns them until it settles: the run-end sweep must
+# not claim one, or a cancel racing a queued follow-up tells the user to
+# "send it again" while the scheduler re-dispatches it anyway.
+_FOLLOWUP_IN_FLIGHT: dict[str, _InFlightFollowup] = {}
+# How long the run-end sweep waits for in-flight writers. The run's process
+# has already exited, so a waiting inject sees the session gone on its next
+# 0.2 s poll; this is a safety bound, not an expected path.
+_FOLLOWUP_SETTLE_S = 2.0
+
+
 def register_followup_anchor(
     command_uuid: str,
     *,
     session_id: str,
     reply_to: MessageRef,
     placeholder: MessageRef | None,
+    in_flight: bool = False,
 ) -> None:
     _FOLLOWUP_ANCHORS[command_uuid] = (session_id, reply_to, placeholder)
+    if in_flight:
+        _FOLLOWUP_IN_FLIGHT[command_uuid] = _InFlightFollowup(session_id)
+
+
+def settle_followup_anchor(command_uuid: str, *, written: bool) -> None:
+    """#921: the writer's verdict on an in-flight anchor — call exactly once.
+
+    ``written=False``: the line never reached the session and the message
+    falls back (resume / queue path), so nothing is owed — drop the anchor.
+    ``written=True``: keep it; the router consumes it when the turn opens,
+    or the run-end sweep reports it if the session dies first.
+    """
+    if not written:
+        _FOLLOWUP_ANCHORS.pop(command_uuid, None)
+    flight = _FOLLOWUP_IN_FLIGHT.pop(command_uuid, None)
+    if flight is not None:
+        flight.written = written
+        flight.settled.set()
+
+
+async def _await_in_flight_followups(session_id: str) -> None:
+    """#921: give in-flight writers for ``session_id`` up to
+    :data:`_FOLLOWUP_SETTLE_S` to settle before the run-end sweep drains."""
+    pending = [
+        (uuid, flight)
+        for uuid, flight in _FOLLOWUP_IN_FLIGHT.items()
+        if flight.session_id == session_id
+    ]
+    if not pending:
+        return
+    with anyio.move_on_after(_FOLLOWUP_SETTLE_S):
+        for _, flight in pending:
+            await flight.settled.wait()
+    for uuid, flight in pending:
+        if not flight.settled.is_set():
+            from .runners.claude import get_live_session
+
+            # Expected when a newer process owns the session id (#816): the
+            # writer is waiting on *that* process, whose router takes it.
+            logger.info(
+                "claude.live_session.followup_settle_timeout",
+                session_id=session_id,
+                command_uuid=uuid,
+                live_owner_present=get_live_session(session_id) is not None,
+            )
+        elif not flight.written:
+            logger.info(
+                "claude.live_session.followup_requeued",
+                session_id=session_id,
+                command_uuid=uuid,
+            )
 
 
 def pop_followup_anchor(
@@ -4715,11 +5400,13 @@ def _consume_absorbed_anchor(evt: UntetherEvent) -> None:
 def drain_followup_anchors(
     session_id: str,
 ) -> list[tuple[MessageRef, MessageRef | None]]:
-    """Anchors whose follow-up never got a turn (the session ended first)."""
+    """Anchors whose follow-up never got a turn (the session ended first).
+
+    #921: anchors still in flight belong to their writer and are skipped."""
     leftovers = [
         (uuid, entry)
         for uuid, entry in _FOLLOWUP_ANCHORS.items()
-        if entry[0] == session_id
+        if entry[0] == session_id and uuid not in _FOLLOWUP_IN_FLIGHT
     ]
     for uuid, _ in leftovers:
         _FOLLOWUP_ANCHORS.pop(uuid, None)
@@ -4834,6 +5521,20 @@ def _live_closing_notice(
     return (
         f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {noun} still running "
         f"{why}: {names}. Stopping {it}."
+    )
+
+
+def _wake_cap_notice(cap: Any) -> str:
+    """#925 §14.4: a self-paced wake-up chain hit ``[loop] max_iterations``
+    and the session closed, dropping the pending wake-up."""
+    count = (
+        f" ({cap} wake-ups)"
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+        else ""
+    )
+    return (
+        f"\N{ALARM CLOCK} Self-paced wake-up limit reached{count} — the "
+        "pending wake-up was cancelled. Reply to continue."
     )
 
 
@@ -5101,6 +5802,23 @@ class FollowupTurnRouter:
             )
             return
         ctx = self.current
+        if evt.reason == "no_query":
+            # #928: the CLI's no-query result closed the turn ``init`` opened
+            # for it — no final, /stats, cost delta, fold, panel edit or push.
+            matched = ctx is not None and ctx.turn == evt.turn
+            had_progress = matched and ctx is not None and ctx.edits is not None
+            if matched and ctx is not None:
+                if ctx.lazy_scope is not None:
+                    ctx.lazy_scope.cancel()
+                async with ctx.progress_lock:
+                    await self._finish(ctx)
+            logger.debug(
+                "live_turn.no_query_dropped",
+                turn=evt.turn,
+                matched=matched,
+                had_progress=had_progress,
+            )
+            return
         if ctx is None or ctx.turn != evt.turn:
             ctx = self._open(evt)
         elif ctx.reason == "unknown" and evt.reason not in ("unknown", "followup"):
@@ -5255,10 +5973,17 @@ async def handle_message(
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
     quarantine_store: QuarantineStore | None = None,
+    outbox_since: float | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
     _stream_idle_retried_count: int = 0,
 ) -> None:
+    # #924: wall-clock start of this executor dispatch (same clock as the
+    # filesystem). Only outbox entries that changed since then are sent; the
+    # recovery re-entries below inherit it. Taken here when the caller (tests,
+    # API users) didn't supply one.
+    run_outbox_since = outbox_since if outbox_since is not None else time.time()
+    outbox_seen: set[tuple[str, int, int]] = set()
     logger.info(
         "handle.incoming",
         channel_id=incoming.channel_id,
@@ -6345,11 +7070,34 @@ async def handle_message(
         engine_state = getattr(edits.stream, "engine_state", None)
         return bool(getattr(engine_state, "live_mode", False))
 
+    def _outbox_cutoffs(oc: Any, run_root: Path) -> tuple[float | None, float | None]:
+        """#924: (send_after, archive_before) for this delivery. Send uses
+        this dispatch's own start; archive uses the oldest active run on the
+        same project root, so one chat finishing can't quarantine a file a
+        concurrent, earlier-started run (same project) is about to deliver.
+        ``send`` policy = no age classification (legacy kill switch)."""
+        if getattr(oc, "outbox_stale_policy", "archive") == "send":
+            return None, None
+        from .telegram.outbox_delivery import (
+            _OUTBOX_FRESH_GRACE_S,
+            oldest_active_since,
+        )
+
+        send_after = run_outbox_since - _OUTBOX_FRESH_GRACE_S
+        archive_before = (
+            min(oldest_active_since(run_root, run_outbox_since), run_outbox_since)
+            - _OUTBOX_FRESH_GRACE_S
+        )
+        return send_after, archive_before
+
     async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
         """Deliver ``.untether-outbox/`` right after a live turn's final —
         a live run's generator only returns when the session closes, which
-        would hold turn files back until then."""
-        if cfg.send_file is None or cfg.outbox_config is None:
+        would hold turn files back until then. #924: the cutoff is the
+        session's (dispatch's) start, not the turn's — a background task
+        started in turn 2 can write before the wake turn that reports it."""
+        oc = _load_outbox_settings(cfg)
+        if cfg.send_file is None or oc is None:
             return
         from .telegram.outbox_delivery import deliver_outbox_files
         from .utils.paths import get_run_base_dir
@@ -6357,8 +7105,8 @@ async def handle_message(
         run_root = get_run_base_dir()
         if run_root is None:
             return
-        oc = cfg.outbox_config
         outbox_early["delivered"] = True
+        send_after, archive_before = _outbox_cutoffs(oc, run_root)
         try:
             result = await deliver_outbox_files(
                 send_file=cfg.send_file,
@@ -6372,11 +7120,16 @@ async def handle_message(
                 max_files=oc.outbox_max_files,
                 cleanup=oc.outbox_cleanup,
                 deliver_directories=getattr(oc, "outbox_deliver_directories", "off"),
+                send_after=send_after,
+                archive_before=archive_before,
+                seen=outbox_seen,
             )
         except Exception:  # noqa: BLE001
             logger.warning("outbox.delivery_failed", exc_info=True)
             return
-        await _surface_outbox_skipped(cfg, incoming, user_ref, result.skipped, oc)
+        await _surface_outbox_skipped(
+            cfg, incoming, user_ref, result.skipped, oc, result=result
+        )
 
     # #829: whether this run's closing notice named tasks — only then does
     # the "closed" outcome get its own line.
@@ -6416,6 +7169,22 @@ async def handle_message(
         if hooks and hook_count is not None and hook_count <= 0:
             hooks = []  # #812: nothing was still running
         if not tasks and not hooks:
+            if payload.get("reason") == "wake_cap":
+                # #925 §14.4: say why the self-paced loop stopped.
+                try:
+                    await cfg.transport.send(
+                        channel_id=incoming.channel_id,
+                        message=RenderedMessage(
+                            text=_wake_cap_notice(payload.get("wake_cap"))
+                        ),
+                        options=SendOptions(
+                            reply_to=turn_router.last_reply_to,
+                            notify=True,
+                            thread_id=incoming.thread_id,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("live_session.notice_failed", exc_info=True)
             return
         raw_hold = payload.get("max_hold_s")
         text = _live_closing_notice(
@@ -6598,6 +7367,9 @@ async def handle_message(
         turn_edits._heartbeat_interval = progress_cfg.heartbeat_interval
         turn_edits.stream = edits.stream
         turn_edits.pid = edits.pid
+        # #929: read-only — the turn ignores surfaced requests and never
+        # offers (``run_level`` is False); only the run-level edits retire.
+        turn_edits.orphan_approvals = edits.orphan_approvals
         if running_task is not None:
             turn_edits.cancel_event = running_task.cancel_requested
         ctx.edits = turn_edits
@@ -6703,6 +7475,9 @@ async def handle_message(
         )
         if sid is None:
             return
+        # #921: a follow-up whose write is still in flight is its writer's
+        # to resolve — wait (bounded) for its verdict before draining.
+        await _await_in_flight_followups(sid.value)
         for reply_to, placeholder in drain_followup_anchors(sid.value):
             text = (
                 "\N{WARNING SIGN} The session ended before this message ran "
@@ -6752,6 +7527,38 @@ async def handle_message(
     )
 
     edits.control_surface_probe = build_control_surface_probe(edits, turn_router)
+
+    # #929: standalone approval messages for requests with no visible host.
+    def _orphan_task(agent_id: str | None) -> Any:
+        if not agent_id:
+            return None
+        tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
+        return tasks.get(agent_id) if isinstance(tasks, dict) else None
+
+    def _orphan_label(agent_id: str | None) -> str | None:
+        task = _orphan_task(agent_id)
+        return task_label(task) if task is not None else None
+
+    def _orphan_anchor(agent_id: str | None) -> MessageRef | None:
+        # #795 pattern: reply to the prompt whose turn launched the agent;
+        # else the message the live session's latest turn answered (never
+        # turn 1's progress ref — the final may have replaced it).
+        task = _orphan_task(agent_id)
+        origin = getattr(task, "origin_turn", None) if task is not None else None
+        if isinstance(origin, int) and not isinstance(origin, bool):
+            return turn_router.anchor_for_turn(origin)
+        return turn_router.last_reply_to
+
+    edits.orphan_approvals = OrphanApprovalSurface(
+        transport=cfg.transport,
+        channel_id=incoming.channel_id,
+        thread_id=incoming.thread_id,
+        clock=clock,
+        label_for=_orphan_label,
+        anchor_for=_orphan_anchor,
+        first_s=edits._STALL_THRESHOLD_APPROVAL_FIRST,
+        repeat_s=edits._STALL_THRESHOLD_APPROVAL,
+    )
 
     def _bg_session_idle() -> bool:
         # The live session sits between turns: no wake / follow-up turn is
@@ -7205,6 +8012,8 @@ async def handle_message(
                 # #631 (T6): thread the resolved store through so an
                 # injected/singleton store survives this recursive re-entry.
                 quarantine_store=_qstore,
+                # #924: the dispatch's outbox cutoff survives the re-entry.
+                outbox_since=run_outbox_since,
                 # Carry ALL recovery counters so an alternating empty-resume ↔
                 # auto-continue ↔ stream-idle-retry chain can't reset another
                 # guard and loop.
@@ -7274,13 +8083,15 @@ async def handle_message(
             # on lba-1 before this fix. Failure to deliver must NOT block
             # auto-continue itself \u2014 the recovery is more important than
             # any single batch of files.
-            if cfg.send_file is not None and cfg.outbox_config is not None:
+            _ac_oc = _load_outbox_settings(cfg)
+            if cfg.send_file is not None and _ac_oc is not None:
                 from .telegram.outbox_delivery import deliver_outbox_files
                 from .utils.paths import get_run_base_dir
 
                 _run_root = get_run_base_dir()
                 if _run_root is not None:
-                    _oc = cfg.outbox_config
+                    _oc = _ac_oc
+                    _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
                     try:
                         result = await deliver_outbox_files(
                             send_file=cfg.send_file,
@@ -7296,6 +8107,9 @@ async def handle_message(
                             deliver_directories=getattr(
                                 _oc, "outbox_deliver_directories", "off"
                             ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
                         )
                         logger.info(
                             "outbox.delivered_pre_auto_continue",
@@ -7316,6 +8130,7 @@ async def handle_message(
                             user_ref,
                             result.skipped,
                             _oc,
+                            result=result,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning(
@@ -7360,6 +8175,8 @@ async def handle_message(
                 # #631 (T6): thread the resolved store through so an
                 # injected/singleton store survives this recursive re-entry.
                 quarantine_store=_qstore,
+                # #924: files subprocess 1 wrote stay fresh for subprocess 2.
+                outbox_since=run_outbox_since,
                 _auto_continued_count=_auto_continued_count + 1,
                 # Carry the other recovery guards so they can't be reset by an
                 # interleaved auto-continue (see #596 auto-resend / #572 retry).
@@ -7445,6 +8262,7 @@ async def handle_message(
                 on_resume_failed=on_resume_failed,
                 clock=clock,
                 quarantine_store=_qstore,
+                outbox_since=run_outbox_since,  # #924
                 # Carry the other recovery counters so an alternating chain
                 # can't reset another guard and loop.
                 _auto_continued_count=_auto_continued_count,
@@ -7463,21 +8281,23 @@ async def handle_message(
         # Delivery of *sent* files still requires a successful run (failures
         # may leave the outbox in a partially-written state), but the user
         # should always learn what the agent intended to send.
-        if (
-            cfg.send_file is not None
-            and cfg.outbox_config is not None
-            and not outbox_early["delivered"]
-        ):
+        _end_oc = (
+            _load_outbox_settings(cfg)
+            if cfg.send_file is not None and not outbox_early["delivered"]
+            else None
+        )
+        if _end_oc is not None:
             from .telegram.outbox_delivery import (
                 OutboxResult,
+                classify_outbox,
                 deliver_outbox_files,
-                scan_outbox,
             )
             from .utils.paths import get_run_base_dir
 
             _run_root = get_run_base_dir()
             if _run_root is not None:
-                _oc = cfg.outbox_config
+                _oc = _end_oc
+                _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
                 _outbox_result: OutboxResult | None = None
                 if run_ok is not False:
                     try:
@@ -7495,6 +8315,9 @@ async def handle_message(
                             deliver_directories=getattr(
                                 _oc, "outbox_deliver_directories", "off"
                             ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning("outbox.delivery_failed", exc_info=True)
@@ -7502,15 +8325,20 @@ async def handle_message(
                 else:
                     # Failed run: skip file delivery but still scan so the user
                     # gets the 📎 Outbox skipped notice for any directory or
-                    # blocked entry the agent left behind.
+                    # blocked entry the agent left behind. #924: fresh entries
+                    # only — no stale reporting or archiving on a failed run
+                    # (stale entries wait for the next successful run).
                     try:
-                        _, _failed_skipped = scan_outbox(
+                        _failed_skipped = classify_outbox(
                             _run_root,
                             outbox_dir=_oc.outbox_dir,
                             deny_globs=_oc.deny_globs,
                             max_download_bytes=_oc.max_download_bytes,
                             max_files=_oc.outbox_max_files,
-                        )
+                            send_after=_send_after,
+                            archive_before=None,
+                            seen=outbox_seen,
+                        ).skipped
                     except Exception:  # noqa: BLE001
                         logger.debug("outbox.failed_run_scan_error", exc_info=True)
                         _failed_skipped = []
@@ -7523,6 +8351,7 @@ async def handle_message(
                         user_ref,
                         _outbox_result.skipped,
                         _oc,
+                        result=_outbox_result,
                     )
     except BaseException:
         release_reason = None

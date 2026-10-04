@@ -30,7 +30,7 @@ from untether.schemas.claude import (
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.287"
+PROBED_CLI_VERSION = "2.1.289"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -198,7 +198,7 @@ def test_informational_notice_present(cli_blob: mmap.mmap) -> None:
         "in _translate_informational (D-15)"
     )
     m = re.search(
-        rb"`\$\{\w{1,4}\(\w{1,4}\)\}('s safeguards stopped the response above"
+        rb"`\$\{[\w$]{1,4}\([\w$]{1,4}\)\}('s safeguards stopped the response above"
         rb"[^`]{0,80})`",
         cli_blob,
     )
@@ -1024,4 +1024,285 @@ def test_743_effort_choices_match_untether_levels() -> None:
     assert choices == set(allowed_reasoning_levels("claude")), (
         "CLI effort levels changed — update `telegram/engine_overrides.py` and "
         f"the /config reasoning buttons (#416 rule): CLI {sorted(choices)}"
+    )
+
+
+# --- #922 (rc20) ---------------------------------------------------------------
+# The #701 action-required cap latch reads the result's `api_error*` fields
+# first and the headless cap wording second. Re-derived against CLI 2.1.289.
+
+# The headless builder's templates: `<cap sentence> Switch to another model${K}
+# to continue.` — the cap sentence is a literal or a `${g}` / `${h}` placeholder.
+_922_HEADLESS_TEMPLATE_RE = re.compile(
+    rb"`([^`]{0,90}?) Switch to another model\$\{\w{1,4}\} to continue\.`"
+)
+_922_PLACEHOLDER_RE = re.compile(r"\$\{\w{1,4}\}")
+# What the builder's `${g}` / `${h}` expand to (each literal is asserted present).
+_922_CAP_SENTENCES = (
+    "You've reached your Fable limit.",
+    "Opus 5.5 requires usage credits.",
+    "You've hit your monthly spend limit.",
+    "You've hit your channel's monthly spend limit.",
+)
+_922_CAP_LITERALS = (
+    b"You've reached your Fable limit.",
+    b" requires usage credits.",
+    b"You've hit your monthly spend limit.",
+    b"You've hit your channel's monthly spend limit.",
+)
+# `${K}`: empty when the account can't buy credits, else the personal or the
+# Team/Enterprise usage URL.
+_922_K_VARIANTS = (
+    "",
+    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at claude.ai/admin-settings/usage,",
+)
+
+
+def _922_render(prefix: str) -> list[str]:
+    if _922_PLACEHOLDER_RE.fullmatch(prefix):
+        heads = list(_922_CAP_SENTENCES)
+    else:
+        heads = [_922_PLACEHOLDER_RE.sub("Opus 5.5", prefix)]
+    return [
+        f"{head} Switch to another model{k} to continue."
+        for head in heads
+        for k in _922_K_VARIANTS
+    ]
+
+
+def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
+    """Every headless cap message the CLI can emit must arm the latch. This
+    probe FAILS (never skips) when the wording moves — that is the drift it
+    exists to catch (#922 review amendment 1)."""
+    from untether.runners.claude import _parse_action_required_cap
+
+    for literal in _922_CAP_LITERALS:
+        assert cli_blob.find(literal) != -1, (
+            f"cap sentence {literal!r} missing from the installed CLI — the "
+            "cap wording moved; re-derive _ACTION_CAP_RE / _ACTION_CAP_CLAUSES"
+        )
+    templates = [
+        m.group(1).decode("utf-8", "replace")
+        for m in _922_HEADLESS_TEMPLATE_RE.finditer(cli_blob)
+    ]
+    assert templates, (
+        "no `… Switch to another model${K} to continue.` template in the "
+        "installed CLI — the headless remedy wording moved; re-derive "
+        "_ACTION_REMEDY_RE (#922)"
+    )
+    unparsed = [
+        text
+        for prefix in templates
+        for text in _922_render(prefix)
+        if _parse_action_required_cap(text) is None
+    ]
+    assert not unparsed, f"cap wording the latch no longer recognises: {unparsed}"
+
+
+def test_922_result_schema_carries_api_error_fields(cli_blob: mmap.mmap) -> None:
+    for key in (b"api_error_status:", b"api_error_code:", b"api_error:"):
+        assert cli_blob.find(key) != -1, f"{key!r} missing from the installed CLI"
+    if (
+        re.search(
+            rb"api_error_status:\w{1,4}\(\)\.int\(\)\.nullable\(\)\.optional\(\),"
+            rb"api_error_code:",
+            cli_blob,
+        )
+        is None
+        or re.search(rb"\{api_error:\w{1,4}\.api_error\}", cli_blob) is None
+    ):
+        pytest.skip(
+            "result api_error_* schema / spread shape moved; re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_922_api_error_enum_keeps_credit_kinds(cli_blob: mmap.mmap) -> None:
+    from untether.runners.claude import (
+        _ACTION_REQUIRED_API_ERRORS,
+        _NOT_ACTION_API_ERRORS,
+    )
+
+    declared = _require(
+        _zod_enum(cli_blob, rb"api_error:\w{1,4}\(\[([^\]]*)\]\)"), "api_error"
+    )
+    missing = (_ACTION_REQUIRED_API_ERRORS | _NOT_ACTION_API_ERRORS) - set(declared)
+    assert not missing, (
+        f"api_error no longer declares {sorted(missing)} — the #922 structured "
+        "cap classification needs re-deriving"
+    )
+
+
+def test_922_cap_builder_tags_api_error(cli_blob: mmap.mmap) -> None:
+    for literal in (
+        b'apiError:"model_requires_usage_credits"',
+        b'apiError:"long_context_credits_required"',
+    ):
+        assert cli_blob.find(literal) != -1, f"{literal!r} missing from the CLI"
+
+
+# --- #929 (rc20) ---------------------------------------------------------------
+
+# Review amendment 1: ``[^}]`` can't cross the ``...r.mcpInfo&&{mcp_server:…}``
+# spread between the subtype and the reason fields, so the window is
+# ``[\s\S]``. The CLI has several ``can_use_tool`` builders (the sandbox
+# network ask carries no ``decision_reason_type``); any occurrence matching is
+# enough.
+_929_REASON_RE = re.compile(
+    rb'subtype:"can_use_tool"[\s\S]{0,1500}?decision_reason_type:'
+)
+_929_IDS_RE = re.compile(
+    rb'subtype:"can_use_tool"[\s\S]{0,1500}?tool_use_id:[\w$]+,agent_id:'
+)
+
+
+def test_929_can_use_tool_carries_agent_and_tool_use_id(cli_blob: mmap.mmap) -> None:
+    """#929: the stage-6 ``can_use_tool`` request names its own tool call and
+    agent (the bridge maps the approval by ``tool_use_id`` and labels the
+    standalone approval message by ``agent_id``) and why it asks."""
+    assert _929_REASON_RE.search(cli_blob) is not None, (
+        "can_use_tool no longer sends decision_reason_type — the #929 surface "
+        "loses its hook-reason line (last green on CLI "
+        f"{PROBED_CLI_VERSION})"
+    )
+    assert _929_IDS_RE.search(cli_blob) is not None, (
+        "can_use_tool no longer sends tool_use_id + agent_id together — #929's "
+        "per-request mapping falls back to the newest tool_use and the "
+        f"surface to its generic copy (last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_929_local_agent_task_id_is_agent_id(cli_blob: mmap.mmap) -> None:
+    """#929 (best-effort): a background agent's task id is its ``agentId``,
+    so ``can_use_tool.agent_id`` looks up ``ClaudeStreamState.tasks``. If this
+    drifts the surface falls back to the generic label and the latest-turn
+    reply anchor."""
+    if re.search(rb'type:"local_agent",status:"running",agentId:', cli_blob) is None:
+        pytest.skip(
+            "local_agent task registration shape moved — re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+# --- #923 (rc20) ---
+
+
+def test_923_async_rewake_exit_2_enqueues_a_next_priority_wake(
+    cli_blob: mmap.mmap,
+) -> None:
+    """#923's open-time idle candidate assumes an asyncRewake hook's exit 2
+    enqueues the wake as a ``next``-priority task-notification, so the
+    parent's turn opens right after the ``hook_response``. ``"Stop hook
+    feedback"`` occurs several times (schema ``describe`` strings first), so
+    every occurrence is scanned."""
+    hits = [m.start() for m in re.finditer(rb'"Stop hook feedback"', cli_blob)]
+    assert any(
+        re.search(rb'priority:"next",stopHookActive:!0', cli_blob[pos : pos + 400])
+        for pos in hits
+    ), (
+        "asyncRewake wake delivery changed — re-verify #923's open-time idle "
+        f"candidate (last green on CLI 2.1.289; {len(hits)} occurrence(s) scanned)"
+    )
+    assert cli_blob.find(b'mode:"task-notification",agentId:') != -1, (
+        "asyncRewake wake delivery changed (no task-notification enqueue with "
+        "agentId) — re-verify #923's open-time idle candidate (last green on "
+        "CLI 2.1.289)"
+    )
+
+
+# --- #928 (rc20) ---
+
+
+def test_928_no_query_dispatch_paths_present(cli_blob: mmap.mmap) -> None:
+    """#928 absorbs the CLI's empty ``num_turns: 0`` task-notification results.
+    They come from the CLI's ``shouldQuery: false`` dispatch paths:
+    notification coalescing, the agent hand-back pointer notice and the
+    generic route. If those move, the result shape may have too."""
+    for literal in (
+        b"queryHeldForNextTurn",
+        b"print_task_notification_coalesce",
+        b"agent_handback_pointer_notice",
+    ):
+        assert cli_blob.find(literal) != -1, (
+            f"{literal.decode()!r} is gone — the CLI changed its no-query "
+            "dispatch paths; re-verify #928's `_is_no_query_result` (last green "
+            "on CLI 2.1.289)"
+        )
+
+
+# --- #925 (rc20) ---
+# Untether owns Loop-mode schedules through SDK PreToolUse hook callbacks
+# (`docs/findings/2026-10-04-claude-session-cron-resume-and-host-controls.md`
+# F3/F8; live probe G1 on CLI 2.1.289). Zero-token string probes.
+
+
+def _require_bytes(blob: mmap.mmap, needles: tuple[bytes, ...], why: str) -> None:
+    missing = [n.decode() for n in needles if blob.find(n) == -1]
+    if missing:
+        pytest.fail(
+            f"installed CLI lost {missing} — {why} "
+            "(last green on CLI 2.1.289; see the 2026-10-04 cron findings note)"
+        )
+
+
+def test_925_hook_callback_protocol_present(cli_blob: mmap.mmap) -> None:
+    """``initialize.hooks`` callback registration, the ``hook_callback``
+    request, the PreToolUse deny output and the ``hook error:`` text the
+    denied tool_result carries (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (
+            b"hookCallbackIds",
+            b'subtype:"hook_callback"',
+            b"permissionDecision",
+            b"hook error: ",
+        ),
+        "#925's CronCreate/CronDelete hooks can no longer decline the job",
+    )
+
+
+def test_925_cron_tools_and_bind_text_present(cli_blob: mmap.mmap) -> None:
+    """The tools the hooks match by exact name, and the result text
+    ``_LOOP_CRON_ID_RE`` binds (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b'"CronCreate"', b'"CronDelete"', b"Scheduled recurring job"),
+        "the hook matchers / upstream id binding no longer match the CLI",
+    )
+
+
+def test_925_session_cron_resurrection_present(cli_blob: mmap.mmap) -> None:
+    """F3: ``--resume`` resurrects session crons unless a CronDelete marker
+    exists. If this disappears the resume behaviour changed — re-evaluate
+    #925 D-E and #926's suppression (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b"resume: resurrected", b"deletedCronIds"),
+        "session-cron resurrection on --resume changed",
+    )
+
+
+# --- #926 (rc20) ---
+
+
+def test_926_disable_cron_env_present(cli_blob: mmap.mmap) -> None:
+    """F6: the env var suppressed sessions are resumed with (CLI 2.1.289)."""
+    _require_bytes(
+        cli_blob,
+        (b"CLAUDE_CODE_DISABLE_CRON",),
+        "#926's resume suppression no longer switches the CLI scheduler off",
+    )
+
+
+def test_926_recurring_max_age_default(cli_blob: mmap.mmap) -> None:
+    """The 7-day resurrect window ``loop_scheduler.CLI_CRON_MAX_AGE_S``
+    mirrors (CLI 2.1.289). Fails loudly if the default moves."""
+    from untether.loop_scheduler import CLI_CRON_MAX_AGE_S
+
+    assert CLI_CRON_MAX_AGE_S * 1000 == 604800000
+    _require_bytes(
+        cli_blob,
+        (b"recurringMaxAgeMs:604800000",),
+        "the CLI's session-cron max age moved — update CLI_CRON_MAX_AGE_S",
     )

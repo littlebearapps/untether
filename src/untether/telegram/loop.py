@@ -336,11 +336,14 @@ async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -
     are logged and skipped so one bad chat can't mask the warning from
     the rest.
     """
+    from ..service_manager import restart_hint
+
     keys_text = ", ".join(f"`{k}`" for k in keys)
+    # #927: name the running unit/label (generic wording when undetected).
     text = (
         "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
         f"Setting {keys_text} changed — restart required to take effect.\n"
-        "Run: `systemctl --user restart untether`"
+        f"To apply: {restart_hint()}."
     )
     targets: set[int] = set()
     targets.update(cfg.runtime.project_chat_ids())
@@ -796,6 +799,11 @@ async def poll_updates(
     offset = await _drain_backlog(cfg, offset)
     await _cleanup_orphan_progress(cfg)
     await _send_startup(cfg)
+
+    # #927: one INFO `service.detected` line (rollout evidence). Never raises.
+    from ..service_manager import log_service_detection
+
+    log_service_detection()
 
     # Signal systemd that Untether is ready to receive traffic. No-op on
     # non-systemd runs (NOTIFY_SOCKET absent). See #287.

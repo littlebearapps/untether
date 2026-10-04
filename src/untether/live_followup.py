@@ -32,7 +32,7 @@ async def inject_live_followup(
     token = job.resume_token
     if token.engine != "claude":
         return False
-    from .runner_bridge import pop_followup_anchor, register_followup_anchor
+    from .runner_bridge import register_followup_anchor, settle_followup_anchor
     from .runners.claude import (
         get_live_session,
         inject_when_idle,
@@ -108,6 +108,9 @@ async def inject_live_followup(
         )
         return False
     command_uuid = str(uuid.uuid4())
+    # #921: in flight until settled — the run-end sweep leaves it to us, so a
+    # cancel racing this wait can't say "send it again" for a message that is
+    # about to be re-dispatched below.
     register_followup_anchor(
         command_uuid,
         session_id=session_id,
@@ -117,10 +120,14 @@ async def inject_live_followup(
             thread_id=job.thread_id,
         ),
         placeholder=job.progress_ref,
+        in_flight=True,
     )
-    ok = await inject_when_idle(session_id, job.text, command_uuid=command_uuid)
+    ok = False
+    try:
+        ok = await inject_when_idle(session_id, job.text, command_uuid=command_uuid)
+    finally:
+        settle_followup_anchor(command_uuid, written=ok)
     if not ok:
-        pop_followup_anchor(command_uuid)
         logger.info(
             "claude.live_session.inject_unavailable",
             session_id=session_id,

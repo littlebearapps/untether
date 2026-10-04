@@ -110,6 +110,12 @@ class TelegramFilesSettings(BaseModel):
     # attachment per directory. Directories with no deliverable members (all
     # denied/empty) or an oversize zip fall back to the #600 archive.
     outbox_deliver_directories: Literal["off", "zip"] = "off"
+    # #924: deliver only entries written or copied into the outbox during the
+    # run (``max(mtime, ctime)`` ≥ the run's start, 5 s grace). "archive"
+    # (default) moves older leftovers once to ``<outbox>/.skipped/`` with one
+    # notice; "send" is the legacy deliver-everything behaviour (kill switch).
+    # Hot-reloads (read per delivery); not in RESTART_REQUIRED_FIELDS.
+    outbox_stale_policy: Literal["archive", "send"] = "archive"
 
     @field_validator("uploads_dir")
     @classmethod
@@ -123,6 +129,10 @@ class TelegramFilesSettings(BaseModel):
     def _validate_outbox_dir(cls, value: str) -> str:
         if Path(value).is_absolute():
             raise ValueError("files.outbox_dir must be a relative path")
+        # #924 review: `..` would let the outbox (and its stale archiving)
+        # reach outside the project.
+        if ".." in Path(value).parts:
+            raise ValueError("files.outbox_dir must not contain '..'")
         return value
 
 
@@ -411,10 +421,11 @@ class CostBudgetSettings(BaseModel):
 
 
 class LoopSettings(BaseModel):
-    """Untether-side observation of Claude Code's session-scoped scheduling
-    tools (CronCreate, ScheduleWakeup) so /loop and dynamic-mode wakeups
-    keep firing after the subprocess exits.  Off by default — opt-in
-    per-chat via /config → 🔁 Loop mode (#289).
+    """Untether-side ownership of Claude Code's scheduling tools
+    (CronCreate, ScheduleWakeup): in Loop-mode chats Untether runs /loop
+    schedules itself, with the caps below, and fires long wake-ups after
+    the subprocess exits (#289, #925).  Loop mode is off by default —
+    opt-in per-chat via /config → 🔁 Loop mode.
 
     Cost limits are NOT in [loop]; they live in [cost_budget] and apply
     to loop fires automatically.  The caps below are runaway-safety
@@ -430,6 +441,13 @@ class LoopSettings(BaseModel):
     max_total_duration_hours: int = Field(default=4, ge=1, le=168)
     min_interval_seconds: int = Field(default=60, ge=60)
     expiry_days: int = Field(default=7, ge=1, le=30)
+    # #925: Untether owns Claude's schedules. An SDK PreToolUse hook on every
+    # control-channel spawn declines CronCreate — Loop mode on: registered
+    # here with the caps above; off: declined with Loop-mode / /at guidance —
+    # and self-paced wake-up chains stop after ``max_iterations``. ``false``
+    # = rc19 behaviour in both modes (kill switch; hot-reloads). Remove the
+    # key before rolling back to rc19, which rejects unknown [loop] keys.
+    own_schedule: bool = True
 
 
 class FooterSettings(BaseModel):

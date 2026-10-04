@@ -1920,3 +1920,108 @@ async def test_890_cancelled_wake_turn_starts_afresh() -> None:
     assert not any(
         "more background wake-up" in c["message"].text for c in transport.edit_calls
     )
+
+
+# ── #928: the CLI's no-query results never reach Telegram ──────────────────
+
+from structlog.testing import capture_logs  # noqa: E402
+
+from untether.model import ResumeToken  # noqa: E402
+
+
+async def test_928_router_drops_no_query_turn_silently() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", 3, "unknown"))
+    assert router.current is not None
+    with capture_logs() as logs:
+        await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.delivered == []
+    assert rec.created == []
+    assert rec.closed == [3]
+    assert router.current is None
+    assert router.turns_delivered == 0
+    (dropped,) = [e for e in logs if e["event"] == "live_turn.no_query_dropped"]
+    assert dropped["log_level"] == "debug"
+    assert dropped["matched"] is True and dropped["had_progress"] is False
+
+
+async def test_928_router_no_query_without_open_turn_is_ignored() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("completed", 4, "no_query", ok=True, answer=""))
+    assert rec.delivered == []
+    assert rec.closed == []
+    assert router.current is None
+    assert router.turns_delivered == 0
+
+
+async def test_928_router_no_query_closes_created_progress() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", 3, "unknown"))
+    await router.on_event(_action())  # forces the progress message
+    assert rec.created == [3]
+    with capture_logs() as logs:
+        await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.closed == [3]
+    assert rec.delivered == []
+    (dropped,) = [e for e in logs if e["event"] == "live_turn.no_query_dropped"]
+    assert dropped["had_progress"] is True
+
+
+@pytest.mark.parametrize("opened_as", ["hook_rewake", "unknown"])
+async def test_928_no_empty_hook_rewake_reaches_telegram(opened_as: str) -> None:
+    """Review amendment 1: a no-query tail that ``init`` opened on a hook
+    hint must never become an empty pushed ``🪝 Hook feedback``."""
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(
+        _turn("started", 3, opened_as, detail={"hook_event": "PostToolUse"})
+    )
+    await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.delivered == []
+    # The real rewake turn that follows still pushes.
+    await router.on_turn(
+        _turn("started", 4, "hook_rewake", detail={"hook_event": "Stop"})
+    )
+    await router.on_turn(
+        _turn("completed", 4, "hook_rewake", ok=True, answer="finding")
+    )
+    assert len(rec.delivered) == 1
+    turn, ok, answer, header, notify, _ = rec.delivered[0]
+    assert (turn, ok, answer, notify) == (4, True, "finding", True)
+    assert header is not None and "Hook feedback" in header
+
+
+def test_928_export_drops_the_no_query_turn() -> None:
+    from untether.telegram.commands.export import _format_export_markdown
+
+    events = [
+        {"type": "started", "engine": "claude", "title": "m"},
+        {"type": "completed", "ok": True, "answer": "first"},
+        {"type": "turn", "phase": "started", "turn": 2, "reason": "unknown"},
+        {"type": "turn_dropped", "turn": 2, "reason": "no_query"},
+        {"type": "turn", "phase": "started", "turn": 3, "reason": "task_finished"},
+        {"type": "completed", "ok": True, "answer": "a2 done", "turn": 3},
+    ]
+    text = _format_export_markdown("sid", events, None)
+    assert "## Turn 2" not in text
+    assert "## Turn 3 (background task finished)" in text
+    assert text.count("✓ Completed") == 2
+
+
+def test_928_record_export_event_marks_no_query_dropped(monkeypatch) -> None:
+    recorded: list[dict] = []
+    from untether.telegram.commands import export as export_mod
+
+    monkeypatch.setattr(
+        export_mod,
+        "record_session_event",
+        lambda sid, evt, **kw: recorded.append(evt),
+    )
+    resume = ResumeToken(engine="claude", value="sid")
+    rb._record_export_event(
+        _turn("completed", 3, "no_query", ok=True, answer=""), resume
+    )
+    assert recorded == [{"type": "turn_dropped", "turn": 3, "reason": "no_query"}]

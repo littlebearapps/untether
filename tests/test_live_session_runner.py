@@ -17,6 +17,7 @@ import anyio
 import pytest
 from structlog.testing import capture_logs
 
+from tests import test_claude_hooks as h
 from untether.model import CompletedEvent, ResumeToken, StartedEvent, TurnEvent
 from untether.runners import claude as claude_mod
 from untether.runners.claude import ENGINE, ClaudeRunner, write_user_message
@@ -44,6 +45,8 @@ _ENV = (
     "FAKE_CLAUDE_LATE_UNSEEN",
     # #876
     "FAKE_CLAUDE_BG_PATCH",
+    # #928
+    "FAKE_CLAUDE_NO_QUERY_INIT",
 )
 
 
@@ -392,6 +395,29 @@ async def test_828_bg_subagent_denial_never_labels_the_wake_turn() -> None:
     assert blocked["started_turn"] == 2
 
 
+async def test_923_subagent_async_rewake_while_idle_labels_hook_rewake() -> None:
+    """#923: a background agent's asyncRewake hook starts and exits 2 while
+    the parent idles (tagged with the next turn, so never "outlived"); the
+    rewake turn the CLI opens right after it is still ``hook_rewake``."""
+    with capture_logs() as logs:
+        events = await _collect("bg_agent_async_rewake_idle", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "hook_rewake"),
+        ("completed", "hook_rewake"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert turns[0].detail["hook_event"] == "PostToolUse"
+    assert turns[0].detail["hook_started_idle"] is True
+    names = [e["event"] for e in logs]
+    assert "claude.hook.rewake_signal" not in names
+    (blocked,) = [e for e in logs if e["event"] == "claude.hook.blocking_exit"]
+    assert blocked["rewake_candidate"] is True and blocked["turn_open"] is False
+    (attributed,) = [e for e in logs if e["event"] == "claude.turn.hook_rewake"]
+    assert attributed["attributed"] == "open_idle"
+
+
 # ── #825: a task finishing during another task's wake turn is named ──────
 
 
@@ -425,8 +451,8 @@ async def test_825_late_task_the_model_never_saw_labels_its_own_wake_turn() -> N
     assert [(t.phase, t.reason) for t in turns] == [
         ("started", "task_finished"),
         ("completed", "task_finished"),
-        ("started", "unknown"),  # the CLI's empty turn
-        ("completed", "unknown"),
+        ("started", "unknown"),  # the CLI's empty no-query turn
+        ("completed", "no_query"),  # #928
         ("started", "unknown"),
         ("completed", "task_finished"),
     ]
@@ -1258,3 +1284,312 @@ async def test_819_live_compact_followup_is_its_own_turn() -> None:
     assert not any(
         e["event"] == "claude.live_session.closed_after_result" for e in logs
     )
+
+
+# ── #928: the CLI's empty no-query results are not turns ───────────────────
+
+
+def _nq(**overrides: Any) -> dict[str, Any]:
+    """The CLI's documented no-query result (SDK docs; CLI 2.1.289)."""
+    obj: dict[str, Any] = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 2,
+        "duration_api_ms": 0,
+        "num_turns": 0,
+        "result": "",
+        "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "origin": {"kind": "task-notification"},
+    }
+    obj.update(overrides)
+    return {k: v for k, v in obj.items() if v is not _DROP}
+
+
+_DROP = object()
+
+
+def _first(state: Any, factory: Any) -> None:
+    h._first_turn(state, factory)
+
+
+def _feed(state: Any, factory: Any, *objs: dict[str, Any]) -> list[Any]:
+    return h._feed(state, factory, *objs)
+
+
+def _logs_named(logs: list[dict], name: str) -> list[dict]:
+    return [e for e in logs if e["event"] == name]
+
+
+def test_928_no_query_result_absorbed_when_no_turn_open() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    turn_before = state.turn
+    with capture_logs() as logs:
+        events = _feed(state, factory, _nq())
+    assert events == []
+    assert state.turn == turn_before
+    assert state.completed_turns == 1
+    assert state.no_query_results == 1
+    assert not state.turn_open
+    (absorbed,) = _logs_named(logs, "claude.turn.no_query")
+    assert absorbed["opened"] is False and absorbed["log_level"] == "info"
+    assert absorbed["after_turn"] == turn_before
+    assert absorbed["origin_kind"] == "task-notification"
+    assert _logs_named(logs, "claude.turn.started") == []
+
+
+def test_928_no_query_in_init_opened_turn_closes_as_no_query() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    with capture_logs() as logs:
+        events = _feed(state, factory, h._init(), _nq())
+    turns = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    assert turns == [("started", "unknown"), ("completed", "no_query")]
+    done = [e for e in events if isinstance(e, TurnEvent)][-1]
+    assert done.ok is True and done.answer == "" and done.detail == {}
+    assert not any(isinstance(e, CompletedEvent) for e in events)
+    assert state.completed_turns == 1  # no #896 accounting wait armed
+    assert state.unattributed_turn_completed_at is None
+    assert state.no_query_results == 1
+    (completed,) = _logs_named(logs, "claude.turn.completed")
+    assert completed["reason"] == "no_query"
+    assert completed["origin_kind"] == "task-notification"
+    (nq,) = _logs_named(logs, "claude.turn.no_query")
+    assert nq["opened"] is True and nq["turn"] == 2 and nq["opened_as"] == "unknown"
+
+
+def test_928_absorb_does_not_spend_idle_attribution() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    state.turn_notifications = ["bg a2"]
+    state.turn_notification_ids = ["a2"]
+    assert _feed(state, factory, _nq()) == []
+    assert state.turn_notifications == ["bg a2"]
+    events = _feed(state, factory, h._init())
+    (opened,) = [e for e in events if isinstance(e, TurnEvent)]
+    assert opened.reason == "task_finished"
+    assert opened.detail["tasks"] == ["bg a2"]
+
+
+def test_928_no_query_absorb_keeps_idle_rewake_candidate() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    h._idle_rewake(state, factory)  # #923's idle candidate
+    assert state.hook_idle_rewake_hint is not None
+    assert _feed(state, factory, _nq()) == []
+    with capture_logs() as logs:
+        events = _feed(state, factory, h._init())
+    (opened,) = [e for e in events if isinstance(e, TurnEvent)]
+    assert opened.reason == "hook_rewake"
+    (attributed,) = _logs_named(logs, "claude.turn.hook_rewake")
+    assert attributed["attributed"] == "open_idle"
+
+
+@pytest.mark.parametrize("strength", ["strong", "weak", "carried"])
+def test_928_case_i_tail_opened_as_hook_rewake_is_no_query_and_restores_hint(
+    strength: str,
+) -> None:
+    """Review amendment 1: an ``init``-opened no-query tail that took a hook
+    hint must not render as an empty pushed 🪝 — it closes as ``no_query``
+    and the hint goes back for the real rewake turn."""
+    state, factory = h._state()
+    if strength == "weak":
+        _first(state, factory)
+        h._idle_rewake(state, factory)
+    else:
+        h._first_turn(state, factory, "h-stop")
+        h._feed(
+            state,
+            factory,
+            h._response("h-stop", "Stop", outcome="error", exit_code=2),
+        )
+        if strength == "carried":
+            # Past the 10 s open TTL, inside the 60 s carry TTL.
+            name, event, _ts = state.hook_rewake_hint  # type: ignore[misc]
+            state.hook_rewake_hint = (name, event, time.monotonic() - 30.0)
+    events = _feed(state, factory, h._init(), _nq())
+    turns = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    opened_as = "unknown" if strength == "carried" else "hook_rewake"
+    assert turns == [("started", opened_as), ("completed", "no_query")]
+    assert state.turn_hook_hint is None
+    if strength == "weak":
+        assert state.hook_idle_rewake_hint is not None
+        assert state.hook_idle_rewake_hint[3] >= 101.0
+    else:
+        assert state.hook_rewake_hint is not None
+    # The real rewake turn that follows still gets its label.
+    events = _feed(
+        state,
+        factory,
+        h._init(),
+        h._text("finding"),
+        h._result("finding", origin={"kind": "task-notification"}),
+    )
+    reasons = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    if strength == "carried":
+        # Still stale at open: carried in, confirmed by ``origin``.
+        assert reasons == [("started", "unknown"), ("completed", "hook_rewake")]
+    else:
+        assert reasons == [("started", "hook_rewake"), ("completed", "hook_rewake")]
+
+
+def test_928_no_query_tail_does_not_pair_a_later_task_end() -> None:
+    from untether.runners.claude import ClaudeTask, _note_task_end
+
+    state, factory = h._state()
+    _first(state, factory)
+    _feed(state, factory, h._init(), _nq())  # case I tail
+    task = ClaudeTask(task_id="a2", tool_use_id="toolu_a2", description="bg a2")
+    task.is_backgrounded = True
+    state.tasks["a2"] = task
+    with capture_logs() as logs:
+        _note_task_end(state, task)
+    assert _logs_named(logs, "claude.turn.task_end_paired") == []
+    assert "a2" not in state.announced_task_ids
+    state.turn_notifications = ["bg a2"]
+    state.turn_notification_ids = ["a2"]
+    events = _feed(state, factory, h._init())
+    (opened,) = [e for e in events if isinstance(e, TurnEvent)]
+    assert opened.reason == "task_finished"
+    assert "already_announced" not in opened.detail
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"num_turns": 1},
+        {"duration_api_ms": 900},
+        {"result": "x"},
+        {"is_error": True, "subtype": "error_during_execution"},
+        {"origin": {"kind": "human"}},
+        {"origin": _DROP},
+        {"local_command": "compact"},
+        {"terminal_reason": "aborted_tools"},
+    ],
+    ids=[
+        "turns",
+        "api_ms",
+        "result",
+        "error",
+        "human",
+        "no_origin",
+        "local_command",
+        "aborted",
+    ],
+)
+def test_928_negatives_keep_todays_unknown_turn(overrides: dict[str, Any]) -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    events = _feed(state, factory, _nq(**overrides))
+    turns = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    assert turns == [("started", "unknown"), ("completed", "unknown")]
+    assert state.completed_turns == 2
+    assert state.no_query_results == 0
+
+
+def test_928_pending_followup_is_never_absorbed() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    state.pending_command_uuid = "cmd-1"  # a ScheduleWakeup / follow-up
+    events = _feed(state, factory, _nq())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)][-1] != "no_query"
+    assert state.completed_turns == 2
+
+
+def test_928_turn_with_assistant_text_is_not_no_query() -> None:
+    state, factory = h._state()
+    _first(state, factory)
+    events = _feed(state, factory, h._init(), h._text("hi"), _nq())
+    turns = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    assert turns == [("started", "unknown"), ("completed", "unknown")]
+
+
+def test_928_no_query_on_task_finished_turn_is_unchanged() -> None:
+    """Scope guard (§11): a ``task_finished`` turn is never reclassified."""
+    state, factory = h._state()
+    _first(state, factory)
+    state.turn_notifications = ["bg a1"]
+    state.turn_notification_ids = ["a1"]
+    events = _feed(state, factory, h._init(), _nq())
+    turns = [(e.phase, e.reason) for e in events if isinstance(e, TurnEvent)]
+    assert turns == [("started", "task_finished"), ("completed", "task_finished")]
+
+
+def test_928_stop_at_limit_not_held_by_no_query() -> None:
+    from untether.runners.claude import LiveSession
+
+    state, factory = h._state()
+    _first(state, factory)
+    live = LiveSession(session_id="nq", state=state, stdin=None)
+    live.accounting_armed = True
+    live.accounted_turns = state.completed_turns
+    _feed(state, factory, h._init(), _nq())  # case I
+    assert live.result_unaccounted is False
+    _feed(state, factory, _nq())  # case R
+    assert live.result_unaccounted is False
+
+
+def test_928_is_no_query_result_predicate() -> None:
+    from untether.runners.claude import _is_no_query_result
+    from untether.schemas.claude import StreamResultMessage
+
+    def msg(**kw: Any) -> StreamResultMessage:
+        base: dict[str, Any] = {
+            "subtype": "success",
+            "duration_ms": 2,
+            "duration_api_ms": 0,
+            "is_error": False,
+            "num_turns": 0,
+            "session_id": "s",
+            "result": "",
+            "origin": {"kind": "task-notification"},
+        }
+        base.update(kw)
+        return StreamResultMessage(**base)
+
+    assert _is_no_query_result(msg()) is True
+    assert _is_no_query_result(msg(result="  \n")) is True
+    assert _is_no_query_result(msg(result=None)) is True
+    assert _is_no_query_result(msg(structured_output={"a": 1})) is False
+    assert _is_no_query_result(msg(local_command={"name": "compact"})) is False
+    assert _is_no_query_result(msg(terminal_reason="aborted_streaming")) is False
+    assert _is_no_query_result(msg(terminal_reason="completed")) is True
+    assert _is_no_query_result(msg(origin="task-notification")) is False
+    assert _is_no_query_result(msg(num_turns=2)) is False
+
+
+async def test_928_agent_wake_tail_absorbed_case_r() -> None:
+    with capture_logs() as logs:
+        events = await _collect("agent_wake_no_query_tail", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert "already_announced" not in turns[2].detail
+    (nq,) = [e for e in logs if e["event"] == "claude.turn.no_query"]
+    assert nq["opened"] is False
+    assert not [e for e in logs if e["event"] == "claude.turn.task_end_paired"]
+
+
+async def test_928_agent_wake_tail_case_i() -> None:
+    os.environ["FAKE_CLAUDE_NO_QUERY_INIT"] = "1"
+    with capture_logs() as logs:
+        events = await _collect("agent_wake_no_query_tail", until=4)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+        ("started", "unknown"),
+        ("completed", "no_query"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert "already_announced" not in turns[4].detail
+    (nq,) = [e for e in logs if e["event"] == "claude.turn.no_query"]
+    assert nq["opened"] is True
+    assert not [e for e in logs if e["event"] == "claude.turn.task_end_paired"]

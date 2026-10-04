@@ -916,6 +916,24 @@ def test_files_outbox_dir_rejects_absolute() -> None:
         TelegramFilesSettings(outbox_dir="/tmp/outbox")
 
 
+@pytest.mark.parametrize("value", ["..", "../Downloads", "out/../../x"])
+def test_files_outbox_dir_rejects_parent_components(value: str) -> None:
+    """#924 review: `..` would let the outbox (and its stale archiving)
+    reach outside the project."""
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError, match=r"'\.\.'"):
+        TelegramFilesSettings(outbox_dir=value)
+
+
+def test_files_outbox_dir_allows_nested_relative() -> None:
+    from untether.settings import TelegramFilesSettings
+
+    assert TelegramFilesSettings(outbox_dir="out/box").outbox_dir == "out/box"
+
+
 def test_files_outbox_max_files_range() -> None:
     from pydantic import ValidationError
 
@@ -925,6 +943,27 @@ def test_files_outbox_max_files_range() -> None:
         TelegramFilesSettings(outbox_max_files=0)
     with pytest.raises(ValidationError):
         TelegramFilesSettings(outbox_max_files=51)
+
+
+def test_files_outbox_stale_policy_default_archive() -> None:
+    """#924: decided default — older outbox leftovers are quarantined."""
+    from untether.settings import TelegramFilesSettings, TelegramTransportSettings
+
+    assert TelegramFilesSettings().outbox_stale_policy == "archive"
+    assert TelegramFilesSettings(outbox_stale_policy="send").outbox_stale_policy == (
+        "send"
+    )
+    # hot-reloadable, not restart-only
+    assert "files" not in TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+
+
+def test_files_outbox_stale_policy_rejects_unknown() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(outbox_stale_policy="skip")
 
 
 # ── AutoContinueSettings ──

@@ -90,6 +90,18 @@ Fields (error path):
   `error_during_execution`, which can carry an `errors` array). Untether keys success on
   `is_error`; `subtype` is informational
 - `result` may be empty or contain an error description
+- API-error fields (decoded since 0.35.5rc20, CLI 2.1.289; all optional, typed `Any`, so a
+  type change upstream never drops the line):
+  - `api_error_status`: HTTP status of the API error that ended the turn (public SDK field)
+  - `api_error_code`: the server's `error.details.error_code`, e.g. `credits_required` (`@internal`)
+  - `api_error`: the CLI's typed kind, e.g. `model_requires_usage_credits` or
+    `long_context_credits_required` (`@internal`; the CLI says the text "stays the fallback")
+
+  The #701 action-required cap latch reads `api_error`, then `api_error_code`, then the
+  `result` text: "… Switch to another model[, or manage usage credits at <url>,] to
+  continue." in headless mode, or the older "Run /usage-credits …" wording
+  ([#922](https://github.com/littlebearapps/untether/issues/922)). The long-context kind never
+  latches: its remedy is different.
 
 Example (error):
 ```json
@@ -104,7 +116,13 @@ Turn-ending fields (decoded since 0.35.5rc14, all optional):
   `CLAUDE_ABORTED_TERMINAL_REASONS` in `schemas/claude.py`).
 - `origin`: what started the turn, e.g. `{"kind":"task-notification","producer":"session-task"}`
   for a turn the CLI started itself (a background-task finish or an `asyncRewake` hook, #812).
-  Typed `Any`: readers check it is an object first.
+  Typed `Any`: readers check it is an object first. The CLI also writes an empty **no-query**
+  result (`num_turns: 0`, `duration_api_ms: 0`, `result: ""`, `origin.kind: "task-notification"`)
+  for each notification it answered together with others, and for the agent hand-back notice — no
+  model call, no cost ([SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript),
+  `SDKResultMessage.origin`). Untether absorbs these ([#928](https://github.com/littlebearapps/untether/issues/928)).
+- `local_command`: set when a local command (e.g. `/compact`) finished without entering the agent
+  loop; such a 0-turn result is never a no-query result (#928). Typed `Any`.
 - `stop_reason`: passed through, typed `Any`.
 
 Optional fields that may appear in upstream Claude Code CLI output but are **not** captured
@@ -158,7 +176,7 @@ emitter still gets a precise countdown ([#518](https://github.com/littlebearapps
 | `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. |
 | `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
 | `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
-| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title (`⛔ Model limit reached — …`) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
+| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage / `seven_day_overage_included` → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title naming the cap kind (`⛔ Fable limit reached — …`, `⛔ Usage credits used up — …`, `⛔ Monthly spend limit reached — …`, `⛔ Team budget reached — …`; [#922](https://github.com/littlebearapps/untether/issues/922)) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
 | `rejected` with `isUsingOverage`, or `resetsAt` already past | Not a throttle (INFO log `retry_after_source=covered_by_overage` / `stale`). |
 | unknown `status` | WARN `claude.rate_limit_event.unknown_status` once per value; no latch. |
 | no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |

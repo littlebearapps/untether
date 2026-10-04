@@ -8,6 +8,7 @@ from typing import Any
 
 import anyio
 import pytest
+from structlog.testing import capture_logs
 
 from tests.test_live_session_harness import _drive, _watchdog
 from untether import runner_bridge as rb
@@ -114,6 +115,7 @@ def cleanup():
     ):
         reg.pop("sid-inj", None)
     rb._FOLLOWUP_ANCHORS.clear()
+    rb._FOLLOWUP_IN_FLIGHT.clear()
 
 
 async def test_followup_during_active_turn_is_held_then_written(cleanup) -> None:
@@ -709,3 +711,304 @@ async def test_835_reply_to_attended_run_keeps_context_identity() -> None:
     running.resume = ResumeToken(engine="claude", value="sid-x")
     job = await _reply_to_running_cron_turn(running)
     assert job.context is ctx
+
+
+# ── #921 in-flight anchor ownership ─────────────────────────────────────────
+
+_RESEND = "please send it again"
+
+
+def _ref(msg: int = 5) -> MessageRef:
+    return MessageRef(channel_id=1, message_id=msg)
+
+
+def test_921_drain_skips_in_flight_anchor(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="s1", reply_to=_ref(5), placeholder=None, in_flight=True
+    )
+    rb.register_followup_anchor(
+        "b", session_id="s1", reply_to=_ref(6), placeholder=None
+    )
+    assert rb.drain_followup_anchors("s1") == [(_ref(6), None)]
+    assert list(rb._FOLLOWUP_ANCHORS) == ["a"]
+
+
+def test_921_settle_not_written_pops_and_signals(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="s1", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+    flight = rb._FOLLOWUP_IN_FLIGHT["a"]
+    rb.settle_followup_anchor("a", written=False)
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+    assert flight.settled.is_set() and flight.written is False
+
+
+def test_921_settle_written_keeps_anchor(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="s1", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+    flight = rb._FOLLOWUP_IN_FLIGHT["a"]
+    rb.settle_followup_anchor("a", written=True)
+    assert flight.settled.is_set() and flight.written is True
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+    # Written but never ran: the run-end sweep still owns telling the user.
+    assert rb.drain_followup_anchors("s1") == [(_ref(), None)]
+
+
+def test_921_settle_unknown_uuid_is_noop(cleanup) -> None:
+    rb.register_followup_anchor("b", session_id="s1", reply_to=_ref(), placeholder=None)
+    rb.settle_followup_anchor("missing", written=False)
+    rb.settle_followup_anchor("missing", written=True)
+    assert list(rb._FOLLOWUP_ANCHORS) == ["b"]
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_inject_failure_settles_and_requeues(cleanup) -> None:
+    """The session goes away while the follow-up waits for the turn to end:
+    inject returns False and leaves nothing behind in either registry."""
+    _install("sid-inj", idle=False)
+    result: dict[str, Any] = {}
+
+    async def go() -> None:
+        result["ok"] = await inject_live_followup(_job("sid-inj"))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(go)
+        with anyio.fail_after(2):
+            while not rb._FOLLOWUP_IN_FLIGHT:
+                await anyio.sleep(0.01)
+        claude_mod._LIVE_SESSIONS.pop("sid-inj", None)
+    assert result["ok"] is False
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_inject_exception_still_settles(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install("sid-inj", idle=True)
+
+    async def boom(*_a: Any, **_k: Any) -> bool:
+        assert rb._FOLLOWUP_IN_FLIGHT  # registered as in flight
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(claude_mod, "inject_when_idle", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        await inject_live_followup(_job("sid-inj"))
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_written_inject_keeps_anchor_not_in_flight(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install("sid-inj", idle=True)
+    seen: list[bool] = []
+
+    async def wrote(*_a: Any, **_k: Any) -> bool:
+        seen.append(bool(rb._FOLLOWUP_IN_FLIGHT))
+        return True
+
+    monkeypatch.setattr(claude_mod, "inject_when_idle", wrote)
+    assert await inject_live_followup(_job("sid-inj")) is True
+    assert seen == [True]
+    assert len(rb._FOLLOWUP_ANCHORS) == 1
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+async def test_921_settle_wait_logs_requeued_when_writer_falls_back(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="s1", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+
+    async def writer() -> None:
+        await anyio.sleep(0.05)
+        rb.settle_followup_anchor("a", written=False)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(writer)
+            await rb._await_in_flight_followups("s1")
+    events = [e["event"] for e in logs]
+    assert "claude.live_session.followup_requeued" in events
+    assert "claude.live_session.followup_settle_timeout" not in events
+    assert rb.drain_followup_anchors("s1") == []
+
+
+async def test_921_settle_wait_silent_when_writer_wrote(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="s1", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+
+    async def writer() -> None:
+        await anyio.sleep(0.05)
+        rb.settle_followup_anchor("a", written=True)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(writer)
+            await rb._await_in_flight_followups("s1")
+    events = {e["event"] for e in logs}
+    assert not events & {
+        "claude.live_session.followup_requeued",
+        "claude.live_session.followup_settle_timeout",
+    }
+    # Written and the session is gone: the sweep's drain now reports it.
+    assert rb.drain_followup_anchors("s1") == [(_ref(), None)]
+
+
+async def test_921_settle_wait_ignores_other_sessions(cleanup) -> None:
+    rb.register_followup_anchor(
+        "a", session_id="other", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+    with anyio.fail_after(0.5), capture_logs() as logs:
+        await rb._await_in_flight_followups("s1")
+    assert logs == []
+    assert "a" in rb._FOLLOWUP_IN_FLIGHT
+
+
+@pytest.mark.parametrize("live_owner", [False, True])
+async def test_921_settle_timeout_leaves_anchor_for_writer(
+    cleanup, monkeypatch: pytest.MonkeyPatch, live_owner: bool
+) -> None:
+    """A writer still in flight after the bound keeps its anchor (no notice).
+    With a newer live owner of the same session id (#816) that is expected:
+    the line goes into the new process, whose router consumes the anchor."""
+    monkeypatch.setattr(rb, "_FOLLOWUP_SETTLE_S", 0.05)
+    if live_owner:
+        _install("sid-inj", idle=False)
+    rb.register_followup_anchor(
+        "a", session_id="sid-inj", reply_to=_ref(), placeholder=None, in_flight=True
+    )
+    with capture_logs() as logs:
+        await rb._await_in_flight_followups("sid-inj")
+    timeouts = [
+        e for e in logs if e["event"] == "claude.live_session.followup_settle_timeout"
+    ]
+    assert len(timeouts) == 1
+    assert timeouts[0]["live_owner_present"] is live_owner
+    assert timeouts[0]["log_level"] == "info"
+    assert rb.drain_followup_anchors("sid-inj") == []  # left for the writer
+    assert "a" in rb._FOLLOWUP_ANCHORS
+    rb.settle_followup_anchor("a", written=False)
+    assert rb._FOLLOWUP_ANCHORS == {} and rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+def _all_texts(transport: Any) -> list[str]:
+    return [c["message"].text for c in transport.send_calls] + [
+        c["message"].text for c in transport.edit_calls
+    ]
+
+
+async def _cancel_once_in_flight(
+    running_tasks: dict[MessageRef, rb.RunningTask], *, enqueue: Any
+) -> None:
+    """Wait for the first turn to be running, queue a follow-up, wait until
+    its inject has registered the anchor, then /cancel the run."""
+    with anyio.fail_after(20):
+        while True:
+            live = claude_mod.get_live_session(SID)
+            if live is not None and live.state.turn_open:
+                break
+            await anyio.sleep(0.02)
+        await enqueue()
+        while not rb._FOLLOWUP_ANCHORS:
+            await anyio.sleep(0.01)
+        while not running_tasks:
+            await anyio.sleep(0.01)
+    (_, task), *_ = rb.unique_running_tasks(running_tasks)
+    task.cancel_requested.set()
+
+
+async def test_921_cancel_while_followup_waits_does_not_ask_to_resend(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance case: /cancel lands while a queued follow-up waits for
+    the running turn to end. The follow-up is re-dispatched (resume path), so
+    the user must NOT be told to send it again, and nothing WARNs."""
+    _watchdog(monkeypatch)
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "followup")
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT_DELAY_S", "3")
+    resumed: list[ThreadJob] = []
+
+    async def run_job(job: ThreadJob) -> None:
+        resumed.append(job)
+
+    running_tasks: dict[MessageRef, rb.RunningTask] = {}
+    holder: dict[str, Any] = {}
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            sched = ThreadScheduler(
+                task_group=tg, run_job=run_job, inject_job=inject_live_followup
+            )
+
+            async def drive() -> None:
+                holder["transport"] = await _drive(
+                    "followup", running_tasks=running_tasks
+                )
+
+            tg.start_soon(drive)
+            await _cancel_once_in_flight(
+                running_tasks, enqueue=lambda: sched.enqueue(_job())
+            )
+
+    texts = _all_texts(holder["transport"])
+    assert not [t for t in texts if _RESEND in t]
+    assert [j.user_msg_id for j in resumed] == [20]  # the resume fallback, once
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}
+    events = [e["event"] for e in logs]
+    assert "claude.live_session.inject_unavailable" in events
+    assert "claude.live_session.followup_requeued" in events
+    assert "claude.live_session.followup_not_run" not in events
+
+
+async def test_921_written_followup_whose_session_dies_still_warns(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: a follow-up that WAS written into the session but
+    never got a turn (the run was cancelled first) still gets the notice and
+    the WARN — it really didn't run."""
+    _watchdog(monkeypatch)
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "followup")
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT_DELAY_S", "3")
+
+    async def wrote_nothing(*_a: Any, **_k: Any) -> bool:
+        return True  # "written" — but nothing reaches the fake CLI
+
+    monkeypatch.setattr(claude_mod, "inject_when_idle", wrote_nothing)
+
+    async def run_job(job: ThreadJob) -> None:  # pragma: no cover
+        raise AssertionError("an injected follow-up must not resume")
+
+    running_tasks: dict[MessageRef, rb.RunningTask] = {}
+    holder: dict[str, Any] = {}
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            sched = ThreadScheduler(
+                task_group=tg, run_job=run_job, inject_job=inject_live_followup
+            )
+
+            async def drive() -> None:
+                holder["transport"] = await _drive(
+                    "followup", running_tasks=running_tasks
+                )
+
+            tg.start_soon(drive)
+            await _cancel_once_in_flight(
+                running_tasks, enqueue=lambda: sched.enqueue(_job())
+            )
+
+    transport = holder["transport"]
+    placeholder = MessageRef(channel_id=123, message_id=99)
+    notices = [c for c in transport.edit_calls if _RESEND in c["message"].text]
+    assert notices and notices[-1]["ref"] == placeholder
+    assert notices[-1]["message"].text == (
+        "\N{WARNING SIGN} The session ended before this message ran "
+        "— please send it again."
+    )
+    warns = [e for e in logs if e["event"] == "claude.live_session.followup_not_run"]
+    assert len(warns) == 1 and warns[0]["log_level"] == "warning"
+    assert rb._FOLLOWUP_ANCHORS == {}
+    assert rb._FOLLOWUP_IN_FLIGHT == {}

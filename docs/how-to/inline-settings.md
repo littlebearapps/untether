@@ -132,7 +132,7 @@ See [Schedule tasks](schedule-tasks.md#pausing-all-triggers) for the pause flow 
 
 ### Loop mode page {#loop-mode}
 
-When the active engine is Claude Code, the home page gains a `🔁 Loop mode` button that opens the Loop sub-page ([#289](https://github.com/littlebearapps/untether/issues/289)). Loop mode is **off by default** — turning it on enables Untether's observation of Claude's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`) so iterations keep firing after the subprocess exits.
+When the active engine is Claude Code, the home page gains a `🔁 Loop mode` button that opens the Loop sub-page ([#289](https://github.com/littlebearapps/untether/issues/289)). Loop mode is **off by default** — turning it on lets Claude schedule repeated runs: Untether declines Claude Code's own `CronCreate` and runs the schedule itself, with the `[loop]` caps, firing each iteration with `claude --resume` whether or not the session is still open ([#925](https://github.com/littlebearapps/untether/issues/925)). With it off, Claude can't schedule recurring or timed tasks and points you here, or to `/at` for a one-off. Self-paced wake-ups (`ScheduleWakeup`) work in both modes, up to `max_iterations` in a row.
 
 The page shows:
 
@@ -141,7 +141,7 @@ The page shows:
 * **💰 Set a budget** — deep-link to the `Cost & Usage` page (`config:cu`) for one-tap budget setup.
 * **Buttons** — `[On] [Off]` with ✓ on the active per-chat choice, then `[Clear override] [💰 Set a budget]` and `[← Back]`.
 
-`/cancel` and `/new` both drop pending loop iterations for the current chat (or forum topic) and write a do-not-resume sentinel so a subsequent `loop_scheduler` resume can't replay them. `/continue` is unaffected (it doesn't trigger loop replay).
+`/cancel` and `/new` both drop pending loop iterations for the current chat (or forum topic); the next message resumes the session without the cancelled loop, and new loops in that session run normally ([#926](https://github.com/littlebearapps/untether/issues/926)). `/continue` is unaffected (it doesn't trigger loop replay).
 
 Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`); the button is hidden for other engines. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full architecture and cost guidance.
 

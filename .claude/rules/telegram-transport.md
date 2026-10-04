@@ -54,7 +54,9 @@ Messages that should auto-delete when a run finishes:
 
 ## Outbox file delivery
 
-Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`.
+Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`, `outbox_stale_policy`.
+
+Freshness (#924): only entries changed since the dispatch's `outbox_since` are sent; older ones are quarantined to `.skipped/` once. Always thread `outbox_since` through every `handle_message` re-entry (a live session uses its spawn time, never a turn's), and read the outbox settings per delivery via `_load_outbox_settings(cfg)` — never `cfg.outbox_config` directly (frozen at startup, so edits wouldn't hot-reload).
 
 ## Progress persistence
 
@@ -66,7 +68,7 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 ## TelegramBridgeConfig hot-reload (#286)
 
-`TelegramBridgeConfig` is unfrozen (slots preserved) as of rc4. `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`.
+`TelegramBridgeConfig` is unfrozen (slots preserved) as of rc4. `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`. Every restart notice gets its "how to apply" text from `service_manager.restart_hint()` (#927) — never hardcode a systemd unit or launchd label.
 
 ## sd_notify (#287)
 

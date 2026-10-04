@@ -378,6 +378,9 @@ _CLOSE_REASONS = {
     "options_changed": "chat settings changed",
     "budget_stop": "cost budget reached",  # #896
     "idle_no_tasks": "session closed",
+    "loop_fire": "loop iteration due",  # #925
+    "wake_cap": "self-paced wake-up limit reached",  # #925
+    "cron_suppressed": "scheduled task stopped",  # #925
 }
 
 

@@ -64,6 +64,13 @@ def test_default_preamble_includes_outbox_instructions() -> None:
     assert "/file get" in _DEFAULT_PREAMBLE
 
 
+def test_preamble_mentions_outbox_freshness() -> None:
+    """#924: only files written during the run are sent; agents must copy an
+    older file in again to resend it."""
+    assert "during this run are sent" in _DEFAULT_PREAMBLE
+    assert "copy it in again" in _DEFAULT_PREAMBLE
+
+
 def test_default_preamble_warns_against_systemctl_restart() -> None:
     """#547 axis 1: agents routinely follow ``edit untether.toml`` with
     ``systemctl --user restart untether`` because their training data is
@@ -82,6 +89,15 @@ def test_default_preamble_warns_against_systemctl_restart() -> None:
     # Restart-only keys mentioned so agents know the exception
     assert "bot_token" in _DEFAULT_PREAMBLE
     assert "chat_id" in _DEFAULT_PREAMBLE
+
+
+def test_preamble_config_path_and_triggers_restart() -> None:
+    """#927: the preamble must not assume the default unit/config path is the
+    running instance, and lists `[triggers] enabled` as restart-only (#894)."""
+    assert "default `~/.untether/untether.toml`" in _DEFAULT_PREAMBLE
+    assert "[triggers] enabled" in _DEFAULT_PREAMBLE
+    assert "launchctl kickstart" in _DEFAULT_PREAMBLE
+    assert "untether-*" in _DEFAULT_PREAMBLE
 
 
 # ───── #508 / #515 — plan-mode preamble clauses ────────────────────────

@@ -14,6 +14,8 @@ What raises a button depends on the permission mode:
 
 With **Diff preview** turned on in `/config`, Edit, Write and Bash requests in the autonomous modes also wait for a tap so you see the change first (except during the reply that follows a plan you approved).
 
+A **background agent** can ask for approval after Claude has already replied — for example when a hook asks you to confirm one of its commands. That request arrives as its own message, with the same buttons, the agent's task and the reason it's asking. It's sent again after 10 minutes and then every 30 minutes while it waits (each copy replaces the last), and it's removed once you answer.
+
 ## The approval buttons
 
 When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons:

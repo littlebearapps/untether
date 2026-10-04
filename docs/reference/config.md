@@ -48,7 +48,9 @@ of that file are seen.
 
 Editing a field marked 🔄 (**restart-required**) posts a warning to the project
 chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
-effect.") and logs `config.reload.transport_config_changed`. Other Telegram
+effect.", followed by a "To apply:" line naming the service that's actually
+running, [#927](https://github.com/littlebearapps/untether/issues/927)) and logs
+`config.reload.transport_config_changed`. Other Telegram
 transport changes apply without a message and log
 `config.reload.transport_config_hot_reloaded`.
 
@@ -71,18 +73,19 @@ restart.
 
 | Section | Restart-required fields | Hot-reload |
 |---|---|---|
-| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*`) |
+| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*` — except that outbox delivery is only wired at startup: if `files.enabled` or `outbox_enabled` was off when Untether started, turning it on needs a restart) |
 | `transports.telegram.topics` | whole section (treated as one unit) | — |
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
 | `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
-To restart:
+To restart, send `/restart` in Telegram (when a service manager relaunches Untether), or restart the service
+directly. The restart notice names the unit or launchd label of the instance that's running; the default is:
 
 ```sh
-systemctl --user restart untether        # staging
-systemctl --user restart untether-dev    # dev
+systemctl --user restart untether                         # Linux (systemd), default unit
+launchctl kickstart -k gui/$(id -u)/<your-launchd-label>  # macOS (launchd)
 ```
 
 ## `transports.telegram`
@@ -146,10 +149,11 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `allowed_user_ids` | int[] | `[]` | Allowed senders for file transfer; empty allows private chats (group usage requires admin). |
 | `deny_globs` | string[] | see below | Glob denylist for `/file put` / `/file get`, `/browse` and the outbox. `**` matches any number of directories, including none, so `**/*.pem` also denies a root-level `key.pem`, and `**/.env.*` a root-level `.env.example` ([#831](https://github.com/littlebearapps/untether/issues/831)). A bare name such as `.env` matches at any depth. Setting the key **replaces** the whole default list. |
 | `outbox_enabled` | bool | `true` | Enable agent-initiated file delivery via `.untether-outbox/`. Requires `enabled = true`. |
-| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
-| `outbox_max_files` | int (1–50) | `10` | Max files sent per run. |
+| `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute or contain `..`). An outbox that resolves outside the project, including through a symlinked path component, is never scanned or archived (`outbox.outside_root` warning, [#924](https://github.com/littlebearapps/untether/issues/924)). |
+| `outbox_max_files` | int (1–50) | `10` | Max files sent per delivery. Extra files are reported in a notice and moved to `.untether-outbox/.skipped/` (never sent with a later run) ([#924](https://github.com/littlebearapps/untether/issues/924)). |
 | `outbox_cleanup` | bool | `true` | Delete sent files and remove empty outbox directory after delivery. |
 | `outbox_notify_skipped` | bool | `true` | ([#524](https://github.com/littlebearapps/untether/issues/524)) Notify the user when a non-deliverable outbox entry (a subdirectory, or a deny-globbed / oversize file) is skipped and archived to `.untether-outbox/.skipped/`, rather than dropping it silently. |
+| `outbox_stale_policy` | `"archive"`\|`"send"` | `"archive"` | ([#924](https://github.com/littlebearapps/untether/issues/924)) Only entries written or copied into the outbox during the run (later of mtime/ctime, 5 s grace) are sent. `"archive"` moves older leftovers once to `.untether-outbox/.skipped/` with one notice; `"send"` is the old send-everything behaviour. Hot-reloads. |
 | `outbox_deliver_directories` | `"off"`\|`"zip"` | `"off"` | ([#628](https://github.com/littlebearapps/untether/issues/628)) When `"zip"`, a subdirectory an agent writes into the outbox (e.g. a `screenshots/` folder from a quality audit) is bundled into a single `<name>.zip` document and delivered, instead of only being archived. Recursive deny-globs, symlink pruning, and per-member / total-input / member-count / final-size caps all apply; anything that fails them falls back to the `.skipped/` archive. |
 
 Default `deny_globs`:
@@ -436,7 +440,7 @@ The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for loca
 
 ### `[loop]`
 
-Controls Untether's observation of Claude Code's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`). Off by default — users opt in per chat via `/config → 🔁 Loop mode`. ([#289](https://github.com/littlebearapps/untether/issues/289))
+Controls how Untether handles Claude Code's scheduling tools (`CronCreate`, `ScheduleWakeup`). With Loop mode on (opt in per chat via `/config → 🔁 Loop mode`), Untether runs Claude's schedules itself, with the caps below. With it off, Claude can't schedule recurring or timed tasks. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
 === "toml"
 
@@ -449,21 +453,26 @@ Controls Untether's observation of Claude Code's session-scoped scheduling tools
     max_total_duration_hours = 4
     min_interval_seconds = 60
     expiry_days = 7
+    own_schedule = true
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `enabled` | bool | `false` | Global default for Loop mode. Per-chat override available via `/config → 🔁 Loop mode`. |
-| `inline_threshold_seconds` | int (≥ 0) | `300` | `ScheduleWakeup` calls with `delaySeconds` ≤ this stay rendered live by the rc8 countdown — no Untether-side timer is registered. Long waits (above the threshold) get an Untether timer that survives subprocess exit. |
-| `redundancy_check_interval` | int (≥ 1) | `30` | Seconds the fire path waits before retrying when the originating subprocess is still alive (race-avoidance gate). |
-| `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). |
+| `enabled` | bool | `false` | Global default for Loop mode. Per-chat override available via `/config → 🔁 Loop mode`. Read when Claude tries to schedule, so a change applies to open sessions too. |
+| `inline_threshold_seconds` | int (≥ 0) | `300` | `ScheduleWakeup` calls with `delaySeconds` ≤ this stay rendered live by the rc8 countdown — no Untether-side timer is registered. Longer waits (Loop mode on) also get an Untether timer, which fires only if the session has closed by then. |
+| `redundancy_check_interval` | int (≥ 1) | `30` | Seconds between retries when a loop iteration is due but its session is busy (background work, an approval waiting). A recurring loop skips the iteration once the next one is due. |
+| `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). Also caps a chain of self-paced wake-ups, in both Loop modes: after this many in a row the session closes and the pending wake-up is dropped. |
 | `max_total_duration_hours` | int (1–168) | `4` | Runaway-safety cap on wall-clock duration (NOT a cost cap). |
 | `min_interval_seconds` | int (≥ 60) | `60` | Accepted but not enforced yet; the upstream cron floor (60 s) applies. |
 | `expiry_days` | int (1–30) | `7` | Auto-expire loops this many days after creation (the default matches upstream's 7-day session-task expiry). |
+| `own_schedule` | bool | `true` | Untether owns Claude's schedules in every Claude chat (a PreToolUse hook declines `CronCreate`; Loop mode decides whether Untether then runs it). `false` restores the pre-rc20 behaviour in both modes: Claude Code's own scheduled task runs uncapped while the session is open, and self-paced wake-ups aren't capped. Hot-reloads for new sessions. |
 
 **Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
 
-State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. The do-not-resume sentinel for `/cancel`-cancelled loops is persisted alongside.
+State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. Alongside it are the per-loop cancel records and the sessions that may still hold an older Claude-side scheduled task; those resume with `CLAUDE_CODE_DISABLE_CRON=1` for up to 7 days so the task can't restart ([#926](https://github.com/littlebearapps/untether/issues/926)).
+
+!!! warning "Rolling back to v0.35.5rc19 or earlier"
+    Older versions reject unknown `[loop]` keys. Remove `own_schedule` from `untether.toml` before downgrading, or the config won't load.
 
 ### `[auto_continue]`
 

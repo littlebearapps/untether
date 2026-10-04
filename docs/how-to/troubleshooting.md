@@ -199,7 +199,9 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
 | MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
 | Child processes / subagents running | 15 min (`subagent_timeout`) | `⏳ Waiting for child processes (…)` or `⏳ Child processes idle (…)` |
-| Pending user approval | 10 min, then every 30 min | `⏳ Awaiting your approval (N min) — tap a button above to proceed (no action needed otherwise)` |
+| Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
+
+The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan". The reminder is removed once you answer, and a later reminder replaces the earlier one.
 
 **If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
 
@@ -685,16 +687,18 @@ For the full list of patterns and hints, see the [Error Reference](../reference/
 
 ## Loop didn't fire / loop fired too many times
 
-Loop mode (`/config → 🔁 Loop mode`) gates Untether's observation of Claude Code's `/loop` and `ScheduleWakeup` tools. ([#289](https://github.com/littlebearapps/untether/issues/289))
+Loop mode (`/config → 🔁 Loop mode`) decides whether Claude can schedule repeated runs. With it on, Untether runs Claude Code's `/loop` schedules itself, with the `[loop]` caps; with it off, Claude can't schedule recurring or timed tasks. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `/loop` registered during the turn but no fires happened afterwards | Loop mode toggle is OFF (the default) | `/config → 🔁 Loop mode → 🔁 On` |
-| Loop stopped after 20 iterations | Hit the iteration cap (`max_iterations`) | Restart the loop with a fresh `/loop`. The cap is fixed at 20 for now: `[loop] max_iterations` is accepted in `untether.toml` but not applied yet |
+| Claude says scheduling is off, or points you to Loop mode or `/at` | Loop mode is off (the default), so Untether declined Claude's `CronCreate` | `/config → 🔁 Loop mode → 🔁 On`, then ask again; for a one-off delay use `/at <delay> <prompt>` |
+| Loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
+| `⏰ Self-paced wake-up limit reached` and the session closed | A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) hit `[loop] max_iterations` in a row, in either Loop mode | Send a message to carry on (it resets the count), or raise `max_iterations` |
+| A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.35.5rc20, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
 | Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
 | Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
-| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
+| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.35.5rc20 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
 | Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
 
 ## Related

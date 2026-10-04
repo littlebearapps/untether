@@ -29,14 +29,79 @@ def test_hot_reload_only_headline_says_no_restart_needed() -> None:
     assert "triggers.crons.bc-daily-triage.schedule" in text
 
 
+_DEV_HINT = "run `systemctl --user restart untether-dev` (or send `/restart`)"
+
+
 def test_restart_required_headline_says_restart_required() -> None:
     text = format_restart_required_notice(
         path="/home/nathan/.untether/untether.toml",
         restart_keys=["session_mode"],
+        restart_hint=_DEV_HINT,
     )
     assert "**Restart required" in text
     assert "session_mode" in text
-    assert "systemctl --user restart untether" in text
+    assert _DEV_HINT in text
+    assert "To apply, run `systemctl --user restart untether-dev`" in text
+
+
+def test_restart_notice_generic_hint(monkeypatch) -> None:
+    """#927: an undetected service gets generic wording, never a
+    confidently wrong default-unit command."""
+    from untether import service_manager
+
+    monkeypatch.setattr(service_manager, "restart_command", lambda: None)
+    text = format_restart_required_notice(
+        path="/home/nathan/.untether/untether.toml",
+        restart_keys=["session_mode"],
+    )
+    assert "restart Untether's service" in text
+    assert "systemctl" not in text
+
+
+def test_partial_notice_uses_hint() -> None:
+    text = format_partial_reload_notice(
+        path="/home/nathan/.untether/untether.toml",
+        hot_keys=["progress.verbose"],
+        restart_keys=["session_mode"],
+        restart_hint=_DEV_HINT,
+    )
+    assert f"To apply those, {_DEV_HINT} when ready" in text
+
+
+def test_dispatcher_threads_hint() -> None:
+    for hot in ([], ["progress.verbose"]):
+        text = format_reload_notification(
+            path=Path("~/.untether/untether.toml").expanduser(),
+            hot_keys=hot,
+            restart_keys=["session_mode"],
+            restart_hint=_DEV_HINT,
+        )
+        assert _DEV_HINT in text
+
+
+def test_no_hardcoded_default_unit(monkeypatch) -> None:
+    """#927 regression guard: with no detected service, no formatter emits
+    the default-unit command literal (built from parts so the test file
+    itself doesn't trip the #929 guard hook when grepped)."""
+    from untether import service_manager
+
+    monkeypatch.setattr(service_manager, "restart_command", lambda: None)
+    probe = "restart " + "untether`"
+    texts = [
+        format_restart_required_notice(path="/tmp/x.toml", restart_keys=["topics"]),
+        format_partial_reload_notice(
+            path="/tmp/x.toml", hot_keys=["a"], restart_keys=["topics"]
+        ),
+        format_reload_notification(
+            path="/tmp/x.toml", hot_keys=[], restart_keys=["topics"]
+        ),
+        format_reload_notification(
+            path="/tmp/x.toml", hot_keys=["a"], restart_keys=["topics"]
+        ),
+    ]
+    for text in texts:
+        assert probe not in text
+        assert "systemctl" not in text
 
 
 def test_partial_reload_separates_hot_and_restart_keys() -> None:

@@ -3,7 +3,7 @@
 There are several ways to run tasks on a schedule: the `/at` command for quick one-shot delays, Telegram's built-in message scheduling, Untether's trigger system (webhooks and cron), and Loop mode for Claude Code's `/loop` and `ScheduleWakeup`.
 
 !!! note "Loop mode is opt-in"
-    By default, Untether does **not** fire Claude Code's session-scoped schedules after a turn ends — the `claude --print` subprocess exits and the cron task dies with it (verified empirically against `claude` v2.1.129/2.1.132 — upstream docs claiming `--resume` restores tasks are incorrect in `--print` mode). Since v0.35.5 a Claude session stays open after its reply while a `ScheduleWakeup` is pending (up to the 30-minute background hold, `[watchdog] post_result_bg_max_hold`), so short dynamic-loop waits fire natively and arrive as `⏰ Scheduled wake-up` messages. For anything longer, turn on **Loop mode** in `/config → 🔁 Loop mode`. See [Loop mode](#loop-mode) below.
+    With Loop mode off (the default), Claude can't create recurring or timed tasks of its own: Untether declines Claude Code's `CronCreate` and Claude tells you to turn on Loop mode, or to use `/at` for a one-off delay. Self-paced waits (`ScheduleWakeup`, a dynamic `/loop`) still work while the session stays open after its reply, and arrive as `⏰ Scheduled wake-up` messages; a chain of them stops after `[loop] max_iterations` wake-ups. For repeated runs on a schedule, turn on **Loop mode** in `/config → 🔁 Loop mode`. See [Loop mode](#loop-mode) below.
 
 ## One-shot delays with /at
 
@@ -33,30 +33,34 @@ When the delay expires, the prompt runs as a normal agent session. Send `/cancel
 
 ## Loop mode
 
-Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interval `/loop <prompt>` dynamic mode driven by `ScheduleWakeup`) for self-pacing autonomous work. Untether's **Loop mode** observes those tool calls at the JSONL layer, captures the user's intent, and re-fires each iteration when due — even after the subprocess exits. ([#289](https://github.com/littlebearapps/untether/issues/289))
+Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interval `/loop <prompt>` dynamic mode driven by `ScheduleWakeup`) for self-pacing autonomous work. With **Loop mode** on, Untether runs those schedules itself, with limits, and fires each iteration when due — whether or not a Claude session is still open. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
-**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. When OFF, behaviour matches the prior-version baseline: `/loop` registers a schedule during the turn but nothing fires after the subprocess exits.
+**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. With Loop mode off, Claude can't schedule recurring or timed tasks itself: it tells you that scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. Before v0.35.5rc20 such a task ran uncapped while the session was open and came back each time the session was resumed.
 
 ### How it works
 
 1. You type `/loop 5m check the deploy` in a Claude session.
 2. Claude calls `CronCreate(cron="*/5 * * * *", prompt="check the deploy", recurring=true)`.
-3. Untether observes the `tool_use` event and registers an Untether-side timer.
-4. The subprocess exits cleanly. Upstream's session-scoped cron dies with it.
-5. Each fire interval, Untether spawns `claude --resume <session_id>` with a wrapped re-issue prompt: `Loop iteration N: check the deploy. Do the task now; do not summarize old results unless necessary.`
+3. Untether declines the call before it runs (a Claude Code PreToolUse hook) and registers the loop on its own timer, with the caps below. Claude is told the loop's id and that Untether runs it, so nothing is scheduled inside Claude Code and nothing comes back when the session is resumed.
+4. Each fire interval, Untether runs `claude --resume <session_id>` with a wrapped re-issue prompt: `Loop iteration N: check the deploy. Do the task now; do not summarize old results unless necessary.` If the session is still open and idle, Untether closes it first; if it's busy (background work, an approval waiting), the iteration waits, and is skipped if the next one falls due first.
+5. A self-paced `ScheduleWakeup` longer than 5 minutes (`inline_threshold_seconds`) fires inside the open session. Untether fires it only if the session has closed by then.
 6. State persists to `active_loops.json` (sibling of `untether.toml`) — loops survive Untether restarts.
+
+To switch this off, set `[loop] own_schedule = false`: Untether then only observes Claude's schedule (the pre-rc20 behaviour), and a Claude-side job can fire uncapped while the session is open.
 
 ### Runaway-safety caps
 
-Every loop has caps in case it runs longer than expected:
+Every loop has caps in case it runs longer than expected (configurable under `[loop]`):
 
 - 20 iterations (`max_iterations`) — cap on iteration count (NOT a cost cap)
 - 4 hours (`max_total_duration_hours`) — wall-clock cap (NOT a cost cap)
 - 7 days (`expiry_days`) — auto-expire 7 days after creation (matches upstream)
 
-These values are fixed for now: the matching `[loop]` keys are accepted in `untether.toml` but not applied yet.
-
 These bound loop duration regardless of cost. They are *not* a substitute for setting a budget — see "Cost considerations" below.
+
+### Self-paced wake-ups
+
+A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) stops after `max_iterations` consecutive wake-ups, in both Loop modes: the session closes with a `⏰ Self-paced wake-up limit reached` notice and the pending wake-up is dropped. Your next message resets the count. The count is per Claude process, so a resumed session starts again from zero.
 
 ### Cost considerations
 
@@ -67,9 +71,13 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 
 **Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. With **Stop at limit** on, fires after the cap is reached are refused. See [Cost budgets](cost-budgets.md#stop-at-limit) for setup.
 
-### Cancelling a loop
+### Stopping a loop
 
-`/cancel` drops all active loops for the current chat **or forum topic** ([#826](https://github.com/littlebearapps/untether/issues/826)) and writes a do-not-resume sentinel so the upstream session-scoped cron — if it ever survives — cannot be re-fired by Untether. `/new` does the same (treats `/new` as "wipe this chat's — or this topic's — state"). In a forum, a loop belongs to the topic whose run created it, and its iterations are posted back in that topic.
+`/cancel` drops all active loops for the current chat **or forum topic** ([#826](https://github.com/littlebearapps/untether/issues/826)), and your next message resumes the session without the cancelled loop coming back. New loops created in that session afterwards run normally ([#926](https://github.com/littlebearapps/untether/issues/926)). `/new` does the same (treats `/new` as "wipe this chat's — or this topic's — state"). You can also ask Claude to stop it: Claude calls `CronDelete` with the loop's id (`ut_loop_…`). In a forum, a loop belongs to the topic whose run created it, and its iterations are posted back in that topic.
+
+With Loop mode off there is nothing to stop: Claude can't schedule on its own, and a self-paced wait ends with `/cancel` or `/new`.
+
+A session that may still hold an older Claude-side scheduled task (one created before v0.35.5rc20, in a chat without a permission mode, or with `own_schedule = false`) resumes with Claude's scheduling switched off for up to 7 days, so the old task can't restart; the progress message says so. `/new` starts a session that can schedule again. A legacy task in a Loop-off session can still fire up to twice after the upgrade (the first time before your reply) before Untether catches it.
 
 ## Telegram scheduling
 

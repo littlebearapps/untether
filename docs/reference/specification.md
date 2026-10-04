@@ -536,13 +536,18 @@ Runners MAY write files to a designated outbox directory (default: `.untether-ou
 The bridge MUST enforce:
 
 * **Deny globs** — files matching configured deny patterns (e.g. `*.env`, `.git/**`) MUST NOT be delivered
-* **Max files** — at most `outbox_max_files` files per run (default: 10)
+* **Max files** — at most `outbox_max_files` files per delivery (default: 10); files beyond the cap SHOULD be reported to the user rather than left for a later run
 * **Size limit** — individual file size MUST NOT exceed the Telegram Bot API file upload limit (50 MB)
+* **Containment** — the outbox directory MUST resolve inside the project root; an outbox that is absolute, contains `..`, or reaches outside the root (including through a symlinked path component) MUST NOT be scanned, delivered from or archived
 * **Flat scan** — only files in the top-level outbox directory are delivered as files; subdirectories are skipped (and reported when `outbox_notify_skipped` is `true`, the default) unless `outbox_deliver_directories = "zip"` (default `"off"`), which sends each skipped directory as one zip after applying the same deny globs
 
 ### 12.3 Cleanup (SHOULD)
 
 When `outbox_cleanup` is `true` (default), the bridge SHOULD delete delivered files from the outbox directory after successful delivery.
+
+### 12.4 Freshness (SHOULD)
+
+The bridge SHOULD deliver only entries that entered or changed in the outbox during the run (the later of the entry's modification and status-change times, against the run's start with a small grace). Older entries SHOULD NOT be sent; they SHOULD be quarantined once and reported in a single notice. A live session's run starts when the session started.
 
 ## 13. Changelog
 
@@ -554,6 +559,7 @@ When `outbox_cleanup` is `true` (default), the bridge SHOULD delete delivered fi
 - Require wrapping generators to close inner generators in the same task (§5.5) and per-run stream/PID binding (§5.6).
 - Add `is_continue` to the `ResumeToken` schema (§3.2), transport-stored resume tokens (§3.4), and correct the OpenCode resume line to `opencode --session <id>` (§3.1).
 - Align §10 (flock lock, v0.35.4), §11.3 (store format) and §12.2 (directory zip delivery, v0.35.4) with the implementation.
+- Add outbox freshness (§12.4): deliver only entries written during the run; quarantine and report older ones. Files over `outbox_max_files` are reported, and the outbox must resolve inside the project root (§12.2).
 
 ### v0.35.0 (2026-03-18)
 

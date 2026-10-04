@@ -1378,6 +1378,56 @@ async def test_826_run_engine_sets_run_thread_contextvar() -> None:
 
 
 @pytest.mark.anyio
+async def test_924_run_engine_passes_outbox_since_and_registers_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#924: every dispatch takes one wall-clock outbox cutoff before the
+    engine spawns, registers it against the run's cwd for the whole run, and
+    hands it to handle_message."""
+    import time
+
+    from untether.telegram import outbox_delivery as od
+    from untether.telegram.commands import executor as ex
+
+    runner = _ThreadRecordingRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="r-924"
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=_CaptureTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    monkeypatch.setattr(
+        TransportRuntime, "resolve_run_cwd", lambda _self, _ctx: tmp_path
+    )
+
+    seen: dict[str, float | None] = {}
+
+    async def _spy(*_a, **kwargs):
+        seen["since"] = kwargs.get("outbox_since")
+        seen["oldest"] = od.oldest_active_since(tmp_path, 1e12)
+
+    monkeypatch.setattr(ex, "handle_message", _spy)
+    before = time.time()
+    await _run_engine(
+        exec_cfg=exec_cfg,
+        runtime=runtime,
+        running_tasks={},
+        chat_id=123,
+        user_msg_id=1,
+        text="hello",
+        resume_token=None,
+        context=None,
+    )
+    assert seen["since"] is not None
+    assert before <= seen["since"] <= time.time()
+    assert seen["oldest"] == seen["since"]
+    # unregistered after the run
+    assert od.oldest_active_since(tmp_path, 1e12) == 1e12
+
+
+@pytest.mark.anyio
 async def test_handle_file_put_writes_file(tmp_path: Path) -> None:
     payload = b"hello"
 

@@ -63,6 +63,16 @@ The message is queued as normal and Untether tells you why:
 
 With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` tells you too, with two exceptions: while Claude is waiting on a question (`AskUserQuestion`) the text is queued without a note, and if your model or mode changed since the session started, the queued run posts its own notice when it restarts the session with the new settings.
 
+## When a follow-up didn't run
+
+In either mode, one notice can appear on a follow-up after the run ends:
+
+| Reply | Meaning |
+|---|---|
+| `⚠️ The session ended before this message ran — please send it again.` | The follow-up was written into the session, but the session ended before Claude started it. It did not run. |
+
+Cancelling a run doesn't drop a follow-up already queued behind it: it runs next, so you don't need to send it again.
+
 ## Related
 
 - [Inline settings menu](inline-settings.md) — the `/config` Follow-up page

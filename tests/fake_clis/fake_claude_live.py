@@ -786,6 +786,41 @@ def scenario_scheduled_wakeup(first: dict) -> None:
     serve_followups()
 
 
+def scenario_wake_chain(first: dict) -> None:
+    """#925 §14.4: a dynamic /loop — every wake turn schedules the next
+    wake-up, until stdin closes (at most 5 wake turns)."""
+    init()
+    tool_use("ScheduleWakeup", "toolu_wk0", {"delaySeconds": 60, "prompt": "WAKE"})
+    tool_result("toolu_wk0", "Next wakeup scheduled for 19:15:00 (in 60s).")
+    result("scheduled", turns=2)
+    for n in range(1, 6):
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        lifecycle(f"wake-cmd-{n}", "started")
+        init()
+        tool_use(
+            "ScheduleWakeup", f"toolu_wk{n}", {"delaySeconds": 60, "prompt": "WAKE"}
+        )
+        tool_result(f"toolu_wk{n}", "Next wakeup scheduled for 19:16:00 (in 60s).")
+        result(f"WOKE {n}", turns=2)
+    serve_followups()
+
+
+def scenario_native_cron_fire(first: dict) -> None:
+    """#925 §14.3: a CLI cron job (no ScheduleWakeup in this process) fires
+    between turns — the native-fire detector's case."""
+    init()
+    text("FIRST")
+    result("FIRST")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    lifecycle("cron-fire-unknown", "started")
+    init()
+    text("TICK")
+    result("TICK")
+    serve_followups()
+
+
 def scenario_followup(first: dict) -> None:
     init()
     text("FIRST")
@@ -943,7 +978,7 @@ def scenario_two_tasks_one_wake_turn(first: dict) -> None:
         _end_quietly("a2")
         result("A is done; B is still running.", turns=2)
         init()
-        result("", turns=0, delta=0.0)
+        _no_query_result()  # #928: the CLI's empty no-query result
         init()
         text("B printed its report.")
         result("B printed its report.")
@@ -1622,6 +1657,57 @@ def _task_notification_result(answer: str) -> None:
     )
 
 
+def _no_query_result() -> None:
+    """#928: the CLI's documented no-query result — a notification answered
+    together with others: no model call, empty, ``num_turns: 0``,
+    ``origin`` task-notification (SDK docs, CLI 2.1.289)."""
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 2,
+            "duration_api_ms": 0,
+            "num_turns": 0,
+            "result": "",
+            "total_cost_usd": _cost,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "origin": {"kind": "task-notification"},
+        }
+    )
+
+
+def scenario_agent_wake_no_query_tail(first: dict) -> None:
+    """#928 (channelo/sl/lba-1/nsd, rc19): two background agents. a1's wake
+    turn is followed ~0.2 s later by the CLI's empty no-query result —
+    with its own ``init`` when ``FAKE_CLAUDE_NO_QUERY_INIT=1`` (case I),
+    bare otherwise (case R). Then a2 finishes and gets its own wake turn."""
+    init()
+    for task_id, tool_id in (("a1", "toolu_a1"), ("a2", "toolu_a2")):
+        tool_use("Agent", tool_id, {"description": f"sweep {task_id}", "prompt": "go"})
+        start_bg(task_id, tool_id, task_type="local_agent")
+        tool_result(tool_id, "Async agent launched successfully.")
+    text("Two sweeps running.")
+    result("Two sweeps running.", turns=3)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("a1 done")
+    _task_notification_result("a1 done")
+    time.sleep(0.2)
+    if os.environ.get("FAKE_CLAUDE_NO_QUERY_INIT") == "1":
+        init()
+    _no_query_result()
+    if wait_idle_or_eof(1.0) is None:
+        shutdown()
+    end_bg("a2")
+    init()
+    text("a2 done")
+    _task_notification_result("a2 done")
+    serve_followups()
+
+
 def scenario_bg_agent_pretooluse_denial(first: dict) -> None:
     """#828 (channelo, rc14): while the parent idles, a background agent's
     Bash call is denied by a sync ``PreToolUse`` hook (exit 2, started and
@@ -1649,6 +1735,41 @@ def scenario_bg_agent_pretooluse_denial(first: dict) -> None:
     init()
     text("agent done")
     _end_quietly("a1")
+    _task_notification_result("agent done")
+    serve_followups()
+
+
+def scenario_bg_agent_async_rewake_idle(first: dict) -> None:
+    """#923 (lba-1, rc17+): while the parent idles, a background agent's
+    ``git commit`` fires an asyncRewake ``PostToolUse:Bash`` hook (e.g.
+    security-guidance's review). It starts AND exits 2 in the idle gap after
+    running a while, and the CLI opens the parent's rewake turn at once.
+    Later the agent finishes and gets its own wake turn."""
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "committer", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    text("Committer running in the background.")
+    result("Committer running in the background.", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    spawn_hook("h-sub", 1.5)
+    hook_started("h-sub", "PostToolUse", name="PostToolUse:Bash")
+    wait_hook("h-sub")
+    hook_response(
+        "h-sub",
+        "PostToolUse",
+        outcome="error",
+        exit_code=2,
+        stderr="R20 finding\n",
+        name="PostToolUse:Bash",
+    )
+    _rewake_turn("HOOK: R20 finding")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("agent done")
     _task_notification_result("agent done")
     serve_followups()
 
@@ -2511,6 +2632,8 @@ _SCENARIOS = {
     "plan_approve_monitor_ticks": scenario_plan_approve_monitor_ticks,
     "async_rewake_idle": scenario_async_rewake_idle,
     "bg_agent_pretooluse_denial": scenario_bg_agent_pretooluse_denial,
+    "bg_agent_async_rewake_idle": scenario_bg_agent_async_rewake_idle,
+    "agent_wake_no_query_tail": scenario_agent_wake_no_query_tail,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,
@@ -2536,6 +2659,8 @@ _SCENARIOS = {
     "agent_orphans_bg_task": scenario_agent_orphans_bg_task,
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
+    "wake_chain": scenario_wake_chain,  # #925
+    "native_cron_fire": scenario_native_cron_fire,  # #925
     "followup": scenario_followup,
     "compact_followup": scenario_compact_followup,
     "auto_compact_mid_turn": scenario_auto_compact_mid_turn,

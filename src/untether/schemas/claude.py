@@ -283,12 +283,28 @@ class StreamResultMessage(
     # Any, not dict: a non-object origin must not drop the result line —
     # readers check ``isinstance(origin, dict)`` first.
     origin: Any = None
+    # #928: set when a local command (e.g. ``/compact``) finished without
+    # entering the agent loop (SDK ``SDKResultMessage.local_command``); such
+    # a 0-turn result is never a no-query notification result. Any, like
+    # ``origin``: an unexpected shape must not drop the result line.
+    local_command: Any = None
     stop_reason: Any = None
     # #819: per-model usage for the session, keyed by the model id the CLI
     # used; each entry carries ``contextWindow`` (the context-% denominator)
     # and ``maxOutputTokens``. Field name as on the wire. Any: readers check
     # ``isinstance(..., dict)`` and int fields.
     modelUsage: Any = None
+    # --- #922: the API error that ended the turn (CLI ≥ 2.1.289) ---
+    # ``api_error_status`` (HTTP code) is public; ``api_error_code`` (the
+    # server's ``error.details.error_code``, e.g. ``credits_required``) and
+    # ``api_error`` (typed kind, e.g. ``model_requires_usage_credits``) are
+    # ``@internal`` — per the CLI's own describe text the message text "stays
+    # the fallback", so the cap latch reads these first and the text second.
+    # Any: an upstream type change must never drop the result line; readers
+    # check ``isinstance`` first.
+    api_error_status: Any = None
+    api_error_code: Any = None
+    api_error: Any = None
 
 
 # #806: result ``terminal_reason`` values that mean the turn was cancelled
@@ -320,6 +336,17 @@ class ControlCanUseToolRequest(
     input: dict[str, Any]
     permission_suggestions: list[Any] | None = None
     blocked_path: str | None = None
+    # #929: the request's own tool call and (for a subagent) its agent id —
+    # ``agent_id`` equals the ``task_started.task_id`` of a background agent.
+    # ``decision_reason*``: why the CLI asks (``hook`` / ``classifier`` / …);
+    # hook text is meant for the user. All optional (the sandbox network ask
+    # sends a synthetic ``tool_use_id`` and no reason). The reason fields are
+    # typed loosely so an unexpected shape can never fail the request's decode
+    # (a dropped control_request hangs the session); the runner coerces them.
+    tool_use_id: str | None = None
+    agent_id: str | None = None
+    decision_reason: Any = None
+    decision_reason_type: Any = None
 
 
 class ControlInitializeRequest(

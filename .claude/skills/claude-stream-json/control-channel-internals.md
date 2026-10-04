@@ -42,6 +42,7 @@ _CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the 
 
 Non-interactive requests are auto-approved without showing buttons:
 - Request types in `_AUTO_APPROVE_TYPES` tuple: `ControlInitializeRequest`, `ControlHookCallbackRequest`, `ControlMcpMessageRequest`, `ControlRewindFilesRequest`, `ControlInterruptRequest`
+- Exception (#925): a `ControlHookCallbackRequest` whose `callback_id` is in `_LOOP_HOOK_IDS` is intercepted before that tuple and decided from its `input` (see Scheduling hooks below). Every other hook callback stays payload-blind (`TestAutoApproveSafetyInvariant`)
 - Tool requests: auto-approved UNLESS `tool_name in _TOOLS_REQUIRING_APPROVAL`
 - `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}`
 - `ExitPlanMode`: NEVER auto-approved — always show Telegram buttons
@@ -230,6 +231,31 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
   (Stop or UserPromptSubmit) was still running; its feedback wasn't
   delivered.` (`N background hooks (…)` when N ≥ 2).
 - Timing knobs are slots-dataclass fields: set them on the instance in tests.
+
+## Scheduling hooks (#925, #926)
+
+Untether owns Claude's schedules. `_loop_hooks_config()` puts exact-name `PreToolUse` matchers for `CronCreate` and
+`CronDelete` (callback ids `ut_loop_cron_create` / `ut_loop_cron_delete`, 30 s timeout) in the `initialize` request of
+**every** control-channel spawn; `[loop] own_schedule = false` sends no hooks (rc19 behaviour). `-p` mode has no
+control channel, so no hooks.
+
+- `ut_loop_cron_create`: Loop mode is read when the callback arrives (per-chat override, else live `[loop] enabled`).
+  Off → deny with `_LOOP_OFF_DENY_REASON` (Loop mode / `/at` guidance; must never match `_LOOP_CRON_ID_RE`). On →
+  `_register_cron_from_input()` registers an Untether loop with the `[loop]` caps, then deny with the loop's
+  `ut_loop_…` token. Logged as `loop.cli_job_denied` (`loop_mode=on|off`).
+- `ut_loop_cron_delete`: a `ut_loop_` id stops that loop **only if this session owns it** (foreign and unknown tokens
+  get the same answer) and denies; any other id passes through so a real CLI job is deleted natively. CLI 2.1.289
+  validates CronDelete ids **before** running hooks, so the `tool_use` observer (`_observe_loop_tool_use`) does the
+  stop in practice; the hook branch is the fallback for a CLI that runs hooks first. Keep both.
+- Never leave a registered callback unanswered (the tool blocks for the hook timeout): `_loop_hook_decision_safe()`
+  fails closed for CronCreate (deny) and open for CronDelete (passthrough). Answers queue on
+  `state.hook_callback_queue`.
+- Self-paced wake chains (`ScheduleWakeup`) are capped per process at `[loop] max_iterations` (`state.wake_cap`); the
+  close reason is `wake_cap`.
+- Residual native jobs (pre-rc20 sessions, `-p` chats, `own_schedule = false`) are tracked as cron-suppression records
+  in `loop_scheduler.py`; a later control-channel spawn resuming that session gets `CLAUDE_CODE_DISABLE_CRON=1` until
+  the CLI's 7-day resurrect window has passed. `/cancel` writes a per-loop cancel sentinel so the cancelled task
+  doesn't come back on the next resume (#926).
 
 ## Parent-initiated control_requests (Untether → Claude)
 

@@ -661,6 +661,24 @@ def is_session_accepting(session_id: str) -> bool:
     return live is not None and live.accepting_input
 
 
+def live_session_loop_closeable(session_id: str) -> bool:
+    """#925 D-D: a due loop iteration may close this live session to resume
+    it — accepting input, not closing, clean idle (no open turn, follow-up,
+    native task or background work), no pending ScheduleWakeup, approval /
+    ask or background hook. ``close_live_session(..., only_if_idle=True)``
+    re-checks the turn under the injection lock."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None or live.closing or not live.accepting_input:
+        return False
+    state = live.state
+    return (
+        _is_clean_idle(live)
+        and not _has_pending_wakeup(state)
+        and not any(v == session_id for v in _REQUEST_TO_SESSION.values())
+        and not has_pending_async_hooks(state)
+    )
+
+
 def stop_live_session_input(session_id: str) -> bool:
     """#896: refuse any further input into ``session_id`` (synchronous).
 
@@ -737,6 +755,20 @@ async def _notify_live_listeners(
             )
 
 
+def _expire_session_wakeups(session_id: str) -> None:
+    """#925 review: expire the session's pending Untether wake-up entries at
+    a ``wake_cap`` close (cron entries untouched; no-op with the kill
+    switch). Never raises — a scheduler error must not block the close."""
+    try:
+        from .. import loop_scheduler
+
+        loop_scheduler.expire_wakeups_for_session(session_id, reason="wake_cap")
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "loop.wake_cap_expire_failed", session_id=session_id, exc_info=True
+        )
+
+
 async def close_live_session(
     session_id: str,
     reason: str,
@@ -788,6 +820,11 @@ async def close_live_session(
         live.close_hooks = candidates if count else []
         live.close_hook_count = count
         live.close_hook_procs = None if shells is None else len(shells)
+    if reason == "wake_cap":
+        # #925 review: the pending wake-up dies with the process — and so
+        # must its Untether wake-up entry, or its timer resumes the session
+        # and the chain restarts at zero (the notice says it was cancelled).
+        _expire_session_wakeups(session_id)
     tasks = live_task_descriptions(live.state)
     live.close_tasks = list(tasks)
     logger.info(
@@ -821,6 +858,9 @@ async def close_live_session(
             # re-arm switched off, that the hold limit was reached).
             payload["max_hold_s"] = live.state.bg_max_hold_s
             payload["rearm_on_progress"] = live.state.bg_hold_rearm_on_progress
+        if reason == "wake_cap":
+            # #925 §14.4: the notice names the cap.
+            payload["wake_cap"] = live.state.wake_cap
         if hook_notice:
             payload["hooks"] = hooks
             payload["hook_count"] = live.close_hook_count
@@ -842,7 +882,19 @@ _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 # transcript complete, resumable — P0 G7-G9). ``abs_cap`` closes mid-turn and
 # ``error`` follows a failed run: both keep the forced-teardown quarantine.
 _STOPPED_CLEAN_REASONS = frozenset(
-    {"max_hold", "cancel", "new", "drain", "options_changed", "budget_stop"}
+    {
+        "max_hold",
+        "cancel",
+        "new",
+        "drain",
+        "options_changed",
+        "budget_stop",
+        # #925: a due loop iteration closes a clean-idle session to resume
+        # it; the self-paced wake-up cap; a native cron fire was caught.
+        "loop_fire",
+        "wake_cap",
+        "cron_suppressed",
+    }
 )
 
 
@@ -1426,6 +1478,48 @@ def pending_control_requests_for_session(session_id: str | None) -> int:
     return pending
 
 
+_CONTROL_REASON_MAX_CHARS = 200
+
+
+def _control_reason_type(request: Any) -> str | None:
+    """#929: ``decision_reason_type`` of a ``can_use_tool`` request
+    (``hook`` / ``classifier`` / ``mode`` / ``rule`` / …), or None."""
+    value = getattr(request, "decision_reason_type", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _control_reason_text(request: Any) -> str | None:
+    """#929: the request's ``decision_reason`` — first non-empty line, at most
+    200 chars. Hook / classifier text meant for the user; never logged."""
+    value = getattr(request, "decision_reason", None)
+    if not isinstance(value, str):
+        return None
+    line = next((ln.strip() for ln in value.splitlines() if ln.strip()), "")
+    if len(line) > _CONTROL_REASON_MAX_CHARS:
+        line = line[: _CONTROL_REASON_MAX_CHARS - 1] + "…"
+    return line or None
+
+
+def _tool_input_details(tool_input: Any) -> str:
+    """``(file_path=`x`, command=`y`)`` for an approval title, or ``""``.
+
+    #871/#418: the title is markdown — a raw value lost its backticks
+    (`x` → x) and a heredoc's newline split the title, so each value is a
+    one-line code span whose fence outruns any inner backtick. #929: the
+    standalone rescue surface reuses this, so Approve always says what it
+    allows.
+    """
+    if not isinstance(tool_input, dict) or not tool_input:
+        return ""
+    key_params = []
+    for key in ["file_path", "path", "command", "pattern"]:
+        if key in tool_input:
+            value = inline_code(str(tool_input[key]), width=50)
+            if value:
+                key_params.append(f"{key}={value}")
+    return f"({', '.join(key_params)})" if key_params else ""
+
+
 @dataclass(frozen=True, slots=True)
 class ControlRequestSnapshot:
     """One control request still registered for a user answer (#684).
@@ -1434,7 +1528,7 @@ class ControlRequestSnapshot:
     ``kind``: ``tool`` | ``ask`` | ``outline_hold`` | ``synthetic`` (``da:``).
     ``answerable_by_text``: a text reply in the chat routes to it (a pending
     AskUserQuestion). ``writer_ok``: a live stdin writer exists for the
-    session.
+    session. ``input_details``: the tool's key parameters, for a title.
     """
 
     request_id: str
@@ -1444,6 +1538,9 @@ class ControlRequestSnapshot:
     kind: str
     answerable_by_text: bool
     writer_ok: bool
+    # #929: the key parameters Approve would allow (``_tool_input_details``),
+    # so a rescued request with no tracked action still says what it is.
+    input_details: str = ""
 
 
 @dataclass(slots=True)
@@ -1676,6 +1773,17 @@ class ClaudeStreamState:
     auto_approve_queue: list[str] = field(default_factory=list)
     # Auto-deny queue: (request_id, message) pairs for rate-limited denials
     auto_deny_queue: list[tuple[str, str]] = field(default_factory=list)
+    # #925: answers to Untether's own PreToolUse hook callbacks
+    # (``_LOOP_HOOK_IDS``): (request_id, callback_id, hook output, decision),
+    # written by ``_drain_hook_callbacks`` after the same line.
+    hook_callback_queue: list[tuple[str, str, dict[str, Any], str]] = field(
+        default_factory=list
+    )
+    # #925: this spawn's ``initialize`` registered those hooks.
+    loop_hooks_registered: bool = False
+    # #925: CronDelete tool_use ids that stopped an Untether loop → token, so
+    # the observer and a (later) hook callback for the same call agree.
+    loop_deleted_by_tool_use: dict[str, str] = field(default_factory=dict)
     # Whether the control channel initialization handshake has been sent
     control_init_sent: bool = False
     # Track last tool_use_id for mapping control requests to tool actions
@@ -1928,6 +2036,24 @@ class ClaudeStreamState:
     # #872: the delay that wake-up announced ("in 94s"), for the
     # ``hold_extended`` log — set and cleared with ``pending_wakeup_until``.
     pending_wakeup_delay_s: float | None = None
+    # #925 §14.3: a ScheduleWakeup tool_use was seen in this process — a
+    # wake turn without one can only be a CLI cron fire (native-fire
+    # detector, ``_open_followup_turn``).
+    schedule_wakeup_seen: bool = False
+    # #925 §14.4: consecutive self-paced wake turns (``scheduled_wakeup``,
+    # not a cron fire) since the last user follow-up, and the cap (``[loop]
+    # max_iterations``; None = no cap: ``-p`` mode or ``own_schedule =
+    # false``). Per process — every spawn starts at 0.
+    wake_chain_turns: int = 0
+    wake_cap: int | None = None
+    # #925 §14.3: a native CronCreate job fired in this process; the
+    # lifecycle closes the session (``cron_suppressed``) once it is idle.
+    cron_suppress_close_pending: bool = False
+    # #926: this spawn resumes a session that may hold a CLI cron job, so it
+    # runs with CLAUDE_CODE_DISABLE_CRON=1 (wall-clock until), and the
+    # init note row has been shown (once per process).
+    cron_suppressed_until: float | None = None
+    cron_suppressed_noted: bool = False
     # #776: why the live session's stdin was closed (idle_no_tasks /
     # max_hold / abs_cap / cancel / new / drain); None while still open.
     live_close_reason: str | None = None
@@ -2181,7 +2307,18 @@ class ClaudeStreamState:
     # The hint the open turn saw (stale at open, or an earlier turn's async
     # hook exiting 2 mid-turn) — the result's ``origin`` confirms it.
     turn_hook_hint: tuple[str | None, str | None, float] | None = None
+    # #923: (hook name, hook event, monotonic ts, held_s) of a hook that
+    # started AND exited 2 in the current idle gap after running at least
+    # ``_HOOK_IDLE_REWAKE_MIN_HELD_S`` (a background subagent's asyncRewake
+    # hook). Weaker than ``hook_rewake_hint``: it labels only a turn opening
+    # within ``_HOOK_IDLE_REWAKE_TTL_S``, and is never carried into
+    # ``turn_hook_hint`` (so the result-time ``origin`` retro can't use it).
+    hook_idle_rewake_hint: tuple[str | None, str | None, float, float] | None = None
     hooks_started: int = 0
+    # #928: the CLI's empty no-query results (``num_turns: 0``, no model
+    # call, ``origin`` task-notification) absorbed or closed as ``no_query``
+    # instead of being run as turns (``session.summary``).
+    no_query_results: int = 0
     # Mirrored from ``[watchdog] hold_for_async_hooks`` /
     # ``async_hook_max_hold`` by ``run_impl`` (read per spawn, so a config
     # edit applies to the next run).
@@ -2280,6 +2417,9 @@ class ClaudeStreamState:
                     kind=kind,
                     answerable_by_text=rid in _PENDING_ASK_REQUESTS,
                     writer_ok=writer_ok,
+                    input_details=""
+                    if synthetic
+                    else _tool_input_details(_REQUEST_TO_INPUT.get(rid)),
                 )
             )
         return snaps
@@ -2363,8 +2503,9 @@ _RESET_CLAUSE_RE = re.compile(
 # wrong *kind* of answer, and the user waits instead of acting.
 #
 # Keyed by auth namespace like _RATE_LIMIT_RESET_LATCH. Value:
-# (monotonic expiry, model display or "" when the message names no model).
-_RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str]] = {}
+# (monotonic expiry, model display or "" when the message names no model,
+# cap kind: model | model_credits | credits | spend | team_budget; #922).
+_RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str, str]] = {}
 
 # Bounded TTL rather than a real deadline: this cap class has no reset time, and
 # nsd's 2026-07-27 window showed one clearing on its own ~15 min later. The latch
@@ -2372,15 +2513,55 @@ _RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str]] = {}
 # nothing while a short one would drop the remedy mid-throttle.
 ACTION_REQUIRED_LATCH_TTL_S = 30 * 60.0
 
-# Both halves required: the "reached your <X> limit" phrasing alone also appears
-# on time-based caps, and it's the /usage-credits | /model remedy that marks this
-# as the action-required class. Fail closed to the 60s default when either is absent.
+# #922: the CLI's structured kind for this cap class, on the result line
+# (``api_error``, CLI ≥ 2.1.289). Read before the text: the CLI's own describe
+# text says consumers should "key on the cause instead of the message text (the
+# text stays the fallback and may change)". The long-context credits cap has a
+# different remedy (switch to standard context, not another model), so it is
+# never this class — even when its server ``error_code`` is ``credits_required``.
+_ACTION_REQUIRED_API_ERRORS: frozenset[str] = frozenset(
+    {"model_requires_usage_credits"}
+)
+_NOT_ACTION_API_ERRORS: frozenset[str] = frozenset({"long_context_credits_required"})
+
+# Text fallback. Both halves required — a cap clause AND a remedy. The remedy
+# alone also appears on unrelated notices ("… doesn't support auto mode. Switch
+# models with /model to change this."), and the "reached your <X> limit" clause
+# alone also appears on time-based caps (#692's class). Fail closed to the 60s
+# default when either is absent.
+#
+# CLI 2.1.289 headless builder (what Untether runs), where ${K} is
+# ", or manage usage credits at <url>," or "" when the account can't buy credits:
+#   You've reached your Fable limit. Switch to another model${K} to continue.
+#   <Model> requires usage credits. Switch to another model${K} to continue.
+#   You're out of usage credits. Switch to another model${K} to continue.
+#   You've hit your [channel's ]monthly spend limit. Switch to another model${K} …
+#   You've hit your team's shared budget. Switch to another model${K} …
+# The interactive branch keeps the older "Run /usage-credits to continue or
+# switch models with /model." / "… /model to switch models." wording. The
+# ``cc_cli_limit_message`` URL marker is NOT stable (absent for Team/Enterprise
+# and when ${K} is empty), so it is never keyed on.
 _ACTION_CAP_RE = re.compile(
     r"reached\s+your\s+(?P<model>[\w.\- ]{1,40}?)\s+limit",
     re.IGNORECASE,
 )
+_ACTION_MODEL_CREDITS_RE = re.compile(
+    r"(?P<model>[\w.\- ]{1,40}?)\s+requires\s+usage\s+credits",
+    re.IGNORECASE,
+)
+# (pattern, kind) for the clauses that name no model, checked in order.
+_ACTION_CAP_CLAUSES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"out\s+of\s+usage\s+credits", re.IGNORECASE), "credits"),
+    (re.compile(r"monthly\s+spend\s+limit", re.IGNORECASE), "spend"),
+    (re.compile(r"shared\s+budget", re.IGNORECASE), "team_budget"),
+)
 _ACTION_REMEDY_RE = re.compile(
-    r"/usage-credits|switch\s+models\s+with\s+/model",
+    r"switch\s+to\s+another\s+model"
+    r"|manage\s+usage\s+credits"
+    r"|/usage-credits"
+    r"|switch\s+models\s+with\s+/model"
+    r"|/model\s+to\s+switch\s+models"
+    r"|switch\s+models\s+to\s+continue",
     re.IGNORECASE,
 )
 
@@ -2476,63 +2657,129 @@ def _latched_rate_limit_reset() -> tuple[float, str] | None:
     return remaining, display
 
 
-def _parse_action_required_cap(text: str | None) -> str | None:
-    """#701: recognise the no-reset cap shape and return the model it names
-    ("Fable 5"), or "" when the remedy is present but no model is named.
+def _action_cap_clause(text: str | None) -> tuple[str, str] | None:
+    """#922: the cap half of the text — ``(model display or "", kind)`` — or
+    None when the text names no action-required cap."""
+    if not text:
+        return None
+    if (m := _ACTION_CAP_RE.search(text)) is not None:
+        return m.group("model").strip(), "model"
+    if (m := _ACTION_MODEL_CREDITS_RE.search(text)) is not None:
+        return m.group("model").strip(), "model_credits"
+    for pattern, kind in _ACTION_CAP_CLAUSES:
+        if pattern.search(text) is not None:
+            return "", kind
+    return None
 
-    ``None`` means "not this cap class" — the caller falls through to the
-    60s default rather than claiming an action is required.
+
+def _parse_action_required_cap(text: str | None) -> str | None:
+    """#701/#922: recognise the no-reset cap shape from its text and return the
+    model it names ("Fable 5"), or "" when the cap names no model (out of
+    credits, monthly spend limit, team budget).
+
+    Both halves are required — a cap clause and a remedy. ``None`` means "not
+    this cap class": the caller falls through to the 60s default rather than
+    claiming an action is required.
     """
     if not text or _ACTION_REMEDY_RE.search(text) is None:
         return None
-    m = _ACTION_CAP_RE.search(text)
-    if m is None:
-        return ""
-    return m.group("model").strip()
+    clause = _action_cap_clause(text)
+    return None if clause is None else clause[0]
 
 
-def _maybe_latch_action_required(result_text: str | None) -> bool:
+def _classify_action_required_cap(
+    text: str | None,
+    *,
+    api_error: str | None = None,
+    api_error_code: str | None = None,
+) -> tuple[str, str, str] | None:
+    """#922: ``(model display, cap kind, source)`` for an action-required cap,
+    or None. The CLI's structured kind wins (``api_error``, then the server's
+    ``api_error_code``); the text is the fallback, with both halves required.
+    The text still supplies the model / kind when it names one."""
+    if api_error in _NOT_ACTION_API_ERRORS:
+        return None
+    clause = _action_cap_clause(text)
+    model, kind = clause if clause is not None else ("", "model")
+    if api_error in _ACTION_REQUIRED_API_ERRORS:
+        return model, kind, "api_error"
+    if api_error_code == "credits_required":
+        return model, kind, "api_error_code"
+    if clause is None or not text or _ACTION_REMEDY_RE.search(text) is None:
+        return None
+    return model, kind, "result_text"
+
+
+def _maybe_latch_action_required(
+    result_text: str | None,
+    *,
+    api_error: str | None = None,
+    api_error_code: str | None = None,
+    api_error_status: int | None = None,
+) -> bool:
     """#701: arm the action-required latch from a result error so subsequent
     `rejected` rate_limit_events without a `resetsAt` render the remedy
     instead of a countdown (#790). True when the latch was armed."""
-    model = _parse_action_required_cap(result_text)
-    if model is None:
+    classified = _classify_action_required_cap(
+        result_text, api_error=api_error, api_error_code=api_error_code
+    )
+    if classified is None:
         return False
+    model, kind, source = classified
     _RATE_LIMIT_ACTION_LATCH[_rate_limit_latch_key()] = (
         time.monotonic() + ACTION_REQUIRED_LATCH_TTL_S,
         model,
+        kind,
     )
+    # #922: field values only — never the error text.
     logger.info(
         "claude.rate_limit_action_required_latched",
         model=model or None,
+        kind=kind,
         ttl_s=ACTION_REQUIRED_LATCH_TTL_S,
-        source="result_error",
+        source=source,
+        api_error=api_error,
+        api_error_code=api_error_code,
+        api_error_status=api_error_status,
     )
     return True
 
 
-def _latched_action_required() -> str | None:
-    """Model display from the armed action-required latch, or None when
-    absent/expired (expired entries are pruned)."""
+def _latched_action_required() -> tuple[str, str] | None:
+    """``(model display, cap kind)`` from the armed action-required latch, or
+    None when absent/expired (expired entries are pruned)."""
     key = _rate_limit_latch_key()
     entry = _RATE_LIMIT_ACTION_LATCH.get(key)
     if entry is None:
         return None
-    expiry, model = entry
+    expiry, model, kind = entry
     if expiry - time.monotonic() <= 0:
         _RATE_LIMIT_ACTION_LATCH.pop(key, None)
         return None
-    return model
+    return model, kind
 
 
-def _format_action_required_title(model: str) -> str:
+def _format_action_required_title(model: str, kind: str = "model") -> str:
     """#701: name the remedy, and hedge the timer claim — nsd saw one of these
     caps clear on its own ~15 min later, so a flat "this will never clear"
-    would be its own inaccuracy."""
-    subject = f"{model} limit" if model else "Model limit"
+    would be its own inaccuracy.
+
+    #922: the remedy is one that works from Untether (there is no
+    /usage-credits command here), and the subject names the cap kind — a
+    spend limit or a team budget is not a "model limit"."""
+    if kind == "credits":
+        subject = "Usage credits used up"
+    elif kind == "spend":
+        subject = "Monthly spend limit reached"
+    elif kind == "team_budget":
+        subject = "Team budget reached"
+    elif kind == "model_credits":
+        subject = f"{model or 'Model'} needs usage credits"
+    else:
+        subject = f"{model} limit reached" if model else "Model limit reached"
     return (
-        f"⛔ {subject} reached — may not clear on a timer; "
-        f"run /usage-credits or switch with /model"
+        f"⛔ {subject} — may not clear on a timer; "
+        f"switch with /model or manage usage credits on claude.ai"
     )
 
 
@@ -2604,6 +2851,9 @@ def _rejection_needs_action(info: claude_schema.RateLimitInfo) -> bool:
     return (
         info.error_code == "credits_required"
         or info.rate_limit_type == "overage"
+        # #922: the CLI's own credits classifier keys on this window too; only
+        # reached when the event has no resetsAt (a dated window keeps its clock).
+        or info.rate_limit_type == "seven_day_overage_included"
         or info.overage_disabled_reason == "out_of_credits"
     )
 
@@ -2789,6 +3039,7 @@ def _translate_rate_limit_event(
     source = ""
     reset_display: str | None = None
     action_display: str | None = None
+    action_kind = "model"
     extension_only = False
 
     if info is None or info.status is None:
@@ -2858,18 +3109,18 @@ def _translate_rate_limit_event(
             # stall detector still gets a deadline.
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "action_required"
-            action_display = _latched_action_required() or ""
+            action_display, action_kind = _latched_action_required() or ("", "model")
         elif (latched := _latched_rate_limit_reset()) is not None:
             # #692: a reset deadline harvested from an earlier result error
             # ("resets 5:30pm (…)") beats guessing.
             retry_s, reset_display = latched
             source = "result_error"
             extension_only = True
-        elif (action_model := _latched_action_required()) is not None:
+        elif (latched_action := _latched_action_required()) is not None:
             # #701: an action-required cap carries no reset time.
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "action_required"
-            action_display = action_model
+            action_display, action_kind = latched_action
         else:
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "default"
@@ -2907,7 +3158,7 @@ def _translate_rate_limit_event(
         )
     elif source == "action_required":
         # #701: no countdown at all — this cap wants an action.
-        title = _format_action_required_title(action_display or "")
+        title = _format_action_required_title(action_display or "", action_kind)
     elif source == "default":
         # A guessed window is shown as an estimate, not as fact.
         title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
@@ -3615,6 +3866,44 @@ def _permission_mode_mismatch_rows(
     ]
 
 
+_CRON_SUPPRESSED_NOTE = (
+    "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} Claude's scheduling is off "
+    "in this session \N{EM DASH} an earlier scheduled task is still recorded in "
+    "it and would restart. /new starts a session that can schedule again."
+)
+
+
+def _cron_suppressed_rows(
+    *, state: ClaudeStreamState, factory: EventFactory
+) -> list[UntetherEvent]:
+    """#926: one info ``note`` row per process when this spawn runs with
+    CLAUDE_CODE_DISABLE_CRON=1 because its session may hold a resurrectable
+    CLI cron job. Gated on the suppression record (not the env value), and
+    on per-process state, so live follow-up turns' inits don't repeat it."""
+    if state.cron_suppressed_until is None or state.cron_suppressed_noted:
+        return []
+    state.cron_suppressed_noted = True
+    state.note_seq += 1
+    action_id = f"claude.cron_suppressed.{state.note_seq}"
+    detail: dict[str, Any] = {"until": state.cron_suppressed_until}
+    return [
+        factory.action_started(
+            action_id=action_id,
+            kind="note",
+            title=_CRON_SUPPRESSED_NOTE,
+            detail=detail,
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=_CRON_SUPPRESSED_NOTE,
+            ok=True,
+            level="info",
+            detail=detail,
+        ),
+    ]
+
+
 # #812 hook lifecycle (``--include-hook-events``).
 _PENDING_HOOKS_MAX = 256
 # SessionStart / Setup hook events are always emitted and settled in-band by
@@ -3627,6 +3916,14 @@ _HOOK_REWAKE_HINT_TTL_S = 10.0
 # into that turn for its result's ``origin`` check only this long; an older
 # hint is dropped (P5-A: hint → ``init`` is ~20 ms, so this is generous).
 _HOOK_REWAKE_CARRY_TTL_S = 60.0
+# #923: a hook that started while idle (a background subagent's asyncRewake
+# hook) and exited 2 is a weak rewake candidate only if a turn opens this soon
+# after its response (fleet: 0.47-0.68 s; P5-A ≈ 0 ms) — open-time only.
+_HOOK_IDLE_REWAKE_TTL_S = 3.0
+# #923: ...and only if it ran at least this long. #828's false positives
+# (subagents' sync PreToolUse denials) were held ≤ 0.1 s; the observed idle
+# rewakes (security-guidance commit reviews) 52-113 s.
+_HOOK_IDLE_REWAKE_MIN_HELD_S = 1.0
 # The asyncRewake wake signal: exit code 2 (``outcome: "error"``).
 _HOOK_REWAKE_EXIT_CODE = 2
 
@@ -3654,6 +3951,10 @@ def _apply_hook_event(
     (or the next turn's ``UserPromptSubmit`` blocker) starts and ends while
     the parent idles, and the open turn's own sync hooks end inside it. Such
     exit-2 responses log ``claude.hook.blocking_exit`` instead.
+
+    #923: an exit-2 hook started and answered in the same idle gap after
+    running ≥ ``_HOOK_IDLE_REWAKE_MIN_HELD_S`` arms the weak, open-only
+    ``hook_idle_rewake_hint`` (``blocking_exit … rewake_candidate=True``).
 
     Produces no UntetherEvents — hook traffic (every configured hook on every
     tool call) must never reach progress rows or the bridge's stall timers.
@@ -3714,6 +4015,25 @@ def _apply_hook_event(
     )
     is_rewake_signal = exit_2 and outlived
     held_s = round(time.monotonic() - known.started_at, 1) if known else None
+    # #923: started and answered in this idle gap, and long-held — a
+    # background subagent's asyncRewake hook. Its wake opens the next turn
+    # within ``_HOOK_IDLE_REWAKE_TTL_S``; a sync denial is held ≤ 0.1 s.
+    idle_candidate = (
+        exit_2
+        and not outlived
+        and known is not None
+        and not state.turn_open
+        and known.turn == state.turn + 1
+        and held_s is not None
+        and held_s >= _HOOK_IDLE_REWAKE_MIN_HELD_S
+    )
+    if idle_candidate:
+        state.hook_idle_rewake_hint = (
+            name,
+            hook_event,
+            time.monotonic(),
+            held_s or 0.0,
+        )
     if is_rewake_signal:
         hint = (name, hook_event, time.monotonic())
         if not state.turn_open:
@@ -3742,6 +4062,7 @@ def _apply_hook_event(
             started_turn=known.turn if known else None,
             held_s=held_s,
             known=known is not None,
+            rewake_candidate=idle_candidate,
         )
     elif outcome == "cancelled":
         logger.info(
@@ -4946,6 +5267,7 @@ def _register_background_handle(
         state.bg_agent_deadlines[tool_id] = time.monotonic() + BG_AGENT_MAX_KEEP_S
     elif tool_name == "ScheduleWakeup":
         state.background_observed = True
+        state.schedule_wakeup_seen = True  # #925 native-fire detector
         # #481: the actual Claude Code ScheduleWakeup tool schema (per
         # #289 / claude-agent-sdk-python) emits ``delaySeconds`` as the
         # canonical field. Earlier versions of this code read
@@ -5182,12 +5504,25 @@ def _observe_loop_tool_use(
     # #826: record the run's topic so /new and /cancel in another forum topic
     # leave this loop alone, and fires land back in the originating topic.
     thread_id = get_run_thread_id()
-    if not _loop_enabled_for_chat(chat_id):
-        return  # master toggle off → behave as today
     tool_name = str(content.name or "")
     tool_id = content.id
     raw_input = content.input if isinstance(content.input, dict) else {}
     session_id = state.factory.resume.value if state.factory.resume else None
+    if tool_name == "CronDelete":
+        # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
+        target = str(raw_input.get("id") or raw_input.get("taskId") or "")
+        if target.startswith(_LOOP_TOKEN_PREFIX):
+            # #925 (live R20-925d, CLI 2.1.289): the CLI validates the job
+            # id before PreToolUse hooks and answers "No scheduled job…"
+            # itself, so the hook never sees a ``ut_loop_`` id — this
+            # observer is what stops the loop, hooks or not, in either Loop
+            # mode (stopping is always allowed).
+            _stop_loop_for_cron_delete(
+                state, tool_id, target, session_id=session_id, chat_id=chat_id
+            )
+            return
+    if not _loop_enabled_for_chat(chat_id):
+        return  # master toggle off → behave as today
     if not session_id:
         return  # session_id only known after system.init; tool_use shouldn't
         # arrive before that, but guard defensively
@@ -5195,35 +5530,16 @@ def _observe_loop_tool_use(
     from .. import loop_scheduler
 
     if tool_name == "CronCreate":
-        # Probe 5: input field is `cron`, NOT `cron_expression`.  Lenient
-        # fallback to `cron_expression`/`schedule` in case the upstream
-        # schema gains aliases later.
-        cron_expr = (
-            raw_input.get("cron")
-            or raw_input.get("cron_expression")
-            or raw_input.get("schedule")
+        # #925: shared with the PreToolUse hook (idempotent per tool_use_id,
+        # either order — G4).
+        _token, error = _register_cron_from_input(
+            state, tool_id, raw_input, session_id=session_id
         )
-        prompt = raw_input.get("prompt") or raw_input.get("text") or ""
-        recurring = bool(raw_input.get("recurring", True))
-        if not cron_expr or not prompt:
-            return
-        try:
-            loop_scheduler.register_pending_cron(
-                session_id=session_id,
-                tool_use_id=tool_id,
-                cron_expression=str(cron_expr),
-                prompt=str(prompt),
-                recurring=recurring,
-                chat_id=int(chat_id),
-                thread_id=thread_id,
-                fallback_first_user_message=state.first_user_message_text,
-                **_loop_caps(),
-            )
-        except loop_scheduler.LoopSchedulerError as exc:
+        if error is not None and error != _LOOP_MISSING_INPUT:
             logger.warning(
                 "loop.observe.cron_register_failed",
                 session=session_id,
-                error=str(exc),
+                error=error,
             )
     elif tool_name == "ScheduleWakeup":
         # Probe 5: minimum delaySeconds = 60 (runtime clamps shorter values).
@@ -5263,16 +5579,330 @@ def _observe_loop_tool_use(
                 error=str(exc),
             )
     elif tool_name == "CronDelete":
-        # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
+        # A real CLI job id (``ut_loop_`` ids are handled above).
         upstream_id = raw_input.get("id") or raw_input.get("taskId")
-        if upstream_id:
-            loop_scheduler.cancel_by_upstream_id(str(upstream_id))
+        if not upstream_id:
+            return
+        loop_scheduler.cancel_by_upstream_id(str(upstream_id), session_id=session_id)
+
+
+def _stop_loop_for_cron_delete(
+    state: ClaudeStreamState,
+    tool_use_id: str | None,
+    token: str,
+    *,
+    session_id: str | None,
+    chat_id: int | None,
+) -> bool:
+    """#925: stop the Untether loop ``token`` for one CronDelete call.
+
+    Shared by the tool_use observer and the PreToolUse hook; idempotent per
+    ``tool_use_id`` (whichever sees the call first stops the loop, the other
+    reports the same outcome). Only the calling session's own loops
+    (``cancel_owned_by_token``). Returns True when the loop was stopped by
+    this call."""
+    from .. import loop_scheduler
+
+    if tool_use_id and state.loop_deleted_by_tool_use.get(tool_use_id) == token:
+        return True
+    stopped = loop_scheduler.cancel_owned_by_token(
+        token,
+        session_id=session_id,
+        chat_id=chat_id,
+        reason="cron_delete",
+    )
+    if stopped and tool_use_id:
+        state.loop_deleted_by_tool_use[tool_use_id] = token
+    return stopped
+
+
+# ── Untether owns the schedule: PreToolUse hook callbacks (#925) ────────
+
+_LOOP_HOOK_CRON_CREATE = "ut_loop_cron_create"
+_LOOP_HOOK_CRON_DELETE = "ut_loop_cron_delete"
+_LOOP_HOOK_IDS = frozenset({_LOOP_HOOK_CRON_CREATE, _LOOP_HOOK_CRON_DELETE})
+_LOOP_HOOK_TIMEOUT_S = 30
+_LOOP_TOKEN_PREFIX = "ut_loop_"
+_LOOP_MISSING_INPUT = "missing cron expression or prompt"
+_LOOP_PROMPT_EXCERPT = 80
+# #925 §14.3 (D1 = A): the model-facing text when Loop mode is off. Must
+# never match ``_LOOP_CRON_ID_RE`` (a test enforces it).
+_LOOP_OFF_DENY_REASON = (
+    "Scheduling is off in this chat (Untether Loop mode is off), so nothing "
+    "was scheduled. Tell the user: to run this on a schedule they can turn on "
+    "Loop mode with /config → Loop mode (Untether then runs it with limits); "
+    "for a one-off delay they can send /at <delay> <prompt>. Do not retry with "
+    "CronCreate, ScheduleWakeup or a sleep loop."
+)
+
+
+def _loop_hooks_config() -> dict[str, Any] | None:
+    """#925 (D1 = A): the ``initialize.hooks`` for every control-channel
+    spawn — exact-name PreToolUse matchers for CronCreate / CronDelete,
+    answered by :func:`_loop_hook_decision`. Loop mode is read when the
+    callback arrives, not here; ``[loop] own_schedule = false`` → None
+    (rc19: no hooks)."""
+    from ..loop_scheduler import own_schedule_enabled
+
+    if not own_schedule_enabled():
+        return None
+    return {
+        "PreToolUse": [
+            {
+                "matcher": "CronCreate",
+                "hookCallbackIds": [_LOOP_HOOK_CRON_CREATE],
+                "timeout": _LOOP_HOOK_TIMEOUT_S,
+            },
+            {
+                "matcher": "CronDelete",
+                "hookCallbackIds": [_LOOP_HOOK_CRON_DELETE],
+                "timeout": _LOOP_HOOK_TIMEOUT_S,
+            },
+        ]
+    }
+
+
+def _register_cron_from_input(
+    state: ClaudeStreamState,
+    tool_use_id: str,
+    raw_input: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Register a CronCreate as an Untether loop with the ``[loop]`` caps.
+
+    Shared by the assistant ``tool_use`` observer and the PreToolUse hook
+    (#925); idempotent per ``tool_use_id``. Returns ``(token, None)`` or
+    ``(None, error)``."""
+    from .. import loop_scheduler
+    from ..utils.paths import get_run_channel_id, get_run_thread_id
+
+    chat_id = get_run_channel_id()
+    if chat_id is None:
+        return None, "not in a chat"
+    if session_id is None:
+        session_id = state.factory.resume.value if state.factory.resume else None
+    if not session_id:
+        return None, "session not started"
+    # Probe 5: input field is `cron`, NOT `cron_expression`.  Lenient
+    # fallback to `cron_expression`/`schedule` in case the upstream
+    # schema gains aliases later.
+    cron_expr = (
+        raw_input.get("cron")
+        or raw_input.get("cron_expression")
+        or raw_input.get("schedule")
+    )
+    prompt = raw_input.get("prompt") or raw_input.get("text") or ""
+    recurring = bool(raw_input.get("recurring", True))
+    if not cron_expr or not prompt:
+        return None, _LOOP_MISSING_INPUT
+    try:
+        token = loop_scheduler.register_pending_cron(
+            session_id=session_id,
+            tool_use_id=tool_use_id,
+            cron_expression=str(cron_expr),
+            prompt=str(prompt),
+            recurring=recurring,
+            chat_id=int(chat_id),
+            # #826: record the run's topic so /new and /cancel in another
+            # forum topic leave this loop alone.
+            thread_id=get_run_thread_id(),
+            fallback_first_user_message=state.first_user_message_text,
+            **_loop_caps(),
+        )
+    except loop_scheduler.LoopSchedulerError as exc:
+        return None, str(exc)
+    return token, None
+
+
+def _loop_schedule_text(cron_expression: str | None) -> str:
+    """A short human form of a loop's cron expression for the deny reason."""
+    expr = (cron_expression or "").strip()
+    fields = expr.split()
+    if len(fields) == 5 and fields[1:] == ["*", "*", "*", "*"]:
+        if fields[0] in ("*", "*/1"):
+            return "every minute"
+        if fields[0].startswith("*/") and fields[0][2:].isdigit():
+            return f"every {int(fields[0][2:])} minutes"
+    from ..triggers.describe import describe_cron
+
+    described = describe_cron(expr) if expr else expr
+    return f'cron "{expr}"' if described == expr else described
+
+
+def _no_bind_match(text: str) -> str:
+    """Keep ``_LOOP_CRON_ID_RE`` from matching model-facing text (a prompt
+    quoting "job deadbeef" would otherwise mis-bind an upstream id)."""
+    return _LOOP_CRON_ID_RE.sub(lambda m: f"job #{m.group(1)}", text)
+
+
+def _loop_deny_reason(token: str) -> str:
+    """#925 D-C: tell the model Untether runs the schedule (Loop mode on)."""
+    from .. import loop_scheduler
+
+    summary = loop_scheduler.entry_summary(token) or {}
+    prompt = " ".join(str(summary.get("prompt") or "").split())
+    if len(prompt) > _LOOP_PROMPT_EXCERPT:
+        prompt = prompt[: _LOOP_PROMPT_EXCERPT - 1] + "…"
+    if summary.get("recurring", True):
+        limits = (
+            f"at most {summary.get('max_iterations')} iterations / "
+            f"{summary.get('max_total_duration_hours')} h"
+        )
+    else:
+        limits = "runs once"
+    reason = (
+        "Untether is running this schedule instead of Claude Code (Loop mode): "
+        f"loop {token}, {_loop_schedule_text(summary.get('cron_expression'))}, "
+        f'prompt "{prompt}", {limits}. Each iteration arrives later as a new '
+        "user message. Nothing was scheduled in this session, so CronList will "
+        "not show it. Do not retry with CronCreate, ScheduleWakeup or a sleep "
+        "loop. Tell the user it is scheduled and that /cancel stops it; to stop "
+        f'it yourself, call CronDelete with id "{token}" (Untether stops the '
+        "loop even though the tool then reports no scheduled job with that id; "
+        "do not retry)."
+    )
+    return _no_bind_match(reason)
+
+
+def _hook_deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _loop_could_not_schedule(error: str) -> dict[str, Any]:
+    """#925 D4: fail closed — Loop mode never leaves an uncapped native job."""
+    return _hook_deny(
+        _no_bind_match(
+            f"Untether could not schedule this ({error}). Nothing was "
+            "scheduled; tell the user."
+        )
+    )
+
+
+def _loop_hook_decision(
+    state: ClaudeStreamState,
+    request: claude_schema.ControlHookCallbackRequest,
+) -> tuple[dict[str, Any], str]:
+    """#925: answer one of Untether's PreToolUse hook callbacks. Returns the
+    hook output (``{}`` = no opinion, the tool runs) and ``deny`` /
+    ``passthrough`` for the log.
+
+    - ``ut_loop_cron_create``: kill switch off → passthrough. Loop mode off
+      (read now: per-chat override, else the live global ``[loop]
+      enabled``) → deny with Loop-mode / ``/at`` guidance (§14.3), nothing
+      registered. Loop mode on → register as an Untether loop with caps and
+      deny with :func:`_loop_deny_reason`; a registration error denies too
+      (fail closed, D4).
+    - ``ut_loop_cron_delete``: a ``ut_loop_`` id → stop that Untether loop
+      if this session owns it, and deny either way (the CLI holds no such
+      job). CLI 2.1.289 validates the id before hooks, so this branch is
+      normally pre-empted by the tool_use observer; it stays as a fallback
+      for a CLI that runs hooks first. Any other id → passthrough, so a
+      real CLI job is deleted natively and its transcript marker stops the
+      resume scan (F3).
+    """
+    from .. import loop_scheduler
+    from ..utils.paths import get_run_channel_id
+
+    hook_input = request.input if isinstance(request.input, dict) else {}
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    session_id = state.factory.resume.value if state.factory.resume else None
+    if not session_id:
+        raw_sid = hook_input.get("session_id")
+        session_id = str(raw_sid) if raw_sid else None
+    if request.callback_id == _LOOP_HOOK_CRON_DELETE:
+        target = str(tool_input.get("id") or "")
+        if not target.startswith(_LOOP_TOKEN_PREFIX):
+            return {}, "passthrough"
+        # #925 review: only a loop this session owns (a token learned from
+        # another chat must not stop it). Foreign and unknown tokens get the
+        # same answer, so the model learns nothing about other sessions.
+        tool_use_id = request.tool_use_id or str(hook_input.get("tool_use_id") or "")
+        if _stop_loop_for_cron_delete(
+            state,
+            tool_use_id or None,
+            target,
+            session_id=session_id,
+            chat_id=get_run_channel_id(),
+        ):
+            reason = f"Untether stopped loop {target}."
+        else:
+            reason = f"No active Untether loop {target} in this session."
+        return _hook_deny(reason), "deny"
+    # ut_loop_cron_create
+    if not loop_scheduler.own_schedule_enabled():
+        return {}, "passthrough"
+    chat_id = get_run_channel_id()
+    if not _loop_enabled_for_chat(chat_id):
+        logger.info(
+            "loop.cli_job_denied",
+            session=session_id,
+            chat_id=chat_id,
+            loop_mode="off",
+            recurring=bool(tool_input.get("recurring", True)),
+        )
+        return _hook_deny(_LOOP_OFF_DENY_REASON), "deny"
+    tool_use_id = request.tool_use_id or str(hook_input.get("tool_use_id") or "")
+    if not tool_use_id:
+        return _loop_could_not_schedule("no tool_use_id"), "deny"
+    token, error = _register_cron_from_input(
+        state, tool_use_id, tool_input, session_id=session_id
+    )
+    if token is None:
+        logger.warning(
+            "loop.cli_job_denied",
+            session=session_id,
+            chat_id=chat_id,
+            loop_mode="on",
+            error=error,
+        )
+        return _loop_could_not_schedule(error or "unknown error"), "deny"
+    logger.info(
+        "loop.cli_job_denied",
+        session=session_id,
+        chat_id=chat_id,
+        loop_mode="on",
+        token=token,
+    )
+    return _hook_deny(_loop_deny_reason(token)), "deny"
+
+
+def _loop_hook_decision_safe(
+    state: ClaudeStreamState,
+    request: claude_schema.ControlHookCallbackRequest,
+) -> tuple[dict[str, Any], str]:
+    """Never leave a hook callback unanswered (the CronCreate would block
+    for the hook timeout). A throwing CronCreate decision still denies
+    (§13 amendment 5, fail closed); CronDelete falls back to passthrough."""
+    try:
+        return _loop_hook_decision(state, request)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "loop.hook_decision_failed",
+            callback_id=request.callback_id,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+            exc_info=True,
+        )
+        if request.callback_id == _LOOP_HOOK_CRON_CREATE:
+            return _loop_could_not_schedule("internal error"), "deny"
+        return {}, "passthrough"
 
 
 def _observe_loop_tool_result(
     state: ClaudeStreamState,
     tool_use_id: str,
     result_content: object,
+    *,
+    is_error: bool = False,
 ) -> None:
     """Observe ``CronCreate`` ``tool_result`` events and bind the upstream
     8-character cron ID to the matching pending entry (#289).
@@ -5280,8 +5910,11 @@ def _observe_loop_tool_result(
     Sibling of :func:`_clear_background_handle`.  Does nothing if no
     matching entry exists (e.g. master toggle was off when tool_use was
     observed).  Idempotent — bind_upstream_id is a no-op for unknown
-    tool_use_ids.
+    tool_use_ids. #925: an error result (a hook-denied CronCreate) never
+    binds — the CLI holds no job for it.
     """
+    if is_error:
+        return
     if not isinstance(result_content, str):
         # tool_result.content can be list[dict] for multi-block results.
         # CronCreate / ScheduleWakeup return free-form strings, so anything
@@ -7007,6 +7640,52 @@ def _result_origin_kind(event: claude_schema.StreamResultMessage) -> str | None:
     return None
 
 
+def _is_no_query_result(event: claude_schema.StreamResultMessage) -> bool:
+    """#928: the CLI's documented no-query result — a task notification
+    answered together with others (or the agent hand-back notice) produces an
+    empty ``num_turns: 0`` result with no model call and
+    ``origin.kind == "task-notification"``. The docs warn against suppressing
+    on ``kind`` alone (scheduled runs share it), so the empty content triple
+    is required too; a local command (``/compact``) is never one."""
+    return (
+        event.subtype == "success"
+        and not event.is_error
+        and event.num_turns == 0
+        and event.duration_api_ms == 0
+        and not (event.result or "").strip()
+        and event.structured_output is None
+        and event.local_command is None
+        and event.terminal_reason not in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS
+        and _result_origin_kind(event) == "task-notification"
+    )
+
+
+def _restore_turn_hook_hints(state: ClaudeStreamState) -> None:
+    """#928 (review amendment 1): a ``no_query`` turn that opened as
+    ``hook_rewake`` spent the hint meant for the real rewake turn that
+    follows — give it back with a fresh timestamp (strong or #923's idle
+    candidate). A hint carried into the turn (``turn_hook_hint``: stale at
+    open, or a hook that exited 2 during it) goes back to ``hook_rewake_hint``
+    unchanged, so the next turn still gets the open / ``origin`` checks."""
+    now = time.monotonic()
+    detail = state.turn_detail
+    if state.turn_reason == "hook_rewake":
+        name, hook_event = detail.get("hook"), detail.get("hook_event")
+        if detail.get("hook_started_idle"):
+            held = detail.get("hook_held_s")
+            state.hook_idle_rewake_hint = (
+                name,
+                hook_event,
+                now,
+                float(held) if isinstance(held, (int, float)) else 0.0,
+            )
+        else:
+            state.hook_rewake_hint = (name, hook_event, now)
+    if state.turn_hook_hint is not None and state.hook_rewake_hint is None:
+        state.hook_rewake_hint = state.turn_hook_hint
+    state.turn_hook_hint = None
+
+
 def _turn_plan_deferred(
     state: ClaudeStreamState, reason: str, command_uuid: str | None
 ) -> int:
@@ -7021,6 +7700,74 @@ def _turn_plan_deferred(
         return 0
     agents, _ = _rearm_deferral(state)
     return agents
+
+
+# #925 §14.3 / 13b amendment 2: whether the native-fire detector may mark a
+# session cron-suppressed (else it only logs ``claude.turn.native_cron_fire``).
+# Fleet false-positive check clean 2026-10-04: 0/8 sessions (all 5 hosts, 7
+# days: every ``scheduled_wakeup`` turn had a ScheduleWakeup / CronCreate
+# tool_use in its transcript).
+_NATIVE_FIRE_SUPPRESSION_ENABLED = True
+
+
+def _note_wake_turn(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    reason: str,
+    detail: dict[str, Any],
+) -> None:
+    """#925 §14.3/§14.4: count self-paced wake turns and catch native cron
+    fires as a turn opens.
+
+    A ``scheduled_wakeup`` turn in a process that never saw a ScheduleWakeup
+    tool_use can only be a CLI cron job firing (a legacy Loop-off job the
+    CLI resurrected — the hook can't stop those). It is tagged
+    ``source=cron`` and, with ``own_schedule`` on, the session is marked
+    cron-suppressed for the CLI's 7-day window and closed once idle, so
+    later spawns run with CLAUDE_CODE_DISABLE_CRON=1. It misses the first
+    resurrected fire (the run's own first turn, F4): up to two stray fires
+    per legacy session. Other wake turns count toward the wake cap; a user
+    follow-up resets it."""
+    if reason == "followup":
+        state.wake_chain_turns = 0
+        return
+    if reason != "scheduled_wakeup":
+        return
+    session_id = factory.resume.value if factory.resume else None
+    if state.schedule_wakeup_seen:
+        state.wake_chain_turns += 1
+        logger.debug(
+            "loop.native_fire_ambiguous",
+            session_id=session_id,
+            turn=state.turn + 1,
+            wake_chain_turns=state.wake_chain_turns,
+        )
+        return
+    detail["source"] = "cron"
+    from .. import loop_scheduler
+
+    own = loop_scheduler.own_schedule_enabled()
+    suppress = own and _NATIVE_FIRE_SUPPRESSION_ENABLED and session_id is not None
+    logger.info(
+        "claude.turn.native_cron_fire",
+        session_id=session_id,
+        turn=state.turn + 1,
+        suppress=suppress,
+    )
+    if suppress and session_id is not None:
+        loop_scheduler.mark_cron_suppressed(
+            session_id,
+            "native",
+            until=time.time() + loop_scheduler.CLI_CRON_MAX_AGE_S,
+            source="native_fire",
+        )
+        state.cron_suppress_close_pending = True
+
+
+def _wake_cap_reached(state: ClaudeStreamState) -> bool:
+    """#925 §14.4: the self-paced wake-up chain has hit ``[loop]
+    max_iterations`` in this process."""
+    return state.wake_cap is not None and state.wake_chain_turns >= state.wake_cap
 
 
 def _open_followup_turn(
@@ -7068,6 +7815,27 @@ def _open_followup_turn(
             hook_event=hint[1],
             attributed="open",
         )
+    elif (idle := state.hook_idle_rewake_hint) is not None and (
+        idle_gap_s := time.monotonic() - idle[2]
+    ) <= _HOOK_IDLE_REWAKE_TTL_S:
+        # #923: a background subagent's asyncRewake hook started and exited
+        # 2 while the parent idled, and this turn opened right after it —
+        # the weak, open-only counterpart of the hint above.
+        reason = "hook_rewake"
+        detail["hook"] = idle[0]
+        detail["hook_event"] = idle[1]
+        detail["hook_started_idle"] = True
+        detail["hook_held_s"] = idle[3]
+        logger.info(
+            "claude.turn.hook_rewake",
+            session_id=factory.resume.value if factory.resume else None,
+            turn=state.turn + 1,
+            hook_name=idle[0],
+            hook_event=idle[1],
+            attributed="open_idle",
+            held_s=idle[3],
+            gap_s=round(idle_gap_s, 2),
+        )
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
@@ -7081,6 +7849,7 @@ def _open_followup_turn(
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
         state.pending_wakeup_delay_s = None
+    _note_wake_turn(state, factory, reason, detail)  # #925
     if reason == "followup" and command_uuid is not None:
         state.awaiting_injected.pop(command_uuid, None)
     # #383 C4: this turn runs unplanned because the approved plan's agents
@@ -7125,6 +7894,20 @@ def _open_followup_turn(
             carried = None
     state.turn_hook_hint = carried
     state.hook_rewake_hint = None
+    # #923: the idle candidate is open-time only — spent or dropped here,
+    # never carried into ``turn_hook_hint``.
+    if (idle_hint := state.hook_idle_rewake_hint) is not None and not detail.get(
+        "hook_started_idle"
+    ):
+        logger.debug(
+            "claude.hook.idle_rewake_hint_expired",
+            session_id=factory.resume.value if factory.resume else None,
+            hook_name=idle_hint[0],
+            hook_event=idle_hint[1],
+            age_s=round(time.monotonic() - idle_hint[2], 1),
+            held_s=idle_hint[3],
+        )
+    state.hook_idle_rewake_hint = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.safeguard = SafeguardTurn()
     state.unattended_denials = []  # #835
@@ -7217,6 +8000,54 @@ def _absorb_injected(
             level="info",
             detail=detail,
         ),
+    ]
+
+
+def _close_no_query_turn(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    event: claude_schema.StreamResultMessage,
+    completed: CompletedEvent | None,
+) -> list[UntetherEvent]:
+    """#928 case I: close a turn ``init`` opened for a no-query result as
+    ``no_query`` — the bridge drops it silently. ``completed_turns`` is not
+    bumped (no #896 accounting wait), the plan re-arm recompute and the retro
+    chain are skipped, no #785 pairing window is armed, and a hook hint the
+    turn spent is restored for the real turn that follows. The turn number
+    stays consumed: hooks started in it are tagged with it (#828/#923)."""
+    opened_as = state.turn_reason
+    state.turn_open = False
+    _restore_turn_hook_hints(state)
+    state.turn_reason = "no_query"
+    state.turn_ended_tasks = []
+    state.unattributed_turn_completed_at = None
+    state.no_query_results += 1
+    logger.info(
+        "claude.turn.no_query",
+        session_id=event.session_id,
+        opened=True,
+        turn=state.turn,
+        opened_as=opened_as,
+        origin_kind=_result_origin_kind(event),
+    )
+    logger.info(
+        "claude.turn.completed",
+        session_id=event.session_id,
+        turn=state.turn,
+        reason="no_query",
+        ok=True,
+        num_turns=event.num_turns,
+        origin_kind=_result_origin_kind(event),
+    )
+    return [
+        factory.turn_completed(
+            turn=state.turn,
+            ok=True,
+            answer="",
+            reason="no_query",
+            usage=completed.usage if completed is not None else None,
+            detail={},
+        )
     ]
 
 
@@ -7359,9 +8190,41 @@ def translate_claude_event(
             )
             return out
         case claude_schema.StreamResultMessage():
+            no_query = _is_no_query_result(event)
+            if no_query and not state.turn_open and state.pending_command_uuid is None:
+                # #928 case R: the CLI's no-query result as the first frame —
+                # absorb it before it opens a turn, so no turn number, idle
+                # hint, ``turn_notifications`` or pairing window is spent.
+                state.no_query_results += 1
+                logger.info(
+                    "claude.turn.no_query",
+                    session_id=event.session_id,
+                    opened=False,
+                    after_turn=state.turn,
+                    since_result_s=(
+                        round(time.monotonic() - state.result_received_at, 2)
+                        if state.result_received_at is not None
+                        else None
+                    ),
+                    origin_kind=_result_origin_kind(event),
+                )
+                return []
             out = []
             if not state.turn_open:
                 out.extend(_open_turn_events(state, factory))
+            # #928 case I: ``init`` already opened a turn for it. Only a turn
+            # nothing else explains (``unknown``) or one opened on a hook hint
+            # (``hook_rewake``, review amendment 1), with no model request,
+            # text, compaction or task end in it.
+            no_query = (
+                no_query
+                and state.turn_reason in ("unknown", "hook_rewake")
+                and state.turn_command_uuid is None
+                and state.turn_model_requests == 0
+                and state.last_assistant_text is None
+                and not state.turn_compactions
+                and not state.turn_ended_tasks
+            )
             base = _translate_claude_event_base(
                 event, title=title, state=state, factory=factory
             )
@@ -7371,6 +8234,8 @@ def translate_claude_event(
             # #819: result-time ActionEvents (the ``% ctx`` telemetry) belong
             # to this turn — forward them before it closes.
             out.extend(evt for evt in base if isinstance(evt, ActionEvent))
+            if no_query:
+                return [*out, *_close_no_query_turn(state, factory, event, completed)]
             state.turn_open = False
             state.completed_turns += 1
             # #383: re-arm plan mode at every live turn close.
@@ -7471,6 +8336,7 @@ def translate_claude_event(
                     reason=state.turn_reason,
                     ok=completed.ok,
                     num_turns=event.num_turns,
+                    origin_kind=_result_origin_kind(event),  # #928
                 )
                 out.append(
                     factory.turn_completed(
@@ -7600,6 +8466,7 @@ def _translate_claude_event_base(
             mismatch_rows = _permission_mode_mismatch_rows(
                 event, state=state, factory=factory
             )
+            mismatch_rows += _cron_suppressed_rows(state=state, factory=factory)
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -7762,7 +8629,12 @@ def _translate_claude_event_base(
                 )
                 # #289 bind upstream cron ID so CronDelete observations
                 # later in the session can target the right loop entry.
-                _observe_loop_tool_result(state, tool_use_id, content.content)
+                _observe_loop_tool_result(
+                    state,
+                    tool_use_id,
+                    content.content,
+                    is_error=bool(getattr(content, "is_error", False)),
+                )
                 action = state.pending_actions.pop(tool_use_id, None)
                 if action is None:
                     action = Action(
@@ -7871,7 +8743,25 @@ def _translate_claude_event_base(
                 # #701: the other cap class — no time to harvest, but a
                 # remedy to name. (Both always run: no short-circuit.)
                 reset_latched = _maybe_latch_rate_limit_reset(event.result, state=state)
-                action_latched = _maybe_latch_action_required(event.result)
+                # #922: the structured kind first (str / int only — Any on
+                # the wire), then the text.
+                action_latched = _maybe_latch_action_required(
+                    event.result,
+                    api_error=(
+                        event.api_error if isinstance(event.api_error, str) else None
+                    ),
+                    api_error_code=(
+                        event.api_error_code
+                        if isinstance(event.api_error_code, str)
+                        else None
+                    ),
+                    api_error_status=(
+                        event.api_error_status
+                        if isinstance(event.api_error_status, int)
+                        and not isinstance(event.api_error_status, bool)
+                        else None
+                    ),
+                )
                 usage_limit_latched = reset_latched or action_latched
             usage = _usage_payload(event)
             if usage_limit_latched:
@@ -7985,11 +8875,26 @@ def _translate_claude_event_base(
             # The other three (initialize, hook_callback, interrupt) are
             # protocol housekeeping with no payload that Untether interprets.
             #
+            # #925 exception: hook callbacks Untether registered itself
+            # (``_LOOP_HOOK_IDS``, the CronCreate / CronDelete PreToolUse
+            # hooks sent in ``initialize``) are intercepted just below and
+            # DO read ``input`` (the tool input) to decide. Every other
+            # ``hook_callback`` keeps the payload-blind auto-approve.
+            #
             # Acceptance: changes to either subtype's semantics in upstream
             # Claude Code MUST trigger a re-audit. Tests in
             # tests/test_claude_control.py::TestAutoApproveSafetyInvariant
             # lock in the expectation that auto-approve runs without
             # invoking any callback that observes the payload.
+            if (
+                isinstance(request, claude_schema.ControlHookCallbackRequest)
+                and request.callback_id in _LOOP_HOOK_IDS
+            ):
+                output, decision = _loop_hook_decision_safe(state, request)
+                state.hook_callback_queue.append(
+                    (request_id, request.callback_id, output, decision)
+                )
+                return []
             _AUTO_APPROVE_TYPES = (
                 claude_schema.ControlInitializeRequest,
                 claude_schema.ControlHookCallbackRequest,
@@ -8022,6 +8927,10 @@ def _translate_claude_event_base(
                     session_id=factory.resume.value if factory.resume else None,
                     permission_mode=state.effective_permission_mode,
                     unattended=state.unattended_trigger,  # #835
+                    # #929: which agent asks and why (type only — never the
+                    # reason text, #822 "name only").
+                    agent_id=getattr(request, "agent_id", None),
+                    decision_reason_type=_control_reason_type(request),
                 )
 
             # #793: record every ExitPlanMode plan body against its request;
@@ -8386,19 +9295,8 @@ def _translate_claude_event_base(
                 tool_input = getattr(request, "input", {})
                 details = f"tool: {tool_name}"
                 # Include key input parameters if available
-                if tool_input:
-                    key_params = []
-                    for key in ["file_path", "path", "command", "pattern"]:
-                        if key in tool_input:
-                            # #871/#418: the title is markdown — a raw value
-                            # lost its backticks (`x` → x) and a heredoc's
-                            # newline split the title. A one-line code span
-                            # whose fence outruns any inner backtick.
-                            value = inline_code(str(tool_input[key]), width=50)
-                            if value:
-                                key_params.append(f"{key}={value}")
-                    if key_params:
-                        details += f" ({', '.join(key_params)})"
+                if key_params := _tool_input_details(tool_input):
+                    details += f" {key_params}"
                 # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)
                 run_opts = get_run_options()
                 if run_opts is None or run_opts.diff_preview is not False:
@@ -8543,9 +9441,22 @@ def _translate_claude_event_base(
             state.note_seq += 1
             action_id = f"claude.control.{state.note_seq}"
 
-            # Map the preceding tool_use_id to this control action for cleanup
-            if state.last_tool_use_id:
-                state.control_action_for_tool[state.last_tool_use_id] = action_id
+            # Map the request's tool call to this control action for cleanup.
+            # #929: the CLI names the call (``tool_use_id``); the newest
+            # tool_use from any agent can be a parallel sibling's, whose
+            # result would then strip a still-pending approval. A native id
+            # this state never saw as a tool_use (the sandbox network ask
+            # sends a generated one no tool_result carries) falls back to the
+            # old mapping; completion then comes via the #229 reconcile.
+            native_tool_use_id = getattr(request, "tool_use_id", None)
+            tool_key = (
+                native_tool_use_id
+                if isinstance(native_tool_use_id, str)
+                and native_tool_use_id in state.pending_actions
+                else state.last_tool_use_id
+            )
+            if tool_key:
+                state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)
             state.request_to_action[request_id] = action_id
 
@@ -8689,6 +9600,15 @@ def _translate_claude_event_base(
                 detail["ask_question"] = ask_question
             if ask_flow_created:
                 detail["ask_flow"] = True
+            # #929: who asks and why — read by the bridge's standalone
+            # approval surface for a request that arrives while live-idle.
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                if agent_id := getattr(request, "agent_id", None):
+                    detail["agent_id"] = agent_id
+                if reason_type := _control_reason_type(request):
+                    detail["decision_reason_type"] = reason_type
+                if reason := _control_reason_text(request):
+                    detail["decision_reason"] = reason
 
             return [
                 *reconciled_events,
@@ -9073,10 +9993,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if effective_mode is not None:
             # SDK-style control channel: send init handshake + user message.
             # The CLI reads both from stdin (no -p mode).
+            # #925: Untether's CronCreate / CronDelete PreToolUse hooks ride
+            # on every control-channel spawn (unless `own_schedule = false`).
+            hooks = _loop_hooks_config()
+            if isinstance(state, ClaudeStreamState):
+                state.loop_hooks_registered = hooks is not None
             init_request = {
                 "type": "control_request",
                 "request_id": f"init_{id(self)}",
-                "request": {"subtype": "initialize", "hooks": None},
+                "request": {"subtype": "initialize", "hooks": hooks},
             }
             user_message = {
                 "type": "user",
@@ -9140,6 +10065,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
+        # #926: this spawn resumes a session that may still hold a CLI cron
+        # job the CLI would resurrect and fire — switch its scheduler off.
+        # Assignment, not setdefault: an inherited value must not re-enable
+        # it. Re-checked here so an expired record stops applying.
+        until = getattr(state, "cron_suppressed_until", None)
+        if until is not None and until > time.time():
+            env["CLAUDE_CODE_DISABLE_CRON"] = "1"
+            logger.info(
+                "claude.cron_suppressed",
+                session_id=(
+                    state.factory.resume.value
+                    if getattr(state, "factory", None) and state.factory.resume
+                    else None
+                ),
+                until=until,
+            )
         return env
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
@@ -9185,6 +10126,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             claude_cli_permission_mode(self._effective_permission_mode()) == "plan"
         )
         state.resumed = resume is not None
+        if requested_mode is not None:
+            from .. import loop_scheduler
+
+            # #926: a resumed control-channel spawn of a session that may
+            # hold a resurrectable CLI cron job runs with
+            # CLAUDE_CODE_DISABLE_CRON=1 (``env``) and shows a note row.
+            if resume is not None and not resume.is_continue:
+                state.cron_suppressed_until = loop_scheduler.cron_suppressed_until(
+                    resume.value
+                )
+            # #925 §14.4: self-paced wake-up chains stop after
+            # ``[loop] max_iterations`` (per process; off with the kill switch).
+            if loop_scheduler.own_schedule_enabled():
+                state.wake_cap = _loop_caps()["max_iterations"]
         # #289 capture the first user message so loop observers can fall back
         # to it when ScheduleWakeup uses the <<autonomous-loop-dynamic>>
         # sentinel.  For resumed runs this is the resume prompt (still better
@@ -9362,6 +10317,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 yield evt
             # Drain auto-approve and auto-deny queues after EVERY line, even if no events
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
+            await self._drain_hook_callbacks(state, stdin=session_stdin)  # #925
             await self._drain_auto_approve(state, stdin=session_stdin)
             await self._drain_auto_deny(state, stdin=session_stdin)
             # #383 backstop: a re-arm the pre-yield drain couldn't write.
@@ -9379,6 +10335,53 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # carries the #505 protection instead (post-exit drain + close).
             if stream.did_emit_completed and not stream.followup_turns:
                 break
+
+    async def _drain_hook_callbacks(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """#925: answer Untether's own PreToolUse hook callbacks. The
+        response payload IS the hook output (``{}`` = no opinion, or a
+        ``hookSpecificOutput`` deny)."""
+        if not state.hook_callback_queue:
+            return
+        pipe = stdin or self._proc_stdin
+        queued = list(state.hook_callback_queue)
+        state.hook_callback_queue.clear()
+        for req_id, callback_id, output, decision in queued:
+            response = {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": req_id,
+                    "response": output,
+                },
+            }
+            payload = (json.dumps(response) + "\n").encode()
+            try:
+                if pipe is not None:
+                    await _locked_send(pipe, payload)
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                else:
+                    logger.warning(
+                        "control_response.hook_callback_failed",
+                        request_id=req_id,
+                        callback_id=callback_id,
+                    )
+                    continue
+                logger.info(
+                    "control_response.hook_callback",
+                    request_id=req_id,
+                    callback_id=callback_id,
+                    decision=decision,
+                )
+            except (OSError, anyio.ClosedResourceError) as e:
+                logger.warning(
+                    "control_response.hook_callback_failed",
+                    request_id=req_id,
+                    callback_id=callback_id,
+                    error=str(e),
+                )
 
     async def _drain_auto_approve(
         self, state: ClaudeStreamState, *, stdin: Any = None
@@ -9780,9 +10783,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 else:
                     state.hook_procs_gone_since = None
                 hooks_pending = live.idle and has_pending_async_hooks(state)
+                # #925 §14.4: at the wake cap a pending wake-up no longer
+                # holds the session — it closes at idle (``wake_cap``).
+                wake_capped = _wake_cap_reached(state) and _has_pending_wakeup(state)
                 live_work = (
                     has_live_background_work(state)
-                    or _has_pending_wakeup(state)
+                    or (_has_pending_wakeup(state) and not wake_capped)
                     or hooks_pending
                 )
                 if hooks_pending and not state.hook_hold_logged:
@@ -9831,6 +10837,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     # A pending approval / ask pauses every timer.
                     live.idle_since = now
                     live.hold_started = now
+                    continue
+                if state.cron_suppress_close_pending and _is_clean_idle(live):
+                    # #925 §14.3: a native cron job fired in this process;
+                    # end it so the CLI's scheduler stops (later spawns run
+                    # with CLAUDE_CODE_DISABLE_CRON=1).
+                    state.cron_suppress_close_pending = False
+                    await close_live_session(sid, "cron_suppressed", only_if_idle=True)
                     continue
                 if live.idle_since is None:
                     live.idle_since = now
@@ -9904,6 +10917,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                     continue
                 if now - live.idle_since >= idle_grace_s:
+                    if wake_capped:
+                        run_logger.info(
+                            "claude.live_session.wake_cap",
+                            session_id=sid,
+                            turns=state.wake_chain_turns,
+                            cap=state.wake_cap,
+                        )
+                        await close_live_session(
+                            sid, "wake_cap", notice=True, only_if_idle=True
+                        )
+                        continue
                     await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
         except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
             cancelled = True

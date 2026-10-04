@@ -2252,7 +2252,9 @@ def test_rejected_credits_required_without_reset_shows_remedy(
     assert len(events) == 2
     title = events[0].action.title
     assert title.startswith("⛔ Model limit reached")
-    assert "/usage-credits" in title
+    # #922: Untether has no /usage-credits command — name what works here.
+    assert "switch with /model or manage usage credits on claude.ai" in title
+    assert "/usage-credits" not in title
     assert "retrying in" not in title
     assert state.awaiting_rate_limit_retry() is True
 
@@ -3252,6 +3254,13 @@ def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
         (
             "You've reached your Fable 5 limit. Run /usage-credits to continue "
             "or switch models with /model.",
+            True,
+        ),
+        # #922: the current headless wording (channelo 2026-09-07 verbatim).
+        (
+            "You've reached your Fable limit. Switch to another model, or manage "
+            "usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, "
+            "to continue.",
             True,
         ),
         ("API Error: 500 internal server error", False),
@@ -7628,8 +7637,6 @@ def test_parse_action_required_cap_shapes() -> None:
 
     # The nsd 2026-07-27 verbatim string.
     assert _parse_action_required_cap(_ACTION_CAP_TEXT) == "Fable 5"
-    # Remedy present, no model named → "" (still the action class).
-    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") == ""
     # Remedy present via the /model spelling only.
     assert (
         _parse_action_required_cap(
@@ -7651,6 +7658,9 @@ def test_parse_action_required_cap_fail_closed() -> None:
     )
     # "reached your … limit" phrasing without the remedy is not this class.
     assert _parse_action_required_cap("You've reached your session limit.") is None
+    # #922: both halves are required — a remedy with no cap clause is not
+    # this class (it used to latch with "").
+    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") is None
     assert _parse_action_required_cap("") is None
     assert _parse_action_required_cap(None) is None
 
@@ -7694,7 +7704,7 @@ def test_action_cap_result_latches_and_rejected_events_show_remedy(
     )
     title = events[0].action.title
     assert "Fable 5 limit reached" in title
-    assert "/usage-credits" in title
+    assert "/usage-credits" not in title
     assert "/model" in title
     # The whole point: no countdown copy.
     assert "waiting to retry" not in title
@@ -7711,7 +7721,7 @@ def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -
     import time as _time
 
     clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
-    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5", "model")
 
     state = ClaudeStreamState()
     events = translate_claude_event(
@@ -7728,7 +7738,7 @@ def test_expired_action_latch_pruned(clean_action_latch) -> None:
 
     from untether.runners import claude as claude_mod
 
-    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5", "model")
     assert claude_mod._latched_action_required() is None
     assert clean_action_latch == {}
 
@@ -7754,7 +7764,7 @@ def test_bare_event_ignores_armed_latches(
     import time as _time
 
     clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
-    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5", "model")
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -7770,7 +7780,334 @@ def test_action_title_without_model_name() -> None:
     from untether.runners.claude import _format_action_required_title
 
     assert _format_action_required_title("").startswith("⛔ Model limit reached")
-    assert "/usage-credits" in _format_action_required_title("")
+    assert "/usage-credits" not in _format_action_required_title("")
+    assert _format_action_required_title("").endswith(
+        "switch with /model or manage usage credits on claude.ai"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #922 — the action-required latch on the CLI's current headless wording
+# ---------------------------------------------------------------------------
+
+_922_CHANNELO_TEXT = (
+    "You've reached your Fable limit. Switch to another model, or manage usage "
+    "credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+)
+
+# The `${K}` remedy suffix of CLI 2.1.289's headless builder: empty when the
+# account can't buy credits, else the personal or the Team/Enterprise URL.
+_922_K_VARIANTS = (
+    "",
+    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at claude.ai/admin-settings/usage,",
+)
+
+# (cap sentence, expected model, expected kind, expected title prefix)
+_922_HEADLESS_CAPS = (
+    ("You've reached your Fable limit.", "Fable", "model", "⛔ Fable limit reached"),
+    (
+        "Opus 5.5 requires usage credits.",
+        "Opus 5.5",
+        "model_credits",
+        "⛔ Opus 5.5 needs usage credits",
+    ),
+    ("You're out of usage credits.", "", "credits", "⛔ Usage credits used up"),
+    (
+        "You've hit your monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your channel's monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your team's shared budget.",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+)
+
+
+def _922_result(text: str | None, **extra) -> dict:
+    payload: dict = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "num_turns": 1,
+        "duration_ms": 30000,
+        "duration_api_ms": 0,
+        "session_id": "a1103c07-922",
+        "result": text,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _922_feed(state: ClaudeStreamState, payload: dict) -> list:
+    return translate_claude_event(
+        _decode_event(payload), title="claude", state=state, factory=state.factory
+    )
+
+
+def _922_latched_logs(logs: list) -> list:
+    return [
+        r for r in logs if r["event"] == "claude.rate_limit_action_required_latched"
+    ]
+
+
+def test_922_channelo_verbatim_latches(clean_action_latch, clean_reset_latch) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _parse_action_required_cap
+
+    assert _parse_action_required_cap(_922_CHANNELO_TEXT) == "Fable"
+    with capture_logs() as logs:
+        _922_feed(ClaudeStreamState(), _922_result(_922_CHANNELO_TEXT))
+    assert clean_action_latch["default"][1:] == ("Fable", "model")
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "result_text"
+    assert rec["model"] == "Fable"
+    assert rec["kind"] == "model"
+    # Field values only — never the error text.
+    assert _922_CHANNELO_TEXT not in str(rec)
+
+
+@pytest.mark.parametrize("k_suffix", _922_K_VARIANTS)
+@pytest.mark.parametrize(("cap", "model", "kind", "title_prefix"), _922_HEADLESS_CAPS)
+def test_922_headless_variants_parse(
+    cap: str, model: str, kind: str, title_prefix: str, k_suffix: str
+) -> None:
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _format_action_required_title,
+        _parse_action_required_cap,
+    )
+
+    text = f"{cap} Switch to another model{k_suffix} to continue."
+    assert _parse_action_required_cap(text) == model
+    assert _classify_action_required_cap(text) == (model, kind, "result_text")
+    title = _format_action_required_title(model, kind)
+    assert title.startswith(title_prefix)
+    assert title.endswith("switch with /model or manage usage credits on claude.ai")
+    assert "Model limit" not in title or kind == "model"
+
+
+@pytest.mark.parametrize(
+    ("text", "model", "kind"),
+    [
+        (_ACTION_CAP_TEXT, "Fable 5", "model"),
+        ("You've reached your Fable limit. /model to switch models.", "Fable", "model"),
+        (
+            "You're out of usage credits. Run /usage-credits to keep using "
+            "Opus 5.5 or /model to switch models.",
+            "",
+            "credits",
+        ),
+        (
+            "You've hit your team's shared budget. /model to switch models.",
+            "",
+            "team_budget",
+        ),
+        (
+            "You've hit your monthly spend limit. Run /usage-credits to manage your "
+            "limit and keep using Opus 5.5 or switch models to continue this chat.",
+            "",
+            "spend",
+        ),
+    ],
+)
+def test_922_interactive_wording_still_latches(
+    text: str, model: str, kind: str
+) -> None:
+    """The older (interactive-branch) wording keeps working."""
+    from untether.runners.claude import _classify_action_required_cap
+
+    assert _classify_action_required_cap(text) == (model, kind, "result_text")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You've hit your session limit · resets 7:50pm (Australia/Melbourne)",
+        "API Error: Usage credits required for 1M context · turn on usage credits "
+        "at claude.ai/settings/usage?from=cc_cli_limit_message",
+        "Opus 5.5 doesn't support auto mode. Switch models with /model to change this.",
+        "Switch to another model to continue.",
+        "",
+        None,
+    ],
+)
+def test_922_fail_closed(text: str | None) -> None:
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _parse_action_required_cap,
+    )
+
+    assert _parse_action_required_cap(text) is None
+    assert _classify_action_required_cap(text) is None
+
+
+def test_922_structured_api_error_latches_without_text(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result(
+                "some future wording",
+                api_error="model_requires_usage_credits",
+                api_error_code="credits_required",
+                api_error_status=429,
+            ),
+        )
+    assert clean_action_latch["default"][1:] == ("", "model")
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "api_error"
+    assert rec["api_error"] == "model_requires_usage_credits"
+    assert rec["api_error_code"] == "credits_required"
+    assert rec["api_error_status"] == 429
+
+
+def test_922_structured_kind_keeps_the_text_subject(clean_action_latch) -> None:
+    """Structured detection, text still names the cap."""
+    from untether.runners.claude import _classify_action_required_cap
+
+    assert _classify_action_required_cap(
+        "You're out of usage credits. Switch to another model to continue.",
+        api_error="model_requires_usage_credits",
+    ) == ("", "credits", "api_error")
+
+
+def test_922_api_error_code_credits_required_latches(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result("API Error: 429", api_error_code="credits_required"),
+        )
+    assert clean_action_latch
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "api_error_code"
+
+
+def test_922_long_context_api_error_never_latches(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(
+        ClaudeStreamState(),
+        _922_result(
+            _922_CHANNELO_TEXT,
+            api_error="long_context_credits_required",
+            api_error_code="credits_required",
+        ),
+    )
+    assert clean_action_latch == {}
+
+
+def test_922_odd_structured_types_decode(clean_action_latch, clean_reset_latch) -> None:
+    """A type change upstream must never drop the result line; the odd values
+    are ignored and the text decides."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    events = _922_feed(
+        state,
+        _922_result("boom", api_error_status="429", api_error=5, api_error_code=["x"]),
+    )
+    assert events  # the result line still decoded and completed the run
+    assert clean_action_latch == {}
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result(
+                _922_CHANNELO_TEXT,
+                api_error_status="429",
+                api_error=5,
+                api_error_code=["x"],
+            ),
+        )
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "result_text"
+    assert rec["api_error"] is None
+    assert rec["api_error_status"] is None
+
+
+def test_922_rejected_event_after_new_wording_shows_remedy(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(ClaudeStreamState(), _922_result(_922_CHANNELO_TEXT))
+    state = ClaudeStreamState()
+    events = _922_feed(state, _REJECTED_NO_RESET)
+    title = events[0].action.title
+    assert title == (
+        "⛔ Fable limit reached — may not clear on a timer; "
+        "switch with /model or manage usage credits on claude.ai"
+    )
+    assert "/usage-credits" not in title
+    assert "waiting to retry" not in title
+
+
+def test_922_rejected_event_names_the_cap_kind(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(
+        ClaudeStreamState(),
+        _922_result(
+            "You're out of usage credits. Switch to another model to continue."
+        ),
+    )
+    events = _922_feed(ClaudeStreamState(), _REJECTED_NO_RESET)
+    assert events[0].action.title.startswith("⛔ Usage credits used up — ")
+
+
+def test_922_seven_day_overage_included_without_reset_is_action_required(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """Decision 3: mirrors the CLI's own credits classifier."""
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=None,
+            rateLimitType="seven_day_overage_included",
+            overageDisabledReason=None,
+            unifiedWindows=None,
+        ),
+    )
+    assert events[0].action.title.startswith("⛔ Model limit reached")
+
+
+def test_922_seven_day_overage_included_with_reset_keeps_the_clock(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    import time as _time
+
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=int(_time.time()) + 600,
+            rateLimitType="seven_day_overage_included",
+            overageDisabledReason=None,
+        ),
+    )
+    title = events[0].action.title
+    assert title.startswith("⏳ Rate limited until")
+    assert "(~10 min)" in title
 
 
 # ---------------------------------------------------------------------------
@@ -8166,3 +8503,1180 @@ def test_api_retry_object_error_does_not_break_title() -> None:
     assert events[0].action.title == (
         "🔁 API error 500 — retrying in 8s (attempt 2/10)"
     )
+
+
+# ───── #925 (rc20) — Untether owns the schedule: PreToolUse hooks ──────
+
+
+def _loop_settings(monkeypatch, **loop_kwargs) -> None:
+    """Serve a ``[loop]`` block to every settings reader the #925 code uses
+    (``runners.claude`` binds ``load_settings_if_exists`` at import;
+    ``loop_scheduler`` imports it from ``settings`` at call time)."""
+    import untether.settings as settings_mod
+    from untether.settings import LoopSettings
+
+    settings = types.SimpleNamespace(loop=LoopSettings(**loop_kwargs))
+
+    def _load():
+        return settings, Path("untether.toml")
+
+    monkeypatch.setattr(claude_runner, "load_settings_if_exists", _load)
+    monkeypatch.setattr(settings_mod, "load_settings_if_exists", _load)
+
+
+def _hook_callback_event(
+    callback_id: str,
+    tool_name: str,
+    tool_input: dict,
+    *,
+    tool_use_id: str = "toolu_hook1",
+    request_id: str = "req-hook-1",
+    session_id: str = "sess-925",
+) -> claude_schema.StreamJsonMessage:
+    """The G1-probed ``hook_callback`` control_request shape (CLI 2.1.289)."""
+    return _decode_event(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": callback_id,
+                "input": {
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "tool_use_id": tool_use_id,
+                },
+                "tool_use_id": tool_use_id,
+            },
+        }
+    )
+
+
+def _seed_loop_state(session_id: str = "sess-925") -> ClaudeStreamState:
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value=session_id)
+    state.first_user_message_text = "schedule a tick"
+    return state
+
+
+def _deny_reason(output: dict) -> str:
+    hso = output["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    return hso["permissionDecisionReason"]
+
+
+@pytest.mark.anyio
+class TestLoopHookOwnership:
+    """#925 D-A..D-C and §14.3 (D1 = A): CronCreate / CronDelete PreToolUse
+    hooks on every control-channel spawn; Loop mode read at callback time."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        from untether import loop_scheduler
+
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @pytest.fixture
+    def _set_chat(self):
+        from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+        token = set_run_channel_id(9250)
+        try:
+            yield 9250
+        finally:
+            reset_run_channel_id(token)
+
+    @pytest.fixture
+    def _loop_on(self):
+        from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+        with apply_run_options(EngineRunOptions(loop_enabled=True)):
+            yield
+
+    @pytest.fixture
+    def _loop_off(self):
+        from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            yield
+
+    @pytest.fixture
+    async def _scheduler(self):
+        from untether import loop_scheduler
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        class _Transport:
+            async def send(self, **_):
+                return None
+
+            async def edit(self, **_):
+                return None
+
+            async def delete(self, _ref):
+                return None
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop, _Transport(), 1)
+            try:
+                yield
+            finally:
+                tg.cancel_scope.cancel()
+
+    # ── initialize.hooks ────────────────────────────────────────────────
+
+    @staticmethod
+    def _init_hooks(runner: ClaudeRunner, state: ClaudeStreamState):
+        payload = runner.stdin_payload("hi", None, state=state)
+        assert payload is not None
+        init = json.loads(payload.decode().splitlines()[0])
+        assert init["request"]["subtype"] == "initialize"
+        return init["request"]["hooks"]
+
+    @pytest.mark.usefixtures("_loop_on")
+    def test_stdin_payload_registers_loop_hooks_when_loop_on(self) -> None:
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = ClaudeStreamState()
+        hooks = self._init_hooks(runner, state)
+        assert hooks == {
+            "PreToolUse": [
+                {
+                    "matcher": "CronCreate",
+                    "hookCallbackIds": ["ut_loop_cron_create"],
+                    "timeout": 30,
+                },
+                {
+                    "matcher": "CronDelete",
+                    "hookCallbackIds": ["ut_loop_cron_delete"],
+                    "timeout": 30,
+                },
+            ]
+        }
+        assert state.loop_hooks_registered is True
+
+    @pytest.mark.usefixtures("_loop_off")
+    def test_stdin_payload_registers_hooks_when_loop_off(self) -> None:
+        """§13b amendment 4: under D1 = A hooks ride on every spawn."""
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="default")
+        hooks = self._init_hooks(runner, ClaudeStreamState())
+        assert [h["matcher"] for h in hooks["PreToolUse"]] == [
+            "CronCreate",
+            "CronDelete",
+        ]
+
+    @pytest.mark.usefixtures("_loop_on")
+    def test_stdin_payload_hooks_none_when_own_schedule_false(
+        self, monkeypatch
+    ) -> None:
+        _loop_settings(monkeypatch, own_schedule=False)
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = ClaudeStreamState()
+        assert self._init_hooks(runner, state) is None
+        assert state.loop_hooks_registered is False
+
+    def test_p_mode_has_no_stdin_payload(self) -> None:
+        runner = ClaudeRunner(claude_cmd="claude")
+        assert runner.stdin_payload("hi", None, state=ClaudeStreamState()) is None
+
+    # ── ut_loop_cron_create ──────────────────────────────────────────────
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_create_registers_and_denies(
+        self, monkeypatch
+    ) -> None:
+        from untether import loop_scheduler
+
+        _loop_settings(
+            monkeypatch,
+            enabled=False,
+            max_iterations=2,
+            max_total_duration_hours=1,
+            expiry_days=2,
+        )
+        state = _seed_loop_state()
+        events = translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/1 * * * *", "prompt": "tick", "recurring": True},
+                tool_use_id="toolu_x",
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert events == []
+        pending = loop_scheduler.pending_for_chat(9250)
+        assert len(pending) == 1
+        entry = pending[0]
+        assert entry.max_iterations == 2
+        assert entry.max_total_duration_hours == 1
+        assert entry.tool_use_id == "toolu_x"
+        assert entry.resume_token == "sess-925"
+        ((req_id, callback_id, output, decision),) = state.hook_callback_queue
+        assert (req_id, callback_id, decision) == (
+            "req-hook-1",
+            "ut_loop_cron_create",
+            "deny",
+        )
+        reason = _deny_reason(output)
+        assert entry.token in reason
+        assert "every minute" in reason
+        assert "at most 2 iterations / 1 h" in reason
+        assert f'CronDelete with id "{entry.token}"' in reason
+        # Not auto-approved — answered only by the hook drain.
+        assert "req-hook-1" not in state.auto_approve_queue
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_before_assistant_event_registers_once(self) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        tool_input = {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True}
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create", "CronCreate", tool_input, tool_use_id="tu_o1"
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronCreate", "tu_o1", tool_input)),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert len(loop_scheduler.pending_for_chat(9250)) == 1
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_assistant_event_before_hook_registers_once(self) -> None:
+        """G4 (2.1.289): the assistant line arrived ~20 ms before the hook."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        tool_input = {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True}
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronCreate", "tu_o2", tool_input)),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        token = loop_scheduler.pending_for_chat(9250)[0].token
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create", "CronCreate", tool_input, tool_use_id="tu_o2"
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert len(loop_scheduler.pending_for_chat(9250)) == 1
+        assert token in _deny_reason(state.hook_callback_queue[0][2])
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_invalid_cron_denies_fail_closed(self) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "not a cron", "prompt": "tick"},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.pending_for_chat(9250) == []
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert "could not schedule" in _deny_reason(output)
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat")
+    async def test_hook_callback_scheduler_not_installed_denies(self) -> None:
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/5 * * * *", "prompt": "tick"},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert "not installed" in _deny_reason(output)
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_decision_exception_fails_closed(self, monkeypatch) -> None:
+        """§13 amendment 5: a throwing CronCreate decision still denies; a
+        throwing CronDelete decision falls back to passthrough."""
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(claude_runner, "_register_cron_from_input", _boom)
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/5 * * * *", "prompt": "tick"},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert "could not schedule" in _deny_reason(output)
+
+        monkeypatch.setattr(claude_runner, "_loop_hook_decision", _boom)
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_delete",
+                "CronDelete",
+                {"id": "ut_loop_deadbeef"},
+                request_id="req-del-boom",
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert state.hook_callback_queue[1][2:] == ({}, "passthrough")
+
+    @pytest.mark.usefixtures("_loop_off", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_create_loop_off_denies_with_guidance(
+        self,
+    ) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/1 * * * *", "prompt": "job deadbeef", "recurring": True},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.pending_for_chat(9250) == []
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        reason = _deny_reason(output)
+        assert "/config" in reason
+        assert "/at" in reason
+        assert claude_runner._LOOP_CRON_ID_RE.search(reason) is None
+
+    @pytest.mark.usefixtures("_loop_off", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_create_one_shot_loop_off_denied(self) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "30 15 4 10 *", "prompt": "say hello", "recurring": False},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+        assert state.hook_callback_queue[0][3] == "deny"
+
+    @pytest.mark.usefixtures("_set_chat", "_scheduler")
+    async def test_loop_off_decision_reads_global_hot_reload(self, monkeypatch) -> None:
+        """No per-chat override: the global ``[loop] enabled`` is read when
+        the callback arrives, not at spawn."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        _loop_settings(monkeypatch, enabled=False)
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/5 * * * *", "prompt": "tick"},
+                tool_use_id="tu_g1",
+                request_id="r1",
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+        _loop_settings(monkeypatch, enabled=True)
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/5 * * * *", "prompt": "tick"},
+                tool_use_id="tu_g2",
+                request_id="r2",
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
+        reasons = [_deny_reason(q[2]) for q in state.hook_callback_queue]
+        assert "Loop mode is off" in reasons[0]
+        assert "Untether is running this schedule" in reasons[1]
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_kill_switch_at_callback_time_passthrough(
+        self, monkeypatch
+    ) -> None:
+        from untether import loop_scheduler
+
+        _loop_settings(monkeypatch, own_schedule=False)
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_create",
+                "CronCreate",
+                {"cron": "*/5 * * * *", "prompt": "tick"},
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert state.hook_callback_queue[0][2:] == ({}, "passthrough")
+        assert loop_scheduler.active_count() == 0
+
+    # ── ut_loop_cron_delete ──────────────────────────────────────────────
+
+    @staticmethod
+    def _register_tick(token_session: str = "sess-925", tool_use_id: str = "tu-del"):
+        from untether import loop_scheduler
+
+        return loop_scheduler.register_pending_cron(
+            session_id=token_session,
+            tool_use_id=tool_use_id,
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_ut_token_cancels_with_hooks_registered(
+        self,
+    ) -> None:
+        """Live R20-925d (CLI 2.1.289): the CLI validates the job id BEFORE
+        PreToolUse hooks, so the ``ut_loop_cron_delete`` callback never
+        arrives for a ``ut_loop_`` id and the CLI answers the tool with
+        "No scheduled job…". The tool_use observer must stop the loop even
+        with the hooks registered; the error result is harmless."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        with capture_logs() as logs:
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+            assert loop_scheduler.active_count() == 0
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_result_event(
+                        "tu-d1",
+                        f"<tool_use_error>No scheduled job with id '{token}'"
+                        "</tool_use_error>",
+                        is_error=True,
+                    )
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        cancelled = [e for e in logs if e["event"] == "loop.cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0]["reason"] == "cron_delete"
+        assert not [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+        assert not [e for e in logs if e.get("log_level") in ("warning", "error")]
+        assert state.hook_callback_queue == []
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_after_observer_stop_says_stopped(self) -> None:
+        """If a later CLI does send the callback after the observer stopped
+        the loop, the same tool_use gets "stopped", not "No active loop"."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        with capture_logs() as logs:
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete",
+                    "CronDelete",
+                    {"id": token},
+                    tool_use_id="tu-d1",
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        assert loop_scheduler.active_count() == 0
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert _deny_reason(output) == f"Untether stopped loop {token}."
+        assert len([e for e in logs if e["event"] == "loop.cancelled"]) == 1
+        # A different CronDelete of the already-stopped token.
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_delete",
+                "CronDelete",
+                {"id": token},
+                tool_use_id="tu-d2",
+                request_id="req-again",
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert _deny_reason(state.hook_callback_queue[1][2]) == (
+            f"No active Untether loop {token} in this session."
+        )
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_ut_token_cancels_and_denies(
+        self,
+    ) -> None:
+        """Hook first (or alone): the callback stops the loop; the observer
+        seeing the same tool_use later is a no-op."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        with capture_logs() as logs:
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete",
+                    "CronDelete",
+                    {"id": token},
+                    tool_use_id="tu-d1",
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+            assert loop_scheduler.active_count() == 0
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert _deny_reason(output) == f"Untether stopped loop {token}."
+        cancelled = [e for e in logs if e["event"] == "loop.cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0]["reason"] == "cron_delete"
+        assert not [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+
+    @pytest.mark.usefixtures("_loop_off", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_ut_token_stops_even_with_loop_off(
+        self,
+    ) -> None:
+        """A loop created while Loop mode was on can still be stopped by
+        CronDelete after the chat turns Loop mode off."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronDelete", "tu-off", {"id": token})),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    @pytest.mark.parametrize("loop_mode", [True, False])
+    @pytest.mark.usefixtures("_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_upstream_id_passthrough(
+        self, loop_mode
+    ) -> None:
+        """A real CLI job id is deleted natively (in both modes — the Loop-off
+        case is ``test_hook_callback_cron_delete_loop_off_passthrough``)."""
+        from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+        state = _seed_loop_state()
+        with apply_run_options(EngineRunOptions(loop_enabled=loop_mode)):
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete", "CronDelete", {"id": "6a9af2cb"}
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        assert state.hook_callback_queue[0][2:] == ({}, "passthrough")
+
+    @pytest.mark.usefixtures("_loop_off", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_loop_off_passthrough(self) -> None:
+        state = _seed_loop_state()
+        translate_claude_event(
+            _hook_callback_event(
+                "ut_loop_cron_delete", "CronDelete", {"id": "abcd1234"}
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert state.hook_callback_queue[0][2:] == ({}, "passthrough")
+
+    # ── deny text vs the bind regex, the -p fallback ─────────────────────
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "tick",
+            "check job deadbeef and report",
+            "Scheduled recurring job 0123abcd",
+            "x" * 300,
+        ],
+    )
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_deny_reason_never_matches_bind_regex(self, prompt) -> None:
+        from untether import loop_scheduler
+
+        token = loop_scheduler.register_pending_cron(
+            session_id="sess-925",
+            tool_use_id=f"tu-{len(prompt)}-{prompt[:4]}",
+            cron_expression="*/5 * * * *",
+            prompt=prompt,
+            recurring=True,
+            chat_id=9250,
+        )
+        reason = claude_runner._loop_deny_reason(token)
+        assert claude_runner._LOOP_CRON_ID_RE.search(reason) is None
+        hook_error = f"PreToolUse:CronCreate hook error: {reason}"
+        assert claude_runner._LOOP_CRON_ID_RE.search(hook_error) is None
+        assert (
+            claude_runner._LOOP_CRON_ID_RE.search(claude_runner._LOOP_OFF_DENY_REASON)
+            is None
+        )
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_ut_token_cancels(self) -> None:
+        """``-p`` mode (no hooks): the observer stops an Untether token."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        assert state.loop_hooks_registered is False
+        token = loop_scheduler.register_pending_cron(
+            session_id="sess-925",
+            tool_use_id="tu-p",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronDelete", "tu-p-d", {"id": token})),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    # ── #925 review: CronDelete only stops this session's own loops ──────
+
+    @pytest.mark.parametrize(
+        ("owner_session", "owner_chat"),
+        [("sess-other", 9250), ("sess-other", 4242)],
+        ids=["same-chat-other-session", "other-chat"],
+    )
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_foreign_token_denied(
+        self, owner_session: str, owner_chat: int
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()  # caller: sess-925 in chat 9250
+        state.loop_hooks_registered = True
+        token = loop_scheduler.register_pending_cron(
+            session_id=owner_session,
+            tool_use_id="tu-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=owner_chat,
+        )
+        with capture_logs() as logs:
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete", "CronDelete", {"id": token}
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        assert loop_scheduler.active_count() == 1
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        # Same text as an unknown token: the model learns nothing about
+        # another session's loops.
+        assert _deny_reason(output) == (
+            f"No active Untether loop {token} in this session."
+        )
+        foreign = [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+        assert foreign and foreign[0]["token"] == token
+        assert not [e for e in logs if e["event"] == "loop.cancelled"]
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_foreign_token_not_cancelled(self) -> None:
+        """``-p`` mode (no hooks): a token from another session is ignored."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        token = loop_scheduler.register_pending_cron(
+            session_id="sess-other",
+            tool_use_id="tu-p-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronDelete", "tu-p-fd", {"id": token})),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_foreign_upstream_id_not_cancelled(
+        self,
+    ) -> None:
+        """A CLI job id bound to another session's loop isn't this
+        session's to stop (the CLI would answer "No scheduled job")."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        loop_scheduler.register_pending_cron(
+            session_id="sess-other",
+            tool_use_id="tu-up-foreign",
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+        loop_scheduler.bind_upstream_id("tu-up-foreign", "abcdef12")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event("CronDelete", "tu-up-fd", {"id": "abcdef12"})
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_denied_cron_create_tool_result_does_not_bind(self) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        tool_input = {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True}
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronCreate", "tu_den", tool_input)),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        translate_claude_event(
+            _decode_event(
+                _make_tool_result_event(
+                    "tu_den",
+                    "PreToolUse:CronCreate hook error: see job deadbeef",
+                    is_error=True,
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        entry = loop_scheduler.pending_for_chat(9250)[0]
+        assert entry.upstream_cron_id is None
+        assert loop_scheduler.cron_suppressed_until("sess-925") is None
+
+    # ── auto-approve invariant (§13 amendment 6) ─────────────────────────
+
+    def test_only_loop_hook_ids_are_intercepted(self) -> None:
+        state = _seed_loop_state()
+        event = _decode_event(
+            {
+                "type": "control_request",
+                "request_id": "req-other-hook",
+                "request": {
+                    "subtype": "hook_callback",
+                    "callback_id": "some_sdk_hook",
+                    "input": {"tool_input": {"cron": "* * * * *"}},
+                },
+            }
+        )
+        assert (
+            translate_claude_event(
+                event, title="claude", state=state, factory=state.factory
+            )
+            == []
+        )
+        assert "req-other-hook" in state.auto_approve_queue
+        assert state.hook_callback_queue == []
+        assert (
+            frozenset({"ut_loop_cron_create", "ut_loop_cron_delete"})
+            == claude_runner._LOOP_HOOK_IDS
+        )
+
+
+# ───── #925 §14.3 / §14.4 — native-fire detector and wake cap ──────────
+
+
+def _wake_turn(state: ClaudeStreamState, *, followup: bool = False) -> None:
+    """Open a live follow-up turn the way ``translate`` does after a result:
+    an unknown command uuid → ``scheduled_wakeup``; an injected one →
+    ``followup``."""
+    uuid = f"cmd-{state.turn + 1}"
+    if followup:
+        state.injected_commands[uuid] = time.monotonic()
+    state.pending_command_uuid = uuid
+    claude_runner._open_followup_turn(state, state.factory)
+    state.turn_open = False
+
+
+class TestNativeFireAndWakeCap:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        from untether import loop_scheduler
+
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_native_cron_fire_marks_suppression_and_closes_idle(
+        self, monkeypatch, enabled
+    ) -> None:
+        """A wake turn with no ScheduleWakeup seen is a CLI cron fire; the
+        suppression mark is gated on ``_NATIVE_FIRE_SUPPRESSION_ENABLED``
+        (13b amendment 2) — log-only when it is off."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        monkeypatch.setattr(claude_runner, "_NATIVE_FIRE_SUPPRESSION_ENABLED", enabled)
+        state = _seed_loop_state("sess-native")
+        with capture_logs() as logs:
+            _wake_turn(state)
+        assert state.turn_detail.get("source") == "cron"
+        assert state.wake_chain_turns == 0  # a cron fire isn't a wake chain
+        fires = [e for e in logs if e["event"] == "claude.turn.native_cron_fire"]
+        assert len(fires) == 1
+        assert fires[0]["suppress"] is enabled
+        until = loop_scheduler.cron_suppressed_until("sess-native")
+        if enabled:
+            assert until is not None
+            assert until - time.time() == pytest.approx(
+                loop_scheduler.CLI_CRON_MAX_AGE_S, abs=60
+            )
+            assert state.cron_suppress_close_pending is True
+        else:
+            assert until is None
+            assert state.cron_suppress_close_pending is False
+
+    def test_wake_turn_after_schedule_wakeup_not_treated_as_cron(self) -> None:
+        from untether import loop_scheduler
+
+        state = _seed_loop_state("sess-sw")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event("ScheduleWakeup", "tu_sw", {"delaySeconds": 120})
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert state.schedule_wakeup_seen is True
+        _wake_turn(state)
+        assert "source" not in state.turn_detail
+        assert state.wake_chain_turns == 1
+        assert loop_scheduler.cron_suppressed_until("sess-sw") is None
+        assert state.cron_suppress_close_pending is False
+
+    def test_native_fire_detector_inert_when_own_schedule_false(
+        self, monkeypatch
+    ) -> None:
+        from untether import loop_scheduler
+
+        _loop_settings(monkeypatch, own_schedule=False)
+        state = _seed_loop_state("sess-ks")
+        _wake_turn(state)
+        assert state.turn_detail.get("source") == "cron"  # logging allowed
+        assert loop_scheduler.cron_suppressed_until("sess-ks") is None
+        assert state.cron_suppress_close_pending is False
+
+    def test_native_fire_first_resumed_turn_not_seen(self) -> None:
+        """13b amendment 1 (F4): the resurrected job's first fire is the
+        resumed run's own first turn, which never goes through
+        ``_open_followup_turn`` — the detector only sees a later fire."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state("sess-f4")
+        state.resumed = True
+        # Turn 1 (the stray tick) is the run's first result: no follow-up
+        # turn opened, nothing detected.
+        assert loop_scheduler.cron_suppressed_until("sess-f4") is None
+        _wake_turn(state, followup=False)  # the next fire while still open
+        assert loop_scheduler.cron_suppressed_until("sess-f4") is not None
+
+    def test_wake_cap_resets_on_followup_turn(self) -> None:
+        state = _seed_loop_state("sess-wc")
+        state.schedule_wakeup_seen = True
+        state.wake_cap = 2
+        _wake_turn(state)
+        _wake_turn(state)
+        assert claude_runner._wake_cap_reached(state)
+        _wake_turn(state, followup=True)
+        assert state.wake_chain_turns == 0
+        assert not claude_runner._wake_cap_reached(state)
+
+    def test_wake_cap_close_reason_label_and_stopped_clean(self) -> None:
+        from untether.background_status import _CLOSE_REASONS
+        from untether.runner_bridge import _wake_cap_notice
+        from untether.runners.claude import _STOPPED_CLEAN_REASONS
+
+        for reason in ("wake_cap", "loop_fire", "cron_suppressed"):
+            assert reason in _STOPPED_CLEAN_REASONS
+        assert _CLOSE_REASONS["wake_cap"] == "self-paced wake-up limit reached"
+        assert _CLOSE_REASONS["loop_fire"] == "loop iteration due"
+        assert "limit reached (3 wake-ups)" in _wake_cap_notice(3)
+        assert "wake-ups)" not in _wake_cap_notice(None)
+
+    @pytest.mark.parametrize("own_schedule", [True, False])
+    def test_wake_cap_from_config_and_disabled_when_own_schedule_false(
+        self, monkeypatch, own_schedule
+    ) -> None:
+        _loop_settings(monkeypatch, max_iterations=7, own_schedule=own_schedule)
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", None)
+        assert state.wake_cap == (7 if own_schedule else None)
+        # -p mode: never capped.
+        p_state = ClaudeRunner(claude_cmd="claude").new_state("hi", None)
+        assert p_state.wake_cap is None
+
+    @pytest.mark.parametrize("loop_mode", [True, False])
+    @pytest.mark.anyio
+    async def test_own_schedule_false_restores_rc19_in_both_modes(
+        self, monkeypatch, loop_mode
+    ) -> None:
+        """§13b amendment 6: no hooks, no Loop-off deny, no detector
+        suppression (logging allowed), no wake cap — in both Loop modes."""
+        from untether import loop_scheduler
+        from untether.runners.run_options import EngineRunOptions, apply_run_options
+        from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+        _loop_settings(monkeypatch, own_schedule=False)
+        chat_token = set_run_channel_id(9251)
+        try:
+            with apply_run_options(EngineRunOptions(loop_enabled=loop_mode)):
+                runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+                state = runner.new_state("hi", None)
+                payload = runner.stdin_payload("hi", None, state=state)
+                init = json.loads(payload.decode().splitlines()[0])
+                assert init["request"]["hooks"] is None
+                assert state.wake_cap is None
+                state.factory._resume = ResumeToken(engine="claude", value="s-ks")
+                # A callback from a spawn that predates the switch: passthrough.
+                translate_claude_event(
+                    _hook_callback_event(
+                        "ut_loop_cron_create",
+                        "CronCreate",
+                        {"cron": "*/5 * * * *", "prompt": "tick"},
+                    ),
+                    title="claude",
+                    state=state,
+                    factory=state.factory,
+                )
+                assert state.hook_callback_queue[0][2:] == ({}, "passthrough")
+                _wake_turn(state)
+                assert loop_scheduler.cron_suppressed_until("s-ks") is None
+                env = runner.env(state=state)
+                assert env is not None
+                assert "CLAUDE_CODE_DISABLE_CRON" not in env
+        finally:
+            reset_run_channel_id(chat_token)
+
+
+# ───── #926 (rc20) — resume suppressed sessions with DISABLE_CRON ───────
+
+
+class TestCronSuppressedSpawn:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        from untether import loop_scheduler
+
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @staticmethod
+    def _suppress(session_id: str, seconds: float = 3600.0) -> None:
+        from untether import loop_scheduler
+
+        loop_scheduler.mark_cron_suppressed(
+            session_id, "6a9af2cb", until=time.time() + seconds, source="test"
+        )
+
+    def test_env_sets_disable_cron_for_suppressed_resume(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        resume = ResumeToken(engine="claude", value="sess-sup")
+        state = runner.new_state("hi", resume)
+        assert state.cron_suppressed_until is not None
+        env = runner.env(state=state)
+        assert env is not None
+        assert env["CLAUDE_CODE_DISABLE_CRON"] == "1"
+
+    def test_env_no_disable_cron_fresh_session(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", None)
+        env = runner.env(state=state) or {}
+        assert "CLAUDE_CODE_DISABLE_CRON" not in env
+
+    def test_env_no_disable_cron_unsuppressed_resume(self) -> None:
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="clean"))
+        assert state.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_env_no_disable_cron_p_mode(self) -> None:
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude")  # no permission mode → -p
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="sess-sup"))
+        assert state.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_disable_cron_overrides_inherited_value(self, monkeypatch) -> None:
+        monkeypatch.setenv("CLAUDE_CODE_DISABLE_CRON", "0")
+        self._suppress("sess-sup")
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        state = runner.new_state("hi", ResumeToken(engine="claude", value="sess-sup"))
+        assert runner.env(state=state)["CLAUDE_CODE_DISABLE_CRON"] == "1"
+
+    def test_env_disable_cron_stops_after_suppression_expiry(self) -> None:
+        """§13 amendment 5: only while ``cron_suppressed_until > now``."""
+        from untether import loop_scheduler
+
+        self._suppress("sess-exp", seconds=3600)
+        runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+        resume = ResumeToken(engine="claude", value="sess-exp")
+        state = runner.new_state("hi", resume)
+        assert runner.env(state=state)["CLAUDE_CODE_DISABLE_CRON"] == "1"
+        # The record lapses: a later spawn runs with the scheduler on, and a
+        # stale state value no longer applies either.
+        loop_scheduler._CRON_SUPPRESSED["sess-exp"] = {"6a9af2cb": time.time() - 1}
+        later = runner.new_state("hi", resume)
+        assert later.cron_suppressed_until is None
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=later) or {})
+        state.cron_suppressed_until = time.time() - 1
+        assert "CLAUDE_CODE_DISABLE_CRON" not in (runner.env(state=state) or {})
+
+    def test_cron_suppressed_note_emitted_once_at_init(self) -> None:
+        state = ClaudeStreamState()
+        state.cron_suppressed_until = time.time() + 3600
+        init = _decode_event(
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "sess-note",
+                "cwd": "/tmp",
+                "model": "claude",
+                "tools": [],
+                "permissionMode": "plan",
+            }
+        )
+        first = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        notes = [
+            e
+            for e in first
+            if isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+        ]
+        assert len(notes) == 2  # started + completed
+        assert notes[-1].level == "info"
+        assert "/new" in notes[-1].action.title
+        again = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        assert not any(
+            isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+            for e in again
+        )
+
+    def test_no_note_without_suppression(self) -> None:
+        state = ClaudeStreamState()
+        init = _decode_event(
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "sess-none",
+                "cwd": "/tmp",
+                "model": "claude",
+                "tools": [],
+            }
+        )
+        events = translate_claude_event(
+            init, title="claude", state=state, factory=state.factory
+        )
+        assert not any(
+            isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
+            for e in events
+        )

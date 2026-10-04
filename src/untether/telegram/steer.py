@@ -199,8 +199,8 @@ async def maybe_steer(
                 logger.info("steer.fallback", chat_id=chat_id, reason="budget")
                 return False
             from ..runner_bridge import (
-                pop_followup_anchor,
                 register_followup_anchor,
+                settle_followup_anchor,
             )
 
             command_uuid = str(uuid.uuid4())
@@ -208,7 +208,8 @@ async def maybe_steer(
             # turn's last tool call, F6) that turn replies to this message.
             # Folded mid-turn, the runner reports it absorbed and the bridge
             # drops the anchor; if the session dies first, the run-end sweep
-            # tells the user it wasn't run.
+            # tells the user it wasn't run. #921: in flight until settled, so
+            # that sweep can't claim it while the write is still undecided.
             register_followup_anchor(
                 command_uuid,
                 session_id=session_id,
@@ -216,11 +217,20 @@ async def maybe_steer(
                     channel_id=chat_id, message_id=user_msg_id, thread_id=thread_id
                 ),
                 placeholder=None,
+                in_flight=True,
             )
             kwargs: dict[str, Any] = {"command_uuid": command_uuid}
             if has_options:
                 kwargs["run_options"] = options
-            outcome = await steer_into_session(session_id, prompt_text, **kwargs)
+            outcome: str | None = None
+            try:
+                outcome = await steer_into_session(session_id, prompt_text, **kwargs)
+            finally:
+                # Exactly once on every exit: only a written line keeps its
+                # anchor; any fallback (or exception) drops it.
+                settle_followup_anchor(
+                    command_uuid, written=outcome in ("steered", "written_idle")
+                )
             if outcome in ("steered", "written_idle"):
                 mid_turn = outcome == "steered"
                 logger.info(
@@ -245,7 +255,6 @@ async def maybe_steer(
                         text=STEERED_ACK,
                     )
                 return True
-            pop_followup_anchor(command_uuid)
             if outcome == "options_changed":
                 # The queue path closes the idle process and resumes with the
                 # new settings (and says so) — nothing to add here.

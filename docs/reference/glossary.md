@@ -76,7 +76,7 @@ Quick definitions for terms used throughout the Untether documentation.
 :   The footer at the bottom of a final message showing which engine, model, and permission mode were used (e.g. `sonnet · plan`), plus cost if available.
 
 **Outbox**
-:   Untether's internal message queue. All Telegram writes (sends, edits, deletes) pass through the outbox, which handles rate limiting and message coalescing automatically.
+:   Untether's internal message queue. All Telegram writes (sends, edits, deletes) pass through the outbox, which handles rate limiting and message coalescing automatically. Not to be confused with `.untether-outbox/`, the folder agents write files into for [delivery to Telegram](../how-to/file-transfer.md#agent-initiated-delivery-outbox).
 
 ## Configuration
 
@@ -96,6 +96,9 @@ Quick definitions for terms used throughout the Untether documentation.
 
 **Delayed run**
 :   A one-shot run scheduled via `/at <duration> <prompt>`. The prompt executes after the specified delay (60 seconds to 24 hours). Pending delays are held in memory and lost on restart. Per-chat cap of 20.
+
+**Loop mode**
+:   A per-chat setting (`/config → 🔁 Loop mode`, off by default) that lets Claude Code schedule repeated runs. With it on, Untether runs Claude's `/loop` schedules itself, within the `[loop]` caps; with it off, Claude can't schedule recurring or timed tasks and points you to Loop mode or `/at`. See [Schedule tasks](../how-to/schedule-tasks.md#loop-mode).
 
 **Webhook action**
 :   A lightweight action a webhook performs without spawning an agent run. Available actions: `file_write` (save POST body to disk), `http_forward` (relay payload to another URL), and `notify_only` (send a Telegram message). The default action (`agent_run`) starts a full agent session.

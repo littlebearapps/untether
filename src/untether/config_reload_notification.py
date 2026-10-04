@@ -22,7 +22,11 @@ Three message shapes:
 
 The headline is deliberately bold-emphasised; downstream agents read these
 messages in next-turn context and the framing materially changes whether
-they reach for ``systemctl restart`` after editing config.
+they reach for a service restart after editing config.
+
+The "how to apply" clause comes from :mod:`untether.service_manager` (#927):
+it names the unit/label of the instance that is actually running, or uses
+generic wording when that can't be detected safely.
 """
 
 from __future__ import annotations
@@ -67,23 +71,35 @@ def format_hot_reload_only_notice(
     )
 
 
+def _resolve_hint(restart_hint: str | None) -> str:
+    if restart_hint is not None:
+        return restart_hint
+    from . import service_manager
+
+    return service_manager.restart_hint()
+
+
 def format_restart_required_notice(
     *,
     path: Path | str,
     restart_keys: list[str],
+    restart_hint: str | None = None,
 ) -> str:
     """A key in the restart-only set was edited; manual action required.
 
     Headline contains the literal phrase ``Restart required``; restart-only
     keys are explicitly named so the agent can advise the user (or revert
     to a hot-reloadable equivalent).
+
+    ``restart_hint`` defaults to :func:`untether.service_manager.restart_hint`
+    (#927: names the running unit/label, generic wording otherwise).
     """
+    hint = _resolve_hint(restart_hint)
     keys_str = ", ".join(f"`{k}`" for k in sorted(set(restart_keys))) or "(no keys)"
     return (
         f"⚠️ **Restart required for `{_short_path(path)}` change** — "
         f"the edited key is in the restart-only set.\n"
-        f"Run `systemctl --user restart untether` to apply, or revert and "
-        f"use the hot-reloadable equivalent.\n"
+        f"To apply, {hint} — or revert and use the hot-reloadable equivalent.\n"
         f"Restart-only keys touched: {keys_str}"
     )
 
@@ -93,8 +109,10 @@ def format_partial_reload_notice(
     path: Path | str,
     hot_keys: list[str],
     restart_keys: list[str],
+    restart_hint: str | None = None,
 ) -> str:
     """Mixed reload — some keys applied immediately, others need restart."""
+    hint = _resolve_hint(restart_hint)
     hot_str = ", ".join(f"`{k}`" for k in sorted(set(hot_keys))) or "(none)"
     restart_str = ", ".join(f"`{k}`" for k in sorted(set(restart_keys))) or "(none)"
     return (
@@ -103,7 +121,7 @@ def format_partial_reload_notice(
         f"applied immediately. **No restart needed for those.**\n"
         f"Applied now: {hot_str}\n"
         f"Need restart to apply: {restart_str}\n"
-        f"Run `systemctl --user restart untether` when ready (or revert the "
+        f"To apply those, {hint} when ready (or revert the "
         f"restart-only keys to a hot-reloadable equivalent)."
     )
 
@@ -113,6 +131,7 @@ def format_reload_notification(
     path: Path | str,
     hot_keys: list[str],
     restart_keys: list[str],
+    restart_hint: str | None = None,
 ) -> str:
     """Dispatch to the right per-case helper based on what changed.
 
@@ -122,8 +141,13 @@ def format_reload_notification(
     has_restart = bool(restart_keys)
     if has_restart and has_hot:
         return format_partial_reload_notice(
-            path=path, hot_keys=hot_keys, restart_keys=restart_keys
+            path=path,
+            hot_keys=hot_keys,
+            restart_keys=restart_keys,
+            restart_hint=restart_hint,
         )
     if has_restart:
-        return format_restart_required_notice(path=path, restart_keys=restart_keys)
+        return format_restart_required_notice(
+            path=path, restart_keys=restart_keys, restart_hint=restart_hint
+        )
     return format_hot_reload_only_notice(path=path, changed_keys=hot_keys)
