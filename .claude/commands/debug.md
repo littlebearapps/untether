@@ -287,7 +287,8 @@ Read `.claude/commands/debug/step-verify.md`. Summary:
    the change scope (patch/minor/major).
 4. Write attestation marker: `scripts/run-integration-tests.sh ${VERSION} --manual ...`.
 5. If this is part of an rc release, run `scripts/fleet-rollout.sh ${VERSION}`
-   only after Nathan merges the PR.
+   only after the rc is merged to `dev`, TestPyPI has it and the attestation
+   marker exists.
 6. Re-run Step 4 grep on the fresh dev logs to ensure no other systemic
    pattern regressed.
 
@@ -320,7 +321,7 @@ posting (default: print only, do not post).
   relevant to the issue. If you can't SSH to a host, log it as a partial scope
   and continue — never silently drop a host.
 - **Stay in the dev branch model.** Feature branch → PR to `dev`. Never feature
-  → master directly. Squash-merge to `dev` is allowed; merging to master is
-  Nathan's only.
+  → master directly. Squash-merge to `dev` is allowed; merging to master
+  happens only in `/pr-main X.Y.Z --merge`, after Nathan approves the release.
 
 End of /debug command file. See companion files for step detail.

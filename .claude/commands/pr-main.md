@@ -1,14 +1,15 @@
 ---
-description: Release-prep for a stable version — confirm dev is green + ahead of master, bump pyproject.toml to X.Y.Z + uv lock, collapse the rc CHANGELOG sections into one dated release entry, run validate_release.py clean, final FAQ pass, confirm the attestation marker exists, then open ONE dev→master PR and STOP. Merging that PR is Nathan's single release gate (→ auto-tag → PyPI). Never merges, tags, releases, or rolls the fleet.
-argument-hint: "<X.Y.Z> (prepare + open dev→master PR) | <X.Y.Z> --dry-run | --rc-summary | [--help]"
+description: Release-prep for a stable version — confirm dev is green + ahead of master, bump pyproject.toml to X.Y.Z + uv lock, collapse the rc CHANGELOG sections into one dated release entry, run validate_release.py clean, final FAQ pass, confirm the attestation marker exists, then open ONE dev→master PR and STOP. `--merge` (only after Nathan explicitly approves the release) merges it through the ask-gated guard (→ auto-tag → PyPI) and verifies the publish. Never tags or creates releases by hand.
+argument-hint: "<X.Y.Z> (prepare + open dev→master PR) | <X.Y.Z> --merge (after Nathan's go) | <X.Y.Z> --dry-run | --rc-summary | [--help]"
 disable-model-invocation: true
-allowed-tools: Read Glob Grep Edit Write Skill ToolSearch Bash(git status:*) Bash(git branch:*) Bash(git rev-parse:*) Bash(git symbolic-ref:*) Bash(git log:*) Bash(git diff:*) Bash(git fetch:*) Bash(git checkout:*) Bash(git add:*) Bash(git commit:*) Bash(git push:*) Bash(gh pr create:*) Bash(gh pr view:*) Bash(gh pr list:*) Bash(gh issue list:*) Bash(gh issue view:*) Bash(uv run pytest:*) Bash(uv run ruff:*) Bash(uv lock:*) Bash(python3 scripts/validate_release.py:*) Bash(grep:*) Bash(rg:*) Bash(jq:*) Bash(date:*) Bash(wc:*) Bash(head:*) Bash(tail:*) Bash(ls:*) Bash(cat:*)
+allowed-tools: Read Glob Grep Edit Write Skill ToolSearch Bash(git status:*) Bash(git branch:*) Bash(git rev-parse:*) Bash(git symbolic-ref:*) Bash(git log:*) Bash(git diff:*) Bash(git fetch:*) Bash(git checkout:*) Bash(git add:*) Bash(git commit:*) Bash(git push:*) Bash(gh pr create:*) Bash(gh pr view:*) Bash(gh pr list:*) Bash(gh pr checks:*) Bash(gh run list:*) Bash(gh run view:*) Bash(gh issue list:*) Bash(gh issue view:*) Bash(uv run pytest:*) Bash(uv run ruff:*) Bash(uv lock:*) Bash(python3 scripts/validate_release.py:*) Bash(grep:*) Bash(rg:*) Bash(jq:*) Bash(date:*) Bash(wc:*) Bash(head:*) Bash(tail:*) Bash(ls:*) Bash(cat:*)
 ---
 
 You are handling `/pr-main`. `/pr-main` prepares a **stable release** and opens
-the `dev`→`master` PR — then **STOPS**. Merging that PR is Nathan's single release
-gate (→ `auto-tag-on-master.yml` → `release.yml` → PyPI). `/pr-main` does
-everything Claude is *allowed* to do and hard-stops at the operator boundary.
+the `dev`→`master` PR — then **STOPS**. The release itself (merging that PR →
+`auto-tag-on-master.yml` → `release.yml` → PyPI) happens only when Nathan
+explicitly approves it: then `/pr-main X.Y.Z --merge` merges and verifies the
+publish ([#917](https://github.com/littlebearapps/untether/issues/917)).
 
 User input: `$ARGUMENTS`
 
@@ -19,15 +20,18 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules) and
 release). Key points:
 
 - **Authority boundary (mirrors `release-guard.sh`).** `gh pr create
-  --base master` is **allowed** (creating a PR is not a push/merge/tag/release).
-  `gh pr merge` to master, `git push master`, `git tag v*`, and `gh release
-  create` are **forbidden**. So `/pr-main` may OPEN the release PR but may **never**
-  merge/tag/release it. The local guard hook is not wired (Claude Code never loads
-  `.claude/hooks.json`), so nothing local will stop you — the rule is on you.
+  --base master` is **allowed**. Merging the `dev`→`master` PR is allowed **only**
+  after Nathan explicitly approves *this* release in the conversation ("merge it",
+  "release 0.35.5"), and only as `gh pr merge <n> --squash --admin`. The guard
+  then checks the head is `dev` and CI is green, and **asks Nathan to confirm** in
+  the permission prompt. A finished `/pr-main X.Y.Z`, a green CI or an earlier
+  approval of a different version is NOT approval. `git push master`, `git tag
+  v*`, `gh release create` and `--delete-branch` stay **forbidden** — the release
+  pipeline tags and publishes. Never work around a block.
 - **The version-bump commit lands on `dev`** (pushing to `dev` is allowed;
   `master` is not). The PR is `dev`→`master`.
-- **`fleet-rollout.sh` is the operator's step** — `/pr-main` never runs it. The
-  attestation marker is surfaced as advisory context in the PR body only.
+- **`fleet-rollout.sh X.Y.Z`** runs only after PyPI has the version, and only when
+  Nathan asks (it's a separate step from the merge). The attestation marker gates it.
 - **Confirm-gated + idempotent.** Surface the PR title + body and wait for a tap;
   a re-invoked `/pr-main` must not double-open the release PR (check for an
   existing open `dev`→`master` PR first).
@@ -39,6 +43,7 @@ release). Key points:
 | Form | Action |
 |---|---|
 | `/pr-main X.Y.Z` | Prepare the stable release + open the `dev`→`master` PR, then STOP |
+| `/pr-main X.Y.Z --merge` | Only after Nathan's explicit go: merge the open release PR (ask-gated) + verify the PyPI publish (M-8) |
 | `/pr-main X.Y.Z --dry-run` | Prepare + validate + print the would-be PR body; open nothing |
 | `/pr-main --rc-summary` | Collapse the rc CHANGELOG sections + validate only; no bump, no PR |
 | `/pr-main --help` | Usage, then stop |
@@ -72,7 +77,7 @@ release). Key points:
 
 Per `.claude/rules/help-faq.md`, scan the collapsed changelog against
 `docs/faq/faq.md`; update any user-visible surface answer that the release
-changes. (Edit/Write allowed; never `rm`/`mv`/`>` it — the guard hook is not wired.)
+changes. (Edit/Write allowed; never `rm`/`mv`/`>` it — `help-faq-protect.sh` blocks that.)
 
 ### M-5. Confirm the attestation marker (advisory)
 
@@ -106,26 +111,46 @@ pyproject.toml → X.Y.Z · uv.lock synced
 - attestation: integration-test-pass-X.Y.Z.json (head_sha=…, tiers=…, <ts>)
 
 ## Release note
-Merging this PR IS the release approval → auto-tag vX.Y.Z → release.yml → PyPI.
-Fleet rollout (scripts/fleet-rollout.sh X.Y.Z) is the operator's follow-up step.
+Merging this PR IS the release → auto-tag vX.Y.Z → release.yml → PyPI.
+Merged by Nathan, or by Claude via `/pr-main X.Y.Z --merge` once Nathan approves.
+Fleet rollout (scripts/fleet-rollout.sh X.Y.Z) follows once PyPI has the version.
 ```
 
 Surface it, wait for a tap, then `gh pr create --base master`. **STOP** — print
-"ready for Nathan to merge (the single release gate)". In `--dry-run`, print the
+"release PR open — say the word to merge and publish". In `--dry-run`, print the
 body and open nothing.
 
 ### M-7. Report + hand-off
 
 Brief report: version prepared, changelog collapsed + validated, FAQ pass,
-marker status, PR URL (or "dry-run"), and the explicit next step: **Nathan merges
-the PR** → auto-tag → PyPI → `scripts/fleet-rollout.sh X.Y.Z` (operator, LOOPS
-A3). `/pr-main` is done at the open PR.
+marker status, PR URL (or "dry-run"), and the explicit next step: **Nathan
+approves the release** (or merges it himself) → auto-tag → PyPI →
+`scripts/fleet-rollout.sh X.Y.Z`. `/pr-main X.Y.Z` is done at the open PR.
+
+### M-8. `--merge` — merge + verify (only after Nathan's explicit go)
+
+1. **Approval check.** Quote Nathan's message approving *this* version. None → STOP
+   and ask; never infer approval.
+2. **Pre-flight.** The open PR is `dev`→`master`, title/version = `X.Y.Z`, `gh pr
+   checks <n>` all green, the attestation marker exists. Anything off → STOP and
+   report.
+3. **Merge.** `gh pr merge <n> --squash --admin` (no `--delete-branch`). The guard
+   asks Nathan to confirm — if he declines, or the call is denied, STOP; never
+   retry another way.
+4. **Verify the publish.** `gh run list --workflow auto-tag-on-master.yml` then
+   `--workflow release.yml` until both succeed; the `vX.Y.Z` tag and GitHub release
+   exist; PyPI serves it (`curl -s https://pypi.org/pypi/untether/json | jq -r
+   .info.version`). If auto-tag succeeded but `release.yml` never ran (the #376
+   cascade), `gh workflow run release.yml --ref vX.Y.Z` — the guard asks again.
+5. **Report** the merge SHA, tag, release run and PyPI version, then offer
+   `scripts/fleet-rollout.sh X.Y.Z` (run it only when Nathan says so).
 
 ## Anti-patterns
 
-- Never attempt the master merge / `git tag` / `gh release create` (blocked —
-  don't fight the guard).
-- Never run `fleet-rollout.sh` (operator).
+- Never merge the release PR without Nathan's explicit approval of this version,
+  and never fight a guard block or a declined prompt.
+- Never `git tag`, `gh release create` or push to `master` — the pipeline does it.
+- Never run `fleet-rollout.sh` before PyPI has the version or without Nathan's go.
 - Never open a master PR from a non-`dev` branch.
 - Never bump to a stable version while rc integration tests are unattested (flag
   the missing marker; recommend `/qa` QA-4).

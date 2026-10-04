@@ -1,17 +1,47 @@
 #!/bin/bash
 # release-guard.sh — PreToolUse hook for Bash tool
-# Blocks pushes to master/main, tag creation, releases, and PR merging.
+# Blocks direct pushes to master/main, tag creation and pushes, and
+# `gh release create`. Merging the dev→master release PR is allowed only via
+# `gh pr merge <n>` with green CI, and always asks Nathan to confirm (#917).
+# Asks before restarting a non-dev Untether service.
 # Feature branch pushes are ALLOWED.
+# Registered in .claude/settings.json (#915).
 # DO NOT MODIFY — protected by release-guard-protect.sh
 
 set -euo pipefail
+# Fail closed: an internal error exits 2, which blocks the call (exit 1 would let it through).
+trap 'echo "release-guard.sh: internal error at line $LINENO — blocked to be safe" >&2; exit 2' ERR
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 [ -z "$COMMAND" ] && echo '{}' && exit 0
+# gh's global repo flag can sit before the subcommand (`gh -R o/r pr merge 2`).
+# Drop it so every gh check below sees `gh <subcommand>`. The value must be a
+# plain [HOST/]OWNER/REPO followed by whitespace, so the strip can never
+# swallow shell syntax (`gh -R x;git push origin master`).
+# It can also sit between the command group and the subcommand
+# (`gh pr -R o/r merge 2`), so strip it in both places (two passes).
+ORIG_COMMAND="$COMMAND"
+GH_REPO_RE="(\s+(-R|--repo)(=|\s+)[\"']?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,2}[\"']?)+"
+for _ in 1 2; do
+  COMMAND=$(printf '%s' "$COMMAND" | sed -E "s#\bgh((\s+[a-z][a-z-]*)?)${GH_REPO_RE}(\s|\$)#gh\1\7#g")
+done
 
 BLOCKED=false
 REASON=""
+
+# Any other `gh [group] -R/--repo <value>` before the subcommand ($VAR, odd
+# quoting, shell metacharacters) can't be checked reliably — fail closed.
+if printf '%s' "$COMMAND" | grep -qP '\bgh(\s+[a-z][a-z-]*)?\s+(-R|--repo)\b'; then
+  BLOCKED=true
+  REASON="gh -R/--repo with a value that isn't a plain owner/repo is blocked. Use a literal owner/repo, or put -R after the subcommand."
+fi
+ASK=false
+ASK_REASON=""
+
+# A branch name is master/main only as a whole token: `origin main`,
+# `HEAD:main`, `refs/heads/main` — never `fix/main-menu` or `maintenance`.
+BRANCH_RE='(?<![\w/.-])(refs/heads/)?(master|main)(?![\w/.-])'
 
 # ── git push — block only if targeting master/main ────────────────
 
@@ -25,20 +55,26 @@ if echo "$COMMAND" | grep -qPi '\bgit\b.*\bpush\b' && \
   fi
 
   # Explicitly mentions master/main as push target
-  if echo "$COMMAND" | grep -qPi '\bpush\b.*\b(master|main)\b'; then
+  if echo "$COMMAND" | grep -qPi "\\bpush\\b.*${BRANCH_RE}"; then
     BLOCKED=true
     REASON="git push to master/main is blocked."
   fi
 
   # Refspec targeting master/main (e.g. HEAD:master, feature:refs/heads/main)
-  if echo "$COMMAND" | grep -qP ':(refs/heads/)?(master|main)\b'; then
+  if echo "$COMMAND" | grep -qP ':(refs/heads/)?(master|main)(?![\w/.-])'; then
     BLOCKED=true
     REASON="git push with refspec targeting master/main is blocked."
   fi
 
+  # Pushing a version tag by name (git push origin v1.2.3 / refs/tags/...)
+  if echo "$COMMAND" | grep -qP '\bpush\b.*((?<![\w/.-])v\d+\.\d+|refs/tags/)'; then
+    BLOCKED=true
+    REASON="git push of a version tag is blocked. Tags are created by auto-tag-on-master.yml."
+  fi
+
   # No explicit branch target — check if current branch is master/main
   if [ "$BLOCKED" = false ]; then
-    PUSH_ARGS=$(echo "$COMMAND" | grep -oP '(?i)\bpush\b\K[^;&|]*' | head -1)
+    PUSH_ARGS=$(echo "$COMMAND" | grep -oP '(?i)\bpush\b\K[^;&|]*' | head -1 || true)
     PUSH_NOFLAG=$(echo "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_-]*//g' | xargs)
     PUSH_BRANCH=$(echo "$PUSH_NOFLAG" | awk '{print $2}')
 
@@ -58,31 +94,96 @@ if echo "$COMMAND" | grep -qPi '\bgit\s+tag\b' && \
    echo "$COMMAND" | grep -qP 'v\d' && \
    ! echo "$COMMAND" | grep -qPi '\bgit\s+tag\s+(-[ldv]\b|--list|--delete|--verify)'; then
   BLOCKED=true
-  REASON="git tag creation is blocked. Tags must be created manually by Nathan."
+  REASON="git tag creation is blocked. Tags are created by auto-tag-on-master.yml when the release PR merges."
 fi
 
 # ── gh release create ────────────────────────────────────────────
 
 if echo "$COMMAND" | grep -qPi '\bgh\s+release\s+create\b'; then
   BLOCKED=true
-  REASON="gh release create is blocked. Releases must be created manually by Nathan."
+  REASON="gh release create is blocked. release.yml creates the GitHub release when the release PR merges."
 fi
 
-# ── gh pr merge — allow dev, block master/main ──────────────────
+# ── gh api writes that merge, release or move refs ───────────────
 
-if echo "$COMMAND" | grep -qPi '\bgh\s+pr\s+merge\b'; then
-  PR_NUM=$(echo "$COMMAND" | grep -oP '\bgh\s+pr\s+merge\s+\K\d+')
-  if [ -n "$PR_NUM" ]; then
-    PR_BASE=$(gh pr view "$PR_NUM" --json baseRefName -q .baseRefName 2>/dev/null || echo "unknown")
+if echo "$COMMAND" | grep -qPi '\bgh\s+api\b' && \
+   echo "$COMMAND" | grep -qPi '/(pulls/\d+/merge|merges|releases|git/refs|git/tags)\b' && \
+   echo "$COMMAND" | grep -qP '(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)\b'; then
+  BLOCKED=true
+  REASON="gh api writes to merge, release, tag or ref endpoints are blocked. Use gh pr merge <number>."
+fi
+
+# The GraphQL API reaches the same operations without a REST path.
+if echo "$COMMAND" | grep -qPi '\bgh\s+api\s+graphql\b' && \
+   echo "$COMMAND" | grep -qPi '\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRef|updateRefs?|deleteRef|createRelease|updateRelease)\b'; then
+  BLOCKED=true
+  REASON="gh api graphql merge, release or ref mutations are blocked. Use gh pr merge <number>."
+fi
+
+# ── Manually dispatching the release pipeline — ask first ────────
+#
+# The #376 fallback (`gh workflow run release.yml --ref vX.Y.Z`) publishes to
+# PyPI, so it needs the same confirmation as the release merge.
+
+# Any dispatch or re-run asks: a workflow can be named by numeric ID, and
+# re-running a failed release run publishes.
+if echo "$ORIG_COMMAND" | grep -qPi '\bgh\b.*\bworkflow\b.*\brun\b|\bgh\b.*\brun\b.*\brerun\b'; then
+  ASK=true
+  ASK_REASON="🚀 This dispatches or re-runs a GitHub Actions workflow, which may be the PyPI release pipeline. Approve only if Nathan explicitly approved it."
+fi
+
+# ── gh pr merge — dev freely; master only as a confirmed release ──
+#
+# dev → TestPyPI: allowed. master/main is the release gate (auto-tag →
+# release.yml → PyPI → fleet). Claude may merge only the dev→master release PR,
+# only with green CI, and always as "ask" so Nathan confirms in the permission
+# prompt (#917). `--admin` bypasses GitHub's review and CI rules, which is why
+# this hook re-checks CI itself.
+
+# Allowlist, not denylist: any command that could merge a PR must be exactly
+# `gh pr merge <N> [--squash|--merge|--rebase] [--admin] [--auto]` with nothing
+# else on the line (no -R, env vars, cd, chaining), and run from an untether
+# checkout — so the PR the hook looks up is the PR gh merges.
+MERGE_RE='^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[0-9]+([[:space:]]+(--squash|--merge|--rebase|--admin|--auto|-s|-m|-r))*[[:space:]]*$'
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
+
+if printf '%s' "$ORIG_COMMAND" | grep -qP '\bgh\b' && printf '%s' "$ORIG_COMMAND" | grep -qP '\bpr\b' && \
+   printf '%s' "$ORIG_COMMAND" | grep -qPi '\bmerge\b'; then
+  ORIGIN=$(git -C "${HOOK_CWD:-.}" remote get-url origin 2>/dev/null || echo "")
+  if [[ ! "$ORIG_COMMAND" =~ $MERGE_RE ]]; then
+    BLOCKED=true
+    REASON="PR merges must be exactly: gh pr merge <number> --squash [--admin] — nothing else on the line (no -R/--repo, env vars, cd or chained commands). Run anything else separately."
+  elif ! echo "$ORIGIN" | grep -qiP 'github\.com[:/]littlebearapps/untether(\.git)?/?$' || [ -n "${GH_REPO:-}${GH_HOST:-}" ]; then
+    BLOCKED=true
+    REASON="gh pr merge from this session may only run in a littlebearapps/untether checkout (cwd origin: '${ORIGIN:-none}'; GH_REPO/GH_HOST must be unset)."
+  else
+  PR_NUM=$(echo "$ORIG_COMMAND" | grep -oP '\bmerge\s+\K\d+')
+    PR_JSON=$(gh pr view "$PR_NUM" --repo littlebearapps/untether --json baseRefName,headRefName,title,statusCheckRollup 2>/dev/null || echo '{}')
+    PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // "unknown"' 2>/dev/null || echo "unknown")
     if [ "$PR_BASE" = "dev" ]; then
       : # Allow merges to dev (TestPyPI/staging)
+    elif [ "$PR_BASE" = "master" ] || [ "$PR_BASE" = "main" ]; then
+      PR_HEAD=$(echo "$PR_JSON" | jq -r '.headRefName // ""')
+      PR_TITLE=$(echo "$PR_JSON" | jq -r '.title // ""')
+      CHECKS_TOTAL=$(echo "$PR_JSON" | jq -r '[.statusCheckRollup[]?] | length')
+      CHECKS_NOT_GREEN=$(echo "$PR_JSON" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | ascii_upcase | select(. != "SUCCESS" and . != "SKIPPED" and . != "NEUTRAL")] | length')
+      if [ "$PR_HEAD" != "dev" ]; then
+        BLOCKED=true
+        REASON="Only the dev→master release PR may be merged to $PR_BASE (PR #$PR_NUM's head is '$PR_HEAD')."
+      elif echo "$COMMAND" | grep -qP '(^|\s)(-d|--delete-branch)\b'; then
+        BLOCKED=true
+        REASON="Merging the release PR with --delete-branch would delete dev. Drop the flag."
+      elif [ "$CHECKS_TOTAL" = "0" ] || [ "$CHECKS_NOT_GREEN" != "0" ]; then
+        BLOCKED=true
+        REASON="Release PR #$PR_NUM has $CHECKS_NOT_GREEN of $CHECKS_TOTAL checks not green (pending, failed or none reported). Wait for CI to pass, then retry."
+      else
+        ASK=true
+        ASK_REASON="🚀 RELEASE: merge PR #$PR_NUM \"$PR_TITLE\" (dev → $PR_BASE). This publishes to PyPI (auto-tag → release.yml) and makes it the stable release. CI: $CHECKS_TOTAL checks green. Approve only if Nathan explicitly approved this release."
+      fi
     else
       BLOCKED=true
-      REASON="gh pr merge to '$PR_BASE' is blocked. Only merges to dev are allowed. Master merges must be done manually by Nathan."
+      REASON="gh pr merge blocked: couldn't confirm PR #$PR_NUM's base branch ('$PR_BASE')."
     fi
-  else
-    BLOCKED=true
-    REASON="gh pr merge without a PR number is blocked. Use: gh pr merge <number>"
   fi
 fi
 
@@ -94,10 +195,35 @@ if echo "$COMMAND" | grep -qF 'release-guard' && \
   REASON="Cannot modify release guard files via shell."
 fi
 
-if echo "$COMMAND" | grep -qF 'hooks.json' && \
-   echo "$COMMAND" | grep -qPi '\b(rm|mv|cp|install|dd|sed|awk|perl|python|ruby|node|tee|truncate|ln)\b|>\s'; then
+# The project .claude/settings.json registers these hooks. The user-level
+# ~/.claude/settings.json is not covered here (only disableAllHooks is).
+PROJECT_CMD=$(echo "$COMMAND" | sed -E "s#(~|\\\$HOME|\\\$\\{HOME\\}|${HOME})/\\.claude/settings#USER_SETTINGS#g")
+if echo "$PROJECT_CMD" | grep -qP '\.claude/settings\.json|hooks\.json' && \
+   echo "$PROJECT_CMD" | grep -qPi '\b(rm|mv|cp|install|dd|sed|awk|perl|python3?|ruby|node|tee|truncate|ln|checkout|restore)\b|>\s'; then
   BLOCKED=true
-  REASON="Cannot modify .claude/hooks.json via shell commands."
+  REASON="Cannot modify .claude/settings.json (the hook registration) via shell commands."
+fi
+
+if echo "$COMMAND" | grep -qF 'disableAllHooks' && \
+   echo "$COMMAND" | grep -qPi '\b(cp|mv|install|dd|sed|awk|perl|python3?|ruby|node|jq|tee|truncate|ln|claude)\b|>\s?'; then
+  BLOCKED=true
+  REASON="disableAllHooks would switch off the release guard. Only Nathan sets it."
+fi
+
+# ── Restarting a non-dev Untether service — ask first ────────────
+#
+# Staging (untether.service) runs a PyPI/TestPyPI wheel, so restarting it
+# never tests local code; the fleet hosts are production. Restarting from
+# inside an active Untether session also drops the final message. The
+# legitimate paths are scripts/staging.sh install, pipx upgrade and
+# scripts/fleet-rollout.sh, which restart internally.
+
+if echo "$COMMAND" | grep -qP '\bsystemctl\b.*\b(restart|start|stop|kill|reload|try-restart|reload-or-restart)\b.*(?<![\w-])untether(\.service)?(?![\w.-])' || \
+   echo "$COMMAND" | grep -qP '\blaunchctl\b.*\b(kickstart|stop|start|bootout|unload)\b.*com\.littlebearapps\.untether(?![\w.-])'; then
+  if ! echo "$COMMAND" | grep -qP 'staging\.sh\s+install|pipx\s+(upgrade|install)\b.*\buntether\b'; then
+    ASK=true
+    ASK_REASON="⚠️ This restarts a non-dev Untether service (staging or a fleet host). Staging runs a PyPI/TestPyPI wheel, so local code changes have no effect on it — test with: systemctl --user restart untether-dev. Upgrade with scripts/staging.sh install or scripts/fleet-rollout.sh. Never restart from inside an active Untether session."
+  fi
 fi
 
 # ── Output ───────────────────────────────────────────────────────
@@ -112,14 +238,23 @@ fi
 #   }
 # The legacy {"decision":"block","reason":...} shape is silently ignored, so
 # blocks return as no-ops. See https://code.claude.com/docs/en/hooks for the
-# spec.
+# spec. A hook "ask" forces the prompt even in auto mode (CLI ≥ 2.1.211); in an
+# unattended -p run nobody can answer it, so the call is denied.
 
 if [ "$BLOCKED" = true ]; then
-  REASON_FULL=$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch and dev branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR to dev: gh pr create --base dev --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")
+  REASON_FULL=$(printf '🛑 RELEASE GUARD: %s\n\nAllowed: feature/dev branch pushes, PRs to dev, gh pr merge <n> for dev PRs, and — with Nathan'"'"'s explicit approval and green CI — gh pr merge <n> --squash --admin for the dev→master release PR (the hook asks him to confirm).\nBlocked: direct pushes to master/main, tags, gh release create.' "$REASON")
   jq -n --arg r "$REASON_FULL" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
+      permissionDecisionReason: $r
+    }
+  }'
+elif [ "$ASK" = true ]; then
+  jq -n --arg r "$ASK_REASON" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "ask",
       permissionDecisionReason: $r
     }
   }'

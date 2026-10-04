@@ -80,12 +80,20 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 ## Release guard (CRITICAL)
 
 - Branches: `feature/*` / `fix/*` → PR → `dev` (→ TestPyPI) → PR → `master` (→ PyPI). Master always matches latest PyPI.
-- Claude Code **MUST NOT** push to `master`/`main`, merge PRs targeting `master`, create `v*` tags, or run `gh release`.
-  Allowed: push feature branches, `gh pr create --base dev`, `gh pr merge <n> --squash` **only when base = `dev`**.
-- Nathan's merge of the `dev`→`master` PR is the single release gate (auto-tag → `release.yml` → PyPI → fleet rollout).
-- Real boundary: GitHub branch ruleset + CODEOWNERS (`* @littlebearapps/core`). The guard scripts in `.claude/hooks/`
-  are **not wired** (2026-10-03): Claude Code reads hooks only from `settings*.json` / plugins, never `.claude/hooks.json`, so no hook
-  will stop you; obey these rules yourself. **Never edit `.claude/hooks.json` or the guard scripts.**
+- Everyday work goes to `dev` → TestPyPI only. Allowed: push feature branches, `gh pr create --base dev`,
+  `gh pr merge <n> --squash` when base = `dev`.
+- Merging the `dev`→`master` PR is the release (auto-tag → `release.yml` → PyPI → fleet rollout). Claude may do it
+  **only** after Nathan explicitly approves that version in the conversation, via `/pr-main X.Y.Z --merge`
+  (`gh pr merge <n> --squash --admin`). The guard then requires head = `dev` + green CI and **asks Nathan to confirm**
+  ([#917](https://github.com/littlebearapps/untether/issues/917)). Never infer approval; never retry a declined prompt.
+- Claude Code **MUST NOT** push to `master`/`main`, create `v*` tags or run `gh release create` — the pipeline does.
+- GitHub rulesets + CODEOWNERS (`* @littlebearapps/core`) block direct pushes to `master`, but Nathan's admin token
+  bypasses review and CI with `--admin`, so the local guard ([#915](https://github.com/littlebearapps/untether/issues/915),
+  registered in `.claude/settings.json`) is what gates a Claude release merge. It denies master/main pushes, tags,
+  releases and non-`dev`-head or red-CI `master` merges, and asks before a release merge, any `gh workflow run` / `gh run rerun`, or a non-dev Untether restart.
+  It's a tripwire, not a boundary — obey the rules regardless, and never work around a block. **Never edit
+  `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`, `help-faq-protect.sh`); personal
+  settings go in `.claude/settings.local.json`.
 - `docs/faq/faq.md` backs the marketing-site FAQPage schema: **never delete or move it**; editing is encouraged.
 
 ## Release workflow (summary — full rules in `.claude/rules/release-discipline.md`)
@@ -93,7 +101,8 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 1. **Dev** — fix, unit tests, test via `@untether_dev_bot`, integration tests per `docs/reference/integration-testing.md`.
 2. **rc** — bump `X.Y.ZrcN`, merge to `dev` (TestPyPI), attest with `scripts/run-integration-tests.sh X.Y.ZrcN --manual`,
    then `scripts/fleet-rollout.sh X.Y.ZrcN` (5 hosts: lba-1 staging, nsd, channelo, sl, mac). The marker is the gate.
-3. **Stable** — bump `X.Y.Z`, CHANGELOG entry, PR `dev`→`master`; Nathan merges.
+3. **Stable** — `/pr-main X.Y.Z` (bump, CHANGELOG, PR `dev`→`master`); on Nathan's explicit go, `/pr-main X.Y.Z --merge`
+   (or Nathan merges), then `scripts/fleet-rollout.sh X.Y.Z` once PyPI has it.
 
 **NEVER skip integration testing or the attestation gate.** Every bug fix / significant change needs a GitHub issue
 (labels `bug`/`enhancement`/`documentation`, `severity:*`, `priority: *`), linked from CHANGELOG as

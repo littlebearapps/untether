@@ -41,7 +41,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 fleet rollout  →  7. Tag & publish
 ```
 
-Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when Nathan merges a stable version to `master`.
+Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when a stable version is merged to `master` (by Nathan, or by Claude via `/pr-main X.Y.Z --merge` after his explicit approval).
 
 **Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
 Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
@@ -336,19 +336,19 @@ systemctl --user restart untether
 
 ## Phase 7: Merge to master (single-gate release)
 
-The release flow uses a single approval gate: **the master PR review IS the release approval**. Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) to master, everything else is automatic.
+The release flow uses a single approval gate: **Nathan's explicit approval of the release**. Once a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) is squash-merged to master, everything else is automatic.
 
 ### Claude Code's role
 
-- Prepare the version bump on a feature branch (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`)
-- Open a PR from `dev` → `master` with a release summary
-- Wait for CI to go green
-- Hand off to Nathan with a one-line instruction: "merge PR #N when ready"
+- Prepare the version bump (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`) and open the `dev` → `master` PR (`/pr-main X.Y.Z`)
+- Wait for CI to go green, then ask Nathan whether to release
+- Only on his explicit go for that version: `/pr-main X.Y.Z --merge` → `gh pr merge <n> --squash --admin`. The guard checks head = `dev` + green CI and asks him to confirm ([#917](https://github.com/littlebearapps/untether/issues/917))
+- Verify auto-tag → `release.yml` → PyPI, then run `scripts/fleet-rollout.sh X.Y.Z` when he says so
 
 ### Nathan's role
 
-- Review the PR on GitHub
-- Squash-merge to master in the GitHub UI
+- Review the PR and approve the release (or squash-merge it himself in the GitHub UI)
+- Confirm the guard's permission prompt when Claude merges
 
 That's it. No tag creation, no PyPI environment approval. The git tag and PyPI publish happen automatically:
 
@@ -364,12 +364,12 @@ That's it. No tag creation, no PyPI environment approval. The git tag and PyPI p
 
 The defenses that the legacy `pypi` environment reviewer was providing are already covered upstream:
 
-- Branch protection on master: only Nathan can merge via PR
+- Branch protection on master: changes only via PR. The release merge needs Nathan's explicit approval — he merges, or Claude via `/pr-main X.Y.Z --merge`, which the guard asks him to confirm (#917)
 - `validate_release.py` runs in CI on version-bump PRs (changelog format, issue links, date)
-- All CI checks must pass before the PR can merge
+- `release-guard.sh` requires green CI before a `master` merge (`--admin` bypasses the ruleset's own CI requirement)
 - `release.yml` re-validates tag-vs-version match
 - PyPI trusted publishing via OIDC (no static API token to leak)
-- Claude Code must never create tags or push master (the local release-guard hooks are not wired; the GitHub ruleset is the gate)
+- Claude Code must never create tags or push master — `release-guard.sh` (registered in `.claude/settings.json`, #915) denies both
 
 ### Manual override (rare)
 
@@ -381,7 +381,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; the local release-guard hook is not wired, so nothing local stops it).
+This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; `release-guard.sh` denies `git tag` and tag pushes).
 
 ## Post-release verification
 

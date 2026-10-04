@@ -1,5 +1,5 @@
 ---
-description: Weekly, human-gated, propose-only promotion of /kaizen bullets. Parse un-struck bullets on the [kaizen] collector, score/dedupe/cluster, present approval packets; on Accept mint a propose-only artefact (pytest/doc/rule draft + GH issue) and strike the source bullet. Never auto-edits rules, hooks.json, CLAUDE.md, or code. Monthly --monthly samples fix-outcome hold-rate.
+description: Weekly, human-gated, propose-only promotion of /kaizen bullets. Parse un-struck bullets on the [kaizen] collector, score/dedupe/cluster, present approval packets; on Accept mint a propose-only artefact (pytest/doc/rule draft + GH issue) and strike the source bullet. Never auto-edits rules, .claude/settings.json, CLAUDE.md, or code. Monthly --monthly samples fix-outcome hold-rate.
 argument-hint: "[] (weekly review) | [--monthly] | [--dry-run] | [--help]"
 disable-model-invocation: true
 allowed-tools: Read Glob Grep Write Skill Bash(gh issue list:*) Bash(gh issue view:*) Bash(gh issue comment:*) Bash(gh issue edit:*) Bash(gh issue create:*) Bash(gh label list:*) Bash(git log:*) Bash(date:*) Bash(grep:*) Bash(jq:*)
@@ -18,7 +18,7 @@ Load `docs/kaizen/README.md` (the full policy: gate, hierarchy, scales,
 approval-boundary table) and `.claude/rules/kaizen.md`. Also
 `.claude/rules/workflow-commands.md`. Key points:
 
-- **Authority: propose-only.** NEVER auto-edit `.claude/rules/`, `hooks.json`,
+- **Authority: propose-only.** NEVER auto-edit `.claude/rules/`, `.claude/settings.json`,
   `CLAUDE.md`, or code. The most it does to an *authoritative* file is draft a
   proposed diff into a **non-authoritative** location (`incoming/kaizen-runs/`,
   gitignored) and open a GH issue. Applying the draft is a later human/`/implement`

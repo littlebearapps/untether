@@ -35,7 +35,7 @@ Delivery loops (net-new capability)
   L2   /implement     approved phase → feature branch, TDD, stop before PR         [available]
   L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [available]
   L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [available]
-  L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [available]
+  L4b  /pr-main       release-prep → open dev→master PR → STOP; --merge on Nathan's go → PyPI [available]
 
 Production loops (defects)
   L5   /debug         8-step investigate (sweep / targeted) — fleet-aware          [available]
@@ -66,7 +66,7 @@ Intentionally NOT built
   /dq-spot-check  — no warehouse / no DQ patterns
   /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [cost_budget]), not a command
   /issue-triage   — covered by A1 + A2
-  /context-health — covered by the context-quality rule (the context-drift hooks in .claude/hooks.json are not wired)
+  /context-health — covered by the context-quality rule (the context-drift hook scripts in .claude/hooks/ are not registered)
 ```
 
 The delivery model is **three boundaries, not five stages** —
@@ -116,15 +116,15 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 
 - **Trigger:** a feature/fix/chore branch at "code + tests done".
 - **Driver:** `/pr-dev` (docs reconciliation folded in as a completion criterion).
-- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/`## Tests` reconciled inline. Merge → TestPyPI (automatic CI).
-- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the one merge Claude may do). Never master/tag/release/deploy.
+- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/test-catalog reconciled inline. Merge → TestPyPI (automatic CI).
+- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the only merge `/pr-dev` may do). Never master/tag/release/deploy.
 
 ### L4b · `/pr-main` — release-prep → open `dev`→`master` PR, STOP  ·  Status: **available**
 
 - **Trigger:** `dev` is green + ahead of `master` and a stable `X.Y.Z` is decided.
 - **Driver:** `/pr-main`.
 - **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the opened `dev`→`master` PR (release body), then **STOP**.
-- **Authority:** everything Claude *may* do up to the operator boundary. Never merges to master, tags, `gh release create`, or runs `fleet-rollout.sh`. The master merge is Nathan's single release gate.
+- **Authority:** prepares and opens the release PR, then stops. `--merge` merges it only after Nathan explicitly approves that version; the guard checks head = `dev` + green CI and asks him to confirm (#917). Never tags or runs `gh release create` (the pipeline does); runs `fleet-rollout.sh` only once PyPI has the version and Nathan says so.
 
 ### L7 · `/kaizen` — capture a process learning  ·  Status: **available**
 
@@ -138,7 +138,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Trigger:** weekly (human-gated); monthly `--monthly` health sample.
 - **Driver:** `/kaizen-review` (propose-only).
 - **Output:** approval packets → on Accept, a propose-only artefact (pytest/doc/rule draft + GH issue) and the source bullet struck.
-- **Authority:** propose only. Never auto-edits `.claude/rules/`, `hooks.json`, `CLAUDE.md`, or code.
+- **Authority:** propose only. Never auto-edits `.claude/rules/`, `.claude/settings.json`, `CLAUDE.md`, or code.
 
 ### L9 · `/handover` — interruption stop-state  ·  Status: **available**
 
