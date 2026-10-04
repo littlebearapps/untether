@@ -19,15 +19,20 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)
 # Drop it so every gh check below sees `gh <subcommand>`. The value must be a
 # plain [HOST/]OWNER/REPO followed by whitespace, so the strip can never
 # swallow shell syntax (`gh -R x;git push origin master`).
+# It can also sit between the command group and the subcommand
+# (`gh pr -R o/r merge 2`), so strip it in both places (two passes).
+ORIG_COMMAND="$COMMAND"
 GH_REPO_RE="(\s+(-R|--repo)(=|\s+)[\"']?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){0,2}[\"']?)+"
-COMMAND=$(printf '%s' "$COMMAND" | sed -E "s#\bgh${GH_REPO_RE}(\s|\$)#gh\5#g")
+for _ in 1 2; do
+  COMMAND=$(printf '%s' "$COMMAND" | sed -E "s#\bgh((\s+[a-z][a-z-]*)?)${GH_REPO_RE}(\s|\$)#gh\1\7#g")
+done
 
 BLOCKED=false
 REASON=""
 
-# Any other `gh -R/--repo <value>` before the subcommand ($VAR, odd quoting,
-# shell metacharacters) can't be checked reliably — fail closed.
-if printf '%s' "$COMMAND" | grep -qP '\bgh\s+(-R|--repo)\b'; then
+# Any other `gh [group] -R/--repo <value>` before the subcommand ($VAR, odd
+# quoting, shell metacharacters) can't be checked reliably — fail closed.
+if printf '%s' "$COMMAND" | grep -qP '\bgh(\s+[a-z][a-z-]*)?\s+(-R|--repo)\b'; then
   BLOCKED=true
   REASON="gh -R/--repo with a value that isn't a plain owner/repo is blocked. Use a literal owner/repo, or put -R after the subcommand."
 fi
@@ -135,7 +140,13 @@ fi
 
 if echo "$COMMAND" | grep -qPi '\bgh\s+pr\s+merge\b'; then
   PR_NUM=$(echo "$COMMAND" | grep -oP '\bgh\s+pr\s+merge\s+\K\d+' || true)
-  if [ -z "$PR_NUM" ]; then
+  # The lookup below checks littlebearapps/untether; gh merges in whatever repo
+  # -R/--repo, GH_REPO or a `cd` selects. Refuse anything that could differ.
+  OTHER_REPO=$(printf '%s' "$ORIG_COMMAND" | grep -oP '(?:^|\s)(?:-R|--repo)(?:=|\s+)["'"'"']?\K[^\s"'"'"']+' | grep -vxP '(github\.com/)?littlebearapps/untether' || true)
+  if [ -n "$OTHER_REPO" ] || printf '%s' "$ORIG_COMMAND" | grep -qP '\bGH_REPO=|\bGH_HOST=|(^|[\s;&|(])(cd|pushd)\s'; then
+    BLOCKED=true
+    REASON="gh pr merge here may only target littlebearapps/untether from this checkout (no other -R/--repo, GH_REPO, GH_HOST or cd). Merge other repos' PRs from their own checkout."
+  elif [ -z "$PR_NUM" ]; then
     BLOCKED=true
     REASON="gh pr merge without a PR number is blocked. Use: gh pr merge <number>"
   else

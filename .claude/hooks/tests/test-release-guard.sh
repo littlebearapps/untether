@@ -103,6 +103,14 @@ bash_check "gh -R \$REPO pr merge 2 --squash --admin"     deny
 bash_check "gh -R \"littlebearapps/untether\" pr merge 2 --squash --admin" ask
 bash_check "gh -R github.com/littlebearapps/untether pr merge 2 --squash --admin" ask
 bash_check "gh pr view 2 -R littlebearapps/untether"      allow
+bash_check "gh pr -R littlebearapps/untether merge 2 --squash --admin" ask
+bash_check "gh pr --repo=littlebearapps/untether merge 3 --squash --admin" deny
+bash_check "gh workflow -R littlebearapps/untether run release.yml" ask
+bash_check "gh release -R littlebearapps/untether create v9.9.9" deny
+bash_check "gh pr merge 2 --squash --admin -R littlebearapps/untether" ask
+bash_check "GH_REPO=littlebearapps/other gh pr merge 1 --squash" deny
+bash_check "gh pr merge 1 --squash --repo littlebearapps/other" deny
+bash_check "cd ../other && gh pr merge 1 --squash"       deny
 bash_check "gh api repos/o/r/pulls/2/merge -X PUT"        deny
 bash_check "gh api repos/o/r/releases -f tag_name=v1"     deny
 bash_check "gh api repos/o/r/pulls/2"                     allow
