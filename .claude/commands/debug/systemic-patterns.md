@@ -121,7 +121,7 @@ For each pattern:
 ### 19. Help-FAQ silently regressed
 - **Sig**: `docs/faq/faq.md` has fewer than 7 question-shaped H2s, or contains TODO/placeholder, or breaks the marketing-site `docs-sync.config.ts` mapping
 - **Class**: help-faq-release-guard
-- **Canonical**: #477, #483 in CLAUDE.md
+- **Canonical**: #477, #483 in `.claude/rules/help-faq.md`
 - **Posture**: bug — FAQ MUST stay current; `help-faq-protect.sh` blocks deletes but does not enforce content shape.
 
 ### 20. CI ty diagnostics pile-up

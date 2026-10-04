@@ -33,7 +33,7 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules),
 | Situation | Command |
 |---|---|
 | Delivering code + its docs | `/pr-dev` (docs folded in) |
-| A doc drifted with no code change (stale FAQ, missing CHANGELOG link, out-of-date `## Tests`) | `/docs` |
+| A doc drifted with no code change (stale FAQ, missing CHANGELOG link, out-of-date `docs/reference/test-catalog.md`) | `/docs` |
 | Reconciling `docs/reference/*` after a runner/schema change already merged | `/docs` |
 
 ## Flow

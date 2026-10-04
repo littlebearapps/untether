@@ -7,7 +7,7 @@ paths:
 # Kaizen — capture rule (thin slice)
 
 The capture slice for Untether's continuous-improvement loop. `/kaizen` and
-`/kaizen-review` load it explicitly (and when a Stop-hook nudges `/kaizen`). The
+`/kaizen-review` load it explicitly (a Stop-hook nudge exists in `.claude/hooks/kaizen-stop-nudge.sh` but isn't registered). The
 full rubric lives in `docs/kaizen/README.md`; this rule is the boundary + shape.
 
 ## When `/kaizen` fires (session end)

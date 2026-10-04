@@ -364,12 +364,12 @@ That's it. No tag creation, no PyPI environment approval. The git tag and PyPI p
 
 The defenses that the legacy `pypi` environment reviewer was providing are already covered upstream:
 
-- Branch protection on master: only Nathan can merge via PR
+- Branch protection on master: changes only via PR. The release merge needs Nathan's explicit approval — he merges, or Claude via `/pr-main X.Y.Z --merge`, which the guard asks him to confirm (#917)
 - `validate_release.py` runs in CI on version-bump PRs (changelog format, issue links, date)
-- All CI checks must pass before the PR can merge
+- `release-guard.sh` requires green CI before a `master` merge (`--admin` bypasses the ruleset's own CI requirement)
 - `release.yml` re-validates tag-vs-version match
 - PyPI trusted publishing via OIDC (no static API token to leak)
-- Claude Code must never create tags or push master (the local release-guard hooks are not wired; the GitHub ruleset is the gate)
+- Claude Code must never create tags or push master — `release-guard.sh` (registered in `.claude/settings.json`, #915) denies both
 
 ### Manual override (rare)
 
@@ -381,7 +381,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; the local release-guard hook is not wired, so nothing local stops it).
+This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; `release-guard.sh` denies `git tag` and tag pushes).
 
 ## Post-release verification
 

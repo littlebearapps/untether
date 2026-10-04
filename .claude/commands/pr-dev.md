@@ -1,5 +1,5 @@
 ---
-description: Everyday finalise → ONE merge-ready PR to dev (→ TestPyPI on merge). Take a feature/fix/chore branch from "code+tests done" to a PR with docs reconciliation folded in as a completion criterion (CHANGELOG, FAQ touch-up, CLAUDE.md ## Tests). Green locally first, apply the batch-cohesion rule, open the table-shaped PR, hand off needs-verification. May merge to dev only (--merge + confirm). Never master/tag/release/deploy.
+description: Everyday finalise → ONE merge-ready PR to dev (→ TestPyPI on merge). Take a feature/fix/chore branch from "code+tests done" to a PR with docs reconciliation folded in as a completion criterion (CHANGELOG, FAQ touch-up, `docs/reference/test-catalog.md`). Green locally first, apply the batch-cohesion rule, open the table-shaped PR, hand off needs-verification. May merge to dev only (--merge + confirm). Never master/tag/release/deploy.
 argument-hint: "[] finalise current branch → dev PR | [--rc X.Y.ZrcN] | [--dry-run] | [--merge] | [--help]"
 disable-model-invocation: true
 allowed-tools: Read Glob Grep Edit Write Skill ToolSearch Bash(git status:*) Bash(git branch:*) Bash(git rev-parse:*) Bash(git symbolic-ref:*) Bash(git log:*) Bash(git diff:*) Bash(git add:*) Bash(git commit:*) Bash(git push:*) Bash(gh pr create:*) Bash(gh pr view:*) Bash(gh pr list:*) Bash(gh pr merge:*) Bash(gh issue list:*) Bash(gh issue view:*) Bash(gh issue comment:*) Bash(gh issue edit:*) Bash(uv run pytest:*) Bash(uv run ruff:*) Bash(uv lock:*) Bash(python3 scripts/validate_release.py:*) Bash(grep:*) Bash(rg:*) Bash(jq:*) Bash(date:*) Bash(wc:*) Bash(head:*) Bash(tail:*) Bash(ls:*) Bash(cat:*)
@@ -19,10 +19,11 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules) and
 points:
 
 - **Release-guard obedience.** PR **to `dev`** only. `gh pr merge --squash` is
-  allowed **only** with base = `dev` (the one merge Claude may do). Never
-  push/merge to `master`, never `git tag`, never `gh release create`, never
-  `--no-verify`. The GitHub branch ruleset + CODEOWNERS is the real gate; the
-  local guard hooks (#915) are a tripwire — never work around a block.
+  allowed **only** with base = `dev` (the only merge `/pr-dev` may do; the
+  release merge is `/pr-main X.Y.Z --merge` only). Never push/merge to
+  `master`, never `git tag`, never `gh release create`, never `--no-verify`.
+  The ruleset blocks direct `master` pushes; the local guard (#915/#917) gates
+  `master` merges — never work around a block.
 - **Dev/staging separation.** Never `systemctl restart` staging or dev from
   inside this session (hot-reload drain drops the final message).
 - **Confirm-gated + idempotent.** Surface the drafted PR body and wait for a tap;

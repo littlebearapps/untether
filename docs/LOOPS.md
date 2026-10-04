@@ -116,8 +116,8 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 
 - **Trigger:** a feature/fix/chore branch at "code + tests done".
 - **Driver:** `/pr-dev` (docs reconciliation folded in as a completion criterion).
-- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/`## Tests` reconciled inline. Merge → TestPyPI (automatic CI).
-- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the one merge Claude may do). Never master/tag/release/deploy.
+- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/test-catalog reconciled inline. Merge → TestPyPI (automatic CI).
+- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the only merge `/pr-dev` may do). Never master/tag/release/deploy.
 
 ### L4b · `/pr-main` — release-prep → open `dev`→`master` PR, STOP  ·  Status: **available**
 

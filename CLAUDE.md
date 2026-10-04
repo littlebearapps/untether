@@ -90,7 +90,7 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 - GitHub rulesets + CODEOWNERS (`* @littlebearapps/core`) block direct pushes to `master`, but Nathan's admin token
   bypasses review and CI with `--admin`, so the local guard ([#915](https://github.com/littlebearapps/untether/issues/915),
   registered in `.claude/settings.json`) is what gates a Claude release merge. It denies master/main pushes, tags,
-  releases and non-`dev`-head or red-CI `master` merges, and asks before a release merge or a non-dev Untether restart.
+  releases and non-`dev`-head or red-CI `master` merges, and asks before a release merge, any `gh workflow run` / `gh run rerun`, or a non-dev Untether restart.
   It's a tripwire, not a boundary — obey the rules regardless, and never work around a block. **Never edit
   `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`, `help-faq-protect.sh`); personal
   settings go in `.claude/settings.local.json`.

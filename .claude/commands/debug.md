@@ -287,7 +287,8 @@ Read `.claude/commands/debug/step-verify.md`. Summary:
    the change scope (patch/minor/major).
 4. Write attestation marker: `scripts/run-integration-tests.sh ${VERSION} --manual ...`.
 5. If this is part of an rc release, run `scripts/fleet-rollout.sh ${VERSION}`
-   only after Nathan merges the PR.
+   only after the rc is merged to `dev`, TestPyPI has it and the attestation
+   marker exists.
 6. Re-run Step 4 grep on the fresh dev logs to ensure no other systemic
    pattern regressed.
 

@@ -135,8 +135,8 @@ EOF
 )"
 ```
 
-The PR targets `dev`. If you accidentally target `master`,
-`release-guard-mcp.sh` blocks the merge.
+The PR targets `dev`. If you accidentally target `master`, `release-guard.sh`
+denies a `master` merge whose head isn't `dev` (`release-guard-mcp.sh` covers MCP merges).
 
 ### 8. Apply `needs-verification` to the issue
 
@@ -170,12 +170,13 @@ EOF
 - **Restarting staging from inside an active session.** The 120s drain
   timeout drops your final response. See `feedback_agent_self_restart_pattern`.
   Use `untether-dev.service` and let hot-reload pick up config changes.
-- **Editing `.claude/hooks.json` or guard scripts.** Forbidden. Don't try.
+- **Editing `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`,
+  `help-faq-protect.sh`). Forbidden. Don't try.
 - **Skipping the test step.** There is no local pre-commit hook, so nothing
   stops a broken commit until CI. Run tests locally first; never `--no-verify`.
-- **Committing files with secrets.** `secret-warning` hook fires on
-  `git add`/`commit`. If it warns, fix the file before continuing — never
-  bypass.
+- **Committing files with secrets.** No hook in this repo scans for them —
+  check staged files before committing, and never bypass a warning from CI
+  secret scanning.
 - **Adding boilerplate to a tiny fix.** Don't add docstrings, don't refactor,
   don't add comments unless they explain a non-obvious why.
 - **Forgetting the FAQ touch-up check.** If the fix changes user-visible
