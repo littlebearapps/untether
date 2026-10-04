@@ -73,7 +73,7 @@ restart.
 
 | Section | Restart-required fields | Hot-reload |
 |---|---|---|
-| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*`) |
+| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*` — except that outbox delivery is only wired at startup: if `files.enabled` or `outbox_enabled` was off when Untether started, turning it on needs a restart) |
 | `transports.telegram.topics` | whole section (treated as one unit) | — |
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
