@@ -4681,14 +4681,85 @@ async def close_idle_live_sessions(
 _FOLLOWUP_ANCHORS: dict[str, tuple[str, MessageRef, MessageRef | None]] = {}
 
 
+@dataclass(slots=True)
+class _InFlightFollowup:
+    session_id: str
+    settled: anyio.Event = field(default_factory=anyio.Event)
+    written: bool | None = None
+
+
+# #921: anchors whose write into the live session is still being decided
+# (``inject_when_idle`` waiting for the turn to end, or a steer waiting for
+# the lock). The writer owns them until it settles: the run-end sweep must
+# not claim one, or a cancel racing a queued follow-up tells the user to
+# "send it again" while the scheduler re-dispatches it anyway.
+_FOLLOWUP_IN_FLIGHT: dict[str, _InFlightFollowup] = {}
+# How long the run-end sweep waits for in-flight writers. The run's process
+# has already exited, so a waiting inject sees the session gone on its next
+# 0.2 s poll; this is a safety bound, not an expected path.
+_FOLLOWUP_SETTLE_S = 2.0
+
+
 def register_followup_anchor(
     command_uuid: str,
     *,
     session_id: str,
     reply_to: MessageRef,
     placeholder: MessageRef | None,
+    in_flight: bool = False,
 ) -> None:
     _FOLLOWUP_ANCHORS[command_uuid] = (session_id, reply_to, placeholder)
+    if in_flight:
+        _FOLLOWUP_IN_FLIGHT[command_uuid] = _InFlightFollowup(session_id)
+
+
+def settle_followup_anchor(command_uuid: str, *, written: bool) -> None:
+    """#921: the writer's verdict on an in-flight anchor — call exactly once.
+
+    ``written=False``: the line never reached the session and the message
+    falls back (resume / queue path), so nothing is owed — drop the anchor.
+    ``written=True``: keep it; the router consumes it when the turn opens,
+    or the run-end sweep reports it if the session dies first.
+    """
+    if not written:
+        _FOLLOWUP_ANCHORS.pop(command_uuid, None)
+    flight = _FOLLOWUP_IN_FLIGHT.pop(command_uuid, None)
+    if flight is not None:
+        flight.written = written
+        flight.settled.set()
+
+
+async def _await_in_flight_followups(session_id: str) -> None:
+    """#921: give in-flight writers for ``session_id`` up to
+    :data:`_FOLLOWUP_SETTLE_S` to settle before the run-end sweep drains."""
+    pending = [
+        (uuid, flight)
+        for uuid, flight in _FOLLOWUP_IN_FLIGHT.items()
+        if flight.session_id == session_id
+    ]
+    if not pending:
+        return
+    with anyio.move_on_after(_FOLLOWUP_SETTLE_S):
+        for _, flight in pending:
+            await flight.settled.wait()
+    for uuid, flight in pending:
+        if not flight.settled.is_set():
+            from .runners.claude import get_live_session
+
+            # Expected when a newer process owns the session id (#816): the
+            # writer is waiting on *that* process, whose router takes it.
+            logger.info(
+                "claude.live_session.followup_settle_timeout",
+                session_id=session_id,
+                command_uuid=uuid,
+                live_owner_present=get_live_session(session_id) is not None,
+            )
+        elif not flight.written:
+            logger.info(
+                "claude.live_session.followup_requeued",
+                session_id=session_id,
+                command_uuid=uuid,
+            )
 
 
 def pop_followup_anchor(
@@ -4715,11 +4786,13 @@ def _consume_absorbed_anchor(evt: UntetherEvent) -> None:
 def drain_followup_anchors(
     session_id: str,
 ) -> list[tuple[MessageRef, MessageRef | None]]:
-    """Anchors whose follow-up never got a turn (the session ended first)."""
+    """Anchors whose follow-up never got a turn (the session ended first).
+
+    #921: anchors still in flight belong to their writer and are skipped."""
     leftovers = [
         (uuid, entry)
         for uuid, entry in _FOLLOWUP_ANCHORS.items()
-        if entry[0] == session_id
+        if entry[0] == session_id and uuid not in _FOLLOWUP_IN_FLIGHT
     ]
     for uuid, _ in leftovers:
         _FOLLOWUP_ANCHORS.pop(uuid, None)
@@ -6703,6 +6776,9 @@ async def handle_message(
         )
         if sid is None:
             return
+        # #921: a follow-up whose write is still in flight is its writer's
+        # to resolve — wait (bounded) for its verdict before draining.
+        await _await_in_flight_followups(sid.value)
         for reply_to, placeholder in drain_followup_anchors(sid.value):
             text = (
                 "\N{WARNING SIGN} The session ended before this message ran "
