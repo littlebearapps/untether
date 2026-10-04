@@ -1025,3 +1025,118 @@ def test_743_effort_choices_match_untether_levels() -> None:
         "CLI effort levels changed — update `telegram/engine_overrides.py` and "
         f"the /config reasoning buttons (#416 rule): CLI {sorted(choices)}"
     )
+
+
+# --- #922 (rc20) ---------------------------------------------------------------
+# The #701 action-required cap latch reads the result's `api_error*` fields
+# first and the headless cap wording second. Re-derived against CLI 2.1.289.
+
+# The headless builder's templates: `<cap sentence> Switch to another model${K}
+# to continue.` — the cap sentence is a literal or a `${g}` / `${h}` placeholder.
+_922_HEADLESS_TEMPLATE_RE = re.compile(
+    rb"`([^`]{0,90}?) Switch to another model\$\{\w{1,4}\} to continue\.`"
+)
+_922_PLACEHOLDER_RE = re.compile(r"\$\{\w{1,4}\}")
+# What the builder's `${g}` / `${h}` expand to (each literal is asserted present).
+_922_CAP_SENTENCES = (
+    "You've reached your Fable limit.",
+    "Opus 5.5 requires usage credits.",
+    "You've hit your monthly spend limit.",
+    "You've hit your channel's monthly spend limit.",
+)
+_922_CAP_LITERALS = (
+    b"You've reached your Fable limit.",
+    b" requires usage credits.",
+    b"You've hit your monthly spend limit.",
+    b"You've hit your channel's monthly spend limit.",
+)
+# `${K}`: empty when the account can't buy credits, else the personal or the
+# Team/Enterprise usage URL.
+_922_K_VARIANTS = (
+    "",
+    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at claude.ai/admin-settings/usage,",
+)
+
+
+def _922_render(prefix: str) -> list[str]:
+    if _922_PLACEHOLDER_RE.fullmatch(prefix):
+        heads = list(_922_CAP_SENTENCES)
+    else:
+        heads = [_922_PLACEHOLDER_RE.sub("Opus 5.5", prefix)]
+    return [
+        f"{head} Switch to another model{k} to continue."
+        for head in heads
+        for k in _922_K_VARIANTS
+    ]
+
+
+def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
+    """Every headless cap message the CLI can emit must arm the latch. This
+    probe FAILS (never skips) when the wording moves — that is the drift it
+    exists to catch (#922 review amendment 1)."""
+    from untether.runners.claude import _parse_action_required_cap
+
+    for literal in _922_CAP_LITERALS:
+        assert cli_blob.find(literal) != -1, (
+            f"cap sentence {literal!r} missing from the installed CLI — the "
+            "cap wording moved; re-derive _ACTION_CAP_RE / _ACTION_CAP_CLAUSES"
+        )
+    templates = [
+        m.group(1).decode("utf-8", "replace")
+        for m in _922_HEADLESS_TEMPLATE_RE.finditer(cli_blob)
+    ]
+    assert templates, (
+        "no `… Switch to another model${K} to continue.` template in the "
+        "installed CLI — the headless remedy wording moved; re-derive "
+        "_ACTION_REMEDY_RE (#922)"
+    )
+    unparsed = [
+        text
+        for prefix in templates
+        for text in _922_render(prefix)
+        if _parse_action_required_cap(text) is None
+    ]
+    assert not unparsed, f"cap wording the latch no longer recognises: {unparsed}"
+
+
+def test_922_result_schema_carries_api_error_fields(cli_blob: mmap.mmap) -> None:
+    for key in (b"api_error_status:", b"api_error_code:", b"api_error:"):
+        assert cli_blob.find(key) != -1, f"{key!r} missing from the installed CLI"
+    if (
+        re.search(
+            rb"api_error_status:\w{1,4}\(\)\.int\(\)\.nullable\(\)\.optional\(\),"
+            rb"api_error_code:",
+            cli_blob,
+        )
+        is None
+        or re.search(rb"\{api_error:\w{1,4}\.api_error\}", cli_blob) is None
+    ):
+        pytest.skip(
+            "result api_error_* schema / spread shape moved; re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_922_api_error_enum_keeps_credit_kinds(cli_blob: mmap.mmap) -> None:
+    from untether.runners.claude import (
+        _ACTION_REQUIRED_API_ERRORS,
+        _NOT_ACTION_API_ERRORS,
+    )
+
+    declared = _require(
+        _zod_enum(cli_blob, rb"api_error:\w{1,4}\(\[([^\]]*)\]\)"), "api_error"
+    )
+    missing = (_ACTION_REQUIRED_API_ERRORS | _NOT_ACTION_API_ERRORS) - set(declared)
+    assert not missing, (
+        f"api_error no longer declares {sorted(missing)} — the #922 structured "
+        "cap classification needs re-deriving"
+    )
+
+
+def test_922_cap_builder_tags_api_error(cli_blob: mmap.mmap) -> None:
+    for literal in (
+        b'apiError:"model_requires_usage_credits"',
+        b'apiError:"long_context_credits_required"',
+    ):
+        assert cli_blob.find(literal) != -1, f"{literal!r} missing from the CLI"

@@ -289,6 +289,17 @@ class StreamResultMessage(
     # and ``maxOutputTokens``. Field name as on the wire. Any: readers check
     # ``isinstance(..., dict)`` and int fields.
     modelUsage: Any = None
+    # --- #922: the API error that ended the turn (CLI ≥ 2.1.289) ---
+    # ``api_error_status`` (HTTP code) is public; ``api_error_code`` (the
+    # server's ``error.details.error_code``, e.g. ``credits_required``) and
+    # ``api_error`` (typed kind, e.g. ``model_requires_usage_credits``) are
+    # ``@internal`` — per the CLI's own describe text the message text "stays
+    # the fallback", so the cap latch reads these first and the text second.
+    # Any: an upstream type change must never drop the result line; readers
+    # check ``isinstance`` first.
+    api_error_status: Any = None
+    api_error_code: Any = None
+    api_error: Any = None
 
 
 # #806: result ``terminal_reason`` values that mean the turn was cancelled

@@ -2363,8 +2363,9 @@ _RESET_CLAUSE_RE = re.compile(
 # wrong *kind* of answer, and the user waits instead of acting.
 #
 # Keyed by auth namespace like _RATE_LIMIT_RESET_LATCH. Value:
-# (monotonic expiry, model display or "" when the message names no model).
-_RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str]] = {}
+# (monotonic expiry, model display or "" when the message names no model,
+# cap kind: model | model_credits | credits | spend | team_budget; #922).
+_RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str, str]] = {}
 
 # Bounded TTL rather than a real deadline: this cap class has no reset time, and
 # nsd's 2026-07-27 window showed one clearing on its own ~15 min later. The latch
@@ -2372,15 +2373,55 @@ _RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str]] = {}
 # nothing while a short one would drop the remedy mid-throttle.
 ACTION_REQUIRED_LATCH_TTL_S = 30 * 60.0
 
-# Both halves required: the "reached your <X> limit" phrasing alone also appears
-# on time-based caps, and it's the /usage-credits | /model remedy that marks this
-# as the action-required class. Fail closed to the 60s default when either is absent.
+# #922: the CLI's structured kind for this cap class, on the result line
+# (``api_error``, CLI ≥ 2.1.289). Read before the text: the CLI's own describe
+# text says consumers should "key on the cause instead of the message text (the
+# text stays the fallback and may change)". The long-context credits cap has a
+# different remedy (switch to standard context, not another model), so it is
+# never this class — even when its server ``error_code`` is ``credits_required``.
+_ACTION_REQUIRED_API_ERRORS: frozenset[str] = frozenset(
+    {"model_requires_usage_credits"}
+)
+_NOT_ACTION_API_ERRORS: frozenset[str] = frozenset({"long_context_credits_required"})
+
+# Text fallback. Both halves required — a cap clause AND a remedy. The remedy
+# alone also appears on unrelated notices ("… doesn't support auto mode. Switch
+# models with /model to change this."), and the "reached your <X> limit" clause
+# alone also appears on time-based caps (#692's class). Fail closed to the 60s
+# default when either is absent.
+#
+# CLI 2.1.289 headless builder (what Untether runs), where ${K} is
+# ", or manage usage credits at <url>," or "" when the account can't buy credits:
+#   You've reached your Fable limit. Switch to another model${K} to continue.
+#   <Model> requires usage credits. Switch to another model${K} to continue.
+#   You're out of usage credits. Switch to another model${K} to continue.
+#   You've hit your [channel's ]monthly spend limit. Switch to another model${K} …
+#   You've hit your team's shared budget. Switch to another model${K} …
+# The interactive branch keeps the older "Run /usage-credits to continue or
+# switch models with /model." / "… /model to switch models." wording. The
+# ``cc_cli_limit_message`` URL marker is NOT stable (absent for Team/Enterprise
+# and when ${K} is empty), so it is never keyed on.
 _ACTION_CAP_RE = re.compile(
     r"reached\s+your\s+(?P<model>[\w.\- ]{1,40}?)\s+limit",
     re.IGNORECASE,
 )
+_ACTION_MODEL_CREDITS_RE = re.compile(
+    r"(?P<model>[\w.\- ]{1,40}?)\s+requires\s+usage\s+credits",
+    re.IGNORECASE,
+)
+# (pattern, kind) for the clauses that name no model, checked in order.
+_ACTION_CAP_CLAUSES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"out\s+of\s+usage\s+credits", re.IGNORECASE), "credits"),
+    (re.compile(r"monthly\s+spend\s+limit", re.IGNORECASE), "spend"),
+    (re.compile(r"shared\s+budget", re.IGNORECASE), "team_budget"),
+)
 _ACTION_REMEDY_RE = re.compile(
-    r"/usage-credits|switch\s+models\s+with\s+/model",
+    r"switch\s+to\s+another\s+model"
+    r"|manage\s+usage\s+credits"
+    r"|/usage-credits"
+    r"|switch\s+models\s+with\s+/model"
+    r"|/model\s+to\s+switch\s+models"
+    r"|switch\s+models\s+to\s+continue",
     re.IGNORECASE,
 )
 
@@ -2476,63 +2517,129 @@ def _latched_rate_limit_reset() -> tuple[float, str] | None:
     return remaining, display
 
 
-def _parse_action_required_cap(text: str | None) -> str | None:
-    """#701: recognise the no-reset cap shape and return the model it names
-    ("Fable 5"), or "" when the remedy is present but no model is named.
+def _action_cap_clause(text: str | None) -> tuple[str, str] | None:
+    """#922: the cap half of the text — ``(model display or "", kind)`` — or
+    None when the text names no action-required cap."""
+    if not text:
+        return None
+    if (m := _ACTION_CAP_RE.search(text)) is not None:
+        return m.group("model").strip(), "model"
+    if (m := _ACTION_MODEL_CREDITS_RE.search(text)) is not None:
+        return m.group("model").strip(), "model_credits"
+    for pattern, kind in _ACTION_CAP_CLAUSES:
+        if pattern.search(text) is not None:
+            return "", kind
+    return None
 
-    ``None`` means "not this cap class" — the caller falls through to the
-    60s default rather than claiming an action is required.
+
+def _parse_action_required_cap(text: str | None) -> str | None:
+    """#701/#922: recognise the no-reset cap shape from its text and return the
+    model it names ("Fable 5"), or "" when the cap names no model (out of
+    credits, monthly spend limit, team budget).
+
+    Both halves are required — a cap clause and a remedy. ``None`` means "not
+    this cap class": the caller falls through to the 60s default rather than
+    claiming an action is required.
     """
     if not text or _ACTION_REMEDY_RE.search(text) is None:
         return None
-    m = _ACTION_CAP_RE.search(text)
-    if m is None:
-        return ""
-    return m.group("model").strip()
+    clause = _action_cap_clause(text)
+    return None if clause is None else clause[0]
 
 
-def _maybe_latch_action_required(result_text: str | None) -> bool:
+def _classify_action_required_cap(
+    text: str | None,
+    *,
+    api_error: str | None = None,
+    api_error_code: str | None = None,
+) -> tuple[str, str, str] | None:
+    """#922: ``(model display, cap kind, source)`` for an action-required cap,
+    or None. The CLI's structured kind wins (``api_error``, then the server's
+    ``api_error_code``); the text is the fallback, with both halves required.
+    The text still supplies the model / kind when it names one."""
+    if api_error in _NOT_ACTION_API_ERRORS:
+        return None
+    clause = _action_cap_clause(text)
+    model, kind = clause if clause is not None else ("", "model")
+    if api_error in _ACTION_REQUIRED_API_ERRORS:
+        return model, kind, "api_error"
+    if api_error_code == "credits_required":
+        return model, kind, "api_error_code"
+    if clause is None or not text or _ACTION_REMEDY_RE.search(text) is None:
+        return None
+    return model, kind, "result_text"
+
+
+def _maybe_latch_action_required(
+    result_text: str | None,
+    *,
+    api_error: str | None = None,
+    api_error_code: str | None = None,
+    api_error_status: int | None = None,
+) -> bool:
     """#701: arm the action-required latch from a result error so subsequent
     `rejected` rate_limit_events without a `resetsAt` render the remedy
     instead of a countdown (#790). True when the latch was armed."""
-    model = _parse_action_required_cap(result_text)
-    if model is None:
+    classified = _classify_action_required_cap(
+        result_text, api_error=api_error, api_error_code=api_error_code
+    )
+    if classified is None:
         return False
+    model, kind, source = classified
     _RATE_LIMIT_ACTION_LATCH[_rate_limit_latch_key()] = (
         time.monotonic() + ACTION_REQUIRED_LATCH_TTL_S,
         model,
+        kind,
     )
+    # #922: field values only — never the error text.
     logger.info(
         "claude.rate_limit_action_required_latched",
         model=model or None,
+        kind=kind,
         ttl_s=ACTION_REQUIRED_LATCH_TTL_S,
-        source="result_error",
+        source=source,
+        api_error=api_error,
+        api_error_code=api_error_code,
+        api_error_status=api_error_status,
     )
     return True
 
 
-def _latched_action_required() -> str | None:
-    """Model display from the armed action-required latch, or None when
-    absent/expired (expired entries are pruned)."""
+def _latched_action_required() -> tuple[str, str] | None:
+    """``(model display, cap kind)`` from the armed action-required latch, or
+    None when absent/expired (expired entries are pruned)."""
     key = _rate_limit_latch_key()
     entry = _RATE_LIMIT_ACTION_LATCH.get(key)
     if entry is None:
         return None
-    expiry, model = entry
+    expiry, model, kind = entry
     if expiry - time.monotonic() <= 0:
         _RATE_LIMIT_ACTION_LATCH.pop(key, None)
         return None
-    return model
+    return model, kind
 
 
-def _format_action_required_title(model: str) -> str:
+def _format_action_required_title(model: str, kind: str = "model") -> str:
     """#701: name the remedy, and hedge the timer claim — nsd saw one of these
     caps clear on its own ~15 min later, so a flat "this will never clear"
-    would be its own inaccuracy."""
-    subject = f"{model} limit" if model else "Model limit"
+    would be its own inaccuracy.
+
+    #922: the remedy is one that works from Untether (there is no
+    /usage-credits command here), and the subject names the cap kind — a
+    spend limit or a team budget is not a "model limit"."""
+    if kind == "credits":
+        subject = "Usage credits used up"
+    elif kind == "spend":
+        subject = "Monthly spend limit reached"
+    elif kind == "team_budget":
+        subject = "Team budget reached"
+    elif kind == "model_credits":
+        subject = f"{model or 'Model'} needs usage credits"
+    else:
+        subject = f"{model} limit reached" if model else "Model limit reached"
     return (
-        f"⛔ {subject} reached — may not clear on a timer; "
-        f"run /usage-credits or switch with /model"
+        f"⛔ {subject} — may not clear on a timer; "
+        f"switch with /model or manage usage credits on claude.ai"
     )
 
 
@@ -2604,6 +2711,9 @@ def _rejection_needs_action(info: claude_schema.RateLimitInfo) -> bool:
     return (
         info.error_code == "credits_required"
         or info.rate_limit_type == "overage"
+        # #922: the CLI's own credits classifier keys on this window too; only
+        # reached when the event has no resetsAt (a dated window keeps its clock).
+        or info.rate_limit_type == "seven_day_overage_included"
         or info.overage_disabled_reason == "out_of_credits"
     )
 
@@ -2789,6 +2899,7 @@ def _translate_rate_limit_event(
     source = ""
     reset_display: str | None = None
     action_display: str | None = None
+    action_kind = "model"
     extension_only = False
 
     if info is None or info.status is None:
@@ -2858,18 +2969,18 @@ def _translate_rate_limit_event(
             # stall detector still gets a deadline.
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "action_required"
-            action_display = _latched_action_required() or ""
+            action_display, action_kind = _latched_action_required() or ("", "model")
         elif (latched := _latched_rate_limit_reset()) is not None:
             # #692: a reset deadline harvested from an earlier result error
             # ("resets 5:30pm (…)") beats guessing.
             retry_s, reset_display = latched
             source = "result_error"
             extension_only = True
-        elif (action_model := _latched_action_required()) is not None:
+        elif (latched_action := _latched_action_required()) is not None:
             # #701: an action-required cap carries no reset time.
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "action_required"
-            action_display = action_model
+            action_display, action_kind = latched_action
         else:
             retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
             source = "default"
@@ -2907,7 +3018,7 @@ def _translate_rate_limit_event(
         )
     elif source == "action_required":
         # #701: no countdown at all — this cap wants an action.
-        title = _format_action_required_title(action_display or "")
+        title = _format_action_required_title(action_display or "", action_kind)
     elif source == "default":
         # A guessed window is shown as an estimate, not as fact.
         title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
@@ -7871,7 +7982,25 @@ def _translate_claude_event_base(
                 # #701: the other cap class — no time to harvest, but a
                 # remedy to name. (Both always run: no short-circuit.)
                 reset_latched = _maybe_latch_rate_limit_reset(event.result, state=state)
-                action_latched = _maybe_latch_action_required(event.result)
+                # #922: the structured kind first (str / int only — Any on
+                # the wire), then the text.
+                action_latched = _maybe_latch_action_required(
+                    event.result,
+                    api_error=(
+                        event.api_error if isinstance(event.api_error, str) else None
+                    ),
+                    api_error_code=(
+                        event.api_error_code
+                        if isinstance(event.api_error_code, str)
+                        else None
+                    ),
+                    api_error_status=(
+                        event.api_error_status
+                        if isinstance(event.api_error_status, int)
+                        and not isinstance(event.api_error_status, bool)
+                        else None
+                    ),
+                )
                 usage_limit_latched = reset_latched or action_latched
             usage = _usage_payload(event)
             if usage_limit_latched:

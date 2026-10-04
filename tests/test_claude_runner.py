@@ -2252,7 +2252,9 @@ def test_rejected_credits_required_without_reset_shows_remedy(
     assert len(events) == 2
     title = events[0].action.title
     assert title.startswith("⛔ Model limit reached")
-    assert "/usage-credits" in title
+    # #922: Untether has no /usage-credits command — name what works here.
+    assert "switch with /model or manage usage credits on claude.ai" in title
+    assert "/usage-credits" not in title
     assert "retrying in" not in title
     assert state.awaiting_rate_limit_retry() is True
 
@@ -3252,6 +3254,13 @@ def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
         (
             "You've reached your Fable 5 limit. Run /usage-credits to continue "
             "or switch models with /model.",
+            True,
+        ),
+        # #922: the current headless wording (channelo 2026-09-07 verbatim).
+        (
+            "You've reached your Fable limit. Switch to another model, or manage "
+            "usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, "
+            "to continue.",
             True,
         ),
         ("API Error: 500 internal server error", False),
@@ -7628,8 +7637,6 @@ def test_parse_action_required_cap_shapes() -> None:
 
     # The nsd 2026-07-27 verbatim string.
     assert _parse_action_required_cap(_ACTION_CAP_TEXT) == "Fable 5"
-    # Remedy present, no model named → "" (still the action class).
-    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") == ""
     # Remedy present via the /model spelling only.
     assert (
         _parse_action_required_cap(
@@ -7651,6 +7658,9 @@ def test_parse_action_required_cap_fail_closed() -> None:
     )
     # "reached your … limit" phrasing without the remedy is not this class.
     assert _parse_action_required_cap("You've reached your session limit.") is None
+    # #922: both halves are required — a remedy with no cap clause is not
+    # this class (it used to latch with "").
+    assert _parse_action_required_cap("Limit reached. Run /usage-credits.") is None
     assert _parse_action_required_cap("") is None
     assert _parse_action_required_cap(None) is None
 
@@ -7694,7 +7704,7 @@ def test_action_cap_result_latches_and_rejected_events_show_remedy(
     )
     title = events[0].action.title
     assert "Fable 5 limit reached" in title
-    assert "/usage-credits" in title
+    assert "/usage-credits" not in title
     assert "/model" in title
     # The whole point: no countdown copy.
     assert "waiting to retry" not in title
@@ -7711,7 +7721,7 @@ def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -
     import time as _time
 
     clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
-    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5", "model")
 
     state = ClaudeStreamState()
     events = translate_claude_event(
@@ -7728,7 +7738,7 @@ def test_expired_action_latch_pruned(clean_action_latch) -> None:
 
     from untether.runners import claude as claude_mod
 
-    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() - 5.0, "Fable 5", "model")
     assert claude_mod._latched_action_required() is None
     assert clean_action_latch == {}
 
@@ -7754,7 +7764,7 @@ def test_bare_event_ignores_armed_latches(
     import time as _time
 
     clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
-    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5", "model")
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -7770,7 +7780,334 @@ def test_action_title_without_model_name() -> None:
     from untether.runners.claude import _format_action_required_title
 
     assert _format_action_required_title("").startswith("⛔ Model limit reached")
-    assert "/usage-credits" in _format_action_required_title("")
+    assert "/usage-credits" not in _format_action_required_title("")
+    assert _format_action_required_title("").endswith(
+        "switch with /model or manage usage credits on claude.ai"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #922 — the action-required latch on the CLI's current headless wording
+# ---------------------------------------------------------------------------
+
+_922_CHANNELO_TEXT = (
+    "You've reached your Fable limit. Switch to another model, or manage usage "
+    "credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+)
+
+# The `${K}` remedy suffix of CLI 2.1.289's headless builder: empty when the
+# account can't buy credits, else the personal or the Team/Enterprise URL.
+_922_K_VARIANTS = (
+    "",
+    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at claude.ai/admin-settings/usage,",
+)
+
+# (cap sentence, expected model, expected kind, expected title prefix)
+_922_HEADLESS_CAPS = (
+    ("You've reached your Fable limit.", "Fable", "model", "⛔ Fable limit reached"),
+    (
+        "Opus 5.5 requires usage credits.",
+        "Opus 5.5",
+        "model_credits",
+        "⛔ Opus 5.5 needs usage credits",
+    ),
+    ("You're out of usage credits.", "", "credits", "⛔ Usage credits used up"),
+    (
+        "You've hit your monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your channel's monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your team's shared budget.",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+)
+
+
+def _922_result(text: str | None, **extra) -> dict:
+    payload: dict = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "num_turns": 1,
+        "duration_ms": 30000,
+        "duration_api_ms": 0,
+        "session_id": "a1103c07-922",
+        "result": text,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _922_feed(state: ClaudeStreamState, payload: dict) -> list:
+    return translate_claude_event(
+        _decode_event(payload), title="claude", state=state, factory=state.factory
+    )
+
+
+def _922_latched_logs(logs: list) -> list:
+    return [
+        r for r in logs if r["event"] == "claude.rate_limit_action_required_latched"
+    ]
+
+
+def test_922_channelo_verbatim_latches(clean_action_latch, clean_reset_latch) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _parse_action_required_cap
+
+    assert _parse_action_required_cap(_922_CHANNELO_TEXT) == "Fable"
+    with capture_logs() as logs:
+        _922_feed(ClaudeStreamState(), _922_result(_922_CHANNELO_TEXT))
+    assert clean_action_latch["default"][1:] == ("Fable", "model")
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "result_text"
+    assert rec["model"] == "Fable"
+    assert rec["kind"] == "model"
+    # Field values only — never the error text.
+    assert _922_CHANNELO_TEXT not in str(rec)
+
+
+@pytest.mark.parametrize("k_suffix", _922_K_VARIANTS)
+@pytest.mark.parametrize(("cap", "model", "kind", "title_prefix"), _922_HEADLESS_CAPS)
+def test_922_headless_variants_parse(
+    cap: str, model: str, kind: str, title_prefix: str, k_suffix: str
+) -> None:
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _format_action_required_title,
+        _parse_action_required_cap,
+    )
+
+    text = f"{cap} Switch to another model{k_suffix} to continue."
+    assert _parse_action_required_cap(text) == model
+    assert _classify_action_required_cap(text) == (model, kind, "result_text")
+    title = _format_action_required_title(model, kind)
+    assert title.startswith(title_prefix)
+    assert title.endswith("switch with /model or manage usage credits on claude.ai")
+    assert "Model limit" not in title or kind == "model"
+
+
+@pytest.mark.parametrize(
+    ("text", "model", "kind"),
+    [
+        (_ACTION_CAP_TEXT, "Fable 5", "model"),
+        ("You've reached your Fable limit. /model to switch models.", "Fable", "model"),
+        (
+            "You're out of usage credits. Run /usage-credits to keep using "
+            "Opus 5.5 or /model to switch models.",
+            "",
+            "credits",
+        ),
+        (
+            "You've hit your team's shared budget. /model to switch models.",
+            "",
+            "team_budget",
+        ),
+        (
+            "You've hit your monthly spend limit. Run /usage-credits to manage your "
+            "limit and keep using Opus 5.5 or switch models to continue this chat.",
+            "",
+            "spend",
+        ),
+    ],
+)
+def test_922_interactive_wording_still_latches(
+    text: str, model: str, kind: str
+) -> None:
+    """The older (interactive-branch) wording keeps working."""
+    from untether.runners.claude import _classify_action_required_cap
+
+    assert _classify_action_required_cap(text) == (model, kind, "result_text")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You've hit your session limit · resets 7:50pm (Australia/Melbourne)",
+        "API Error: Usage credits required for 1M context · turn on usage credits "
+        "at claude.ai/settings/usage?from=cc_cli_limit_message",
+        "Opus 5.5 doesn't support auto mode. Switch models with /model to change this.",
+        "Switch to another model to continue.",
+        "",
+        None,
+    ],
+)
+def test_922_fail_closed(text: str | None) -> None:
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _parse_action_required_cap,
+    )
+
+    assert _parse_action_required_cap(text) is None
+    assert _classify_action_required_cap(text) is None
+
+
+def test_922_structured_api_error_latches_without_text(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result(
+                "some future wording",
+                api_error="model_requires_usage_credits",
+                api_error_code="credits_required",
+                api_error_status=429,
+            ),
+        )
+    assert clean_action_latch["default"][1:] == ("", "model")
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "api_error"
+    assert rec["api_error"] == "model_requires_usage_credits"
+    assert rec["api_error_code"] == "credits_required"
+    assert rec["api_error_status"] == 429
+
+
+def test_922_structured_kind_keeps_the_text_subject(clean_action_latch) -> None:
+    """Structured detection, text still names the cap."""
+    from untether.runners.claude import _classify_action_required_cap
+
+    assert _classify_action_required_cap(
+        "You're out of usage credits. Switch to another model to continue.",
+        api_error="model_requires_usage_credits",
+    ) == ("", "credits", "api_error")
+
+
+def test_922_api_error_code_credits_required_latches(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result("API Error: 429", api_error_code="credits_required"),
+        )
+    assert clean_action_latch
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "api_error_code"
+
+
+def test_922_long_context_api_error_never_latches(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(
+        ClaudeStreamState(),
+        _922_result(
+            _922_CHANNELO_TEXT,
+            api_error="long_context_credits_required",
+            api_error_code="credits_required",
+        ),
+    )
+    assert clean_action_latch == {}
+
+
+def test_922_odd_structured_types_decode(clean_action_latch, clean_reset_latch) -> None:
+    """A type change upstream must never drop the result line; the odd values
+    are ignored and the text decides."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    events = _922_feed(
+        state,
+        _922_result("boom", api_error_status="429", api_error=5, api_error_code=["x"]),
+    )
+    assert events  # the result line still decoded and completed the run
+    assert clean_action_latch == {}
+
+    with capture_logs() as logs:
+        _922_feed(
+            ClaudeStreamState(),
+            _922_result(
+                _922_CHANNELO_TEXT,
+                api_error_status="429",
+                api_error=5,
+                api_error_code=["x"],
+            ),
+        )
+    (rec,) = _922_latched_logs(logs)
+    assert rec["source"] == "result_text"
+    assert rec["api_error"] is None
+    assert rec["api_error_status"] is None
+
+
+def test_922_rejected_event_after_new_wording_shows_remedy(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(ClaudeStreamState(), _922_result(_922_CHANNELO_TEXT))
+    state = ClaudeStreamState()
+    events = _922_feed(state, _REJECTED_NO_RESET)
+    title = events[0].action.title
+    assert title == (
+        "⛔ Fable limit reached — may not clear on a timer; "
+        "switch with /model or manage usage credits on claude.ai"
+    )
+    assert "/usage-credits" not in title
+    assert "waiting to retry" not in title
+
+
+def test_922_rejected_event_names_the_cap_kind(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    _922_feed(
+        ClaudeStreamState(),
+        _922_result(
+            "You're out of usage credits. Switch to another model to continue."
+        ),
+    )
+    events = _922_feed(ClaudeStreamState(), _REJECTED_NO_RESET)
+    assert events[0].action.title.startswith("⛔ Usage credits used up — ")
+
+
+def test_922_seven_day_overage_included_without_reset_is_action_required(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """Decision 3: mirrors the CLI's own credits classifier."""
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=None,
+            rateLimitType="seven_day_overage_included",
+            overageDisabledReason=None,
+            unifiedWindows=None,
+        ),
+    )
+    assert events[0].action.title.startswith("⛔ Model limit reached")
+
+
+def test_922_seven_day_overage_included_with_reset_keeps_the_clock(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    import time as _time
+
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=int(_time.time()) + 600,
+            rateLimitType="seven_day_overage_included",
+            overageDisabledReason=None,
+        ),
+    )
+    title = events[0].action.title
+    assert title.startswith("⏳ Rate limited until")
+    assert "(~10 min)" in title
 
 
 # ---------------------------------------------------------------------------
