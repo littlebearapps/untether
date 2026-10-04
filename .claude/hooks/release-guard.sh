@@ -125,9 +125,11 @@ fi
 # The #376 fallback (`gh workflow run release.yml --ref vX.Y.Z`) publishes to
 # PyPI, so it needs the same confirmation as the release merge.
 
-if echo "$COMMAND" | grep -qPi '\bgh\s+workflow\s+run\b.*\b(release|auto-tag-on-master)(\.ya?ml)?\b'; then
+# Any dispatch or re-run asks: a workflow can be named by numeric ID, and
+# re-running a failed release run publishes.
+if echo "$ORIG_COMMAND" | grep -qPi '\bgh\b.*\bworkflow\b.*\brun\b|\bgh\b.*\brun\b.*\brerun\b'; then
   ASK=true
-  ASK_REASON="🚀 RELEASE: this dispatches the PyPI release pipeline by hand. Approve only if Nathan explicitly approved publishing this version."
+  ASK_REASON="🚀 This dispatches or re-runs a GitHub Actions workflow, which may be the PyPI release pipeline. Approve only if Nathan explicitly approved it."
 fi
 
 # ── gh pr merge — dev freely; master only as a confirmed release ──
@@ -138,18 +140,24 @@ fi
 # prompt (#917). `--admin` bypasses GitHub's review and CI rules, which is why
 # this hook re-checks CI itself.
 
-if echo "$COMMAND" | grep -qPi '\bgh\s+pr\s+merge\b'; then
-  PR_NUM=$(echo "$COMMAND" | grep -oP '\bgh\s+pr\s+merge\s+\K\d+' || true)
-  # The lookup below checks littlebearapps/untether; gh merges in whatever repo
-  # -R/--repo, GH_REPO or a `cd` selects. Refuse anything that could differ.
-  OTHER_REPO=$(printf '%s' "$ORIG_COMMAND" | grep -oP '(?:^|\s)(?:-R|--repo)(?:=|\s+)["'"'"']?\K[^\s"'"'"']+' | grep -vxP '(github\.com/)?littlebearapps/untether' || true)
-  if [ -n "$OTHER_REPO" ] || printf '%s' "$ORIG_COMMAND" | grep -qP '\bGH_REPO=|\bGH_HOST=|(^|[\s;&|(])(cd|pushd)\s'; then
+# Allowlist, not denylist: any command that could merge a PR must be exactly
+# `gh pr merge <N> [--squash|--merge|--rebase] [--admin] [--auto]` with nothing
+# else on the line (no -R, env vars, cd, chaining), and run from an untether
+# checkout — so the PR the hook looks up is the PR gh merges.
+MERGE_RE='^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+[0-9]+([[:space:]]+(--squash|--merge|--rebase|--admin|--auto|-s|-m|-r))*[[:space:]]*$'
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
+
+if printf '%s' "$ORIG_COMMAND" | grep -qP '\bgh\b' && printf '%s' "$ORIG_COMMAND" | grep -qP '\bpr\b' && \
+   printf '%s' "$ORIG_COMMAND" | grep -qPi '\bmerge\b'; then
+  ORIGIN=$(git -C "${HOOK_CWD:-.}" remote get-url origin 2>/dev/null || echo "")
+  if [[ ! "$ORIG_COMMAND" =~ $MERGE_RE ]]; then
     BLOCKED=true
-    REASON="gh pr merge here may only target littlebearapps/untether from this checkout (no other -R/--repo, GH_REPO, GH_HOST or cd). Merge other repos' PRs from their own checkout."
-  elif [ -z "$PR_NUM" ]; then
+    REASON="PR merges must be exactly: gh pr merge <number> --squash [--admin] — nothing else on the line (no -R/--repo, env vars, cd or chained commands). Run anything else separately."
+  elif ! echo "$ORIGIN" | grep -qiP 'github\.com[:/]littlebearapps/untether(\.git)?/?$' || [ -n "${GH_REPO:-}${GH_HOST:-}" ]; then
     BLOCKED=true
-    REASON="gh pr merge without a PR number is blocked. Use: gh pr merge <number>"
+    REASON="gh pr merge from this session may only run in a littlebearapps/untether checkout (cwd origin: '${ORIGIN:-none}'; GH_REPO/GH_HOST must be unset)."
   else
+  PR_NUM=$(echo "$ORIG_COMMAND" | grep -oP '\bmerge\s+\K\d+')
     PR_JSON=$(gh pr view "$PR_NUM" --repo littlebearapps/untether --json baseRefName,headRefName,title,statusCheckRollup 2>/dev/null || echo '{}')
     PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // "unknown"' 2>/dev/null || echo "unknown")
     if [ "$PR_BASE" = "dev" ]; then

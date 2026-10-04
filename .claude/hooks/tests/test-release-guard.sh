@@ -41,8 +41,13 @@ EOF
 chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH"
 
-# A non-master git checkout so the "current branch" fallback never fires.
+# A non-master git checkout so the "current branch" fallback never fires, with
+# an untether origin so PR merges pass the checkout check. A second checkout
+# with another origin stands in for "a different repo".
 git -C "$TMP" init -q -b feature/test repo 2>/dev/null || git -C "$TMP" init -q repo
+git -C "$TMP/repo" remote add origin https://github.com/littlebearapps/untether.git
+git -C "$TMP" init -q other
+git -C "$TMP/other" remote add origin https://github.com/littlebearapps/other.git
 cd "$TMP/repo" || exit 2
 
 PASS=0
@@ -58,7 +63,7 @@ check() { # desc expected(deny|ask|allow) hook input-json
   fi
 }
 
-bash_in() { jq -nc --arg c "$1" '{tool_name:"Bash", tool_input:{command:$c}}'; }
+bash_in() { jq -nc --arg c "$1" --arg d "${2:-$PWD}" '{tool_name:"Bash", cwd:$d, tool_input:{command:$c}}'; }
 bash_check() { check "$1" "$2" release-guard.sh "$(bash_in "$1")"; }
 file_in() { jq -nc --arg p "$1" --arg s "${2:-x}" '{tool_name:"Edit", tool_input:{file_path:$p, new_string:$s}}'; }
 
@@ -86,11 +91,11 @@ bash_check "gh pr merge 5 --squash --admin"               deny
 bash_check "gh pr merge 99 --squash"                      deny
 bash_check "gh pr merge --squash"                         deny
 bash_check "gh workflow run release.yml --ref v9.9.9"     ask
-bash_check "gh workflow run ci.yml"                       allow
+bash_check "gh workflow run ci.yml"                       ask
 bash_check "gh pr merge 1 --squash && gh pr merge 2 --squash --admin" deny
-bash_check "gh -R littlebearapps/untether pr merge 2 --squash --admin" ask
+bash_check "gh -R littlebearapps/untether pr merge 2 --squash --admin" deny
 bash_check "gh --repo=littlebearapps/untether pr merge 3 --squash --admin" deny
-bash_check "gh -R littlebearapps/untether pr merge 1 --squash" allow
+bash_check "gh -R littlebearapps/untether pr merge 1 --squash" deny
 bash_check "gh -R littlebearapps/untether workflow run release.yml" ask
 bash_check "gh -R littlebearapps/untether release create v9.9.9" deny
 bash_check "gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'" deny
@@ -100,17 +105,27 @@ bash_check "gh -R x;git push origin master"               deny
 bash_check "gh -R a/b&&git push origin master"            deny
 bash_check "gh -R x;gh release create v9.9.9"             deny
 bash_check "gh -R \$REPO pr merge 2 --squash --admin"     deny
-bash_check "gh -R \"littlebearapps/untether\" pr merge 2 --squash --admin" ask
-bash_check "gh -R github.com/littlebearapps/untether pr merge 2 --squash --admin" ask
+bash_check "gh -R \"littlebearapps/untether\" pr merge 2 --squash --admin" deny
+bash_check "gh -R github.com/littlebearapps/untether pr merge 2 --squash --admin" deny
 bash_check "gh pr view 2 -R littlebearapps/untether"      allow
-bash_check "gh pr -R littlebearapps/untether merge 2 --squash --admin" ask
+bash_check "gh pr -R littlebearapps/untether merge 2 --squash --admin" deny
 bash_check "gh pr --repo=littlebearapps/untether merge 3 --squash --admin" deny
 bash_check "gh workflow -R littlebearapps/untether run release.yml" ask
 bash_check "gh release -R littlebearapps/untether create v9.9.9" deny
-bash_check "gh pr merge 2 --squash --admin -R littlebearapps/untether" ask
+bash_check "gh pr merge 2 --squash --admin -R littlebearapps/untether" deny
 bash_check "GH_REPO=littlebearapps/other gh pr merge 1 --squash" deny
 bash_check "gh pr merge 1 --squash --repo littlebearapps/other" deny
 bash_check "cd ../other && gh pr merge 1 --squash"       deny
+bash_check "gh pr merge 1 -s"                             allow
+bash_check "gh pr merge 1 --squash -Rlittlebearapps/other" deny
+bash_check "env GH_REPO=littlebearapps/other gh pr merge 1 --squash" deny
+bash_check "gh pr merge 2 --squash --admin --body x"      deny
+bash_check "gh pr checkout 5 && git merge dev"            deny
+bash_check "gh workflow run 123456 --ref v9.9.9"          ask
+bash_check "gh run rerun 123456"                          ask
+check "gh pr merge from another repo's checkout" deny release-guard.sh "$(bash_in "gh pr merge 1 --squash" "$TMP/other")"
+check "gh pr merge from a non-repo dir"          deny release-guard.sh "$(bash_in "gh pr merge 1 --squash" "$TMP")"
+GH_REPO=littlebearapps/other check "GH_REPO set in the session env" deny release-guard.sh "$(bash_in "gh pr merge 1 --squash")"
 bash_check "gh api repos/o/r/pulls/2/merge -X PUT"        deny
 bash_check "gh api repos/o/r/releases -f tag_name=v1"     deny
 bash_check "gh api repos/o/r/pulls/2"                     allow
