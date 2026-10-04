@@ -5582,6 +5582,433 @@ async def test_surface_outbox_skipped_helper_only_overflow_entries_silent(
     assert transport.send_calls == []
 
 
+# ── #924: run-scoped outbox delivery ─────────────────────────────────────
+
+
+def _mtime_clock(monkeypatch) -> None:
+    """Unit tests can't backdate ctime: judge freshness on mtime only so a
+    test can place a file before/after the run cutoff with ``os.utime``."""
+    monkeypatch.setattr(
+        "untether.telegram.outbox_delivery.entry_changed_at",
+        lambda st: st.st_mtime,
+    )
+
+
+def _outbox_cfg(transport, send_file, **files_kw):
+    from untether.settings import TelegramFilesSettings
+
+    return ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=TelegramFilesSettings(enabled=True, **files_kw),
+    )
+
+
+class _WritingRunner(ScriptRunner):
+    """Writes ``files`` (name → mtime) into the outbox as the run starts."""
+
+    def __init__(self, outbox, files: dict[str, float], steps=None) -> None:
+        super().__init__(steps or [Return(answer="done")], engine=CODEX_ENGINE)
+        self._outbox = outbox
+        self._files = files
+
+    async def run(self, prompt, resume):
+        for name, mtime in self._files.items():
+            p = self._outbox / name
+            p.write_text(name, encoding="utf-8")
+            os.utime(p, (mtime, mtime))
+        async for evt in super().run(prompt, resume):
+            yield evt
+
+
+@pytest.mark.anyio
+async def test_924_stale_file_not_sent_and_notice_once(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "2026-08-25-handover.md").write_text("old", encoding="utf-8")
+
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="status?"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_not_called()
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "older file" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert ".skipped" in notices[0]
+    assert "2026-08-25-handover.md" in notices[0]
+    assert "/file get .untether-outbox/.skipped" in notices[0]
+    assert (outbox / ".skipped" / "2026-08-25-handover.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_fresh_file_sent_stale_noticed(tmp_path, monkeypatch) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _mtime_clock(monkeypatch)
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    old = outbox / "old.md"
+    old.write_text("old", encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    now = time.time()
+    runner = _WritingRunner(outbox, {"fresh.md": now + 1})
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=now,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["fresh.md"]
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "older file" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert "old.md" in notices[0]
+    assert "fresh.md" not in notices[0]
+
+
+@pytest.mark.anyio
+async def test_924_policy_send_delivers_old_files(tmp_path, monkeypatch) -> None:
+    """Kill switch: ``outbox_stale_policy = "send"`` restores the old
+    deliver-everything behaviour."""
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_stale_policy="send")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["old.md"]
+    assert not any("older file" in c["message"].text for c in transport.send_calls)
+
+
+@pytest.mark.anyio
+async def test_924_notify_disabled_silences_stale_notice(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_notify_skipped=False)
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done"),
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=time.time() + 10,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_not_called()
+    assert not any("older file" in c["message"].text for c in transport.send_calls)
+    # still quarantined (silently)
+    assert (outbox / ".skipped" / "old.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_overflow_surfaced_and_archived(tmp_path) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file, outbox_max_files=2)
+    now = time.time()
+    outbox.mkdir()
+    runner = _WritingRunner(outbox, {f"n{i}.md": now + 1 for i in range(4)})
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=1, text="go"),
+            resume_token=None,
+            outbox_since=now,
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert send_file.call_count == 2
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "weren't sent (limit outbox_max_files = 2)" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert "n2.md" in notices[0] and "n3.md" in notices[0]
+    assert (outbox / ".skipped" / "n3.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_auto_continue_threads_outbox_since(
+    tmp_path, monkeypatch, progress_store, quarantine_store
+) -> None:
+    """Every recovery re-entry carries the dispatch's cutoff, so files
+    subprocess 1 wrote stay fresh for subprocess 2 (and nothing older
+    becomes fresh because the child's own start time is later)."""
+    import untether.runner_bridge as rb
+
+    seen_since: list[float | None] = []
+    original = rb.handle_message
+
+    async def _spy(*args, **kwargs):
+        seen_since.append(kwargs.get("outbox_since"))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(rb, "handle_message", _spy)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=False
+    )
+    with anyio.fail_after(10):
+        await original(
+            cfg,
+            runner=_810ToolResultThenAnswerRunner(),
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            outbox_since=1234.5,
+        )
+    assert seen_since == [1234.5]
+
+
+@pytest.mark.anyio
+async def test_924_live_turn_uses_run_since_not_turn_start(
+    tmp_path, monkeypatch
+) -> None:
+    """A background task's file, written after the run started but before
+    the wake turn that reports it, is delivered after that turn (the live
+    session's cutoff is its spawn time, not the turn's start)."""
+    import time
+    from unittest.mock import AsyncMock
+
+    from untether.model import TURN_COMPLETE_MARKER, TurnEvent
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _mtime_clock(monkeypatch)
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    token_ = ResumeToken(engine="claude", value="sess-924")
+    now = time.time()
+
+    class _BgRunner(ScriptRunner):
+        async def run(self, prompt, resume):
+            async for evt in super().run(prompt, resume):
+                if isinstance(evt, TurnEvent) and evt.phase == "started":
+                    p = outbox / "r20-bg.md"
+                    p.write_text("bg", encoding="utf-8")
+                    os.utime(p, (now - 50, now - 50))  # before this turn began
+                yield evt
+
+    runner = _BgRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=token_)),
+            Emit(
+                StartedEvent(
+                    engine="claude",
+                    resume=token_,
+                    meta={"complete": TURN_COMPLETE_MARKER},
+                )
+            ),
+            Emit(
+                TurnEvent(
+                    engine="claude", phase="started", turn=2, reason="task_finished"
+                )
+            ),
+            Emit(
+                TurnEvent(
+                    engine="claude",
+                    phase="completed",
+                    turn=2,
+                    reason="task_finished",
+                    ok=True,
+                    answer="BG DONE",
+                )
+            ),
+            Return(answer="FIRST"),
+        ],
+        engine="claude",
+        resume_value=token_.value,
+    )
+    send_file = AsyncMock()
+    transport = FakeTransport()
+    cfg = _outbox_cfg(transport, send_file)
+    token = set_run_base_dir(tmp_path)
+    try:
+        with anyio.fail_after(10):
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+                resume_token=None,
+                outbox_since=now - 100,
+            )
+    finally:
+        reset_run_base_dir(token)
+
+    assert [c[0][2] for c in send_file.call_args_list] == ["r20-bg.md"]
+
+
+def test_924_outbox_settings_hot_reload(tmp_path, monkeypatch) -> None:
+    from untether.runner_bridge import _load_outbox_settings
+    from untether.settings import TelegramFilesSettings
+
+    cfg_path = tmp_path / "live" / "untether.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "[transports.telegram.files]\n"
+        "enabled = true\n"
+        'outbox_stale_policy = "send"\n'
+        "outbox_max_files = 3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg_path))
+    frozen = TelegramFilesSettings(enabled=True)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=lambda *a: None,
+        outbox_config=frozen,
+    )
+    live = _load_outbox_settings(cfg)
+    assert live is not None
+    assert live.outbox_stale_policy == "send"
+    assert live.outbox_max_files == 3
+
+    # Outbox switched off in the live config → no delivery.
+    cfg_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "[transports.telegram.files]\n"
+        "enabled = true\n"
+        "outbox_enabled = false\n",
+        encoding="utf-8",
+    )
+    assert _load_outbox_settings(cfg) is None
+
+    # Not enabled at startup (no send callable) → None regardless.
+    cfg_off = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=False
+    )
+    assert _load_outbox_settings(cfg_off) is None
+
+
+def test_924_outbox_settings_parse_error_falls_back_to_frozen(
+    tmp_path, monkeypatch
+) -> None:
+    """Amendment 3: a half-edited (unparseable) config must not silently swap
+    in hard defaults (max_files / deny globs) mid-run."""
+    from untether.runner_bridge import _load_outbox_settings
+    from untether.settings import TelegramFilesSettings
+
+    cfg_path = tmp_path / "live" / "untether.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text("[transports.telegram\nbot_token = ", encoding="utf-8")
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg_path))
+    frozen = TelegramFilesSettings(enabled=True, outbox_max_files=7)
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=lambda *a: None,
+        outbox_config=frozen,
+    )
+    assert _load_outbox_settings(cfg) is frozen
+
+    # No config file at all (tests / API users) → frozen config too.
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(tmp_path / "missing.toml"))
+    assert _load_outbox_settings(cfg) is frozen
+
+
+def test_924_format_stale_notice_wording() -> None:
+    from untether.runner_bridge import _format_outbox_stale_notice
+
+    stale = [(f"2026-09-{d:02d}-handover.md", 1_790_000_000.0 + d) for d in range(7)]
+    text = _format_outbox_stale_notice(
+        stale, archived_to=".untether-outbox/.skipped/", cleanup=True
+    )
+    assert text.startswith("📎 7 older files were already in .untether-outbox/")
+    assert "so they weren't sent:" in text
+    assert "- … and 2 more" in text
+    # newest first
+    assert text.index("2026-09-06-handover.md") < text.index("2026-09-05-handover.md")
+    assert "Moved to .untether-outbox/.skipped/" in text
+    assert "/file get .untether-outbox/.skipped" in text
+
+    left = _format_outbox_stale_notice(stale[:1], archived_to=None, cleanup=False)
+    assert left.startswith("📎 1 older file was already in .untether-outbox/")
+    assert "Left in place (outbox_cleanup is off)." in left
+
+
 # ── _should_auto_continue detection (#34142/#30333) ──
 
 

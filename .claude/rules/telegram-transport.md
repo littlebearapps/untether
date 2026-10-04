@@ -54,7 +54,9 @@ Messages that should auto-delete when a run finishes:
 
 ## Outbox file delivery
 
-Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`.
+Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`, `outbox_stale_policy`.
+
+Freshness (#924): only entries changed since the dispatch's `outbox_since` are sent; older ones are quarantined to `.skipped/` once. Always thread `outbox_since` through every `handle_message` re-entry (a live session uses its spawn time, never a turn's), and read the outbox settings per delivery via `_load_outbox_settings(cfg)` — never `cfg.outbox_config` directly (frozen at startup, so edits wouldn't hot-reload).
 
 ## Progress persistence
 

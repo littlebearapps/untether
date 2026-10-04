@@ -416,6 +416,44 @@ def _load_auto_continue_settings():
         return AutoContinueSettings()
 
 
+def _load_outbox_settings(cfg: ExecBridgeConfig) -> Any | None:
+    """#924: the outbox settings to use for THIS delivery (hot-reload).
+
+    ``cfg.outbox_config`` is frozen at startup (``telegram/backend.py``) and
+    ``TelegramBridgeConfig.update_from`` never refreshes it, so every
+    ``outbox_*`` edit used to need a restart. Read per delivery instead,
+    following ``_load_auto_continue_settings`` (cheap: #506 parse cache).
+
+    - ``None`` when the outbox wasn't enabled at startup (no send callable —
+      turning ``files.enabled`` on still needs a restart) or is now disabled
+      in the live config;
+    - the frozen ``cfg.outbox_config`` when no config file is loadable (tests,
+      API users) **or the file doesn't parse** (amendment 3: a half-edited
+      toml must not silently swap in hard defaults mid-run);
+    - otherwise the live ``[transports.telegram.files]``.
+    """
+    frozen = cfg.outbox_config
+    if cfg.send_file is None or frozen is None:
+        return None
+    try:
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+    except Exception:  # noqa: BLE001
+        logger.warning("outbox_settings.load_failed", exc_info=True)
+        return frozen
+    if result is None:
+        return frozen
+    settings, _ = result
+    try:
+        files = settings.transports.telegram.files
+    except AttributeError:
+        return frozen
+    if not (files.enabled and files.outbox_enabled):
+        return None
+    return files
+
+
 def _is_signal_death(rc: int | None) -> bool:
     """Return True if the return code indicates the process was killed by a signal.
 
@@ -531,12 +569,81 @@ def _format_outbox_skipped_notice(skipped: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+_OUTBOX_NOTICE_NAME_CAP = 5
+
+
+def _format_outbox_stale_notice(
+    stale: list[tuple[str, float]],
+    *,
+    archived_to: str | None,
+    cleanup: bool,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: one block for outbox entries that predate the run (not sent).
+
+    Newest first, up to 5 names, plus the count and the date range.
+    """
+    from datetime import datetime
+
+    count = len(stale)
+    noun, verb = ("file", "was") if count == 1 else ("files", "were")
+    times = [t for _, t in stale]
+    first = datetime.fromtimestamp(min(times)).strftime("%Y-%m-%d")
+    last = datetime.fromtimestamp(max(times)).strftime("%Y-%m-%d")
+    span = first if first == last else f"{first} – {last}"
+    lines = [
+        f"\U0001f4ce {count} older {noun} {verb} already in {outbox_dir}/ "
+        f"before this run ({span}), so they weren't sent:"
+    ]
+    items = sorted(stale, key=lambda kv: kv[1], reverse=True)
+    for name, _ in items[:_OUTBOX_NOTICE_NAME_CAP]:
+        lines.append(f"- {name}")
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        lines.append(f"- … and {count - _OUTBOX_NOTICE_NAME_CAP} more")
+    if archived_to is not None:
+        graveyard = archived_to.rstrip("/")
+        lines.append(
+            f"Moved to {archived_to} — /file get {graveyard} fetches them as a zip."
+        )
+    elif not cleanup:
+        lines.append("Left in place (outbox_cleanup is off).")
+    else:
+        lines.append("Left in place (moving them aside failed).")
+    return "\n".join(lines)
+
+
+def _format_outbox_overflow_notice(
+    overflow: list[str],
+    *,
+    max_files: int | None,
+    archived_to: str | None,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: fresh files beyond ``outbox_max_files`` — previously hidden."""
+    count = len(overflow)
+    noun, verb = ("file", "wasn't") if count == 1 else ("files", "weren't")
+    names = ", ".join(overflow[:_OUTBOX_NOTICE_NAME_CAP])
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        names += f" and {count - _OUTBOX_NOTICE_NAME_CAP} more"
+    where = (
+        f"moved to {archived_to}"
+        if archived_to is not None
+        else f"left in {outbox_dir}/"
+    )
+    return (
+        f"\U0001f4ce {count} more {noun} {verb} sent "
+        f"(limit outbox_max_files = {max_files}): {names} — {where}."
+    )
+
+
 async def _surface_outbox_skipped(
     cfg: ExecBridgeConfig,
     incoming: IncomingMessage,
     user_ref: MessageRef,
     skipped: list[tuple[str, str]],
     outbox_config: Any,
+    *,
+    result: Any | None = None,
 ) -> None:
     """#524 rc20 follow-up: send the 📎 Outbox skipped notice as a follow-up
     Telegram message. Extracted so the same surface fires from both the
@@ -547,15 +654,40 @@ async def _surface_outbox_skipped(
     The "..." pseudo-entry is the max-files-exceeded notice which we keep
     in logs but skip from the user-facing block (the per-file reason there
     isn't actionable).
+
+    #924: pass the delivery's ``OutboxResult`` as ``result`` to add the
+    stale-files block and the overflow block. All three blocks go out as one
+    message, all gated by ``outbox_notify_skipped``.
     """
-    if not skipped:
-        return
     if not getattr(outbox_config, "outbox_notify_skipped", True):
         return
+    blocks: list[str] = []
     notable = [(name, reason) for (name, reason) in skipped if name != "..."]
-    if not notable:
+    if notable:
+        blocks.append(_format_outbox_skipped_notice(notable))
+    if result is not None:
+        outbox_dir = getattr(result, "outbox_dir", ".untether-outbox")
+        if getattr(result, "stale", None):
+            blocks.append(
+                _format_outbox_stale_notice(
+                    result.stale,
+                    archived_to=result.stale_archived_to,
+                    cleanup=result.cleanup,
+                    outbox_dir=outbox_dir,
+                )
+            )
+        if getattr(result, "overflow", None):
+            blocks.append(
+                _format_outbox_overflow_notice(
+                    result.overflow,
+                    max_files=result.overflow_limit,
+                    archived_to=result.overflow_archived_to,
+                    outbox_dir=outbox_dir,
+                )
+            )
+    if not blocks:
         return
-    text = _format_outbox_skipped_notice(notable)
+    text = "\n\n".join(blocks)
     try:
         await cfg.transport.send(
             channel_id=incoming.channel_id,
@@ -717,6 +849,9 @@ _DEFAULT_PREAMBLE = (
     "  - To send files to the user, write them to `.untether-outbox/`\n"
     "  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n"
     "  - Files are delivered as Telegram documents when the run completes\n"
+    "  - Only files written or copied into it during this run are sent — "
+    "older leftovers are moved aside. To resend an older file, copy it in "
+    "again.\n"
     "  - The user can also request any project file with `/file get <path>`\n"
     "  ### Next Steps\n"
     "  - [Remaining work, if any]\n"
@@ -5331,10 +5466,17 @@ async def handle_message(
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
     quarantine_store: QuarantineStore | None = None,
+    outbox_since: float | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
     _stream_idle_retried_count: int = 0,
 ) -> None:
+    # #924: wall-clock start of this executor dispatch (same clock as the
+    # filesystem). Only outbox entries that changed since then are sent; the
+    # recovery re-entries below inherit it. Taken here when the caller (tests,
+    # API users) didn't supply one.
+    run_outbox_since = outbox_since if outbox_since is not None else time.time()
+    outbox_seen: set[tuple[str, int, int]] = set()
     logger.info(
         "handle.incoming",
         channel_id=incoming.channel_id,
@@ -6421,11 +6563,34 @@ async def handle_message(
         engine_state = getattr(edits.stream, "engine_state", None)
         return bool(getattr(engine_state, "live_mode", False))
 
+    def _outbox_cutoffs(oc: Any, run_root: Path) -> tuple[float | None, float | None]:
+        """#924: (send_after, archive_before) for this delivery. Send uses
+        this dispatch's own start; archive uses the oldest active run on the
+        same project root, so one chat finishing can't quarantine a file a
+        concurrent, earlier-started run (same project) is about to deliver.
+        ``send`` policy = no age classification (legacy kill switch)."""
+        if getattr(oc, "outbox_stale_policy", "archive") == "send":
+            return None, None
+        from .telegram.outbox_delivery import (
+            _OUTBOX_FRESH_GRACE_S,
+            oldest_active_since,
+        )
+
+        send_after = run_outbox_since - _OUTBOX_FRESH_GRACE_S
+        archive_before = (
+            min(oldest_active_since(run_root, run_outbox_since), run_outbox_since)
+            - _OUTBOX_FRESH_GRACE_S
+        )
+        return send_after, archive_before
+
     async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
         """Deliver ``.untether-outbox/`` right after a live turn's final —
         a live run's generator only returns when the session closes, which
-        would hold turn files back until then."""
-        if cfg.send_file is None or cfg.outbox_config is None:
+        would hold turn files back until then. #924: the cutoff is the
+        session's (dispatch's) start, not the turn's — a background task
+        started in turn 2 can write before the wake turn that reports it."""
+        oc = _load_outbox_settings(cfg)
+        if cfg.send_file is None or oc is None:
             return
         from .telegram.outbox_delivery import deliver_outbox_files
         from .utils.paths import get_run_base_dir
@@ -6433,8 +6598,8 @@ async def handle_message(
         run_root = get_run_base_dir()
         if run_root is None:
             return
-        oc = cfg.outbox_config
         outbox_early["delivered"] = True
+        send_after, archive_before = _outbox_cutoffs(oc, run_root)
         try:
             result = await deliver_outbox_files(
                 send_file=cfg.send_file,
@@ -6448,11 +6613,16 @@ async def handle_message(
                 max_files=oc.outbox_max_files,
                 cleanup=oc.outbox_cleanup,
                 deliver_directories=getattr(oc, "outbox_deliver_directories", "off"),
+                send_after=send_after,
+                archive_before=archive_before,
+                seen=outbox_seen,
             )
         except Exception:  # noqa: BLE001
             logger.warning("outbox.delivery_failed", exc_info=True)
             return
-        await _surface_outbox_skipped(cfg, incoming, user_ref, result.skipped, oc)
+        await _surface_outbox_skipped(
+            cfg, incoming, user_ref, result.skipped, oc, result=result
+        )
 
     # #829: whether this run's closing notice named tasks — only then does
     # the "closed" outcome get its own line.
@@ -7284,6 +7454,8 @@ async def handle_message(
                 # #631 (T6): thread the resolved store through so an
                 # injected/singleton store survives this recursive re-entry.
                 quarantine_store=_qstore,
+                # #924: the dispatch's outbox cutoff survives the re-entry.
+                outbox_since=run_outbox_since,
                 # Carry ALL recovery counters so an alternating empty-resume ↔
                 # auto-continue ↔ stream-idle-retry chain can't reset another
                 # guard and loop.
@@ -7353,13 +7525,15 @@ async def handle_message(
             # on lba-1 before this fix. Failure to deliver must NOT block
             # auto-continue itself \u2014 the recovery is more important than
             # any single batch of files.
-            if cfg.send_file is not None and cfg.outbox_config is not None:
+            _ac_oc = _load_outbox_settings(cfg)
+            if cfg.send_file is not None and _ac_oc is not None:
                 from .telegram.outbox_delivery import deliver_outbox_files
                 from .utils.paths import get_run_base_dir
 
                 _run_root = get_run_base_dir()
                 if _run_root is not None:
-                    _oc = cfg.outbox_config
+                    _oc = _ac_oc
+                    _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
                     try:
                         result = await deliver_outbox_files(
                             send_file=cfg.send_file,
@@ -7375,6 +7549,9 @@ async def handle_message(
                             deliver_directories=getattr(
                                 _oc, "outbox_deliver_directories", "off"
                             ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
                         )
                         logger.info(
                             "outbox.delivered_pre_auto_continue",
@@ -7395,6 +7572,7 @@ async def handle_message(
                             user_ref,
                             result.skipped,
                             _oc,
+                            result=result,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning(
@@ -7439,6 +7617,8 @@ async def handle_message(
                 # #631 (T6): thread the resolved store through so an
                 # injected/singleton store survives this recursive re-entry.
                 quarantine_store=_qstore,
+                # #924: files subprocess 1 wrote stay fresh for subprocess 2.
+                outbox_since=run_outbox_since,
                 _auto_continued_count=_auto_continued_count + 1,
                 # Carry the other recovery guards so they can't be reset by an
                 # interleaved auto-continue (see #596 auto-resend / #572 retry).
@@ -7524,6 +7704,7 @@ async def handle_message(
                 on_resume_failed=on_resume_failed,
                 clock=clock,
                 quarantine_store=_qstore,
+                outbox_since=run_outbox_since,  # #924
                 # Carry the other recovery counters so an alternating chain
                 # can't reset another guard and loop.
                 _auto_continued_count=_auto_continued_count,
@@ -7542,21 +7723,23 @@ async def handle_message(
         # Delivery of *sent* files still requires a successful run (failures
         # may leave the outbox in a partially-written state), but the user
         # should always learn what the agent intended to send.
-        if (
-            cfg.send_file is not None
-            and cfg.outbox_config is not None
-            and not outbox_early["delivered"]
-        ):
+        _end_oc = (
+            _load_outbox_settings(cfg)
+            if cfg.send_file is not None and not outbox_early["delivered"]
+            else None
+        )
+        if _end_oc is not None:
             from .telegram.outbox_delivery import (
                 OutboxResult,
+                classify_outbox,
                 deliver_outbox_files,
-                scan_outbox,
             )
             from .utils.paths import get_run_base_dir
 
             _run_root = get_run_base_dir()
             if _run_root is not None:
-                _oc = cfg.outbox_config
+                _oc = _end_oc
+                _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
                 _outbox_result: OutboxResult | None = None
                 if run_ok is not False:
                     try:
@@ -7574,6 +7757,9 @@ async def handle_message(
                             deliver_directories=getattr(
                                 _oc, "outbox_deliver_directories", "off"
                             ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning("outbox.delivery_failed", exc_info=True)
@@ -7581,15 +7767,20 @@ async def handle_message(
                 else:
                     # Failed run: skip file delivery but still scan so the user
                     # gets the 📎 Outbox skipped notice for any directory or
-                    # blocked entry the agent left behind.
+                    # blocked entry the agent left behind. #924: fresh entries
+                    # only — no stale reporting or archiving on a failed run
+                    # (stale entries wait for the next successful run).
                     try:
-                        _, _failed_skipped = scan_outbox(
+                        _failed_skipped = classify_outbox(
                             _run_root,
                             outbox_dir=_oc.outbox_dir,
                             deny_globs=_oc.deny_globs,
                             max_download_bytes=_oc.max_download_bytes,
                             max_files=_oc.outbox_max_files,
-                        )
+                            send_after=_send_after,
+                            archive_before=None,
+                            seen=outbox_seen,
+                        ).skipped
                     except Exception:  # noqa: BLE001
                         logger.debug("outbox.failed_run_scan_error", exc_info=True)
                         _failed_skipped = []
@@ -7602,6 +7793,7 @@ async def handle_message(
                         user_ref,
                         _outbox_result.skipped,
                         _oc,
+                        result=_outbox_result,
                     )
     except BaseException:
         release_reason = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -42,6 +43,7 @@ from ..engine_overrides import (
     drop_unsupported_reasoning,
     supports_reasoning,
 )
+from ..outbox_delivery import outbox_run_scope
 
 logger = get_logger(__name__)
 
@@ -340,7 +342,14 @@ async def _run_engine(
                 reply_to=reply_ref,
                 thread_id=thread_id,
             )
-            with apply_run_options(run_options):
+            # #924: one outbox cutoff per dispatch (wall clock, before the
+            # engine spawns), registered against the run's cwd so a
+            # concurrent same-project run can't quarantine this run's files.
+            outbox_since = time.time()
+            with (
+                apply_run_options(run_options),
+                outbox_run_scope(cwd, outbox_since),
+            ):
                 await handle_message(
                     exec_cfg,
                     runner=runner,
@@ -353,6 +362,7 @@ async def _run_engine(
                     on_thread_known=on_thread_known,
                     on_resume_failed=on_resume_failed,
                     progress_ref=progress_ref,
+                    outbox_since=outbox_since,
                 )
         finally:
             reset_run_base_dir(run_base_token)

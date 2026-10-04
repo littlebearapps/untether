@@ -110,6 +110,12 @@ class TelegramFilesSettings(BaseModel):
     # attachment per directory. Directories with no deliverable members (all
     # denied/empty) or an oversize zip fall back to the #600 archive.
     outbox_deliver_directories: Literal["off", "zip"] = "off"
+    # #924: deliver only entries written or copied into the outbox during the
+    # run (``max(mtime, ctime)`` ≥ the run's start, 5 s grace). "archive"
+    # (default) moves older leftovers once to ``<outbox>/.skipped/`` with one
+    # notice; "send" is the legacy deliver-everything behaviour (kill switch).
+    # Hot-reloads (read per delivery); not in RESTART_REQUIRED_FIELDS.
+    outbox_stale_policy: Literal["archive", "send"] = "archive"
 
     @field_validator("uploads_dir")
     @classmethod

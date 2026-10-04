@@ -927,6 +927,27 @@ def test_files_outbox_max_files_range() -> None:
         TelegramFilesSettings(outbox_max_files=51)
 
 
+def test_files_outbox_stale_policy_default_archive() -> None:
+    """#924: decided default — older outbox leftovers are quarantined."""
+    from untether.settings import TelegramFilesSettings, TelegramTransportSettings
+
+    assert TelegramFilesSettings().outbox_stale_policy == "archive"
+    assert TelegramFilesSettings(outbox_stale_policy="send").outbox_stale_policy == (
+        "send"
+    )
+    # hot-reloadable, not restart-only
+    assert "files" not in TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+
+
+def test_files_outbox_stale_policy_rejects_unknown() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(outbox_stale_policy="skip")
+
+
 # ── AutoContinueSettings ──
 
 

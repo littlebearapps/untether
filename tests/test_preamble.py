@@ -64,6 +64,13 @@ def test_default_preamble_includes_outbox_instructions() -> None:
     assert "/file get" in _DEFAULT_PREAMBLE
 
 
+def test_preamble_mentions_outbox_freshness() -> None:
+    """#924: only files written during the run are sent; agents must copy an
+    older file in again to resend it."""
+    assert "during this run are sent" in _DEFAULT_PREAMBLE
+    assert "copy it in again" in _DEFAULT_PREAMBLE
+
+
 def test_default_preamble_warns_against_systemctl_restart() -> None:
     """#547 axis 1: agents routinely follow ``edit untether.toml`` with
     ``systemctl --user restart untether`` because their training data is

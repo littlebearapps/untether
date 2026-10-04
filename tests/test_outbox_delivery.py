@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
+from untether.telegram import outbox_delivery as od
 from untether.telegram.outbox_delivery import (
     cleanup_outbox,
     deliver_outbox_files,
@@ -772,3 +775,333 @@ async def test_628_zip_build_error_falls_back_to_archive(
     assert (outbox / ".skipped" / "boom").is_dir()
     reasons = dict(result.skipped)
     assert "zip failed" in reasons["boom"]
+
+
+# -- #924: run-scoped freshness, stale quarantine, overflow --
+
+
+def _classify(tmp_path: Path, **overrides) -> od.OutboxScan:
+    kwargs = {
+        "outbox_dir": ".untether-outbox",
+        "deny_globs": DENY_GLOBS,
+        "max_download_bytes": MAX_BYTES,
+        "max_files": 10,
+        "send_after": None,
+        "archive_before": None,
+        "seen": None,
+    }
+    kwargs.update(overrides)
+    return od.classify_outbox(tmp_path, **kwargs)
+
+
+def _future() -> float:
+    """A cutoff after every file the test just wrote (ctime can't be
+    backdated, so "stale" means "before the cutoff")."""
+    return time.time() + 10
+
+
+def test_924_entry_changed_at_uses_max_of_mtime_and_ctime() -> None:
+    def _st(mtime: float, ctime: float) -> os.stat_result:
+        return os.stat_result((0o100644, 0, 0, 1, 0, 0, 5, 0, mtime, ctime))
+
+    assert od.entry_changed_at(_st(100.0, 200.0)) == 200.0
+    assert od.entry_changed_at(_st(300.0, 200.0)) == 300.0
+
+
+def test_924_preexisting_files_classified_stale_and_not_sent(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    for n in range(3):
+        (outbox / f"old-{n}.md").write_text("old", encoding="utf-8")
+    cutoff = _future()
+    scan = _classify(tmp_path, send_after=cutoff, archive_before=cutoff)
+    assert scan.files == []
+    assert sorted(n for n, _ in scan.stale) == ["old-0.md", "old-1.md", "old-2.md"]
+    assert scan.skipped == []
+
+
+def test_924_moved_in_file_with_old_mtime_is_fresh(tmp_path: Path) -> None:
+    """`mv`/`cp -p` keep mtime; ctime is "now", so the file still counts."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    p = outbox / "report.md"
+    p.write_text("report", encoding="utf-8")
+    os.utime(p, (0, 0))  # mtime 1970, ctime now
+    since = time.time() - 60
+    scan = _classify(tmp_path, send_after=since, archive_before=since)
+    assert [f.abs_path.name for f in scan.files] == ["report.md"]
+    assert scan.stale == []
+
+
+@pytest.mark.anyio
+async def test_924_stale_archived_to_skipped_once(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    send_file = AsyncMock()
+    cutoff = _future()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, send_file=send_file, send_after=cutoff, archive_before=cutoff
+        )
+    )
+    send_file.assert_not_called()
+    assert [n for n, _ in result.stale] == ["old.md"]
+    assert result.stale_archived_to == ".untether-outbox/.skipped/"
+    assert (outbox / ".skipped" / "old.md").is_file()
+    assert not (outbox / "old.md").exists()
+
+    again = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, send_file=send_file, send_after=cutoff, archive_before=cutoff
+        )
+    )
+    assert again.stale == []
+    assert again.skipped == []
+    send_file.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_924_cleanup_false_leaves_stale_in_place(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "old.md").write_text("old", encoding="utf-8")
+    cutoff = _future()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, cleanup=False, send_after=cutoff, archive_before=cutoff
+        )
+    )
+    assert [n for n, _ in result.stale] == ["old.md"]
+    assert result.stale_archived_to is None
+    assert (outbox / "old.md").is_file()
+    assert not (outbox / ".skipped").exists()
+
+
+@pytest.mark.anyio
+async def test_924_policy_send_none_cutoffs_is_legacy(tmp_path: Path) -> None:
+    """Kill switch: no cutoffs = no age classification (old files sent)."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    p = outbox / "old.md"
+    p.write_text("old", encoding="utf-8")
+    os.utime(p, (0, 0))
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file)
+    )
+    send_file.assert_called_once()
+    assert result.stale == []
+
+
+def test_924_between_cutoffs_neither_sent_nor_archived(tmp_path: Path) -> None:
+    """Concurrent-run guard: newer than the oldest active same-root run's
+    start (archive cutoff) but older than this run's own start (send
+    cutoff) → left alone for the run that owns it."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "theirs.md").write_text("x", encoding="utf-8")
+    scan = _classify(tmp_path, send_after=_future(), archive_before=time.time() - 60)
+    assert scan.files == []
+    assert scan.stale == []
+    assert scan.skipped == []
+    assert scan.overflow == []
+
+
+@pytest.mark.anyio
+async def test_924_cap_applies_to_fresh_only_and_dirs_still_classified(
+    tmp_path: Path,
+) -> None:
+    """Regression for the old `break` at max_files: entries sorting after
+    the 10th file (here `zz/`) were never classified or archived."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    for n in range(12):
+        (outbox / f"f{n:02d}.md").write_text("x", encoding="utf-8")
+    (outbox / "zz").mkdir()
+    send_file = AsyncMock()
+    since = time.time() - 60
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, send_file=send_file, send_after=since, archive_before=since
+        )
+    )
+    assert send_file.call_count == 10
+    assert result.overflow == ["f10.md", "f11.md"]
+    assert result.overflow_limit == 10
+    assert (outbox / ".skipped" / "zz").is_dir()
+
+
+@pytest.mark.anyio
+async def test_924_overflow_archived_when_cleanup(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    for n in range(3):
+        (outbox / f"f{n}.md").write_text("x", encoding="utf-8")
+    since = time.time() - 60
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, max_files=1, send_after=since, archive_before=since)
+    )
+    assert result.overflow == ["f1.md", "f2.md"]
+    assert result.overflow_archived_to == ".untether-outbox/.skipped/"
+    assert (outbox / ".skipped" / "f1.md").is_file()
+    assert (outbox / ".skipped" / "f2.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_924_stale_dir_archived_not_zipped_in_zip_mode(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "shots").mkdir(parents=True)
+    (outbox / "shots" / "a.png").write_bytes(b"png")
+    send_file = AsyncMock()
+    cutoff = _future()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path,
+            send_file=send_file,
+            deliver_directories="zip",
+            send_after=cutoff,
+            archive_before=cutoff,
+        )
+    )
+    send_file.assert_not_called()
+    assert [n for n, _ in result.stale] == ["shots"]
+    assert (outbox / ".skipped" / "shots" / "a.png").is_file()
+
+
+def test_924_graveyard_file_collision_keeps_extension(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / ".skipped").mkdir(parents=True)
+    (outbox / ".skipped" / "plan.md").write_text("first", encoding="utf-8")
+    (outbox / "plan.md").write_text("second", encoding="utf-8")
+    rel = od._move_to_graveyard(tmp_path, ".untether-outbox", "plan.md")
+    assert rel == ".untether-outbox/.skipped/plan_1.md"
+    assert (outbox / ".skipped" / "plan_1.md").read_text(encoding="utf-8") == "second"
+
+
+def test_924_graveyard_never_archived_into_itself(tmp_path: Path) -> None:
+    """Amendment 2: the graveyard is checked before freshness, so `.skipped/`
+    can never be classified stale and moved into itself."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / ".skipped").mkdir(parents=True)
+    (outbox / ".skipped" / "old.md").write_text("x", encoding="utf-8")
+    cutoff = _future()
+    scan = _classify(tmp_path, send_after=cutoff, archive_before=cutoff)
+    assert scan.stale == []
+    assert scan.skipped == []
+
+
+def test_924_stale_symlink_moved_not_followed(tmp_path: Path) -> None:
+    """Amendment 2: a stale symlink is renamed itself — its target is never
+    followed, copied or moved."""
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "link.txt").symlink_to(outside)
+    cutoff = _future()
+    scan = _classify(tmp_path, send_after=cutoff, archive_before=cutoff)
+    assert [n for n, _ in scan.stale] == ["link.txt"]
+    rel = od._archive_entries(tmp_path, ".untether-outbox", ["link.txt"])
+    assert rel == ".untether-outbox/.skipped/"
+    moved = outbox / ".skipped" / "link.txt"
+    assert moved.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+
+def test_924_symlinked_graveyard_refused(tmp_path: Path) -> None:
+    """A `.skipped` that is a symlink would move files outside the project."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / ".skipped").symlink_to(elsewhere, target_is_directory=True)
+    (outbox / "old.md").write_text("x", encoding="utf-8")
+    assert od._archive_entries(tmp_path, ".untether-outbox", ["old.md"]) is None
+    assert (outbox / "old.md").is_file()
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_924_seen_set_prevents_resend_with_cleanup_false(tmp_path: Path) -> None:
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "a.md").write_text("a", encoding="utf-8")
+    (outbox / "dir").mkdir()
+    send_file = AsyncMock()
+    seen: set = set()
+    since = time.time() - 60
+    first = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path,
+            send_file=send_file,
+            cleanup=False,
+            send_after=since,
+            archive_before=since,
+            seen=seen,
+        )
+    )
+    assert len(first.sent) == 1
+    assert [n for n, _ in first.skipped] == ["dir"]
+    second = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path,
+            send_file=send_file,
+            cleanup=False,
+            send_after=since,
+            archive_before=since,
+            seen=seen,
+        )
+    )
+    assert second.sent == []
+    assert second.skipped == []
+    assert send_file.call_count == 1
+
+
+def test_924_registry_oldest_active_since(tmp_path: Path) -> None:
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    assert od.oldest_active_since(root_a, 500.0) == 500.0
+    with od.outbox_run_scope(root_a, 100.0):
+        with od.outbox_run_scope(root_a, 200.0):
+            assert od.oldest_active_since(root_a, 300.0) == 100.0
+            assert od.oldest_active_since(root_b, 300.0) == 300.0
+        assert od.oldest_active_since(root_a, 300.0) == 100.0
+    assert od.oldest_active_since(root_a, 300.0) == 300.0
+
+    with pytest.raises(RuntimeError), od.outbox_run_scope(root_a, 50.0):
+        raise RuntimeError("boom")
+    assert od.oldest_active_since(root_a, 300.0) == 300.0
+
+    with od.outbox_run_scope(None, 10.0):  # no cwd → registers nothing
+        assert od.oldest_active_since(root_a, 300.0) == 300.0
+
+
+def test_924_registry_key_matches_delivery_root(tmp_path: Path) -> None:
+    """Amendment 1: the executor registers with the run's cwd and delivery
+    queries with ``get_run_base_dir()`` (the same cwd). A symlinked project
+    path resolves to the same key; a separate worktree (`@branch` cwd) stays
+    isolated from the main checkout."""
+    from untether.utils.paths import (
+        get_run_base_dir,
+        reset_run_base_dir,
+        set_run_base_dir,
+    )
+
+    real = tmp_path / "project"
+    real.mkdir()
+    link = tmp_path / "project-link"
+    link.symlink_to(real, target_is_directory=True)
+    worktree = tmp_path / "worktrees" / "feature"
+    worktree.mkdir(parents=True)
+
+    token = set_run_base_dir(link)
+    try:
+        with od.outbox_run_scope(get_run_base_dir(), 100.0):
+            assert od.oldest_active_since(real, 300.0) == 100.0
+            assert od.oldest_active_since(get_run_base_dir(), 300.0) == 100.0
+            assert od.oldest_active_since(worktree, 300.0) == 300.0
+    finally:
+        reset_run_base_dir(token)

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import io
 import os
 import shutil
 import stat
 import zipfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +51,161 @@ class OutboxResult:
     sent: list[OutboxFile] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     cleaned: bool = False
+    # #924: entries that predate the run (name, changed-at epoch seconds),
+    # and where they were quarantined (None = left in place).
+    stale: list[tuple[str, float]] = field(default_factory=list)
+    stale_archived_to: str | None = None
+    # #924: fresh files beyond ``max_files`` — surfaced, never auto-sent later.
+    overflow: list[str] = field(default_factory=list)
+    overflow_archived_to: str | None = None
+    overflow_limit: int | None = None
+    cleanup: bool = False
+    outbox_dir: str = ".untether-outbox"
+
+
+# #924: an outbox entry is "fresh" for a run when it last changed (or arrived)
+# no earlier than this many seconds before the run started. Covers coarse
+# filesystem timestamps (HFS+ 1 s, FAT 2 s) and small clock skew.
+_OUTBOX_FRESH_GRACE_S = 5.0
+
+SeenKey = tuple[str, int, int]
+
+
+def entry_changed_at(st: os.stat_result) -> float:
+    """#924: when an entry last changed or entered the directory.
+
+    ``st_mtime`` alone is user-settable and survives ``mv`` / ``cp -p`` /
+    ``rsync -a``, so a report written last week and moved into the outbox
+    today would look old. ``st_ctime`` can't be set from userspace and is
+    bumped by ``rename(2)`` and by creating a new inode, so the max of the two
+    answers "when did this land here".
+    """
+    return max(st.st_mtime, st.st_ctime)
+
+
+def _seen_key(name: str, st: os.stat_result) -> SeenKey:
+    return (name, st.st_mtime_ns, st.st_size)
+
+
+@dataclass(slots=True)
+class OutboxScan:
+    """#924: full classification of one outbox scan."""
+
+    files: list[OutboxFile] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    stale: list[tuple[str, float]] = field(default_factory=list)
+    overflow: list[str] = field(default_factory=list)
+    keys: dict[str, SeenKey] = field(default_factory=dict)
+
+
+def classify_outbox(
+    run_root: Path,
+    *,
+    outbox_dir: str,
+    deny_globs: Sequence[str],
+    max_download_bytes: int,
+    max_files: int,
+    send_after: float | None = None,
+    archive_before: float | None = None,
+    seen: set[SeenKey] | None = None,
+) -> OutboxScan:
+    """Classify every outbox entry. Flat scan only — no recursion.
+
+    #924 cutoffs (epoch seconds, already grace-adjusted by the caller):
+
+    - ``changed < archive_before`` → ``stale`` (predates every active run on
+      this project root);
+    - ``changed < send_after`` → left alone (another, earlier-started run on
+      the same root may still deliver it);
+    - otherwise the existing checks, then the ``max_files`` cap applies to the
+      deliverable files only (the rest → ``overflow``).
+
+    ``None`` cutoffs = no age classification (legacy / ``send`` policy).
+    Entries whose seen-key is in ``seen`` were already handled this run.
+    Every entry is ``lstat``-ed once; symlinks are never followed.
+    """
+    scan = OutboxScan()
+    target = run_root / outbox_dir
+    if not target.is_dir():
+        return scan
+
+    if (
+        archive_before is not None
+        and send_after is not None
+        and archive_before > send_after
+    ):
+        archive_before = send_after
+
+    deliverable: list[OutboxFile] = []
+    for entry in sorted(target.iterdir(), key=lambda p: p.name):
+        name = entry.name
+        # #600: never re-report the graveyard of previously-archived skipped
+        # entries — and (#924 amendment 2) check it BEFORE freshness so the
+        # graveyard can never be classified stale and archived into itself.
+        if name == _SKIPPED_GRAVEYARD:
+            continue
+        try:
+            st = entry.lstat()
+        except OSError:
+            scan.skipped.append((name, "stat failed"))
+            continue
+        key = _seen_key(name, st)
+        if seen is not None and key in seen:
+            continue
+        changed = entry_changed_at(st)
+        if archive_before is not None and changed < archive_before:
+            scan.stale.append((name, changed))
+            scan.keys[name] = key
+            continue
+        if send_after is not None and changed < send_after:
+            continue  # between the cutoffs: owned by an earlier active run
+        scan.keys[name] = key
+
+        if stat.S_ISLNK(st.st_mode):
+            scan.skipped.append((name, "symlink"))
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            scan.skipped.append((name, "directory"))
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            scan.keys.pop(name, None)
+            continue
+
+        rel_path = Path(outbox_dir) / name
+
+        # Security: resolve within project root
+        resolved = resolve_path_within_root(run_root, rel_path)
+        if resolved is None:
+            scan.skipped.append((name, "outside project root"))
+            continue
+
+        # Deny globs
+        denied = deny_reason(rel_path, deny_globs)
+        if denied is not None:
+            scan.skipped.append((name, f"denied by glob: {denied}"))
+            continue
+
+        size = st.st_size
+        if size > max_download_bytes:
+            scan.skipped.append(
+                (
+                    name,
+                    f"too large: {format_bytes(size)} > {format_bytes(max_download_bytes)}",
+                )
+            )
+            continue
+
+        if size == 0:
+            scan.skipped.append((name, "empty file"))
+            continue
+
+        deliverable.append(OutboxFile(rel_path=rel_path, abs_path=resolved, size=size))
+
+    # #924: classify everything first, then cap the deliverable files only —
+    # the old ``break`` left later entries (dirs included) unclassified.
+    scan.files = deliverable[:max_files]
+    scan.overflow = [f.rel_path.name for f in deliverable[max_files:]]
+    return scan
 
 
 def scan_outbox(
@@ -58,77 +216,74 @@ def scan_outbox(
     max_download_bytes: int,
     max_files: int,
 ) -> tuple[list[OutboxFile], list[tuple[str, str]]]:
-    """Scan the outbox directory for files to send.
+    """Scan the outbox directory for files to send (no age classification).
 
-    Returns (files_to_send, skipped_with_reason). Flat scan only — no recursion.
+    Returns (files_to_send, skipped_with_reason); files beyond ``max_files``
+    are summarised as a ``("...", "N more files exceeded max_files=…")``
+    entry. Thin wrapper over :func:`classify_outbox`.
     """
-    target = run_root / outbox_dir
-    if not target.is_dir():
-        return [], []
+    scan = classify_outbox(
+        run_root,
+        outbox_dir=outbox_dir,
+        deny_globs=deny_globs,
+        max_download_bytes=max_download_bytes,
+        max_files=max_files,
+    )
+    skipped = list(scan.skipped)
+    if scan.overflow:
+        skipped.append(
+            ("...", f"{len(scan.overflow)} more files exceeded max_files={max_files}")
+        )
+    return scan.files, skipped
 
-    files: list[OutboxFile] = []
-    skipped: list[tuple[str, str]] = []
 
-    entries = sorted(target.iterdir(), key=lambda p: p.name)
-    for entry in entries:
-        name = entry.name
-        # #600: never re-report the graveyard of previously-archived
-        # skipped directories.
-        if name == _SKIPPED_GRAVEYARD:
-            continue
-        if not entry.is_file() or entry.is_symlink():
-            if entry.is_symlink():
-                skipped.append((name, "symlink"))
-            elif entry.is_dir():
-                skipped.append((name, "directory"))
-            continue
+# ── #924: active-run registry (archive cutoff across same-root runs) ──────
 
-        rel_path = Path(outbox_dir) / name
+_ACTIVE_RUNS: dict[str, list[float]] = {}
 
-        # Security: resolve within project root
-        resolved = resolve_path_within_root(run_root, rel_path)
-        if resolved is None:
-            skipped.append((name, "outside project root"))
-            continue
 
-        # Deny globs
-        denied = deny_reason(rel_path, deny_globs)
-        if denied is not None:
-            skipped.append((name, f"denied by glob: {denied}"))
-            continue
+def _registry_key(run_root: Path | str) -> str:
+    """One key derivation for registration and lookup (amendment 1): the
+    resolved form of the run's cwd, i.e. what ``set_run_base_dir(cwd)``
+    stored and ``get_run_base_dir()`` returns at delivery."""
+    try:
+        return str(Path(run_root).resolve())
+    except (OSError, RuntimeError):
+        return str(run_root)
 
-        # Size check
-        try:
-            size = entry.stat().st_size
-        except OSError:
-            skipped.append((name, "stat failed"))
-            continue
 
-        if size > max_download_bytes:
-            skipped.append(
-                (
-                    name,
-                    f"too large: {format_bytes(size)} > {format_bytes(max_download_bytes)}",
-                )
-            )
-            continue
+@contextmanager
+def outbox_run_scope(run_root: Path | None, since: float) -> Iterator[None]:
+    """Register an active run on ``run_root`` that started at ``since``.
 
-        if size == 0:
-            skipped.append((name, "empty file"))
-            continue
+    While registered, other runs on the same root won't archive outbox
+    entries newer than ``since`` — they may be this run's deliverables.
+    ``None`` (no cwd) registers nothing.
+    """
+    if run_root is None:
+        yield
+        return
+    key = _registry_key(run_root)
+    _ACTIVE_RUNS.setdefault(key, []).append(since)
+    try:
+        yield
+    finally:
+        runs = _ACTIVE_RUNS.get(key)
+        if runs is not None:
+            with contextlib.suppress(ValueError):
+                runs.remove(since)
+            if not runs:
+                _ACTIVE_RUNS.pop(key, None)
 
-        files.append(OutboxFile(rel_path=rel_path, abs_path=resolved, size=size))
 
-        if len(files) >= max_files:
-            # Skip remaining entries
-            remaining = len(entries) - (entries.index(entry) + 1)
-            if remaining > 0:
-                skipped.append(
-                    ("...", f"{remaining} more files exceeded max_files={max_files}")
-                )
-            break
-
-    return files, skipped
+def oldest_active_since(run_root: Path | None, default: float) -> float:
+    """The earliest start among active runs on ``run_root`` (or ``default``)."""
+    if run_root is None:
+        return default
+    runs = _ACTIVE_RUNS.get(_registry_key(run_root))
+    if not runs:
+        return default
+    return min(default, *runs)
 
 
 def cleanup_outbox(
@@ -158,6 +313,41 @@ def cleanup_outbox(
     return False
 
 
+def _graveyard_dest(graveyard: Path, name: str, *, is_dir: bool) -> Path:
+    """Collision-free destination: directories get ``name_N``, files keep
+    their extension (``plan_1.md``, #924). ``lexists`` so a dangling symlink
+    at the destination is never silently replaced."""
+    dest = graveyard / name
+    suffix = 0
+    stem, ext = (name, "") if is_dir else (Path(name).stem, Path(name).suffix)
+    while os.path.lexists(dest):
+        suffix += 1
+        dest = graveyard / f"{stem}_{suffix}{ext}"
+    return dest
+
+
+def _move_to_graveyard(run_root: Path, outbox_dir: str, name: str) -> str | None:
+    """Move one outbox entry into ``<outbox>/.skipped/`` (#600, #924).
+
+    ``os.rename`` on the entry itself: a symlink is moved, never followed, and
+    nothing is copied. Refuses a graveyard that is itself a symlink (it could
+    point outside the project). Raises ``OSError`` on failure; returns the
+    relative destination path.
+    """
+    target = run_root / outbox_dir
+    graveyard = target / _SKIPPED_GRAVEYARD
+    src = target / name
+    if graveyard.is_symlink():
+        raise OSError(f"{graveyard} is a symlink; refusing to archive into it")
+    graveyard.mkdir(parents=True, exist_ok=True)
+    if graveyard.is_symlink() or not graveyard.is_dir():
+        raise OSError(f"{graveyard} is not a directory")
+    is_dir = stat.S_ISDIR(src.lstat().st_mode)
+    dest = _graveyard_dest(graveyard, name, is_dir=is_dir)
+    os.rename(src, dest)
+    return str(Path(outbox_dir) / _SKIPPED_GRAVEYARD / dest.name)
+
+
 def _move_dir_to_graveyard(run_root: Path, outbox_dir: str, name: str) -> str | None:
     """#600: move one skipped directory into ``<outbox>/.skipped/``.
 
@@ -165,17 +355,8 @@ def _move_dir_to_graveyard(run_root: Path, outbox_dir: str, name: str) -> str | 
     None on failure. Name collisions get a ``_1``/``_2`` suffix (mirrors the
     upload-dedup convention in ``telegram/files.py``).
     """
-    target = run_root / outbox_dir
-    graveyard = target / _SKIPPED_GRAVEYARD
-    src = target / name
     try:
-        graveyard.mkdir(parents=True, exist_ok=True)
-        dest = graveyard / name
-        suffix = 0
-        while dest.exists():
-            suffix += 1
-            dest = graveyard / f"{name}_{suffix}"
-        src.rename(dest)
+        rel_dest = _move_to_graveyard(run_root, outbox_dir, name)
     except OSError:
         logger.warning(
             "outbox.skipped_dir_archive_failed",
@@ -183,13 +364,33 @@ def _move_dir_to_graveyard(run_root: Path, outbox_dir: str, name: str) -> str | 
             exc_info=True,
         )
         return None
-    rel_dest = str(Path(outbox_dir) / _SKIPPED_GRAVEYARD / dest.name)
     logger.info(
         "outbox.skipped_dir_archived",
         directory=name,
         moved_to=rel_dest,
     )
     return rel_dest
+
+
+def _archive_entries(
+    run_root: Path, outbox_dir: str, names: Sequence[str]
+) -> str | None:
+    """#924: quarantine stale / overflow entries in ``<outbox>/.skipped/``.
+
+    Returns the graveyard's relative path (``.untether-outbox/.skipped/``)
+    when every move succeeded, else None. A failed move logs
+    ``outbox.stale_archive_failed`` and leaves that entry in place.
+    """
+    ok = True
+    for name in names:
+        try:
+            _move_to_graveyard(run_root, outbox_dir, name)
+        except OSError:
+            ok = False
+            logger.warning("outbox.stale_archive_failed", entry=name, exc_info=True)
+    if not ok:
+        return None
+    return f"{Path(outbox_dir) / _SKIPPED_GRAVEYARD}/"
 
 
 def _archive_skipped_dirs(
@@ -516,18 +717,79 @@ async def deliver_outbox_files(
     max_files: int,
     cleanup: bool,
     deliver_directories: str = "off",
+    send_after: float | None = None,
+    archive_before: float | None = None,
+    seen: set[SeenKey] | None = None,
 ) -> OutboxResult:
-    """Scan outbox, send files as Telegram documents, and optionally clean up."""
-    files, skipped = scan_outbox(
+    """Scan outbox, send files as Telegram documents, and optionally clean up.
+
+    #924: ``send_after`` / ``archive_before`` (epoch seconds, grace-adjusted)
+    restrict delivery to entries that changed during the run; older entries
+    are quarantined once (when ``cleanup``) and reported via
+    ``OutboxResult.stale``. Fresh files beyond ``max_files`` are reported as
+    ``overflow`` and, with age classification on, quarantined too. ``None``
+    cutoffs keep the legacy behaviour. ``seen`` (run-scoped) skips entries a
+    previous delivery in the same run already sent, archived or reported.
+    """
+    scan = classify_outbox(
         run_root,
         outbox_dir=outbox_dir,
         deny_globs=deny_globs,
         max_download_bytes=max_download_bytes,
         max_files=max_files,
+        send_after=send_after,
+        archive_before=archive_before,
+        seen=seen,
+    )
+    files, skipped = scan.files, scan.skipped
+
+    if not files and not skipped and not scan.stale and not scan.overflow:
+        return OutboxResult()
+
+    result = OutboxResult(
+        cleanup=cleanup, overflow_limit=max_files, outbox_dir=outbox_dir
     )
 
-    if not files and not skipped:
-        return OutboxResult()
+    if scan.stale:
+        result.stale = list(scan.stale)
+        if cleanup:
+            result.stale_archived_to = _archive_entries(
+                run_root, outbox_dir, [n for n, _ in scan.stale]
+            )
+        times = [t for _, t in scan.stale]
+        logger.info(
+            "outbox.stale",
+            count=len(scan.stale),
+            oldest=datetime.fromtimestamp(min(times)).isoformat(timespec="seconds"),
+            newest=datetime.fromtimestamp(max(times)).isoformat(timespec="seconds"),
+            archived=result.stale_archived_to is not None,
+            cutoff=archive_before,
+        )
+
+    if scan.overflow:
+        result.overflow = list(scan.overflow)
+        # Legacy (no cutoffs / ``send`` policy): overflow stays for a later
+        # run, as before. Otherwise quarantine it now so it is never
+        # attached to an unrelated later answer (#924's own mechanism).
+        if cleanup and send_after is not None:
+            result.overflow_archived_to = _archive_entries(
+                run_root, outbox_dir, scan.overflow
+            )
+        logger.info(
+            "outbox.overflow",
+            count=len(scan.overflow),
+            max_files=max_files,
+            archived=result.overflow_archived_to is not None,
+        )
+
+    if seen is not None:
+        for name, _ in scan.stale:
+            seen.add(scan.keys[name])
+        for name in scan.overflow:
+            seen.add(scan.keys[name])
+        for name, _ in skipped:
+            if name in scan.keys:
+                seen.add(scan.keys[name])
 
     if skipped:
         logger.info("outbox.skipped", skipped=skipped)
@@ -554,7 +816,7 @@ async def deliver_outbox_files(
                 # and re-notify on every subsequent run.
                 skipped = _archive_skipped_dirs(run_root, outbox_dir, skipped)
 
-    result = OutboxResult(skipped=skipped)
+    result.skipped = skipped
 
     for f in files:
         try:
@@ -569,6 +831,8 @@ async def deliver_outbox_files(
                 caption,
             )
             result.sent.append(f)
+            if seen is not None:
+                seen.add(scan.keys[f.rel_path.name])
             logger.info(
                 "outbox.sent",
                 file=str(f.rel_path),
