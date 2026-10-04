@@ -1,6 +1,7 @@
 #!/bin/bash
 # release-guard-mcp.sh — PreToolUse hook for GitHub MCP write tools
-# Always blocks merge_pull_request.
+# Allows merge_pull_request only for dev-targeting PRs; release merges to
+# master go through `gh pr merge` so release-guard.sh can check CI and ask.
 # Blocks push_files/create_or_update_file/delete_file targeting master/main.
 # Feature branches are allowed.
 # DO NOT MODIFY — protected by release-guard-protect.sh
@@ -39,12 +40,12 @@ if [ "$TOOL_NAME" = "mcp__github__merge_pull_request" ]; then
       exit 0
     fi
   fi
-  deny "🛑 RELEASE GUARD: PR merging to master/main via GitHub MCP is blocked.\n\nOnly merges to dev are allowed via Claude Code. Master merges must be done manually by Nathan."
+  deny "🛑 RELEASE GUARD: PR merging to master/main via GitHub MCP is blocked.\n\nMerge the dev→master release PR with: gh pr merge <number> --squash --admin\nThe Bash guard checks CI and asks Nathan to confirm the release (#917)."
 fi
 
 # Fallback: detect merge by input fields (block if not already handled above)
 if echo "$INPUT" | jq -e '.tool_input.pull_number // .tool_input.merge_method' > /dev/null 2>&1; then
-  deny "🛑 RELEASE GUARD: PR merging via GitHub MCP is blocked.\n\nUse gh pr merge <number> for dev-targeting PRs, or merge manually in GitHub UI."
+  deny "🛑 RELEASE GUARD: PR merging via GitHub MCP is blocked.\n\nUse gh pr merge <number> (dev PRs, or the dev→master release PR with Nathan's approval)."
 fi
 
 # ── push_files / create_or_update_file / delete_file — check branch ──

@@ -1,7 +1,9 @@
 #!/bin/bash
 # release-guard.sh — PreToolUse hook for Bash tool
-# Blocks pushes to master/main, tag creation and pushes, releases, and PR
-# merging outside dev. Asks before restarting a non-dev Untether service.
+# Blocks direct pushes to master/main, tag creation and pushes, and
+# `gh release create`. Merging the dev→master release PR is allowed only via
+# `gh pr merge <n>` with green CI, and always asks Nathan to confirm (#917).
+# Asks before restarting a non-dev Untether service.
 # Feature branch pushes are ALLOWED.
 # Registered in .claude/settings.json (#915).
 # DO NOT MODIFY — protected by release-guard-protect.sh
@@ -74,14 +76,14 @@ if echo "$COMMAND" | grep -qPi '\bgit\s+tag\b' && \
    echo "$COMMAND" | grep -qP 'v\d' && \
    ! echo "$COMMAND" | grep -qPi '\bgit\s+tag\s+(-[ldv]\b|--list|--delete|--verify)'; then
   BLOCKED=true
-  REASON="git tag creation is blocked. Tags must be created manually by Nathan."
+  REASON="git tag creation is blocked. Tags are created by auto-tag-on-master.yml when the release PR merges."
 fi
 
 # ── gh release create ────────────────────────────────────────────
 
 if echo "$COMMAND" | grep -qPi '\bgh\s+release\s+create\b'; then
   BLOCKED=true
-  REASON="gh release create is blocked. Releases must be created manually by Nathan."
+  REASON="gh release create is blocked. release.yml creates the GitHub release when the release PR merges."
 fi
 
 # ── gh api writes that merge, release or move refs ───────────────
@@ -90,24 +92,59 @@ if echo "$COMMAND" | grep -qPi '\bgh\s+api\b' && \
    echo "$COMMAND" | grep -qPi '/(pulls/\d+/merge|merges|releases|git/refs|git/tags)\b' && \
    echo "$COMMAND" | grep -qP '(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)\b'; then
   BLOCKED=true
-  REASON="gh api writes to merge, release, tag or ref endpoints are blocked. Use gh pr merge <number> for dev-targeting PRs."
+  REASON="gh api writes to merge, release, tag or ref endpoints are blocked. Use gh pr merge <number>."
 fi
 
-# ── gh pr merge — allow dev, block master/main ──────────────────
+# ── Manually dispatching the release pipeline — ask first ────────
+#
+# The #376 fallback (`gh workflow run release.yml --ref vX.Y.Z`) publishes to
+# PyPI, so it needs the same confirmation as the release merge.
+
+if echo "$COMMAND" | grep -qPi '\bgh\s+workflow\s+run\b.*\b(release|auto-tag-on-master)(\.ya?ml)?\b'; then
+  ASK=true
+  ASK_REASON="🚀 RELEASE: this dispatches the PyPI release pipeline by hand. Approve only if Nathan explicitly approved publishing this version."
+fi
+
+# ── gh pr merge — dev freely; master only as a confirmed release ──
+#
+# dev → TestPyPI: allowed. master/main is the release gate (auto-tag →
+# release.yml → PyPI → fleet). Claude may merge only the dev→master release PR,
+# only with green CI, and always as "ask" so Nathan confirms in the permission
+# prompt (#917). `--admin` bypasses GitHub's review and CI rules, which is why
+# this hook re-checks CI itself.
 
 if echo "$COMMAND" | grep -qPi '\bgh\s+pr\s+merge\b'; then
   PR_NUM=$(echo "$COMMAND" | grep -oP '\bgh\s+pr\s+merge\s+\K\d+' || true)
-  if [ -n "$PR_NUM" ]; then
-    PR_BASE=$(gh pr view "$PR_NUM" --json baseRefName -q .baseRefName 2>/dev/null || echo "unknown")
-    if [ "$PR_BASE" = "dev" ]; then
-      : # Allow merges to dev (TestPyPI/staging)
-    else
-      BLOCKED=true
-      REASON="gh pr merge to '$PR_BASE' is blocked. Only merges to dev are allowed. Master merges must be done manually by Nathan."
-    fi
-  else
+  if [ -z "$PR_NUM" ]; then
     BLOCKED=true
     REASON="gh pr merge without a PR number is blocked. Use: gh pr merge <number>"
+  else
+    PR_JSON=$(gh pr view "$PR_NUM" --repo littlebearapps/untether --json baseRefName,headRefName,title,statusCheckRollup 2>/dev/null || echo '{}')
+    PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // "unknown"' 2>/dev/null || echo "unknown")
+    if [ "$PR_BASE" = "dev" ]; then
+      : # Allow merges to dev (TestPyPI/staging)
+    elif [ "$PR_BASE" = "master" ] || [ "$PR_BASE" = "main" ]; then
+      PR_HEAD=$(echo "$PR_JSON" | jq -r '.headRefName // ""')
+      PR_TITLE=$(echo "$PR_JSON" | jq -r '.title // ""')
+      CHECKS_TOTAL=$(echo "$PR_JSON" | jq -r '[.statusCheckRollup[]?] | length')
+      CHECKS_NOT_GREEN=$(echo "$PR_JSON" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | ascii_upcase | select(. != "SUCCESS" and . != "SKIPPED" and . != "NEUTRAL")] | length')
+      if [ "$PR_HEAD" != "dev" ]; then
+        BLOCKED=true
+        REASON="Only the dev→master release PR may be merged to $PR_BASE (PR #$PR_NUM's head is '$PR_HEAD')."
+      elif echo "$COMMAND" | grep -qP '(^|\s)(-d|--delete-branch)\b'; then
+        BLOCKED=true
+        REASON="Merging the release PR with --delete-branch would delete dev. Drop the flag."
+      elif [ "$CHECKS_TOTAL" = "0" ] || [ "$CHECKS_NOT_GREEN" != "0" ]; then
+        BLOCKED=true
+        REASON="Release PR #$PR_NUM has $CHECKS_NOT_GREEN of $CHECKS_TOTAL checks not green (pending, failed or none reported). Wait for CI to pass, then retry."
+      else
+        ASK=true
+        ASK_REASON="🚀 RELEASE: merge PR #$PR_NUM \"$PR_TITLE\" (dev → $PR_BASE). This publishes to PyPI (auto-tag → release.yml) and makes it the stable release. CI: $CHECKS_TOTAL checks green. Approve only if Nathan explicitly approved this release."
+      fi
+    else
+      BLOCKED=true
+      REASON="gh pr merge blocked: couldn't confirm PR #$PR_NUM's base branch ('$PR_BASE')."
+    fi
   fi
 fi
 
@@ -162,10 +199,11 @@ fi
 #   }
 # The legacy {"decision":"block","reason":...} shape is silently ignored, so
 # blocks return as no-ops. See https://code.claude.com/docs/en/hooks for the
-# spec.
+# spec. A hook "ask" forces the prompt even in auto mode (CLI ≥ 2.1.211); in an
+# unattended -p run nobody can answer it, so the call is denied.
 
 if [ "$BLOCKED" = true ]; then
-  REASON_FULL=$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch and dev branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR to dev: gh pr create --base dev --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")
+  REASON_FULL=$(printf '🛑 RELEASE GUARD: %s\n\nAllowed: feature/dev branch pushes, PRs to dev, gh pr merge <n> for dev PRs, and — with Nathan'"'"'s explicit approval and green CI — gh pr merge <n> --squash --admin for the dev→master release PR (the hook asks him to confirm).\nBlocked: direct pushes to master/main, tags, gh release create.' "$REASON")
   jq -n --arg r "$REASON_FULL" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

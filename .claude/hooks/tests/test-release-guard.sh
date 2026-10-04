@@ -16,12 +16,27 @@ command -v jq >/dev/null 2>&1 || { echo "FATAL: jq required"; exit 2; }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Stub gh: `gh pr view N` reports base `dev` for PR 1, `master` otherwise.
+# Stub gh for `gh pr view N`:
+#   1 → base dev            2 → dev→master, CI green    3 → dev→master, a check pending
+#   4 → feature→master      5 → dev→master, no checks   other → lookup fails
+# With -q it prints the base branch (release-guard-mcp.sh); otherwise JSON.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'EOF'
 #!/bin/bash
-for a in "$@"; do [ "$a" = "1" ] && { echo dev; exit 0; }; done
-echo master
+n=""; q=false
+for a in "$@"; do
+  case "$a" in -q) q=true ;; *) [[ -z "$n" && "$a" =~ ^[0-9]+$ ]] && n="$a" ;; esac
+done
+green='[{"conclusion":"SUCCESS"},{"conclusion":"SKIPPED"},{"state":"SUCCESS"}]'
+case "$n" in
+  1) base=dev;    json='{"baseRefName":"dev","headRefName":"fix/x","title":"fix","statusCheckRollup":[]}' ;;
+  2) base=master; json='{"baseRefName":"master","headRefName":"dev","title":"release: v9.9.9","statusCheckRollup":'"$green"'}' ;;
+  3) base=master; json='{"baseRefName":"master","headRefName":"dev","title":"release: v9.9.9","statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":null,"status":"IN_PROGRESS"}]}' ;;
+  4) base=master; json='{"baseRefName":"master","headRefName":"feature/x","title":"feat","statusCheckRollup":'"$green"'}' ;;
+  5) base=master; json='{"baseRefName":"master","headRefName":"dev","title":"release: v9.9.9","statusCheckRollup":[]}' ;;
+  *) exit 1 ;;
+esac
+if $q; then echo "$base"; else echo "$json"; fi
 EOF
 chmod +x "$TMP/bin/gh"
 export PATH="$TMP/bin:$PATH"
@@ -63,8 +78,15 @@ bash_check "git tag v0.35.5"                              deny
 bash_check "git tag -l"                                   allow
 bash_check "gh release create v0.35.5"                    deny
 bash_check "gh pr merge 1 --squash"                       allow
-bash_check "gh pr merge 2 --squash"                       deny
+bash_check "gh pr merge 2 --squash --admin"               ask
+bash_check "gh pr merge 2 --squash --admin --delete-branch" deny
+bash_check "gh pr merge 3 --squash --admin"               deny
+bash_check "gh pr merge 4 --squash --admin"               deny
+bash_check "gh pr merge 5 --squash --admin"               deny
+bash_check "gh pr merge 99 --squash"                      deny
 bash_check "gh pr merge --squash"                         deny
+bash_check "gh workflow run release.yml --ref v9.9.9"     ask
+bash_check "gh workflow run ci.yml"                       allow
 bash_check "gh api repos/o/r/pulls/2/merge -X PUT"        deny
 bash_check "gh api repos/o/r/releases -f tag_name=v1"     deny
 bash_check "gh api repos/o/r/pulls/2"                     allow
@@ -89,6 +111,9 @@ check "Edit release-guard.sh"            deny  release-guard-protect.sh "$(file_
 check "Edit help-faq-protect.sh"         deny  release-guard-protect.sh "$(file_in "$PWD/.claude/hooks/help-faq-protect.sh")"
 check "Edit project .claude/settings.json" deny release-guard-protect.sh "$(file_in "$PWD/.claude/settings.json")"
 check "Edit worktree .claude/settings.json" deny release-guard-protect.sh "$(file_in "$PWD/.claude/worktrees/a/.claude/settings.json")"
+check "Edit .claude/./settings.json"     deny  release-guard-protect.sh "$(file_in "$PWD/.claude/./settings.json")"
+check "Edit .claude//settings.json"      deny  release-guard-protect.sh "$(file_in "$PWD/.claude//settings.json")"
+check "Edit .claude/hooks/../settings.json" deny release-guard-protect.sh "$(file_in "$PWD/.claude/hooks/../settings.json")"
 check "Edit .claude/settings.local.json" allow release-guard-protect.sh "$(file_in "$PWD/.claude/settings.local.json" '"allow": []')"
 check "disableAllHooks in settings.local.json" deny release-guard-protect.sh "$(file_in "$PWD/.claude/settings.local.json" '"disableAllHooks": true')"
 check "Edit ~/.claude/settings.json"     allow release-guard-protect.sh "$(file_in "$HOME/.claude/settings.json" '"effortLevel": "high"')"
@@ -98,7 +123,7 @@ check "Edit src file"                    allow release-guard-protect.sh "$(file_
 
 echo "== release-guard-mcp.sh =="
 check "MCP merge PR into dev"     allow release-guard-mcp.sh '{"tool_name":"mcp__github__merge_pull_request","tool_input":{"pullNumber":1}}'
-check "MCP merge PR into master"  deny  release-guard-mcp.sh '{"tool_name":"mcp__github__merge_pull_request","tool_input":{"pullNumber":2}}'
+check "MCP merge release PR (use gh pr merge)" deny release-guard-mcp.sh '{"tool_name":"mcp__github__merge_pull_request","tool_input":{"pullNumber":2}}'
 check "MCP push_files to master"  deny  release-guard-mcp.sh '{"tool_name":"mcp__github__push_files","tool_input":{"branch":"master"}}'
 check "MCP push_files no branch"  deny  release-guard-mcp.sh '{"tool_name":"mcp__github__push_files","tool_input":{}}'
 check "MCP push_files to feature" allow release-guard-mcp.sh '{"tool_name":"mcp__github__push_files","tool_input":{"branch":"fix/x"}}'

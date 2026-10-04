@@ -11,6 +11,8 @@ trap 'echo "release-guard-protect.sh: internal error at line $LINENO — blocked
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // ""' 2>/dev/null)
 [ -z "$FILE_PATH" ] && echo '{}' && exit 0
+# Normalise `.`, `..`, `//` and symlinks so .claude/./settings.json can't slip past the patterns below.
+FILE_PATH=$(realpath -m -- "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
 
 # Helper: emit the current Claude Code PreToolUse deny shape (2026+).
 # Legacy {"decision":"block",...} is silently ignored. See:
