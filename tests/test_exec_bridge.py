@@ -12015,6 +12015,73 @@ async def test_920_cadence_every_30_min() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["ask", "tool"])
+async def test_920_repeat_reminder_not_swallowed_by_activity_suppression(
+    kind: str,
+) -> None:
+    """Live R20-920e: the 40-min repeat reminder never went out. With a
+    pending approval the open AskUserQuestion / tool row counts as a running
+    tool and the session's MCP children keep CPU busy while the main process
+    sleeps, so the tool-active (and CPU/children-active) suppression branches
+    swallowed every reminder after the first."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    if kind == "ask":
+        await edits.on_event(_ask_action_919())
+        _with_snaps_919(
+            edits, [_snap_919(kind="ask", tool_name="AskUserQuestion", text=True)]
+        )
+    else:
+        await edits.on_event(_tool_action_919(tool_name="Write", request_id="r-1"))
+        _with_snaps_919(edits, [_snap_919("r-1")])
+    edits._stall_check_interval = 0.001
+    edits._heartbeat_interval = 0.001
+    edits._stall_repeat_seconds = 180.0
+    edits.pid = 12345
+    sent_at: list[float] = []
+    orig_send = transport.send
+
+    async def _send(**kwargs):
+        if kwargs["message"].text.startswith("⏳ Waiting for"):
+            sent_at.append(clock())
+        return await orig_send(**kwargs)
+
+    transport.send = _send  # type: ignore[method-assign]
+    calls = 0
+
+    def sleeping_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal calls
+        calls += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000 + calls * 300,
+            cpu_stime=200 + calls * 50,
+            child_pids=[pid + 1],
+        )
+
+    steps: list[Any] = []
+    for t in range(0, 3001, 30):
+        steps.append(lambda t=t: clock.set(float(t)))
+        steps.append(0.004)
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=sleeping_cpu_diag,
+    ):
+        await _run_920(edits, steps)
+
+    assert len(sent_at) == 2, sent_at
+    assert 600 <= sent_at[0] < 660
+    assert 2400 <= sent_at[1] < 2460
+
+
+@pytest.mark.anyio
 async def test_920_second_approval_gets_first_threshold() -> None:
     transport = FakeTransport()
     clock = _FakeClock(start=100.0)

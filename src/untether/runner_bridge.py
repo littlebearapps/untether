@@ -3076,7 +3076,14 @@ class ProgressEdits:
             # event so journalctl can audit which rule fired. The
             # heartbeat bump keeps the elapsed-time tail current
             # without resetting stall counters.
-            if not frozen_escalate and _post_result_idle:
+            # #920 (live R20-920e): an approval wait is not a stall — its
+            # reminder must not be swallowed by the activity suppressions
+            # below. The open AskUserQuestion / tool row counts as a running
+            # tool and MCP children keep CPU busy while the main process
+            # sleeps, which silenced every reminder after the first.
+            _approval_wait = threshold_reason == "pending_approval"
+            _notify_anyway = frozen_escalate or _approval_wait
+            if not _notify_anyway and _post_result_idle:
                 self._bump_stall_suppression("post_result")
                 logger.info(
                     "progress_edits.stall_post_result_suppressed",
@@ -3086,7 +3093,7 @@ class ProgressEdits:
                     pid=self.pid,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _wakeup_state is not None:
+            elif not _notify_anyway and _wakeup_state is not None:
                 soonest, count = _wakeup_state
                 logger.info(
                     "progress_edits.stall_schedule_wakeup_suppressed",
@@ -3098,7 +3105,7 @@ class ProgressEdits:
                     wakeup_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _monitor_state is not None:
+            elif not _notify_anyway and _monitor_state is not None:
                 soonest, count = _monitor_state
                 logger.info(
                     "progress_edits.stall_monitor_active_suppressed",
@@ -3110,7 +3117,7 @@ class ProgressEdits:
                     monitor_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_grace:
+            elif not _notify_anyway and _bash_grace:
                 logger.info(
                     "progress_edits.stall_bash_grace_suppressed",
                     channel_id=self.channel_id,
@@ -3120,7 +3127,7 @@ class ProgressEdits:
                     bash_grace_seconds=self._bash_grace_seconds,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_fresh:
+            elif not _notify_anyway and _bash_fresh:
                 logger.info(
                     "progress_edits.stall_long_bash_suppressed",
                     channel_id=self.channel_id,
@@ -3130,7 +3137,7 @@ class ProgressEdits:
                     freshness_threshold_s=round(threshold / 2.0, 1),
                 )
                 self._bump_heartbeat()
-            elif cpu_active is True and not frozen_escalate and not main_sleeping:
+            elif cpu_active is True and not _notify_anyway and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
@@ -3154,6 +3161,7 @@ class ProgressEdits:
                 and main_sleeping
                 and _tool_running
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Tool subprocess actively working — first warning already
                 # sent, suppress repeats until CPU goes idle.  The ring
@@ -3182,6 +3190,7 @@ class ProgressEdits:
                 and main_sleeping
                 and self._has_active_children(diag)
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Subagent child processes actively working — first warning
                 # already sent, suppress repeats.  Similar to tool-active
