@@ -116,7 +116,11 @@ Claude Code emits a system init event early in the stream:
   exit_code:2}` from a hook that started in an earlier turn arms the
   `hook_rewake` attribution for the next turn (4.5); any other exit 2 (a
   background subagent's sync denial, a `UserPromptSubmit` blocker) logs
-  `claude.hook.blocking_exit` instead (#828).
+  `claude.hook.blocking_exit` instead (#828). An exit 2 from a hook that
+  started **and** ended while idle after running ≥ 1 s (a background
+  subagent's `asyncRewake` hook) logs `blocking_exit rewake_candidate=True`
+  and arms a weak, open-only hint: a turn opening ≤ 3 s later is
+  `hook_rewake` (#923).
   The base runner does not let them overwrite `last_event_type`.
 - `system/informational` (#814): the safeguard notice ("…'s safeguards
   stopped the response above · continuing once …") feeds the per-turn
@@ -294,7 +298,9 @@ message; `reason` comes from what preceded it: an injected line's
 `command_lifecycle.command_uuid` (`followup`), a `task_notification`
 (`task_finished`), a fresh (≤ 10 s) idle `hook_response` with exit code 2
 from a background hook that outlived its turn (`hook_rewake`, #812/#828;
-`detail.hook` / `hook_event`),
+`detail.hook` / `hook_event`), or a hook that started while idle, ran ≥ 1 s
+and exited 2 just before the turn opened (≤ 3 s, open-time only; `hook_rewake`
+with `detail.hook_started_idle`, #923),
 a `command_lifecycle(started)` with an unknown uuid (`scheduled_wakeup`), or a
 live Monitor task (`monitor_event`). A turn that opened `unknown` becomes
 `hook_rewake` at its result when an earlier turn's hook exited 2 during it

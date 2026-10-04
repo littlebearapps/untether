@@ -1183,3 +1183,29 @@ def test_929_local_agent_task_id_is_agent_id(cli_blob: mmap.mmap) -> None:
             "local_agent task registration shape moved — re-derive the probe "
             f"(last green on CLI {PROBED_CLI_VERSION})"
         )
+
+
+# --- #923 (rc20) ---
+
+
+def test_923_async_rewake_exit_2_enqueues_a_next_priority_wake(
+    cli_blob: mmap.mmap,
+) -> None:
+    """#923's open-time idle candidate assumes an asyncRewake hook's exit 2
+    enqueues the wake as a ``next``-priority task-notification, so the
+    parent's turn opens right after the ``hook_response``. ``"Stop hook
+    feedback"`` occurs several times (schema ``describe`` strings first), so
+    every occurrence is scanned."""
+    hits = [m.start() for m in re.finditer(rb'"Stop hook feedback"', cli_blob)]
+    assert any(
+        re.search(rb'priority:"next",stopHookActive:!0', cli_blob[pos : pos + 400])
+        for pos in hits
+    ), (
+        "asyncRewake wake delivery changed — re-verify #923's open-time idle "
+        f"candidate (last green on CLI 2.1.289; {len(hits)} occurrence(s) scanned)"
+    )
+    assert cli_blob.find(b'mode:"task-notification",agentId:') != -1, (
+        "asyncRewake wake delivery changed (no task-notification enqueue with "
+        "agentId) — re-verify #923's open-time idle candidate (last green on "
+        "CLI 2.1.289)"
+    )

@@ -72,12 +72,13 @@ def _response(
     outcome: str = "success",
     exit_code: int | None = 0,
     stderr: str = "",
+    name: str | None = None,
 ) -> dict[str, Any]:
     obj: dict[str, Any] = {
         "type": "system",
         "subtype": "hook_response",
         "hook_id": hook_id,
-        "hook_name": event,
+        "hook_name": name or event,
         "hook_event": event,
         "output": stderr,
         "stdout": "",
@@ -766,3 +767,154 @@ def test_carry_ttl_drops_an_old_hint() -> None:
     )
     done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
     assert done[0].reason == "unknown"
+
+
+# ── #923: a long exit-2 hook that started while idle (a subagent's) ─────────
+
+
+def _idle_rewake(
+    state: ClaudeStreamState, factory: EventFactory, *, held_s: float = 101.0
+) -> list[dict]:
+    """A background subagent's asyncRewake ``PostToolUse:Bash`` hook (e.g.
+    security-guidance's commit review) starts and exits 2 while the parent
+    idles, after running ``held_s`` seconds."""
+    with capture_logs() as logs:
+        _feed(state, factory, _started("h-sub", "PostToolUse", name="PostToolUse:Bash"))
+        if held_s:
+            _age(state, **{"h-sub": held_s})
+        _feed(
+            state,
+            factory,
+            _response(
+                "h-sub",
+                "PostToolUse",
+                outcome="error",
+                exit_code=2,
+                stderr="R20 finding",
+                name="PostToolUse:Bash",
+            ),
+        )
+    return logs
+
+
+def test_923_idle_started_long_exit_2_labels_the_next_turn() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    logs = _idle_rewake(state, factory)
+    assert state.hook_rewake_hint is None  # never the strong (#828) hint
+    assert state.hook_idle_rewake_hint is not None
+    assert state.hook_idle_rewake_hint[:2] == ("PostToolUse:Bash", "PostToolUse")
+    assert _hook_logs(logs, "claude.hook.rewake_signal") == []
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["rewake_candidate"] is True
+    assert blocked["turn_open"] is False and blocked["started_turn"] == 2
+    with capture_logs() as logs:
+        events = _feed(state, factory, _init())
+    (opened,) = [e for e in events if isinstance(e, TurnEvent)]
+    assert opened.reason == "hook_rewake"
+    assert opened.detail["hook"] == "PostToolUse:Bash"
+    assert opened.detail["hook_event"] == "PostToolUse"
+    assert opened.detail["hook_started_idle"] is True
+    assert state.hook_idle_rewake_hint is None  # spent on open
+    assert state.turn_hook_hint is None  # never carried
+    (attributed,) = _hook_logs(logs, "claude.turn.hook_rewake")
+    assert attributed["attributed"] == "open_idle"
+    assert attributed["held_s"] >= 101.0
+    assert attributed["gap_s"] >= 0.0
+
+
+def test_923_idle_candidate_expires_after_ttl() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _idle_rewake(state, factory)
+    name, event, _ts, held = state.hook_idle_rewake_hint  # type: ignore[misc]
+    state.hook_idle_rewake_hint = (name, event, time.monotonic() - 5.0, held)
+    with capture_logs() as logs:
+        events = _feed(state, factory, _init())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)] == ["unknown"]
+    assert state.hook_idle_rewake_hint is None
+    assert state.turn_hook_hint is None
+    (expired,) = _hook_logs(logs, "claude.hook.idle_rewake_hint_expired")
+    assert expired["log_level"] == "debug"
+    assert expired["age_s"] >= 5.0
+
+
+def test_923_short_idle_denial_is_not_a_candidate() -> None:
+    """#828 parity. Also covers an SDK callback hook's quick denial (#925 G2):
+    held < 1 s, so never a candidate."""
+    state, factory = _state()
+    _first_turn(state, factory)
+    logs = _idle_denial(state, factory)
+    assert state.hook_idle_rewake_hint is None
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["rewake_candidate"] is False
+    events = _feed(state, factory, _init())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)] == ["unknown"]
+
+
+@pytest.mark.parametrize("stronger", ["followup", "task_finished"])
+def test_923_followup_and_task_finished_outrank_the_candidate(stronger: str) -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _idle_rewake(state, factory)
+    assert state.hook_idle_rewake_hint is not None
+    if stronger == "followup":
+        state.pending_command_uuid = "c1"
+        state.injected_commands["c1"] = time.monotonic()
+    else:
+        state.turn_notifications = ["bg x"]
+    events = _feed(state, factory, _init())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)] == [stronger]
+    assert state.hook_idle_rewake_hint is None
+    assert state.turn_hook_hint is None
+
+
+def test_923_candidate_answered_mid_turn_is_ignored() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _feed(state, factory, _started("h-sub", "PostToolUse", name="PostToolUse:Bash"))
+    assert state.pending_hooks["h-sub"].turn == 2
+    _feed(state, factory, _init())  # opens turn 2
+    _age(state, **{"h-sub": 5.0})
+    with capture_logs() as logs:
+        _feed(
+            state,
+            factory,
+            _response(
+                "h-sub",
+                "PostToolUse",
+                outcome="error",
+                exit_code=2,
+                name="PostToolUse:Bash",
+            ),
+        )
+    assert state.hook_idle_rewake_hint is None
+    assert state.turn_hook_hint is None
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["rewake_candidate"] is False
+
+
+def test_923_candidate_never_reaches_result_retro() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _idle_rewake(state, factory)
+    name, event, _ts, held = state.hook_idle_rewake_hint  # type: ignore[misc]
+    state.hook_idle_rewake_hint = (name, event, time.monotonic() - 5.0, held)
+    _feed(state, factory, _init(), _text("x"))
+    events = _feed(state, factory, _result("x", origin={"kind": "task-notification"}))
+    done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert done[0].reason == "unknown"
+
+
+def test_923_unknown_hook_id_long_exit_2_is_not_a_candidate() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    with capture_logs() as logs:
+        _feed(
+            state,
+            factory,
+            _response("zz", "PostToolUse", outcome="error", exit_code=2),
+        )
+    assert state.hook_idle_rewake_hint is None
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["known"] is False and blocked["rewake_candidate"] is False

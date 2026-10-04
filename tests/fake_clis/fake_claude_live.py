@@ -1653,6 +1653,41 @@ def scenario_bg_agent_pretooluse_denial(first: dict) -> None:
     serve_followups()
 
 
+def scenario_bg_agent_async_rewake_idle(first: dict) -> None:
+    """#923 (lba-1, rc17+): while the parent idles, a background agent's
+    ``git commit`` fires an asyncRewake ``PostToolUse:Bash`` hook (e.g.
+    security-guidance's review). It starts AND exits 2 in the idle gap after
+    running a while, and the CLI opens the parent's rewake turn at once.
+    Later the agent finishes and gets its own wake turn."""
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "committer", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    text("Committer running in the background.")
+    result("Committer running in the background.", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    spawn_hook("h-sub", 1.5)
+    hook_started("h-sub", "PostToolUse", name="PostToolUse:Bash")
+    wait_hook("h-sub")
+    hook_response(
+        "h-sub",
+        "PostToolUse",
+        outcome="error",
+        exit_code=2,
+        stderr="R20 finding\n",
+        name="PostToolUse:Bash",
+    )
+    _rewake_turn("HOOK: R20 finding")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("agent done")
+    _task_notification_result("agent done")
+    serve_followups()
+
+
 def scenario_async_hook_success(first: dict) -> None:
     _stop_turn("DONE", ("h-stop", "Stop"))
     got = wait_idle_or_eof(WAKE_S)
@@ -2511,6 +2546,7 @@ _SCENARIOS = {
     "plan_approve_monitor_ticks": scenario_plan_approve_monitor_ticks,
     "async_rewake_idle": scenario_async_rewake_idle,
     "bg_agent_pretooluse_denial": scenario_bg_agent_pretooluse_denial,
+    "bg_agent_async_rewake_idle": scenario_bg_agent_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,

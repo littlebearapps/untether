@@ -2226,6 +2226,13 @@ class ClaudeStreamState:
     # The hint the open turn saw (stale at open, or an earlier turn's async
     # hook exiting 2 mid-turn) — the result's ``origin`` confirms it.
     turn_hook_hint: tuple[str | None, str | None, float] | None = None
+    # #923: (hook name, hook event, monotonic ts, held_s) of a hook that
+    # started AND exited 2 in the current idle gap after running at least
+    # ``_HOOK_IDLE_REWAKE_MIN_HELD_S`` (a background subagent's asyncRewake
+    # hook). Weaker than ``hook_rewake_hint``: it labels only a turn opening
+    # within ``_HOOK_IDLE_REWAKE_TTL_S``, and is never carried into
+    # ``turn_hook_hint`` (so the result-time ``origin`` retro can't use it).
+    hook_idle_rewake_hint: tuple[str | None, str | None, float, float] | None = None
     hooks_started: int = 0
     # Mirrored from ``[watchdog] hold_for_async_hooks`` /
     # ``async_hook_max_hold`` by ``run_impl`` (read per spawn, so a config
@@ -3786,6 +3793,14 @@ _HOOK_REWAKE_HINT_TTL_S = 10.0
 # into that turn for its result's ``origin`` check only this long; an older
 # hint is dropped (P5-A: hint → ``init`` is ~20 ms, so this is generous).
 _HOOK_REWAKE_CARRY_TTL_S = 60.0
+# #923: a hook that started while idle (a background subagent's asyncRewake
+# hook) and exited 2 is a weak rewake candidate only if a turn opens this soon
+# after its response (fleet: 0.47-0.68 s; P5-A ≈ 0 ms) — open-time only.
+_HOOK_IDLE_REWAKE_TTL_S = 3.0
+# #923: ...and only if it ran at least this long. #828's false positives
+# (subagents' sync PreToolUse denials) were held ≤ 0.1 s; the observed idle
+# rewakes (security-guidance commit reviews) 52-113 s.
+_HOOK_IDLE_REWAKE_MIN_HELD_S = 1.0
 # The asyncRewake wake signal: exit code 2 (``outcome: "error"``).
 _HOOK_REWAKE_EXIT_CODE = 2
 
@@ -3813,6 +3828,10 @@ def _apply_hook_event(
     (or the next turn's ``UserPromptSubmit`` blocker) starts and ends while
     the parent idles, and the open turn's own sync hooks end inside it. Such
     exit-2 responses log ``claude.hook.blocking_exit`` instead.
+
+    #923: an exit-2 hook started and answered in the same idle gap after
+    running ≥ ``_HOOK_IDLE_REWAKE_MIN_HELD_S`` arms the weak, open-only
+    ``hook_idle_rewake_hint`` (``blocking_exit … rewake_candidate=True``).
 
     Produces no UntetherEvents — hook traffic (every configured hook on every
     tool call) must never reach progress rows or the bridge's stall timers.
@@ -3873,6 +3892,25 @@ def _apply_hook_event(
     )
     is_rewake_signal = exit_2 and outlived
     held_s = round(time.monotonic() - known.started_at, 1) if known else None
+    # #923: started and answered in this idle gap, and long-held — a
+    # background subagent's asyncRewake hook. Its wake opens the next turn
+    # within ``_HOOK_IDLE_REWAKE_TTL_S``; a sync denial is held ≤ 0.1 s.
+    idle_candidate = (
+        exit_2
+        and not outlived
+        and known is not None
+        and not state.turn_open
+        and known.turn == state.turn + 1
+        and held_s is not None
+        and held_s >= _HOOK_IDLE_REWAKE_MIN_HELD_S
+    )
+    if idle_candidate:
+        state.hook_idle_rewake_hint = (
+            name,
+            hook_event,
+            time.monotonic(),
+            held_s or 0.0,
+        )
     if is_rewake_signal:
         hint = (name, hook_event, time.monotonic())
         if not state.turn_open:
@@ -3901,6 +3939,7 @@ def _apply_hook_event(
             started_turn=known.turn if known else None,
             held_s=held_s,
             known=known is not None,
+            rewake_candidate=idle_candidate,
         )
     elif outcome == "cancelled":
         logger.info(
@@ -7227,6 +7266,26 @@ def _open_followup_turn(
             hook_event=hint[1],
             attributed="open",
         )
+    elif (idle := state.hook_idle_rewake_hint) is not None and (
+        idle_gap_s := time.monotonic() - idle[2]
+    ) <= _HOOK_IDLE_REWAKE_TTL_S:
+        # #923: a background subagent's asyncRewake hook started and exited
+        # 2 while the parent idled, and this turn opened right after it —
+        # the weak, open-only counterpart of the hint above.
+        reason = "hook_rewake"
+        detail["hook"] = idle[0]
+        detail["hook_event"] = idle[1]
+        detail["hook_started_idle"] = True
+        logger.info(
+            "claude.turn.hook_rewake",
+            session_id=factory.resume.value if factory.resume else None,
+            turn=state.turn + 1,
+            hook_name=idle[0],
+            hook_event=idle[1],
+            attributed="open_idle",
+            held_s=idle[3],
+            gap_s=round(idle_gap_s, 2),
+        )
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
@@ -7284,6 +7343,20 @@ def _open_followup_turn(
             carried = None
     state.turn_hook_hint = carried
     state.hook_rewake_hint = None
+    # #923: the idle candidate is open-time only — spent or dropped here,
+    # never carried into ``turn_hook_hint``.
+    if (idle_hint := state.hook_idle_rewake_hint) is not None and not detail.get(
+        "hook_started_idle"
+    ):
+        logger.debug(
+            "claude.hook.idle_rewake_hint_expired",
+            session_id=factory.resume.value if factory.resume else None,
+            hook_name=idle_hint[0],
+            hook_event=idle_hint[1],
+            age_s=round(time.monotonic() - idle_hint[2], 1),
+            held_s=idle_hint[3],
+        )
+    state.hook_idle_rewake_hint = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.safeguard = SafeguardTurn()
     state.unattended_denials = []  # #835

@@ -392,6 +392,29 @@ async def test_828_bg_subagent_denial_never_labels_the_wake_turn() -> None:
     assert blocked["started_turn"] == 2
 
 
+async def test_923_subagent_async_rewake_while_idle_labels_hook_rewake() -> None:
+    """#923: a background agent's asyncRewake hook starts and exits 2 while
+    the parent idles (tagged with the next turn, so never "outlived"); the
+    rewake turn the CLI opens right after it is still ``hook_rewake``."""
+    with capture_logs() as logs:
+        events = await _collect("bg_agent_async_rewake_idle", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "hook_rewake"),
+        ("completed", "hook_rewake"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert turns[0].detail["hook_event"] == "PostToolUse"
+    assert turns[0].detail["hook_started_idle"] is True
+    names = [e["event"] for e in logs]
+    assert "claude.hook.rewake_signal" not in names
+    (blocked,) = [e for e in logs if e["event"] == "claude.hook.blocking_exit"]
+    assert blocked["rewake_candidate"] is True and blocked["turn_open"] is False
+    (attributed,) = [e for e in logs if e["event"] == "claude.turn.hook_rewake"]
+    assert attributed["attributed"] == "open_idle"
+
+
 # ── #825: a task finishing during another task's wake turn is named ──────
 
 
