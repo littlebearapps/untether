@@ -8960,27 +8960,36 @@ class TestLoopHookOwnership:
 
     # ── ut_loop_cron_delete ──────────────────────────────────────────────
 
+    @staticmethod
+    def _register_tick(token_session: str = "sess-925", tool_use_id: str = "tu-del"):
+        from untether import loop_scheduler
+
+        return loop_scheduler.register_pending_cron(
+            session_id=token_session,
+            tool_use_id=tool_use_id,
+            cron_expression="*/5 * * * *",
+            prompt="tick",
+            recurring=True,
+            chat_id=9250,
+        )
+
     @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
-    async def test_hook_callback_cron_delete_ut_token_cancels_and_denies(
+    async def test_observe_cron_delete_ut_token_cancels_with_hooks_registered(
         self,
     ) -> None:
+        """Live R20-925d (CLI 2.1.289): the CLI validates the job id BEFORE
+        PreToolUse hooks, so the ``ut_loop_cron_delete`` callback never
+        arrives for a ``ut_loop_`` id and the CLI answers the tool with
+        "No scheduled job…". The tool_use observer must stop the loop even
+        with the hooks registered; the error result is harmless."""
         from structlog.testing import capture_logs
 
         from untether import loop_scheduler
 
         state = _seed_loop_state()
         state.loop_hooks_registered = True
-        token = loop_scheduler.register_pending_cron(
-            session_id="sess-925",
-            tool_use_id="tu-del",
-            cron_expression="*/5 * * * *",
-            prompt="tick",
-            recurring=True,
-            chat_id=9250,
-        )
+        token = self._register_tick()
         with capture_logs() as logs:
-            # The assistant line (observer) arrives first: with the hook
-            # registered it leaves the cancel to the callback.
             translate_claude_event(
                 _decode_event(
                     _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
@@ -8989,10 +8998,53 @@ class TestLoopHookOwnership:
                 state=state,
                 factory=state.factory,
             )
-            assert loop_scheduler.active_count() == 1
+            assert loop_scheduler.active_count() == 0
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_result_event(
+                        "tu-d1",
+                        f"<tool_use_error>No scheduled job with id '{token}'"
+                        "</tool_use_error>",
+                        is_error=True,
+                    )
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        cancelled = [e for e in logs if e["event"] == "loop.cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0]["reason"] == "cron_delete"
+        assert not [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+        assert not [e for e in logs if e.get("log_level") in ("warning", "error")]
+        assert state.hook_callback_queue == []
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_after_observer_stop_says_stopped(self) -> None:
+        """If a later CLI does send the callback after the observer stopped
+        the loop, the same tool_use gets "stopped", not "No active loop"."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        with capture_logs() as logs:
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
             translate_claude_event(
                 _hook_callback_event(
-                    "ut_loop_cron_delete", "CronDelete", {"id": token}
+                    "ut_loop_cron_delete",
+                    "CronDelete",
+                    {"id": token},
+                    tool_use_id="tu-d1",
                 ),
                 title="claude",
                 state=state,
@@ -9002,14 +9054,14 @@ class TestLoopHookOwnership:
         _, _, output, decision = state.hook_callback_queue[0]
         assert decision == "deny"
         assert _deny_reason(output) == f"Untether stopped loop {token}."
-        cancelled = [e for e in logs if e["event"] == "loop.cancelled"]
-        assert cancelled[0]["reason"] == "cron_delete"
-        # Unknown / already-stopped token.
+        assert len([e for e in logs if e["event"] == "loop.cancelled"]) == 1
+        # A different CronDelete of the already-stopped token.
         translate_claude_event(
             _hook_callback_event(
                 "ut_loop_cron_delete",
                 "CronDelete",
                 {"id": token},
+                tool_use_id="tu-d2",
                 request_id="req-again",
             ),
             title="claude",
@@ -9019,6 +9071,67 @@ class TestLoopHookOwnership:
         assert _deny_reason(state.hook_callback_queue[1][2]) == (
             f"No active Untether loop {token} in this session."
         )
+
+    @pytest.mark.usefixtures("_loop_on", "_set_chat", "_scheduler")
+    async def test_hook_callback_cron_delete_ut_token_cancels_and_denies(
+        self,
+    ) -> None:
+        """Hook first (or alone): the callback stops the loop; the observer
+        seeing the same tool_use later is a no-op."""
+        from structlog.testing import capture_logs
+
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        with capture_logs() as logs:
+            translate_claude_event(
+                _hook_callback_event(
+                    "ut_loop_cron_delete",
+                    "CronDelete",
+                    {"id": token},
+                    tool_use_id="tu-d1",
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+            assert loop_scheduler.active_count() == 0
+            translate_claude_event(
+                _decode_event(
+                    _make_tool_use_event("CronDelete", "tu-d1", {"id": token})
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        _, _, output, decision = state.hook_callback_queue[0]
+        assert decision == "deny"
+        assert _deny_reason(output) == f"Untether stopped loop {token}."
+        cancelled = [e for e in logs if e["event"] == "loop.cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0]["reason"] == "cron_delete"
+        assert not [e for e in logs if e["event"] == "loop.cron_delete_foreign_token"]
+
+    @pytest.mark.usefixtures("_loop_off", "_set_chat", "_scheduler")
+    async def test_observe_cron_delete_ut_token_stops_even_with_loop_off(
+        self,
+    ) -> None:
+        """A loop created while Loop mode was on can still be stopped by
+        CronDelete after the chat turns Loop mode off."""
+        from untether import loop_scheduler
+
+        state = _seed_loop_state()
+        state.loop_hooks_registered = True
+        token = self._register_tick()
+        translate_claude_event(
+            _decode_event(_make_tool_use_event("CronDelete", "tu-off", {"id": token})),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
 
     @pytest.mark.parametrize("loop_mode", [True, False])
     @pytest.mark.usefixtures("_set_chat", "_scheduler")

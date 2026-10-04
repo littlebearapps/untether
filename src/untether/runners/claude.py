@@ -1781,6 +1781,9 @@ class ClaudeStreamState:
     )
     # #925: this spawn's ``initialize`` registered those hooks.
     loop_hooks_registered: bool = False
+    # #925: CronDelete tool_use ids that stopped an Untether loop → token, so
+    # the observer and a (later) hook callback for the same call agree.
+    loop_deleted_by_tool_use: dict[str, str] = field(default_factory=dict)
     # Whether the control channel initialization handshake has been sent
     control_init_sent: bool = False
     # Track last tool_use_id for mapping control requests to tool actions
@@ -5501,12 +5504,25 @@ def _observe_loop_tool_use(
     # #826: record the run's topic so /new and /cancel in another forum topic
     # leave this loop alone, and fires land back in the originating topic.
     thread_id = get_run_thread_id()
-    if not _loop_enabled_for_chat(chat_id):
-        return  # master toggle off → behave as today
     tool_name = str(content.name or "")
     tool_id = content.id
     raw_input = content.input if isinstance(content.input, dict) else {}
     session_id = state.factory.resume.value if state.factory.resume else None
+    if tool_name == "CronDelete":
+        # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
+        target = str(raw_input.get("id") or raw_input.get("taskId") or "")
+        if target.startswith(_LOOP_TOKEN_PREFIX):
+            # #925 (live R20-925d, CLI 2.1.289): the CLI validates the job
+            # id before PreToolUse hooks and answers "No scheduled job…"
+            # itself, so the hook never sees a ``ut_loop_`` id — this
+            # observer is what stops the loop, hooks or not, in either Loop
+            # mode (stopping is always allowed).
+            _stop_loop_for_cron_delete(
+                state, tool_id, target, session_id=session_id, chat_id=chat_id
+            )
+            return
+    if not _loop_enabled_for_chat(chat_id):
+        return  # master toggle off → behave as today
     if not session_id:
         return  # session_id only known after system.init; tool_use shouldn't
         # arrive before that, but guard defensively
@@ -5563,24 +5579,41 @@ def _observe_loop_tool_use(
                 error=str(exc),
             )
     elif tool_name == "CronDelete":
-        # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
+        # A real CLI job id (``ut_loop_`` ids are handled above).
         upstream_id = raw_input.get("id") or raw_input.get("taskId")
         if not upstream_id:
             return
-        if str(upstream_id).startswith(_LOOP_TOKEN_PREFIX):
-            # #925: an Untether loop token. With the hook registered the
-            # callback stops it (and tells the model); this is the hook-less
-            # path (``-p`` mode), where the CLI answers "No scheduled job".
-            if not state.loop_hooks_registered:
-                # #925 review: only this session's own loops.
-                loop_scheduler.cancel_owned_by_token(
-                    str(upstream_id),
-                    session_id=session_id,
-                    chat_id=int(chat_id),
-                    reason="cron_delete",
-                )
-            return
         loop_scheduler.cancel_by_upstream_id(str(upstream_id), session_id=session_id)
+
+
+def _stop_loop_for_cron_delete(
+    state: ClaudeStreamState,
+    tool_use_id: str | None,
+    token: str,
+    *,
+    session_id: str | None,
+    chat_id: int | None,
+) -> bool:
+    """#925: stop the Untether loop ``token`` for one CronDelete call.
+
+    Shared by the tool_use observer and the PreToolUse hook; idempotent per
+    ``tool_use_id`` (whichever sees the call first stops the loop, the other
+    reports the same outcome). Only the calling session's own loops
+    (``cancel_owned_by_token``). Returns True when the loop was stopped by
+    this call."""
+    from .. import loop_scheduler
+
+    if tool_use_id and state.loop_deleted_by_tool_use.get(tool_use_id) == token:
+        return True
+    stopped = loop_scheduler.cancel_owned_by_token(
+        token,
+        session_id=session_id,
+        chat_id=chat_id,
+        reason="cron_delete",
+    )
+    if stopped and tool_use_id:
+        state.loop_deleted_by_tool_use[tool_use_id] = token
+    return stopped
 
 
 # ── Untether owns the schedule: PreToolUse hook callbacks (#925) ────────
@@ -5725,7 +5758,9 @@ def _loop_deny_reason(token: str) -> str:
         "user message. Nothing was scheduled in this session, so CronList will "
         "not show it. Do not retry with CronCreate, ScheduleWakeup or a sleep "
         "loop. Tell the user it is scheduled and that /cancel stops it; to stop "
-        f'it yourself, call CronDelete with id "{token}".'
+        f'it yourself, call CronDelete with id "{token}" (Untether stops the '
+        "loop even though the tool then reports no scheduled job with that id; "
+        "do not retry)."
     )
     return _no_bind_match(reason)
 
@@ -5766,7 +5801,9 @@ def _loop_hook_decision(
       (fail closed, D4).
     - ``ut_loop_cron_delete``: a ``ut_loop_`` id → stop that Untether loop
       if this session owns it, and deny either way (the CLI holds no such
-      job); any other id → passthrough, so a
+      job). CLI 2.1.289 validates the id before hooks, so this branch is
+      normally pre-empted by the tool_use observer; it stays as a fallback
+      for a CLI that runs hooks first. Any other id → passthrough, so a
       real CLI job is deleted natively and its transcript marker stops the
       resume scan (F3).
     """
@@ -5788,11 +5825,13 @@ def _loop_hook_decision(
         # #925 review: only a loop this session owns (a token learned from
         # another chat must not stop it). Foreign and unknown tokens get the
         # same answer, so the model learns nothing about other sessions.
-        if loop_scheduler.cancel_owned_by_token(
+        tool_use_id = request.tool_use_id or str(hook_input.get("tool_use_id") or "")
+        if _stop_loop_for_cron_delete(
+            state,
+            tool_use_id or None,
             target,
             session_id=session_id,
             chat_id=get_run_channel_id(),
-            reason="cron_delete",
         ):
             reason = f"Untether stopped loop {target}."
         else:
