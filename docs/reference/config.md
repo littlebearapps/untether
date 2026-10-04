@@ -437,7 +437,7 @@ The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for loca
 
 ### `[loop]`
 
-Controls Untether's observation of Claude Code's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`). Off by default — users opt in per chat via `/config → 🔁 Loop mode`. ([#289](https://github.com/littlebearapps/untether/issues/289))
+Controls how Untether handles Claude Code's scheduling tools (`CronCreate`, `ScheduleWakeup`). With Loop mode on (opt in per chat via `/config → 🔁 Loop mode`), Untether runs Claude's schedules itself, with the caps below. With it off, Claude can't schedule recurring or timed tasks. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
 === "toml"
 
@@ -450,21 +450,26 @@ Controls Untether's observation of Claude Code's session-scoped scheduling tools
     max_total_duration_hours = 4
     min_interval_seconds = 60
     expiry_days = 7
+    own_schedule = true
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `enabled` | bool | `false` | Global default for Loop mode. Per-chat override available via `/config → 🔁 Loop mode`. |
-| `inline_threshold_seconds` | int (≥ 0) | `300` | `ScheduleWakeup` calls with `delaySeconds` ≤ this stay rendered live by the rc8 countdown — no Untether-side timer is registered. Long waits (above the threshold) get an Untether timer that survives subprocess exit. |
-| `redundancy_check_interval` | int (≥ 1) | `30` | Seconds the fire path waits before retrying when the originating subprocess is still alive (race-avoidance gate). |
-| `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). |
+| `enabled` | bool | `false` | Global default for Loop mode. Per-chat override available via `/config → 🔁 Loop mode`. Read when Claude tries to schedule, so a change applies to open sessions too. |
+| `inline_threshold_seconds` | int (≥ 0) | `300` | `ScheduleWakeup` calls with `delaySeconds` ≤ this stay rendered live by the rc8 countdown — no Untether-side timer is registered. Longer waits (Loop mode on) also get an Untether timer, which fires only if the session has closed by then. |
+| `redundancy_check_interval` | int (≥ 1) | `30` | Seconds between retries when a loop iteration is due but its session is busy (background work, an approval waiting). A recurring loop skips the iteration once the next one is due. |
+| `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). Also caps a chain of self-paced wake-ups, in both Loop modes: after this many in a row the session closes and the pending wake-up is dropped. |
 | `max_total_duration_hours` | int (1–168) | `4` | Runaway-safety cap on wall-clock duration (NOT a cost cap). |
 | `min_interval_seconds` | int (≥ 60) | `60` | Accepted but not enforced yet; the upstream cron floor (60 s) applies. |
 | `expiry_days` | int (1–30) | `7` | Auto-expire loops this many days after creation (the default matches upstream's 7-day session-task expiry). |
+| `own_schedule` | bool | `true` | Untether owns Claude's schedules in every Claude chat (a PreToolUse hook declines `CronCreate`; Loop mode decides whether Untether then runs it). `false` restores the pre-rc20 behaviour in both modes: Claude Code's own scheduled task runs uncapped while the session is open, and self-paced wake-ups aren't capped. Hot-reloads for new sessions. |
 
 **Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
 
-State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. The do-not-resume sentinel for `/cancel`-cancelled loops is persisted alongside.
+State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. Alongside it are the per-loop cancel records and the sessions that may still hold an older Claude-side scheduled task; those resume with `CLAUDE_CODE_DISABLE_CRON=1` for up to 7 days so the task can't restart ([#926](https://github.com/littlebearapps/untether/issues/926)).
+
+!!! warning "Rolling back to v0.35.5rc19 or earlier"
+    Older versions reject unknown `[loop]` keys. Remove `own_schedule` from `untether.toml` before downgrading, or the config won't load.
 
 ### `[auto_continue]`
 

@@ -15,7 +15,7 @@ Grounds [#925](https://github.com/littlebearapps/untether/issues/925) and
 |---|---|---|
 | F1 | Print/stream-json mode has its own cron scheduler, created only when `isKairosCronEnabled()` (`!CLAUDE_CODE_DISABLE_CRON && flag tengu_kairos_cron`, default on). It runs both CronCreate jobs (`onFireTask`) and ScheduleWakeup wake-ups (`onFire(…,"schedule_wakeup")`). `isLoading: running \|\| inputClosed`, so a job fires only between turns and only while stdin is open. `isKilled` is re-checked on every 1 s tick. A fire enqueues `{mode:"prompt", isMeta:true, priority:"later", modelScheduledOrigin:true, wakeupSource}` | BINARY (`createCronScheduler({onFire,onFireTask,isLoading,getJitterConfig,isKilled})` in the headless setup) |
 | F2 | Each fire is a `command_lifecycle` with a uuid Untether never wrote, so `_open_followup_turn` labels the turn `scheduled_wakeup` (`runners/claude.py:7071`). The transcript records `queue-operation enqueue "<prompt>"` and then `user {isMeta:true, promptSource:"system"}` | INCIDENT: journal 04:19–04:23Z, `claude.turn.started reason=scheduled_wakeup` ×5; transcript lines 60–92 |
-| F3 | **`--resume` / `--continue` resurrects session-only CronCreate jobs.** On resume the CLI scans the transcript: CronCreate `tool_use` calls, plus the **non-error** `tool_result`s whose `toolUseResult` carries `{id, …}`. It skips `durable:true` jobs, ids in `deletedCronIds` (the `input.id` of **any** CronDelete `tool_use`; the result isn't checked), ids already loaded, recurring jobs older than `recurringMaxAgeMs` (default `604800000` = 7 d; remote config `tengu_kairos_cron_config` allows 0–30 d), and one-shots whose time has passed. Then it logs `resume: resurrected N session cron task(s)`. This only happens when `isKairosCronEnabled()` is true | BINARY (`function os({calls,results,deletedCronIds})` + the transcript scan `qi()`), DOCS |
+| F3 | **`--resume` / `--continue` resurrects session-only CronCreate jobs.** On resume the CLI scans the transcript: CronCreate `tool_use` calls, plus the **non-error** `tool_result`s whose `toolUseResult` carries `{id, …}`. It skips `durable:true` jobs, ids in `deletedCronIds` (the `input.id` of **any** CronDelete `tool_use`; the result isn't checked), ids already loaded, recurring jobs older than `recurringMaxAgeMs` (default `604800000` = 7 d; remote config `tengu_kairos_cron_config` allows up to 30 d, and `0` means **no age limit**: `s.recurringMaxAgeMs!==0&&r-g.createdAt>=s.recurringMaxAgeMs`), and one-shots whose time has passed. Then it logs `resume: resurrected N session cron task(s)`. This only happens when `isKairosCronEnabled()` is true | BINARY (`function os({calls,results,deletedCronIds})` + the transcript scan `qi()`), DOCS |
 | F4 | A resurrected recurring job has no `lastFiredAt`, so its next fire is computed from `createdAt`. That time is in the past, so the job **fires on the first idle tick after spawn**. This beats a stdin prompt written a second later | BINARY (`h1t(e.cron, e.lastFiredAt ?? e.createdAt, …)`); INCIDENT: transcript line 97, the tick was enqueued at 04:24:22 and Untether's prompt at 04:24:23 |
 | F5 | F3 and F4 contradict #289 Probe 1 (CLI 2.1.129, 2026-05-06), which found "No scheduled jobs." after resume. Upstream changed the behaviour between 2.1.129 and 2.1.289, and the docs now state it | `docs/plans/2026-05-06-289-loop-and-cron-interception.md` §Probe 1 vs DOCS |
 | F6 | `CLAUDE_CODE_DISABLE_CRON=1` (a boolean env var, read at spawn) turns off CronCreate/CronDelete/CronList (`isEnabled()`), the headless scheduler (so ScheduleWakeup **fires** stop too in that process) and resurrection (F3 returns early). The ScheduleWakeup tool has no `isEnabled` gate of its own, so it may stay callable but never fire (**UNVERIFIED**, G5). The docs say "The cron tools and `/loop` become unavailable, and any already-scheduled tasks stop firing" | BINARY, DOCS |
@@ -60,6 +60,25 @@ Grounds [#925](https://github.com/littlebearapps/untether/issues/925) and
   execution)? Untether registers idempotently either way, but record which order you see.
 - **G5. `CLAUDE_CODE_DISABLE_CRON=1` on `--resume`.** Check the init `tools` list (are CronCreate and ScheduleWakeup
   absent?), whether a ScheduleWakeup call succeeds but never fires, and that there is no resurrection.
+
+## Addendum: probe results (2026-10-04, CLI 2.1.289, haiku)
+
+- **G1 PASS.** `initialize` with `hooks.PreToolUse=[{matcher:"CronCreate",hookCallbackIds:["ut_loop_cron_create"],timeout:30}]`
+  returned `control_response` success. The model reached CronCreate through `ToolSearch select:CronCreate` (it is a
+  deferred tool); the CLI then sent `control_request{subtype:"hook_callback", callback_id:"ut_loop_cron_create",
+  input:{session_id, transcript_path, hook_event_name:"PreToolUse", tool_name:"CronCreate", tool_input:{cron, prompt}, …},
+  tool_use_id}`. Answering `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+  "permissionDecisionReason":"<reason>"}}` gave a `tool_result` with `is_error:true` and content
+  `PreToolUse:CronCreate hook error: <reason>` (note the prefix). CronList afterwards: "No scheduled jobs."; no fire in
+  130 s idle with stdin open; `--resume` without hooks plus 70 s idle: no resurrection. Other tools behaved identically
+  with the hook registered.
+- **G2.** Callback hooks emit **no** `hook_started` / `hook_response` system frames (only settings-file hooks do), so
+  they never enter the #812 `pending_hooks` tracker and can't arm #923's idle candidate.
+- **G4.** The assistant line carrying the CronCreate `tool_use` arrived ~20 ms **before** the `hook_callback` in this run.
+  Untether registers idempotently per `tool_use_id`, so either order is handled.
+- **Fleet false-positive check for the native-fire detector (#925 §13b amendment 2): clean.** 7 days, 5 hosts: 8
+  sessions logged `claude.turn.started reason=scheduled_wakeup`; every one had a ScheduleWakeup and/or CronCreate
+  `tool_use` in its transcript (0/8 without a known cron), so the detector ships with suppression on.
 
 ## Sources (fetched 2026-10-04)
 

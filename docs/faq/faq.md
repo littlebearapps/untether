@@ -132,11 +132,13 @@ Cost tracking is most accurate for Claude (full USD reporting via API metadata) 
 
 ## Does /loop work via Untether?
 
-Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scoped. Since v0.35.5 Untether keeps a Claude session open after its reply while a wake-up is pending (ScheduleWakeup's own limit is one hour), so self-paced waits fire on their own and arrive as a `⏰ Scheduled wake-up` message. Schedules that outlive the session (cron-style `/loop` intervals) still end with it.
+Yes, with **Loop mode** on (`/config → 🔁 Loop mode`). Untether then runs Claude's `/loop` schedules itself: it declines Claude Code's own scheduled task and fires each iteration when due with `claude --resume`, capped by `[loop]` `max_iterations`, `max_total_duration_hours` and `expiry_days`. A loop never runs uncapped inside an open session, and never comes back when the session is resumed.
 
-To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
+With Loop mode off (the default), Claude can't create recurring or timed tasks: it tells you scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. Before v0.35.5rc20 such a task kept firing while the session was open and came back each time you resumed it. Self-paced waits (`ScheduleWakeup`, a dynamic `/loop`) still work in both modes: Untether keeps the session open after its reply while a wake-up is pending (ScheduleWakeup's own limit is one hour), and each one arrives as a `⏰ Scheduled wake-up` message. A chain of them stops after `max_iterations` wake-ups.
 
-Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets alert by default; turn on **Stop at limit** (`auto_cancel = true`) and loop fires are refused once the daily budget is reached. Otherwise the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
+`/cancel` (or `/new`) stops a loop for good: the next message resumes the session without the cancelled loop coming back. With Loop mode off there is nothing to stop beyond a pending self-paced wait, which `/cancel` and `/new` also end.
+
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets alert by default; turn on **Stop at limit** (`auto_cancel = true`) and loop fires are refused once the daily budget is reached. Otherwise the runaway caps in `[loop]` are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
 
 ## Can I schedule runs or trigger them from a webhook?
 
