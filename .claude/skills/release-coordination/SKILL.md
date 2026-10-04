@@ -24,7 +24,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 | `pyproject.toml` | Package version (`version = "X.Y.Z"`) |
 | `CHANGELOG.md` | Release notes with issue links |
 | `uv.lock` | Locked dependency versions |
-| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing, reviewer approval gate) |
+| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing; no reviewer gate — the release merge is the approval, see Phase 7) |
 | `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, lockfile, audit, bandit, docs, testpypi, release-validation) |
 | `.github/workflows/prerelease-deps.yml` | Weekly pre-release dependency testing (informational) |
 | `scripts/validate_release.py` | Automated changelog/version validation (runs in CI on version-bump PRs) |

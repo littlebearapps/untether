@@ -104,6 +104,8 @@ Live-updates the Telegram progress message:
 - `delete_ephemeral()` cleans up notification messages on run completion
 - Stall monitor reads the run's **own** `JsonlStreamState`/PID from the per-run `RunStreamHandle` (ContextVar bound in `run_runner_with_cancel`), never the shared `runner.current_stream`/`last_pid` (#510)
 - Expected waits (rate-limit `rejected` latch #790, `api_retry` back-off #792, approvals) demote stall warnings; live-idle holds between turns raise no stall WARN and are reported as `peak_live_idle_seconds` in `session.summary`, not `peak_idle_seconds` (#787)
+- Approval reminder (#919/#920): first at 10 min, then every 30 min; each repeat replaces the previous reminder (`_approval_reminder_ref`) and it is deleted once the request is answered or the run ends
+- `edits.orphan_approvals` (`orphan_approvals.py`, #929): a background agent's `can_use_tool` that arrives while the live session is idle gets its own pushed Approve / Deny message (same 10 / 30 min re-post, retired once answered). It never auto-denies; writes go through the transport only
 
 ### TelegramPresenter (`telegram/bridge.py`)
 
@@ -158,6 +160,8 @@ UntetherSettings (pydantic-settings, TOML source)
   │           └── TelegramFilesSettings
   ├── PluginsSettings
   ├── ProjectSettings (per project)
+  ├── CostBudgetSettings, LoopSettings, FooterSettings, PreambleSettings,
+  │   ProgressSettings, WatchdogSettings, AutoContinueSettings, SecuritySettings
   └── engine_config(engine_id) -> dict  # [claude], [codex], etc.
 ```
 

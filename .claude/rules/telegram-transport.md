@@ -68,7 +68,7 @@ Freshness (#924): only entries changed since the dispatch's `outbox_since` are s
 
 ## TelegramBridgeConfig hot-reload (#286)
 
-`TelegramBridgeConfig` is unfrozen (slots preserved) as of rc4. `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`.
+`TelegramBridgeConfig` is unfrozen (slots preserved) as of rc4. `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`. Every restart notice gets its "how to apply" text from `service_manager.restart_hint()` (#927) — never hardcode a systemd unit or launchd label.
 
 ## sd_notify (#287)
 

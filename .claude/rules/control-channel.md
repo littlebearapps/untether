@@ -5,12 +5,13 @@ paths:
   - "src/untether/telegram/commands/claude_control.py"
   - "src/untether/telegram/commands/ask_question.py"
   - "src/untether/live_followup.py"
+  - "src/untether/loop_scheduler.py"
 ---
 
 # Control Channel Rules (Claude runner)
 
-Invariants only. Mechanism detail (registry table, claim flow, async-hook hold, plan re-arm, live-session close
-sequence): `.claude/skills/claude-stream-json/control-channel-internals.md` and `docs/reference/runners/claude/runner.md`.
+Invariants only. Mechanism detail (registry table, claim flow, async-hook hold, scheduling hooks, plan re-arm,
+live-session close sequence): `.claude/skills/claude-stream-json/control-channel-internals.md` and `docs/reference/runners/claude/runner.md`.
 Read those before changing any of these areas.
 
 ## PTY + registries
@@ -52,6 +53,15 @@ Read those before changing any of these areas.
 - After "Pause & Outline", the gate is text-based (`_OUTLINE_MIN_CHARS`): short → auto-deny, written → hold open with buttons.
 - Synthetic buttons use the `da:` callback prefix (64-byte limit), handled in `claude_control.py` before approve/deny.
 - "Let's discuss" holds the request open; the 5-min sweep is event-driven, not a timer.
+
+## Scheduling hooks (#925)
+- Every control-channel spawn registers `PreToolUse` hook callbacks `ut_loop_cron_create` / `ut_loop_cron_delete` in
+  `initialize` (none with `[loop] own_schedule = false`). Only ids in `_LOOP_HOOK_IDS` may read a hook payload; every
+  other `hook_callback` stays payload-blind auto-approve.
+- Always answer them: CronCreate fails **closed** (deny), CronDelete fails open (passthrough). Read Loop mode when the
+  callback arrives, never at spawn. CronDelete only stops loops the calling session owns.
+- CLI 2.1.289 validates CronDelete ids before hooks, so the `tool_use` observer is what stops a `ut_loop_` id — never
+  remove it in favour of the hook branch.
 
 ## Parent-initiated control requests
 - Request ids use the `ut_<feature>_<session_id>_<seq>` namespace (never collide with the CLI's `req_*`). Extend the

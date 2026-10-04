@@ -25,10 +25,11 @@ Untether spawns Claude Code CLI as a subprocess and consumes its JSONL output. T
 | `src/untether/runners/claude.py` | `ClaudeRunner` — subprocess management, PTY, control channel, event translation |
 | `src/untether/schemas/claude.py` | msgspec structs for Claude JSONL events |
 | `src/untether/runners/tool_actions.py` | `tool_kind_and_title()` — tool name to ActionKind mapping |
+| `src/untether/loop_scheduler.py` | Loop mode: Untether-run `/loop` schedules, wake-up timers, cancel and cron-suppression records (#925, #926) |
 | `docs/reference/runners/claude/runner.md` | Full runner specification |
 | `docs/reference/runners/claude/stream-json-cheatsheet.md` | JSONL event shapes with examples |
 | `docs/reference/runners/claude/untether-events.md` | Claude JSONL to Untether event mapping |
-| `.claude/skills/claude-stream-json/control-channel-internals.md` | Control-channel mechanism detail: registries, claims, live-session stdin writers, async-hook hold, plan re-arm, parent-initiated requests |
+| `.claude/skills/claude-stream-json/control-channel-internals.md` | Control-channel mechanism detail: registries, claims, live-session stdin writers, async-hook hold, scheduling hooks, plan re-arm, parent-initiated requests |
 
 ## CLI invocation
 
@@ -54,6 +55,9 @@ claude --output-format stream-json --input-format stream-json --verbose \
 - `--permission-prompt-tool stdio`: enables bidirectional control channel
 - `--permission-mode <mode>`: the configured mode verbatim (`plan`, `auto`, `default`, `acceptEdits`, …); only Untether's `plan-auto` is translated (to `plan`, #741)
 - `--include-hook-events` when the cached `claude --help` probe lists it (#812)
+- The stdin `initialize` request carries `hooks`: exact-name `PreToolUse` matchers for `CronCreate` / `CronDelete`
+  (callback ids `ut_loop_cron_create` / `ut_loop_cron_delete`, #925) unless `[loop] own_schedule = false`
+- A session that may still hold a native CLI cron job is resumed with `CLAUDE_CODE_DISABLE_CRON=1` (#926)
 
 ### Common flags
 
@@ -220,7 +224,8 @@ _DISCUSS_APPROVED / _DISCUSS_CARRY: set[str]           # post-outline approval; 
 Decided per control request in `ClaudeRunner` (mechanism: `control-channel-internals.md`):
 
 - Housekeeping request types (`_AUTO_APPROVE_TYPES`: initialize, hook_callback, mcp_message, rewind_files,
-  interrupt) are auto-approved without looking at the payload
+  interrupt) are auto-approved without looking at the payload — except `hook_callback`s whose `callback_id` is in
+  `_LOOP_HOOK_IDS` (Untether's own scheduling hooks, #925), answered by `_loop_hook_decision_safe()`
 - `can_use_tool` in an autonomous mode (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`): auto-approved
   unless the tool is in `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` or diff preview routes it
 - `can_use_tool` in a prompting mode (`default`/`manual`/`acceptEdits`, `state.prompting_mode`): every tool goes to
