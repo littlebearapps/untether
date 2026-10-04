@@ -87,6 +87,29 @@ def _seen_key(name: str, st: os.stat_result) -> SeenKey:
     return (name, st.st_mtime_ns, st.st_size)
 
 
+def outbox_dir_unsafe_reason(run_root: Path, outbox_dir: str) -> str | None:
+    """#924 review: why the outbox directory must not be scanned, or None.
+
+    Stale archiving ``os.rename``s every older entry of the outbox into
+    ``<outbox>/.skipped/``, so the directory itself must be a real directory
+    inside the project: no ``..``/absolute path, no symlinked component
+    between ``run_root`` and the outbox (a ``.untether-outbox`` symlink to
+    ``~/Downloads`` would otherwise quarantine the user's downloads), and it
+    must resolve within ``run_root``. ``run_root`` itself may be a symlink.
+    """
+    rel = Path(outbox_dir)
+    if rel.is_absolute() or ".." in rel.parts:
+        return "outbox_dir is not a plain relative path"
+    current = run_root
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            return f"symlinked path component: {current.relative_to(run_root)}"
+    if resolve_path_within_root(run_root, rel) is None:
+        return "resolves outside the project root"
+    return None
+
+
 @dataclass(slots=True)
 class OutboxScan:
     """#924: full classification of one outbox scan."""
@@ -127,6 +150,17 @@ def classify_outbox(
     scan = OutboxScan()
     target = run_root / outbox_dir
     if not target.is_dir():
+        return scan
+    unsafe = outbox_dir_unsafe_reason(run_root, outbox_dir)
+    if unsafe is not None:
+        # Nothing is sent, reported stale or moved from a directory that
+        # isn't really the project's own outbox.
+        logger.warning(
+            "outbox.outside_root",
+            outbox_dir=outbox_dir,
+            run_root=str(run_root),
+            reason=unsafe,
+        )
         return scan
 
     if (
@@ -334,6 +368,9 @@ def _move_to_graveyard(run_root: Path, outbox_dir: str, name: str) -> str | None
     point outside the project). Raises ``OSError`` on failure; returns the
     relative destination path.
     """
+    unsafe = outbox_dir_unsafe_reason(run_root, outbox_dir)
+    if unsafe is not None:
+        raise OSError(f"{outbox_dir}: {unsafe}; refusing to archive from it")
     target = run_root / outbox_dir
     graveyard = target / _SKIPPED_GRAVEYARD
     src = target / name

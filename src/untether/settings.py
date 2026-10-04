@@ -129,6 +129,10 @@ class TelegramFilesSettings(BaseModel):
     def _validate_outbox_dir(cls, value: str) -> str:
         if Path(value).is_absolute():
             raise ValueError("files.outbox_dir must be a relative path")
+        # #924 review: `..` would let the outbox (and its stale archiving)
+        # reach outside the project.
+        if ".." in Path(value).parts:
+            raise ValueError("files.outbox_dir must not contain '..'")
         return value
 
 

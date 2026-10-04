@@ -1105,3 +1105,104 @@ def test_924_registry_key_matches_delivery_root(tmp_path: Path) -> None:
             assert od.oldest_active_since(worktree, 300.0) == 300.0
     finally:
         reset_run_base_dir(token)
+
+
+# -- #924 review: the outbox directory itself must stay inside the project --
+
+
+def _make_outside_dir(tmp_path: Path) -> tuple[Path, Path]:
+    """A project root plus an unrelated directory (think ~/Downloads)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    for n in range(3):
+        (downloads / f"personal-{n}.pdf").write_text("mine", encoding="utf-8")
+    return project, downloads
+
+
+@pytest.mark.anyio
+async def test_924_symlinked_outbox_dir_never_scanned_or_archived(
+    tmp_path: Path,
+) -> None:
+    from structlog.testing import capture_logs
+
+    project, downloads = _make_outside_dir(tmp_path)
+    (project / ".untether-outbox").symlink_to(downloads, target_is_directory=True)
+    send_file = AsyncMock()
+    cutoff = _future()
+    with capture_logs() as logs:
+        result = await deliver_outbox_files(
+            **_deliver_kwargs(
+                project, send_file=send_file, send_after=cutoff, archive_before=cutoff
+            )
+        )
+    send_file.assert_not_called()
+    assert result.stale == []
+    assert result.sent == []
+    assert not (downloads / ".skipped").exists()
+    assert sorted(p.name for p in downloads.iterdir()) == [
+        "personal-0.pdf",
+        "personal-1.pdf",
+        "personal-2.pdf",
+    ]
+    warns = [e for e in logs if e["event"] == "outbox.outside_root"]
+    assert warns and warns[0]["log_level"] == "warning"
+
+
+def test_924_symlinked_outbox_dir_inside_project_also_refused(tmp_path: Path) -> None:
+    """Any symlink on the way to the outbox is refused, even one that
+    resolves inside the project — `.skipped` moves must stay put."""
+    real = tmp_path / "real-outbox"
+    real.mkdir()
+    (real / "old.md").write_text("x", encoding="utf-8")
+    (tmp_path / ".untether-outbox").symlink_to(real, target_is_directory=True)
+    cutoff = _future()
+    scan = _classify(tmp_path, send_after=cutoff, archive_before=cutoff)
+    assert scan.stale == []
+    assert scan.files == []
+
+
+def test_924_symlinked_parent_of_outbox_dir_refused(tmp_path: Path) -> None:
+    project, downloads = _make_outside_dir(tmp_path)
+    (downloads / "out").mkdir()
+    (downloads / "out" / "old.md").write_text("x", encoding="utf-8")
+    (project / "link").symlink_to(downloads, target_is_directory=True)
+    cutoff = _future()
+    scan = _classify(
+        project, outbox_dir="link/out", send_after=cutoff, archive_before=cutoff
+    )
+    assert scan.stale == []
+    assert scan.files == []
+
+
+def test_924_dotdot_outbox_dir_refused(tmp_path: Path) -> None:
+    project, downloads = _make_outside_dir(tmp_path)
+    cutoff = _future()
+    scan = _classify(
+        project, outbox_dir="../Downloads", send_after=cutoff, archive_before=cutoff
+    )
+    assert scan.stale == []
+    assert scan.files == []
+
+
+def test_924_move_to_graveyard_refuses_symlinked_outbox(tmp_path: Path) -> None:
+    project, downloads = _make_outside_dir(tmp_path)
+    (project / ".untether-outbox").symlink_to(downloads, target_is_directory=True)
+    with pytest.raises(OSError, match="refusing to archive"):
+        od._move_to_graveyard(project, ".untether-outbox", "personal-0.pdf")
+    assert od._archive_entries(project, ".untether-outbox", ["personal-1.pdf"]) is None
+    assert not (downloads / ".skipped").exists()
+    assert (downloads / "personal-0.pdf").is_file()
+    assert (downloads / "personal-1.pdf").is_file()
+
+
+def test_924_nested_real_outbox_dir_still_works(tmp_path: Path) -> None:
+    outbox = tmp_path / "out" / "box"
+    outbox.mkdir(parents=True)
+    (outbox / "old.md").write_text("x", encoding="utf-8")
+    cutoff = _future()
+    scan = _classify(
+        tmp_path, outbox_dir="out/box", send_after=cutoff, archive_before=cutoff
+    )
+    assert [n for n, _ in scan.stale] == ["old.md"]
