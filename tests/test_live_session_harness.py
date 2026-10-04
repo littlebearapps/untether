@@ -48,6 +48,8 @@ _ENV = (
     "FAKE_CLAUDE_WAKE_OK",
     # #921: hold the first turn open while a follow-up waits to be injected.
     "FAKE_CLAUDE_RESULT_DELAY_S",
+    # #928
+    "FAKE_CLAUDE_NO_QUERY_INIT",
 )
 
 

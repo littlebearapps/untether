@@ -1209,3 +1209,23 @@ def test_923_async_rewake_exit_2_enqueues_a_next_priority_wake(
         "agentId) — re-verify #923's open-time idle candidate (last green on "
         "CLI 2.1.289)"
     )
+
+
+# --- #928 (rc20) ---
+
+
+def test_928_no_query_dispatch_paths_present(cli_blob: mmap.mmap) -> None:
+    """#928 absorbs the CLI's empty ``num_turns: 0`` task-notification results.
+    They come from the CLI's ``shouldQuery: false`` dispatch paths:
+    notification coalescing, the agent hand-back pointer notice and the
+    generic route. If those move, the result shape may have too."""
+    for literal in (
+        b"queryHeldForNextTurn",
+        b"print_task_notification_coalesce",
+        b"agent_handback_pointer_notice",
+    ):
+        assert cli_blob.find(literal) != -1, (
+            f"{literal.decode()!r} is gone — the CLI changed its no-query "
+            "dispatch paths; re-verify #928's `_is_no_query_result` (last green "
+            "on CLI 2.1.289)"
+        )

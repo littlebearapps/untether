@@ -261,6 +261,16 @@ The terminal event looks like:
   bridge renders that turn as `cancelled` (never on `subtype` / `is_error`).
 - `origin.kind == "task-notification"` marks a turn the CLI started itself;
   it confirms a `hook_rewake` turn at its result (4.5).
+- **No-query results (#928):** in a live session, a successful result with
+  `num_turns == 0`, `duration_api_ms == 0`, an empty `result`, no
+  `structured_output` or `local_command`, no aborted `terminal_reason` and
+  `origin.kind == "task-notification"` is the CLI's no-query result. With no
+  turn open (and no pending `command_lifecycle`) it is absorbed: no events,
+  INFO `claude.turn.no_query opened=False`. If an `init` already opened an
+  `unknown` (or `hook_rewake`) turn with no model request or text, that turn
+  closes as `TurnEvent(completed, reason="no_query")` — the bridge drops it
+  silently — and a hook hint it spent is restored. Every live
+  `claude.turn.completed` line logs `origin_kind`.
 - `usage["safeguard"]` is added when the turn had a safeguard stop (4.2 E).
 - `usage["background"]` (#821) names the background agents active since the
   previous result (`agents`, `agents_live`, `agents_ended`, `task_ids`,
@@ -307,7 +317,9 @@ live Monitor task (`monitor_event`). A turn that opened `unknown` becomes
 (or a stale idle hint ≤ 60 s old was carried in) and the result's `origin.kind`
 is `task-notification`
 (`detail.retro_attributed`). The bridge always pushes a `hook_rewake` final
-(`🪝 Hook feedback — <event>`) and never folds it. Assistant/user
+(`🪝 Hook feedback — <event>`) and never folds it. A turn closed by the CLI's
+no-query result completes with `reason="no_query"` (#928): never rendered,
+delivered, accounted, folded or exported. Assistant/user
 events tagged `parent_tool_use_id` (a background subagent) never open a turn.
 `command_lifecycle` lines emit nothing themselves, with one exception (#775):
 a `started` for a line Untether injected (a steer or a follow-up) while a

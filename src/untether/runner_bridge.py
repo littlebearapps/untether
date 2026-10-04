@@ -1664,7 +1664,10 @@ def _record_export_event(
             # #418: a live session's later turns (follow-ups, wake turns).
             # The opening boundary marks the turn; the closing one carries
             # its answer, so it is recorded as that turn's ``completed``.
-            if evt.phase == "completed":
+            if evt.phase == "completed" and evt.reason == "no_query":
+                # #928: not a turn — the export drops its opening heading.
+                event_dict = {"type": "turn_dropped"}
+            elif evt.phase == "completed":
                 event_dict = {
                     "type": "completed",
                     "ok": evt.ok,
@@ -5132,12 +5135,15 @@ async def run_runner_with_cancel(
 
 def _hook_summary_fields(stream: Any) -> dict[str, Any]:
     """#812: ``hooks_started`` for engines that track hook lifecycle frames
-    (Claude with ``--include-hook-events``); absent for the rest."""
+    (Claude with ``--include-hook-events``); #928: ``no_query_results``
+    (the CLI's empty no-query results absorbed). Absent for the rest."""
     engine_state = getattr(stream, "engine_state", None)
-    started = getattr(engine_state, "hooks_started", None)
-    if isinstance(started, int) and not isinstance(started, bool):
-        return {"hooks_started": started}
-    return {}
+    fields: dict[str, Any] = {}
+    for key in ("hooks_started", "no_query_results"):
+        value = getattr(engine_state, key, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            fields[key] = value
+    return fields
 
 
 def sync_resume_token(
@@ -5773,6 +5779,23 @@ class FollowupTurnRouter:
             )
             return
         ctx = self.current
+        if evt.reason == "no_query":
+            # #928: the CLI's no-query result closed the turn ``init`` opened
+            # for it — no final, /stats, cost delta, fold, panel edit or push.
+            matched = ctx is not None and ctx.turn == evt.turn
+            had_progress = matched and ctx is not None and ctx.edits is not None
+            if matched and ctx is not None:
+                if ctx.lazy_scope is not None:
+                    ctx.lazy_scope.cancel()
+                async with ctx.progress_lock:
+                    await self._finish(ctx)
+            logger.debug(
+                "live_turn.no_query_dropped",
+                turn=evt.turn,
+                matched=matched,
+                had_progress=had_progress,
+            )
+            return
         if ctx is None or ctx.turn != evt.turn:
             ctx = self._open(evt)
         elif ctx.reason == "unknown" and evt.reason not in ("unknown", "followup"):

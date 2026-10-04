@@ -116,7 +116,13 @@ Turn-ending fields (decoded since 0.35.5rc14, all optional):
   `CLAUDE_ABORTED_TERMINAL_REASONS` in `schemas/claude.py`).
 - `origin`: what started the turn, e.g. `{"kind":"task-notification","producer":"session-task"}`
   for a turn the CLI started itself (a background-task finish or an `asyncRewake` hook, #812).
-  Typed `Any`: readers check it is an object first.
+  Typed `Any`: readers check it is an object first. The CLI also writes an empty **no-query**
+  result (`num_turns: 0`, `duration_api_ms: 0`, `result: ""`, `origin.kind: "task-notification"`)
+  for each notification it answered together with others, and for the agent hand-back notice — no
+  model call, no cost ([SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript),
+  `SDKResultMessage.origin`). Untether absorbs these ([#928](https://github.com/littlebearapps/untether/issues/928)).
+- `local_command`: set when a local command (e.g. `/compact`) finished without entering the agent
+  loop; such a 0-turn result is never a no-query result (#928). Typed `Any`.
 - `stop_reason`: passed through, typed `Any`.
 
 Optional fields that may appear in upstream Claude Code CLI output but are **not** captured

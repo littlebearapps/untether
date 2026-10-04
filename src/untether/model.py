@@ -37,6 +37,10 @@ type TurnReason = Literal[
     # #812: an asyncRewake hook exited 2 and woke the idle session.
     "hook_rewake",
     "unknown",
+    # #928: a CLI result with no model call (``num_turns: 0``, a
+    # task-notification already answered by another turn) that ``init``
+    # opened as a turn. Closes only; never rendered, delivered or accounted.
+    "no_query",
 ]
 
 # #333: footer marker (``meta["complete"]``) for a finished turn — the session

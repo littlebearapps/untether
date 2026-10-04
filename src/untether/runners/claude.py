@@ -2234,6 +2234,10 @@ class ClaudeStreamState:
     # ``turn_hook_hint`` (so the result-time ``origin`` retro can't use it).
     hook_idle_rewake_hint: tuple[str | None, str | None, float, float] | None = None
     hooks_started: int = 0
+    # #928: the CLI's empty no-query results (``num_turns: 0``, no model
+    # call, ``origin`` task-notification) absorbed or closed as ``no_query``
+    # instead of being run as turns (``session.summary``).
+    no_query_results: int = 0
     # Mirrored from ``[watchdog] hold_for_async_hooks`` /
     # ``async_hook_max_hold`` by ``run_impl`` (read per spawn, so a config
     # edit applies to the next run).
@@ -7205,6 +7209,52 @@ def _result_origin_kind(event: claude_schema.StreamResultMessage) -> str | None:
     return None
 
 
+def _is_no_query_result(event: claude_schema.StreamResultMessage) -> bool:
+    """#928: the CLI's documented no-query result — a task notification
+    answered together with others (or the agent hand-back notice) produces an
+    empty ``num_turns: 0`` result with no model call and
+    ``origin.kind == "task-notification"``. The docs warn against suppressing
+    on ``kind`` alone (scheduled runs share it), so the empty content triple
+    is required too; a local command (``/compact``) is never one."""
+    return (
+        event.subtype == "success"
+        and not event.is_error
+        and event.num_turns == 0
+        and event.duration_api_ms == 0
+        and not (event.result or "").strip()
+        and event.structured_output is None
+        and event.local_command is None
+        and event.terminal_reason not in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS
+        and _result_origin_kind(event) == "task-notification"
+    )
+
+
+def _restore_turn_hook_hints(state: ClaudeStreamState) -> None:
+    """#928 (review amendment 1): a ``no_query`` turn that opened as
+    ``hook_rewake`` spent the hint meant for the real rewake turn that
+    follows — give it back with a fresh timestamp (strong or #923's idle
+    candidate). A hint carried into the turn (``turn_hook_hint``: stale at
+    open, or a hook that exited 2 during it) goes back to ``hook_rewake_hint``
+    unchanged, so the next turn still gets the open / ``origin`` checks."""
+    now = time.monotonic()
+    detail = state.turn_detail
+    if state.turn_reason == "hook_rewake":
+        name, hook_event = detail.get("hook"), detail.get("hook_event")
+        if detail.get("hook_started_idle"):
+            held = detail.get("hook_held_s")
+            state.hook_idle_rewake_hint = (
+                name,
+                hook_event,
+                now,
+                float(held) if isinstance(held, (int, float)) else 0.0,
+            )
+        else:
+            state.hook_rewake_hint = (name, hook_event, now)
+    if state.turn_hook_hint is not None and state.hook_rewake_hint is None:
+        state.hook_rewake_hint = state.turn_hook_hint
+    state.turn_hook_hint = None
+
+
 def _turn_plan_deferred(
     state: ClaudeStreamState, reason: str, command_uuid: str | None
 ) -> int:
@@ -7276,6 +7326,7 @@ def _open_followup_turn(
         detail["hook"] = idle[0]
         detail["hook_event"] = idle[1]
         detail["hook_started_idle"] = True
+        detail["hook_held_s"] = idle[3]
         logger.info(
             "claude.turn.hook_rewake",
             session_id=factory.resume.value if factory.resume else None,
@@ -7452,6 +7503,54 @@ def _absorb_injected(
     ]
 
 
+def _close_no_query_turn(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    event: claude_schema.StreamResultMessage,
+    completed: CompletedEvent | None,
+) -> list[UntetherEvent]:
+    """#928 case I: close a turn ``init`` opened for a no-query result as
+    ``no_query`` — the bridge drops it silently. ``completed_turns`` is not
+    bumped (no #896 accounting wait), the plan re-arm recompute and the retro
+    chain are skipped, no #785 pairing window is armed, and a hook hint the
+    turn spent is restored for the real turn that follows. The turn number
+    stays consumed: hooks started in it are tagged with it (#828/#923)."""
+    opened_as = state.turn_reason
+    state.turn_open = False
+    _restore_turn_hook_hints(state)
+    state.turn_reason = "no_query"
+    state.turn_ended_tasks = []
+    state.unattributed_turn_completed_at = None
+    state.no_query_results += 1
+    logger.info(
+        "claude.turn.no_query",
+        session_id=event.session_id,
+        opened=True,
+        turn=state.turn,
+        opened_as=opened_as,
+        origin_kind=_result_origin_kind(event),
+    )
+    logger.info(
+        "claude.turn.completed",
+        session_id=event.session_id,
+        turn=state.turn,
+        reason="no_query",
+        ok=True,
+        num_turns=event.num_turns,
+        origin_kind=_result_origin_kind(event),
+    )
+    return [
+        factory.turn_completed(
+            turn=state.turn,
+            ok=True,
+            answer="",
+            reason="no_query",
+            usage=completed.usage if completed is not None else None,
+            detail={},
+        )
+    ]
+
+
 def translate_claude_event(
     event: claude_schema.StreamJsonMessage,
     *,
@@ -7591,9 +7690,41 @@ def translate_claude_event(
             )
             return out
         case claude_schema.StreamResultMessage():
+            no_query = _is_no_query_result(event)
+            if no_query and not state.turn_open and state.pending_command_uuid is None:
+                # #928 case R: the CLI's no-query result as the first frame —
+                # absorb it before it opens a turn, so no turn number, idle
+                # hint, ``turn_notifications`` or pairing window is spent.
+                state.no_query_results += 1
+                logger.info(
+                    "claude.turn.no_query",
+                    session_id=event.session_id,
+                    opened=False,
+                    after_turn=state.turn,
+                    since_result_s=(
+                        round(time.monotonic() - state.result_received_at, 2)
+                        if state.result_received_at is not None
+                        else None
+                    ),
+                    origin_kind=_result_origin_kind(event),
+                )
+                return []
             out = []
             if not state.turn_open:
                 out.extend(_open_turn_events(state, factory))
+            # #928 case I: ``init`` already opened a turn for it. Only a turn
+            # nothing else explains (``unknown``) or one opened on a hook hint
+            # (``hook_rewake``, review amendment 1), with no model request,
+            # text, compaction or task end in it.
+            no_query = (
+                no_query
+                and state.turn_reason in ("unknown", "hook_rewake")
+                and state.turn_command_uuid is None
+                and state.turn_model_requests == 0
+                and state.last_assistant_text is None
+                and not state.turn_compactions
+                and not state.turn_ended_tasks
+            )
             base = _translate_claude_event_base(
                 event, title=title, state=state, factory=factory
             )
@@ -7603,6 +7734,8 @@ def translate_claude_event(
             # #819: result-time ActionEvents (the ``% ctx`` telemetry) belong
             # to this turn — forward them before it closes.
             out.extend(evt for evt in base if isinstance(evt, ActionEvent))
+            if no_query:
+                return [*out, *_close_no_query_turn(state, factory, event, completed)]
             state.turn_open = False
             state.completed_turns += 1
             # #383: re-arm plan mode at every live turn close.
@@ -7703,6 +7836,7 @@ def translate_claude_event(
                     reason=state.turn_reason,
                     ok=completed.ok,
                     num_turns=event.num_turns,
+                    origin_kind=_result_origin_kind(event),  # #928
                 )
                 out.append(
                     factory.turn_completed(

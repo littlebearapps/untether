@@ -943,7 +943,7 @@ def scenario_two_tasks_one_wake_turn(first: dict) -> None:
         _end_quietly("a2")
         result("A is done; B is still running.", turns=2)
         init()
-        result("", turns=0, delta=0.0)
+        _no_query_result()  # #928: the CLI's empty no-query result
         init()
         text("B printed its report.")
         result("B printed its report.")
@@ -1620,6 +1620,57 @@ def _task_notification_result(answer: str) -> None:
             "origin": {"kind": "task-notification", "producer": "session-task"},
         }
     )
+
+
+def _no_query_result() -> None:
+    """#928: the CLI's documented no-query result — a notification answered
+    together with others: no model call, empty, ``num_turns: 0``,
+    ``origin`` task-notification (SDK docs, CLI 2.1.289)."""
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 2,
+            "duration_api_ms": 0,
+            "num_turns": 0,
+            "result": "",
+            "total_cost_usd": _cost,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "origin": {"kind": "task-notification"},
+        }
+    )
+
+
+def scenario_agent_wake_no_query_tail(first: dict) -> None:
+    """#928 (channelo/sl/lba-1/nsd, rc19): two background agents. a1's wake
+    turn is followed ~0.2 s later by the CLI's empty no-query result —
+    with its own ``init`` when ``FAKE_CLAUDE_NO_QUERY_INIT=1`` (case I),
+    bare otherwise (case R). Then a2 finishes and gets its own wake turn."""
+    init()
+    for task_id, tool_id in (("a1", "toolu_a1"), ("a2", "toolu_a2")):
+        tool_use("Agent", tool_id, {"description": f"sweep {task_id}", "prompt": "go"})
+        start_bg(task_id, tool_id, task_type="local_agent")
+        tool_result(tool_id, "Async agent launched successfully.")
+    text("Two sweeps running.")
+    result("Two sweeps running.", turns=3)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("a1 done")
+    _task_notification_result("a1 done")
+    time.sleep(0.2)
+    if os.environ.get("FAKE_CLAUDE_NO_QUERY_INIT") == "1":
+        init()
+    _no_query_result()
+    if wait_idle_or_eof(1.0) is None:
+        shutdown()
+    end_bg("a2")
+    init()
+    text("a2 done")
+    _task_notification_result("a2 done")
+    serve_followups()
 
 
 def scenario_bg_agent_pretooluse_denial(first: dict) -> None:
@@ -2547,6 +2598,7 @@ _SCENARIOS = {
     "async_rewake_idle": scenario_async_rewake_idle,
     "bg_agent_pretooluse_denial": scenario_bg_agent_pretooluse_denial,
     "bg_agent_async_rewake_idle": scenario_bg_agent_async_rewake_idle,
+    "agent_wake_no_query_tail": scenario_agent_wake_no_query_tail,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,

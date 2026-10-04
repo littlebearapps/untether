@@ -532,8 +532,10 @@ def test_session_summary_hook_fields() -> None:
 
     state = ClaudeStreamState()
     state.hooks_started = 7
+    state.no_query_results = 2  # #928
     assert _hook_summary_fields(SimpleNamespace(engine_state=state)) == {
-        "hooks_started": 7
+        "hooks_started": 7,
+        "no_query_results": 2,
     }
     # Other engines (no hook tracking) add nothing.
     assert _hook_summary_fields(SimpleNamespace(engine_state=object())) == {}

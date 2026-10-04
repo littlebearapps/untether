@@ -283,6 +283,11 @@ class StreamResultMessage(
     # Any, not dict: a non-object origin must not drop the result line —
     # readers check ``isinstance(origin, dict)`` first.
     origin: Any = None
+    # #928: set when a local command (e.g. ``/compact``) finished without
+    # entering the agent loop (SDK ``SDKResultMessage.local_command``); such
+    # a 0-turn result is never a no-query notification result. Any, like
+    # ``origin``: an unexpected shape must not drop the result line.
+    local_command: Any = None
     stop_reason: Any = None
     # #819: per-model usage for the session, keyed by the model id the CLI
     # used; each entry carries ``contextWindow`` (the context-% denominator)
