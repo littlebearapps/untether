@@ -6,7 +6,7 @@ Shipped in Untether v0.5.0.
 ## Installation
 
 ```bash
-npm i -g opencode-ai@latest
+npm i -g opencode-ai@1
 ```
 
 ### Supported versions

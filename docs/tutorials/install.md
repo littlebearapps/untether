@@ -304,7 +304,7 @@ untether runs these engines on your computer. switch anytime with /agent.
   ───────────────────────────────────────────
   codex     ✓ installed
   claude    ✓ installed
-  opencode  ✗ not found    npm install -g opencode-ai@latest
+  opencode  ✗ not found    npm install -g opencode-ai@1
   pi        ✗ not found    npm install -g @mariozechner/pi-coding-agent
   gemini    ✗ not found    npm install -g @google/gemini-cli
   amp       ✗ not found    npm install -g @sourcegraph/amp
