@@ -76,7 +76,7 @@ This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timesta
 Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` before final release:
 
 - rc versions live on the `dev` branch — merged via PR from feature branches
-- rc versions do **NOT** require changelog entries — `validate_release.py` skips them
+- rc versions get no changelog heading of their own — `validate_release.py` skips them. Each fix is still logged as it lands, under the line's single `## vX.Y.Z (unreleased)` heading (newest at the top of each subsection), and that heading is dated at the `dev`→`master` release merge
 - rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
 - Commit message convention: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare version bump is `chore(release): X.Y.ZrcN`
 - Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`

@@ -37,6 +37,31 @@ post-return recovery would act on it. The early check and the post-return path s
 (`_empty_resend_due`, `_auto_continue_due`, `_stream_idle_retry_due`): change a recovery condition there, never in one
 path only, or an error final gets delivered and then recovered (or held and never recovered).
 
+## Final delivery (#928, #948)
+
+- A final counts as **sent once it is handed to the transport**: `delivery["sent"]` is set before `send_result_message`
+  and reset only if that call raises. The outbox delivers a queued op even when its waiter is cancelled (the early
+  path's 60 s `_EARLY_DELIVERY_TIMEOUT_S` bound), so never gate "sent" on the await completing — that resends the
+  final at live-session close (duplicate message + a second `$0` `runner.completed`).
+- Before any final / cancelled edit of a progress message, `await edits.stop_repaints()` — never set `_finalizing`
+  by hand. A debounced repaint already past its check would otherwise land after (and over) the final.
+
+## Resume auto-clear (#45, #952)
+
+A failed resumed run clears the chat's saved session only through `_resume_failure_clears_session()`: a reported
+`num_turns` decides (0 → clear); with none, only the turn-count engines in `_TURN_COUNT_ENGINES` (Claude, AMP) clear,
+and every other engine clears only when the error matches `_RESUME_FAILURE_RE` (the CLI's own "session not found"
+wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x) never clears.
+Never treat a missing `num_turns` as 0 again: Codex/OpenCode/Pi never report turns, so a bad model id or missing
+API key would wipe a healthy session.
+
+## Stall threshold (#953)
+
+A child process earns the 15-min `subagent_timeout` threshold unconditionally only for engines in
+`_CHILD_WORK_ENGINES` (Claude — its children are Agent/Bash work). Elsewhere a child is usually permanent (Codex's npm
+shim, OpenCode's MCP servers), so it counts only while the process tree is using CPU (or on the TCP signal). A
+stopped engine process (state `T`/`t`) never earns it and is reported as "Engine process is stopped".
+
 ## Event creation
 
 Use `EventFactory` (from `src/untether/events.py`) for all event construction:
@@ -74,6 +99,11 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 5. Register in `pyproject.toml` entry points: `myengine = "untether.runners.myengine:BACKEND"`
 6. Add reference docs in `docs/reference/runners/myengine/`
 7. Add tests mirroring the Codex suite's patterns (`tests/test_codex_runner_helpers.py`, `tests/test_codex_schema.py`, `tests/test_codex_tool_result_summary.py`)
+8. Bridge tables in `runner_bridge.py`: add the CLI's "session not found" wording to `_RESUME_FAILURE_RE` (or the
+   engine to `_TURN_COUNT_ENGINES` if it reports `num_turns`); add it to `_CHILD_WORK_ENGINES` only if its child
+   processes are real work, never a permanent wrapper
+9. A pre-spawn refusal (e.g. an unsupported CLI version — OpenCode's 2.x guard, #970) yields one
+   `completed_error(..., usage={PRESPAWN_BLOCKED_KEY: "<reason>"})` before anything spawns, so the saved session is kept
 
 ## Deprecated engines — sweep exemption
 

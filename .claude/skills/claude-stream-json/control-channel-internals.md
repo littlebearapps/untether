@@ -28,6 +28,7 @@ _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel
 _HANDLED_REQUESTS: dict[str, HandledControl | None]    # #685: answered/cancelled/expired record (action, outcome, channel)
 _INFLIGHT_CONTROL_RESPONSES: dict[str, str]            # #685: request_id -> claim owner while a tap is being written
 _REQUEST_TO_CHANNEL: dict[str, int]                    # #388: request_id -> chat its buttons were posted in (bind after every _REQUEST_TO_SESSION[...] =)
+_REQUEST_TO_ORIGINATOR: dict[str, int]                 # #388 phase 2: request_id -> Telegram user who started the run (set by the same _bind_request_channel; read only with approval_originator_only)
 _CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the request while a tap was mid-write
 ```
 

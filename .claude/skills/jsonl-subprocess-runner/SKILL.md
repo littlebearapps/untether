@@ -37,7 +37,7 @@ Runner (Protocol)
   BaseRunner (SessionLockMixin)
     JsonlSubprocessRunner
       CodexRunner
-      OpenCodeRunner
+      OpenCodeRunner (wraps run_impl: refuses OpenCode 2.x before spawning, #970)
       PiRunner
       GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
@@ -184,6 +184,7 @@ Key invariants:
 | Translation error | `translate_error_events()` → warning ActionEvent, continue |
 | Non-zero exit code | `process_error_events()` → CompletedEvent(ok=False) |
 | Stream ends without result | `stream_end_events()` → CompletedEvent(ok=False) |
+| Pre-spawn block (RAM, concurrency, unsupported CLI version) | `completed_error(..., usage={PRESPAWN_BLOCKED_KEY: reason})`, nothing spawned; the bridge keeps the saved session (#838) |
 
 ## Resume token mixin
 

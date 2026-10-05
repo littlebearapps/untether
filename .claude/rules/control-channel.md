@@ -22,6 +22,11 @@ Read those before changing any of these areas.
   **never write a response without a claim** (`claim_control_request()` before the dispatcher's first `await`).
 - A CLI `control_cancel_request` (#684) retires the request everywhere and records `cancelled`; write nothing back.
   A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`.
+- Every request registration binds through `_bind_request_channel()`, which records `_REQUEST_TO_CHANNEL` **and** the
+  run's originator (`_REQUEST_TO_ORIGINATOR`, from `get_run_sender_id()`, #388); clean both with the other registries.
+  No originator entry (cron, webhook, `/at`, loop fires) means any allowed user may answer — never invent one.
+  `[transports.telegram] approval_originator_only` checks it in `_dispatch_callback` **before** the early answer
+  reserves a claim, and on typed AskUserQuestion replies.
 
 ## Auto-approve
 - Auto-approve the non-interactive request types in `_AUTO_APPROVE_TYPES`.
