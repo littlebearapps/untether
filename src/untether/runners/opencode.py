@@ -13,16 +13,23 @@ Session IDs use the format: ses_XXXX (e.g., ses_494719016ffe85dkDMj0FPRbHK)
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import shutil
+import subprocess
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
 from ..config import ConfigError
+from ..events import EventFactory
 from ..logging import get_logger
 from ..model import (
     Action,
@@ -35,6 +42,7 @@ from ..model import (
     UntetherEvent,
 )
 from ..runner import (
+    PRESPAWN_BLOCKED_KEY,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
@@ -54,6 +62,88 @@ ENGINE: EngineId = "opencode"
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?opencode(?:\s+run)?\s+(?:--session|-s)\s+(?P<token>ses_[A-Za-z0-9]+)`?\s*$"
 )
+
+
+# #970: OpenCode v2 (npm ``@opencode/cli``, binary also named ``opencode``)
+# routes ``run`` through a shared per-user background service unless
+# ``--standalone`` is passed, and its ``run --format json`` schema is
+# unverified. Under Untether that would run the agent outside our process
+# control (environment, cwd, cancel, stall watchdog), so only the 1.x CLI
+# (npm ``opencode-ai``) is supported until a v2 adapter is built.
+_SUPPORTED_MAJOR = 1
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+_VERSION_PROBE_TIMEOUT_S = 10.0
+_VERSION_CACHE: dict[tuple[str, float], str | None] = {}
+UNSUPPORTED_VERSION_BLOCK = "unsupported_version"
+
+
+def parse_opencode_version(output: str) -> tuple[int, ...] | None:
+    """``opencode --version`` output → ``(major, minor[, patch])``, or None."""
+    match = _VERSION_RE.search(output or "")
+    if match is None:
+        return None
+    return tuple(int(g) for g in match.groups() if g is not None)
+
+
+def _probe_opencode_version(path: str) -> str | None:
+    """Run ``<opencode> --version`` (no session, no model call). None on failure.
+
+    Tests stub this (see ``tests/conftest.py``).
+    """
+    try:
+        proc = subprocess.run(  # nosec B603 — fixed argv, no shell
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_PROBE_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
+
+
+def opencode_cli_version(cmd: str) -> str | None:
+    """#970: the installed OpenCode CLI's version string, or None if unknown.
+
+    One ``--version`` probe per (binary path, mtime), so an upgrade or a
+    switch between the 1.x and 2.x packages re-probes. Blocking: call it
+    off the event loop.
+    """
+    path = shutil.which(cmd) or (cmd if os.path.isabs(cmd) else None)
+    if path is None:
+        return None
+    try:
+        real = os.path.realpath(path)
+        key = (real, os.stat(real).st_mtime)
+    except OSError:
+        return None
+    if key in _VERSION_CACHE:
+        return _VERSION_CACHE[key]
+    output = _probe_opencode_version(real)
+    if output is None:
+        # Not cached: a transient failure (e.g. a slow first start) re-probes.
+        logger.warning("opencode.version.probe_failed", cli_path=real)
+        return None
+    parsed = parse_opencode_version(output)
+    version = ".".join(str(n) for n in parsed) if parsed is not None else None
+    _VERSION_CACHE[key] = version
+    logger.info("opencode.version.probe", cli_path=real, version=version)
+    return version
+
+
+def unsupported_version_message(version: str) -> str:
+    """#970: the Telegram-facing refusal for an unsupported OpenCode CLI."""
+    return (
+        f"🛑 OpenCode {version} isn't supported yet, so this run wasn't started. "
+        "Untether drives the OpenCode 1.x CLI; OpenCode 2.x (`@opencode/cli`) "
+        "runs prompts on a shared background service outside Untether's "
+        "control. Install the 1.x CLI on this host:\n"
+        "`npm uninstall -g @opencode/cli && npm install -g opencode-ai@1`"
+    )
 
 
 def _extract_event_type(raw: str) -> str | None:
@@ -423,6 +513,50 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     model: str | None = None
     session_title: str = "opencode"
     logger = logger
+
+    async def run_impl(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[UntetherEvent]:
+        # #970: refuse OpenCode 2.x before anything is spawned. The probe
+        # is cached per binary and runs off the event loop.
+        blocked = await self._unsupported_version_event(resume)
+        if blocked is not None:
+            yield blocked
+            return
+        # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True).
+        async with contextlib.aclosing(
+            JsonlSubprocessRunner.run_impl(self, prompt, resume)
+        ) as events:
+            async for evt in events:
+                yield evt
+
+    async def _unsupported_version_event(
+        self, resume: ResumeToken | None
+    ) -> UntetherEvent | None:
+        version = await anyio.to_thread.run_sync(
+            opencode_cli_version, self.opencode_cmd
+        )
+        parsed = parse_opencode_version(version) if version else None
+        if parsed is None:
+            # Fail open: a slow or odd ``--version`` must never block 1.x
+            # users. A missing binary fails at spawn with the usual error.
+            logger.warning(
+                "opencode.version.unknown", cmd=self.opencode_cmd, version=version
+            )
+            return None
+        if parsed[0] <= _SUPPORTED_MAJOR:
+            return None
+        logger.error(
+            "opencode.version.unsupported",
+            version=version,
+            supported_major=_SUPPORTED_MAJOR,
+        )
+        return EventFactory(ENGINE).completed_error(
+            error=unsupported_version_message(str(version)),
+            resume=resume,
+            # Never ran the engine: keep the chat's saved session (#838).
+            usage={PRESPAWN_BLOCKED_KEY: UNSUPPORTED_VERSION_BLOCK},
+        )
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:

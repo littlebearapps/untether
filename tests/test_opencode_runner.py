@@ -903,3 +903,162 @@ def test_build_runner_no_opencode_config(
     runner = build_runner({}, tmp_path / "untether.toml")
     assert runner.model is None
     assert runner.session_title == "opencode"
+
+
+# ---------------------------------------------------------------------------
+# #970: OpenCode v2 (@opencode/cli) version guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("1.14.33\n", (1, 14, 33)),
+        ("2.0.23", (2, 0, 23)),
+        ("opencode 2.0.23\nextra", (2, 0, 23)),
+        ("v1.18.4", (1, 18, 4)),
+        ("", None),
+        ("not a version", None),
+    ],
+)
+def test_parse_opencode_version(output: str, expected) -> None:
+    from untether.runners.opencode import parse_opencode_version
+
+    assert parse_opencode_version(output) == expected
+
+
+def _fake_opencode_bin(tmp_path: Path) -> Path:
+    """A fake ``opencode`` that records each spawn and emits a v1 run."""
+    marker = tmp_path / "spawned"
+    script = tmp_path / "opencode"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo spawn >> "{marker}"\n'
+        "echo '"
+        '{"type":"step_start","sessionID":"ses_v1ok","part":{}}'
+        "'\n"
+        "echo '"
+        '{"type":"text","sessionID":"ses_v1ok","part":{"id":"p1","text":"ok"}}'
+        "'\n"
+        "echo '"
+        '{"type":"step_finish","sessionID":"ses_v1ok","part":{"reason":"stop"}}'
+        "'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.anyio
+async def test_run_refuses_opencode_v2_without_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a 2.x CLI fails fast with a clear message and never spawns `run`."""
+    from untether.runner import prespawn_blocked_reason
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: "2.0.23")
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+    resume = ResumeToken(engine=ENGINE, value="ses_keepme")
+
+    events = [evt async for evt in runner.run("hello", resume)]
+
+    assert len(events) == 1
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.ok is False
+    assert completed.error is not None
+    assert "OpenCode 2.0.23" in completed.error
+    assert "opencode-ai@1" in completed.error
+    assert completed.resume == resume
+    # Guard block: the chat's saved session must not be auto-cleared (#838).
+    assert prespawn_blocked_reason(completed.usage) == "unsupported_version"
+    assert not (tmp_path / "spawned").exists()
+
+
+@pytest.mark.anyio
+async def test_run_allows_opencode_v1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a 1.x CLI runs as before."""
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: "1.14.33")
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+
+    events = [evt async for evt in runner.run("hello", None)]
+
+    assert isinstance(events[0], StartedEvent)
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is True
+    assert events[-1].answer == "ok"
+    assert (tmp_path / "spawned").exists()
+
+
+@pytest.mark.anyio
+async def test_run_unknown_opencode_version_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a failed/unparsable probe never blocks a run (logged instead)."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: None)
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+
+    with capture_logs() as logs:
+        events = [evt async for evt in runner.run("hello", None)]
+
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is True
+    assert any(e["event"] == "opencode.version.unknown" for e in logs)
+
+
+def test_opencode_version_probe_cached_per_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: one --version probe per (binary, mtime); an upgrade re-probes."""
+    import os
+
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    calls: list[str] = []
+
+    def probe(path: str) -> str:
+        calls.append(path)
+        return "1.14.33"
+
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", probe)
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert len(calls) == 1
+
+    st = script.stat()
+    os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert len(calls) == 2
+
+
+def test_opencode_version_unresolvable_command_is_unknown() -> None:
+    from untether.runners import opencode as opencode_mod
+
+    assert opencode_mod.opencode_cli_version("definitely-not-opencode-xyz") is None
+
+
+def test_opencode_version_probe_failure_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a failed probe re-probes next time instead of sticking."""
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    results = iter([None, "2.0.23"])
+    monkeypatch.setattr(
+        opencode_mod, "_probe_opencode_version", lambda path: next(results)
+    )
+    assert opencode_mod.opencode_cli_version(str(script)) is None
+    assert opencode_mod.opencode_cli_version(str(script)) == "2.0.23"

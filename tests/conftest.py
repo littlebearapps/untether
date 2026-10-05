@@ -292,3 +292,17 @@ def _clear_cli_version_cache() -> Iterator[None]:
     _CLI_VERSION_CACHE.clear()
     yield
     _CLI_VERSION_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_opencode_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """#970: ``OpenCodeRunner.run_impl`` asks ``opencode --version`` (once per
+    binary) whether it's the unsupported 2.x CLI. Unit tests must never spawn
+    the host's real CLI for that, so the probe reports "unknown" (→ the run
+    is allowed) unless a test stubs ``_probe_opencode_version`` itself."""
+    from untether.runners import opencode as opencode_runner
+
+    monkeypatch.setattr(opencode_runner, "_probe_opencode_version", lambda path: None)
+    opencode_runner._VERSION_CACHE.clear()
+    yield
+    opencode_runner._VERSION_CACHE.clear()
