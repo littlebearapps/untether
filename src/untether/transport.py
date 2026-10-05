@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -29,6 +32,28 @@ class SendOptions:
     notify: bool = True
     replace: MessageRef | None = None
     thread_id: ThreadId | None = None
+
+
+# #823: what an outgoing Telegram call is for (``progress``, ``final``,
+# ``bg_status``, ``approval_surface`` …), for its error log lines only. A
+# message_id alone can't say which surface a failed edit was.
+_MESSAGE_KIND: ContextVar[str | None] = ContextVar(
+    "untether_message_kind", default=None
+)
+
+
+@contextmanager
+def message_kind(kind: str | None) -> Iterator[None]:
+    """Label the transport calls made inside the block (#823)."""
+    token = _MESSAGE_KIND.set(kind)
+    try:
+        yield
+    finally:
+        _MESSAGE_KIND.reset(token)
+
+
+def current_message_kind() -> str | None:
+    return _MESSAGE_KIND.get()
 
 
 class Transport(Protocol):

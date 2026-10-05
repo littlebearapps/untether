@@ -63,6 +63,7 @@ from .transport import (
     SendOptions,
     ThreadId,
     Transport,
+    message_kind,
 )
 
 logger = get_logger(__name__)
@@ -238,7 +239,8 @@ async def delete_outline_messages(session_id: str) -> None:
     transport, refs = entry
     for ref in refs:
         try:
-            await transport.delete(ref=ref)
+            with message_kind("outline"):
+                await transport.delete(ref=ref)
         except Exception:  # noqa: BLE001
             logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
@@ -4444,15 +4446,18 @@ class ProgressEdits:
 
                         async def _send_notify(text: str) -> None:
                             try:
-                                self._approval_notify_ref = await self.transport.send(
-                                    channel_id=self.channel_id,
-                                    message=RenderedMessage(text=text),
-                                    options=SendOptions(
-                                        notify=True,
-                                        reply_to=self.progress_ref,
-                                        thread_id=self.thread_id,
-                                    ),
-                                )
+                                with message_kind("approval_notify"):
+                                    self._approval_notify_ref = (
+                                        await self.transport.send(
+                                            channel_id=self.channel_id,
+                                            message=RenderedMessage(text=text),
+                                            options=SendOptions(
+                                                notify=True,
+                                                reply_to=self.progress_ref,
+                                                thread_id=self.thread_id,
+                                            ),
+                                        )
+                                    )
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_send_failed",
@@ -4468,7 +4473,8 @@ class ProgressEdits:
 
                         async def _delete_notify(ref: MessageRef) -> None:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("approval_notify"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_delete_failed",
@@ -4493,7 +4499,8 @@ class ProgressEdits:
                     ) -> None:
                         for ref in refs:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("outline"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.outline_delete_failed",
@@ -4529,11 +4536,12 @@ class ProgressEdits:
                             message_id=self.progress_ref.message_id,
                             rendered=rendered.text,
                         )
-                        edited = await self.transport.edit(
-                            ref=self.progress_ref,
-                            message=rendered,
-                            wait=has_approval and not had_approval,
-                        )
+                        with message_kind("progress"):
+                            edited = await self.transport.edit(
+                                ref=self.progress_ref,
+                                message=rendered,
+                                wait=has_approval and not had_approval,
+                            )
                         if edited is not None:
                             self.last_rendered = rendered
                             self._last_render_at = self.clock()
@@ -4708,15 +4716,16 @@ class ProgressEdits:
                     extra: dict[str, Any] = {"entities": entities}
                     if approval_keyboard and idx == last_idx:
                         extra["reply_markup"] = approval_keyboard
-                    ref = await self.transport.send(
-                        channel_id=self.channel_id,
-                        message=RenderedMessage(text=rendered_text, extra=extra),
-                        options=SendOptions(
-                            reply_to=self.progress_ref,
-                            notify=False,
-                            thread_id=self.thread_id,
-                        ),
-                    )
+                    with message_kind("outline"):
+                        ref = await self.transport.send(
+                            channel_id=self.channel_id,
+                            message=RenderedMessage(text=rendered_text, extra=extra),
+                            options=SendOptions(
+                                reply_to=self.progress_ref,
+                                notify=False,
+                                thread_id=self.thread_id,
+                            ),
+                        )
                     if ref:
                         self._outline_refs.append(ref)
                 except Exception:  # noqa: BLE001
@@ -4744,11 +4753,12 @@ class ProgressEdits:
         self._approval_first_reminder_sent = True
         previous = self._approval_reminder_ref
         try:
-            ref = await self.transport.send(
-                channel_id=self.channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(thread_id=self.thread_id, replace=previous),
-            )
+            with message_kind("approval_reminder"):
+                ref = await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(thread_id=self.thread_id, replace=previous),
+                )
         except Exception:  # noqa: BLE001
             logger.debug("progress_edits.stall_notify_failed", exc_info=True)
             return
@@ -4779,11 +4789,12 @@ class ProgressEdits:
             self._approval_first_reminder_sent = False
         deleted = False
         try:
-            deleted = bool(await self.transport.delete(ref=ref))
+            with message_kind("approval_reminder"):
+                deleted = bool(await self.transport.delete(ref=ref))
         except Exception:  # noqa: BLE001
             deleted = False
         if not deleted:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception), message_kind("approval_reminder"):
                 await self.transport.edit(
                     ref=ref, message=RenderedMessage(text="✅ No longer waiting.")
                 )
@@ -4816,7 +4827,8 @@ class ProgressEdits:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
             try:
-                await self.transport.delete(ref=self._approval_notify_ref)
+                with message_kind("approval_notify"):
+                    await self.transport.delete(ref=self._approval_notify_ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.delete.failed",
@@ -4849,7 +4861,8 @@ class ProgressEdits:
             _OUTLINE_REGISTRY_TS.pop(sid, None)  # #203: keep ts map in sync
         for ref in self._outline_refs:
             try:
-                await self.transport.delete(ref=ref)
+                with message_kind("outline"):
+                    await self.transport.delete(ref=ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.outline_delete.failed",
@@ -4866,7 +4879,8 @@ class ProgressEdits:
             _EPHEMERAL_MSGS_TS.pop(key, None)  # #203: keep ts map in sync
             for ref in refs:
                 try:
-                    await self.transport.delete(ref=ref)
+                    with message_kind("ephemeral"):
+                        await self.transport.delete(ref=ref)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "ephemeral.delete.failed",
@@ -4908,16 +4922,17 @@ async def send_initial_progress(
         elapsed_s=0.0,
         label=label,
     )
-    sent_ref, _ = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=initial_rendered,
-        edit_ref=progress_ref,
-        reply_to=reply_to,
-        notify=False,
-        replace_ref=progress_ref,
-        thread_id=thread_id,
-    )
+    with message_kind("progress"):
+        sent_ref, _ = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=initial_rendered,
+            edit_ref=progress_ref,
+            reply_to=reply_to,
+            notify=False,
+            replace_ref=progress_ref,
+            thread_id=thread_id,
+        )
     if sent_ref is not None:
         last_rendered = initial_rendered
         logger.debug(
@@ -5290,16 +5305,17 @@ async def send_result_message(
 ) -> MessageRef | None:
     """Send (or edit in) a final; returns its message ref (#890), or None
     when the transport delivered nothing."""
-    final_msg, edited = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=message,
-        edit_ref=edit_ref,
-        reply_to=reply_to,
-        notify=notify,
-        replace_ref=replace_ref,
-        thread_id=thread_id,
-    )
+    with message_kind("final"):
+        final_msg, edited = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=message,
+            edit_ref=edit_ref,
+            reply_to=reply_to,
+            notify=notify,
+            replace_ref=replace_ref,
+            thread_id=thread_id,
+        )
     if final_msg is None:
         return None
     if (
@@ -5313,7 +5329,8 @@ async def send_result_message(
             message_id=progress_ref.message_id,
             tag=delete_tag,
         )
-        await cfg.transport.delete(ref=progress_ref)
+        with message_kind("progress"):
+            await cfg.transport.delete(ref=progress_ref)
     return final_msg
 
 
@@ -7136,7 +7153,7 @@ async def handle_message(
             if t_edits is not None:
                 await t_edits.stop_repaints()
             if t_progress_ref is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception), message_kind("progress"):
                     await cfg.transport.delete(ref=t_progress_ref)
                 _release_progress(t_progress_ref, reason="folded")
             return
@@ -7164,7 +7181,7 @@ async def handle_message(
             if t_edits is not None:
                 await t_edits.stop_repaints()
             if t_progress_ref is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception), message_kind("progress"):
                     await cfg.transport.delete(ref=t_progress_ref)
                 _release_progress(t_progress_ref, reason="capped_repeat")
             return

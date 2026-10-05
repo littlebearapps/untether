@@ -873,3 +873,79 @@ def test_823_payload_target_dict() -> None:
 
     assert _payload_target({"chat_id": 1, "message_id": 2}) == (1, 2)
     assert _payload_target({"offset": 3}) == (None, None)
+
+
+# --- #823: the message kind (progress / final / …) on the error lines ---
+
+
+@pytest.mark.anyio
+async def test_823_kind_rides_the_outbox_onto_benign_rejection() -> None:
+    """The caller sets the kind (``message_kind``), but the request runs on
+    the outbox worker task, so the op must carry it across."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.client import TelegramClient
+    from untether.transport import message_kind
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": _EDIT_GONE},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramClient(
+        "123:abcDEF_ghij", http_client=http, private_chat_rps=0, group_chat_rps=0
+    )
+    try:
+        with capture_logs() as logs:
+            with message_kind("progress"):
+                await client.edit_message_text(chat_id=123, message_id=9, text="x")
+            await client.edit_message_text(chat_id=123, message_id=10, text="x")
+    finally:
+        await client.close()
+        await http.aclose()
+    recs = _events(logs, "telegram.benign_rejection")
+    assert [(r["message_id"], r["kind"]) for r in recs] == [
+        (9, "progress"),
+        (10, None),
+    ]
+
+
+@pytest.mark.anyio
+async def test_823_kind_on_http_api_and_network_errors() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.transport import current_message_kind, message_kind
+
+    responses = iter(
+        [
+            httpx.Response(400, json={"ok": False, "description": "Bad Request: x"}),
+            httpx.Response(200, json={"ok": False, "error_code": 400}),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            resp = next(responses)
+        except StopIteration:
+            raise httpx.ConnectError("boom", request=request) from None
+        resp.request = request
+        return resp
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http)
+    try:
+        with capture_logs() as logs, message_kind("final"):
+            for _ in range(3):
+                await api.send_message(chat_id=123, text="x")
+            with message_kind("bg_status"):
+                assert current_message_kind() == "bg_status"
+            assert current_message_kind() == "final"
+    finally:
+        await http.aclose()
+    assert current_message_kind() is None
+    for name in ("telegram.http_error", "telegram.api_error", "telegram.network_error"):
+        recs = _events(logs, name)
+        assert recs and recs[0]["kind"] == "final", name

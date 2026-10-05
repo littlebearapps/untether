@@ -31,7 +31,13 @@ import anyio
 
 from .logging import get_logger
 from .markdown import HARD_BREAK, shorten
-from .transport import MessageRef, RenderedMessage, SendOptions, Transport
+from .transport import (
+    MessageRef,
+    RenderedMessage,
+    SendOptions,
+    Transport,
+    message_kind,
+)
 
 logger = get_logger(__name__)
 
@@ -622,13 +628,14 @@ class BackgroundStatusPanel:
     async def open(self, reply_to: MessageRef | None) -> bool:
         text = self.render()
         try:
-            ref = await self._transport.send(
-                channel_id=self._channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(
-                    reply_to=reply_to, notify=False, thread_id=self._thread_id
-                ),
-            )
+            with message_kind("bg_status"):
+                ref = await self._transport.send(
+                    channel_id=self._channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(
+                        reply_to=reply_to, notify=False, thread_id=self._thread_id
+                    ),
+                )
         except Exception:  # noqa: BLE001 — a status panel is best-effort
             logger.warning("background_status.send_failed", exc_info=True)
             return False
@@ -653,7 +660,10 @@ class BackgroundStatusPanel:
             self._last_sig = self._signature()
             return
         try:
-            await self._transport.edit(ref=self.ref, message=RenderedMessage(text=text))
+            with message_kind("bg_status"):
+                await self._transport.edit(
+                    ref=self.ref, message=RenderedMessage(text=text)
+                )
         except Exception:  # noqa: BLE001
             logger.debug("background_status.edit_failed", exc_info=True)
             return
@@ -720,13 +730,14 @@ class BackgroundStatusPanel:
         self.quiet_notice_sent = True
         text = self._header(self._clock())
         try:
-            await self._transport.send(
-                channel_id=self._channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(
-                    reply_to=self.reply_to, notify=True, thread_id=self._thread_id
-                ),
-            )
+            with message_kind("bg_status"):
+                await self._transport.send(
+                    channel_id=self._channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(
+                        reply_to=self.reply_to, notify=True, thread_id=self._thread_id
+                    ),
+                )
         except Exception:  # noqa: BLE001
             logger.warning("background_status.quiet_notice_failed", exc_info=True)
             return False

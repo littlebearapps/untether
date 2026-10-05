@@ -9,6 +9,7 @@ import anyio
 import httpx
 
 from ..logging import get_logger
+from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
 from .client_api import BotClient, HttpBotClient, TelegramRetryAfter
 from .outbox import (
@@ -123,6 +124,7 @@ class TelegramClient:
             queued_at=self._clock(),
             chat_id=chat_id,
             label=label,
+            kind=current_message_kind(),
             superseded_result=superseded_result,
         )
         return await self._outbox.enqueue(key=key, op=request, wait=wait)

@@ -249,6 +249,37 @@ async def test_final_notify_sends_loud_final_message() -> None:
 
 
 @pytest.mark.anyio
+async def test_823_progress_and_final_calls_carry_message_kind() -> None:
+    """#823: the transport calls name their surface, so a failed edit's
+    ``telegram.http_error`` / ``benign_rejection`` line says which it was."""
+    from untether.transport import current_message_kind
+
+    kinds: list[tuple[str, str | None]] = []
+
+    class _KindTransport(FakeTransport):
+        async def send(self, **kwargs):  # type: ignore[override]
+            kinds.append(("send", current_message_kind()))
+            return await super().send(**kwargs)
+
+        async def delete(self, *, ref: MessageRef) -> bool:
+            kinds.append(("delete", current_message_kind()))
+            return await super().delete(ref=ref)
+
+    transport = _KindTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=_return_runner(answer="ok"),
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+    assert kinds == [("send", "progress"), ("send", "final")]
+    assert current_message_kind() is None
+
+
+@pytest.mark.anyio
 async def test_handle_message_strips_resume_line_from_prompt() -> None:
     transport = FakeTransport()
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)

@@ -18,7 +18,13 @@ from ..settings import (
     TelegramTopicsSettings,
     TelegramTransportSettings,
 )
-from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
+from ..transport import (
+    MessageRef,
+    RenderedMessage,
+    SendOptions,
+    Transport,
+    current_message_kind,
+)
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .client_api import classify_benign_rejection
@@ -341,6 +347,7 @@ class TelegramTransport:
         if sent is None:
             logger.warning(
                 "transport.send.failed",
+                kind=current_message_kind(),
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
                 text_len=len(message.text) if message.text else 0,
@@ -426,6 +433,7 @@ class TelegramTransport:
                     return ref
                 logger.warning(
                     "transport.edit.failed",
+                    kind=current_message_kind(),
                     chat_id=chat_id,
                     message_id=message_id,
                     has_reply_markup=reply_markup is not None,
@@ -473,6 +481,7 @@ class TelegramTransport:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "transport.delete.failed",
+                kind=current_message_kind(),
                 chat_id=ref.channel_id,
                 message_id=ref.message_id,
                 error=str(exc),
