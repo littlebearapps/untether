@@ -1278,7 +1278,7 @@ Setup: `[loop] max_iterations = 2`, `max_total_duration_hours = 1`. Logs: `grep 
 | R20-925m | Kill switch, Loop off: `own_schedule = false`, the 925a prompt, `/new` after one tick | rc19 behaviour (native tick). Restore `true` | no `hook_callback`, no `wake_cap` |
 | R20-926a | `[loop] max_iterations = 5`, Loop on. `/new`; the 925a prompt; wait for `iter 1/5`; `/cancel`; `[r20] reply with the word next` | `❌ cancelled 1 active loop.`; first reply exactly "next"; no ticks for 3 min | `loop.cancelled reason=user_cancel`; **no** `loop.cron_suppressed_marked`; `runner.start resume=<sid>` without `CLAUDE_CODE_DISABLE_CRON` |
 | R20-926b | Same session: CronCreate `*/2` with prompt "[r20] reply with the word tock" | `⏰ /loop · iter 1/5` + "tock" within ~2 min | `loop.fired_ok` for the new token; **no** `loop.expired reason=do_not_resume` |
-| R20-926c | Residual session (opportunistic; one dev stop/start from a terminal). (1) Loop off + `own_schedule = false`, `/new`, the 925a prompt → native job (session `S`); `/cancel` after one tick. (2) Stop dev; back up `~/.untether-dev/active_loops.json`; set `"do_not_resume": ["<S>"]` with no `do_not_resume_at` key; start dev. (3) `own_schedule = true`; `[r20] reply with the word quiet` | First reply "quiet"; progress shows `ℹ️ Claude's scheduling is off in this session …`; no ticks for 3 min | `loop.cron_suppressed_marked source=restore_v1`; `claude.cron_suppressed session_id=<S>`; `runner.start` args contain `CLAUDE_CODE_DISABLE_CRON=***` |
+| R20-926c | Residual session (opportunistic; one dev stop/start from a terminal). (1) Loop off + `own_schedule = false`, `/new`, the 925a prompt → native job (session `S`); `/cancel` after one tick. (2) Stop dev; back up `~/.untether-dev/active_loops.json`; set `"do_not_resume": ["<S>"]` and delete the whole `do_not_resume_at` key (dropping only S's stamp leaves a v2 file, so the v1 migration never runs); start dev. (3) `own_schedule = true`; `[r20] reply with the word quiet` | First reply "quiet"; progress shows `ℹ️ Claude's scheduling is off in this session …`; no ticks for 3 min | `loop.cron_suppressed_marked source=restore_v1`; `claude.cron_suppressed session_id=<S>`; `runner.start` args contain `CLAUDE_CODE_DISABLE_CRON=***` |
 
 Regression with the hooks on: U1–U4, U6, C1–C6, B-LIVE-1/2/7, R17-01d (a single self-paced wake still fires with Loop off), Q16 `/ping`. Soak on staging (lba-1) for 24 h before the other 4 hosts. Negative grep over 30 min: `Traceback|hook_callback.*error|initialize: hooks must|loop.hook_decision_failed|loop.restore.entry_invalid|loop.persist_failed` must be empty. Clean-up: restore the config and `active_loops.json` backups, Loop mode off, `/new`.
 
@@ -1381,12 +1381,12 @@ Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untethe
 - **When and what:** 2026-10-05, on the dev bot, head `413288b`.
 - **CLIs:** Claude 2.1.289, Codex 0.160.0, OpenCode 1.14.33, Pi 0.78.0.
 - **Pre-flight:** `pytest` 6257 passed (88.26% coverage), `ruff` clean.
-- **Marker:** `~/.untether-dev/integration-test-pass-0.36.0rc1.json`. Nathan chose to write it with the two NOT RUN items noted.
+- **Marker:** `~/.untether-dev/integration-test-pass-0.36.0rc1.json`. It was first written with Q16 and R20-926c NOT RUN; both were then run later the same day with Nathan's approval, and the marker notes were updated.
 
 | ID | Engine / chat | Result | Note |
 |---|---|---|---|
 | Q1–Q15 | DM | PASS | Q14 ran on the wrong engine (codex, not the chat's claude) → [#950](https://github.com/littlebearapps/untether/issues/950) |
-| Q16 | Pi chat | NOT RUN | Needs `[triggers] enabled` + a cron + a restart. The config edit was blocked by the auto-mode classifier. Also not run on rc20 |
+| Q16 | Pi chat | PASS | Triggers temporarily on, with a far-future test cron for the Pi chat and a dev restart: `🏓 pong — up 10s` / `⏰ triggers: 1 cron (it-0360rc1-q16, 0 3 1 1 *)`. Config restored afterwards |
 | `/config` deprecated wording | DM | PASS | `⚠️ amp, gemini — deprecated, no longer supported, may be removed in a future release. Prefer another engine.` |
 | U1–U10 | Claude | PASS | |
 | U1–U10 | Codex | PASS | The footer model is still `codex-mini-latest` (#846) |
@@ -1400,7 +1400,7 @@ Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untethe
 | S1 | Codex | PARTIAL | The stall warning fired at 15 min, not 5, because npm-wrapped engines always get the children threshold → [#953](https://github.com/littlebearapps/untether/issues/953). Claude S1 was not run |
 | B-LIVE-1/2/7 | Claude | PASS | B-LIVE-2's follow-up was queued about 6 s behind a wake turn |
 | R20-919b | Claude | PASS | The 10-minute tool-approval reminder names Write as an approval, with no `kind:title (running)` leak. The Deny tap cleared it within 20 s, so R20-920c passes too |
-| R20-926c | Claude | NOT RUN | Step 1 (native job under `own_schedule = false`, one tick, `/cancel`) passed. The `active_loops.json` edit while dev was stopped was blocked by the classifier |
+| R20-926c | Claude | PASS | Session `26e82577`, with a true v1 file (no `do_not_resume_at` key). Logs: `loop.cron_suppressed_marked source=restore_v1`, `claude.cron_suppressed`, and `runner.start` with `CLAUDE_CODE_DISABLE_CRON=***`. First reply "quiet"; no ticks for 3+ min; the note row is inferred (1 step, no tool use; the card is deleted on final). A first attempt that kept `do_not_resume_at` was invalid setup |
 | #948 | Claude | REPRODUCED 1/2 | The card stayed "working" after cancel when the follow-up was queued first ([comment](https://github.com/littlebearapps/untether/issues/948#issuecomment-5988234252)) |
 | #928 residual | Claude | PASS | None of 13 `runner.completed` across 3 live sessions had `turn_cost_usd=0.0` |
 | Upgrade: config | offline | PASS | A 0.35.4-shaped config parses. `auto_semantics_changed` fires once for both `auto` crons (sunset 0.37.0) |
