@@ -222,7 +222,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
         await self.set_followup_mode(chat_id, None)
 
     # #297: legacy method aliases preserved so any external/uncovered call
-    # site keeps working. Remove after one release cycle (v0.36.x).
+    # site keeps working. Remove in v0.37.0 (#947).
     async def get_trigger_mode(self, chat_id: ChannelId) -> str | None:
         return await self.get_listen_mode(chat_id)
 

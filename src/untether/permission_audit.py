@@ -11,7 +11,8 @@ Three findings, each logged as one WARN per change:
 * ``claude.permission_mode.auto_semantics_changed`` — ``auto`` in engine
   config or on a cron. Its meaning changed in 0.35.5rc8 (#741): it used to be
   Untether's plan-mode sugar (now ``plan-auto``) and is now Claude Code's own
-  classifier-gated mode. Log-only (Decision 1); **sunset 0.36.0** (Decision 2).
+  classifier-gated mode. Log-only (Decision 1); **sunset 0.37.0** (Decision 2;
+  moved from 0.36.0 by #947 so 0.35.4 upgraders still see it).
 * ``trigger.unattended_approval_risk`` (``phase=config``) — a cron whose
   explicit mode waits for a Telegram tap (``default`` / ``manual`` /
   ``acceptEdits`` for a tool approval, ``plan`` for the plan approval).

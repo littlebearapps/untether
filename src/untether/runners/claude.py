@@ -5327,7 +5327,7 @@ def _clear_background_handle(
     defaults True so direct callers and the remaining primitives (Bash-bg,
     ScheduleWakeup, RemoteTrigger) keep their pre-#374 clear-on-result behaviour
     (see ``_is_terminal_tool_result`` for why their interim-handling is still
-    deferred to the v0.35.5 lifecycle refactor, #573).
+    deferred to the v0.36.0 lifecycle refactor, #573).
 
     Note: ``state.last_schedule_wakeup_arm_delay`` and
     ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
@@ -5381,7 +5381,7 @@ def _is_terminal_tool_result(
       signal the empty-resume detector relies on (#596). There is no reliable
       upstream completion signal for Agent/Task yet (true-terminal detection via
       KillShell, subprocess-exit reconciliation, and child-PID cleanup is the
-      v0.35.5 lifecycle refactor, #573), so its bound is the fixed
+      v0.36.0 lifecycle refactor, #573), so its bound is the fixed
       ``BG_AGENT_MAX_KEEP_S`` deadline set at register time in
       ``_register_background_handle`` — the safe trade-off between "keep
       suppressing stall warnings while genuinely running" and "never leave a
@@ -5396,7 +5396,7 @@ def _is_terminal_tool_result(
     bounded deadline.
 
     Every other tool_result — including Bash-bg, ScheduleWakeup, and
-    RemoteTrigger, whose true-terminal detection remains deferred to the v0.35.5
+    RemoteTrigger, whose true-terminal detection remains deferred to the v0.36.0
     refactor (#573) — is treated as terminal, preserving the pre-#374
     clear-on-first-result behaviour for foreground tools and those primitives.
     """
@@ -8958,7 +8958,7 @@ def _translate_claude_event_base(
             # here in plan mode, and gating them would raise a button per tool
             # in the fleet's most-used mode for no safety gain (probes G/H/I).
             #
-            # Known gap, carried to v0.35.6: an explicit `ask` rule reaches
+            # Known gap, carried to v0.36.2: an explicit `ask` rule reaches
             # stage 6 even under `bypassPermissions`, and this branch still
             # approves it.  Closing that needs a stage-5 change (the allowlist),
             # not a wider handler gate.

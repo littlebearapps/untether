@@ -431,7 +431,7 @@ _209_MANAGED = (
 # managed  — Untether sets it; refused in extra_args
 # allowed  — passes through; documented in docs/how-to/security.md
 # d10      — allowed today but replaces/breaks the stream-json run (interactive,
-#            cloud, background, TUI); candidates for the v0.35.6 follow-up #851
+#            cloud, background, TUI); candidates for the v0.36.2 follow-up #851
 CLAUDE_FLAGS_CLASSIFIED_2_1_285: dict[str, str] = {
     **dict.fromkeys(_209_BLOCKED, "blocked"),
     **dict.fromkeys(_209_MANAGED, "managed"),
