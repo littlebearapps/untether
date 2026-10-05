@@ -35,7 +35,7 @@ When the delay expires, the prompt runs as a normal agent session. Send `/cancel
 
 Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interval `/loop <prompt>` dynamic mode driven by `ScheduleWakeup`) for self-pacing autonomous work. With **Loop mode** on, Untether runs those schedules itself, with limits, and fires each iteration when due — whether or not a Claude session is still open. ([#289](https://github.com/littlebearapps/untether/issues/289), [#925](https://github.com/littlebearapps/untether/issues/925))
 
-**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. With Loop mode off, Claude can't schedule recurring or timed tasks itself: it tells you that scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. Before v0.35.5rc20 such a task ran uncapped while the session was open and came back each time the session was resumed.
+**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. With Loop mode off, Claude can't schedule recurring or timed tasks itself: it tells you that scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. Before v0.36.0 such a task ran uncapped while the session was open and came back each time the session was resumed.
 
 ### How it works
 
@@ -46,7 +46,7 @@ Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interva
 5. A self-paced `ScheduleWakeup` longer than 5 minutes (`inline_threshold_seconds`) fires inside the open session. Untether fires it only if the session has closed by then.
 6. State persists to `active_loops.json` (sibling of `untether.toml`) — loops survive Untether restarts.
 
-To switch this off, set `[loop] own_schedule = false`: Untether then only observes Claude's schedule (the pre-rc20 behaviour), and a Claude-side job can fire uncapped while the session is open.
+To switch this off, set `[loop] own_schedule = false`: Untether then only observes Claude's schedule (the behaviour before v0.36.0), and a Claude-side job can fire uncapped while the session is open.
 
 ### Runaway-safety caps
 
@@ -77,7 +77,7 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 
 With Loop mode off there is nothing to stop: Claude can't schedule on its own, and a self-paced wait ends with `/cancel` or `/new`.
 
-A session that may still hold an older Claude-side scheduled task (one created before v0.35.5rc20, in a chat without a permission mode, or with `own_schedule = false`) resumes with Claude's scheduling switched off for up to 7 days, so the old task can't restart; the progress message says so. `/new` starts a session that can schedule again. A legacy task in a Loop-off session can still fire up to twice after the upgrade (the first time before your reply) before Untether catches it.
+A session that may still hold an older Claude-side scheduled task (one created before v0.36.0, in a chat without a permission mode, or with `own_schedule = false`) resumes with Claude's scheduling switched off for up to 7 days, so the old task can't restart; the progress message says so. `/new` starts a session that can schedule again. A legacy task in a Loop-off session can still fire up to twice after the upgrade (the first time before your reply) before Untether catches it.
 
 ## Telegram scheduling
 
@@ -143,7 +143,7 @@ Add `run_once = true` to fire a cron exactly once, then auto-disable. Fired stat
 
 ### Autonomous crons in plan-mode chats (Claude) {#autonomous-crons}
 
-By default a cron inherits the chat's permission mode, and if the chat has none, the engine default (`plan` unless you changed `[engines.claude] permission_mode`). Nobody is around to approve anything when a cron fires, so since v0.35.5rc17 an unattended Claude run **denies** anything that would wait for a tap: a plan approval, a question, or a tool the mode would ask about ([#835](https://github.com/littlebearapps/untether/issues/835)). A cron that inherits `plan` therefore ends with a plan instead of doing the work.
+By default a cron inherits the chat's permission mode, and if the chat has none, the engine default: `[engines.claude] permission_mode`, or, if that's unset, Claude Code's non-interactive `-p` path, with no Telegram approvals or plan mode. Nobody is around to approve anything when a cron fires, so since v0.36.0 an unattended Claude run **denies** anything that would wait for a tap: a plan approval, a question, or a tool the mode would ask about ([#835](https://github.com/littlebearapps/untether/issues/835)). A cron that inherits `plan` therefore ends with a plan instead of doing the work.
 
 **Always set an explicit `permission_mode` on a Claude cron that should act unattended.** Set `permission_mode = "auto"` (or `"bypassPermissions"`) to make that run autonomous without flipping the whole chat:
 
@@ -157,8 +157,8 @@ prompt = "Review overnight PRs and reply with a summary."
 permission_mode = "auto"
 ```
 
-!!! warning "`auto` changed meaning in v0.35.5"
-    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
+!!! warning "`auto` changed meaning in v0.36.0"
+    Before v0.36.0, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
 
 !!! warning "Unattended runs never wait for a tap"
     A cron or webhook run has nobody to tap Approve, so Untether denies, at once, anything that would wait for one, and tells Claude to carry on without it or stop and report what it would have done ([#835](https://github.com/littlebearapps/untether/issues/835)). The progress message shows `🔒 Unattended run — denied <tool>: nobody to approve it`, the final lists every denial once (`🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`), and each one logs `permission.unattended_deny`. What that means per mode:

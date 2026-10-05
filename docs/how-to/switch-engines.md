@@ -48,9 +48,11 @@ Untether shells out to engine CLIs. Install them and make sure they’re on your
 !!! warning "Deprecated engines"
 
     The `gemini` and `amp` directives still work, but both engines are
-    **deprecated** and targeted for removal in 0.36.0. Gemini CLI no longer
-    authenticates individual or free Google accounts (upstream end-of-life,
-    18 June 2026, [announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) — use [Antigravity CLI](https://antigravity.google) instead),
+    **deprecated and no longer supported**: they are still included, but get
+    no fixes, are excluded from testing, and may be removed in a future
+    release. Gemini CLI no longer authenticates individual or free Google
+    accounts (upstream end-of-life, 18 June 2026, [announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) — use [Antigravity CLI](https://antigravity.google) instead;
+    Untether support for it is planned for v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)),
     and Untether's Amp integration is unmaintained. See
     [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines)
     in the README.

@@ -55,7 +55,7 @@ This tells you how much of your 5-hour and 7-day rate limits you've used — all
 With the footer off, Untether still adds a warning line once the 5-hour window passes 70% (`⚡5h: 75% (1h 14m) | 7d: 30%`), turning to `⚠️` at 90% and `🛑 5h limit hit — resets in …` at 100%.
 
 !!! tip "Limit notes during a run"
-    Separately from the footer, a running Claude session shows a one-off `⚠️ 5h limit 85% used — resets 17:30` note when Claude Code reports the window is nearly used, and `⏳ Rate limited until …` if a request is actually refused. Since v0.35.5 routine usage snapshots no longer show a false `Rate limited` wait ([#790](https://github.com/littlebearapps/untether/issues/790)). See [Troubleshooting → Rate-limit and API-retry notes](troubleshooting.md#rate-limit-and-api-retry-notes-claude).
+    Separately from the footer, a running Claude session shows a one-off `⚠️ 5h limit 85% used — resets 17:30` note when Claude Code reports the window is nearly used, and `⏳ Rate limited until …` if a request is actually refused. Since v0.36.0 routine usage snapshots no longer show a false `Rate limited` wait ([#790](https://github.com/littlebearapps/untether/issues/790)). See [Troubleshooting → Rate-limit and API-retry notes](troubleshooting.md#rate-limit-and-api-retry-notes-claude).
 
 ## Combine with API cost
 

@@ -72,7 +72,7 @@ If you prefer a cleaner chat, hide resume lines:
 
 When you reply to a message, the agent sees what you replied to, so "what does this error mean?" or "do the second step" has something to point at ([#904](https://github.com/littlebearapps/untether/issues/904), community PR [#736](https://github.com/littlebearapps/untether/pull/736)). Untether adds the replied message's text (or a media caption) after your prompt. If you select part of a message and use Telegram's **Quote** option, only the selected quote is passed.
 
-This works for every engine and on every kind of reply: one that starts a new run, one that resumes a session through its resume line, a follow-up into a Claude session that is still open, and a [steer](steer-follow-ups.md). Before v0.35.5 a reply only told Untether which session to continue; the agent never saw the message you replied to.
+This works for every engine and on every kind of reply: one that starts a new run, one that resumes a session through its resume line, a follow-up into a Claude session that is still open, and a [steer](steer-follow-ups.md). Before v0.36.0 a reply only told Untether which session to continue; the agent never saw the message you replied to.
 
 The reference is added in a labelled `<telegram_reply_context>` block that tells the agent it is reference data, not instructions, and Untether's own resume lines are removed from it. `<`, `>` and `&` in the replied text are HTML-escaped (`&lt;`, `&gt;`, `&amp;`) so it can't close the block early. It is capped at 4,000 characters; anything longer is cut off with a `[… reply context truncated by Untether …]` note. In a forum topic, a plain message (which Telegram sends as a reply to the topic's first message) carries no reply context.
 
@@ -82,7 +82,7 @@ In group chats, Untether stores a session per sender, so different people can wo
 
 ## Topics in a private chat
 
-If you use Telegram's topics in a private chat with the bot, each topic keeps its own session, separate from the main thread ([#734](https://github.com/littlebearapps/untether/issues/734)). Before v0.35.5 every follow-up in a private-chat topic quietly started a fresh session.
+If you use Telegram's topics in a private chat with the bot, each topic keeps its own session, separate from the main thread ([#734](https://github.com/littlebearapps/untether/issues/734)). Before v0.36.0 every follow-up in a private-chat topic quietly started a fresh session.
 
 ## While Claude is still working
 

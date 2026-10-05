@@ -149,12 +149,14 @@ events and no exit — hence the stall rather than an error message. Filed as
 Gemini CLI reached **end-of-life for individual Google accounts (free, Google AI Pro and Ultra) on
 18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to
 [Antigravity CLI](https://antigravity.google) (Untether support is planned as a
-separate engine) or use a supported engine. Enterprise / Google Cloud licences
+separate engine in v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)) or use a supported engine. Enterprise / Google Cloud licences
 may still work, but Untether no longer verifies this.
 
 ### What to do
 
-Both engines are targeted for removal in 0.36.0 — see
+Both engines are deprecated and no longer supported: they are still included,
+but get no fixes, are excluded from testing, and may be removed in a future
+release — see
 [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
 Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
 
@@ -173,11 +175,11 @@ Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model
 
 ### Codex: approval hang
 
-`codex exec` (the headless mode Untether runs) always runs with approval `never` and never waits for terminal approval, so an approval hang is not expected on any recent Codex CLI. Untether v0.35.5+ no longer passes `--ask-for-approval` at all; the Codex **safe** policy picks the read-only sandbox instead (`--sandbox read-only`). If Codex still stalls, check the stall diagnostics and your MCP servers.
+`codex exec` (the headless mode Untether runs) always runs with approval `never` and never waits for terminal approval, so an approval hang is not expected on any recent Codex CLI. Untether v0.36.0+ no longer passes `--ask-for-approval` at all; the Codex **safe** policy picks the read-only sandbox instead (`--sandbox read-only`). If Codex still stalls, check the stall diagnostics and your MCP servers.
 
 ### Codex: `invalid value 'untrusted'` / `is no longer supported; remove this setting`
 
-- `error: invalid value 'untrusted' for '--ask-for-approval'` (rc=2, every run in a chat set to **Safe**): Untether before v0.35.5 passed `--ask-for-approval untrusted`, which codex-cli 0.149.0+ removed. **Fix:** upgrade Untether ([#830](https://github.com/littlebearapps/untether/issues/830)), or switch the chat to **Full auto** in `/config` → Approval policy until you can.
+- `error: invalid value 'untrusted' for '--ask-for-approval'` (rc=2, every run in a chat set to **Safe**): Untether before v0.36.0 passed `--ask-for-approval untrusted`, which codex-cli 0.149.0+ removed. **Fix:** upgrade Untether ([#830](https://github.com/littlebearapps/untether/issues/830)), or switch the chat to **Full auto** in `/config` → Approval policy until you can.
 - `approval_policy = "untrusted" is no longer supported; remove this setting` (every Codex run, Full auto included): your own `~/.codex/config.toml` (or a `--profile` file) sets the retired value. **Fix:** remove the `approval_policy = "untrusted"` line. Untether's error hint names this case.
 - A `sandbox_mode` and `default_permissions` conflict is possible if `[engines.codex] extra_args` sets `-c default_permissions=…` while the chat is in **Safe** (Safe sets the sandbox itself). Drop the `-c default_permissions` override, or use Full auto.
 
@@ -231,9 +233,10 @@ The pending-approval reminder names what it's waiting for: a question reads "⏳
 |---|---|
 | `⚠️ 5h limit 85% used — resets 17:30` | Heads-up only. Your subscription window is nearly used up; the run keeps going. Shown at most once per window ([#790](https://github.com/littlebearapps/untether/issues/790)). |
 | `⏳ Rate limited until 17:30 (~30 min)` | Claude Code reported the limit as reached and extra usage isn't covering it. Untether treats the wait as expected until the reset time, so no stall warning fires. |
+| `⛔ Fable limit reached — may not clear on a timer; switch with /model or manage usage credits on claude.ai` | A cap that needs action rather than a wait: a model allowance (e.g. Fable), used-up usage credits (`Usage credits used up`), a monthly spend limit (`Monthly spend limit reached`) or a team budget (`Team budget reached`). There is no countdown; switch model with `/model`, or manage usage credits on claude.ai ([#701](https://github.com/littlebearapps/untether/issues/701), [#922](https://github.com/littlebearapps/untether/issues/922)). |
 | `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` | Anthropic's API returned a retryable error and Claude Code is backing off before retrying. The line updates in place for each attempt ([#792](https://github.com/littlebearapps/untether/issues/792)). |
 
-Before v0.35.5 Untether misread Claude Code's routine usage snapshots and showed a brief `Rate limited` note every few minutes on healthy sessions. That no longer happens: routine snapshots are recorded but not shown.
+Before v0.36.0 Untether misread Claude Code's routine usage snapshots and showed a brief `Rate limited` note every few minutes on healthy sessions. That no longer happens: routine snapshots are recorded but not shown.
 
 ## Claude Code hangs after an MCP tool_result
 
@@ -294,7 +297,7 @@ Type-B (cold-start zero-byte) is **never** retried — retrying just hammers a d
 
 **Symptoms:** Claude has clearly finished the turn (you can see the final answer in Telegram), but the session metadata indicates it's still running. The bidirectional Claude CLI is sitting idle holding stdin open.
 
-!!! note "v0.35.5 and later"
+!!! note "v0.36.0 and later"
     With live sessions on (the default), a session that stays open after its answer is usually doing background work, and it closes itself about a minute after that work ends. See [Messages arrive after the run finished](#messages-arrive-after-the-run-finished). The post-result watchdog settings below apply when `[watchdog] live_sessions = false`.
 
 The post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) closes the gap: every successful `result` event arms `[watchdog] post_result_idle_timeout` (default 600s / 10 min, range 30s–1h). Once the deadline passes the runner closes stdin and the CLI exits cleanly (rc=0). The footer also shows a `✓ turn complete` marker on every successful turn so you have an immediate visual confirmation that the turn has ended even if the process is still alive briefly.
@@ -362,7 +365,7 @@ To change:
     voice_transcription_url_allowlist = ["127.0.0.0/8"]   # or your private range
     ```
 
-    Since v0.35.5 ([#679](https://github.com/littlebearapps/untether/issues/679)) the voice note reply names the blocked host and the exact entry to add (for example ``voice transcription endpoint `localhost` is blocked by the SSRF guard …``), and the log shows `voice.base_url.ssrf_blocked` with `host`, `blocked_addresses` and `suggested_allowlist`. The same problem is logged at startup and after a hot-reload as `voice.base_url.not_permitted` (WARNING); `voice.base_url.permitted` confirms a fix. A reply saying the endpoint "could not be resolved" means a DNS failure, not the SSRF guard: check the hostname in `voice_transcription_base_url`.
+    Since v0.36.0 ([#679](https://github.com/littlebearapps/untether/issues/679)) the voice note reply names the blocked host and the exact entry to add (for example ``voice transcription endpoint `localhost` is blocked by the SSRF guard …``), and the log shows `voice.base_url.ssrf_blocked` with `host`, `blocked_addresses` and `suggested_allowlist`. The same problem is logged at startup and after a hot-reload as `voice.base_url.not_permitted` (WARNING); `voice.base_url.permitted` confirms a fix. A reply saying the endpoint "could not be resolved" means a DNS failure, not the SSRF guard: check the hostname in `voice_transcription_base_url`.
 
 Run `untether doctor` to check the voice API key. It doesn't check the transcription endpoint yet; use the startup log line above for that.
 
@@ -377,14 +380,14 @@ Run `untether doctor` to check the voice API key. It doesn't check the transcrip
     enabled = true
     ```
 
-2. Check `deny_globs` — files matching these patterns are blocked. The defaults cover `.git/**`, `.env` and `.env.*` files, `.envrc`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`, `.ssh/**`, `.netrc`, `.npmrc` and `.pypirc` at any depth, including the project root (see [Security → File transfer deny globs](security.md#file-transfer-deny-globs)). The reply names the rule that matched, for example ``path denied by rule: `**/.env.*` ``. Since v0.35.5 a project-root `.env.example` matches too ([#831](https://github.com/littlebearapps/untether/issues/831)).
+2. Check `deny_globs` — files matching these patterns are blocked. The defaults cover `.git/**`, `.env` and `.env.*` files, `.envrc`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`, `.ssh/**`, `.netrc`, `.npmrc` and `.pypirc` at any depth, including the project root (see [Security → File transfer deny globs](security.md#file-transfer-deny-globs)). The reply names the rule that matched, for example ``path denied by rule: `**/.env.*` ``. Since v0.36.0 a project-root `.env.example` matches too ([#831](https://github.com/littlebearapps/untether/issues/831)).
 3. A symlink is checked at the path it points to as well, so `cfg.txt → .env` is refused, and the reply adds `(resolves to …)` ([#390](https://github.com/littlebearapps/untether/issues/390))
 4. In group chats, file transfer requires admin or creator status (unless `files.allowed_user_ids` is set)
 5. Check the `uploads_dir` path exists relative to the project root
 
 ## `/browse` says "No project directory for this chat"
 
-Since v0.35.5 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, or set `default_project`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
+Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, or set `default_project`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
 
 ## Topics not appearing
 
@@ -414,7 +417,7 @@ Since v0.35.5 `/browse` only works in a chat bound to a project (`chat_id` under
 6. Check firewall rules if the webhook server is behind NAT
 7. Look at `debug.log` for incoming request logs
 8. **A cron fired but no run started?** Each trigger first posts a `⏰ Scheduled: cron:<id>` (or `⚡ Trigger: webhook:<id>`) message. If Telegram can't be reached, Untether retries that send after 5 s and 30 s (`triggers.dispatch.send_retry`) and only then gives up (`triggers.dispatch.send_failed`) ([#758](https://github.com/littlebearapps/untether/issues/758)).
-9. **Ran on the wrong engine?** A cron or webhook with a `project` and no `engine` runs on that project's default engine since v0.35.5; before, it used the global default ([#862](https://github.com/littlebearapps/untether/issues/862)). Set `engine` on the trigger to pin it.
+9. **Ran on the wrong engine?** A cron or webhook with a `project` and no `engine` runs on that project's default engine since v0.36.0; before, it used the global default ([#862](https://github.com/littlebearapps/untether/issues/862)). Set `engine` on the trigger to pin it.
 
 ## Config change didn't take effect
 
@@ -440,35 +443,35 @@ Since v0.35.5 `/browse` only works in a chat bound to a project (`chat_id` under
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.35.5 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
+- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.36.0 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
 
 ## Follow-up message says it's "queued"
 
 **Symptoms:** You send a follow-up (or voice note) and it shows a `queued` notice instead of running immediately.
 
-A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.35.5, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). The notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
+A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.36.0, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). The notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
 
 ## Messages arrive after the run finished (🔔 / 📡 / ⏰)
 
 **Symptoms:** After Claude's answer, more messages appear on their own: `🔔 Background task finished — …`, `📡 Monitor — …`, `⏰ Scheduled wake-up`, or `🪝 Hook feedback`.
 
-This is expected since v0.35.5. When Claude starts a background task, a subagent, a `Monitor` or a `ScheduleWakeup` and ends its turn, Untether keeps the session open. Claude then carries on by itself when the work finishes, and each of those turns is delivered as its own message. Before v0.35.5 these turns ran with nothing shown in Telegram. Monitor updates arrive silently (no notification); the others notify, once per finished task ([#785](https://github.com/littlebearapps/untether/issues/785)). Approval buttons work inside these turns as normal ([#776](https://github.com/littlebearapps/untether/issues/776)). `🪝 Hook feedback` is a Claude Code hook that ran in the background (for example a commit review) reporting back; the session is held open while such a hook runs, up to `[watchdog] async_hook_max_hold` ([#812](https://github.com/littlebearapps/untether/issues/812)). Short replies to finished background tasks may be folded into the background status message instead of arriving separately — see [Verbose progress → Background tasks](verbose-progress.md#background-tasks-claude).
+This is expected since v0.36.0. When Claude starts a background task, a subagent, a `Monitor` or a `ScheduleWakeup` and ends its turn, Untether keeps the session open. Claude then carries on by itself when the work finishes, and each of those turns is delivered as its own message. Before v0.36.0 these turns ran with nothing shown in Telegram. Monitor updates arrive silently (no notification); the others notify, once per finished task ([#785](https://github.com/littlebearapps/untether/issues/785)). Approval buttons work inside these turns as normal ([#776](https://github.com/littlebearapps/untether/issues/776)). `🪝 Hook feedback` is a Claude Code hook that ran in the background (for example a commit review) reporting back; the session is held open while such a hook runs, up to `[watchdog] async_hook_max_hold` ([#812](https://github.com/littlebearapps/untether/issues/812)). Short replies to finished background tasks may be folded into the background status message instead of arriving separately — see [Verbose progress → Background tasks](verbose-progress.md#background-tasks-claude).
 
 The session stays open while background work is live, until it has shown no activity for 30 minutes (`[watchdog] post_result_bg_max_hold`) or has been open for 4 hours in total (`live_session_max_s`). Activity means a turn, a background agent's progress (every tool call it makes, including one long-running command), or new output from a background command. A working agent is therefore not stopped at 30 minutes, but a silent `sleep` or a stuck agent is — unless Claude gave the background command a longer `timeout` or a scheduled wake-up is pending: the session then stays open until that time (at most 2 hours / 1 hour; `[watchdog] bg_hold_declared_waits`, [#872](https://github.com/littlebearapps/untether/issues/872)). With no background work the session closes about a minute after the reply. When it closes over running tasks you get a notice naming them, such as `⏳ Closing session — 1 background task still running with no progress for 30 min: … Stopping it.` Once the session has stopped, a quiet follow-up tells you what happens next. `↩️ Reply to continue in the same session.` means a reply resumes the same conversation. The `⚠️ … your next message starts a fresh session` warning means the session didn't stop cleanly, so Claude won't remember that run, and partial work may be left in the working tree. `/cancel`, changing settings (`/planmode`, model) and Untether restarts close the session the same way, with a notice. To go back to the old turn-based hold, set `[watchdog] bg_hold_rearm_on_progress = false` ([#829](https://github.com/littlebearapps/untether/issues/829)).
 
-To turn this off and get the pre-v0.35.5 behaviour back (stop at the first answer), set `live_sessions = false` under `[watchdog]`.
+To turn this off and get the pre-v0.36.0 behaviour back (stop at the first answer), set `live_sessions = false` under `[watchdog]`.
 
 ## "Asked for auto mode — Claude Code is running default"
 
 **Symptoms:** The progress message shows `⚠️ Asked for auto mode — Claude Code is running default (auto mode isn't available for this model); approvals will be requested`, and Approve / Deny buttons appear in a chat set to **Auto**.
 
-Claude Code's auto mode needs a model that supports it. On one that doesn't (for example Haiku via `/model`), Claude Code silently starts in its prompting `default` mode instead. Since v0.35.5 Untether notices, shows this line, logs `claude.permission_mode.mismatch`, and sends each permission request to Telegram rather than approving it unseen ([#751](https://github.com/littlebearapps/untether/issues/751)). Switch to a model that supports auto mode (Opus 4.6+, Sonnet 4.6+, Fable 5), or pick a different mode with `/planmode`.
+Claude Code's auto mode needs a model that supports it. On one that doesn't (for example Haiku via `/model`), Claude Code silently starts in its prompting `default` mode instead. Since v0.36.0 Untether notices, shows this line, logs `claude.permission_mode.mismatch`, and sends each permission request to Telegram rather than approving it unseen ([#751](https://github.com/littlebearapps/untether/issues/751)). Switch to a model that supports auto mode (Opus 4.6+, Sonnet 4.6+, Fable 5), or pick a different mode with `/planmode`.
 
 ## A cron or webhook run stopped with a plan, or shows `🔒 unattended … denied`
 
 **Symptoms:** A scheduled or webhook-started Claude run ends with a plan or a short report instead of doing the work, and its final carries a line like `🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`.
 
-Since v0.35.5 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then the engine default (`plan`), so it stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`. The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
+Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then `[engines.claude] permission_mode`, so a cron that lands on `plan` stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`. The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
 
 ## "🛡️ safeguards stopped a response"
 
@@ -492,7 +495,7 @@ A tap that lands while a request is being withdrawn is answered with `⏹️ Cla
 
 **Symptoms:** The startup message lists an engine under `failed to load:`, chats using it reply that the engine is unavailable, or Untether won't start at all.
 
-Since v0.35.5 `[engines.claude]` / `[engines.codex]` `extra_args` may not carry flags that bypass approvals or the sandbox (`--dangerously-skip-permissions`, `--allowedTools`, `--yolo`, `--sandbox danger-full-access`, …) or flags Untether manages itself ([#209](https://github.com/littlebearapps/untether/issues/209)). The error names the flag. Remove it, or use the dedicated key (`allowed_tools`, `permission_mode`). See [Security → Engine CLI flags](security.md#engine-cli-flags-extra_args).
+Since v0.36.0 `[engines.claude]` / `[engines.codex]` `extra_args` may not carry flags that bypass approvals or the sandbox (`--dangerously-skip-permissions`, `--allowedTools`, `--yolo`, `--sandbox danger-full-access`, …) or flags Untether manages itself ([#209](https://github.com/littlebearapps/untether/issues/209)). The error names the flag. Remove it, or use the dedicated key (`allowed_tools`, `permission_mode`). See [Security → Engine CLI flags](security.md#engine-cli-flags-extra_args).
 
 ## "🗑️ Dropped N messages sent just before /new"
 
@@ -694,11 +697,11 @@ Loop mode (`/config → 🔁 Loop mode`) decides whether Claude can schedule rep
 | Claude says scheduling is off, or points you to Loop mode or `/at` | Loop mode is off (the default), so Untether declined Claude's `CronCreate` | `/config → 🔁 Loop mode → 🔁 On`, then ask again; for a one-off delay use `/at <delay> <prompt>` |
 | Loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
 | `⏰ Self-paced wake-up limit reached` and the session closed | A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) hit `[loop] max_iterations` in a row, in either Loop mode | Send a message to carry on (it resets the count), or raise `max_iterations` |
-| A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.35.5rc20, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
+| A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.36.0, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
 | Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
 | Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
-| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.35.5rc20 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
+| Loop kept firing after `/cancel` | Before v0.36.0 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.36.0 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
 | Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
 
 ## Related
