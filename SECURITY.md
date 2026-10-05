@@ -4,10 +4,10 @@
 
 | Version | Supported |
 |---------|-----------|
-| Latest release | Yes |
+| Latest release on PyPI (currently 0.35.4) | Yes |
 | Older releases | No |
 
-Only the latest published release receives security fixes. Please upgrade before reporting.
+Only the latest published release receives security fixes. Please upgrade before reporting. When v0.36.0 is published, the 0.36.x line becomes the supported one and 0.35.x stops receiving fixes.
 
 ## Reporting a vulnerability
 
@@ -45,12 +45,12 @@ Include:
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
 
-## Security improvements in v0.35.5 (upcoming)
+## Security improvements in v0.36.0 (upcoming)
 
-v0.35.5 closes several approval, sandbox and file-access gaps. Upgrade notes:
+v0.36.0 (published to TestPyPI as release candidates 0.35.5rc1–rc20) closes several approval, sandbox and file-access gaps. Upgrade notes:
 
 - **BREAKING — `extra_args` refuses approval and sandbox bypass flags** ([#209](https://github.com/littlebearapps/untether/issues/209)). Claude's `--dangerously-skip-permissions`, `--allowedTools`, `--permission-prompts` and similar, and Codex's `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--sandbox danger-full-access`, `-C`/`--cd` and similar, now fail config load: the default engine won't start and any other engine is disabled until the flag is removed. Errors and logs name the flag, never its value. `[engines.claude] dangerously_skip_permissions = true` now logs a warning, since it overrides every `/planmode` choice. See [Security how-to → Engine CLI flags](docs/how-to/security.md#engine-cli-flags-extra_args) for what `extra_args` blocking can't stop.
-- **Codex safe mode now restricts Codex** ([#830](https://github.com/littlebearapps/untether/issues/830)). Before v0.35.5, `codex exec` ignored the approval flag Untether passed, so a chat set to **safe** ran exactly like full auto (and on codex-cli 0.149.0+ every safe run failed to start). Safe now uses Codex's read-only sandbox: edits, writes and shell network access are blocked.
+- **Codex safe mode now restricts Codex** ([#830](https://github.com/littlebearapps/untether/issues/830)). Before v0.36.0, `codex exec` ignored the approval flag Untether passed, so a chat set to **safe** ran exactly like full auto (and on codex-cli 0.149.0+ every safe run failed to start). Safe now uses Codex's read-only sandbox: edits, writes and shell network access are blocked.
 - **Claude prompting modes prompt** ([#749](https://github.com/littlebearapps/untether/issues/749)). `default`, `manual` and `acceptEdits` (`/planmode off`) used to approve every tool silently; anything the mode doesn't cover now waits for an Approve / Deny tap. Unattended crons and webhooks in these modes are flagged in the log (`trigger.unattended_approval_risk`), and their requests are denied rather than left waiting (next bullet).
 - **BREAKING — unattended trigger runs fail closed** ([#835](https://github.com/littlebearapps/untether/issues/835)). A cron or webhook Claude run never waits on an approval nobody can give, and never approves what an attended run would have asked about: tool approvals, plan approvals and questions are denied at once (`permission.unattended_deny`, listed in the run's final), and in `auto`, `dontAsk` and `bypassPermissions` every request that still reaches Untether is denied. `plan` and prompting-mode crons (including crons with no `permission_mode`, which inherit `plan` by default) now end with a plan or a report instead of acting; give each Claude cron that should act on its own an explicit `permission_mode`. A reply to an unattended run continues in an attended session with normal buttons.
 - **Approval buttons are bound to their chat** ([#388](https://github.com/littlebearapps/untether/issues/388)). A forged `claude_control:` callback sent from another chat is refused, so a pending approval can only be answered where it was posted.
@@ -62,7 +62,7 @@ v0.35.5 closes several approval, sandbox and file-access gaps. Upgrade notes:
 - **Log redaction widened** ([#800](https://github.com/littlebearapps/untether/issues/800), [#679](https://github.com/littlebearapps/untether/issues/679)). Process titles are scanned in full, and bearer credentials, JWTs and `api_key=` / `token=` / `secret=` / `password=` values are redacted; `ssrf.*` log lines redact URL userinfo.
 - **Dependency advisories** — `anyio` 4.15.1 (CVE-2026-63374, CVE-2026-64847; [#773](https://github.com/littlebearapps/untether/issues/773)) and `aiohttp` 3.14.3 (`PYSEC-2026-3545`/`3546`/`3547`) in the lockfile.
 
-See [CHANGELOG v0.35.5](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355-unreleased) for the full entry list.
+See [CHANGELOG v0.36.0](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0360-unreleased) for the full entry list.
 
 ## Security improvements in v0.35.3
 

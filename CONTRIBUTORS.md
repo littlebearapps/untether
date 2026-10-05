@@ -16,6 +16,7 @@ Listed alphabetically by first name:
 - [botica](https://github.com/wkkraft)
 - [Charles Cooper](https://github.com/charles-cooper)
 - [codyw912](https://github.com/codyw912)
+- [Dvredin](https://github.com/Dvredin)
 - [Leo Liu](https://github.com/lsj5031)
 - [Lewis Freiberg](https://github.com/l3wi)
 - [Nathan Schram](https://github.com/nathanschram)

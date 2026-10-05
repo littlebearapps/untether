@@ -16,7 +16,7 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.35.5)
+    🐕 **untether is ready** (v0.36.0)
 
     *default engine:* `codex`<br>
     *installed engines:* `claude, codex, opencode`<br>
@@ -151,7 +151,7 @@ Want to use a different engine for one message? Prefix your message with `/<engi
 
 This uses Claude Code for just this message. The resume line will show `claude --resume ...`, and replies will automatically use Claude Code.
 
-Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi` (plus `/gemini` and `/amp`, which still work but are deprecated and will be removed in 0.36.0).
+Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
 
 !!! tip "Set a default engine"
     Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.
