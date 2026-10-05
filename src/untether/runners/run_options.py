@@ -85,7 +85,7 @@ CLAUDE_PLAN_AUTO_MODE = "plan-auto"
 # ``build_runtime_spec`` logs one aggregated
 # ``claude.permission_mode.auto_semantics_changed`` WARN at startup, and again
 # whenever a config reload changes the set of affected entries (engine config
-# and crons); see ``untether.permission_audit`` (#751).  Sunset: 0.36.0.
+# and crons); see ``untether.permission_audit`` (#751).  Sunset: 0.37.0 (#947).
 LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 
 # Canonical per-engine permission_mode value sets. Used by trigger config

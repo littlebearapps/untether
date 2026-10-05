@@ -187,7 +187,7 @@ Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the 
 | A3 | `fleet-rollout.sh` / `fleet-rollback.sh` / `fleet-status.sh` — parallel upgrade/rollback/status, attestation-gated | `scripts/` (operator-run) |
 | A4 | `run-integration-tests.sh` — writes the per-VERSION attestation marker | `scripts/` |
 | A5 | CI — format / ruff / ty / pytest 3.12–3.14 / build / lockfile / install-test / pip-audit / bandit / codeql / docs | `.github/workflows/` |
-| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI) | OPERATOR gate: the `dev`→`master` PR merge |
+| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI) | OPERATOR gate: the `dev`→`master` PR merge (Nathan, or `/pr-main X.Y.Z --merge` after his explicit go; the guard asks) |
 
 ---
 

@@ -47,8 +47,10 @@ rules the command obeys:
    exact `send_message`/`press_inline_button` script it *would* run**, then
    STOPS. Live drive requires `--run` (or explicit operator confirmation in text
    under Untether-mode).
-2. **Allowlist only.** Drive `@untether_dev_bot` and the 6 documented engine chat
-   IDs **only** (`docs/reference/integration-testing.md` → Test chats). Prove the
+2. **Allowlist only.** Drive `@untether_dev_bot` and the documented engine chat
+   IDs **only** (`docs/reference/integration-testing.md` → Test chats: the 4
+   supported engines; the deprecated Gemini/AMP chats are opt-in spot checks
+   only, never part of a required tier). Prove the
    target is the dev bot first (`mcp__telegram__get_me` / bot ID `8678330610`);
    **fail closed** if it can't be proven. Never staging, never fleet-wide.
 3. **Bounded.** Cap messages-per-run and per-chat pacing, cap retries, cap total
@@ -76,7 +78,7 @@ one down for docs/trivials.
 ## Reuse map (do not duplicate)
 
 - `docs/reference/integration-testing.md` — the tier definitions (U1–U10, C1–C7,
-  T1–T10, B/S stress), the 6 engine chat IDs, and the "Changed area → required
+  T1–T11, B/S stress), the engine chat IDs, and the "Changed area → required
   tiers" table. **Implement it; do not restate the tiers here.**
 - Telegram MCP: `send_message`, `get_history`/`get_messages`,
   `list_inline_buttons`, `press_inline_button`, `reply_to_message`, `send_voice`,

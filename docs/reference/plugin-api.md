@@ -17,7 +17,7 @@ subject to change. The API version is tracked by `TAKOPI_PLUGIN_API_VERSION`.
 - Plugins should pin to a compatible Untether range, e.g.:
 
 ```toml
-dependencies = ["untether>=0.35,<0.36"]
+dependencies = ["untether>=0.36,<0.37"]
 ```
 
 ---

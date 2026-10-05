@@ -31,6 +31,9 @@ paths:
 - **Patch**: bug fixes, schema updates, dependency bumps
 - **Minor**: new features, new commands, new engines, config additions
 - **Major**: breaking changes to config, runner protocol, or public API
+- **Pre-1.0 (`0.x`)**: a line with any `### breaking` entry ships as the next **minor**, never a patch — anyone pinned
+  to `~=0.35` must not get breaking changes. That is why the 0.35.5rc1–rc20 line ships as **v0.36.0** (rcs continue as
+  `0.36.0rcN`; [#947](https://github.com/littlebearapps/untether/issues/947)).
 
 ## MANDATORY integration testing before release
 
@@ -64,7 +67,7 @@ scripts/run-integration-tests.sh ${VERSION} --manual \
 
 This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timestamp, tester, tier list, and notes. `scripts/fleet-rollout.sh ${VERSION}` REQUIRES this marker to exist — it refuses to roll the rc/stable to any host (lba-1, nsd, channelo, sl, mac) without it. The only way around the gate is `--skip-test-gate`, which prints a loud warning and is not recommended for any change that touches production hosts.
 
-**The marker is per-version, not per-host.** One pass on `@untether_dev_bot` is enough to gate the fleet rollout because the dev bot exercises the same code paths every host runs. Re-test if the version number changes (e.g. rc14 → rc15 each get their own marker).
+**The marker is per-version, not per-host.** One pass on `@untether_dev_bot` is enough to gate the fleet rollout because the dev bot exercises the same code paths every host runs. Re-test if the version number changes (e.g. `0.36.0rc1` → `0.36.0rc2` each get their own marker).
 
 **Markers are durable.** Delete them manually if you want to invalidate a rollout (e.g. discovered a regression post-test): `rm ~/.untether-dev/integration-test-pass-${VERSION}.json` then the rollout script will refuse to run.
 
@@ -75,7 +78,7 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 - rc versions live on the `dev` branch — merged via PR from feature branches
 - rc versions do **NOT** require changelog entries — `validate_release.py` skips them
 - rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
-- Commit message convention: `chore: staging X.Y.ZrcN`
+- Commit message convention: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare version bump is `chore(release): X.Y.ZrcN`
 - Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`
 - **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. Nathan's explicit approval of the release is the only manual gate (he merges, or Claude via `/pr-main X.Y.Z --merge` and the guard asks him to confirm, #917) — no PyPI environment gate, no manual tag step.
 - See `docs/reference/dev-instance.md` for the full staging workflow.
@@ -90,11 +93,11 @@ Rules: `CLAUDE.md` §Release guard. Hooks: registered in `.claude/settings.json`
 Untether ships from one repo to **five hosts**: lba-1 staging, nsd VPS, channelo VPS, sl VPS, and Nathan's Mac. All hosts are rolled in parallel after integration tests pass (no separate dogfood window — the integration tests are the quality gate). sl was added to the fleet 2026-07-14; before that it was upgraded manually.
 
 ```bash
-scripts/run-integration-tests.sh 0.35.3rc14 --manual    # write attestation marker
-scripts/fleet-rollout.sh 0.35.3rc14                     # parallel upgrade across 5 hosts
-scripts/fleet-rollout.sh 0.35.3rc14 --dry-run           # preview without executing
-scripts/fleet-rollout.sh 0.35.3rc14 --only mac          # roll one host
-scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to known-good
+scripts/run-integration-tests.sh X.Y.ZrcN --manual    # write attestation marker
+scripts/fleet-rollout.sh X.Y.ZrcN                     # parallel upgrade across 5 hosts
+scripts/fleet-rollout.sh X.Y.ZrcN --dry-run           # preview without executing
+scripts/fleet-rollout.sh X.Y.ZrcN --only mac          # roll one host
+scripts/fleet-rollback.sh <known-good> --only mac     # revert one host to known-good
 ```
 
 **Order of operations:**
@@ -107,7 +110,7 @@ scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to kno
 
 **Partial failure handling:** if one host fails (network glitch, SSH timeout, etc.), the script reports the failure but does NOT roll back successful hosts. Operator decides whether to roll forward (rerun) or roll back the failed host (`fleet-rollback.sh <prev> --only <host>`).
 
-**Rc supersede:** if rc14 is already deployed and rc15 is ready, just run `fleet-rollout.sh 0.35.3rc15` — the script detects the supersede and proceeds. `--force-downgrade` is required for older-than-current versions.
+**Rc supersede:** if rcN is already deployed and rcN+1 is ready, just run `fleet-rollout.sh X.Y.Zrc<N+1>` — the script detects the supersede and proceeds. `--force-downgrade` is required for older-than-current versions.
 
 **Strategic plan:** `docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md` (Phase 4; `docs/plans/` is gitignored — lba-1 checkout only). See also `.claude/rules/dev-workflow.md` for dev/staging separation rules that still apply per-host.
 
@@ -121,10 +124,10 @@ Two automated systems file GitHub issues into this repo. Recognise them by label
 Before tagging a release, scan both:
 
 ```bash
-# Open audit findings against the current milestone, ranked by severity
+# Open audit findings against the current milestone (e.g. v0.36.0), ranked by severity
 gh issue list --repo littlebearapps/untether \
   --label auto:monitor-audit --state open \
-  --milestone v0.35.5 --json number,title,labels,milestone
+  --milestone vX.Y.Z --json number,title,labels,milestone
 
 # Just the release-blockers
 gh issue list --repo littlebearapps/untether \

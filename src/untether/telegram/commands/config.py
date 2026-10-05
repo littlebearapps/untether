@@ -1071,7 +1071,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         lines += [
             "",
             f"⚠️ <b>{deprecated_shown}</b> — deprecated, no longer supported,"
-            " removal planned. Prefer another engine.",
+            " may be removed in a future release. Prefer another engine.",
         ]
 
     lines += [

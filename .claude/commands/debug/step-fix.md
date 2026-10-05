@@ -84,10 +84,11 @@ If lint or format fails, fix and re-run. Never push code that doesn't pass
 
 ### 5. Update CHANGELOG
 
-Find the active rc/stable section in `CHANGELOG.md`. If a section for the
-current version doesn't exist yet, add one with header `## vX.Y.Z (YYYY-MM-DD)`.
-Add an entry under the correct subsection (`### fixes`, `### changes`,
-`### breaking`, `### docs`, `### tests`):
+Find the current release's section in `CHANGELOG.md` — `## vX.Y.Z (unreleased)`
+(e.g. `## v0.36.0 (unreleased)`; rc numbers never get their own heading, and
+`/pr-main` dates the heading at release). If none exists yet, add one. Add an
+entry under the correct subsection (`### breaking`, `### fixes`, `### changes`,
+`### docs`, `### tests`):
 
 ```markdown
 - description of the fix [#N](https://github.com/littlebearapps/untether/issues/N)
@@ -96,13 +97,13 @@ Add an entry under the correct subsection (`### fixes`, `### changes`,
 Every entry MUST include the issue link in the `[#N](https://...)` form.
 `scripts/validate_release.py` enforces this in CI.
 
-Note: rc versions (e.g. `0.35.3rc14`) don't require changelog entries —
-`validate_release.py` skips them.
+Note: `validate_release.py` skips rc versions (e.g. `0.36.0rc1`), so CI won't
+catch a missing entry mid-line — add it anyway; the stable release collects them.
 
 ### 6. Commit + push the feature branch
 
 ```bash
-git add -A    # only files you actually changed; never blanket-add
+git add <path> <path>    # only files you actually changed; never `git add -A`
 git commit -m "fix: <one-line description> (#N)"
 git push -u origin "fix/<N>-<slug>"
 ```

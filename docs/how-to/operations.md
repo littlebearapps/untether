@@ -49,7 +49,7 @@ Untether refuses to spawn a new engine subprocess when free RAM is below `[watch
 
 The same check holds two concurrency limits ([#589](https://github.com/littlebearapps/untether/issues/589)): `prespawn_ram_per_run_reserve_mb` raises the block bar by that much for each engine run already in flight, and `max_concurrent_engine_runs` (default `0`, unlimited) refuses a spawn outright with `🛑 Too many engine runs in flight (N/M)`. `0 / 0 / 0` turns the whole guard off.
 
-It applies to every engine, Claude Code included (before v0.35.5 Claude runs skipped it, [#838](https://github.com/littlebearapps/untether/issues/838)). Only new processes are checked: a follow-up written into a live Claude session isn't. A Claude session kept open after its reply for background work (or the idle grace) still holds its process and MCP children, so it counts as a run in flight; the block message names those idle sessions, and they close on their own. A block never clears the chat's saved session — the next message after the load drops resumes it (log `session.auto_clear_skipped reason=prespawn_blocked`).
+It applies to every engine, Claude Code included (before v0.36.0 Claude runs skipped it, [#838](https://github.com/littlebearapps/untether/issues/838)). Only new processes are checked: a follow-up written into a live Claude session isn't. A Claude session kept open after its reply for background work (or the idle grace) still holds its process and MCP children, so it counts as a run in flight; the block message names those idle sessions, and they close on their own. A block never clears the chat's saved session — the next message after the load drops resumes it (log `session.auto_clear_skipped reason=prespawn_blocked`).
 
 ## Graceful restart
 
@@ -93,7 +93,7 @@ Untether automatically handles this: active progress messages are tracked in `ac
 !!! untether "Untether"
     ⚠️ interrupted by restart
 
-This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.35.5 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)).
+This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.36.0 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)).
 
 The cleanup happens before the startup message is sent, so by the time you see "Untether started", all orphan messages are already resolved.
 
@@ -221,6 +221,8 @@ Untether re-reads `untether.toml` only when its contents (or the `UNTETHER__*` e
 - `[progress] group_chat_rps` (read when the Telegram client starts)
 - the top-level `transport`
 - `watch_config` itself (the watcher starts with the process)
+
+When a reload touches a restart-only key, Untether posts a `⚠️ Restart required` notice naming the keys. The notice names the service that is actually running — for example `systemctl --user restart untether-dev`, or `launchctl kickstart -k gui/<uid>/<label>` on macOS — or falls back to generic wording when it can't detect one, and suggests `/restart` as an alternative ([#927](https://github.com/littlebearapps/untether/issues/927)).
 
 ## Process management
 

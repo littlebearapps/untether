@@ -54,10 +54,10 @@ After each run completes, Untether checks the reported cost against your budgets
 Only one alert is shown per run, and the per-run check comes first: a run that trips the per-run warning or limit doesn't also report the daily one.
 
 !!! note "Claude costs are per run"
-    Claude reports a running total for the whole session, including earlier runs you resumed. Since v0.35.5 Untether subtracts what the session had already cost, so budgets, `/stats` and the footer see only this run's spend. A turn that Claude runs on its own after a background task counts as its own small run ([#778](https://github.com/littlebearapps/untether/issues/778)).
+    Claude reports a running total for the whole session, including earlier runs you resumed. Since v0.36.0 Untether subtracts what the session had already cost, so budgets, `/stats` and the footer see only this run's spend. A turn that Claude runs on its own after a background task counts as its own small run ([#778](https://github.com/littlebearapps/untether/issues/778)).
 
 !!! note "Token-only engines"
-    Engines that don't report USD costs (Codex, and OpenCode on its free tier) show token counts in the footer instead, marked `🔢` (e.g. `🔢12.3k/400`, input/output); `💰` means the footer carries a cost ([#417](https://github.com/littlebearapps/untether/issues/417)). Codex reports a running total for the whole thread, so since v0.35.5 Untether shows each run's own share; a figure that is still the whole thread (for example the first `/continue` of a thread started outside Untether) is labelled `· thread total` ([#419](https://github.com/littlebearapps/untether/issues/419)). Pi currently shows no cost or token footer: its usage block isn't in a shape the footer reads. Gemini CLI and AMP (both deprecated) surface `total_cost_usd` when their CLI reports one. Budget alerts apply only to the USD-reporting path.
+    Engines that don't report USD costs (Codex, and OpenCode on its free tier) show token counts in the footer instead, marked `🔢` (e.g. `🔢12.3k/400`, input/output); `💰` means the footer carries a cost ([#417](https://github.com/littlebearapps/untether/issues/417)). Codex reports a running total for the whole thread, so since v0.36.0 Untether shows each run's own share; a figure that is still the whole thread (for example the first `/continue` of a thread started outside Untether) is labelled `· thread total` ([#419](https://github.com/littlebearapps/untether/issues/419)). Pi currently shows no cost or token footer: its usage block isn't in a shape the footer reads. Gemini CLI and AMP (both deprecated) surface `total_cost_usd` when their CLI reports one. Budget alerts apply only to the USD-reporting path.
 
 ### Expensive single runs
 
@@ -101,7 +101,7 @@ Your next message after a per-run stop starts a new run with a fresh per-run tot
 
 ### Daily reset
 
-The daily cost counter resets at midnight in the host's local time zone (the server clock, not yours), and each new day starts from zero. Since v0.35.5 the day's total is saved to `daily_cost.json` next to `untether.toml` after every run, so restarts, upgrades and daily reboots no longer reset it; a file left over from an earlier day is ignored ([#898](https://github.com/littlebearapps/untether/issues/898)).
+The daily cost counter resets at midnight in the host's local time zone (the server clock, not yours), and each new day starts from zero. Since v0.36.0 the day's total is saved to `daily_cost.json` next to `untether.toml` after every run, so restarts, upgrades and daily reboots no longer reset it; a file left over from an earlier day is ignored ([#898](https://github.com/littlebearapps/untether/issues/898)).
 
 ## Check current usage
 

@@ -25,7 +25,7 @@ project commands take precedence when invoked from inside `/home/nathan/untether
 | `.claude/commands/debug/step-classify.md` | Step 1 | 15 Untether issue classes + diagnostic hints |
 | `.claude/commands/debug/step-evidence.md` | Step 2 | Data-source catalogue (journalctl, structlog, fleet SSH, MCP, state files) |
 | `.claude/commands/debug/step-research.md` | Step 3 | Docs, closed issues, upstream engine repos, library docs |
-| `.claude/commands/debug/systemic-patterns.md` | Step 4 | 15-20 known Untether patterns + memory-aware exceptions |
+| `.claude/commands/debug/systemic-patterns.md` | Step 4 | ~20 known Untether patterns + memory-aware exceptions |
 | `.claude/commands/debug/step-fix.md` | Step 7 | Implementation checklist (tests, lint, format, changelog, branch model) |
 | `.claude/commands/debug/step-verify.md` | Step 8 | Post-fix verification (dev restart, integration tests, attestation, fleet rollout) |
 | `.claude/commands/debug/output-template.md` | output | Debug-report-comment and triage-report templates |
@@ -211,7 +211,7 @@ Read `.claude/commands/debug/systemic-patterns.md`. Walk the pattern list
 top to bottom. For each match:
 - If the pattern has a canonical issue, **comment on that issue** with the
   new evidence rather than creating a new one.
-- If the pattern is flagged "by-design" (e.g. cron + plan-mode stalls), say
+- If the pattern is flagged "by-design" (e.g. an unattended cron run denied an approval), say
   so clearly in the Debug Report and stop — no fix needed.
 - If the pattern is "regression of previously-fixed" — flag as a regression
   with explicit reference to the prior fix commit.

@@ -44,7 +44,7 @@ Untether’s core types live in `untether.model`:
 Runners **must not** invent new event types. They translate engine output into these.
 
 !!! note "`TurnEvent` (live sessions)"
-    Since v0.35.5 `untether.model` also has `TurnEvent`. Only a runner that keeps its process open after the first result emits it (today, Claude Code in control-channel mode): each later turn in the same process is a `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segment *after* the run's `CompletedEvent` ([#776](https://github.com/littlebearapps/untether/issues/776)). A new runner doesn't need it; the invariants below still describe the run itself.
+    Since v0.36.0 `untether.model` also has `TurnEvent`. Only a runner that keeps its process open after the first result emits it (today, Claude Code in control-channel mode): each later turn in the same process is a `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segment *after* the run's `CompletedEvent` ([#776](https://github.com/littlebearapps/untether/issues/776)). A new runner doesn't need it; the invariants below still describe the run itself.
 
 ### 2) The runner contract (invariants)
 

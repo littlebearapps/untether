@@ -30,7 +30,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.35.5`).
+You should see the installed version number (e.g. `0.36.0`).
 
 ## 3. Install agent CLIs
 
@@ -83,8 +83,10 @@ Pi can authenticate via a provider login or use API billing. You can log in with
     Enterprise / Google Cloud licences may still work, but Untether no longer
     verifies this.
 
-    The `gemini` engine is targeted for **removal in 0.36.0**. Antigravity CLI is
-    planned as a separate engine ([#558](https://github.com/littlebearapps/untether/issues/558)).
+    The `gemini` engine is still included but **deprecated and no longer
+    supported**: no bug fixes, no testing, and it may be removed in a future
+    release. Antigravity CLI support ships as a separate `antigravity` engine
+    in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)).
 
 ```sh
 npm install -g @google/gemini-cli
@@ -99,8 +101,9 @@ Gemini CLI needs a paid Gemini API key (Google AI Studio or Vertex AI) or an Ent
 
 !!! warning "Deprecated — don't install for new setups"
 
-    Untether's AMP integration is **no longer maintained** and is targeted for
-    **removal in 0.36.0**. AMP remotely refuses clients it considers out of date
+    Untether's AMP integration is still included but **deprecated and no longer
+    supported**: no bug fixes, no testing, and it may be removed in a future
+    release. AMP remotely refuses clients it considers out of date
     (`426 This version of Amp is no longer supported`), so a refused run fails
     within seconds. Untether does not track AMP's update cadence, so a working
     setup can stop working without notice.
@@ -340,7 +343,7 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.35.5)
+    🐕 **untether is ready** (v0.36.0)
 
     *default engine:* `codex`<br>
     *installed engines:* `codex, claude` (not installed: opencode, pi, gemini, amp)<br>

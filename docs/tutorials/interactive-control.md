@@ -213,7 +213,7 @@ To drop the plan phase (Claude Code's `acceptEdits` mode):
 /planmode off
 ```
 
-This sets Claude Code to `acceptEdits` mode: no plan phase, and file edits run without buttons. Since v0.35.5, anything `acceptEdits` doesn't cover (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons, unless your Claude Code `permissions.allow` rules already allow it.
+This sets Claude Code to `acceptEdits` mode: no plan phase, and file edits run without buttons. Since v0.36.0, anything `acceptEdits` doesn't cover (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons, unless your Claude Code `permissions.allow` rules already allow it.
 
 To go back to the engine's default instead, send `/planmode clear`.
 

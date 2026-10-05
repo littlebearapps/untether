@@ -65,6 +65,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
 | `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
 | `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
+| `telegram/reply_context.py` | Appends the replied-to message and any selected quote to the prompt as bounded, clearly marked context ([#736](https://github.com/littlebearapps/untether/issues/736)). |
+| `telegram/budget_notice.py` | Telegram side of the daily budget gate: the "Daily budget reached" notice and its one-shot **Run anyway** button ([#896](https://github.com/littlebearapps/untether/issues/896)). |
 
 ## Plugins
 

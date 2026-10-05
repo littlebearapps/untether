@@ -1,6 +1,6 @@
 # Untether — Cursor Rules
 
-Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi; Gemini CLI and Amp are deprecated, removed in 0.36.0). Lets users control agents from their phone or any device — agents run on the user's machine while they're away from the terminal.
+Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi; Gemini CLI and Amp are deprecated and no longer supported — still included, may be removed in a future release). Lets users control agents from their phone or any device — agents run on the user's machine while they're away from the terminal.
 
 ## Stack & conventions
 
@@ -42,7 +42,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
-- runners/gemini.py, runners/amp.py — deprecated runners (removal in 0.36.0; xfail/skip on sweeps, don't fix)
+- runners/gemini.py, runners/amp.py — deprecated, unsupported runners (no removal scheduled; xfail/skip on sweeps, don't fix)
 - runner_bridge.py — Runner-to-transport bridge
 - cost_tracker.py — Per-run/daily cost tracking
 - telegram/bridge.py — Telegram message rendering

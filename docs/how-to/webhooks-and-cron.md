@@ -239,7 +239,7 @@ Each webhook and cron can specify where the Telegram notification appears:
 - Set `chat_id` to post in a specific chat
 - If omitted, uses the default chat from `[transports.telegram]` — even when `project` is set. A project's bound chat is **not** used, so add `chat_id` to post in the project's chat. Untether logs `trigger.cron.chat_fallback` / `trigger.webhook.chat_fallback` once when a project-only trigger will post to a different chat than the project's ([#894](https://github.com/littlebearapps/untether/issues/894))
 - Set `project` to run in a specific project's working directory
-- Set `engine` to pick the engine. Without it, a trigger with a `project` runs on that project's `default_engine` (since v0.35.5 — it used to fall back to the global default, [#862](https://github.com/littlebearapps/untether/issues/862)), and one without a project uses the global `default_engine`
+- Set `engine` to pick the engine. Without it, a trigger with a `project` runs on that project's `default_engine` (since v0.36.0 — it used to fall back to the global default, [#862](https://github.com/littlebearapps/untether/issues/862)), and one without a project uses the global `default_engine`
 
 ## Server configuration
 
@@ -309,7 +309,7 @@ A one-shot only counts as fired once its run is dispatched, or once its fetch st
 
 ## Autonomous crons in plan-mode chats (Claude)
 
-A cron normally inherits the chat's permission mode, then the engine default (`plan` unless `[engines.claude] permission_mode` says otherwise). Nobody can approve anything when a cron fires, so an unattended Claude run denies anything that would wait for a tap ([#835](https://github.com/littlebearapps/untether/issues/835)) — a cron that inherits `plan` ends with a plan instead of doing the work. **Give every Claude cron that should act unattended an explicit `permission_mode`.** Set `permission_mode = "auto"` on the cron to override:
+A cron normally inherits the chat's permission mode, then the engine default: `[engines.claude] permission_mode`, or, if that's unset, Claude Code's non-interactive `-p` path, with no Telegram approvals or plan mode. Nobody can approve anything when a cron fires, so an unattended Claude run denies anything that would wait for a tap ([#835](https://github.com/littlebearapps/untether/issues/835)) — a cron that inherits `plan` ends with a plan instead of doing the work. **Give every Claude cron that should act unattended an explicit `permission_mode`.** Set `permission_mode = "auto"` on the cron to override:
 
 ```toml
 [[triggers.crons]]
@@ -321,8 +321,8 @@ prompt = "Review overnight PRs and reply with a summary."
 permission_mode = "auto"
 ```
 
-!!! warning "`auto` changed meaning in v0.35.5"
-    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
+!!! warning "`auto` changed meaning in v0.36.0"
+    Before v0.36.0, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
 
 !!! warning "Unattended runs deny instead of waiting"
     Cron and webhook runs never wait on an approval button nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). In `default` / `manual` / `acceptEdits` (what `/planmode off` sets) any tool the mode would ask about is denied; in `plan` the plan approval and the file-changing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) are denied; in `auto`, `dontAsk` and `bypassPermissions` only the requests the CLI still asks about (an `ask` rule, a hook's `ask`, a tool that needs a person, auto mode falling back after repeated blocks) are denied; with diff preview on, an edit awaiting its diff approval is denied. Questions are always denied. Claude is told to carry on without the denied action or stop and report; the final lists the denials (`🔒 unattended (cron:<id>) · denied …`) and each logs `permission.unattended_deny`. A reply to the run's message continues in an attended session with normal buttons. `/at` runs keep their buttons. For hands-off crons set `permission_mode` to `plan-auto`, `auto` or `bypassPermissions` (or pre-approve the tools). Startup logs `trigger.unattended_approval_risk` for crons set to an asking mode, and the startup message lists them.

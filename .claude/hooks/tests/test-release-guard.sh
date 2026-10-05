@@ -73,15 +73,15 @@ bash_check "git push -u origin main"                      deny
 bash_check "git push origin HEAD:master"                  deny
 bash_check "git push origin feature/x:refs/heads/main"    deny
 bash_check "git push --tags"                              deny
-bash_check "git push origin v0.35.5"                      deny
-bash_check "git push origin refs/tags/v0.35.5"            deny
+bash_check "git push origin v0.36.0"                      deny
+bash_check "git push origin refs/tags/v0.36.0"            deny
 bash_check "git push -u origin feature/x"                 allow
 bash_check "git push -u origin fix/main-menu"             allow
-bash_check "git push -u origin feature/v0.35.5rc19"       allow
+bash_check "git push -u origin feature/v0.36.0rc1"       allow
 bash_check "git push origin dev"                          allow
-bash_check "git tag v0.35.5"                              deny
+bash_check "git tag v0.36.0"                              deny
 bash_check "git tag -l"                                   allow
-bash_check "gh release create v0.35.5"                    deny
+bash_check "gh release create v0.36.0"                    deny
 bash_check "gh pr merge 1 --squash"                       allow
 bash_check "gh pr merge 2 --squash --admin"               ask
 bash_check "gh pr merge 2 --squash --admin --delete-branch" deny
@@ -142,7 +142,7 @@ bash_check "ssh nsd 'systemctl --user restart untether'"  ask
 bash_check "launchctl kickstart -k gui/501/com.littlebearapps.untether" ask
 bash_check "systemctl --user restart untether-dev"        allow
 bash_check "systemctl --user status untether"             allow
-bash_check "scripts/staging.sh install 0.35.5rc19 && systemctl --user restart untether" allow
+bash_check "scripts/staging.sh install 0.36.0rc1 && systemctl --user restart untether" allow
 bash_check "uv run pytest"                                allow
 
 echo "== release-guard-protect.sh =="

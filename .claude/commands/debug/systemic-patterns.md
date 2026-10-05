@@ -46,11 +46,11 @@ For each pattern:
 - **Canonical**: #547 (closed v0.35.3) + MEMORY.md `feedback_agent_self_restart_pattern`
 - **Posture**: by-design behavior on the *kernel/systemd* side — fix is to educate the agent (preamble + this debug-rule), not patch the daemon. If observed: flag, never blame the daemon.
 
-### 7. Cron + plan-mode stalls (`feedback_cron_plan_mode_stalls`)
-- **Sig**: long `peak_idle` (>10 min) + repeat `stall_warning` on a session that was triggered by a cron (look for `trigger=cron:<id>` in StartedEvent meta)
-- **Class**: stall-liveness-watchdog
-- **Canonical**: warning-UX fixed by #526 (approval-pending stalls, closed v0.35.3; the #527 unified-predicate rewrite was closed not-planned); MEMORY.md `feedback_cron_plan_mode_stalls`
-- **Posture**: **by-design** — cron-fired sessions in default plan mode are correctly waiting for user approval. **Do not escalate as a bug.** UX rendering of these warnings is the only legitimate fix surface.
+### 7. Cron/webhook run denied an approval (`permission.unattended_deny`)
+- **Sig**: `permission.unattended_deny` / a `🔒 unattended (cron:<id>) · denied <Tool> ×N` row on a run with `trigger=cron:<id>` or `webhook:<id>`; a `plan` or prompting-mode cron ends with a plan or a report instead of acting
+- **Class**: control-channel
+- **Canonical**: #835 (0.35.5rc17, shipping in v0.36.0) — unattended runs deny at once instead of waiting on a button nobody can tap. Before #835 the same runs sat waiting (long `peak_idle` + repeat `stall_warning`, #526; MEMORY.md `feedback_cron_plan_mode_stalls`)
+- **Posture**: **by-design** — the fix is config, not code: give the cron an explicit autonomous `permission_mode` (`plan-auto`, `auto`, `dontAsk`). A cron/webhook run that is still *waiting* on an approval is a `bug` (an #835 regression).
 
 ### 8. CLI-style Telegram summary brevity drift
 - **Sig**: final Telegram message > 5000 chars; plan body re-pasted in the final summary
@@ -109,7 +109,7 @@ For each pattern:
 ### 17. `_clear_background_handle` racing watchdog read (#374, #333, #507 redux)
 - **Sig**: background-handle scalar wiped before watchdog reads it; "dead wakeup" symptom
 - **Class**: stall-liveness-watchdog
-- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux`; fixed by #374 (handle cleared on terminal signal) and #573 (lifecycle v2), both closed in v0.35.5
+- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux`; fixed by #374 (handle cleared on terminal signal) and #573 (lifecycle v2), both closed in the 0.35.5rc line (ships as v0.36.0)
 - **Posture**: regression-watch — was a known defect in the v0.35.3 line.
 
 ### 18. Integration-test attestation gate bypass
@@ -129,6 +129,18 @@ For each pattern:
 - **Class**: ci-pipeline-release-guard
 - **Canonical**: MEMORY.md pattern note — non-blocking since rc9
 - **Posture**: by-design — informational. Don't escalate. Tackling ty is a planned enhancement, not a bug.
+
+### 21. Claude's own schedule refused (`loop.cli_job_denied`)
+- **Sig**: `loop.cli_job_denied loop_mode=off`; Claude says it can't schedule a recurring/timed task and points at Loop mode or `/at`; a self-paced wake chain closes with reason `wake_cap`; `ℹ️ Claude's scheduling is off in this session`
+- **Class**: control-channel
+- **Canonical**: #925 / #926 (0.35.5rc20, shipping in v0.36.0, `### breaking`) — Untether owns `CronCreate`/`CronDelete` via `PreToolUse` hooks; `.claude/rules/control-channel.md` §Scheduling hooks
+- **Posture**: **by-design** with Loop mode off or past `[loop] max_iterations`. `loop_mode=on` that still denies without registering a loop, or a CronCreate hook left unanswered (tool blocks ~30 s), is a `bug`. Kill switch: `[loop] own_schedule = false`.
+
+### 22. Prompting-mode approval prompts (`acceptEdits` / `default` / `manual`)
+- **Sig**: users report "it keeps asking now"; `control_request.received` + Telegram approvals for `Bash`/`Edit`/`Write` in a chat set to `/planmode off`
+- **Class**: control-channel
+- **Canonical**: #749 (`### breaking`) — the prompting modes now prompt; `--allowedTools` is no longer sent there
+- **Posture**: **by-design**. Point at an autonomous mode (`plan-auto`, `auto`, `dontAsk`) or an explicit `[engines.claude] allowed_tools`.
 
 ## How to use this list
 

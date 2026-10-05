@@ -18,7 +18,7 @@ Untether supports a small set of environment variables for logging and runtime b
 |----------|-------------|
 | `TAKOPI_NO_INTERACTIVE` | Any non-empty value disables interactive prompts (useful for CI / non-TTY). |
 | `UNTETHER_CONFIG_PATH` | Override config file location (default `~/.untether/untether.toml`). Useful for running multiple instances or testing with alternate configs. |
-| `UNTETHER_SETTINGS_CACHE` | Set to `0` (or `false`/`off`/`no`) to turn off the settings parse cache ([#506](https://github.com/littlebearapps/untether/issues/506)). By default `untether.toml` is parsed once per edit: every read compares the file's bytes (and the `UNTETHER__*` env vars) with the last parse and re-parses only when they differ, so edits still apply on the next read. Turning the cache off re-parses on every read, as before 0.35.5. Set it in a systemd drop-in (`Environment=UNTETHER_SETTINGS_CACHE=0`) for a per-host rollback. |
+| `UNTETHER_SETTINGS_CACHE` | Set to `0` (or `false`/`off`/`no`) to turn off the settings parse cache ([#506](https://github.com/littlebearapps/untether/issues/506)). By default `untether.toml` is parsed once per edit: every read compares the file's bytes (and the `UNTETHER__*` env vars) with the last parse and re-parses only when they differ, so edits still apply on the next read. Turning the cache off re-parses on every read, as before 0.36.0. Set it in a systemd drop-in (`Environment=UNTETHER_SETTINGS_CACHE=0`) for a per-host rollback. |
 | `NOTIFY_SOCKET` | Set by systemd for `Type=notify` units; Untether sends `READY=1` there once it is up and `STOPPING=1` when it starts draining. Not set by hand. |
 
 ## Config overrides { #config-overrides }
@@ -74,7 +74,7 @@ These variables are set (or removed) automatically by Untether in the engine sub
 | `CLAUDE_ENABLE_STREAM_WATCHDOG` | Claude runner | Defaults to `1` (turns on Claude Code's own stream watchdog — [#322](https://github.com/littlebearapps/untether/issues/322)). A value already in Untether's environment wins. |
 | `MCP_TOOL_TIMEOUT` | Claude runner | Defaults to `120000` (ms). A value already in Untether's environment wins. |
 | `MAX_MCP_OUTPUT_TOKENS` | Claude runner | Defaults to `12000`. A value already in Untether's environment wins. |
-| `CLAUDE_CODE_DISABLE_CRON` | Claude runner | Set to `1` (overriding any inherited value) when Untether resumes a session that may still hold a Claude Code scheduled task from before v0.35.5rc20, a `-p` chat or `[loop] own_schedule = false`, for up to 7 days, so the CLI can't restart that task. Logged as `claude.cron_suppressed` ([#926](https://github.com/littlebearapps/untether/issues/926)). Not set otherwise. |
+| `CLAUDE_CODE_DISABLE_CRON` | Claude runner | Set to `1` (overriding any inherited value) when Untether resumes a session that may still hold a Claude Code scheduled task created by an earlier version (0.35.4, or 0.35.5rc19 and earlier), a `-p` chat or `[loop] own_schedule = false`, for up to 7 days, so the CLI can't restart that task. Logged as `claude.cron_suppressed` ([#926](https://github.com/littlebearapps/untether/issues/926)). Not set otherwise. |
 | `ANTHROPIC_API_KEY` | Claude runner | **Removed** from the Claude subprocess environment unless `[claude] use_api_billing = true`, so Claude Code uses its subscription login. |
 | `NO_COLOR`, `CI` | Pi runner | Default to `1` so Pi's output carries no ANSI codes. A value already in Untether's environment wins. |
 
@@ -108,7 +108,7 @@ If you'd rather the new variable ship as a default for every Untether user, open
 
 <!-- verified codex 0.157.1 / opencode 1.14.33, 2026-09-30 (#454); recheck on either CLI bump -->
 
-Untether does not filter the Codex or OpenCode environment: both CLIs are spawned with Untether's full process environment (so are the deprecated Gemini CLI and AMP engines, removed in 0.36.0). `[security] env_extra_allow` has no effect on them (there is no allowlist to extend). Per-runner filtering for these engines is tracked in [#375](https://github.com/littlebearapps/untether/issues/375).
+Untether does not filter the Codex or OpenCode environment: both CLIs are spawned with Untether's full process environment (so are the deprecated, unsupported Gemini CLI and AMP engines). `[security] env_extra_allow` has no effect on them (there is no allowlist to extend). Per-runner filtering for these engines is tracked in [#375](https://github.com/littlebearapps/untether/issues/375).
 
 What an **MCP server** sees is decided by the engine, not by Untether, and the two engines differ:
 

@@ -64,7 +64,7 @@ Completed status rows that start with their own emoji (🗜️, ⚠️, ⏳, �
 
 `(auto)` is Claude compacting on its own as the window fills. `(manual)` is a `/compact` you sent as a follow-up while the session was still live, and that reply's body is the same `🗜️ Context compacted …` line. A failed compaction shows `🗜️ Compaction failed · <reason>`. Compaction counts as activity, not as a stall.
 
-Other rows a Claude run can show, all new in v0.35.5:
+Other rows a Claude run can show, all new in v0.36.0:
 
 | Row | Meaning |
 |---|---|
@@ -111,7 +111,7 @@ Control how many actions appear in the progress message. Actions beyond this lim
 Set to `0` to hide the action list entirely, or increase it to see more history.
 
 !!! tip "Hot-reload"
-    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). Since v0.35.5 `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of a Claude session that is still open ([#863](https://github.com/littlebearapps/untether/issues/863)).
+    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). Since v0.36.0 `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of a Claude session that is still open ([#863](https://github.com/littlebearapps/untether/issues/863)).
 
 ## Long-running tool tail (heartbeat)
 

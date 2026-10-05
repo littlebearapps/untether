@@ -247,7 +247,7 @@ flowchart TD
 
 ## Live sessions (Claude Code)
 
-The flow above ends at the first `result`. Since v0.35.5 a Claude Code run in a permission mode (the control-channel mode, without `-p`) is a **live session**: Untether keeps reading after the answer, so the process stays open while Claude Code has background work in flight ([#776](https://github.com/littlebearapps/untether/issues/776)).
+The flow above ends at the first `result`. Since v0.36.0 a Claude Code run in a permission mode (the control-channel mode, without `-p`) is a **live session**: Untether keeps reading after the answer, so the process stays open while Claude Code has background work in flight ([#776](https://github.com/littlebearapps/untether/issues/776)).
 
 ```mermaid
 sequenceDiagram
