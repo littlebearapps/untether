@@ -1373,3 +1373,53 @@ Dev config already has `[transports.telegram.files] enabled = true` + `watch_con
 Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untether-outbox/.skipped` after R20-924a (returns `.skipped.zip` with the 3 files), B-RESUME and U4. Clean up the outbox afterwards. No WARNING/ERROR `outbox.` lines (`outbox.stale_archive_failed` must be 0); a symlinked or out-of-project outbox logs `outbox.outside_root` and is never scanned.
 
 **Required for rc20:** Tier 7 + Tier 1 (Claude, Codex, OpenCode) + Tier 2 C1–C6 + B-LIVE-1…7 + R20-* (every row above, plus the regressions each subsection names). R20-922c and R20-924g are gated; R20-926c is opportunistic; R20-920d/e and R20-929e are optional.
+
+## 0.36.0rc1 scenarios / results
+
+0.36.0rc1 is the 0.35.5 line renumbered as a minor ([#947](https://github.com/littlebearapps/untether/issues/947)). The runtime diff from rc20 is the version bump and wording only, so this run covers the **Minor** tiers, the rc20 gaps and the upgrade path from 0.35.4.
+
+- **When and what:** 2026-10-05, on the dev bot, head `413288b`.
+- **CLIs:** Claude 2.1.289, Codex 0.160.0, OpenCode 1.14.33, Pi 0.78.0.
+- **Pre-flight:** `pytest` 6257 passed (88.26% coverage), `ruff` clean.
+- **Marker:** `~/.untether-dev/integration-test-pass-0.36.0rc1.json`. Nathan chose to write it with the two NOT RUN items noted.
+
+| ID | Engine / chat | Result | Note |
+|---|---|---|---|
+| Q1–Q15 | DM | PASS | Q14 ran on the wrong engine (codex, not the chat's claude) → [#950](https://github.com/littlebearapps/untether/issues/950) |
+| Q16 | Pi chat | NOT RUN | Needs `[triggers] enabled` + a cron + a restart. The config edit was blocked by the auto-mode classifier. Also not run on rc20 |
+| `/config` deprecated wording | DM | PASS | `⚠️ amp, gemini — deprecated, no longer supported, may be removed in a future release. Prefer another engine.` |
+| U1–U10 | Claude | PASS | |
+| U1–U10 | Codex | PASS | The footer model is still `codex-mini-latest` (#846) |
+| U1–U10 | OpenCode | PASS | Text parts are glued together ("CLAUDE.md.Files") → [#955](https://github.com/littlebearapps/untether/issues/955) |
+| U1–U10 | Pi | PASS | U1's tool calls were blocked by the lba-1 `pi-permission-system` extension (environment, not Untether). Re-run as U2b with a temporary allow config: PASS. U8 has no token counts (#899) |
+| C1–C5, C7 | Claude | PASS | |
+| C6 | Claude | PARTIAL | The approved keyboard lingered 11 s and the denied one 6 s (rc20: 13–17 s). Pre-existing pacing, [#945](https://github.com/littlebearapps/untether/issues/945) |
+| T1, T2, T3, T6, T8 | DM | PASS | |
+| O1, O2, O8 | DM / Codex | PASS | O8: `/agent set pi` survived a dev restart |
+| S2, S4, S7 | Codex / OpenCode / Pi | PASS | |
+| S1 | Codex | PARTIAL | The stall warning fired at 15 min, not 5, because npm-wrapped engines always get the children threshold → [#953](https://github.com/littlebearapps/untether/issues/953). Claude S1 was not run |
+| B-LIVE-1/2/7 | Claude | PASS | B-LIVE-2's follow-up was queued about 6 s behind a wake turn |
+| R20-919b | Claude | PASS | The 10-minute tool-approval reminder names Write as an approval, with no `kind:title (running)` leak. The Deny tap cleared it within 20 s, so R20-920c passes too |
+| R20-926c | Claude | NOT RUN | Step 1 (native job under `own_schedule = false`, one tick, `/cancel`) passed. The `active_loops.json` edit while dev was stopped was blocked by the classifier |
+| #948 | Claude | REPRODUCED 1/2 | The card stayed "working" after cancel when the follow-up was queued first ([comment](https://github.com/littlebearapps/untether/issues/948#issuecomment-5988234252)) |
+| #928 residual | Claude | PASS | None of 13 `runner.completed` across 3 live sessions had `turn_cost_usd=0.0` |
+| Upgrade: config | offline | PASS | A 0.35.4-shaped config parses. `auto_semantics_changed` fires once for both `auto` crons (sunset 0.37.0) |
+| Upgrade: state | offline | PASS | State files written by 0.35.4's code load cleanly, with one-shot migrations (chat-prefs `plan-auto`, loops v1 `do_not_resume`) |
+| Upgrade: rollback | offline | PASS | 0.35.4 rejects `[loop] own_schedule`, as documented. About 20 other new keys and `plan-auto` also break a rollback but aren't documented → [#956](https://github.com/littlebearapps/untether/issues/956) |
+| Logs | dev | PASS | Every warning and error is explained (deliberate bad model ids, S1 stall, T8 stale button, MCP `catalog_staleness`). 12 FDs, no zombies |
+
+**Filed (rc21, v0.36.0):** [#950](https://github.com/littlebearapps/untether/issues/950) through [#956](https://github.com/littlebearapps/untether/issues/956):
+
+- #950: `/at` uses the wrong engine.
+- #951: the About page blocks the event loop for about 10 s, and Pi is missing.
+- #952: a failed run on a non-Claude engine silently drops the session.
+- #953: stall threshold.
+- #954: the elapsed timer freezes.
+- #955: OpenCode text joins.
+- #956: rollback docs.
+
+**Not filed (trivial, noted here):**
+
+- A stale `💬 interim update` line stays in the background block after "all done".
+- The path is repeated in the long-running action tail.
+- Spurious `✓ Permission resolved` rows.
