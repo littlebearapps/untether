@@ -1434,3 +1434,41 @@ Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untethe
 - A stale `💬 interim update` line stays in the background block after "all done".
 - The path is repeated in the long-running action tail.
 - Spurious `✓ Permission resolved` rows.
+
+## 0.36.0rc2 scenarios / results
+
+0.36.0rc2 fixes the 0.36.0rc1 integration-run and soak findings plus the open v0.36.0 bugs. This run is **targeted**: each fix was verified live where it can be triggered on demand, with a regression pass over the paths the fixes touched. It is not the full Minor matrix, so **no attestation marker was written** for 0.36.0rc2; run the Minor tiers before a fleet rollout.
+
+- **When and what:** 2026-10-05 22:48–23:50 UTC, on the dev bot (and the `untether-dev-ws` forum for [#826](https://github.com/littlebearapps/untether/issues/826)), feature branch `feature/v0.36.0rc2`.
+- **CLIs:** Claude 2.1.289, Codex 0.160.0, OpenCode 1.14.33, Pi 0.78.0.
+- **Pre-flight:** full `pytest` green (6315 passed before the last batch of fixes; re-run on the final head before merge), `ruff` clean.
+
+| ID | Engine / chat | Result | Note |
+|---|---|---|---|
+| [#838](https://github.com/littlebearapps/untether/issues/838) | Claude + Codex | PASS | `[watchdog] max_concurrent_engine_runs = 1`: `/claude` in the Codex chat while a Claude run was live → `🛑 Too many engine runs in flight (1/1)` and `subprocess.prespawn.concurrency_blocked` from the Claude runner; a follow-up into the live Claude session was absorbed, not blocked. Already fixed in rc17 |
+| [#826](https://github.com/littlebearapps/untether/issues/826) R17-14a–e | dev-ws forum (Codex) | PASS | `/new` in topic B and in General: `new.cancel_scope scoped=True cancelled=0 skipped_other_threads=1`; `/cancel` in B: "nothing running in this topic."; `/cancel` and `/new` in A cancel only A. Already fixed in rc17 |
+| [#921](https://github.com/littlebearapps/untether/issues/921) R20-921a | Claude | PASS | `/queue`, a 45 s loop, a follow-up, then `/cancel`: the queued message was re-dispatched and answered (QUEUED-OK); no "please send it again" |
+| [#924](https://github.com/littlebearapps/untether/issues/924) R20-924a | Claude | PASS | 3 old files in the outbox: none attached, one 📎 notice, moved to `.skipped/`, `outbox.stale count=3 archived=True` |
+| [#929](https://github.com/littlebearapps/untether/issues/929) R20-929a | Claude | PASS | Re-run on rc2 because [#388](https://github.com/littlebearapps/untether/issues/388) touched the request registry: surface pushed, Approve went through, retired after 27.5 s, no `control_request.unanswerable` |
+| [#987](https://github.com/littlebearapps/untether/issues/987) | Codex | PASS | One `⚠️ Codex is ignoring 1 unrecognized configuration setting` row in progress; `/export` shows `- ✓ ⚠️ …` |
+| [#954](https://github.com/littlebearapps/untether/issues/954) | Claude | PASS | Silent 2500-word story: header 7s → 1m 02s → 1m 33s, repainting every 30 s with no events |
+| [#951](https://github.com/littlebearapps/untether/issues/951) | Pi | PASS | `/config` → About in ~3 s, lists `pi 0.78.0` |
+| [#984](https://github.com/littlebearapps/untether/issues/984) | Pi | PASS | `/browse` of a folder with one file and one dir: `1 dir · 1 file` |
+| [#955](https://github.com/littlebearapps/untether/issues/955) / [#970](https://github.com/littlebearapps/untether/issues/970) | OpenCode | PASS | Pre-tool and post-tool text are separate paragraphs; `opencode.version.probe` ran once (1.14.33) and the run spawned normally. The 2.x refusal path is unit-tested only |
+| [#952](https://github.com/littlebearapps/untether/issues/952) | Pi | PASS | `/model set` a bogus model, `ping`: run failed, `session.auto_clear_skipped reason=not_resume_failure`; after `/model clear` the next ping resumed the same session with no error |
+| [#889](https://github.com/littlebearapps/untether/issues/889) | Claude | PASS | Resumed run with a non-existent model: `session: … · resumed · turns: 1 · cost: $0.00 · session cost: $2.03 · session api: 317056ms` |
+| [#985](https://github.com/littlebearapps/untether/issues/985) | Claude | PARTIAL | Two background tasks: the block ends `✅ all 2 background tasks done` with no `💬` interim note, but Task A's `↳` ack still says "Task B … is still running" → [#989](https://github.com/littlebearapps/untether/issues/989) |
+| [#986](https://github.com/littlebearapps/untether/issues/986) | Claude | PASS | 120 s foreground loop: `▸ for i in …; echo finished-986b · 1m 30s`, no repeat. (A bare `sleep 75` is blocked by Claude Code; use a loop) |
+| [#948](https://github.com/littlebearapps/untether/issues/948) | Claude | PASS ×2 | Cancel tapped mid follow-up (steps updating) in a live session holding a background task: card ends `cancelled · claude · Ns`, no buttons, never reverts |
+| [#388](https://github.com/littlebearapps/untether/issues/388) | Claude | PASS (single user) | `approval_originator_only = true` hot-reloaded; the originator's Approve (C1) and AskUserQuestion answer (C4) work. The refusal of a second user is unit-tested only (no second allowed account on the dev bot) |
+| [#823](https://github.com/littlebearapps/untether/issues/823) | Codex | PASS | Progress message deleted by hand mid-run: `telegram.benign_rejection … kind=progress … reason_class=target_gone` |
+| [#953](https://github.com/littlebearapps/untether/issues/953) S1 | Codex | PASS | `kill -STOP` on the engine with a shell command open: `⏳ Engine process is stopped (state T, 10 min)` at `stall_threshold_selected reason=running_tool threshold=600` (was 900 s and "Child processes idle"); `kill -CONT` + `/cancel` clean |
+| [#904](https://github.com/littlebearapps/untether/issues/904) | Claude | PASS (reply half) | A reply to an earlier bot message reached the agent as `telegram_reply_context`; the selected-quote half needs the Telegram app |
+| C1, C2, C4 | Claude | PASS | C1 approve (file written), C2 deny acknowledged, C4 option answered |
+| T8 | Claude | PASS | Keyboards are removed when the run ends, so no stale button is left to tap |
+| U1/U3/U4/U6/U9/U10 sampling | all 4 | PASS | Codex long answer split 3/3; resumes on Claude and Pi; cancels on Claude and Codex |
+| Logs | dev | PASS | Only explained warnings/errors (the dev config's placeholder `chat_id = 123` startup message, the deliberate bad models, the S1 stall, `catalog_staleness`); 16 FDs, no zombies |
+
+**Unit-test only (can't be triggered on demand):** [#905](https://github.com/littlebearapps/untether/issues/905) (stream-idle class vs a wake result), [#928](https://github.com/littlebearapps/untether/issues/928) residual (needs a slow `deleteMessage` after a sent final), [#959](https://github.com/littlebearapps/untether/issues/959) (clock-mapping race), [#789](https://github.com/littlebearapps/untether/issues/789) (voice mishear map), [#970](https://github.com/littlebearapps/untether/issues/970) 2.x refusal.
+
+**Filed during rc2 (v0.36.0, label `0.36.0rc3`):** [#989](https://github.com/littlebearapps/untether/issues/989) (#985 attributed variant), [#990](https://github.com/littlebearapps/untether/issues/990) (steer fallback from General), [#991](https://github.com/littlebearapps/untether/issues/991) (#928 timeout edges), [#992](https://github.com/littlebearapps/untether/issues/992) (unattributed `reason=unknown` wakes on staging), [#993](https://github.com/littlebearapps/untether/issues/993) (OpenCode install pin / About probe command), [#994](https://github.com/littlebearapps/untether/issues/994) (`event_seq` double duty).
