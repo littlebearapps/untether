@@ -58,7 +58,7 @@ For tools that modify files, the approval message includes a compact diff, shown
 - **Write**: 📝 file path, then the first 8 lines of content to be written (as `+` lines)
 - **Bash**: `$ command` (up to 200 characters)
 
-Long lines are cut at 60 characters, and a `…(N more added)` line says how much was left out. Before v0.35.5 the preview was rendered as Markdown, so an added `+ x` line could show up as a `- x` bullet; it is now a fenced block that keeps every line as written ([#855](https://github.com/littlebearapps/untether/issues/855)).
+Long lines are cut at 60 characters, and a `…(N more added)` line says how much was left out. Before v0.36.0 the preview was rendered as Markdown, so an added `+ x` line could show up as a `- x` bullet; it is now a fenced block that keeps every line as written ([#855](https://github.com/littlebearapps/untether/issues/855)).
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
@@ -150,13 +150,13 @@ This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. 
 !!! warning "Safe blocks every sandboxed write"
     The read-only sandbox blocks **all** filesystem writes from Codex's commands, not just edits inside the project: caches (`.pytest_cache`, `__pycache__`, `npm`/`uv` caches), build output and `/tmp` too. Tests, builds and package installs fail in Safe. Switch the chat to **Full auto** when you want Codex to run them. MCP tools run outside Codex's command sandbox, so Safe does not restrict what an MCP server does.
 
-!!! note "Before v0.35.5"
+!!! note "Before v0.36.0"
     Safe used to pass `--ask-for-approval untrusted`. `codex exec` never applied that flag, so Safe ran exactly like Full auto, and codex-cli 0.149.0+ rejects it outright, so every Safe run failed at startup ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
 ### Gemini CLI — Approval mode
 
 !!! warning "Deprecated"
-    Gemini CLI is deprecated in Untether and targeted for removal in 0.36.0. See [Switch engines](switch-engines.md).
+    Gemini CLI is deprecated in Untether and no longer supported: it is still included, but gets no fixes and may be removed in a future release. See [Switch engines](switch-engines.md).
 
 Toggle via `/config` → **Approval mode**:
 
@@ -169,7 +169,7 @@ Toggle via `/config` → **Approval mode**:
 This is also a pre-run policy. Gemini CLI doesn't have interactive mid-run approval.
 
 !!! warning "Read-only runs with full access"
-    With no approval mode set, Untether starts Gemini CLI with `--approval-mode yolo`, so every tool is approved. The **Read-only** button in `/config` only clears the chat's setting, which lands back on that same default; it does not restrict Gemini. Use **Edit files** if you need shell commands blocked. The Gemini engine is deprecated and won't get a read-only mode before it is removed.
+    With no approval mode set, Untether starts Gemini CLI with `--approval-mode yolo`, so every tool is approved. The **Read-only** button in `/config` only clears the chat's setting, which lands back on that same default; it does not restrict Gemini. Use **Edit files** if you need shell commands blocked. The Gemini engine is deprecated and no longer receives fixes, so it won't get a read-only mode.
 
 Both policies persist per chat via `/config` and can be cleared back to the default. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
 

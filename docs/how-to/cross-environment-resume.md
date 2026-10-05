@@ -90,7 +90,7 @@ This works because resume tokens are stored per-directory, not per-transport. Bo
 
 ## Tips
 
-- After a `/continue`, Untether tracks the real session it resumed, so your next message (or a reply to the result) carries on in that session as usual. Before v0.35.5 a Claude `/continue` could leave the session half-registered, so the next resume waited 30 seconds and then started fresh ([#816](https://github.com/littlebearapps/untether/issues/816), [#817](https://github.com/littlebearapps/untether/issues/817)).
+- After a `/continue`, Untether tracks the real session it resumed, so your next message (or a reply to the result) carries on in that session as usual. Before v0.36.0 a Claude `/continue` could leave the session half-registered, so the next resume waited 30 seconds and then started fresh ([#816](https://github.com/littlebearapps/untether/issues/816), [#817](https://github.com/littlebearapps/untether/issues/817)).
 - Codex reports token usage as a running total for the thread. When you `/continue` a thread that Untether hasn't seen before, the footer can't tell how much of that was this run, so it is labelled `· thread total` ([#419](https://github.com/littlebearapps/untether/issues/419)).
 
 - Use `/new` first if you want to clear any stored Untether session before continuing a CLI session.

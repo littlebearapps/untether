@@ -59,7 +59,7 @@ uv run untether                      # Ctrl+C first if already running
 
 ```
 $ journalctl --user -u untether-dev -f
-Mar 10 09:15:23 lba-1 untether[12345]: untether.started version=0.35.5 engine=codex projects=3
+Mar 10 09:15:23 lba-1 untether[12345]: untether.started version=0.36.0 engine=codex projects=3
 Mar 10 09:15:23 lba-1 untether[12345]: telegram.connected bot=@untether_dev_bot
 Mar 10 09:15:23 lba-1 untether[12345]: telegram.polling started
 ```
