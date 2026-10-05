@@ -561,13 +561,14 @@ def _make_edits(
     transport: FakeTransport,
     presenter: _KeyboardPresenter,
     clock: _FakeClock | None = None,
+    engine: str = "codex",
 ) -> ProgressEdits:
     if clock is None:
         clock = _FakeClock()
     # #481: thread the FakeClock into the tracker so ActionState
     # timestamps align with the bridge's clock (otherwise long-running
     # action age computations would mix wall-clock and fake clock).
-    tracker = ProgressTracker(engine="codex", clock=clock)
+    tracker = ProgressTracker(engine=engine, clock=clock)
     progress_ref = MessageRef(channel_id=123, message_id=1)
     return ProgressEdits(
         transport=transport,
@@ -4530,7 +4531,9 @@ async def test_stall_tool_active_suppressed_even_with_frozen_ring() -> None:
 
 @pytest.mark.anyio
 async def test_stall_threshold_elevated_with_active_children() -> None:
-    """When child processes exist, use the subagent threshold (900s) instead of normal (300s)."""
+    """When child processes exist, use the subagent threshold (900s) instead of normal (300s).
+
+    Claude only: its children are Agent/Bash work (#953 keeps this path)."""
     from unittest.mock import patch
 
     from untether.utils.proc_diag import ProcessDiag
@@ -4538,7 +4541,7 @@ async def test_stall_threshold_elevated_with_active_children() -> None:
     transport = FakeTransport()
     presenter = _KeyboardPresenter()
     clock = _FakeClock(start=100.0)
-    edits = _make_edits(transport, presenter, clock=clock)
+    edits = _make_edits(transport, presenter, clock=clock, engine="claude")
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05  # 50ms
     edits._STALL_THRESHOLD_SUBAGENT = 0.5  # 500ms
@@ -4894,7 +4897,7 @@ async def test_stall_message_active_children() -> None:
     transport = FakeTransport()
     presenter = _KeyboardPresenter()
     clock = _FakeClock(start=100.0)
-    edits = _make_edits(transport, presenter, clock=clock)
+    edits = _make_edits(transport, presenter, clock=clock, engine="claude")
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
     edits._STALL_THRESHOLD_SUBAGENT = 0.05  # match so it triggers
@@ -4940,6 +4943,115 @@ async def test_stall_message_active_children() -> None:
         f"{[c['message'].text for c in transport.send_calls]}"
     )
     assert "3 children" in stall_msgs[0]["message"].text
+
+
+async def _run_stall_953(
+    engine: str, *, state: str = "S", tree_cpu_grows: bool = False
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """#953: drive one stall window with a permanent child pid (Codex's npm
+    shim / OpenCode's MCP servers). Normal threshold 50 ms, subagent 500 ms;
+    the clock sits at 100 ms, so only the normal threshold can fire."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock, engine=engine)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.5
+    edits._stall_repeat_seconds = 0.5
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    ticks = iter(range(1_000_000))
+
+    def diag(pid: int) -> ProcessDiag:
+        tree = 3000 + (next(ticks) * 10 if tree_cpu_grows else 0)
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state=state,
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001],
+            tree_cpu_utime=tree,
+            tree_cpu_stime=600,
+        )
+
+    with (
+        patch("untether.utils.proc_diag.collect_proc_diag", side_effect=diag),
+        structlog.testing.capture_logs() as logs,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # A few diag samples first, so the tree-CPU baseline exists
+                # before the silence crosses the normal threshold (60 s
+                # sampling vs a 300 s threshold in production).
+                await anyio.sleep(0.03)
+                clock.set(100.1)
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    return [c["message"].text for c in transport.send_calls], logs
+
+
+def _threshold_reasons(logs: list[dict[str, Any]]) -> set[str]:
+    return {
+        r["reason"]
+        for r in logs
+        if r.get("event") == "progress_edits.stall_threshold_selected"
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["codex", "opencode"])
+async def test_953_idle_permanent_child_uses_normal_threshold(engine: str) -> None:
+    """#953: a permanent wrapper/MCP child on an idle tree no longer earns the
+    15-min subagent threshold, and the warning doesn't blame child processes."""
+    texts, logs = await _run_stall_953(engine)
+
+    assert _threshold_reasons(logs) == {"normal"}
+    assert any("No progress" in t for t in texts), texts
+    assert not any("child processes" in t.lower() for t in texts)
+
+
+@pytest.mark.anyio
+async def test_953_busy_child_tree_keeps_subagent_threshold() -> None:
+    """#953: a non-Claude child tree that is burning CPU still gets the
+    subagent threshold (no warning inside it)."""
+    texts, logs = await _run_stall_953("codex", tree_cpu_grows=True)
+
+    assert _threshold_reasons(logs) == set()
+    assert texts == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["codex", "claude"])
+async def test_953_stopped_engine_says_stopped(engine: str) -> None:
+    """#953: a SIGSTOPped engine (state T) isn't waiting on children — normal
+    threshold, and the warning says the engine process is stopped."""
+    texts, logs = await _run_stall_953(engine, state="T")
+
+    assert _threshold_reasons(logs) == {"normal"}
+    assert any("Engine process is stopped (state T" in t for t in texts), texts
+    assert not any("child processes" in t.lower() for t in texts)
+
+
+@pytest.mark.anyio
+async def test_953_claude_idle_children_unchanged() -> None:
+    """#953 regression guard: Claude's children keep the subagent threshold
+    even on an idle tree."""
+    texts, logs = await _run_stall_953("claude")
+
+    assert _threshold_reasons(logs) == set()
+    assert texts == []
 
 
 @pytest.mark.anyio

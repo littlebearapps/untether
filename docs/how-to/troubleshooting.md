@@ -205,9 +205,12 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
 | MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
 | Child processes / subagents running | 15 min (`subagent_timeout`) | `⏳ Waiting for child processes (…)` or `⏳ Child processes idle (…)` |
+| Engine process stopped (`kill -STOP`, state `T`) | 5 min | `⏳ Engine process is stopped (state T, N min)` |
 | Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
 
 The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan". The reminder is removed once you answer, and a later reminder replaces the earlier one.
+
+For Codex, OpenCode and Pi, a child process only earns the 15 min threshold while the process tree is using CPU: Codex's npm wrapper and OpenCode's MCP servers are always there, so an idle engine falls back to 5 min ([#953](https://github.com/littlebearapps/untether/issues/953)).
 
 **If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
 

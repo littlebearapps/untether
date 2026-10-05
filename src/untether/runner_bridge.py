@@ -2143,6 +2143,14 @@ def _approval_reminder_headline(info: _PendingRequestInfo | None, mins: int) -> 
     return f"⏳ Waiting for your approval ({mins} min) — tap a button above. {tail}"
 
 
+# #953: /proc states — T/t stopped or traced, D uninterruptible I/O wait.
+_STOPPED_PROC_STATES = frozenset({"T", "t"})
+_BLOCKED_PROC_STATES = frozenset({"D"})
+# #953: engines whose child processes are real work (Agent subagents, Bash
+# tools), not a permanent wrapper binary or MCP servers.
+_CHILD_WORK_ENGINES = frozenset({"claude"})
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -2622,7 +2630,7 @@ class ProgressEdits:
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
-            elif self._has_active_children(diag):
+            elif self._children_extend_threshold(diag, tree_active):
                 threshold = self._STALL_THRESHOLD_SUBAGENT
                 threshold_reason = "active_children"
             elif self._has_running_tool():
@@ -3291,6 +3299,22 @@ class ProgressEdits:
                         and _approval_info.question
                     ):
                         parts.append(f"❓ {_approval_info.question}")
+                elif (
+                    diag is not None
+                    and diag.alive
+                    and diag.state in _STOPPED_PROC_STATES | _BLOCKED_PROC_STATES
+                ):
+                    # #953: say what the engine process itself is doing.
+                    if diag.state in _STOPPED_PROC_STATES:
+                        parts = [
+                            f"⏳ Engine process is stopped (state {diag.state},"
+                            f" {mins} min)"
+                        ]
+                    else:
+                        parts = [
+                            f"⏳ Engine process is blocked on I/O (state"
+                            f" {diag.state}, {mins} min)"
+                        ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -4000,6 +4024,23 @@ class ProgressEdits:
                     return parts[1] if len(parts) >= 2 else name
             break  # only check the most recent
         return None
+
+    def _children_extend_threshold(self, diag: Any, tree_active: bool | None) -> bool:
+        """Whether child-process work earns the longer subagent threshold.
+
+        #953: a stopped engine process can't be waiting on subagent work, and
+        outside Claude (whose children are Agent/Bash work) a child pid is
+        usually permanent — Codex's npm shim wraps the real binary, OpenCode
+        keeps MCP servers — so there it counts only while the process tree is
+        burning CPU (or on the TCP signal, unchanged).
+        """
+        if diag is not None and diag.state in _STOPPED_PROC_STATES:
+            return False
+        if not self._has_active_children(diag):
+            return False
+        if self.tracker.engine in _CHILD_WORK_ENGINES:
+            return True
+        return tree_active is True or diag.tcp_total > self._TCP_ACTIVE_THRESHOLD
 
     def _has_active_children(self, diag: Any) -> bool:
         """True if the process has active child processes or elevated TCP.
