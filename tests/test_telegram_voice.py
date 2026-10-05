@@ -1315,3 +1315,70 @@ def test_679_voice_endpoint_keys_changed() -> None:
         ["show_resume_line", "voice_transcription_model", "voice_transcription_prompt"]
     )
     assert not voice_endpoint_keys_changed([])
+
+
+# --- #789: deterministic fix-up of the known "Claude" mishears ---
+
+
+@pytest.mark.parametrize(
+    ("heard", "fixed"),
+    [
+        ("Thanks, Clawde. Yes, go ahead", "Thanks, Claude. Yes, go ahead"),
+        ("thanks clawd", "thanks Claude"),
+        ("open it in Clawed Code", "open it in Claude Code"),
+        ("NSDMain Corde Code session", "NSDMain Claude Code session"),
+        ("Clawde Code is running", "Claude Code is running"),
+        ("including Clawde.md and AGENTS.md", "including CLAUDE.md and AGENTS.md"),
+        ("update the Claw.md file", "update the CLAUDE.md file"),
+        ("check clawed.md, then", "check CLAUDE.md, then"),
+    ],
+)
+def test_789_known_claude_mishears_corrected(heard: str, fixed: str) -> None:
+    from untether.telegram.voice import correct_known_mishears
+
+    text, count = correct_known_mishears(heard)
+    assert text == fixed
+    assert count >= 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Real words and real names stay as heard.
+        "the cat clawed at the door",
+        "a claw machine and a corded drill",
+        "Claude Code, CLAUDE.md and Claude are already right",
+        "Cloud Code is a Google product",
+        "clawdeck",  # inside another word
+        "",
+    ],
+)
+def test_789_correction_leaves_other_text_alone(text: str) -> None:
+    from untether.telegram.voice import correct_known_mishears
+
+    assert correct_known_mishears(text) == (text, 0)
+
+
+@pytest.mark.anyio
+async def test_789_transcribe_voice_returns_corrected_text() -> None:
+    from structlog.testing import capture_logs
+
+    async def reply(**kwargs) -> None:
+        raise AssertionError(kwargs)
+
+    transcriber = _Transcriber(result="Thanks, Clawde. Update Claw.md in Clawed Code")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    with capture_logs() as logs:
+        result = await transcribe_voice(
+            bot=bot,
+            msg=_voice_message(file_size=2),
+            enabled=True,
+            model="whisper-1",
+            reply=reply,
+            transcriber=transcriber,
+        )
+    assert result == "Thanks, Claude. Update CLAUDE.md in Claude Code"
+    fixed = [r for r in logs if r["event"] == "voice.transcript.corrected"]
+    assert len(fixed) == 1 and fixed[0]["corrections"] == 3
+    # The transcript itself is never logged.
+    assert "Clawde" not in str(fixed)
