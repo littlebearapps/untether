@@ -7370,6 +7370,91 @@ async def test_954_silent_run_header_elapsed_advances() -> None:
     assert texts == ["working 5s", "working 65s"]
 
 
+@pytest.mark.anyio
+async def test_948_debounced_repaint_never_lands_after_the_final() -> None:
+    """#948: a repaint waiting out the render debounce when the turn is
+    finalised must not be sent after the final ``cancelled`` edit."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=10.0)
+    gate = anyio.Event()
+    sleeping = anyio.Event()
+
+    async def _sleep(_s: float) -> None:
+        sleeping.set()
+        await gate.wait()
+
+    edits = ProgressEdits(
+        transport=transport,
+        presenter=_KeyboardPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=ProgressTracker(engine="claude", clock=clock),
+        started_at=0.0,
+        clock=clock,
+        last_rendered=None,
+        min_render_interval=2.0,
+        sleep=_sleep,
+    )
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()  # first render — no debounce
+        await anyio.sleep(0.02)
+        clock.set(11.0)
+        edits._bump_heartbeat()  # second render waits out the debounce
+        await sleeping.wait()
+        # The turn is cancelled meanwhile and its final edit goes out
+        # (``note_final`` sets the flag the same way, synchronously).
+        edits._finalizing = True
+        await transport.edit(
+            ref=edits.progress_ref, message=RenderedMessage(text="cancelled")
+        )
+        gate.set()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert texts == ["working 10s", "cancelled"]
+
+
+@pytest.mark.anyio
+async def test_948_stop_repaints_waits_for_an_edit_being_sent() -> None:
+    """#948: a repaint already handed to the transport finishes before
+    ``stop_repaints`` returns, so the final edit is always ordered after it
+    (and supersedes it in the outbox)."""
+    order: list[str] = []
+    release = anyio.Event()
+    entered = anyio.Event()
+
+    class _SlowTransport(FakeTransport):
+        async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+            if message.text.startswith("working"):
+                entered.set()
+                await release.wait()
+            order.append(message.text)
+            return ref
+
+    transport = _SlowTransport()
+    clock = _FakeClock(start=7.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()
+        await entered.wait()
+
+        async def _finalise() -> None:
+            await edits.stop_repaints()
+            await transport.edit(
+                ref=edits.progress_ref, message=RenderedMessage(text="cancelled")
+            )
+
+        tg.start_soon(_finalise)
+        await anyio.sleep(0.02)
+        assert order == []  # the final waits for the in-flight repaint
+        release.set()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    assert order == ["working 7s", "cancelled"]
+
+
 # ---------------------------------------------------------------------------
 # #333 Tier 2 — post-result limbo lets auto-cancel fire when watchdog fails
 # ---------------------------------------------------------------------------

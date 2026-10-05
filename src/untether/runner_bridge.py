@@ -2206,6 +2206,9 @@ class ProgressEdits:
         self._sleep = sleep
         self._last_render_at: float = 0.0
         self._has_rendered: bool = False
+        # #948: held while a repaint is handed to the transport;
+        # ``stop_repaints`` takes it so a final edit is ordered after it.
+        self._edit_lock = anyio.Lock()
         self._last_event_at: float = clock()
         self._stall_warned: bool = False
         self._stall_warn_count: int = 0
@@ -4504,39 +4507,44 @@ class ProgressEdits:
                 if self._outline_sent and not source_has_approval:
                     self._outline_sent = False
 
-                if rendered != self.last_rendered:
-                    # Log keyboard transitions at info level for #103/#104 diagnostics
-                    if has_approval and not had_approval:
-                        logger.info(
-                            "progress_edits.keyboard_attach",
+                # #948: the debounce sleep and sends above can outlast the
+                # turn being finalised. Re-check under the lock
+                # ``stop_repaints`` takes, so a stale repaint is never sent
+                # after (and over) the final edit.
+                async with self._edit_lock:
+                    if rendered != self.last_rendered and not self._finalizing:
+                        # Log keyboard transitions at info level for #103/#104 diagnostics
+                        if has_approval and not had_approval:
+                            logger.info(
+                                "progress_edits.keyboard_attach",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                                request_id=_kb_request_id,
+                                tool_name=_kb_tool,
+                            )
+                        logger.debug(
+                            "transport.edit_message",
                             channel_id=self.channel_id,
                             message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
-                            request_id=_kb_request_id,
-                            tool_name=_kb_tool,
+                            rendered=rendered.text,
                         )
-                    logger.debug(
-                        "transport.edit_message",
-                        channel_id=self.channel_id,
-                        message_id=self.progress_ref.message_id,
-                        rendered=rendered.text,
-                    )
-                    edited = await self.transport.edit(
-                        ref=self.progress_ref,
-                        message=rendered,
-                        wait=has_approval and not had_approval,
-                    )
-                    if edited is not None:
-                        self.last_rendered = rendered
-                        self._last_render_at = self.clock()
-                        self._has_rendered = True
-                    elif has_approval:
-                        logger.warning(
-                            "progress_edits.keyboard_edit_failed",
-                            channel_id=self.channel_id,
-                            message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
+                        edited = await self.transport.edit(
+                            ref=self.progress_ref,
+                            message=rendered,
+                            wait=has_approval and not had_approval,
                         )
+                        if edited is not None:
+                            self.last_rendered = rendered
+                            self._last_render_at = self.clock()
+                            self._has_rendered = True
+                        elif has_approval:
+                            logger.warning(
+                                "progress_edits.keyboard_edit_failed",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                            )
             except Exception:  # noqa: BLE001
                 # Transport errors (timeouts, network issues) are best-effort —
                 # never crash a run because a progress edit failed to send.
@@ -4574,6 +4582,18 @@ class ProgressEdits:
     # result idle past this point with no other expected-wait signal,
     # Tier 1 missed an edge case — stop suppressing auto-cancel.
     _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
+
+    async def stop_repaints(self) -> None:
+        """#948: stop progress repaints before a final edit of this message.
+
+        Sets ``_finalizing`` (no new repaint starts), then waits for a repaint
+        already being handed to the transport, so the caller's final edit is
+        enqueued after it — the outbox coalesces same-message edits, so the
+        final supersedes it or follows it, and never the other way round.
+        """
+        self._finalizing = True
+        async with self._edit_lock:
+            pass
 
     def note_final(self, evt: UntetherEvent) -> None:
         """#591: record a terminal CompletedEvent WITHOUT scheduling a repaint.
@@ -7099,7 +7119,7 @@ async def handle_message(
         ):
             delivery["sent"] = True
             if t_edits is not None:
-                t_edits._finalizing = True
+                await t_edits.stop_repaints()
             if t_progress_ref is not None:
                 with contextlib.suppress(Exception):
                     await cfg.transport.delete(ref=t_progress_ref)
@@ -7127,7 +7147,7 @@ async def handle_message(
         ):
             delivery["sent"] = True
             if t_edits is not None:
-                t_edits._finalizing = True
+                await t_edits.stop_repaints()
             if t_progress_ref is not None:
                 with contextlib.suppress(Exception):
                     await cfg.transport.delete(ref=t_progress_ref)
@@ -7144,7 +7164,7 @@ async def handle_message(
         # can't overwrite the final message. (The early path already set
         # this via note_final; this covers the post-return path.)
         if t_edits is not None:
-            t_edits._finalizing = True
+            await t_edits.stop_repaints()
 
         final_ref = await send_result_message(
             cfg,
@@ -7540,7 +7560,7 @@ async def handle_message(
         )
         if ctx.edits is not None:
             # Stop progress repaints so a queued render can't overwrite it.
-            ctx.edits._finalizing = True
+            await ctx.edits.stop_repaints()
         await send_result_message(
             cfg,
             channel_id=incoming.channel_id,
