@@ -6905,7 +6905,10 @@ def _extract_error(
     such a turn shows its own share (since ``prev_cost_usd`` /
     ``prev_api_ms``, the previous result in this process) plus a labelled
     ``session cost:``, and ``live turn N`` instead of the spawn-time
-    ``new`` / ``resumed``. The run's own result keeps the original line."""
+    ``new`` / ``resumed``. A ``resumed`` run's result is cumulative too: its
+    own share needs the session's earlier total as ``prev_cost_usd``; any
+    figure with no baseline is labelled ``session cost:`` / ``session api:``.
+    A new session's first result keeps the original line."""
     if not event.is_error:
         return None
     # First line: error summary
@@ -6932,24 +6935,41 @@ def _extract_error(
         parts.append("resumed" if resumed else "new")
     parts.append(f"turns: {event.num_turns}")
     cost = event.total_cost_usd
-    if live_turn is not None:
+    api_ms = event.duration_api_ms
+    if live_turn is not None or resumed:
         if cost is not None:
             if prev_cost_usd is not None:
                 parts.append(f"cost: ${max(0.0, cost - prev_cost_usd):.2f}")
             parts.append(f"session cost: ${cost:.2f}")
-        api_ms = event.duration_api_ms
-        if api_ms and prev_api_ms is not None and api_ms > prev_api_ms:
-            parts.append(f"api: {api_ms - prev_api_ms}ms")
+        if api_ms:
+            if prev_api_ms is None:
+                parts.append(f"session api: {api_ms}ms")
+            elif api_ms > prev_api_ms:
+                parts.append(f"api: {api_ms - prev_api_ms}ms")
     else:
         if cost is not None:
             parts.append(f"cost: ${cost:.2f}")
-        if event.duration_api_ms:
-            parts.append(f"api: {event.duration_api_ms}ms")
+        if api_ms:
+            parts.append(f"api: {api_ms}ms")
 
     diagnostics = " · ".join(parts)
     if classification is not None:
         return f"{first}\n{diagnostics}\n\n{classification}"
     return f"{first}\n{diagnostics}"
+
+
+def _session_cost_before(state: ClaudeStreamState, session_id: str) -> float | None:
+    """#889: the session's total before this process's first result — the
+    bridge's cost ledger (not yet updated for this result), else the total the
+    resume guard absorbed. Mirrors the footer's #778 delta sources."""
+    try:
+        from ..session_costs import get_session_cost_ledger
+
+        last = get_session_cost_ledger().last(ENGINE, session_id)
+    except Exception:  # noqa: BLE001 — a diagnostic line must never fail
+        logger.debug("claude.error_cost_baseline_failed", exc_info=True)
+        last = None
+    return last if last is not None else state.absorbed_cost_baseline
 
 
 _PREPEND_LENGTH_GATE = 600
@@ -8726,6 +8746,9 @@ def _translate_claude_event_base(
             live_turn = (
                 state.turn if state.live_mode and state.completed_turns > 0 else None
             )
+            prev_cost_usd = state.prev_result_cost_usd
+            if not ok and prev_cost_usd is None and state.resumed and event.session_id:
+                prev_cost_usd = _session_cost_before(state, event.session_id)
             error = (
                 None
                 if ok
@@ -8733,7 +8756,7 @@ def _translate_claude_event_base(
                     event,
                     resumed=state.resumed,
                     live_turn=live_turn,
-                    prev_cost_usd=state.prev_result_cost_usd,
+                    prev_cost_usd=prev_cost_usd,
                     prev_api_ms=state.prev_result_api_ms,
                 )
             )
