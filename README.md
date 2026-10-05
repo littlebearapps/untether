@@ -150,7 +150,7 @@ These two engines are still included and still load and run, but they are **depr
 | **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Preamble injection** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ~³ | ~³ |
-| **Interactive permissions** | ✅ | — | — | — | — | — |
+| **Interactive permissions** | ✅ | — | —⁸ | — | — | — |
 | **Approval policy** | ✅ | ~⁴ | — | — | ~² | — |
 | **Plan mode** | ✅ | — | — | — | — | — |
 | **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
@@ -163,7 +163,7 @@ These two engines are still included and still load and run, but they are **depr
 | **Live sessions & background tasks** | ✅ | — | — | — | — | — |
 | **Steer follow-ups** | ✅ | — | — | — | — | — |
 | **Context % in status line** | ✅ | — | — | — | — | — |
-| **Context compaction** | ✅ | — | — | ✅ | — | — |
+| **Context compaction** | ✅ | — | —⁹ | ✅ | — | — |
 | **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
@@ -173,6 +173,8 @@ These two engines are still included and still load and run, but they are **depr
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
 ⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks above describe what the integration does today; they are not a support commitment, and these engines may be removed in a future release.
+⁸ `opencode run` auto-rejects any tool your OpenCode permission rules set to `ask` (it never auto-approves), and denies OpenCode's question and plan tools. Set rules to `allow` for tools you want run unattended.
+⁹ OpenCode compacts long sessions itself, but `opencode run` doesn't report it, so Untether can't show it.
 
 Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
 

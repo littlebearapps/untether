@@ -35,7 +35,7 @@ Untether:   ActionEvent(engine="opencode", action=Action(kind="command"), phase=
 
 `ok` is false only when `metadata.exit` is a non-zero int. `detail` carries `name`, `input`, `callID`, `exit_code` and `output_preview` (first 500 characters of `state.output`); file-change tools also get `changes=[{path, kind: "update"}]`.
 
-**Error status** (`state.status == "error"`): completed with `ok=False`, `detail.error` and `message` set to `state.error`. The error text is kept as a fallback answer if the run then finishes with no text.
+**Error status** (`state.status == "error"`): completed with `ok=False`, `detail.error` and `message` set to `state.error`. The error text is kept as a fallback answer if the run then finishes with no text. A tool call that an OpenCode `ask` rule would have prompted for lands here too: `opencode run` auto-rejects `ask` permissions (it never auto-approves them), so the rejection shows as a failed tool. See [Permissions in `opencode run`](runner.md#permissions-in-opencode-run).
 
 Lines that fail to decode: an unknown `type` becomes a warning action (`opencode emitted unsupported event: <type>`) and logs `opencode.event.unsupported`; a line with no readable `type` (e.g. malformed JSON) is only logged (`jsonl.msgspec.invalid`).
 

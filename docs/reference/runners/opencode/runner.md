@@ -36,6 +36,25 @@ instead (it also labels the `🏷` footer).
 non-interactively, and approvals, plan mode, AskUserQuestion, live sessions and
 steer are Claude Code-only.
 
+## Permissions in `opencode run`
+
+`opencode run` has no way to ask you anything, so it decides for you:
+
+- **`ask` permissions are auto-rejected, not auto-approved.** A tool call that
+  your OpenCode permission rules resolve to `ask` fails, and the model sees the
+  rejection. Only `opencode run --dangerously-skip-permissions` approves them,
+  and Untether never passes that flag.
+- **The `question`, `plan_enter` and `plan_exit` tools are denied** in the
+  sessions `run` creates, so OpenCode never asks questions or switches plan
+  mode under Untether.
+- OpenCode's default policy allows almost everything, so `ask` mostly comes up
+  for rules you configured yourself. The built-in exceptions are access outside
+  the project directory, `.env` reads and, on v1, `doom_loop`.
+
+If a tool fails under Untether but works in the OpenCode TUI, look for an `ask`
+rule in your OpenCode config: change it to `allow` for the tools you want
+OpenCode to run unattended.
+
 ## Usage
 
 ```bash
@@ -78,15 +97,13 @@ See [stream-json-cheatsheet.md](./stream-json-cheatsheet.md) for detailed event 
 
 ## Known Limitations
 
-### No auto-compaction
+### Compaction isn't shown
 
-OpenCode does not support automatic context compaction. Unlike Pi (which emits `AutoCompactionStart`/`AutoCompactionEnd` events to trim context) and Claude Code (which manages its context window internally), OpenCode sessions accumulate unbounded context across turns.
+OpenCode compacts long sessions itself: v1 auto-compacts (the `compaction.auto` setting) and emits `session.compacted` on its server event bus, and v2 has [checkpoint compaction](https://opencode.ai/v2/docs/compaction). But `opencode run --format json` only forwards `step_start`, `tool_use`, `text`, `step_finish` and `error`, so Untether never sees a compaction. There is no `🗜️` row for OpenCode as there is for Claude Code and Pi.
 
-**Impact:** Long sessions with many prompts will progressively slow down as the full conversation history is sent to the model on every turn. A session that starts at 72k tokens can grow past 77k+ after just 4-5 prompts.
+**Impact:** a long session still grows turn by turn until OpenCode compacts it, and each turn resends the history, so responses can slow down (a session that starts at 72k tokens can pass 77k after 4–5 prompts). Per-run token counts drop after a compaction with no explanation in the chat.
 
-**Workaround:** Start a fresh session with `/new` when response times degrade noticeably.
-
-If OpenCode adds compaction events in the future, Untether will need schema and runner updates following the Pi compaction pattern.
+**Workaround:** start a fresh session with `/new` when response times degrade noticeably.
 
 ## See also
 

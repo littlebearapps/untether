@@ -73,6 +73,6 @@ Labels as in `2026-09-29-claude-rc14-cli-surface.md`: VERIFIED-BINARY / VERIFIED
 - **VERIFIED-DOCS** (https://code.claude.com/docs/en/agent-sdk/cost-tracking, fetched 2026-10-02):
   `total_cost_usd` "Counts subagent requests alongside the top-level loop"; `modelUsage` likewise,
   "broken down by model" (`ModelUsage.costUSD`). No per-subagent / per-task breakdown.
-- Candidates for true attribution (v0.35.6, all UNVERIFIED for this purpose): `modelUsage` per-model
+- Candidates for true attribution (v0.35.6, now v0.36.2; all UNVERIFIED for this purpose): `modelUsage` per-model
   `costUSD` deltas (only separates agents on a different model); the `get_session_cost` control
   request (§A5 list; response shape unknown); token × price estimates.

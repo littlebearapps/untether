@@ -119,6 +119,9 @@ opencode run --format json [--session SESSION_ID] [--model MODEL] -- <prompt>
 - Prompt as positional arg after `--`
 - Resume: `--session ses_XXX`
 - Session IDs: `ses_` prefix + 20+ chars
+- `run` auto-**rejects** `ask` permissions (never auto-approves; only `--dangerously-skip-permissions`, which Untether
+  doesn't pass) and denies `question`/`plan_enter`/`plan_exit`. OpenCode does auto-compact, but `run --format json`
+  doesn't report it (#969)
 
 ### JSONL events
 

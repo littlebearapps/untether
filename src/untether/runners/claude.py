@@ -5326,8 +5326,8 @@ def _clear_background_handle(
     ``BG_AGENT_MAX_KEEP_S``) so a handle can never be kept forever. ``is_terminal``
     defaults True so direct callers and the remaining primitives (Bash-bg,
     ScheduleWakeup, RemoteTrigger) keep their pre-#374 clear-on-result behaviour
-    (see ``_is_terminal_tool_result`` for why their interim-handling is still
-    deferred to the v0.36.0 lifecycle refactor, #573).
+    (see ``_is_terminal_tool_result`` for where their real lifecycle is tracked
+    since #776, which closed #573).
 
     Note: ``state.last_schedule_wakeup_arm_delay`` and
     ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
@@ -5378,11 +5378,13 @@ def _is_terminal_tool_result(
       ~25ms after the tool_use) before the subagent actually finishes. Clearing
       ``live_bg_agents`` on that first result reintroduced the same premature-drain
       bug the Monitor fix addressed: it poisoned the "no live background work"
-      signal the empty-resume detector relies on (#596). There is no reliable
-      upstream completion signal for Agent/Task yet (true-terminal detection via
-      KillShell, subprocess-exit reconciliation, and child-PID cleanup is the
-      v0.36.0 lifecycle refactor, #573), so its bound is the fixed
-      ``BG_AGENT_MAX_KEEP_S`` deadline set at register time in
+      signal the empty-resume detector relies on (#596). The tool_result stream
+      carries no reliable completion signal for Agent/Task. Since #776 (which
+      closed #573) a CLI that emits native ``system/task_*`` events decides
+      Agent/Task-bg liveness from that task map instead (see
+      ``_live_background_counts``), and #590's ``reap_orphaned_group`` reaps
+      orphaned children. For CLIs without task events the handle's bound is the
+      fixed ``BG_AGENT_MAX_KEEP_S`` deadline set at register time in
       ``_register_background_handle`` — the safe trade-off between "keep
       suppressing stall warnings while genuinely running" and "never leave a
       handle uncleared forever".
@@ -5396,9 +5398,13 @@ def _is_terminal_tool_result(
     bounded deadline.
 
     Every other tool_result — including Bash-bg, ScheduleWakeup, and
-    RemoteTrigger, whose true-terminal detection remains deferred to the v0.36.0
-    refactor (#573) — is treated as terminal, preserving the pre-#374
+    RemoteTrigger — is treated as terminal, preserving the pre-#374
     clear-on-first-result behaviour for foreground tools and those primitives.
+    Their real lifecycle is tracked elsewhere since #776 (which closed #573):
+    Bash-bg from the native ``system/task_*`` map, a pending ScheduleWakeup from
+    its confirmation (``pending_wakeup_until``). RemoteTrigger has no native
+    end-of-task signal; ``REMOTE_TRIGGER_MAX_KEEP_S`` only backstops a handle
+    whose result never arrives.
     """
     monitor_deadline = state.live_monitors.get(tool_use_id)
     if monitor_deadline is not None:

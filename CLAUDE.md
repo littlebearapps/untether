@@ -46,6 +46,7 @@ release may drop them (Gemini: upstream EOL for individual accounts, hangs under
 AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner, `xfail`/`skip` the test — do NOT fix the
 runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier. Antigravity
 CLI (#558, ships in v0.36.1) is a new engine and must not reuse the `gemini` id.
+Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 
 ## Commands
 
