@@ -175,7 +175,11 @@ def test_translate_codex_events_for_items() -> None:
     out = translate_codex_event(completed, title="Codex", factory=factory)
     assert isinstance(out[0], ActionEvent)
     assert out[0].action.kind == "warning"
-    assert out[0].ok is False
+    # #987: a non-fatal warning, not a failed step.
+    assert out[0].ok is True
+    assert out[0].level == "warning"
+    assert out[0].action.title == "⚠️ boom"
+    assert out[0].message == "boom"
 
 
 def test_translate_codex_thread_started() -> None:
@@ -216,6 +220,72 @@ def test_codex_runner_translate_reconnect_message() -> None:
     assert out[0].phase == "updated"
     assert out[0].action.detail["attempt"] == 2
     assert out[0].action.detail["max"] == 3
+
+
+# Captured from codex 0.160 with a `[project]` table in ~/.codex/config.toml:
+# the same warning arrives twice under two item ids.
+_CONFIG_WARNING_987 = (
+    "Codex is ignoring 1 unrecognized configuration setting. Check for typos or"
+    " deprecated settings.\n  user (/home/u/.codex/config.toml): `project` is"
+    " ignored."
+)
+
+
+def test_987_config_warning_renders_once_as_warning() -> None:
+    """#987: Codex's non-fatal config warning is one ⚠️ row, not two ✗ rows."""
+    import json
+
+    from untether.markdown import format_action_line
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    lines = [
+        {"type": "thread.started", "thread_id": "t-987"},
+        {
+            "type": "item.completed",
+            "item": {"id": "item_0", "type": "error", "message": _CONFIG_WARNING_987},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "item_1", "type": "error", "message": _CONFIG_WARNING_987},
+        },
+        {"type": "turn.started"},
+    ]
+    events = []
+    for line in lines:
+        data = codex_schema.decode_event(json.dumps(line))
+        events.extend(
+            runner.translate(data, state=state, resume=None, found_session=None)
+        )
+
+    warnings = [
+        e for e in events if isinstance(e, ActionEvent) and e.action.kind == "warning"
+    ]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.ok is True
+    assert warning.level == "warning"
+    rendered = format_action_line(
+        warning.action, warning.phase, warning.ok, command_width=200
+    )
+    assert rendered.startswith("⚠️ Codex is ignoring")
+    assert "✗" not in rendered
+
+
+def test_987_distinct_warnings_both_render() -> None:
+    """#987: only an identical repeat is dropped."""
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    out = []
+    for i, msg in enumerate(["first warning", "second warning", "first warning"]):
+        data = codex_schema.ItemCompleted(
+            item=codex_schema.ErrorItem(id=f"item_{i}", message=msg)
+        )
+        out.extend(runner.translate(data, state=state, resume=None, found_session=None))
+    assert [e.message for e in out if isinstance(e, ActionEvent)] == [
+        "first warning",
+        "second warning",
+    ]
 
 
 def test_codex_runner_process_and_stream_end_events() -> None:
