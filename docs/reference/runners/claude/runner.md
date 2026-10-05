@@ -1,4 +1,4 @@
-Below is a concrete implementation spec for the **Anthropic Claude Code (“claude” CLI / Agent SDK runtime)** runner, first shipped in Untether v0.3.0 and kept current with the code (v0.35.5). The "Code changes", "Test plan" and checklist sections further down are the original v0.3.0 spec; where they differ from the sections above, the code and the sections above win.
+Below is a concrete implementation spec for the **Anthropic Claude Code (“claude” CLI / Agent SDK runtime)** runner, first shipped in Untether v0.3.0 and kept current with the code (v0.36.0). The "Code changes", "Test plan" and checklist sections further down are the original v0.3.0 spec; where they differ from the sections above, the code and the sections above win.
 
 ---
 
@@ -113,7 +113,7 @@ Notes:
 * Untether reads `model`, `permission_mode`, `allowed_tools`, `extra_args`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
 * `permission_mode` is validated at config load against the same allowlist crons use ([#742](https://github.com/littlebearapps/untether/issues/742)); an unknown value raises a `ConfigError` instead of failing at subprocess spawn. See "Permission modes" below.
 * `extra_args` lets you pass additional upstream `claude` CLI flags that Untether doesn't expose directly — for example `["--chrome"]` opts into the Claude-in-Chrome extension (otherwise gated off by Claude Code 2.1.x), or `["--strict-mcp-config"]` / `["--mcp-config", "path"]` for MCP tweaks. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools`) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load with a `ConfigError` naming the flag (never its value), in every spelling — `--flag=value` and short clusters such as `-pc` included ([#209](https://github.com/littlebearapps/untether/issues/209); see [Security → Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). A default engine with a refused flag won't start; any other engine is disabled (`failed to load`). Mirrors `codex.extra_args`. `--include-hook-events` is **not** reserved: Untether adds it itself in control-channel mode (see "Async hooks" under Live sessions) and skips its own copy when `extra_args` already carries it, so configs that already pass it keep working ([#812](https://github.com/littlebearapps/untether/issues/812)).
-* `dangerously_skip_permissions = true` adds `--dangerously-skip-permissions`, which outranks `permission_mode` and every `/planmode` choice (the CLI reports `bypassPermissions`), so no Telegram approvals are shown. Since 0.35.5 Untether logs one `claude.config.dangerously_skip_permissions` WARN per process when it is set ([#209](https://github.com/littlebearapps/untether/issues/209)). It is the only accepted way to request a bypass; the same flag in `extra_args` is refused.
+* `dangerously_skip_permissions = true` adds `--dangerously-skip-permissions`, which outranks `permission_mode` and every `/planmode` choice (the CLI reports `bypassPermissions`), so no Telegram approvals are shown. Since 0.36.0 Untether logs one `claude.config.dangerously_skip_permissions` WARN per process when it is set ([#209](https://github.com/littlebearapps/untether/issues/209)). It is the only accepted way to request a bypass; the same flag in `extra_args` is refused.
 * By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude Code uses subscription billing. Set `use_api_billing = true` to keep the key.
 
 ### Permission modes
@@ -160,7 +160,7 @@ clears it resets silently), and TOML is never rewritten:
 * `claude.permission_mode.auto_semantics_changed` — `entries`
   (`engines.claude`, `triggers.crons[<id>]`; capped at 50, `count` is the
   total), `reason` (`startup` / `reload`), `config_path`, `note`. Log-only;
-  it is kept through 0.35.x and removed in 0.36.0. It replaces the old
+  it is kept through 0.36.x and removed in 0.37.0, so upgrades straight from 0.35.4 still see it. It replaces the old
   one-shot WARN in `_validate_permission_mode`, whose process latch swallowed
   every reload and which never saw crons.
 * `trigger.unattended_approval_risk phase=config` — crons whose explicit mode
@@ -302,7 +302,7 @@ approval button per tool in the fleet's most-used mode while buying no safety
 longer holds on CLI 2.1.285:** plan mode now raises a `can_use_tool`
 (`decision_reason_type: "mode"`) for a non-plan-file `Write`, and this
 classification lets stage 6 approve it; the model's plan-mode instructions are
-what hold it back. This is an open issue, unchanged in 0.35.5 (see the #383
+what hold it back. This is an open issue, unchanged in 0.36.0 (see the #383
 "Known limit" above).
 
 #### `--allowedTools` is mode-aware ([#749](https://github.com/littlebearapps/untether/issues/749))
@@ -341,7 +341,7 @@ process) so the interaction is discoverable rather than silent.
 > read-only and closer to its documented "locked-down CI" purpose; revisit if
 > `dontAsk` acquires real usage.
 
-> **Known gap, carried to v0.35.6.** An explicit `permissions.ask` rule reaches
+> **Known gap, carried to v0.36.2.** An explicit `permissions.ask` rule reaches
 > stage 6 *even under `bypassPermissions`* — the CLI deliberately overriding
 > the mode to honour the user's highest-priority rule. Because autonomous modes
 > retain both the two-tool gate and the stage-5 allowlist, such a rule is still
@@ -445,7 +445,7 @@ The progress, final and live-turn header lines end with Claude's context-window 
 - **Denominator** — `result.modelUsage.<model>.contextWindow`, learned per model on each `result` and cached per process (`claude.context.window_learned`, INFO, once per model). A model id ending in `[1m]` (the session's `system/init` model, or the frame's) with the other id equal to its base resolves to 1 000 000 before any cache hit. Dated ids are never fuzzy-matched to a base id: a miss logs `claude.context.window_miss` (DEBUG) and shows nothing. So the first turn on a model not seen since the last restart gets its `% ctx` only at the final.
 - **Rounding** — `Math.round` half-up in integer maths, matching `/context`. A value over 100 is shown as 100 after one `claude.context.over_window` WARN per (session, model).
 - **After a compaction** (`system/compact_boundary`) the segment disappears until the next main-thread response (`post_tokens` excludes the system prompt and tools, so it would under-report).
-- **Configured autocompact windows** (`--autocompact` in `extra_args`, settings `autoCompactWindow`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) are not read: the header divides by the model window, `/context` by the configured one, so ours reads lower. Exact parity via the `get_context_usage` control request is planned for v0.35.6 ([#833](https://github.com/littlebearapps/untether/issues/833)) and not shipped yet; the value above is the only `% ctx` source today.
+- **Configured autocompact windows** (`--autocompact` in `extra_args`, settings `autoCompactWindow`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) are not read: the header divides by the model window, `/context` by the configured one, so ours reads lower. Exact parity via the `get_context_usage` control request is planned for v0.36.2 ([#833](https://github.com/littlebearapps/untether/issues/833)) and not shipped yet; the value above is the only `% ctx` source today.
 
 The value travels as an `ActionEvent` of kind `telemetry` (id `claude.context`, phase `updated`, `detail.context_pct` / `context_used` / `context_window` / `model`), emitted only when the integer percentage changes. `ProgressTracker` stores it apart from the actions (no step, never a running tool, never folded or exported). In a live session the runner re-emits the current value right after each `TurnEvent(started)` (a turn's tracker starts empty), holds changes that arrive between turns until the next turn opens, and forwards result-time telemetry before the `TurnEvent(completed)`. `usage["context"]` (`pct`, `used`, `window`, `model`) rides on the result for the `runner.completed context_pct=` log field only. Display switch: `[progress] show_context_usage` (default `true`, re-read per run). Claude only; the Codex half is [#832](https://github.com/littlebearapps/untether/issues/832).
 
@@ -575,7 +575,7 @@ After `options_changed` only the warning is sent, because the queued message alr
 
 **Resume guard.** On `--resume` of a session whose previous process ended with background work still live, the CLI replays `task_notification{stopped}` and answers it with a 0-turn result before running the real turn. That result is absorbed (`claude.resume_guard.absorbed`), not delivered — no empty-resume quarantine or resend.
 
-**Cost.** `total_cost_usd` is cumulative per session (also across `--resume`); the bridge records per-turn deltas via `session_costs.json` ([#778](https://github.com/littlebearapps/untether/issues/778)). `total_cost_usd` counts subagent requests too, with no per-agent breakdown, so a turn's delta includes **all** background-agent spend since the previous result — an 18 s wake ack can carry the cost of ten planning agents. Each result therefore carries `usage["background"]` (`_background_usage`: backgrounded `local_agent` tasks, top-level or nested, that are live or ended / showed activity since the previous result — `agents`, `agents_live`, `agents_ended`, `task_ids` (≤ 10), `since_s`; absent when none), `cost.turn_delta` and `cost.run_outlier` log `bg_agents` (0 when none, Claude only), `bg_agents_live`, `bg_agents_ended`, `bg_task_ids`, the 💸 outlier notice adds `— includes spend by N background agents since the previous reply` and the 💰 footer `· incl. N bg agents`. The figure is labelled, not split — true per-agent attribution is [#877](https://github.com/littlebearapps/untether/issues/877) (v0.35.6). Known under-label: the first result of a **resumed** process spans the previous process's spend but starts with a fresh task map (`since_s` null), so agent spend before the restart is unlabelled ([#821](https://github.com/littlebearapps/untether/issues/821)).
+**Cost.** `total_cost_usd` is cumulative per session (also across `--resume`); the bridge records per-turn deltas via `session_costs.json` ([#778](https://github.com/littlebearapps/untether/issues/778)). `total_cost_usd` counts subagent requests too, with no per-agent breakdown, so a turn's delta includes **all** background-agent spend since the previous result — an 18 s wake ack can carry the cost of ten planning agents. Each result therefore carries `usage["background"]` (`_background_usage`: backgrounded `local_agent` tasks, top-level or nested, that are live or ended / showed activity since the previous result — `agents`, `agents_live`, `agents_ended`, `task_ids` (≤ 10), `since_s`; absent when none), `cost.turn_delta` and `cost.run_outlier` log `bg_agents` (0 when none, Claude only), `bg_agents_live`, `bg_agents_ended`, `bg_task_ids`, the 💸 outlier notice adds `— includes spend by N background agents since the previous reply` and the 💰 footer `· incl. N bg agents`. The figure is labelled, not split — true per-agent attribution is [#877](https://github.com/littlebearapps/untether/issues/877) (v0.36.2). Known under-label: the first result of a **resumed** process spans the previous process's spend but starts with a fresh task map (`since_s` null), so agent spend before the restart is unlabelled ([#821](https://github.com/littlebearapps/untether/issues/821)).
 
 **Kill switch:** `[watchdog] live_sessions = false` restores the pre-rc11 "stop at the first result" behaviour. Legacy `-p` mode (no permission mode) is always single-result.
 

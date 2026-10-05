@@ -55,7 +55,7 @@ For each bot in the table:
 Report a one-line-per-host result, e.g.:
 
 ```
-/ping sweep — 0.35.5rc16
+/ping sweep — 0.36.0rc1
   lba-1     🏓 pong   ✓
   nsd       🏓 pong   ✓
   channelo  🏓 pong   ✓

@@ -49,7 +49,7 @@ Untether allows parallel runs across **different threads**, but enforces seriali
 - Telegram side: jobs are queued FIFO per thread. Prompts sent within about a second of each other are merged into one job first, and `/cancel`, `/new` and `/continue` drop anything still waiting in that window.
 - Runner side: runners enforce per-resume-token locks (so the same session can’t be resumed concurrently). A `/continue` run locks the real session id it resumes, not a shared placeholder ([#817](https://github.com/littlebearapps/untether/issues/817)).
 
-Claude Code's **live sessions** (v0.35.5) keep this guarantee without a new process per turn: a queued follow-up for a session whose process is still open is written into that process once its current turn ends, rather than waiting for it to exit and resuming. A [steered](../how-to/steer-follow-ups.md) message is the one exception to "one turn at a time": it is written into the running turn on purpose. See [Architecture → Live sessions](architecture.md#live-sessions-claude-code).
+Claude Code's **live sessions** (v0.36.0) keep this guarantee without a new process per turn: a queued follow-up for a session whose process is still open is written into that process once its current turn ends, rather than waiting for it to exit and resuming. A [steered](../how-to/steer-follow-ups.md) message is the one exception to "one turn at a time": it is written into the running turn on purpose. See [Architecture → Live sessions](architecture.md#live-sessions-claude-code).
 
 The precise invariants are specified in the [Specification](../reference/specification.md).
 
