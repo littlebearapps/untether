@@ -130,7 +130,7 @@ characters of a comma-separated list): OpenAI Whisper keeps only the **last**
 224 tokens, so put your most important terms at the end. Other providers may
 truncate or reject an over-long prompt, so keep it under that size.
 
-Since v0.35.5 the key is **not** inert when unset
+Since v0.36.0 the key is **not** inert when unset
 ([#703](https://github.com/littlebearapps/untether/issues/703)): Untether ships a
 product-generic default covering the terms every user speaks —
 
@@ -175,7 +175,7 @@ Commands:
 - `/listen all` restores the default behaviour.
 - `/listen clear` clears a topic override (topics only).
 
-`/trigger` continues to work as a deprecated alias for one release cycle ([#297](https://github.com/littlebearapps/untether/issues/297)) and prints a one-line deprecation notice on each invocation.
+`/trigger` (renamed in v0.35.3) still works as a deprecated alias ([#297](https://github.com/littlebearapps/untether/issues/297)) and prints a one-line deprecation notice on each invocation.
 
 In group chats, changing listen mode requires the sender to be an admin.
 
@@ -213,7 +213,7 @@ Behaviour:
     you still need it.` (or `Dropped N messages … send them again if you still
     need them.`; N counts merged prompts and attached forwards), logged as
     `forward.prompt.dropped` with `reason` and `merged_count`. Sending it first would only start a run for the command
-    to kill, or run it in the session being left. Before v0.35.5
+    to kill, or run it in the session being left. Before v0.36.0
     `/continue` dropped it silently and `/cancel` / `/new` let it run after
     them.
   - Every other command **flushes** the pending prompt first
@@ -425,7 +425,7 @@ deny_globs = [
   project-root `key.pem`, and a trailing `/**` covers every depth below a
   matching directory. A bare pattern such as `.env` still matches that name at
   any depth. Any `.git` path component is denied case-insensitively (`.GIT/hooks`
-  on macOS too). Since v0.35.5 a project-root `.env.example` matches `**/.env.*`;
+  on macOS too). Since v0.36.0 a project-root `.env.example` matches `**/.env.*`;
   narrow the list if you need such files.
 - **Symlinks** ([#390](https://github.com/littlebearapps/untether/issues/390)):
   the path is checked as requested and again after resolving symlinks, so an

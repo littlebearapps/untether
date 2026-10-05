@@ -155,7 +155,7 @@ Six dev-bot test workspaces live under `test-projects/` in the repo (gitignored,
 Each has a `CLAUDE.md` and `.claude/settings.json`. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified.
 
 !!! warning "Gemini CLI and AMP are deprecated"
-    Both engines still load but are unsupported and are **removed in 0.36.0**. Their routes remain in the dev config, but they are excluded from every integration-test tier — see [integration-testing.md](integration-testing.md).
+    Both engines still load but are **deprecated and no longer supported** (no fixes; may be removed in a future release). Their routes remain in the dev config, but they are excluded from every integration-test tier — see [integration-testing.md](integration-testing.md).
 
 ### Telegram groups
 

@@ -5,7 +5,7 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Core concepts
 
 **Engine**
-:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode or Pi (Gemini CLI and Amp still load but are deprecated and will be removed in 0.36.0). Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
+:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode or Pi (Gemini CLI and Amp still load but are deprecated and no longer supported, and may be removed in a future release). Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
 
 **Runner**
 :   The Untether component that manages an engine subprocess. Each engine has a dedicated runner (e.g. `ClaudeRunner`, `CodexRunner`) that translates between the engine's output format and Untether's internal events.
@@ -39,7 +39,7 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Interactive control (Claude Code)
 
 **Permission mode**
-:   The level of oversight applied to Claude Code's actions. **Plan** (`on`) has Claude plan without editing files and asks you to approve the plan. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs file edits and common filesystem commands and asks before anything else. Plan-auto was called `auto` before v0.35.5, before Claude Code shipped a mode of that name. The modes that prompt (`default`, `manual`, accept edits) send every remaining tool request to Telegram for approval.
+:   The level of oversight applied to Claude Code's actions. **Plan** (`on`) has Claude plan without editing files and asks you to approve the plan. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs file edits and common filesystem commands and asks before anything else. Plan-auto was called `auto` before v0.36.0, before Claude Code shipped a mode of that name. The modes that prompt (`default`, `manual`, accept edits) send every remaining tool request to Telegram for approval.
 
 **Approval buttons**
 :   Inline Telegram buttons that appear when Claude Code needs your permission. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding.

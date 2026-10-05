@@ -115,7 +115,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `id` | string | (required) | Unique identifier for this webhook. |
 | `path` | string | (required) | URL path the server listens on (e.g. `/hooks/slack-alerts`). Must start with `/`, contain only letters, digits, `/`, `_`, `.` and `-`, and not be `/health` (reserved). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
-| `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.35.5 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
+| `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.36.0 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
@@ -201,8 +201,8 @@ runs full auto); the deprecated Gemini runner passes it through as
 `permission_mode`. Full cross-engine and webhook coverage is tracked in
 [#332](https://github.com/littlebearapps/untether/issues/332) (not shipped).
 
-!!! warning "`auto` changed meaning in v0.35.5"
-    Before 0.35.5, Untether's `auto` meant plan mode with the `ExitPlanMode`
+!!! warning "`auto` changed meaning in v0.36.0"
+    Before 0.36.0, Untether's `auto` meant plan mode with the `ExitPlanMode`
     approval auto-approved. That behaviour is now spelled **`plan-auto`**, and
     `auto` passes through as Claude Code's own classifier-gated auto mode, which
     has no plan gate ([#741](https://github.com/littlebearapps/untether/issues/741)).
@@ -771,7 +771,7 @@ When triggers are enabled, the startup message includes a triggers line
 (abridged):
 
 ```
-🐕 untether is ready (v0.35.5)
+🐕 untether is ready (v0.36.0)
 
 default engine: codex
 

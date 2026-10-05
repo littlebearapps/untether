@@ -23,7 +23,7 @@ Quick pointers for navigating the Untether codebase.
 
 ## Engines and streaming
 
-- Runner implementations: `src/untether/runners/*` (`claude.py` holds all interactive features; `gemini.py` and `amp.py` are deprecated and removed in 0.36.0)
+- Runner implementations: `src/untether/runners/*` (`claude.py` holds all interactive features; `gemini.py` and `amp.py` are deprecated and no longer supported, but still load)
 - Per-run engine options (model, reasoning, permission mode) via ContextVar: `src/untether/runners/run_options.py`
 - `extra_args` deny-list tokeniser: `src/untether/runners/extra_args_guard.py`
 - JSONL decoding schemas: `src/untether/schemas/*`

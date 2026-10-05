@@ -2,13 +2,14 @@
 
 !!! warning "Deprecated"
 
-    The `gemini` engine is **deprecated in v0.35.5**: it still loads but is
-    unsupported, and removal is targeted for **0.36.0**
+    The `gemini` engine is **deprecated and no longer supported** (as of
+    v0.36.0): it still loads, but gets no fixes, is excluded from testing, and
+    may be removed in a future release
     ([#722](https://github.com/littlebearapps/untether/issues/722)). Google ended
     Gemini CLI support for individual accounts (free, Google AI Pro and Ultra) on **18 June 2026**
     (`IneligibleTierError`); under Untether the subprocess hangs until the
     watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
-    Antigravity CLI is tracked as a separate engine
+    Antigravity CLI ships as a separate engine in v0.36.1
     ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
 
 `gemini --output-format stream-json --prompt=<prompt>` writes **one JSON object per line** (JSONL) with a

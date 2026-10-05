@@ -66,11 +66,11 @@ These are “engine adapter” implementation details: JSONL formats, mapping ru
   - [runner.md](runners/pi/runner.md)
   - [stream-json-cheatsheet.md](runners/pi/stream-json-cheatsheet.md)
   - [untether-events.md](runners/pi/untether-events.md)
-- Gemini CLI (deprecated — removal targeted for 0.36.0):
+- Gemini CLI (deprecated, no longer supported):
   - [runner.md](runners/gemini/runner.md)
   - [stream-json-cheatsheet.md](runners/gemini/stream-json-cheatsheet.md)
   - [untether-events.md](runners/gemini/untether-events.md)
-- AMP (deprecated — removal targeted for 0.36.0):
+- AMP (deprecated, no longer supported):
   - [runner.md](runners/amp/runner.md)
   - [stream-json-cheatsheet.md](runners/amp/stream-json-cheatsheet.md)
   - [untether-events.md](runners/amp/untether-events.md)

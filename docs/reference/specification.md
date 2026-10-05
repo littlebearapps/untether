@@ -1,10 +1,10 @@
-# Untether Specification v0.35.5 [unreleased]
+# Untether Specification v0.36.0 [unreleased]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.35.5 specifies:
+Untether v0.36.0 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -23,7 +23,7 @@ Out of scope:
 
 ## 2. Terminology
 
-- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`; the deprecated `"gemini"` and `"amp"` still load but are unsupported and are removed in 0.36.0).
+- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`; the deprecated `"gemini"` and `"amp"` still load but are deprecated and no longer supported, and may be removed in a future release).
 - **Runner**: Untether adapter that executes an engine process and yields **Untether events**.
 - **Thread**: a single engine-side conversation, identified in Untether by a **ResumeToken**.
 - **ResumeToken**: Untether-owned thread identifier `{ engine: EngineId, value: str }`.
@@ -551,7 +551,9 @@ The bridge SHOULD deliver only entries that entered or changed in the outbox dur
 
 ## 13. Changelog
 
-### v0.35.5 (unreleased)
+### v0.36.0 (unreleased)
+
+Developed and pre-released as 0.35.5rc1–rc20; there is no 0.35.5 stable release.
 
 - Add the `turn` event (§4.3.4) and live sessions: a live-session runner MAY follow `completed` with `turn` segments (§5.4); the bridge MAY inject queued jobs into the live process and supports follow-up mode `queue`/`steer` (§6.2).
 - Document the `telemetry` action kind (§4.4) and the reference `usage` keys (§4.3.3).
