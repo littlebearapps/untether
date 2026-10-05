@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from collections.abc import Collection
 from pathlib import Path
 
@@ -55,42 +56,78 @@ def _expect_transport_settings(transport_config: object) -> TelegramTransportSet
     raise TypeError("transport_config must be TelegramTransportSettings")
 
 
+def _parse_cli_version(output: str) -> str | None:
+    """First line of ``--version`` output → a bare version (``v1.2.3`` → ``1.2.3``)."""
+    lines = output.strip().splitlines()
+    if not lines:
+        return None
+    text = lines[0]
+    for token in text.split():
+        cleaned = token.lstrip("vV")
+        if cleaned and cleaned[0].isdigit():
+            return cleaned
+    return text
+
+
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
         # #202: cmd comes from EngineBackend.cli_cmd (e.g. "claude", "codex"),
         # a fixed table of engine entrypoints configured in pyproject.toml.
-        # No shell, fixed argv, 3-second timeout.
+        # No shell, fixed argv, 5-second timeout (#951: the probes now run
+        # side by side, so Node start-up is slower than the ~2-3 s serial).
         result = subprocess.run(  # nosec B603
             [cmd, "--version"],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=5,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            # Extract just the version number from output like "claude v1.0.20"
-            text = result.stdout.strip().splitlines()[0]
-            # Try to find a version-like substring
-            for token in text.split():
-                cleaned = token.lstrip("vV")
-                if cleaned and cleaned[0].isdigit():
-                    return cleaned
-            return text
+        if result.returncode == 0:
+            # #951: Pi prints its version to stderr.
+            return _parse_cli_version(result.stdout) or _parse_cli_version(
+                result.stderr or ""
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     return None
 
 
-def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
-    """Build a ``py X.Y.Z · engine X.Y.Z`` versions line."""
+# #951: engine versions only change on an upgrade, so /config → About reuses
+# a probe for a few minutes instead of spawning every CLI on each tap.
+_CLI_VERSION_TTL_S = 300.0
+_CLI_VERSION_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+async def _cli_version(cmd: str) -> str | None:
+    cached = _CLI_VERSION_CACHE.get(cmd)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _CLI_VERSION_TTL_S:
+        return cached[1]
+    # A worker thread, so the ~2-3 s Node start-up never blocks the event loop.
+    version = await anyio.to_thread.run_sync(_detect_cli_version, cmd)
+    _CLI_VERSION_CACHE[cmd] = (now, version)
+    return version
+
+
+async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
+    """Build a ``py X.Y.Z · engine X.Y.Z`` versions line.
+
+    #951: the engines are probed concurrently, off the event loop.
+    """
     py = (
         f"py {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
+    engines = sorted(engine_ids)
+    versions: dict[str, str | None] = {}
+
+    async def probe(engine: str) -> None:
+        versions[engine] = await _cli_version(engine)
+
+    async with anyio.create_task_group() as tg:
+        for engine in engines:
+            tg.start_soon(probe, engine)
     parts = [py]
-    for engine in sorted(engine_ids):
-        version = _detect_cli_version(engine)
-        if version:
-            parts.append(f"{engine} {version}")
+    parts.extend(f"{e} {versions[e]}" for e in engines if versions.get(e))
     return " · ".join(parts) if len(parts) > 1 else None
 
 

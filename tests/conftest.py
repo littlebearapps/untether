@@ -281,3 +281,14 @@ def _no_cli_help_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     claude_runner._HOOK_EVENTS_SUPPORT.clear()
     yield
     claude_runner._HOOK_EVENTS_SUPPORT.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_cli_version_cache() -> Iterator[None]:
+    """#951: /config → About caches each engine's ``--version`` per process;
+    a probe cached by one test must not answer another test's stub."""
+    from untether.telegram.backend import _CLI_VERSION_CACHE
+
+    _CLI_VERSION_CACHE.clear()
+    yield
+    _CLI_VERSION_CACHE.clear()

@@ -466,18 +466,102 @@ def test_detect_cli_version_missing_cli(monkeypatch: pytest.MonkeyPatch) -> None
     assert telegram_backend._detect_cli_version("missing") is None
 
 
-def test_build_versions_line(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_build_versions_line(monkeypatch: pytest.MonkeyPatch) -> None:
     versions = {"claude": "2.1.63", "opencode": "1.1.11"}
     monkeypatch.setattr(
         telegram_backend,
         "_detect_cli_version",
         lambda cmd: versions.get(cmd),
     )
-    line = telegram_backend._build_versions_line(("claude", "opencode"))
+    line = await telegram_backend._build_versions_line(("opencode", "claude", "pi"))
     assert line is not None
-    assert "py " in line
-    assert "claude 2.1.63" in line
-    assert "opencode 1.1.11" in line
+    assert line.startswith("py ")
+    assert line.endswith("claude 2.1.63 · opencode 1.1.11")
+
+
+def test_detect_cli_version_reads_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#951: Pi prints its version to stderr, with an empty stdout."""
+    import subprocess as sp
+
+    def fake_run(args, **kwargs):
+        return sp.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr="0.78.0\n"
+        )
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    assert telegram_backend._detect_cli_version("pi") == "0.78.0"
+
+
+def test_detect_cli_version_failed_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#951: a non-zero exit is still no version, whatever stderr says."""
+    import subprocess as sp
+
+    def fake_run(args, **kwargs):
+        return sp.CompletedProcess(
+            args=args, returncode=1, stdout="", stderr="error: 1.2.3 broke\n"
+        )
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    assert telegram_backend._detect_cli_version("broken") is None
+
+
+@pytest.mark.anyio
+async def test_build_versions_line_probes_concurrently_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#951: four slow probes take about one probe's time, and the event loop
+    keeps running while they do."""
+    import time
+
+    import anyio
+
+    def slow_probe(cmd: str) -> str:
+        time.sleep(0.3)
+        return "1.0.0"
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", slow_probe)
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await anyio.sleep(0.01)
+            ticks += 1
+
+    start = time.monotonic()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(ticker)
+        line = await telegram_backend._build_versions_line(
+            ("claude", "codex", "opencode", "pi")
+        )
+        tg.cancel_scope.cancel()
+    elapsed = time.monotonic() - start
+
+    assert line is not None and "pi 1.0.0" in line
+    assert elapsed < 0.9  # serial would be >= 1.2 s
+    assert ticks >= 10  # the loop wasn't blocked
+
+
+@pytest.mark.anyio
+async def test_build_versions_line_caches_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#951: a second About within the TTL spawns nothing; after it, re-probes."""
+    calls: list[str] = []
+
+    def probe(cmd: str) -> str:
+        calls.append(cmd)
+        return "1.0.0"
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    await telegram_backend._build_versions_line(("claude", "pi"))
+    await telegram_backend._build_versions_line(("claude", "pi"))
+    assert sorted(calls) == ["claude", "pi"]
+
+    monkeypatch.setattr(telegram_backend, "_CLI_VERSION_TTL_S", 0.0)
+    await telegram_backend._build_versions_line(("pi",))
+    assert sorted(calls) == ["claude", "pi", "pi"]
 
 
 def test_startup_message_excludes_versions(
