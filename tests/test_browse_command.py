@@ -171,8 +171,10 @@ class TestFormatListing:
         dirs, files = _list_directory(tmp_path)
         text, buttons = _format_listing(tmp_path, tmp_path, dirs, files, chat_id=CHAT)
         assert "/" in text
-        assert "1 dirs" in text
-        assert "1 files" in text
+        # #984: singular counts read "1 dir · 1 file", not "1 dirs · 1 files"
+        assert "1 dir · 1 file" in text.splitlines()
+        assert "1 dirs" not in text
+        assert "1 files" not in text
         # No ".." button at root
         assert not any("📂 .." in b[0]["text"] for b in buttons if buttons)
 
@@ -254,6 +256,16 @@ class TestFormatListingTruncation:
         dirs, files = _list_directory(tmp_path)
         text, buttons = _format_listing(tmp_path, tmp_path, dirs, files, chat_id=CHAT)
         assert "not shown" in text
+        assert "…and 5 files not shown" in text
+
+    def test_truncation_line_singular(self, tmp_path):
+        # #984: one hidden file reads "1 file", not "1 files"
+        for i in range(_MAX_ENTRIES + 1):
+            (tmp_path / f"file_{i:03d}.py").write_text(f"content {i}")
+        dirs, files = _list_directory(tmp_path)
+        text, _ = _format_listing(tmp_path, tmp_path, dirs, files, chat_id=CHAT)
+        assert "…and 1 file not shown" in text
+        assert f"{_MAX_ENTRIES + 1} files" in text
 
     def test_dirs_only_listing(self, tmp_path):
         (tmp_path / "dirA").mkdir()
