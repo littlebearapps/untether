@@ -248,7 +248,10 @@ The terminal event looks like:
   success an approved `ExitPlanMode` plan body is prepended as
   `📋 Plan (approved)` when the answer is brief (#508/#793)
 - `error` (only when `is_error`): built by `_extract_error` from the result
-  text (or subtype), a diagnostic line and the #438 stream-idle classification
+  text (or subtype), a diagnostic line and the #438 stream-idle classification;
+  a resumed run's line shows its own cost (the session's earlier total from the
+  cost ledger, else the resume guard's absorbed baseline) plus `session cost:`,
+  and a figure with no baseline is labelled `session cost:` / `session api:` (#889)
 - `resume = ResumeToken(engine="claude", value=event.session_id)`
 - `usage`: see section 6
 - Emit exactly one `completed` event per run. With live sessions off (or in
