@@ -5974,6 +5974,38 @@ class FollowupTurnRouter:
         await self._finish(ctx)
 
 
+# #952: engines whose CompletedEvent.usage carries a turn count. For these a
+# failed resume with ``num_turns == 0`` (or no result at all) means the
+# session never got going (#45). Codex, OpenCode and Pi never report turns,
+# so for them only an error that names the resume itself clears the session.
+_TURN_COUNT_ENGINES = frozenset({"claude", "amp"})
+_RESUME_FAILURE_RE = re.compile(
+    r"no rollout found"  # codex: thread/resume failed
+    r"|thread/resume failed"
+    r"|session not found"  # opencode: NotFoundError
+    r"|no session found"  # pi: No session found matching '…'
+    r"|finished but no session_id"  # codex/opencode: never confirmed it
+    r"|failed to load on resume",  # pi: zero events on a resumed run
+    re.IGNORECASE,
+)
+_SESSION_CLEARED_NOTICE = (
+    "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} The saved session couldn't"
+    " be resumed, so it was cleared \N{EM DASH} your next message starts a new"
+    " session."
+)
+
+
+def _resume_failure_clears_session(
+    engine: str, usage: Mapping[str, Any] | None, error: object
+) -> bool:
+    """Whether a failed resumed run should clear the saved session (#45, #952)."""
+    if usage and "num_turns" in usage:
+        return not usage.get("num_turns")
+    if engine in _TURN_COUNT_ENGINES:
+        return True
+    return bool(error) and _RESUME_FAILURE_RE.search(str(error)) is not None
+
+
 async def handle_message(
     cfg: ExecBridgeConfig,
     *,
@@ -6602,6 +6634,7 @@ async def handle_message(
         # #838: a pre-spawn guard block (RAM / concurrency) never ran the
         # engine, so the saved session is fine — keep it.
         _blocked = prespawn_blocked_reason(completed.usage)
+        _session_auto_cleared = False
         if (
             turn is None
             and run_ok is False
@@ -6622,10 +6655,9 @@ async def handle_message(
             and resume_token is not None
             and on_resume_failed is not None
         ):
-            _num_turns = 0
-            if completed.usage:
-                _num_turns = completed.usage.get("num_turns", 0) or 0
-            if _num_turns == 0:
+            if _resume_failure_clears_session(
+                resume_token.engine, completed.usage, run_error
+            ):
                 try:
                     await on_resume_failed(resume_token)
                     logger.info(
@@ -6633,8 +6665,18 @@ async def handle_message(
                         engine=resume_token.engine,
                         resume=resume_token.value,
                     )
+                    _session_auto_cleared = True
                 except Exception:  # noqa: BLE001
                     logger.debug("session.auto_clear_failed", exc_info=True)
+            else:
+                # #952: a non-resume failure (bad model, auth, rate limit)
+                # on an engine that reports no turn count — keep the session.
+                logger.info(
+                    "session.auto_clear_skipped",
+                    reason="not_resume_failure",
+                    engine=resume_token.engine,
+                    resume=resume_token.value,
+                )
 
         if run_ok is False and run_error:
             raw_error = str(run_error)
@@ -6670,6 +6712,9 @@ async def handle_message(
                     )
                 else:
                     final_answer = f"```\n{raw_error}\n```"
+        if _session_auto_cleared:
+            # #952: say so — the card's resume line still names the old session.
+            final_answer = f"{final_answer}\n\n{_SESSION_CLEARED_NOTICE}".lstrip()
 
         # #596: a 0-turn / $0 / empty-answer completion with ok=True is a
         # no-op resume (upstream: the resumed session considers itself

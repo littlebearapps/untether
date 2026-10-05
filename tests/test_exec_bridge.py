@@ -1505,6 +1505,105 @@ async def test_on_resume_failed_not_called_when_not_resumed() -> None:
     assert len(cleared_tokens) == 0
 
 
+async def _run_failed_resume_952(
+    engine: str, error: str, usage: dict[str, Any] | None = None
+) -> tuple[list[ResumeToken], list[str], list[dict[str, Any]]]:
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error=error, usage=usage or {})],
+        engine=engine,
+        resume_value="healthy-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    cleared: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared.append(token)
+
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=engine, value="healthy-session"),
+            on_resume_failed=on_resume_failed,
+        )
+    texts = [c["message"].text for c in transport.send_calls] + [
+        c["message"].text for c in transport.edit_calls
+    ]
+    return cleared, texts, logs
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        (
+            "codex",
+            '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.3-codex\' model is not supported"}}',
+        ),
+        ("pi", "pi failed (rc=1).\nsession: 01a10a3b · resumed\nNo API key found"),
+        ("opencode", "Model not found: deepseek/deepseek-v4-flash."),
+    ],
+)
+async def test_952_non_resume_failure_keeps_session(engine: str, error: str) -> None:
+    """#952: engines without a turn count keep a healthy session when the
+    resumed run fails for an unrelated reason (bad model, missing key)."""
+    cleared, texts, logs = await _run_failed_resume_952(engine, error)
+
+    assert cleared == []
+    skipped = [r for r in logs if r.get("event") == "session.auto_clear_skipped"]
+    assert skipped and skipped[0]["reason"] == "not_resume_failure"
+    assert not any("couldn't be resumed" in t for t in texts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        (
+            "codex",
+            "codex exec failed (rc=1).\nError: thread/resume: thread/resume failed:"
+            " no rollout found for thread id 01a10a3b (code -32600)",
+        ),
+        ("opencode", "opencode finished but no session_id was captured"),
+        ("opencode", 'NotFoundError data: {message: "Session not found: ses_x"}'),
+        ("pi", "pi failed (rc=1).\nNo session found matching 'zzzz'"),
+    ],
+)
+async def test_952_resume_failure_clears_session_and_says_so(
+    engine: str, error: str
+) -> None:
+    """#952: a failure that names the resume still clears (the #45 recovery),
+    and the error card tells the user."""
+    cleared, texts, _logs = await _run_failed_resume_952(engine, error)
+
+    assert [t.value for t in cleared] == ["healthy-session"]
+    assert any("couldn't be resumed, so it was cleared" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_952_claude_without_usage_still_clears() -> None:
+    """#952: Claude reports turns, so a failed resume with no result (no
+    usage at all) keeps the original #45 auto-clear."""
+    cleared, _texts, _logs = await _run_failed_resume_952(
+        CLAUDE_ENGINE, "claude failed (rc=1)."
+    )
+    assert [t.value for t in cleared] == ["healthy-session"]
+
+
+@pytest.mark.anyio
+async def test_952_reported_turns_win_over_error_text() -> None:
+    """#952: an explicit turn count decides, whatever the error says."""
+    cleared, _texts, _logs = await _run_failed_resume_952(
+        "codex", "no rollout found", usage={"num_turns": 2}
+    )
+    assert cleared == []
+
+
 # ---------------------------------------------------------------------------
 # Error/answer deduplication tests
 # ---------------------------------------------------------------------------
