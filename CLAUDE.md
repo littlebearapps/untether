@@ -41,11 +41,11 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 
 ## Deprecated engines (Gemini CLI, AMP)
 
-Both still load but are unsupported and **removed in 0.36.0** (Gemini: upstream EOL for individual accounts, hangs under
-Untether until the watchdog cancels; AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner,
-`xfail`/`skip` the test — do NOT fix the runner.** Security and doc-accuracy fixes still apply. Both are excluded from
-every integration-test tier. Antigravity CLI (#558, planned for v0.35.6) is a new engine and must not reuse the
-`gemini` id.
+Both still ship and load but are strictly deprecated and no longer supported — no removal is scheduled, though a future
+release may drop them (Gemini: upstream EOL for individual accounts, hangs under Untether until the watchdog cancels;
+AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner, `xfail`/`skip` the test — do NOT fix the
+runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier. Antigravity
+CLI (#558, ships in v0.36.1) is a new engine and must not reuse the `gemini` id.
 
 ## Commands
 
@@ -103,6 +103,9 @@ versions to PyPI. Third-party actions are pinned to SHAs.
    then `scripts/fleet-rollout.sh X.Y.ZrcN` (5 hosts: lba-1 staging, nsd, channelo, sl, mac). The marker is the gate.
 3. **Stable** — `/pr-main X.Y.Z` (bump, CHANGELOG, PR `dev`→`master`); on Nathan's explicit go, `/pr-main X.Y.Z --merge`
    (or Nathan merges), then `scripts/fleet-rollout.sh X.Y.Z` once PyPI has it.
+
+Pre-1.0, a line with any `### breaking` entry ships as a **minor**: the 0.35.5rc1–rc20 line ships as **v0.36.0**
+(rcs continue as `0.36.0rcN`, milestone `v0.36.0`; [#947](https://github.com/littlebearapps/untether/issues/947)).
 
 **NEVER skip integration testing or the attestation gate.** Every bug fix / significant change needs a GitHub issue
 (labels `bug`/`enhancement`/`documentation`, `severity:*`, `priority: *`), linked from CHANGELOG as

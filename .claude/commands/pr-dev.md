@@ -39,7 +39,7 @@ points:
 | Form | Action |
 |---|---|
 | `/pr-dev` (no args) | Finalise the current branch → open a PR to `dev` (stops merge-ready) |
-| `/pr-dev --rc X.Y.ZrcN` | Cut a staging rc bump (`chore: staging X.Y.ZrcN`) → PR to `dev` |
+| `/pr-dev --rc X.Y.ZrcN` | Bump `pyproject.toml` + `uv lock` to the rc (`chore(release): X.Y.ZrcN`, or fold it into the batch PR titled `rcN: … — X.Y.ZrcN (#…)`) → PR to `dev` |
 | `/pr-dev --dry-run` | Gate + local checks + print what would happen; open/push nothing |
 | `/pr-dev --merge` | Squash-merge the PR **to `dev` only** (confirm-gated) → TestPyPI CI |
 | `/pr-dev --help` | Usage, then stop |
@@ -69,9 +69,11 @@ via the Skill tool — evidence before "done"). Never push red.
 This is the completion criterion that replaces AT's separate docs stage +
 manifest:
 
-- **CHANGELOG entry** — issue-linked (`[#N](…)`); **rc versions skip** per
-  `validate_release.py`. One section per release, correct `### fixes/changes/…`
-  subsections.
+- **CHANGELOG entry** — issue-linked (`[#N](…)`), under the current
+  `## vX.Y.Z (unreleased)` heading (e.g. `v0.36.0`) in the right
+  `### breaking/fixes/changes/docs/tests` subsection; rc numbers never get their own
+  heading (`validate_release.py` skips rc versions). A `### breaking` entry needs a
+  **Migration:** line.
 - **FAQ touch-up** — scan the change against `docs/faq/faq.md` per
   `.claude/rules/help-faq.md`; if a user-visible surface changed (engine support,
   auth/billing, privacy/data flow, approval semantics, cost budgets, voice,

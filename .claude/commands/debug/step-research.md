@@ -14,8 +14,8 @@ documented config gotcha.
 | `docs/reference/runners/codex/*.md` | Codex runner spec + JSONL + translation |
 | `docs/reference/runners/opencode/*.md` | OpenCode runner spec + JSONL + translation |
 | `docs/reference/runners/pi/*.md` | Pi runner spec + JSONL + translation |
-| `docs/reference/runners/gemini/*.md` | Gemini runner spec + JSONL + translation |
-| `docs/reference/runners/amp/*.md` | AMP runner spec + JSONL + translation |
+| `docs/reference/runners/gemini/*.md` | Gemini runner spec + JSONL + translation (deprecated, unsupported — no fixes) |
+| `docs/reference/runners/amp/*.md` | AMP runner spec + JSONL + translation (deprecated, unsupported — no fixes) |
 | `docs/reference/transports/telegram.md` | Telegram transport — Bot API client, outbox, voice, forum topics |
 | `docs/reference/modes.md` | Workflow modes (assistant / workspace / handoff) |
 | `docs/reference/dev-instance.md` | Dev vs staging service quickref + staging workflow |

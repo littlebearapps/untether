@@ -52,8 +52,10 @@ costly than under-classifying.
 
 Before classifying any "error" as a bug, check whether the
 [`systemic-patterns.md`](./systemic-patterns.md) by-design list covers it.
-For example: long `peak_idle` on a cron-fired session in default plan mode is
-by-design (waiting for user approval) — do not escalate.
+For example: a cron-fired Claude run that logs `permission.unattended_deny` and
+ends with a plan or report is by-design (#835 — unattended runs never wait on a
+button) — do not escalate. A cron run still *waiting* on an approval is the
+regression.
 
 ## Output
 

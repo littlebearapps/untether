@@ -11,7 +11,7 @@ paths:
 - structlog for log capture in tests
 - msgspec for JSONL fixture generation
 
-### Traps (rc12)
+### Traps
 
 - **Never `monkeypatch.setattr(module.logger, "warning", …)`** on a structlog lazy proxy. Undoing it pins a bound method with the default processors, silently hiding every later warning from `structlog.testing.capture_logs()` in full-suite runs only. Use `capture_logs()` to assert on logs.
 - **`ClaudeRunner` is a slots dataclass**: overriding timing knobs (`_live_close_grace_s`, `_live_poll_s`, …) as subclass class attributes is inert — field defaults shadow them. Set them on the instance.

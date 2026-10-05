@@ -18,7 +18,7 @@ ClaudeRunner uses `pty.openpty()` for stdin (not `subprocess.PIPE`):
 ## Session registries
 
 ```python
-_SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin
+_SESSION_STDIN: dict[str, Any]                         # session_id -> stdin writer (PTY/pipe)
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
 _OUTLINE_PENDING: set[str]                             # sessions awaiting outline text
 _DISCUSS_APPROVED: set[str]                            # sessions with post-outline approval
@@ -34,7 +34,7 @@ _CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the 
 - Register on first `system.init` event (when session_id is known)
 - Every `can_use_tool` request logs INFO `control_request.received` (`request_id`, `tool_name`, `session_id`, `permission_mode`) before any branch decides it (#822); housekeeping subtypes don't. Keyboard / write / tap logs carry `tool_name` too — never `tool_input`
 - Clean up all registries in the `finally` block of `run_impl` (including outline and approval state)
-- All control responses go through `write_control_response(session_id, request_id, approved, deny_message)`
+- All control responses go through `write_control_response(request_id, approved, *, deny_message=None, rejects_plan=True)` (the session is resolved via `_REQUEST_TO_SESSION`)
 - Taps go through `respond_to_control_request()` (#685): `claim_control_request()` reserves the id before the dispatcher's first `await` (early-toast hook), and the result is three-way — sent / already handled (`Already answered`, silent `ℹ️` line) / not found or expired. `classify_control_request()` is channel-scoped. `send_claude_control_response()` is the bool wrapper. Never write a response without a claim
 - The CLI can withdraw a pending request with `control_cancel_request` (#684): `_handle_control_cancel` retires it from every registry, strips its keyboard and records `cancelled` (a late tap toasts `No longer needed`); nothing is written to the CLI. A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`
 
@@ -43,7 +43,9 @@ _CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the 
 Non-interactive requests are auto-approved without showing buttons:
 - Request types in `_AUTO_APPROVE_TYPES` tuple: `ControlInitializeRequest`, `ControlHookCallbackRequest`, `ControlMcpMessageRequest`, `ControlRewindFilesRequest`, `ControlInterruptRequest`
 - Exception (#925): a `ControlHookCallbackRequest` whose `callback_id` is in `_LOOP_HOOK_IDS` is intercepted before that tuple and decided from its `input` (see Scheduling hooks below). Every other hook callback stays payload-blind (`TestAutoApproveSafetyInvariant`)
-- Tool requests: auto-approved UNLESS `tool_name in _TOOLS_REQUIRING_APPROVAL`
+- Tool requests in an autonomous mode (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`): auto-approved UNLESS `tool_name in _TOOLS_REQUIRING_APPROVAL` or diff preview routes it
+- Tool requests in a prompting mode (`default` / `manual` / `acceptEdits`, `is_claude_prompting_mode()`): every tool goes to Telegram (#749)
+- Unattended cron/webhook runs: anything that would wait for a tap is denied at once (`_unattended_deny`, `permission.unattended_deny`, #835)
 - `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}`
 - `ExitPlanMode`: NEVER auto-approved — always show Telegram buttons
 - `AskUserQuestion`: NEVER auto-approved — shown in Telegram for user to reply with text
@@ -236,7 +238,7 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
 
 Untether owns Claude's schedules. `_loop_hooks_config()` puts exact-name `PreToolUse` matchers for `CronCreate` and
 `CronDelete` (callback ids `ut_loop_cron_create` / `ut_loop_cron_delete`, 30 s timeout) in the `initialize` request of
-**every** control-channel spawn; `[loop] own_schedule = false` sends no hooks (rc19 behaviour). `-p` mode has no
+**every** control-channel spawn; `[loop] own_schedule = false` sends no hooks (the 0.35.5rc19 behaviour). `-p` mode has no
 control channel, so no hooks.
 
 - `ut_loop_cron_create`: Loop mode is read when the callback arrives (per-chat override, else live `[loop] enabled`).
@@ -252,7 +254,7 @@ control channel, so no hooks.
   `state.hook_callback_queue`.
 - Self-paced wake chains (`ScheduleWakeup`) are capped per process at `[loop] max_iterations` (`state.wake_cap`); the
   close reason is `wake_cap`.
-- Residual native jobs (pre-rc20 sessions, `-p` chats, `own_schedule = false`) are tracked as cron-suppression records
+- Residual native jobs (sessions from before 0.35.5rc20, `-p` chats, `own_schedule = false`) are tracked as cron-suppression records
   in `loop_scheduler.py`; a later control-channel spawn resuming that session gets `CLAUDE_CODE_DISABLE_CRON=1` until
   the CLI's 7-day resurrect window has passed. `/cancel` writes a per-loop cancel sentinel so the cancelled task
   doesn't come back on the next resume (#926).

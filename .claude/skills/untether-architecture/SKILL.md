@@ -198,8 +198,8 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
-gemini = "untether.runners.gemini:BACKEND"  # deprecated, removed in 0.36.0
-amp = "untether.runners.amp:BACKEND"        # deprecated, removed in 0.36.0
+gemini = "untether.runners.gemini:BACKEND"  # deprecated, unsupported
+amp = "untether.runners.amp:BACKEND"        # deprecated, unsupported
 ```
 
 ### EngineBackend
@@ -304,6 +304,18 @@ Triggers let external events or schedules start agent runs automatically. Opt-in
 ### Dispatch
 
 Both crons and webhooks feed into `TriggerDispatcher.dispatch_cron()`/`dispatch_webhook()` → sends a notification message to Telegram (`⏰`/`⚡`) → calls `run_job()` with the prompt, threading under the notification.
+
+- Cron/webhook runs are **unattended** (`RunContext.trigger_source`): a Claude approval, plan approval or question is
+  denied at once (`permission.unattended_deny`, #835) — they need an explicit autonomous `permission_mode`
+  (`plan-auto`, `auto`, `dontAsk`). A reply to the run continues attended. `/at` runs still ask.
+- Per-cron `permission_mode` / `model` / `reasoning` overrides apply to that run only (`_apply_trigger_overrides`).
+
+### Loop mode (`loop_scheduler.py`)
+
+Untether runs `/loop` schedules itself and, on control-channel Claude spawns, owns Claude's `CronCreate` /
+`CronDelete` through `PreToolUse` hook callbacks (#925): Loop on → registered as an Untether loop under the `[loop]`
+caps; Loop off → denied with Loop mode / `/at` guidance. `[loop] own_schedule = false` is the kill switch. Detail:
+`.claude/skills/claude-stream-json/control-channel-internals.md` → "Scheduling hooks".
 
 ### Key files
 

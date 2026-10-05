@@ -59,8 +59,8 @@ scripts/run-integration-tests.sh ${VERSION} --manual \
 ```
 
 This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with
-timestamp, tester, tier list, and notes. The marker is per-version; rc14 →
-rc15 each get their own.
+timestamp, tester, tier list, and notes. The marker is per-version; `0.36.0rc1`
+→ `0.36.0rc2` each get their own.
 
 **Markers are durable.** Delete manually if you discover a regression
 post-test:
