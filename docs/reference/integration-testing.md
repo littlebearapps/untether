@@ -377,9 +377,20 @@ diff ~/.untether/untether.toml ~/.untether-dev/untether.toml
 pip install untether==$CURRENT_PROD_VERSION --dry-run
 
 # After release: if issues found, rollback path is:
+# 0. clean each host's untether.toml + chat prefs first (see below)
 # pipx install untether==$OLD_VERSION && systemctl --user restart untether   # lba-1 staging only
 # scripts/fleet-rollback.sh $OLD_VERSION [--only HOST]                         # all 5 hosts
 ```
+
+**Config cleanup before a rollback.** Older versions reject config keys they don't know (every section is
+`extra="forbid"`), and `fleet-rollback.sh` reinstalls the package without touching config. Before rolling back across a
+release that added keys, remove them from each host's `untether.toml`, or the config won't load (an unknown key on a
+cron instead switches off every cron and webhook via `triggers.init_failed`). For 0.36.0 → 0.35.4 that means about 20
+keys plus reverting `plan-auto` → `auto` in the toml, crons and chat prefs; the full list is in
+[Rolling back to 0.35.4](../how-to/update.md#rolling-back-to-0354)
+([#956](https://github.com/littlebearapps/untether/issues/956)). Check with
+`journalctl --user -u untether --since "2 minutes ago" | grep -E "extra_forbidden|Extra inputs|triggers.init_failed|permission-mode"`
+after the restart.
 
 ### State file compatibility
 
@@ -589,7 +600,7 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 
 ### Engine-specific
 
-- **OpenCode: no auto-compaction** — OpenCode sessions accumulate unbounded context across turns (no compaction events). After 4-5 prompts, response times degrade significantly (72k → 77k+ input tokens). Use `/new` to start a fresh session before isolated tests (e.g. error handling) to avoid slowdowns from prior context.
+- **OpenCode: compaction not surfaced** — OpenCode auto-compacts, but `opencode run --format json` doesn't report it, so context grows across turns with no `🗜️` row until OpenCode compacts. After 4-5 prompts, response times degrade significantly (72k → 77k+ input tokens). Use `/new` to start a fresh session before isolated tests (e.g. error handling) to avoid slowdowns from prior context.
 - **Resume (U4)** requires replying to the specific resume line in the final message. Resume token format varies by engine.
 - **Model override (U5)** availability depends on which models each engine supports. `/model` shows the current model; `/config` → Engine & model has no picker (an interactive picker is [#512](https://github.com/littlebearapps/untether/issues/512), planned for v0.36.2), so pass a model id to `/model set`.
 - **Long response (U3)** behaviour varies by engine — some produce shorter responses. The key check is message splitting, not word count.

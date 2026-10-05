@@ -1,6 +1,6 @@
 """OpenCode CLI runner.
 
-This runner integrates with the OpenCode CLI (https://github.com/sst/opencode).
+This runner integrates with the OpenCode CLI (https://github.com/anomalyco/opencode).
 
 OpenCode outputs JSON events in a streaming format with types:
 - step_start: Marks the beginning of a processing step

@@ -42,10 +42,13 @@ systemctl --user restart untether
 
 v0.36.0 is the release that was tested as 0.35.5rc1–rc20; it is a minor version bump because it contains breaking changes. See the [v0.36.0 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0360-unreleased) for the full list. Behaviour changes that may affect operators upgrading from v0.35.4:
 
+!!! warning "New keys block a rollback"
+    Several settings below (`rearm_plan_mode`, `live_sessions`, `outbox_stale_policy`, `own_schedule`, `plan-auto` and others) are new in v0.36.0, and v0.35.4 refuses a config that uses them. If you might need to downgrade, read [Rolling back to 0.35.4](#rolling-back-to-0354) first.
+
 - **`auto` permission mode renamed `plan-auto` (breaking).** `/planmode auto` now selects Claude Code's own classifier-gated auto mode. Per-chat settings migrate automatically; if `untether.toml` sets `permission_mode = "auto"` and you want the old behaviour, change it to `"plan-auto"`. See [Plan mode](plan-mode.md). ([#741](https://github.com/littlebearapps/untether/issues/741))
 - **`/planmode off` (Accept edits) now asks before shell commands.** Prompting modes (`acceptEdits`, `default`, `manual`) previously approved every tool silently. Anything the mode doesn't cover now shows Approve / Deny buttons unless your Claude Code settings allow it. Crons and webhooks can't wait for a tap — see the next point. ([#749](https://github.com/littlebearapps/untether/issues/749))
 - **Unattended cron and webhook runs deny instead of waiting (breaking, Claude).** A tool approval, plan approval or question in a cron or webhook run is denied at once and listed in the run's final (`🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`, logged as `permission.unattended_deny`). Crons in `plan` or a prompting mode, **including crons with no `permission_mode`** (they inherit the chat's `/planmode`, then `[engines.claude] permission_mode`), now end with a plan or a report instead of doing the work. Give every Claude cron that should act on its own an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`); webhooks follow the chat's `/planmode`. The startup message lists the crons this affects. A reply to an unattended run continues with normal buttons, and `/at` runs still ask. See [Webhooks and cron](webhooks-and-cron.md). ([#835](https://github.com/littlebearapps/untether/issues/835), [#836](https://github.com/littlebearapps/untether/issues/836))
-- **With Loop mode off, Claude can no longer schedule tasks itself (breaking, Claude).** Claude Code's own recurring and timed tasks ran uncapped while a session was open and came back on every resume. Untether now declines them: with Loop mode off, Claude tells you scheduling is off and points you to Loop mode or `/at`; with Loop mode on, Untether runs the schedule itself with the `[loop]` caps. Chains of self-paced wake-ups stop after `[loop] max_iterations` in both modes. `[loop] own_schedule = false` restores the old behaviour; remove that key before downgrading to an earlier version (0.35.4 and older refuse it). See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode). ([#925](https://github.com/littlebearapps/untether/issues/925), [#926](https://github.com/littlebearapps/untether/issues/926))
+- **With Loop mode off, Claude can no longer schedule tasks itself (breaking, Claude).** Claude Code's own recurring and timed tasks ran uncapped while a session was open and came back on every resume. Untether now declines them: with Loop mode off, Claude tells you scheduling is off and points you to Loop mode or `/at`; with Loop mode on, Untether runs the schedule itself with the `[loop]` caps. Chains of self-paced wake-ups stop after `[loop] max_iterations` in both modes. `[loop] own_schedule = false` restores the old behaviour; remove that key before downgrading (see [Rolling back to 0.35.4](#rolling-back-to-0354)). See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode). ([#925](https://github.com/littlebearapps/untether/issues/925), [#926](https://github.com/littlebearapps/untether/issues/926))
 - **The outbox only sends files written during the run.** Files left in `.untether-outbox/` by an earlier session are moved once to `.untether-outbox/.skipped/` with a single notice instead of being attached to the next answer, and files over `outbox_max_files` are reported and moved aside too. Set `[transports.telegram.files] outbox_stale_policy = "send"` for the old behaviour. See [File transfer](file-transfer.md#agent-initiated-delivery-outbox). ([#924](https://github.com/littlebearapps/untether/issues/924))
 - **`/new` and `/cancel` in a forum topic only touch that topic.** `/new` in General no longer cancels every topic's runs, and a no-reply `/cancel` in one topic can't stop another topic's run. Cron and webhook runs belong to General. See [Topics](topics.md#reset-a-topic-session). ([#826](https://github.com/littlebearapps/untether/issues/826))
 - **`/export` sends a file.** The transcript arrives as a `.md` or `.json` document instead of an inline message cut at 3,000 characters. See [Export sessions](export-sessions.md). ([#418](https://github.com/littlebearapps/untether/issues/418))
@@ -63,6 +66,34 @@ v0.36.0 is the release that was tested as 0.35.5rc1–rc20; it is a minor versio
 - **Gemini CLI and Amp are deprecated and no longer supported.** Both are still included, but they get no fixes, are excluded from testing, and may be removed in a future release. Antigravity CLI support is planned for v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)). See [Switch engines](switch-engines.md).
 
 New in v0.36.0 and worth a look after upgrading: [steering a running Claude run](steer-follow-ups.md) with `/steer`, the [background-task status message and context-window percentage](verbose-progress.md) in Claude runs, approval [diff previews](interactive-approval.md#diff-previews) as a proper diff block, and a [per-cron model and effort](schedule-tasks.md#pick-a-model-per-cron) (`model` / `reasoning` on `[[triggers.crons]]`, [#743](https://github.com/littlebearapps/untether/issues/743)).
+
+## Rolling back to 0.35.4
+
+v0.35.4 rejects any setting it doesn't know (every config section is strict), and it doesn't know `plan-auto`. A v0.36.0 config can therefore stop v0.35.4 from starting, switch off all your crons and webhooks, or make every Claude run fail. Before you downgrade (`uv tool install --force untether==0.35.4` or `pipx install --force untether==0.35.4`), clean up `untether.toml` and your chat settings.
+
+**1. Remove the keys v0.35.4 doesn't know.** Delete any of these that you set (a v0.36.0 default needs no action, only keys written in the file):
+
+| Section | Keys new in v0.36.0 |
+|---|---|
+| `[watchdog]` | `rearm_plan_mode`, `live_sessions`, `live_session_max_s`, `hold_for_async_hooks`, `async_hook_max_hold`, `bg_hold_declared_waits`, `bg_hold_rearm_on_progress`, `detect_unanswerable_control_requests` |
+| `[progress]` | `show_context_usage`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns` |
+| `[cost_budget]` | `warn_run_above_usd`, `notify_run_outlier` |
+| `[loop]` | `own_schedule` |
+| `[transports.telegram]` | `followup_mode`, `voice_transcription_prompt` |
+| `[transports.telegram.files]` | `outbox_stale_policy` |
+| `[[triggers.crons]]` | `model`, `reasoning` |
+
+An unknown key outside `[triggers]` stops v0.35.4 from loading the config. An unknown key on a cron makes v0.35.4 reject the whole `[triggers]` section (`triggers.init_failed`), so every cron and webhook is off.
+
+**2. Change `plan-auto` back to `auto`.** In v0.35.4, `auto` is the mode v0.36.0 calls `plan-auto`, and v0.35.4 passes `plan-auto` straight to Claude Code as `--permission-mode plan-auto`, which fails.
+
+- `untether.toml`: change `permission_mode = "plan-auto"` (in `[engines.claude]` or `[claude]`, and on any `[[triggers.crons]]`) to `"auto"`. On a cron that sets `engine = "claude"`, v0.35.4 also rejects `manual` (use `default`) and `dontAsk`, and one rejected cron switches off the whole `[triggers]` section. A `plan-auto` cron without `engine` loads but fails when it runs.
+- Chat and topic settings: v0.36.0 rewrote saved per-chat `auto` choices to `plan-auto`, and any `/planmode plan-auto` sent since is saved that way too. After the downgrade, send `/planmode auto` (or another mode) in each chat or topic that uses it. Or, with Untether stopped, replace `"permission_mode": "plan-auto"` with `"permission_mode": "auto"` in `telegram_chat_prefs_state.json` and `telegram_topics_state.json` (next to `untether.toml`).
+
+!!! note "Upgrading again later"
+    The rewrite to `plan-auto` runs only once per settings file. If you roll back and later upgrade again, chats you set to `auto` on v0.35.4 stay `auto`, which v0.36.0 treats as Claude Code's own auto mode. Run `/planmode plan-auto` in those chats if you want Untether's version back.
+
+The chat, topic and loop state files (`telegram_chat_prefs_state.json`, `telegram_topics_state.json`, `active_loops.json`) otherwise stay readable by v0.35.4. `scripts/fleet-rollback.sh` reinstalls the package only; it doesn't touch config, so do this cleanup on each host first.
 
 ## Upgrading to v0.35.4
 

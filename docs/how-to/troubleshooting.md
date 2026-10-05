@@ -171,7 +171,7 @@ Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model
 
 ## Engine hangs in headless mode
 
-**Symptoms:** The engine starts but produces no output, eventually triggering stall warnings. Common with Codex and OpenCode when the engine needs user input (approval or question) but has no terminal to display it.
+**Symptoms:** The engine starts but produces no output, eventually triggering stall warnings. This used to happen when an engine needed user input (approval or question) but had no terminal to display it. Current Codex and OpenCode headless modes decide on their own instead of waiting (see below), so if one hangs, check the stall diagnostics and your MCP servers.
 
 ### Codex: approval hang
 
@@ -187,7 +187,11 @@ Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model
 
 If OpenCode emits a JSONL event type that Untether doesn't recognise (e.g. a `question` or `permission` event from a newer OpenCode version), Untether v0.35.0+ shows a visible warning in Telegram: "opencode emitted unsupported event: {type}". In older versions, these events were silently dropped, leaving the user with no feedback until the stall watchdog fired.
 
-If you see this warning, check for an Untether update that adds support for the new event type. OpenCode's `run` command auto-denies questions via permission rules, so this should be rare — it most likely indicates an OpenCode protocol change.
+If you see this warning, check for an Untether update that adds support for the new event type. `opencode run` never waits for you: it denies the `question`, `plan_enter` and `plan_exit` tools and auto-rejects any permission your OpenCode rules set to `ask`, so this should be rare — it most likely indicates an OpenCode protocol change.
+
+### OpenCode: a tool fails with a permission rejection
+
+`opencode run` (the headless mode Untether runs) **auto-rejects** a tool call that your OpenCode permission rules resolve to `ask` — it does not approve it, and there are no Telegram buttons for OpenCode. The run shows the tool as failed with OpenCode's rejection text. **Fix:** change that rule to `allow` in your OpenCode config for the tools you want to run unattended. See [OpenCode runner → Permissions in `opencode run`](../reference/runners/opencode/runner.md#permissions-in-opencode-run).
 
 ## Stall warnings
 

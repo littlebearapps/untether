@@ -113,6 +113,17 @@ Example:
 {"type":"error","timestamp":1767036065000,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","error":{"name":"APIError","data":{"message":"Rate limit exceeded","statusCode":429,"isRetryable":true}}}
 ```
 
+### What `run` doesn't emit
+
+`run --format json` is a thin client over OpenCode's server and forwards only the five types above. Server events for
+permissions, questions and compaction (`permission.asked`, `question.asked`, `session.compacted`) never reach stdout:
+
+- `run` answers every `ask` permission with a rejection itself (unless `--dangerously-skip-permissions`, which Untether
+  doesn't pass). The rejected call arrives as a `tool_use` with `state.status == "error"` and the rejection in
+  `state.error`.
+- `run` creates its sessions with the `question`, `plan_enter` and `plan_exit` tools denied.
+- OpenCode still auto-compacts long sessions; the compaction just isn't reported here.
+
 ## Mapping to Untether Events
 
 | OpenCode Event | Untether Event | Condition |
