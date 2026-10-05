@@ -15,7 +15,7 @@ Always include a "Manual testing" checklist section in PRs.
 ## Project conventions
 
 - Python 3.12+, anyio for async, msgspec for JSONL parsing, structlog for logging
-- Engines: Claude Code, Codex, OpenCode, Pi (Gemini CLI and Amp deprecated, removal targeted for 0.36.0)
+- Engines: Claude Code, Codex, OpenCode, Pi (Gemini CLI and Amp: deprecated and no longer supported — still included, may be removed in a future release; Antigravity CLI ships in v0.36.1)
 - Australian English in user-facing text (realise, colour, behaviour, licence)
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - 80% test coverage threshold enforced
