@@ -10,7 +10,7 @@ description: "Common questions about Untether: installation, supported engines, 
 
 ## What is Untether?
 
-Untether is a Telegram bridge for AI coding agents. It runs on your computer (or a server you control) and forwards messages between Telegram and the agent CLI of your choice — Claude Code, Codex, OpenCode or Pi. (Gemini CLI and Amp still load but are deprecated and will be removed in 0.36.0.)
+Untether is a Telegram bridge for AI coding agents. It runs on your computer (or a server you control) and forwards messages between Telegram and the agent CLI of your choice — Claude Code, Codex, OpenCode or Pi. (Gemini CLI and Amp are still included, but deprecated and no longer supported.)
 
 Your machine still does all the work. Untether is the wire between your phone and the agent, with progress streaming, interactive approval buttons, voice transcription, cost tracking, scheduled runs, and inline settings layered on top. The intent is simple: keep using the same agent you already use, but stop being chained to a terminal window when you want to walk the dog or watch the footy.
 
@@ -43,9 +43,9 @@ Untether supports four agent CLIs out of the box:
 - **[OpenCode](https://opencode.ai)** — 75+ providers via Models.dev, local model support.
 - **[Pi](https://github.com/mariozechner/pi-coding-agent)** — multi-provider auth, conversational style.
 
-Two further engines still load but are **deprecated** and targeted for removal in 0.36.0 — don't start new work on them:
+Two further engines are still included and still load, but are **deprecated and no longer supported** — no bug fixes, no testing, and they may be removed in a future release. Don't start new work on them:
 
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google [retired Gemini CLI for individual accounts (free, Google AI Pro and Ultra) on 18 June 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the engine still loads, but Untether no longer tests it or fixes bugs in it. Antigravity is planned as a separate engine.
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google [retired Gemini CLI for individual accounts (free, Google AI Pro and Ultra) on 18 June 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the engine still loads, but Untether no longer tests it or fixes bugs in it. Antigravity CLI support ships as a separate `antigravity` engine in v0.36.1.
 - **[Amp](https://ampcode.com)** — Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that cadence, so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself.
 
 You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [README](https://github.com/littlebearapps/untether#-supported-engines).
@@ -84,7 +84,7 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 - **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons. Auto mode needs a model that supports it: on one that doesn't (such as Haiku), Claude Code quietly runs in its ordinary ask-first mode instead, so Untether shows a `⚠️ Asked for auto mode — Claude Code is running default` line in the run and sends the remaining permission requests to Telegram for approval instead of approving them. Shell commands and file edits stay pre-approved by the default tool allowlist in that case, so pick a model that supports auto mode for anything you wouldn't let run unchecked.
 - **off** — no plan phase; file edits and common filesystem commands run without asking, and other actions (most shell commands, web fetches, MCP tools) ask for approval unless your Claude Code settings allow them.
 
-The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
+The **plan-auto** mode was called `auto` before v0.36.0. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
 For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), the deprecated Gemini CLI uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
 
@@ -122,7 +122,10 @@ max_cost_per_run = 2.00      # USD; alert when a single run reaches this
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
 warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works even without a budget
+auto_cancel = false          # true = "Stop at limit": refuse new runs once the daily budget is reached
 ```
+
+Budgets alert by default. Turn on **Stop at limit** (`auto_cancel = true`, or `/config → 💰 Cost & usage`) and, once today's total reaches `max_cost_per_day`, new runs are refused until local midnight: chats get a `🛑 Daily budget reached` notice with a one-shot **Run anyway** button, and crons and webhooks are skipped with a notice. A live Claude session also ends after the reply that passes `max_cost_per_run`, so background wake-ups and queued follow-ups add no more spend. Today's total is saved to disk, so a restart doesn't reset it to $0.
 
 If you set no budget at all, Untether still flags a single run that costs more than `warn_run_above_usd` (default US$20) with a chat line and a `cost.run_outlier` log entry, so a costly session can't pass silently. When background agents were working since the previous reply, the line says so (`— includes spend by N background agents since the previous reply`), because their spend lands on whichever reply comes next. Set `notify_run_outlier = false` to keep the log entry without the chat line.
 
@@ -134,7 +137,7 @@ Cost tracking is most accurate for Claude (full USD reporting via API metadata) 
 
 Yes, with **Loop mode** on (`/config → 🔁 Loop mode`). Untether then runs Claude's `/loop` schedules itself: it declines Claude Code's own scheduled task and fires each iteration when due with `claude --resume`, capped by `[loop]` `max_iterations`, `max_total_duration_hours` and `expiry_days`. A loop never runs uncapped inside an open session, and never comes back when the session is resumed.
 
-With Loop mode off (the default), Claude can't create recurring or timed tasks: it tells you scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. Before v0.35.5rc20 such a task kept firing while the session was open and came back each time you resumed it. Self-paced waits (`ScheduleWakeup`, a dynamic `/loop`) still work in both modes: Untether keeps the session open after its reply while a wake-up is pending (ScheduleWakeup's own limit is one hour), and each one arrives as a `⏰ Scheduled wake-up` message. A chain of them stops after `max_iterations` wake-ups.
+With Loop mode off (the default), Claude can't create recurring or timed tasks: it tells you scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. In v0.35.4 and earlier, such a task kept firing while the session was open and came back each time you resumed it. Self-paced waits (`ScheduleWakeup`, a dynamic `/loop`) still work in both modes: Untether keeps the session open after its reply while a wake-up is pending (ScheduleWakeup's own limit is one hour), and each one arrives as a `⏰ Scheduled wake-up` message. A chain of them stops after `max_iterations` wake-ups.
 
 `/cancel` (or `/new`) stops a loop for good: the next message resumes the session without the cancelled loop coming back. With Loop mode off there is nothing to stop beyond a pending self-paced wait, which `/cancel` and `/new` also end.
 
@@ -217,9 +220,9 @@ Then restart the running bot to pick up the new wheel. If you're running interac
 systemctl --user restart untether
 ```
 
-Untether follows semver: patch versions (e.g. `0.35.2 → 0.35.3`) are mostly bug fixes, minor versions (`0.34.x → 0.35.0`) add features, major versions break config or runner protocol. While Untether is pre-1.0, a patch release can still carry a breaking change when a fix needs one; these are listed under **breaking** in the changelog. Pre-release `rcN` wheels publish to TestPyPI for staging dogfooding. The [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) lists every change with linked GitHub issues.
+Untether follows semver: patch versions (e.g. `0.35.3 → 0.35.4`) are mostly bug fixes, and minor versions (`0.35.x → 0.36.0`) add features. While Untether is pre-1.0, a minor release can carry breaking changes, and occasionally a patch release does too when a fix needs one; these are listed under **breaking** in the changelog. Pre-release `rcN` wheels publish to TestPyPI for staging dogfooding. The [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) lists every change with linked GitHub issues.
 
-Upgrading to **v0.35.5**? Read [Upgrading to v0.35.5](https://littlebearapps.com/help/untether/update/#upgrading-to-v0355) first. Untether's old `auto` permission mode is now called `plan-auto` (`auto` now means Claude Code's own auto mode). `/planmode off` now asks before shell commands, web fetches and MCP tools. An `extra_args` that carries an approval- or sandbox-bypass flag now stops the engine loading. Codex **safe** mode is now a real read-only sandbox, so edits, tests and builds fail there.
+Upgrading to **v0.36.0** (published to TestPyPI as release candidates 0.35.5rc1–rc20)? Read [Upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) first. Untether's old `auto` permission mode is now called `plan-auto` (`auto` now means Claude Code's own auto mode). `/planmode off` now asks before shell commands, web fetches and MCP tools. An `extra_args` that carries an approval- or sandbox-bypass flag now stops the engine loading. Codex **safe** mode is now a real read-only sandbox, so edits, tests and builds fail there. Unattended cron and webhook runs deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself.
 
 ## How do I uninstall Untether?
 

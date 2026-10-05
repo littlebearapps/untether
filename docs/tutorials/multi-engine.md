@@ -14,10 +14,10 @@ Different engines have different strengths:
 | **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe = read-only sandbox), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
-| **Gemini CLI** ⚠️ | Deprecated — removal in 0.36.0 | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
-| **AMP** ⚠️ | Deprecated — removal in 0.36.0 | Mode selection (deep/free/rush/smart), rich permissions |
+| **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
+| **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
-Gemini CLI and AMP still load and run, but are no longer supported — don't start new work on them. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
+Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, arrives as its own engine in v0.36.1. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether#engine-compatibility) in the README for a full feature-by-feature breakdown.
 

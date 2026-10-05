@@ -91,9 +91,10 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 📋 **Permission modes** — toggle per chat with `/planmode`; choose plan approval, auto-approved plans, Claude Code's own classifier-gated auto mode, or no plan phase (edits run, other tools ask)
 - 🔔 **Background work stays visible (Claude, with a permission mode set)** — when Claude hands work to a background task, subagent, `Monitor` or `ScheduleWakeup`, the session stays open: each result arrives as its own message, and your follow-ups land in the same session. A `⏳ background (N)` block and a status message show each task's elapsed time and progress while it runs
 - ↪️ **Steer or queue follow-ups (Claude, with a permission mode set)** — a message sent mid-run waits for the current turn by default; `/steer <text>` (or steer as the chat default) writes it straight into the running session so Claude picks it up at its next step
+- 💬 **Reply with context** — reply to any message, or select part of it with Telegram's **Quote**, and the agent sees that text alongside your prompt (every engine)
 - 🗜️ **Context use at a glance (Claude)** — the status line ends with how full Claude's context window is (`done · claude · 1m 36s · step 10 · 62% ctx`), and compaction shows as a `🗜️ Context compacted · 182k → 41k tokens` row instead of looking like a stall
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
-- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budget alerts and `/usage` breakdowns keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
+- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budget alerts and `/usage` breakdowns keep spending visible. Turn on **Stop at limit** (`auto_cancel`) and new runs pause once the daily budget is reached. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance; Claude's API retry back-offs (`🔁 API error 529 … retrying in 8s`) and safeguard stops (`🛡️`) show as their own rows rather than silent hangs
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
@@ -127,11 +128,11 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 ### Deprecated engines
 
-These two engines still load and run, but are no longer supported and are **targeted for removal in 0.36.0**. Don't start new work on them.
+These two engines are still included and still load and run, but they are **deprecated and no longer supported**: no bug fixes, no testing, and they may be removed in a future release. Don't start new work on them.
 
 | Engine | Status |
 |--------|--------|
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Deprecated — not supported by Untether.** Google [retired Gemini CLI for individual Google accounts (free, Google AI Pro and Ultra) on **18 June 2026**](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the `gemini` engine still loads, so you can keep using it — but Untether no longer tests it or fixes bugs in it. Antigravity support is tracked separately in [#558](https://github.com/littlebearapps/untether/issues/558). |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Deprecated — not supported by Untether.** Google [retired Gemini CLI for individual Google accounts (free, Google AI Pro and Ultra) on **18 June 2026**](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the `gemini` engine still loads, so you can keep using it — but Untether no longer tests it or fixes bugs in it. Antigravity CLI support ships as its own `antigravity` engine in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)). |
 | [Amp](https://ampcode.com) | **Deprecated.** Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that update cadence — so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself. |
 
 ### Engine compatibility
@@ -171,7 +172,7 @@ These two engines still load and run, but are no longer supported and are **targ
 ⁴ Toggle via `/config` between full auto (default; Codex's own sandbox setting) and safe (`--sandbox read-only`: read-only, edits blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
-⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks above describe what the integration does today; they are not a support commitment, and these engines are targeted for removal in 0.36.0.
+⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks above describe what the integration does today; they are not a support commitment, and these engines may be removed in a future release.
 
 Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
 
@@ -263,7 +264,7 @@ untether                         # start (or restart — Ctrl+C first if already
 
 > **Note:** If you've set up a systemd service on Linux, use `systemctl --user restart untether` instead.
 
-> **Upgrading to v0.35.5?** It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Unattended cron and webhook runs now deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself. Read [Upgrading to v0.35.5](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0355) first.
+> **Upgrading to v0.36.0?** (It went through release candidates as 0.35.5rc1–rc20.) It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Unattended cron and webhook runs now deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself. Read [Upgrading to v0.36.0](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0360) first.
 
 ---
 

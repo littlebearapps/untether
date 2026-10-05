@@ -12,7 +12,7 @@ This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By particip
 
 - **Python 3.12+** — `uv python install 3.14`
 - **uv** — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, or `pi` (`gemini` and `amp` are deprecated and removed in 0.36.0 — when a change breaks their runners, `xfail`/`skip` the test rather than fixing the runner)
+- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, or `pi` (`gemini` and `amp` are still included but deprecated and no longer supported — they're excluded from testing, and when a change breaks their runners, `xfail`/`skip` the test rather than fixing the runner)
 
 ### Development setup
 
