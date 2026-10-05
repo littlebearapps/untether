@@ -570,7 +570,10 @@ class TestLongRunningTail:
             elapsed_seconds=227.0,
         )
         assert "3m 47s" in line
-        assert "npm run build" in line
+        # #986: the title already shows the command, so the tail doesn't
+        # repeat it.
+        assert line.count("npm run build") == 1
+        assert line.endswith(" · 3m 47s")
 
     def test_long_running_no_detail_shows_only_elapsed(self):
         from untether.markdown import format_action_line
@@ -584,6 +587,99 @@ class TestLongRunningTail:
             elapsed_seconds=120.0,
         )
         assert "2m 00s" in line
+
+    def test_986_file_change_tail_does_not_repeat_path(self):
+        from untether.markdown import format_action_line
+        from untether.runners.claude import _tool_action
+        from untether.schemas import claude as claude_schema
+
+        for tool in ("Write", "Edit"):
+            action = _tool_action(
+                claude_schema.StreamToolUseBlock(
+                    id="t1",
+                    name=tool,
+                    input={
+                        "file_path": "/tmp/it0360-919b.txt",
+                        "content": "x",
+                        "old_string": "a",
+                        "new_string": "b",
+                    },
+                ),
+                parent_tool_use_id=None,
+            )
+            line = format_action_line(
+                action,
+                phase="started",
+                ok=None,
+                command_width=300,
+                elapsed_seconds=594.0,
+            )
+            assert line == "▸ files: update `/tmp/it0360-919b.txt` · 9m 54s", tool
+
+    def test_986_read_and_grep_tail_do_not_repeat_title(self):
+        from untether.markdown import format_action_line
+        from untether.runners.tool_actions import tool_kind_and_title
+
+        for name, inp, needle in (
+            ("Read", {"file_path": "/tmp/big.log"}, "/tmp/big.log"),
+            ("Grep", {"pattern": "TODO"}, "TODO"),
+            ("Task", {"description": "audit the repo"}, "audit the repo"),
+        ):
+            kind, title = tool_kind_and_title(name, inp, path_keys=("file_path",))
+            action = Action(
+                id="1", kind=kind, title=title, detail={"name": name, "input": inp}
+            )
+            line = format_action_line(
+                action,
+                phase="started",
+                ok=None,
+                command_width=300,
+                elapsed_seconds=120.0,
+            )
+            assert line.count(needle) == 1, line
+            assert line.endswith(" · 2m 00s"), line
+
+    def test_986_tail_keeps_detail_the_title_lacks(self):
+        from untether.markdown import format_action_line
+
+        action = Action(
+            id="1",
+            kind="tool",
+            title="BashOutput",
+            detail={
+                "name": "BashOutput",
+                "input": {"bash_id": "abc12345"},
+                "result_preview": "step 1\nDeploy Production: in_progress",
+            },
+        )
+        line = format_action_line(
+            action,
+            phase="started",
+            ok=None,
+            command_width=300,
+            elapsed_seconds=120.0,
+        )
+        assert line == "▸ tool: BashOutput · 2m 00s · Deploy Production: in_progress"
+
+    def test_986_truncated_command_title_keeps_tail_detail(self):
+        from untether.markdown import format_action_line
+
+        cmd = "npm run build -- --verbose --watch=false"
+        action = Action(
+            id="1",
+            kind="command",
+            title=cmd,
+            detail={"name": "Bash", "input": {"command": cmd}},
+        )
+        line = format_action_line(
+            action,
+            phase="started",
+            ok=None,
+            command_width=12,
+            elapsed_seconds=120.0,
+        )
+        # The title is cut to 12 chars, so the tail still shows the command.
+        assert line.endswith(f" · 2m 00s · `{cmd}`"), line
 
     def test_completed_action_no_tail(self):
         from untether.markdown import format_action_line
