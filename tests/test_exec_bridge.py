@@ -7312,6 +7312,64 @@ async def test_heartbeat_mutates_schedule_wakeup_countdown() -> None:
     assert action_state.action.detail["countdown_s"] >= 0
 
 
+def test_954_heartbeat_ticks_header_during_silent_generation() -> None:
+    """#954: no events and no open action (pure generation) — the heartbeat
+    still re-renders once per interval so the header's elapsed time moves."""
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    edits._heartbeat_tick()  # never rendered, but no engine event yet either
+    # event_seq stays 0 — the no_pid_no_events auto-cancel's signal.
+    assert edits.event_seq == 0
+    edits.event_seq = before = 1  # the engine's first event...
+    edits._last_render_at = 95.0  # ...rendered 5 s ago
+    edits._heartbeat_tick()
+    assert edits.event_seq == before  # rendered recently — nothing to refresh
+    clock.set(125.0)
+    edits._heartbeat_tick()
+    assert edits.event_seq == before + 1
+
+
+def test_954_heartbeat_header_tick_quiet_when_finalizing_or_live_idle() -> None:
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    before = edits.event_seq
+    # A live session sitting between turns isn't running anything.
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(
+            live_mode=True, completed_turns=1, turn_open=False
+        )
+    )
+    edits._heartbeat_tick()
+    assert edits.event_seq == before
+    # Once the final answer is being delivered, no more repaints.
+    edits.stream = None
+    edits._finalizing = True
+    edits._heartbeat_tick()
+    assert edits.event_seq == before
+
+
+@pytest.mark.anyio
+async def test_954_silent_run_header_elapsed_advances() -> None:
+    """End to end through the render loop: the progress message's elapsed
+    time is edited forward with no engine events at all."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=5.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()  # the first render (an event at 5 s)
+        await anyio.sleep(0.02)
+        clock.set(65.0)  # a minute of silent generation
+        edits._heartbeat_tick()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert texts == ["working 5s", "working 65s"]
+
+
 # ---------------------------------------------------------------------------
 # #333 Tier 2 — post-result limbo lets auto-cancel fire when watchdog fails
 # ---------------------------------------------------------------------------

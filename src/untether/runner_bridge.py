@@ -2330,6 +2330,10 @@ class ProgressEdits:
            is older than 60 s — this keeps the elapsed-time tail current
            in the chat (otherwise the message looks frozen during long
            BashOutput polling cycles).
+        4. (#777) refresh a live background-task block.
+        5. (#954) otherwise, re-render when nothing has for a heartbeat
+           interval, so the header's elapsed time keeps moving while the
+           engine generates silently.
         """
         stream = self.stream
         engine_state = getattr(stream, "engine_state", None) if stream else None
@@ -2403,7 +2407,22 @@ class ProgressEdits:
                 continue
             if (now - action_state.started_at) > 60.0:
                 self._bump_heartbeat()
-                break
+                return
+
+        # 5) #954: an engine generating silently (no events, no open action)
+        #    would otherwise leave the header's elapsed time frozen. Re-render
+        #    once nothing has repainted for a full heartbeat interval, so a
+        #    busy run gains no edits and a silent one gains one per interval
+        #    (30 s default) — well inside Telegram's edit budget. Only once
+        #    the engine has produced an event: ``event_seq == 0`` is the
+        #    ``no_pid_no_events`` auto-cancel's "never started" signal.
+        if (
+            self.event_seq > 0
+            and not self._finalizing
+            and not self._is_live_session_idle()
+            and now - self._last_render_at >= self._heartbeat_interval
+        ):
+            self._bump_heartbeat()
 
     async def _flush_pending_closing_message(self) -> None:
         """#470: send the one-shot post-result closing Telegram message.
