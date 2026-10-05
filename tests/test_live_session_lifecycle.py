@@ -6,6 +6,7 @@ lifecycle timers shrunk to fractions of a second.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from pathlib import Path
@@ -1191,9 +1192,13 @@ async def test_829_printing_background_bash_rearms_once_per_window(
     assert 0.4 <= closed_at - float(marker.read_text()) < 1.3
     rearmed = _events(logs, "claude.live_session.hold_rearmed")
     assert rearmed and {e["source"] for e in rearmed} == {"bash_output"}
-    # At most one re-arm per 0.5 s window: ~4 while it prints, plus the one
-    # that lands on the last write before the close.
-    assert 2 <= len(rearmed) <= 6
+    # At most one re-arm per 0.5 s window (less the 0.1 s write interval):
+    # ~4 while it prints, plus the one on the last write before the close.
+    # #959: an unchanged file no longer re-arms on later polls (see
+    # test_959_unchanged_output_file_maps_to_the_same_activity_time); a slow
+    # runner can still stretch the printing, so bound by its measured span.
+    print_span = float(marker.read_text()) - clock.result_at
+    assert 2 <= len(rearmed) <= max(6, math.ceil(print_span / 0.4) + 1), rearmed
     # Re-armed to a write newer than the previous re-arm: never older than
     # one hold (+ a poll), or the check ran on a stale mtime.
     assert all(e["activity_age_s"] < 0.7 for e in rearmed), rearmed

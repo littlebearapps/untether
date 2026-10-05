@@ -2342,6 +2342,9 @@ class ClaudeStreamState:
     # file grows while the command prints (P0 G4) — the only activity signal
     # a ``local_bash`` task has.
     bg_output_files: dict[str, str] = field(default_factory=dict)
+    # #959: path -> (mtime, monotonic ``at``) of the last write seen, so an
+    # unchanged file maps to the same activity time on every poll.
+    bg_output_seen: dict[str, tuple[float, float]] = field(default_factory=dict)
     # #872: the budget Claude declared for a background Bash — its ``timeout``
     # with ``run_in_background`` (tool_use_id -> seconds). The CLI stops the
     # command at that limit (30 min default, 2 h max), so the live session's
@@ -6196,7 +6199,16 @@ async def _bash_output_activity(state: ClaudeStreamState) -> BackgroundActivity 
         mtime = mtimes.get(path)
         if mtime is None:
             continue
-        at = mono_now - max(0.0, wall_now - mtime)
+        # #959: map each write to monotonic time once. Re-deriving it from
+        # fresh wall/monotonic samples drifts by the gap between them, and
+        # the hold re-arms on ``at > hold_started`` — the same write would
+        # re-arm it again on later polls.
+        seen = state.bg_output_seen.get(path)
+        if seen is not None and seen[0] == mtime:
+            at = seen[1]
+        else:
+            at = mono_now - max(0.0, wall_now - mtime)
+            state.bg_output_seen[path] = (mtime, at)
         if best is None or at > best.at:
             best = BackgroundActivity(at, "bash_output", task.task_id)
     return best
