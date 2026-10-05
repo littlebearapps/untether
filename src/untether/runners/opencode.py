@@ -79,6 +79,9 @@ class OpenCodeStreamState:
 
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_text: str | None = None
+    # #955: complete text parts keyed by ``part.id`` (insertion-ordered), so
+    # separate parts are joined with a blank line instead of glued together.
+    text_parts: dict[str, str] = field(default_factory=dict)
     last_tool_error: str | None = None
     note_seq: int = 0
     session_id: str | None = None
@@ -320,10 +323,16 @@ def translate_opencode_event(
             part = part or {}
             text = part.get("text")
             if isinstance(text, str) and text:
-                if state.last_text is None:
-                    state.last_text = text
-                else:
-                    state.last_text += text
+                # #955: ``opencode run`` emits each text part once, complete
+                # (``run.ts`` only emits when ``part.time.end`` is set), so
+                # successive events are distinct parts, not deltas. A repeated
+                # ``part.id`` replaces its earlier text; an id-less part is
+                # always a new part.
+                part_id = part.get("id")
+                if not isinstance(part_id, str) or not part_id:
+                    part_id = f"_anon{len(state.text_parts)}"
+                state.text_parts[part_id] = text
+                state.last_text = "\n\n".join(state.text_parts.values())
             return []
 
         case opencode_schema.StepFinish(part=part):

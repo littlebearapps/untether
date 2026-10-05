@@ -143,7 +143,7 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "text",
                 "sessionID": "ses_test123",
-                "part": {"type": "text", "text": "Hello "},
+                "part": {"id": "prt_1", "type": "text", "text": "Hello"},
             }
         ),
         title="opencode",
@@ -154,14 +154,15 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "text",
                 "sessionID": "ses_test123",
-                "part": {"type": "text", "text": "World"},
+                "part": {"id": "prt_2", "type": "text", "text": "World"},
             }
         ),
         title="opencode",
         state=state,
     )
 
-    assert state.last_text == "Hello World"
+    # #955: distinct text parts are separated, never glued together.
+    assert state.last_text == "Hello\n\nWorld"
 
     events = translate_opencode_event(
         _decode_event(
@@ -182,12 +183,84 @@ def test_translate_accumulates_text() -> None:
     assert len(events) == 1
     completed = events[0]
     assert isinstance(completed, CompletedEvent)
-    assert completed.answer == "Hello World"
+    assert completed.answer == "Hello\n\nWorld"
     assert completed.ok is True
     assert completed.usage is not None
     assert completed.usage["total_cost_usd"] == 0.005
     assert completed.usage["usage"]["input_tokens"] == 100
     assert completed.usage["usage"]["output_tokens"] == 10
+
+
+def _text_event(text: str, part_id: str | None) -> opencode_schema.OpenCodeEvent:
+    part: dict = {"type": "text", "text": text}
+    if part_id is not None:
+        part["id"] = part_id
+    return _decode_event({"type": "text", "sessionID": "ses_t955", "part": part})
+
+
+def test_translate_text_parts_across_tool_call_keep_separator() -> None:
+    """#955: text, a tool call, then more text must not run together."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(
+        _text_event("I'll read CLAUDE.md.", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _decode_event(
+            {
+                "type": "tool_use",
+                "sessionID": "ses_t955",
+                "part": {
+                    "id": "prt_tool",
+                    "callID": "call_1",
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "CLAUDE.md"},
+                        "output": "...",
+                    },
+                },
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+    translate_opencode_event(
+        _text_event("Files listed below.", "prt_b"), title="opencode", state=state
+    )
+    events = translate_opencode_event(
+        _decode_event(
+            {"type": "step_finish", "sessionID": "ses_t955", "part": {"reason": "stop"}}
+        ),
+        title="opencode",
+        state=state,
+    )
+    completed = events[-1]
+    assert isinstance(completed, CompletedEvent)
+    assert "CLAUDE.md.Files" not in completed.answer
+    assert completed.answer == "I'll read CLAUDE.md.\n\nFiles listed below."
+
+
+def test_translate_repeated_text_part_id_replaces_not_duplicates() -> None:
+    """#955: a re-emitted part (same part.id) updates in place, no duplicate."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(
+        _text_event("Draft", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _text_event("Draft, revised", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _text_event("Tail", "prt_b"), title="opencode", state=state
+    )
+    assert state.last_text == "Draft, revised\n\nTail"
+
+
+def test_translate_text_parts_without_id_are_separated() -> None:
+    """#955: parts with no id are still treated as distinct parts."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(_text_event("One.", None), title="opencode", state=state)
+    translate_opencode_event(_text_event("Two.", None), title="opencode", state=state)
+    assert state.last_text == "One.\n\nTwo."
 
 
 def test_translate_accumulates_cost_across_steps() -> None:
