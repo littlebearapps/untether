@@ -55,7 +55,7 @@ By default any allowed user can answer any approval in the chat. To restrict tha
 approval_originator_only = true
 ```
 
-Then Approve / Deny / Pause & Outline / Let's discuss buttons, the background-agent approval message, and AskUserQuestion answers (option buttons or a typed reply) only work for that person. Anyone else sees `Only the person who started this run can answer this.`, and Untether logs a WARNING (`callback.not_originator` or `ask_user_question.not_originator`) with both user ids. Runs with no human originator (cron, webhook, `/at` and loop fires) can still be answered by any allowed user. In a live Claude session, the originator is whoever started the session. The setting hot-reloads ([#388](https://github.com/littlebearapps/untether/issues/388)).
+Then Claude Code's Approve / Deny / Pause & Outline / Let's discuss buttons, the background-agent approval message, and AskUserQuestion answers (option buttons or a typed reply) only work for that person. Anyone else sees `Only the person who started this run can answer this.`, and Untether logs a WARNING (`callback.not_originator` or `ask_user_question.not_originator`) with both user ids. Runs with no human originator (cron, webhook, `/at` and loop fires) can still be answered by any allowed user. In a live Claude session, the originator is whoever started the session. The setting hot-reloads ([#388](https://github.com/littlebearapps/untether/issues/388)).
 
 ## Set listen mode for groups
 

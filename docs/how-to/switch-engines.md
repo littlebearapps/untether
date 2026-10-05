@@ -43,7 +43,7 @@ Selection precedence (highest to lowest): resume token → `/<engine-id>` direct
 ## Engine installation
 
 Untether shells out to engine CLIs. Install them and make sure they’re on your `PATH`
-(`codex`, `claude`, `opencode`, `pi`). Authentication is handled by each CLI.
+(`codex`, `claude`, `opencode`, `pi`). Authentication is handled by each CLI. For OpenCode, install the 1.x CLI (`npm install -g opencode-ai@1`): OpenCode 2.x (`@opencode/cli`) isn't supported yet, and Untether refuses a run on it before anything starts ([#970](https://github.com/littlebearapps/untether/issues/970)).
 
 !!! warning "Deprecated engines"
 

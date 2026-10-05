@@ -359,7 +359,7 @@ For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TO
 /at 90s Run the test suite
 ```
 
-Duration supports `Ns` / `Nm` / `Nh` with a 60s minimum and 24h maximum. Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays.
+Duration supports `Ns` / `Nm` / `Nh` with a 60s minimum and 24h maximum. Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. The run uses the engine and project a plain message in that chat or topic would use at the moment you schedule it ([#950](https://github.com/littlebearapps/untether/issues/950)); see [Schedule tasks](schedule-tasks.md#one-shot-delays-with-at).
 
 ## Discovering configured triggers
 

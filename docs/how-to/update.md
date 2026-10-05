@@ -32,7 +32,7 @@ systemctl --user restart untether
     ```sh
     npm update -g @anthropic-ai/claude-code
     npm update -g @openai/codex
-    npm update -g opencode-ai
+    npm install -g opencode-ai@1   # OpenCode: stay on the 1.x CLI (2.x isn't supported yet)
     npm update -g @mariozechner/pi-coding-agent
     npm update -g @google/gemini-cli
     npm update -g @sourcegraph/amp
@@ -40,7 +40,7 @@ systemctl --user restart untether
 
 ## Upgrading to v0.36.0
 
-v0.36.0 is the release that was tested as 0.35.5rc1–rc20; it is a minor version bump because it contains breaking changes. See the [v0.36.0 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0360-unreleased) for the full list. Behaviour changes that may affect operators upgrading from v0.35.4:
+v0.36.0 is the release that was tested as 0.35.5rc1–rc20 and then 0.36.0rcN; it is a minor version bump because it contains breaking changes. See the [v0.36.0 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0360-unreleased) for the full list. Behaviour changes that may affect operators upgrading from v0.35.4:
 
 !!! warning "New keys block a rollback"
     Several settings below (`rearm_plan_mode`, `live_sessions`, `outbox_stale_policy`, `own_schedule`, `plan-auto` and others) are new in v0.36.0, and v0.35.4 refuses a config that uses them. If you might need to downgrade, read [Rolling back to 0.35.4](#rolling-back-to-0354) first.
@@ -61,6 +61,8 @@ v0.36.0 is the release that was tested as 0.35.5rc1–rc20; it is a minor versio
 - **File deny globs match at the project root (security).** The default `deny_globs` now also cover a root-level `key.pem`, `id_rsa`, `.npmrc`, `.netrc` or `.ssh/config`, and a project-root `.env.example` now matches `**/.env.*`, so `/file get` and outbox delivery skip it. Deny globs are also checked after following symlinks. See [Security → File transfer deny globs](security.md#file-transfer-deny-globs). ([#831](https://github.com/littlebearapps/untether/issues/831), [#390](https://github.com/littlebearapps/untether/issues/390))
 - **`/browse` needs a project.** It no longer falls back to the process working directory (your home directory under systemd). Bind the chat to a project or set `default_project`. Hidden paths and deny globs are now refused there too. See [Browse files](browse-files.md). ([#389](https://github.com/littlebearapps/untether/issues/389))
 - **Crons and webhooks with a `project` but no `engine` use that project's engine.** They used to run on the global default engine. Set `engine` on the trigger if you relied on the old behaviour. ([#862](https://github.com/littlebearapps/untether/issues/862))
+- **`/at` runs on the engine a plain message would use.** It now follows the topic's or chat's `/agent` default, then the default of the project bound with `/ctx`, then the global default. It used to skip the `/agent` defaults, so a delay could fire on a different engine. See [Schedule tasks](schedule-tasks.md#one-shot-delays-with-at). ([#950](https://github.com/littlebearapps/untether/issues/950))
+- **OpenCode 2.x is refused.** Untether supports the OpenCode 1.x CLI (npm `opencode-ai`). If `opencode --version` reports 2.x (npm `@opencode/cli`), the run isn't started and the reply tells you how to reinstall 1.x (`npm install -g opencode-ai@1`); the chat's saved session is kept. ([#970](https://github.com/littlebearapps/untether/issues/970))
 - **Codex no longer offers the `minimal` reasoning level.** A saved `minimal` is ignored with a one-line note and the run uses Codex's default. ([#416](https://github.com/littlebearapps/untether/issues/416))
 - **Voice transcription has a default vocabulary hint.** Unless you set `voice_transcription_prompt`, Untether now biases transcription towards engine and project names such as Claude, `CLAUDE.md` and Codex. Set it to `""` to send no hint. See [Voice notes](voice-notes.md#improve-recognition-of-names). ([#703](https://github.com/littlebearapps/untether/issues/703), [#789](https://github.com/littlebearapps/untether/issues/789))
 - **Gemini CLI and Amp are deprecated and no longer supported.** Both are still included, but they get no fixes, are excluded from testing, and may be removed in a future release. Antigravity CLI support is planned for v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)). See [Switch engines](switch-engines.md).
@@ -79,7 +81,7 @@ v0.35.4 rejects any setting it doesn't know (every config section is strict), an
 | `[progress]` | `show_context_usage`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns` |
 | `[cost_budget]` | `warn_run_above_usd`, `notify_run_outlier` |
 | `[loop]` | `own_schedule` |
-| `[transports.telegram]` | `followup_mode`, `voice_transcription_prompt` |
+| `[transports.telegram]` | `followup_mode`, `voice_transcription_prompt`, `approval_originator_only` |
 | `[transports.telegram.files]` | `outbox_stale_policy` |
 | `[[triggers.crons]]` | `model`, `reasoning` |
 

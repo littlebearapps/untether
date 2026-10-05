@@ -47,7 +47,7 @@ Effort: default  · high
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -157,6 +157,10 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 
 For historical cost data across sessions, use the [`/stats`](../reference/commands-and-directives.md) command.
+
+### About page
+
+`ℹ️ About` shows the Untether version and a `py X.Y.Z · <engine> X.Y.Z · …` line with the version of each available engine CLI (in alphabetical order) that answers `--version` (Pi included), plus GitHub, bug-report and feature-request links. The engine CLIs are checked side by side in the background, so the page opens in a few seconds without holding up the bot, and the versions are reused for 5 minutes ([#951](https://github.com/littlebearapps/untether/issues/951)).
 
 ## Callbacks vs commands
 

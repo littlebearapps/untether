@@ -87,7 +87,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 ## 🎯 Features
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
-- 🔐 **Interactive permissions** — approve plan transitions, tool calls and clarifying questions with inline buttons; how much asks first depends on the permission mode, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
+- 🔐 **Interactive permissions** — approve plan transitions, tool calls and clarifying questions with inline buttons; how much asks first depends on the permission mode, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving. In shared chats, `approval_originator_only = true` lets only the person who started a run answer it
 - 📋 **Permission modes** — toggle per chat with `/planmode`; choose plan approval, auto-approved plans, Claude Code's own classifier-gated auto mode, or no plan phase (edits run, other tools ask)
 - 🔔 **Background work stays visible (Claude, with a permission mode set)** — when Claude hands work to a background task, subagent, `Monitor` or `ScheduleWakeup`, the session stays open: each result arrives as its own message, and your follow-ups land in the same session. A `⏳ background (N)` block and a status message show each task's elapsed time and progress while it runs
 - ↪️ **Steer or queue follow-ups (Claude, with a permission mode set)** — a message sent mid-run waits for the current turn by default; `/steer <text>` (or steer as the chat default) writes it straight into the running session so Claude picks it up at its next step
@@ -97,7 +97,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budget alerts and `/usage` breakdowns keep spending visible. Turn on **Stop at limit** (`auto_cancel`) and new runs pause once the daily budget is reached. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance; Claude's API retry back-offs (`🔁 API error 529 … retrying in 8s`) and safeguard stops (`🛡️`) show as their own rows rather than silent hangs
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
-- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
+- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription, and the usual mishears of "Claude" ("Clawde", "Clawed Code") corrected
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, and Pi ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion, with whole directories optionally bundled as a zip (`outbox_deliver_directories = "zip"`)
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
@@ -121,10 +121,12 @@ The wizard offers three **workflow modes** — pick the one that fits:
 |--------|---------|-------------------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context |
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
-| [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
+| [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@1` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
 **Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
+
+**OpenCode:** Untether drives the OpenCode **1.x** CLI (npm `opencode-ai`). OpenCode 2.x (`@opencode/cli`) isn't supported yet — Untether checks `opencode --version` before each run and refuses 2.x with an install hint instead of starting it.
 
 ### Deprecated engines
 
@@ -266,7 +268,7 @@ untether                         # start (or restart — Ctrl+C first if already
 
 > **Note:** If you've set up a systemd service on Linux, use `systemctl --user restart untether` instead.
 
-> **Upgrading to v0.36.0?** (It went through release candidates as 0.35.5rc1–rc20.) It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Unattended cron and webhook runs now deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself. Read [Upgrading to v0.36.0](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0360) first.
+> **Upgrading to v0.36.0?** (It went through release candidates as 0.35.5rc1–rc20, then 0.36.0rcN.) It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Unattended cron and webhook runs now deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself. Read [Upgrading to v0.36.0](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0360) first.
 
 ---
 

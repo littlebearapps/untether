@@ -115,7 +115,7 @@ Set to `0` to hide the action list entirely, or increase it to see more history.
 
 ## Long-running tool tail (heartbeat)
 
-Long-running tool calls (Bash, BashOutput, ScheduleWakeup, Monitor, KillShell, …) get an automatic elapsed-time tail on the progress message after ~60 s — `▸ Bash · 3m 47s · npm run build` — so a glancing user can answer "is it alive? what's it doing? for how long?" without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). The tail appears regardless of `/verbose` state.
+Long-running tool calls (Bash, BashOutput, ScheduleWakeup, Monitor, KillShell, …) get an automatic elapsed-time tail on the progress message after ~60 s — `▸ npm run build · 3m 47s` — so a glancing user can answer "is it alive? what's it doing? for how long?" without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). The tail appears regardless of `/verbose` state. It doesn't repeat what the row's title already shows (a command, a `read:` path, a `grep:` pattern or a file change's file names: `▸ files: update x.txt · 9m 54s`); a detail the title lacks, such as a cut-down command's full text, a polled shell's latest output or a countdown, follows the time ([#986](https://github.com/littlebearapps/untether/issues/986)).
 
 In **verbose** mode the tool's `format_verbose_detail` line additionally renders:
 
@@ -124,7 +124,7 @@ In **verbose** mode the tool's `format_verbose_detail` line additionally renders
 - `Monitor` — countdown remaining
 - `KillShell` — target shell id
 
-Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
+Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. The tick also repaints the message when nothing else has for a whole interval, so the header's elapsed time (`working · codex · 1m 33s`) keeps moving while an engine writes a long answer with no tool calls, or stalls ([#954](https://github.com/littlebearapps/untether/issues/954)). A busy run gets no extra edits. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
 
 ## Background tasks (Claude)
 
@@ -161,7 +161,7 @@ Claude often answers each background task finishing with a one-liner — "the li
    ↳ Sweep one is back; waiting on sweep two.
 ```
 
-A wake turn still arrives as its own message when it runs a tool (up to three `Read` / `Glob` / `Grep` calls to collect a result don't count — [#813](https://github.com/littlebearapps/untether/issues/813)), asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. If every reply in a batch folded, a short pushed `✅ all N background tasks done` notice arrives when the last task ends. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
+A wake turn still arrives as its own message when it runs a tool (up to three `Read` / `Glob` / `Grep` calls to collect a result don't count — [#813](https://github.com/littlebearapps/untether/issues/813)), asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. If every reply in a batch folded, a short pushed `✅ all N background tasks done` notice arrives when the last task ends. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line). A 💬 line folded while tasks were still running ("… hasn't finished yet") is removed once every task has finished, so it can't contradict the `✅ all N background tasks done` header; a batch that ends with a stopped or failed task keeps them ([#985](https://github.com/littlebearapps/untether/issues/985)).
 
 === "toml"
 
