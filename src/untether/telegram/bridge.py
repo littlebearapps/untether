@@ -209,6 +209,8 @@ class TelegramBridgeConfig:
     # Mirrors `TelegramTransportSettings.allow_any_user` so the loop can
     # log on every boot (telegram/loop.py:security.allow_any_user).
     allow_any_user: bool = False
+    # #388: only the run's originator may answer its approvals (opt-in).
+    approval_originator_only: bool = False
     files: TelegramFilesSettings = field(default_factory=TelegramFilesSettings)
     chat_ids: tuple[int, ...] | None = None
     topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
@@ -243,6 +245,7 @@ class TelegramBridgeConfig:
         self.media_group_debounce_s = float(settings.media_group_debounce_s)
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
         self.allow_any_user = bool(settings.allow_any_user)
+        self.approval_originator_only = bool(settings.approval_originator_only)
         self.files = settings.files
 
 

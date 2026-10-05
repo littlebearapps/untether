@@ -16,6 +16,12 @@ _run_channel_id: ContextVar[int | None] = ContextVar(
 _run_thread_id: ContextVar[int | None] = ContextVar(
     "untether_run_thread_id", default=None
 )
+# #388: the Telegram user whose message started the run (None for cron,
+# webhook, /at and loop fires), so pending approvals can record who may
+# answer them when ``approval_originator_only`` is on.
+_run_sender_id: ContextVar[int | None] = ContextVar(
+    "untether_run_sender_id", default=None
+)
 
 
 def get_run_base_dir() -> Path | None:
@@ -52,6 +58,18 @@ def set_run_thread_id(thread_id: int | None) -> Token[int | None]:
 
 def reset_run_thread_id(token: Token[int | None]) -> None:
     _run_thread_id.reset(token)
+
+
+def get_run_sender_id() -> int | None:
+    return _run_sender_id.get()
+
+
+def set_run_sender_id(sender_id: int | None) -> Token[int | None]:
+    return _run_sender_id.set(sender_id)
+
+
+def reset_run_sender_id(token: Token[int | None]) -> None:
+    _run_sender_id.reset(token)
 
 
 def relativize_path(value: str, *, base_dir: Path | None = None) -> str:

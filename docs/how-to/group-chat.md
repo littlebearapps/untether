@@ -46,6 +46,17 @@ In group chats, approval buttons (Approve, Deny, Pause & Outline Plan) are valid
 
 This also applies to cancel buttons. Approval buttons also only work in the chat they were posted in: a callback for a pending request sent from any other chat is refused ([#388](https://github.com/littlebearapps/untether/issues/388)). (When `allow_any_user = true` is set as the dev/demo escape hatch, all group members can interact with any buttons since there's no allowlist to validate against.)
 
+### Only the person who started the run can approve (opt-in)
+
+By default any allowed user can answer any approval in the chat. To restrict that to the person whose message started the run, set:
+
+```toml
+[transports.telegram]
+approval_originator_only = true
+```
+
+Then Approve / Deny / Pause & Outline / Let's discuss buttons, the background-agent approval message, and AskUserQuestion answers (option buttons or a typed reply) only work for that person. Anyone else sees `Only the person who started this run can answer this.`, and Untether logs a WARNING (`callback.not_originator` or `ask_user_question.not_originator`) with both user ids. Runs with no human originator (cron, webhook, `/at` and loop fires) can still be answered by any allowed user. In a live Claude session, the originator is whoever started the session. The setting hot-reloads ([#388](https://github.com/littlebearapps/untether/issues/388)).
+
 ## Set listen mode for groups
 
 By default, the bot responds to every message (`all` mode). In busy groups, switch to `mentions` mode so the bot only responds when @mentioned:

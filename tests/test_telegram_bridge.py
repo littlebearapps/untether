@@ -1336,11 +1336,13 @@ class _ThreadRecordingRunner(ScriptRunner):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.seen_threads: list[int | None] = []
+        self.seen_senders: list[int | None] = []
 
     async def run(self, prompt, resume):  # type: ignore[override]
-        from untether.utils.paths import get_run_thread_id
+        from untether.utils.paths import get_run_sender_id, get_run_thread_id
 
         self.seen_threads.append(get_run_thread_id())
+        self.seen_senders.append(get_run_sender_id())
         async for event in super().run(prompt, resume):
             yield event
 
@@ -1375,6 +1377,43 @@ async def test_826_run_engine_sets_run_thread_contextvar() -> None:
 
     assert runner.seen_threads == [10]
     assert get_run_thread_id() is None
+
+
+@pytest.mark.anyio
+async def test_388_run_engine_sets_run_sender_from_triggering_message() -> None:
+    """#388 phase 2: a run started by a user's message carries that user as
+    its originator; a run whose message isn't a noted user message (a cron
+    or webhook announcement) carries none. Reset after the run."""
+    from untether.telegram.approval_originator import note_message_sender
+    from untether.utils.paths import get_run_sender_id
+
+    runner = _ThreadRecordingRunner(
+        [Return(answer="ok"), Return(answer="ok")],
+        engine=CODEX_ENGINE,
+        resume_value="r-388s",
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=_CaptureTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    note_message_sender(123, 3881, 4242)
+
+    for msg_id in (3881, 3882):
+        await _run_engine(
+            exec_cfg=exec_cfg,
+            runtime=runtime,
+            running_tasks={},
+            chat_id=123,
+            user_msg_id=msg_id,
+            text="hello",
+            resume_token=None,
+            context=None,
+        )
+
+    assert runner.seen_senders == [4242, None]
+    assert get_run_sender_id() is None
 
 
 @pytest.mark.anyio
@@ -5222,6 +5261,110 @@ async def test_run_main_loop_handles_command_plugins(monkeypatch) -> None:
     assert runner.calls == []
     assert transport.send_calls
     assert transport.send_calls[-1]["message"].text == "echo:hello"
+
+
+def _388_loop_cfg(runner: ScriptRunner, *, originator_only: bool):
+    transport = FakeTransport()
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=TransportRuntime(
+            router=_make_router(runner), projects=_empty_projects()
+        ),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        approval_originator_only=originator_only,
+    )
+    return cfg, transport
+
+
+def _388_msg(text: str, sender_id: int, message_id: int = 1):
+    return TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=message_id,
+        text=text,
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=sender_id,
+        chat_type="group",
+    )
+
+
+@pytest.mark.anyio
+async def test_388_prompt_run_carries_sender_as_originator() -> None:
+    """#388 phase 2: the loop notes each message's sender, so the run a
+    prompt starts knows who started it."""
+    runner = _ThreadRecordingRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="r-388l"
+    )
+    cfg, _transport = _388_loop_cfg(runner, originator_only=True)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _388_msg("hello", 77, message_id=3880)
+
+    await run_main_loop(cfg, poller)
+
+    assert runner.seen_senders == [77]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("originator_only", "sender", "answered"),
+    [(True, 1, False), (True, 2, True), (False, 1, True)],
+    ids=["other-user-refused", "originator-answers", "setting-off"],
+)
+async def test_388_typed_ask_answer_originator_only(
+    monkeypatch, originator_only, sender, answered
+) -> None:
+    """#388 phase 2: a typed AskUserQuestion answer from someone other than
+    the run's originator is refused (WARNING, reply) when the setting is on,
+    and never reaches the agent or starts a run."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+    from untether.telegram.approval_originator import NOT_ORIGINATOR_TEXT
+
+    calls: list[tuple[str, str]] = []
+
+    async def _answer(request_id: str, text: str) -> bool:
+        calls.append((request_id, text))
+        return True
+
+    monkeypatch.setattr(claude_mod, "answer_ask_question", _answer)
+    claude_mod._PENDING_ASK_REQUESTS["req-388a"] = (123, "Which one?")
+    claude_mod._REQUEST_TO_SESSION["req-388a"] = "sess-388a"
+    claude_mod._REQUEST_TO_ORIGINATOR["req-388a"] = 2
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    cfg, transport = _388_loop_cfg(runner, originator_only=originator_only)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _388_msg("option B", sender)
+
+    try:
+        with capture_logs() as logs:
+            await run_main_loop(cfg, poller)
+    finally:
+        claude_mod._PENDING_ASK_REQUESTS.pop("req-388a", None)
+        claude_mod._REQUEST_TO_SESSION.pop("req-388a", None)
+
+    assert runner.calls == []
+    texts = [c["message"].text for c in transport.send_calls]
+    warn = [r for r in logs if r.get("event") == "ask_user_question.not_originator"]
+    if answered:
+        assert calls == [("req-388a", "option B")]
+        assert NOT_ORIGINATOR_TEXT not in texts
+        assert warn == []
+    else:
+        assert calls == []
+        assert texts == [NOT_ORIGINATOR_TEXT]
+        assert len(warn) == 1
+        assert warn[0]["sender_id"] == 1 and warn[0]["originator_id"] == 2
+        assert "option B" not in str(warn[0])
 
 
 @pytest.mark.anyio

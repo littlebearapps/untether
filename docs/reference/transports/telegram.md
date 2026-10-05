@@ -545,6 +545,20 @@ reads as expired and answers nothing
 ([#388](https://github.com/littlebearapps/untether/issues/388)). Other callback
 families already act only on the tapping chat.
 
+With `approval_originator_only = true` (opt-in, hot-reloads), `_dispatch_callback`
+also refuses a `claude_control:` or `aq:` tap from anyone but the run's
+originator, **before** the early answer reserves a claim: toast
+`Only the person who started this run can answer this.`, WARNING
+`callback.not_originator` (`chat_id`, `request_id`, `sender_id`,
+`originator_id`). The originator comes from the triggering message: the loop
+notes `(chat_id, message_id) → sender_id` for every allowed message
+(`telegram/approval_originator.py`, bounded), `_run_engine` sets the run's
+sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the Claude
+runner records it per request in `_REQUEST_TO_ORIGINATOR`. Cron, webhook, `/at`
+and loop fires start from a bot notice, so they have no originator and any
+allowed user may answer. A typed AskUserQuestion answer is gated the same way
+(`ask_user_question.not_originator`, reply instead of answering).
+
 Backends that want a visible toast ("Approved" / "Denied" / …) set
 `answer_early = True` and provide `early_answer_toast(args_text) -> str | None`.
 Dispatch hits `answerCallbackQuery` via that path **before** calling

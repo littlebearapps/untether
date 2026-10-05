@@ -19,7 +19,7 @@ Untether gives remote access to coding agents on your server, so locking down wh
     allowed_user_ids = [12345, 67890]
     ```
 
-Only listed user IDs can interact with the bot. Messages from everyone else are silently ignored. In group chats, `allowed_user_ids` also governs button press validation — only allowlisted users can tap Approve/Deny buttons. Any allowlisted user can answer any request in the chat, including one raised by another user's run. See [Group chat](group-chat.md#button-press-validation) for details.
+Only listed user IDs can interact with the bot. Messages from everyone else are silently ignored. In group chats, `allowed_user_ids` also governs button press validation — only allowlisted users can tap Approve/Deny buttons. By default any allowlisted user can answer any request in the chat, including one raised by another user's run; set `approval_originator_only = true` under `[transports.telegram]` to accept approvals and AskUserQuestion answers only from the person whose message started the run (cron, webhook, `/at` and loop runs have no originator, so any allowlisted user can still answer them) ([#388](https://github.com/littlebearapps/untether/issues/388)). See [Group chat](group-chat.md#button-press-validation) for details.
 
 To find your Telegram user ID:
 

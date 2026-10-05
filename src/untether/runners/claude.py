@@ -65,7 +65,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
-from ..utils.paths import get_run_base_dir, get_run_channel_id
+from ..utils.paths import get_run_base_dir, get_run_channel_id, get_run_sender_id
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -381,6 +381,12 @@ _HANDLED_REQUESTS: OrderedDict[str, HandledControl | None] = OrderedDict()
 # liveness pruning, never by evicting a live id (no fail-open under load).
 _REQUEST_TO_CHANNEL: dict[str, int] = {}
 _REQUEST_TO_CHANNEL_MAX = 512
+# #388 phase 2: request_id -> the Telegram user whose message started the run
+# (``get_run_sender_id()`` at registration). Read only when
+# ``[transports.telegram] approval_originator_only`` is on; no entry (cron,
+# webhook, /at, loop fires) means any allowed user may answer. Same liveness
+# rules and pruning as ``_REQUEST_TO_CHANNEL``.
+_REQUEST_TO_ORIGINATOR: dict[str, int] = {}
 
 
 @dataclass(slots=True)
@@ -12886,6 +12892,10 @@ def _bind_request_channel(request_id: str) -> None:
     """
     channel = get_run_channel_id()
     _REQUEST_TO_CHANNEL.pop(request_id, None)
+    _REQUEST_TO_ORIGINATOR.pop(request_id, None)
+    sender = get_run_sender_id()
+    if sender is not None:
+        _REQUEST_TO_ORIGINATOR[request_id] = sender
     if channel is None:
         return
     _REQUEST_TO_CHANNEL[request_id] = channel
@@ -12898,12 +12908,28 @@ def _bind_request_channel(request_id: str) -> None:
             if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
         ]:
             del _REQUEST_TO_CHANNEL[rid]
+    if len(_REQUEST_TO_ORIGINATOR) > _REQUEST_TO_CHANNEL_MAX:
+        for rid in [
+            rid
+            for rid in _REQUEST_TO_ORIGINATOR
+            if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
+        ]:
+            del _REQUEST_TO_ORIGINATOR[rid]
 
 
 def control_request_origin(request_id: str) -> int | None:
     """The chat a pending / claimed request is bound to (#388), or None."""
     if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
         return _REQUEST_TO_CHANNEL.get(request_id)
+    return None
+
+
+def control_request_originator(request_id: str) -> int | None:
+    """The Telegram user who started the run that raised a pending / claimed
+    request (#388), or None — no human originator (cron, webhook, /at, loop
+    fire) or not pending."""
+    if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
+        return _REQUEST_TO_ORIGINATOR.get(request_id)
     return None
 
 
@@ -13233,6 +13259,7 @@ def _cleanup_session_registries(
     for k in stale:
         del _REQUEST_TO_SESSION[k]
         _REQUEST_TO_CHANNEL.pop(k, None)  # #388
+        _REQUEST_TO_ORIGINATOR.pop(k, None)
         # #685: a claim on a request whose session is gone can never
         # complete — drop it so the id doesn't read "in flight" for ever.
         _INFLIGHT_CONTROL_RESPONSES.pop(k, None)

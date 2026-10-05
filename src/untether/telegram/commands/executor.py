@@ -32,11 +32,14 @@ from ...transport_runtime import TransportRuntime
 from ...utils.paths import (
     reset_run_base_dir,
     reset_run_channel_id,
+    reset_run_sender_id,
     reset_run_thread_id,
     set_run_base_dir,
     set_run_channel_id,
+    set_run_sender_id,
     set_run_thread_id,
 )
+from ..approval_originator import message_sender
 from ..bridge import send_plain
 from ..engine_overrides import (
     allowed_reasoning_levels,
@@ -321,6 +324,9 @@ async def _run_engine(
         run_channel_token = set_run_channel_id(chat_id)
         # #826: loop registrations record the run's topic.
         run_thread_token = set_run_thread_id(thread_id)
+        # #388: the user whose message started the run (None for cron,
+        # webhook, /at and loop fires) — pending approvals record it.
+        run_sender_token = set_run_sender_id(message_sender(chat_id, user_msg_id))
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -368,6 +374,7 @@ async def _run_engine(
             reset_run_base_dir(run_base_token)
             reset_run_channel_id(run_channel_token)
             reset_run_thread_id(run_thread_token)
+            reset_run_sender_id(run_sender_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",

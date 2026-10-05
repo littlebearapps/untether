@@ -407,6 +407,7 @@ class TelegramBackend(TransportBackend):
             media_group_debounce_s=settings.media_group_debounce_s,
             allowed_user_ids=tuple(settings.allowed_user_ids),
             allow_any_user=settings.allow_any_user,
+            approval_originator_only=settings.approval_originator_only,
             topics=settings.topics,
             files=settings.files,
             trigger_config=trigger_config,

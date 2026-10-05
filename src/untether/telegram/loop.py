@@ -25,6 +25,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions
 from ..transport_runtime import ResolvedMessage
+from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
 from .chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -3399,9 +3400,36 @@ async def run_main_loop(
                     )
                     from .commands.ask_question import send_next_ask_question_message
 
+                    async def _ask_answer_refused(ask_request_id: str) -> bool:
+                        # #388: with approval_originator_only on, only the
+                        # user who started the run may answer its question.
+                        if not cfg.approval_originator_only:
+                            return False
+                        from .approval_originator import (
+                            NOT_ORIGINATOR_TEXT,
+                            request_originator_mismatch,
+                        )
+
+                        originator = request_originator_mismatch(
+                            ask_request_id, msg.sender_id
+                        )
+                        if originator is None:
+                            return False
+                        logger.warning(
+                            "ask_user_question.not_originator",
+                            chat_id=msg.chat_id,
+                            request_id=ask_request_id,
+                            sender_id=msg.sender_id,
+                            originator_id=originator,
+                        )
+                        await reply(text=NOT_ORIGINATOR_TEXT)
+                        return True
+
                     # Check for active option flow in "Other" text mode first
                     flow = get_ask_question_flow(channel_id=msg.chat_id)
                     if flow is not None and flow.awaiting_text:
+                        if await _ask_answer_refused(flow.request_id):
+                            return
                         flow.awaiting_text = False
                         current_q = flow.questions[flow.current_index]
                         question_key = current_q.get(
@@ -3435,6 +3463,8 @@ async def run_main_loop(
                     pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
                     if pending_ask is not None:
                         ask_req_id, _ask_question = pending_ask
+                        if await _ask_answer_refused(ask_req_id):
+                            return
                         logger.info(
                             "ask_user_question.answering",
                             request_id=ask_req_id,
@@ -3574,6 +3604,12 @@ async def run_main_loop(
                     if len(state.seen_messages_order) > _SEEN_MESSAGES_LIMIT:
                         oldest = state.seen_messages_order.popleft()
                         state.seen_message_keys.discard(oldest)
+                if isinstance(update, TelegramIncomingMessage):
+                    # #388: remember who sent it, so a run it starts knows
+                    # its originator (approval_originator_only).
+                    note_message_sender(
+                        update.chat_id, update.message_id, update.sender_id
+                    )
                 if isinstance(update, TelegramCallbackQuery):
                     if update.data == CANCEL_CALLBACK_DATA:
                         tg.start_soon(

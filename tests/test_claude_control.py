@@ -3902,6 +3902,31 @@ def test_388_session_cleanup_drops_bindings() -> None:
     assert "r-388c" not in _REQUEST_TO_CHANNEL
 
 
+def test_388_registration_records_run_originator() -> None:
+    """#388 phase 2: a request raised in a run started by a Telegram user
+    records that user; a run with no originator (cron/webhook) records none.
+    Liveness-gated like the chat binding and dropped on session cleanup."""
+    from untether.runners.claude import (
+        _REQUEST_TO_ORIGINATOR,
+        control_request_originator,
+    )
+    from untether.utils.paths import reset_run_sender_id, set_run_sender_id
+
+    token = set_run_sender_id(4242)
+    try:
+        _388_raise_in_chat(111, "r-orig", session_id="sess-orig")
+    finally:
+        reset_run_sender_id(token)
+    _388_raise_in_chat(111, "r-cron", session_id="sess-cron")
+
+    assert control_request_originator("r-orig") == 4242
+    assert control_request_originator("r-cron") is None
+    assert control_request_originator("r-unknown") is None
+    _cleanup_session_registries("sess-orig")
+    assert "r-orig" not in _REQUEST_TO_ORIGINATOR
+    assert control_request_originator("r-orig") is None
+
+
 def test_388_every_registration_binds_its_channel() -> None:
     """Structural: each ``_REQUEST_TO_SESSION[...] = ...`` in claude.py is
     followed in the same block by ``_bind_request_channel(`` (a site that

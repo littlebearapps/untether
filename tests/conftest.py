@@ -109,11 +109,13 @@ def _clear_request_channel_bindings() -> Iterator[None]:
     """#388: ``_REQUEST_TO_CHANNEL`` binds request ids to chats. Tests reuse
     ids (``req-1``…) across files; a binding left by one test would make
     another test's tap from a different chat read ``channel_mismatch``."""
-    from untether.runners.claude import _REQUEST_TO_CHANNEL
+    from untether.runners.claude import _REQUEST_TO_CHANNEL, _REQUEST_TO_ORIGINATOR
 
     _REQUEST_TO_CHANNEL.clear()
+    _REQUEST_TO_ORIGINATOR.clear()
     yield
     _REQUEST_TO_CHANNEL.clear()
+    _REQUEST_TO_ORIGINATOR.clear()
 
 
 @pytest.fixture(autouse=True)

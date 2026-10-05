@@ -337,6 +337,32 @@ async def _dispatch_callback(
             )
         return
 
+    # #388: opt-in "only the originator can approve". Checked before the
+    # early answer, which reserves a claim and toasts "Approved".
+    if cfg.approval_originator_only:
+        from ..approval_originator import (
+            NOT_ORIGINATOR_TEXT,
+            callback_originator_mismatch,
+        )
+
+        mismatch = callback_originator_mismatch(
+            command_id, args_text, msg.chat_id, msg.sender_id
+        )
+        if mismatch is not None:
+            logger.warning(
+                "callback.not_originator",
+                chat_id=msg.chat_id,
+                command=command_id,
+                request_id=mismatch[0],
+                sender_id=msg.sender_id,
+                originator_id=mismatch[1],
+            )
+            if callback_query_id is not None:
+                await cfg.bot.answer_callback_query(
+                    callback_query_id, text=NOT_ORIGINATOR_TEXT
+                )
+            return
+
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
     user_msg_id = msg.message_id
