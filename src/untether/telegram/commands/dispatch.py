@@ -8,6 +8,7 @@ import anyio
 
 from ...commands import CommandContext, CommandResult, get_command
 from ...config import ConfigError
+from ...context import RunContext
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
 from ...runner_bridge import RunningTasks, _utf16_len, register_ephemeral_message
@@ -177,6 +178,8 @@ async def _dispatch_command(
     default_engine_override: EngineId | None,
     engine_overrides_resolver: Callable[[EngineId], Awaitable[EngineRunOptions | None]]
     | None,
+    *,
+    ambient_context: RunContext | None = None,
 ) -> None:
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
@@ -254,6 +257,8 @@ async def _dispatch_command(
         trigger_manager=cfg.trigger_manager,
         default_chat_id=cfg.chat_id,
         file_deny_globs=tuple(cfg.files.deny_globs),
+        default_engine_override=default_engine_override,  # #950
+        ambient_context=ambient_context,
     )
     try:
         result = await backend.handle(ctx)

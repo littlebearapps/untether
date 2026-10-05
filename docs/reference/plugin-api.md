@@ -232,8 +232,10 @@ The full field list:
 | `default_chat_id` | `int \| None` | Chat that unscoped triggers fall back to |
 | `file_deny_globs` | `tuple[str, ...] \| None` | Live `[transports.telegram.files] deny_globs` ([#389](https://github.com/littlebearapps/untether/issues/389)); `None` means the defaults |
 | `callback_query_id` | `str \| None` | Callback query id of a button tap ([#685](https://github.com/littlebearapps/untether/issues/685)); `None` for text commands |
+| `default_engine_override` | `EngineId \| None` | The topic's or chat's `/agent` default engine for this message ([#950](https://github.com/littlebearapps/untether/issues/950)); `None` means fall through to the project and global defaults |
+| `ambient_context` | `RunContext \| None` | The run context a plain message here would use: the topic's or chat's `/ctx` binding, else the chat's project ([#950](https://github.com/littlebearapps/untether/issues/950)); `None` when unknown (use `runtime.default_context_for_chat`) |
 
-The last four are optional (default `None`), so transports that don't set them keep working.
+The last six are optional (default `None`), so transports that don't set them keep working.
 
 Use `ctx.executor.run_one(...)` or `ctx.executor.run_many(...)` to reuse Untether's
 engine pipeline. Use `mode="capture"` to collect results and build a custom reply. A captured run refused by the daily budget sends nothing to the chat and offers no **Run anyway** button: check `result.refused` and tell the user yourself.

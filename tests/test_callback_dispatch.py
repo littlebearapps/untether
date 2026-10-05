@@ -733,6 +733,53 @@ async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
     assert [c.file_deny_globs for c in backend.contexts] == [("x/**",), ("w",)]
 
 
+@pytest.mark.anyio
+async def test_950_command_context_carries_engine_default_and_context(
+    monkeypatch,
+) -> None:
+    """#950: a command sees the topic/chat engine default and the ambient
+    (topic/chat-bound) context a plain prompt in that chat would use."""
+    from untether.context import RunContext
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+    ambient = RunContext(project="beta", branch="feat")
+    await _dispatch_command(
+        cfg,
+        msg,
+        "/test_cmd",
+        "test_cmd",
+        "",
+        {},
+        AsyncMock(),
+        None,
+        False,
+        "opencode",
+        None,
+        ambient_context=ambient,
+    )
+    await _dispatch_command(
+        cfg, msg, "/test_cmd", "test_cmd", "", {}, AsyncMock(), None, False, None, None
+    )
+
+    assert backend.contexts[0].default_engine_override == "opencode"
+    assert backend.contexts[0].ambient_context == ambient
+    assert backend.contexts[1].default_engine_override is None
+    assert backend.contexts[1].ambient_context is None
+
+
 # ---------------------------------------------------------------------------
 # #418 — CommandResult.attachment is delivered as a Telegram document
 # ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ When the delay expires, the prompt runs as a normal agent session. Send `/cancel
     Pending `/at` delays are held in memory. They are lost if Untether restarts. For persistent scheduled tasks, use [cron triggers](#cron-triggers) instead.
 
 !!! note "Engine and project frozen at schedule time"
-    When you run `/at`, Untether snapshots the chat's current project mapping and engine at that moment. That snapshot is what fires when the delay expires — changing `/agent`, `/ctx`, or `/planmode` afterwards does **not** affect already-scheduled delays. Cancel with `/cancel` and re-schedule if you change your mind. ([#362](https://github.com/littlebearapps/untether/issues/362))
+    When you run `/at`, Untether snapshots the engine and project that a plain message in that chat (or forum topic) would use at that moment: the topic's or chat's `/agent` default first, then the default of the project bound with `/ctx` (or the chat's project), then the global default ([#950](https://github.com/littlebearapps/untether/issues/950)). That snapshot is what fires when the delay expires — changing `/agent`, `/ctx`, or `/planmode` afterwards does **not** affect already-scheduled delays. Cancel with `/cancel` and re-schedule if you change your mind. ([#362](https://github.com/littlebearapps/untether/issues/362))
 
 ## Loop mode
 

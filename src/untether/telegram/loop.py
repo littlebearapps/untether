@@ -3368,7 +3368,9 @@ async def run_main_loop(
                             topic_store=state.topic_store,
                         )
                         tg.start_soon(
-                            dispatch_command,
+                            # #950: /at freezes the engine + context a plain
+                            # prompt here would use (topic/chat defaults).
+                            partial(dispatch_command, ambient_context=ambient_context),
                             cfg,
                             msg,
                             text,

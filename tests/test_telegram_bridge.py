@@ -5312,6 +5312,91 @@ async def test_run_main_loop_command_uses_project_default_engine(
 
 
 @pytest.mark.anyio
+async def test_950_command_context_sees_chat_engine_default_and_bound_context(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """#950: a command (e.g. /at) gets the chat's /agent default and its
+    /ctx-bound context, the same values a plain prompt in this chat uses."""
+    seen: list[commands.CommandContext] = []
+
+    class _Command:
+        id = "peek_ctx"
+        description = "peek"
+
+        async def handle(self, ctx):
+            seen.append(ctx)
+            return commands.CommandResult(text="ok")
+
+    install_entrypoints(
+        monkeypatch,
+        [
+            FakeEntryPoint(
+                "peek_ctx",
+                "untether.commands.peek_ctx:BACKEND",
+                plugins.COMMAND_GROUP,
+                loader=_Command,
+            )
+        ],
+    )
+    state_path = tmp_path / "untether.toml"
+    transport = FakeTransport()
+    codex_runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    pi_runner = ScriptRunner([Return(answer="ok")], engine="pi")
+    router = AutoRouter(
+        entries=[
+            RunnerEntry(engine=codex_runner.engine, runner=codex_runner),
+            RunnerEntry(engine=pi_runner.engine, runner=pi_runner),
+        ],
+        default_engine=codex_runner.engine,
+    )
+    (tmp_path / "beta").mkdir()
+    projects = ProjectsConfig(
+        projects={
+            "beta": ProjectConfig(
+                alias="Beta",
+                path=tmp_path / "beta",
+                worktrees_dir=Path(".worktrees"),
+            ),
+        },
+        default_project=None,
+    )
+    runtime = TransportRuntime(router=router, projects=projects, config_path=state_path)
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    await prefs.set_context(123, RunContext(project="beta"))
+    await prefs.set_default_engine(123, "pi")
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="/peek_ctx",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+
+    await run_main_loop(cfg, poller)
+
+    assert len(seen) == 1
+    assert seen[0].default_engine_override == "pi"
+    assert seen[0].ambient_context is not None
+    assert seen[0].ambient_context.project == "beta"
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_command_defaults_to_chat_project(
     monkeypatch,
 ) -> None:

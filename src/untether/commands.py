@@ -90,6 +90,13 @@ class CommandContext:
     # early toast reserved a claim can recognise its own claim in ``handle``.
     # ``None`` for text commands and callbacks without an id.
     callback_query_id: str | None = None
+    # #950: what a plain prompt in this chat/topic would run with — the
+    # topic or chat ``/agent`` default engine (``None`` = fall through to the
+    # project → global defaults) and the ambient run context (topic/chat
+    # ``/ctx`` binding or the chat's project; ``None`` = not known, use
+    # ``runtime.default_context_for_chat``).
+    default_engine_override: EngineId | None = None
+    ambient_context: RunContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
