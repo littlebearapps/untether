@@ -4867,6 +4867,10 @@ class RunOutcome:
     cancelled: bool = False
     completed: CompletedEvent | None = None
     resume: ResumeToken | None = None
+    # #905: ``completed``'s #572 stream-idle class, captured as it is
+    # consumed. The engine state's copy is rewritten by every later result,
+    # so a live session's wake turn would otherwise mask the run's own.
+    stream_idle_class: str | None = None
 
 
 async def run_runner_with_cancel(
@@ -4957,6 +4961,19 @@ async def run_runner_with_cancel(
                             first_completed = outcome.completed is None
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
+                            # #905: the runner set this result's class just
+                            # before yielding it and is suspended at the
+                            # yield, so this read belongs to ``evt``.
+                            run_stream = (
+                                stream_handle.stream
+                                if stream_handle.stream is not None
+                                else edits.stream
+                            )
+                            outcome.stream_idle_class = getattr(
+                                getattr(run_stream, "engine_state", None),
+                                "stream_idle_class",
+                                None,
+                            )
                             # #591: deliver the final answer NOW — the run
                             # generator may not return for up to the full
                             # post-result limbo window (MCP children holding
@@ -7243,10 +7260,10 @@ async def handle_message(
         completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
     ) -> bool:
         stream = edits.stream
-        engine_state = getattr(stream, "engine_state", None) if stream else None
         return _should_stream_idle_retry(
             watchdog=watchdog,
-            stream_idle_class=getattr(engine_state, "stream_idle_class", None),
+            # #905: the run's own class, not the engine state's latest.
+            stream_idle_class=run_outcome.stream_idle_class,
             run_ok=completed.ok,
             cancelled=run_outcome.cancelled,
             resume_present=(completed.resume or run_outcome.resume) is not None,

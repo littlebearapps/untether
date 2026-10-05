@@ -11198,6 +11198,9 @@ class _LiveErrorThenAnswerRunner(MockRunner):
         # Runs just before the errored result is yielded — no checkpoint in
         # between, so the bridge sees the result before ``wait_cancel`` runs.
         self.before_result: Callable[[], None] | None = None
+        # Runs once the bridge has consumed the errored result, while the
+        # session holds — models a later wake turn's result (#905).
+        self.after_result: Callable[[], None] | None = None
 
     async def run(self, prompt, resume):
         from untether.runner import publish_run_stream
@@ -11219,6 +11222,8 @@ class _LiveErrorThenAnswerRunner(MockRunner):
                     error=self.error,
                     usage=self.usage,
                 )
+                if self.after_result is not None:
+                    self.after_result()
                 await self.hang.wait()
             else:
                 yield CompletedEvent(
@@ -11323,6 +11328,65 @@ async def test_900_error_held_for_the_stream_idle_retry(monkeypatch) -> None:
     assert not any("boom-900" in t for t in texts)
     assert any("Recovered 900." in t for t in texts)
     assert len(runner.calls) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("wake_class", [None, "type_b"], ids=["ok", "type_b"])
+async def test_905_wake_result_does_not_mask_the_runs_stream_idle_class(
+    monkeypatch, wake_class: str | None
+) -> None:
+    """#905: the Claude runner rewrites ``stream_idle_class`` on every
+    ``result``, so a wake turn's result landing before the live session
+    closes used to replace the run's own Type-A class — the post-return
+    #572 retry then read the wake's class and silently didn't retry."""
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    runner = _LiveErrorThenAnswerRunner(
+        hang=anyio.Event(),
+        stream_idle_class="type_a",
+        error=_572_STREAM_IDLE_ERROR + " boom-900",
+        usage=dict(_572_USAGE),
+    )
+
+    def _wake_result() -> None:
+        runner.stream.engine_state.stream_idle_class = wake_class
+
+    runner.after_result = _wake_result
+    transport, early, logs = await _900_drive(
+        runner, resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-900")
+    )
+    assert not early
+    events = [r.get("event") for r in logs]
+    assert "claude.stream_idle.auto_retry" in events
+    texts = _900_texts(transport)
+    assert not any("boom-900" in t for t in texts)
+    assert any("Recovered 900." in t for t in texts)
+    assert len(runner.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_905_wake_type_a_does_not_retry_a_non_stream_idle_error(
+    monkeypatch,
+) -> None:
+    """#905 converse: the run's own (non-stream-idle) error is not retried
+    just because a later wake result was a Type-A stall."""
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    runner = _LiveErrorThenAnswerRunner(
+        hang=anyio.Event(),
+        stream_idle_class=None,
+        usage=dict(_572_USAGE),
+    )
+
+    def _wake_result() -> None:
+        runner.stream.engine_state.stream_idle_class = "type_a"
+
+    runner.after_result = _wake_result
+    transport, _early, logs = await _900_drive(
+        runner, resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-900")
+    )
+    events = [r.get("event") for r in logs]
+    assert "claude.stream_idle.auto_retry" not in events
+    assert sum("boom-900" in t for t in _900_texts(transport)) == 1
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.anyio

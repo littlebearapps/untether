@@ -8806,6 +8806,8 @@ def _translate_claude_event_base(
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.
+            # Overwritten by every result; the bridge snapshots it as it
+            # consumes the run's own CompletedEvent (#905).
             state.stream_idle_class = None if ok else _stream_idle_timeout_class(event)
 
             # #333: arm the post-result idle watchdog. Reset on every
