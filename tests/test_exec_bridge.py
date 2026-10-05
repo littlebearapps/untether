@@ -7828,6 +7828,87 @@ async def test_591_error_result_waits_for_post_return_path() -> None:
         hang.set()
 
 
+class _StallAfterFinalSendTransport(FakeTransport):
+    """A final send (``options.replace`` set) lands, then the call stalls —
+    the #928 shape: Telegram's replace-delete of the progress message hit a
+    ``ReadTimeout`` retry after the final was already on the wire."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stalled = False
+
+    async def send(
+        self,
+        *,
+        channel_id: int | str,
+        message: RenderedMessage,
+        options: SendOptions | None = None,
+    ) -> MessageRef:
+        ref = await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+        if options is not None and options.replace is not None and not self.stalled:
+            self.stalled = True
+            await anyio.sleep_forever()
+        return ref
+
+
+@pytest.mark.anyio
+async def test_928_early_delivery_timeout_after_send_does_not_redeliver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#928: the early final's send landed but the call then outlived the
+    early-delivery bound. The bound cancelled delivery before the sent flag
+    was recorded, so the post-return path at session close delivered the
+    same final again — a second ``runner.completed`` and a duplicate
+    message. The send is committed once handed to the transport; a timeout
+    is logged, never redelivered."""
+    import untether.runner_bridge as rb
+
+    monkeypatch.setattr(rb, "_EARLY_DELIVERY_TIMEOUT_S", 0.2)
+    transport = _StallAfterFinalSendTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # The generator returns at session close with the same result.
+        [Emit(_completed_591()), Wait(hang), Return(answer="early answer 591")],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    def _final_sends() -> list[dict]:
+        return [
+            c for c in transport.send_calls if "early answer 591" in c["message"].text
+        ]
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def _run() -> None:
+                await handle_message(
+                    cfg,
+                    runner=runner,
+                    incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                    resume_token=None,
+                )
+
+            tg.start_soon(_run)
+            with anyio.fail_after(5.0):
+                while not any(
+                    r.get("event") == "final.early_delivery_timeout" for r in logs
+                ):
+                    await anyio.sleep(0.01)
+            # Session closes: the run generator returns.
+            hang.set()
+
+    assert len(_final_sends()) == 1, "final delivered twice"
+    completed = [r for r in logs if r.get("event") == "runner.completed"]
+    assert len(completed) == 1, completed
+
+
 def test_591_note_final_records_without_repaint() -> None:
     """note_final feeds the tracker but does NOT bump event_seq — a bumped
     seq would wake _run_loop into painting a progress frame that races the

@@ -465,6 +465,37 @@ async def test_delete_drops_pending_edits() -> None:
 
 
 @pytest.mark.anyio
+async def test_928_replace_send_returns_before_replace_delete() -> None:
+    """#928: a replace send returns once the new message lands. The delete of
+    the replaced message is queued, not awaited — a ``deleteMessage`` stuck
+    in a network retry held the early final delivery past its bound, so the
+    final was treated as undelivered and sent again at session close."""
+    bot = FakeBot()
+    delete_release = anyio.Event()
+    original_delete = bot.delete_message
+
+    async def slow_delete(chat_id: int, message_id: int) -> bool:
+        await delete_release.wait()
+        return await original_delete(chat_id, message_id)
+
+    bot.delete_message = slow_delete  # type: ignore[method-assign]
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
+    await client.send_message(chat_id=1, text="progress")  # starts the outbox
+
+    with anyio.fail_after(1):
+        sent = await client.send_message(chat_id=1, text="final", replace_message_id=5)
+    assert sent is not None
+    assert bot.delete_calls == []
+
+    # The delete still goes out once Telegram answers.
+    delete_release.set()
+    with anyio.fail_after(1):
+        while not bot.delete_calls:
+            await anyio.lowlevel.checkpoint()
+    assert bot.delete_calls == [(1, 5)]
+
+
+@pytest.mark.anyio
 async def test_retry_after_retries_once() -> None:
     bot = FakeBot()
     bot.retry_after = 0.0

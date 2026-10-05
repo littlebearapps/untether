@@ -4953,6 +4953,11 @@ class RunOutcome:
     stream_idle_class: str | None = None
 
 
+#: #614/#618: the bound on the shielded early final delivery (#591). 60 s,
+#: not less — a 4-chunk final under group-chat outbox pacing takes 15 s+.
+_EARLY_DELIVERY_TIMEOUT_S = 60.0
+
+
 async def run_runner_with_cancel(
     runner: Runner,
     *,
@@ -5100,8 +5105,18 @@ async def run_runner_with_cancel(
                                     # timeout that fires between the last
                                     # chunk and the sent-flag re-creates the
                                     # spurious-cancelled artifact.
-                                    with anyio.move_on_after(60, shield=True):
+                                    with anyio.move_on_after(
+                                        _EARLY_DELIVERY_TIMEOUT_S, shield=True
+                                    ) as delivery_scope:
                                         await on_completed(evt, outcome)
+                                    if delivery_scope.cancelled_caught:
+                                        # #928: was silent — a send that
+                                        # landed then stalled (e.g. on the
+                                        # replace-delete) looked undelivered.
+                                        logger.warning(
+                                            "final.early_delivery_timeout",
+                                            timeout_s=_EARLY_DELIVERY_TIMEOUT_S,
+                                        )
                                 except Exception:  # noqa: BLE001
                                     logger.warning(
                                         "final.early_delivery_failed",
@@ -7166,19 +7181,28 @@ async def handle_message(
         if t_edits is not None:
             await t_edits.stop_repaints()
 
-        final_ref = await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=t_reply_to,
-            progress_ref=t_progress_ref,
-            message=final_rendered,
-            notify=t_notify,
-            edit_ref=edit_ref,
-            replace_ref=t_progress_ref,
-            delete_tag="final",
-            thread_id=incoming.thread_id,
-        )
+        # #928: committed once handed to the transport. The outbox delivers a
+        # queued send even if this await is cut short (the early path's
+        # bounded scope), so a timeout after the send landed — e.g. stalled on
+        # the replace-delete — must not let the post-return path send it
+        # again. Only a raised send (nothing queued) stays undelivered.
         delivery["sent"] = True
+        try:
+            final_ref = await send_result_message(
+                cfg,
+                channel_id=incoming.channel_id,
+                reply_to=t_reply_to,
+                progress_ref=t_progress_ref,
+                message=final_rendered,
+                notify=t_notify,
+                edit_ref=edit_ref,
+                replace_ref=t_progress_ref,
+                delete_tag="final",
+                thread_id=incoming.thread_id,
+            )
+        except Exception:
+            delivery["sent"] = False
+            raise
         if (
             capped_head is not None
             and final_ref is not None

@@ -212,7 +212,12 @@ class TelegramClient:
             chat_id=chat_id,
         )
         if replace_message_id is not None and result is not None:
-            await self.delete_message(chat_id=chat_id, message_id=replace_message_id)
+            # #928: queue the replaced message's delete without awaiting it —
+            # the caller's message has landed, and a slow delete (network
+            # retry) must not hold a final's delivery past its bound.
+            await self.delete_message(
+                chat_id=chat_id, message_id=replace_message_id, wait=False
+            )
         return result
 
     async def send_document(
@@ -293,7 +298,10 @@ class TelegramClient:
         self,
         chat_id: int,
         message_id: int,
+        *,
+        wait: bool = True,
     ) -> bool:
+        """``wait=False`` queues the delete and returns False at once."""
         await self.drop_pending_edits(chat_id=chat_id, message_id=message_id)
 
         async def execute() -> bool:
@@ -309,6 +317,7 @@ class TelegramClient:
                 execute=execute,
                 priority=DELETE_PRIORITY,
                 chat_id=chat_id,
+                wait=wait,
             )
         )
 
