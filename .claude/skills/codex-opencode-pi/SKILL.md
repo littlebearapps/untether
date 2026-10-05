@@ -45,14 +45,15 @@ These three engines are **non-interactive only** — no control channel, no perm
 ### CLI invocation
 
 ```bash
-codex [--model MODEL] [-c model_reasoning_effort=LEVEL] \
+codex [extra_args…] [--profile P] [--model MODEL] [-c model_reasoning_effort=LEVEL] \
   exec --json --skip-git-repo-check --color=never \
   [--sandbox read-only] [resume <thread_id> | resume --last] -
 ```
 
 - Prompt on stdin (trailing `-` means read stdin)
 - Resume: `resume <thread_id> -` (`resume --last -` for `/continue`)
-- `--sandbox` only in `safe` permission mode, and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
+- Safe mode is genuinely read-only: `--sandbox read-only` (exec-level, so it outranks a root-level sandbox flag), only in `safe` permission mode and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
+- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209)
 - `--skip-git-repo-check --color=never` for clean output
 
 ### JSONL events

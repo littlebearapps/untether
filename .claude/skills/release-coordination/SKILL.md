@@ -25,7 +25,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 | `CHANGELOG.md` | Release notes with issue links |
 | `uv.lock` | Locked dependency versions |
 | `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing; no reviewer gate — the release merge is the approval, see Phase 7) |
-| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, lockfile, audit, bandit, docs, testpypi, release-validation) |
+| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, install-test, lockfile, pip-audit, bandit, docs, testpypi-publish, release-validation) |
 | `.github/workflows/prerelease-deps.yml` | Weekly pre-release dependency testing (informational) |
 | `scripts/validate_release.py` | Automated changelog/version validation (runs in CI on version-bump PRs) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
@@ -87,7 +87,11 @@ Analyse commits since the last tag and determine the version bump:
 | **Minor** (0.x.0) | New features, new commands, new engine support, config additions | `/browse` command, Pi runner, cost tracking |
 | **Major** (x.0.0) | Breaking changes to config format, runner protocol, or public API | Remove `untether.bridge`, change TOML schema |
 
-**Decision rule**: If ANY commit is breaking → major. If ANY commit adds features → minor. Otherwise → patch.
+**Decision rule (pre-1.0, `0.x`)**: if ANY entry is `### breaking` or adds features → **minor**. Otherwise → patch. A
+breaking line never ships as a patch — anyone pinned to `~=0.35` would get it. Example: the 0.35.5rc1–rc20 line carried
+six `### breaking` entries, so it ships as **v0.36.0** and its rcs continue as `0.36.0rcN`
+([#947](https://github.com/littlebearapps/untether/issues/947)). If the version changes mid-line, rename the
+milestone, the CHANGELOG heading and the rc numbering together.
 
 ## Phase 3: Changelog drafting
 
@@ -123,7 +127,7 @@ Analyse commits since the last tag and determine the version bump:
 - Every entry links to a GitHub issue: `[#N](...)`
 - Sub-bullets for implementation details (no issue link needed)
 - Sections appear only when they have entries (omit empty sections)
-- Section order: `fixes` → `changes` → `breaking` → `docs` → `tests`
+- Put `### breaking` first when present (with a **Migration:** line); the other sections' order isn't enforced
 - One changelog section per release — no retroactive edits to prior sections
 - Date is the date of the release tag, not the date of the commit
 
@@ -259,7 +263,7 @@ scripts/run-integration-tests.sh X.Y.ZrcN --manual \
   --notes "Tier 7 + Tier 1 all pass on @untether_dev_bot. No log warnings."
 ```
 
-The marker lands at `~/.untether-dev/integration-test-pass-X.Y.ZrcN.json` with timestamp, tester, tiers, and notes. **One marker per version.** If rc14 → rc15, write a new marker for rc15.
+The marker lands at `~/.untether-dev/integration-test-pass-X.Y.ZrcN.json` with timestamp, tester, tiers, and notes. **One marker per version.** If `0.36.0rc1` → `0.36.0rc2`, write a new marker for rc2.
 
 To invalidate a marker (e.g. discovered a regression post-test):
 
@@ -277,12 +281,12 @@ Before tagging a final release, publish a release candidate to TestPyPI and roll
 ### Enter the rc cycle
 
 ```bash
-# Bump to rc version (no changelog entry needed)
+# Bump to rc version on the batch's feature/fix branch (no changelog entry needed)
 # Edit pyproject.toml: version = "X.Y.Zrc1"
 uv lock
 git add pyproject.toml uv.lock
-git commit -m "chore: staging X.Y.Zrc1"
-git push origin dev          # dev push, NOT master — CI publishes to TestPyPI
+git commit -m "chore(release): X.Y.Zrc1"
+git push -u origin <branch>  # then PR → dev (/pr-dev); the dev merge publishes to TestPyPI
 
 # Wait for CI to publish to TestPyPI (~3 min), then:
 #   1. Run integration tests via @untether_dev_bot (Phase 5)
@@ -330,8 +334,8 @@ systemctl --user restart untether
 
 - rc versions are **NOT** git-tagged (avoids triggering `release.yml`)
 - rc versions do **NOT** require changelog entries (`validate_release.py` skips them)
-- Commit message: `chore: staging X.Y.ZrcN`
-- Attestation marker is **per-version** — rc14 → rc15 each get their own
+- Commit message: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare bump is `chore(release): X.Y.ZrcN`
+- Attestation marker is **per-version** — `0.36.0rc1` → `0.36.0rc2` each get their own
 - Partial fleet failures are reported but NOT auto-rolled-back; operator decides
 
 ## Phase 7: Merge to master (single-gate release)

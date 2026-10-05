@@ -39,7 +39,7 @@ Runner (Protocol)
       CodexRunner
       OpenCodeRunner
       PiRunner
-      GeminiRunner, AmpRunner (deprecated, removed in 0.36.0)
+      GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
   (each concrete runner also mixes in ResumeTokenMixin)
 ```
@@ -142,6 +142,8 @@ Locking rules:
 1. new_state(prompt, resume)           → create per-run state
 2. build_args(prompt, resume, state)   → construct CLI command
 3. stdin_payload(prompt, resume, state) → optional stdin data
+   _check_prespawn_ram_guard(...)      → RAM / max_concurrent_engine_runs gate before ANY spawn
+                                          (#350/#589; every spawn site incl. ClaudeRunner, pinned by #838)
 4. manage_subprocess(cmd, ...)         → spawn with PIPE for stdin/stdout/stderr
    publish_run_stream(stream, pid)     → create JsonlStreamState, publish stream + PID
                                           together to the per-run RunStreamHandle (#510)

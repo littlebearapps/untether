@@ -22,7 +22,7 @@ release). Key points:
 - **Authority boundary (mirrors `release-guard.sh`).** `gh pr create
   --base master` is **allowed**. Merging the `dev`→`master` PR is allowed **only**
   after Nathan explicitly approves *this* release in the conversation ("merge it",
-  "release 0.35.5"), and only as `gh pr merge <n> --squash --admin`. The guard
+  "release X.Y.Z"), and only as `gh pr merge <n> --squash --admin`. The guard
   then checks the head is `dev` and CI is green, and **asks Nathan to confirm** in
   the permission prompt. A finished `/pr-main X.Y.Z`, a green CI or an earlier
   approval of a different version is NOT approval. `git push master`, `git tag
@@ -45,7 +45,7 @@ release). Key points:
 | `/pr-main X.Y.Z` | Prepare the stable release + open the `dev`→`master` PR, then STOP |
 | `/pr-main X.Y.Z --merge` | Only after Nathan's explicit go: merge the open release PR (ask-gated) + verify the PyPI publish (M-8) |
 | `/pr-main X.Y.Z --dry-run` | Prepare + validate + print the would-be PR body; open nothing |
-| `/pr-main --rc-summary` | Collapse the rc CHANGELOG sections + validate only; no bump, no PR |
+| `/pr-main --rc-summary` | Finalise the `(unreleased)` CHANGELOG section (M-3) + validate only; no bump, no PR |
 | `/pr-main --help` | Usage, then stop |
 
 ## Flow
@@ -67,9 +67,15 @@ release). Key points:
 
 ### M-3. Finalise the CHANGELOG
 
-- Collapse the accumulated `rc` entries into ONE `## vX.Y.Z (YYYY-MM-DD)` section
-  with `### fixes/changes/breaking/docs/tests` subsections; every entry keeps its
-  `[#N](…)` issue link.
+- The rc line accumulates under ONE `## vX.Y.Z (unreleased)` heading (rcs carry no
+  sections of their own). Date it — `## vX.Y.Z (YYYY-MM-DD)` — drop the maintainer
+  `<!-- Status … -->` comment, keep `### breaking` first (each with its
+  **Migration:** line), then `fixes/changes/docs/tests`; every entry keeps its
+  `[#N](…)` issue link and duplicate rc-era entries are merged.
+- If the line was renumbered mid-cycle (the 0.35.5rc1–rc20 line ships as v0.36.0,
+  #947), confirm the heading, `pyproject.toml`, the milestone and the attestation
+  marker all use the new version, and keep the one-line note naming the rc range it
+  went through.
 - Run `python3 scripts/validate_release.py` until clean (section exists, ISO
   date, issue links present, allowed subsection headings).
 

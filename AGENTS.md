@@ -1,6 +1,6 @@
 # Untether — Agent Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated, removed in 0.36.0 — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 ## Architecture
 

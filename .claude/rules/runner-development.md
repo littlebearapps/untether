@@ -77,7 +77,9 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 
 ## Deprecated engines — sweep exemption
 
-`gemini` and `amp` are **deprecated** and targeted for removal in 0.36.0. Both
+`gemini` and `amp` are **deprecated and no longer supported**. They still ship
+and load, but no removal is scheduled (a future release may drop them; tracked
+in [#722](https://github.com/littlebearapps/untether/issues/722)). Both
 are non-functional on the maintainer's accounts today (Gemini: upstream EOL for
 individual accounts 2026-06-18; AMP: remote `426` refusal of out-of-date
 clients), and neither has observed Untether usage.
@@ -89,7 +91,7 @@ sweep breaks `gemini` or `amp`:
 
 > **`xfail`/`skip` the affected test — do NOT fix the runner.**
 
-Mark it with a comment pointing at the removal issue. This is the whole point of
+Mark it with a comment pointing at #722. This is the whole point of
 the deprecation: without this rule the posture buys nothing, because a
 required-green `test_amp_runner.py` drags the fix back onto the critical path.
 
@@ -105,7 +107,7 @@ What does NOT apply:
 - Required integration testing (both dropped from the Tier 1 matrix — see `docs/reference/integration-testing.md`)
 - Investigation of upstream protocol changes
 
-Do not delete their tests before the removal release — they run against fake
+Do not delete their tests while the engines still ship — they run against fake
 CLIs, cost nothing, and deleting ~100 tests would flatter the 80% coverage gate
 while reducing compatibility coverage.
 

@@ -1,6 +1,6 @@
 ---
 name: delivery-reviewer
-description: Advisory, non-authoring reviewer of a /pr-dev or /pr-main hand-off before merge. Checks PR base (dev, never master for /pr-dev; for /pr-main the release PR opened, and merged only via --merge after Nathan's explicit approval), batch-cohesion, CHANGELOG issue-linking + rc-skip correctness, FAQ touch-up when a user-visible surface changed, `docs/reference/test-catalog.md` reconciliation, the table-shaped PR body, needs-verification, green-locally evidence, and explicit-path staging. Returns a verdict + gaps — it never edits, stages, opens, or merges anything. Use before merging a dev PR or before a release PR is merged.
+description: Advisory, non-authoring reviewer of a /pr-dev or /pr-main hand-off before merge. Checks PR base (dev, never master for /pr-dev; for /pr-main the release PR opened, and merged only via --merge after Nathan's explicit approval), batch-cohesion, CHANGELOG issue-linking + placement under the `(unreleased)` heading, FAQ touch-up when a user-visible surface changed, `docs/reference/test-catalog.md` reconciliation, the table-shaped PR body, needs-verification, green-locally evidence, and explicit-path staging. Returns a verdict + gaps — it never edits, stages, opens, or merges anything. Use before merging a dev PR or before a release PR is merged.
 tools: Read, Glob, Grep, Bash
 ---
 
@@ -27,8 +27,9 @@ merge-ready and surface gaps; you **author nothing**.
 2. **Green locally.** `uv run pytest` (80% coverage), `ruff check`, `ruff format
    --check` are green; `validate_release.py` clean when a version changed. No red
    pushed.
-3. **Docs completion (folded-in).** CHANGELOG entry is issue-linked (`[#N]`) with
-   correct subsections; **rc versions correctly skip** the changelog. FAQ
+3. **Docs completion (folded-in).** CHANGELOG entry is issue-linked (`[#N]`),
+   under the current `## vX.Y.Z (unreleased)` heading (no per-rc heading) and in
+   the correct subsection; a `### breaking` entry carries a **Migration:** line. FAQ
    (`docs/faq/faq.md`) touched when a user-visible surface changed (per
    `.claude/rules/help-faq.md`). `docs/reference/test-catalog.md` + `docs/reference/*`
    reconciled when a runner/schema/telegram surface changed.
@@ -40,8 +41,10 @@ merge-ready and surface gaps; you **author nothing**.
    applied where tracked issues are fixed.
 6. **Staging discipline.** Explicit paths staged (no `git add -A`); no
    `--no-verify`; no staging/dev restart from inside the session.
-7. **/pr-main specifics.** Stable version (no rc suffix); rc CHANGELOG sections
-   collapsed into one dated section; `uv lock` synced; attestation marker for the
+7. **/pr-main specifics.** Stable version (no rc suffix) that matches the
+   milestone and the CHANGELOG heading (pre-1.0: a line with `### breaking` is a
+   minor bump, never a patch); the `(unreleased)` section dated, its status
+   comment dropped; `uv lock` synced; attestation marker for the
    version surfaced (SHA-bound) or its absence flagged.
 
 ## Output
