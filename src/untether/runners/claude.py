@@ -1095,6 +1095,63 @@ def _lifecycle_exit_reason(
     return exit_reason  # the await completed: exited_after_close|sigint|sigterm|sigkill
 
 
+# #1001: a background task that ended this close to an unexpected exit was
+# stopped by it — the dying CLI ends its tasks itself (an empty snapshot, then
+# ``task_updated`` with a failure status) a moment before it exits.
+_DEATH_TASK_WINDOW_S = 10.0
+_TASK_DONE_STATUSES = frozenset({"completed", "done", "success"})
+
+
+def _exit_signal(rc: int | None) -> int | None:
+    """#1001: the signal behind an exit code — ``-N`` (killed outright) or
+    ``128 + N`` (the CLI handled the signal and exited, e.g. 143 for
+    SIGTERM). None for an ordinary exit."""
+    if rc is None:
+        return None
+    if rc < 0:
+        return -rc
+    if 128 < rc < 128 + 65:
+        return rc - 128
+    return None
+
+
+def _signal_name(sig: int | None) -> str | None:
+    if sig is None:
+        return None
+    try:
+        return signal.Signals(sig).name
+    except ValueError:
+        return f"signal {sig}"
+
+
+def _exit_cause(rc: int | None) -> str:
+    """#1001: ``external_signal`` (a signal Untether didn't send), ``crash``
+    (any other non-zero exit) or ``exited`` (rc 0 with work still live)."""
+    if _exit_signal(rc) is not None:
+        return "external_signal"
+    return "crash" if rc else "exited"
+
+
+def _tasks_stopped_by_exit(
+    state: ClaudeStreamState, *, since: float
+) -> list[ClaudeTask]:
+    """#1001: the background tasks an unexpected exit took down — still live
+    in the map (SIGKILL: the CLI said nothing), or ended at or after
+    ``since`` with anything but a success (SIGTERM: the CLI ended them as it
+    died, usually as ``failed``)."""
+    stopped: list[ClaudeTask] = []
+    for task in state.tasks.values():
+        if not task.is_backgrounded:
+            continue
+        if task.status in _TASK_LIVE_STATUSES or (
+            task.ended_at is not None
+            and task.ended_at >= since
+            and task.status not in _TASK_DONE_STATUSES
+        ):
+            stopped.append(task)
+    return stopped
+
+
 def _close_grace_diag(pid: int, start: Any) -> dict[str, Any]:
     """#791: a structured process snapshot for a live close that overran its
     grace — what the CLI was doing when Untether had to signal it."""
@@ -2086,6 +2143,9 @@ class ClaudeStreamState:
     # #776: why the live session's stdin was closed (idle_no_tasks /
     # max_hold / abs_cap / cancel / new / drain); None while still open.
     live_close_reason: str | None = None
+    # #1001: the idle live session's process died without a close by
+    # Untether (``external_signal`` / ``crash`` / ``exited``); None otherwise.
+    live_exit_cause: str | None = None
 
     # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
     # separate dict (rather than converting `live_bg_agents` to
@@ -11136,6 +11196,84 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         with anyio.CancelScope(shield=True), anyio.move_on_after(5):
             await _notify_live_listeners(live, "closed", payload)
 
+    async def _note_live_session_death(
+        self, *, state: ClaudeStreamState, rc: int | None, run_logger: Any
+    ) -> None:
+        """#1001: the live session's CLI exited while idle without Untether
+        closing it — killed from outside (SIGTERM/SIGKILL, OOM killer) or
+        crashed between turns. ``_lifecycle_exit_reason`` already calls this
+        ``reader_done`` with ``close_reason=None``, but nothing acted on it:
+        no chat notice, background rows read ❌ failed (the dying CLI ends its
+        tasks itself) and ``session.summary`` said ``ok=True``.
+
+        Records ``state.live_exit_cause`` (read by the bridge for the status
+        message's close reason and ``session.summary``), marks the tasks the
+        exit took down as ``stopped``, logs
+        ``claude.live_session.died_unexpectedly`` and sends listeners one
+        ``"died"`` event. Nothing for an Untether close (``close_reason``
+        set), a turn in flight (the bridge's turn router already reports an
+        interrupted turn, #806), a restart (the drain notice covers it), or a
+        clean rc 0 exit with nothing left running (#820 ``reader_done``)."""
+        sid = state.factory.resume.value if state.factory.resume is not None else None
+        live = _LIVE_SESSIONS.get(sid) if sid else None
+        if (
+            live is None
+            or live.state is not state  # another process owns the id now
+            or live.closing
+            or state.live_close_reason is not None
+            or not live.idle
+        ):
+            return
+        from ..shutdown import is_shutting_down
+
+        if is_shutting_down():
+            return
+        now = time.monotonic()
+        stopped = _tasks_stopped_by_exit(state, since=now - _DEATH_TASK_WINDOW_S)
+        if not rc and not stopped:
+            return
+        cause = _exit_cause(rc)
+        sig = _exit_signal(rc)
+        for task in stopped:
+            task.status = "stopped"
+            if task.ended_at is None:
+                task.ended_at = now
+        state.live_exit_cause = cause
+        quarantined = False
+        with contextlib.suppress(Exception):
+            quarantined = get_quarantine_store().is_quarantined(self.engine, sid)
+        tasks = [t.description or t.task_type or "task" for t in stopped]
+        run_logger.warning(
+            "claude.live_session.died_unexpectedly",
+            session_id=sid,
+            pid=state.pid,
+            rc=rc,
+            signal=sig,
+            signal_name=_signal_name(sig),
+            exit_cause=cause,
+            live_tasks=len(stopped),
+            task_ids=[t.task_id for t in stopped][:10],
+            idle_s=(
+                round(now - live.idle_period_started, 1)
+                if live.idle_period_started is not None
+                else None
+            ),
+            last_progress_age_s=_last_progress_age_s(state),
+            age_s=round(now - live.spawned_at, 1),
+            quarantined=quarantined,
+        )
+        payload = {
+            "rc": rc,
+            "signal": sig,
+            "signal_name": _signal_name(sig),
+            "exit_cause": cause,
+            "tasks": tasks,
+            "task_ids": [t.task_id for t in stopped],
+            "quarantined": quarantined,
+        }
+        with anyio.CancelScope(shield=True), anyio.move_on_after(5):
+            await _notify_live_listeners(live, "died", payload)
+
     async def _await_live_exit_or_force(
         self,
         *,
@@ -12609,6 +12747,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 stream.proc_returncode = rc
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
                 if stream.did_emit_completed:
+                    if state.live_mode:
+                        # #1001: an idle live session that died on its own.
+                        await self._note_live_session_death(
+                            state=state, rc=rc, run_logger=run_logger
+                        )
                     return
                 found_session = stream.found_session
                 if rc != 0:

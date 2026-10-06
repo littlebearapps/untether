@@ -50,6 +50,8 @@ _ENV = (
     "FAKE_CLAUDE_RESULT_DELAY_S",
     # #928
     "FAKE_CLAUDE_NO_QUERY_INIT",
+    # #1001
+    "FAKE_CLAUDE_DEATH",
 )
 
 
@@ -312,6 +314,65 @@ async def test_829_unclean_close_warns_of_a_fresh_session(
     warning = [c for c in transport.send_calls if "fresh session" in c["message"].text]
     assert len(warning) == 1 and warning[0]["options"].notify is False
     assert not any("Reply to continue" in t for t in _texts(transport))
+
+
+def _summary(logs: list[dict]) -> dict:
+    (summary,) = [e for e in logs if e.get("event") == "session.summary"]
+    return summary
+
+
+async def test_1001_external_sigterm_while_idle_is_reported_in_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1001 end to end: an idle session held open by two background tasks
+    is SIGTERM'd from outside. The chat gets one pushed notice replying to
+    the prompt that launched the work, the status message ends ⏹️ stopped
+    (the dying CLI had marked both tasks failed), and ``session.summary``
+    is ``ok=False`` with ``exit_cause``."""
+    _watchdog(monkeypatch)
+    _progress(monkeypatch, show_background_tasks=True)
+    os.environ["FAKE_CLAUDE_DEATH"] = "term"
+    with capture_logs() as logs:
+        transport = await _drive("killed_while_idle", wake_s=1.5)
+    died = [
+        c for c in transport.send_calls if "ended unexpectedly" in c["message"].text
+    ]
+    assert len(died) == 1
+    assert died[0]["message"].text == (
+        "⚠️ The Claude session ended unexpectedly (terminated by SIGTERM / "
+        "exit 143) — 2 background tasks were stopped: bg b1, bg b2.\n"
+        "↩️ Reply to continue in the same session."
+    )
+    assert died[0]["options"].notify is True
+    assert died[0]["options"].reply_to.message_id == 10
+    status = next(
+        c for c in transport.send_calls if c["message"].text.startswith("⏳ background")
+    )
+    final = [
+        c["message"].text for c in transport.edit_calls if c["ref"] == status["ref"]
+    ][-1]
+    assert final.splitlines()[0] == (
+        "⏹️ background tasks ended · 2 stopped (session ended unexpectedly)"
+    )
+    assert "❌" not in final and "failed" not in final
+    assert "⏹️ bg b1 stopped" in final and "⏹️ bg b2 stopped" in final
+    summary = _summary(logs)
+    assert summary["ok"] is False
+    assert summary["exit_cause"] == "external_signal"
+    assert summary["cancelled"] is False
+
+
+async def test_1001_untether_close_keeps_ok_summary_and_no_death_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog(monkeypatch, post_result_bg_max_hold=0.5)
+    with capture_logs() as logs:
+        transport = await _drive("killed_while_idle", wake_s=30)
+    texts = _texts(transport)
+    assert any("Closing session" in t for t in texts)
+    assert not any("ended unexpectedly" in t for t in texts)
+    summary = _summary(logs)
+    assert summary["ok"] is True and "exit_cause" not in summary
 
 
 async def test_829_idle_close_without_tasks_sends_no_closed_line(

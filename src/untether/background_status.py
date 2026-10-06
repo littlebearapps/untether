@@ -387,6 +387,7 @@ _CLOSE_REASONS = {
     "loop_fire": "loop iteration due",  # #925
     "wake_cap": "self-paced wake-up limit reached",  # #925
     "cron_suppressed": "scheduled task stopped",  # #925
+    "died": "session ended unexpectedly",  # #1001
 }
 
 
@@ -973,6 +974,34 @@ class BackgroundStatusManager:
                 already_announced=already_announced,
                 turn=turn,
                 announced_turns=list(announced_turns),
+            )
+
+    async def session_died(self, task_ids: Iterable[str]) -> None:
+        """#1001: the live session's process died without a close. The dying
+        CLI usually ends its tasks itself first, so the poll may already have
+        finalised the message as if the work had finished (rows ❌ failed).
+        Finalise — or re-finalise that message — under the ``died`` reason;
+        the runner has marked the tasks it took down ``stopped`` (⏹️). A
+        message finalised earlier for other tasks is left alone."""
+        ids = {str(t) for t in task_ids}
+        async with self._lock:
+            panel = self.panel
+            if panel is None or panel.ref is None:
+                return
+            if not panel.finalised:
+                panel.track(self._tasks())
+                await panel.finalise("died")
+                return
+            if panel.close_reason is not None or not ids & set(panel.tasks):
+                return
+            panel.close_reason = "died"
+            await panel._edit(panel.render())
+            logger.info(
+                "background_status.refinalised",
+                channel_id=self._channel_id,
+                message_id=panel.ref.message_id,
+                tasks=len(panel.tasks),
+                reason=panel.close_reason,
             )
 
     async def aclose(self, reason: str | None) -> None:
