@@ -6,7 +6,7 @@ session. **When you add or substantially change a test file, update its entry he
 
 ## Test files
 
-6367 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+6389 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Every `test_*.py` file in `tests/` is listed below. Counts come from `uv run pytest --collect-only -q`. The detailed entries come first in their original order; the remaining files follow, grouped by area, under **Other test files**.
 
