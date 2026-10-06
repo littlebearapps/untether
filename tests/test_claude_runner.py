@@ -3243,7 +3243,8 @@ def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
     assert "live turn 3" in diag
     assert "session cost: $12.38" in diag
     assert " cost: $12.38" not in diag.replace("session cost: $12.38", "")
-    assert "api:" not in diag
+    # No earlier API time either: the cumulative figure is labelled too.
+    assert diag.endswith("session cost: $12.38 · session api: 900ms")
     assert "new" not in diag.split(" · ")
 
 
@@ -3310,6 +3311,57 @@ def test_889_first_turn_error_line_unchanged() -> None:
     completed = next(e for e in events if isinstance(e, CompletedEvent))
     assert completed.error == (
         "boom\nsession: 681bd6d5 · new · turns: 1 · cost: $1.50 · api: 3000ms"
+    )
+
+
+def _resumed_error(state: ClaudeStreamState) -> str:
+    state.resumed = True
+    state.factory.started(ResumeToken(engine="claude", value="681bd6d5-aaaa-bbbb"))
+    events = translate_claude_event(
+        _live_result(cost=1.16, api_ms=38421, is_error=True, text="boom"),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.error is not None
+    return completed.error.split("\n", 1)[1]
+
+
+def test_889_resumed_error_shows_this_runs_cost_from_ledger() -> None:
+    """#889 (resumed half): a resumed run's result carries the whole
+    session's cost and API time. With the session's previous total in the
+    cost ledger the line shows this run's own cost plus a labelled session
+    total — not the cumulative figure as ``cost:``."""
+    from untether.session_costs import get_session_cost_ledger
+
+    # conftest's per-test in-memory ledger.
+    get_session_cost_ledger().record(
+        "claude", "681bd6d5-aaaa-bbbb", 1.05, resumed=False
+    )
+    diag = _resumed_error(ClaudeStreamState())
+    assert diag == (
+        "session: 681bd6d5 · resumed · turns: 1 · cost: $0.11"
+        " · session cost: $1.16 · session api: 38421ms"
+    )
+
+
+def test_889_resumed_error_uses_absorbed_baseline() -> None:
+    """#889: no ledger entry, but the resume guard absorbed the previous
+    process's result — its total is the baseline."""
+    state = ClaudeStreamState()
+    state.absorbed_cost_baseline = 1.00
+    diag = _resumed_error(state)
+    assert "cost: $0.16 · session cost: $1.16" in diag
+
+
+def test_889_resumed_error_without_baseline_labels_session_figures() -> None:
+    """#889: no earlier total known → the figures are labelled as the
+    session's, never passed off as this run's."""
+    diag = _resumed_error(ClaudeStreamState())
+    assert diag == (
+        "session: 681bd6d5 · resumed · turns: 1"
+        " · session cost: $1.16 · session api: 38421ms"
     )
 
 

@@ -65,7 +65,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
-from ..utils.paths import get_run_base_dir, get_run_channel_id
+from ..utils.paths import get_run_base_dir, get_run_channel_id, get_run_sender_id
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -381,6 +381,12 @@ _HANDLED_REQUESTS: OrderedDict[str, HandledControl | None] = OrderedDict()
 # liveness pruning, never by evicting a live id (no fail-open under load).
 _REQUEST_TO_CHANNEL: dict[str, int] = {}
 _REQUEST_TO_CHANNEL_MAX = 512
+# #388 phase 2: request_id -> the Telegram user whose message started the run
+# (``get_run_sender_id()`` at registration). Read only when
+# ``[transports.telegram] approval_originator_only`` is on; no entry (cron,
+# webhook, /at, loop fires) means any allowed user may answer. Same liveness
+# rules and pruning as ``_REQUEST_TO_CHANNEL``.
+_REQUEST_TO_ORIGINATOR: dict[str, int] = {}
 
 
 @dataclass(slots=True)
@@ -2342,6 +2348,9 @@ class ClaudeStreamState:
     # file grows while the command prints (P0 G4) — the only activity signal
     # a ``local_bash`` task has.
     bg_output_files: dict[str, str] = field(default_factory=dict)
+    # #959: path -> (mtime, monotonic ``at``) of the last write seen, so an
+    # unchanged file maps to the same activity time on every poll.
+    bg_output_seen: dict[str, tuple[float, float]] = field(default_factory=dict)
     # #872: the budget Claude declared for a background Bash — its ``timeout``
     # with ``run_in_background`` (tool_use_id -> seconds). The CLI stops the
     # command at that limit (30 min default, 2 h max), so the live session's
@@ -6196,7 +6205,16 @@ async def _bash_output_activity(state: ClaudeStreamState) -> BackgroundActivity 
         mtime = mtimes.get(path)
         if mtime is None:
             continue
-        at = mono_now - max(0.0, wall_now - mtime)
+        # #959: map each write to monotonic time once. Re-deriving it from
+        # fresh wall/monotonic samples drifts by the gap between them, and
+        # the hold re-arms on ``at > hold_started`` — the same write would
+        # re-arm it again on later polls.
+        seen = state.bg_output_seen.get(path)
+        if seen is not None and seen[0] == mtime:
+            at = seen[1]
+        else:
+            at = mono_now - max(0.0, wall_now - mtime)
+            state.bg_output_seen[path] = (mtime, at)
         if best is None or at > best.at:
             best = BackgroundActivity(at, "bash_output", task.task_id)
     return best
@@ -6905,7 +6923,10 @@ def _extract_error(
     such a turn shows its own share (since ``prev_cost_usd`` /
     ``prev_api_ms``, the previous result in this process) plus a labelled
     ``session cost:``, and ``live turn N`` instead of the spawn-time
-    ``new`` / ``resumed``. The run's own result keeps the original line."""
+    ``new`` / ``resumed``. A ``resumed`` run's result is cumulative too: its
+    own share needs the session's earlier total as ``prev_cost_usd``; any
+    figure with no baseline is labelled ``session cost:`` / ``session api:``.
+    A new session's first result keeps the original line."""
     if not event.is_error:
         return None
     # First line: error summary
@@ -6932,24 +6953,41 @@ def _extract_error(
         parts.append("resumed" if resumed else "new")
     parts.append(f"turns: {event.num_turns}")
     cost = event.total_cost_usd
-    if live_turn is not None:
+    api_ms = event.duration_api_ms
+    if live_turn is not None or resumed:
         if cost is not None:
             if prev_cost_usd is not None:
                 parts.append(f"cost: ${max(0.0, cost - prev_cost_usd):.2f}")
             parts.append(f"session cost: ${cost:.2f}")
-        api_ms = event.duration_api_ms
-        if api_ms and prev_api_ms is not None and api_ms > prev_api_ms:
-            parts.append(f"api: {api_ms - prev_api_ms}ms")
+        if api_ms:
+            if prev_api_ms is None:
+                parts.append(f"session api: {api_ms}ms")
+            elif api_ms > prev_api_ms:
+                parts.append(f"api: {api_ms - prev_api_ms}ms")
     else:
         if cost is not None:
             parts.append(f"cost: ${cost:.2f}")
-        if event.duration_api_ms:
-            parts.append(f"api: {event.duration_api_ms}ms")
+        if api_ms:
+            parts.append(f"api: {api_ms}ms")
 
     diagnostics = " · ".join(parts)
     if classification is not None:
         return f"{first}\n{diagnostics}\n\n{classification}"
     return f"{first}\n{diagnostics}"
+
+
+def _session_cost_before(state: ClaudeStreamState, session_id: str) -> float | None:
+    """#889: the session's total before this process's first result — the
+    bridge's cost ledger (not yet updated for this result), else the total the
+    resume guard absorbed. Mirrors the footer's #778 delta sources."""
+    try:
+        from ..session_costs import get_session_cost_ledger
+
+        last = get_session_cost_ledger().last(ENGINE, session_id)
+    except Exception:  # noqa: BLE001 — a diagnostic line must never fail
+        logger.debug("claude.error_cost_baseline_failed", exc_info=True)
+        last = None
+    return last if last is not None else state.absorbed_cost_baseline
 
 
 _PREPEND_LENGTH_GATE = 600
@@ -8726,6 +8764,9 @@ def _translate_claude_event_base(
             live_turn = (
                 state.turn if state.live_mode and state.completed_turns > 0 else None
             )
+            prev_cost_usd = state.prev_result_cost_usd
+            if not ok and prev_cost_usd is None and state.resumed and event.session_id:
+                prev_cost_usd = _session_cost_before(state, event.session_id)
             error = (
                 None
                 if ok
@@ -8733,7 +8774,7 @@ def _translate_claude_event_base(
                     event,
                     resumed=state.resumed,
                     live_turn=live_turn,
-                    prev_cost_usd=state.prev_result_cost_usd,
+                    prev_cost_usd=prev_cost_usd,
                     prev_api_ms=state.prev_result_api_ms,
                 )
             )
@@ -8806,6 +8847,8 @@ def _translate_claude_event_base(
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.
+            # Overwritten by every result; the bridge snapshots it as it
+            # consumes the run's own CompletedEvent (#905).
             state.stream_idle_class = None if ok else _stream_idle_timeout_class(event)
 
             # #333: arm the post-result idle watchdog. Reset on every
@@ -12849,6 +12892,10 @@ def _bind_request_channel(request_id: str) -> None:
     """
     channel = get_run_channel_id()
     _REQUEST_TO_CHANNEL.pop(request_id, None)
+    _REQUEST_TO_ORIGINATOR.pop(request_id, None)
+    sender = get_run_sender_id()
+    if sender is not None:
+        _REQUEST_TO_ORIGINATOR[request_id] = sender
     if channel is None:
         return
     _REQUEST_TO_CHANNEL[request_id] = channel
@@ -12861,12 +12908,28 @@ def _bind_request_channel(request_id: str) -> None:
             if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
         ]:
             del _REQUEST_TO_CHANNEL[rid]
+    if len(_REQUEST_TO_ORIGINATOR) > _REQUEST_TO_CHANNEL_MAX:
+        for rid in [
+            rid
+            for rid in _REQUEST_TO_ORIGINATOR
+            if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
+        ]:
+            del _REQUEST_TO_ORIGINATOR[rid]
 
 
 def control_request_origin(request_id: str) -> int | None:
     """The chat a pending / claimed request is bound to (#388), or None."""
     if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
         return _REQUEST_TO_CHANNEL.get(request_id)
+    return None
+
+
+def control_request_originator(request_id: str) -> int | None:
+    """The Telegram user who started the run that raised a pending / claimed
+    request (#388), or None — no human originator (cron, webhook, /at, loop
+    fire) or not pending."""
+    if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
+        return _REQUEST_TO_ORIGINATOR.get(request_id)
     return None
 
 
@@ -13196,6 +13259,7 @@ def _cleanup_session_registries(
     for k in stale:
         del _REQUEST_TO_SESSION[k]
         _REQUEST_TO_CHANNEL.pop(k, None)  # #388
+        _REQUEST_TO_ORIGINATOR.pop(k, None)
         # #685: a claim on a request whose session is gone can never
         # complete — drop it so the id doesn't read "in flight" for ever.
         _INFLIGHT_CONTROL_RESPONSES.pop(k, None)

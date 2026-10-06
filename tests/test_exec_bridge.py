@@ -249,6 +249,37 @@ async def test_final_notify_sends_loud_final_message() -> None:
 
 
 @pytest.mark.anyio
+async def test_823_progress_and_final_calls_carry_message_kind() -> None:
+    """#823: the transport calls name their surface, so a failed edit's
+    ``telegram.http_error`` / ``benign_rejection`` line says which it was."""
+    from untether.transport import current_message_kind
+
+    kinds: list[tuple[str, str | None]] = []
+
+    class _KindTransport(FakeTransport):
+        async def send(self, **kwargs):  # type: ignore[override]
+            kinds.append(("send", current_message_kind()))
+            return await super().send(**kwargs)
+
+        async def delete(self, *, ref: MessageRef) -> bool:
+            kinds.append(("delete", current_message_kind()))
+            return await super().delete(ref=ref)
+
+    transport = _KindTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=_return_runner(answer="ok"),
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+    assert kinds == [("send", "progress"), ("send", "final")]
+    assert current_message_kind() is None
+
+
+@pytest.mark.anyio
 async def test_handle_message_strips_resume_line_from_prompt() -> None:
     transport = FakeTransport()
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
@@ -561,13 +592,14 @@ def _make_edits(
     transport: FakeTransport,
     presenter: _KeyboardPresenter,
     clock: _FakeClock | None = None,
+    engine: str = "codex",
 ) -> ProgressEdits:
     if clock is None:
         clock = _FakeClock()
     # #481: thread the FakeClock into the tracker so ActionState
     # timestamps align with the bridge's clock (otherwise long-running
     # action age computations would mix wall-clock and fake clock).
-    tracker = ProgressTracker(engine="codex", clock=clock)
+    tracker = ProgressTracker(engine=engine, clock=clock)
     progress_ref = MessageRef(channel_id=123, message_id=1)
     return ProgressEdits(
         transport=transport,
@@ -1503,6 +1535,105 @@ async def test_on_resume_failed_not_called_when_not_resumed() -> None:
     )
 
     assert len(cleared_tokens) == 0
+
+
+async def _run_failed_resume_952(
+    engine: str, error: str, usage: dict[str, Any] | None = None
+) -> tuple[list[ResumeToken], list[str], list[dict[str, Any]]]:
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error=error, usage=usage or {})],
+        engine=engine,
+        resume_value="healthy-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    cleared: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared.append(token)
+
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=engine, value="healthy-session"),
+            on_resume_failed=on_resume_failed,
+        )
+    texts = [c["message"].text for c in transport.send_calls] + [
+        c["message"].text for c in transport.edit_calls
+    ]
+    return cleared, texts, logs
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        (
+            "codex",
+            '{"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.3-codex\' model is not supported"}}',
+        ),
+        ("pi", "pi failed (rc=1).\nsession: 01a10a3b · resumed\nNo API key found"),
+        ("opencode", "Model not found: deepseek/deepseek-v4-flash."),
+    ],
+)
+async def test_952_non_resume_failure_keeps_session(engine: str, error: str) -> None:
+    """#952: engines without a turn count keep a healthy session when the
+    resumed run fails for an unrelated reason (bad model, missing key)."""
+    cleared, texts, logs = await _run_failed_resume_952(engine, error)
+
+    assert cleared == []
+    skipped = [r for r in logs if r.get("event") == "session.auto_clear_skipped"]
+    assert skipped and skipped[0]["reason"] == "not_resume_failure"
+    assert not any("couldn't be resumed" in t for t in texts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        (
+            "codex",
+            "codex exec failed (rc=1).\nError: thread/resume: thread/resume failed:"
+            " no rollout found for thread id 01a10a3b (code -32600)",
+        ),
+        ("opencode", "opencode finished but no session_id was captured"),
+        ("opencode", 'NotFoundError data: {message: "Session not found: ses_x"}'),
+        ("pi", "pi failed (rc=1).\nNo session found matching 'zzzz'"),
+    ],
+)
+async def test_952_resume_failure_clears_session_and_says_so(
+    engine: str, error: str
+) -> None:
+    """#952: a failure that names the resume still clears (the #45 recovery),
+    and the error card tells the user."""
+    cleared, texts, _logs = await _run_failed_resume_952(engine, error)
+
+    assert [t.value for t in cleared] == ["healthy-session"]
+    assert any("couldn't be resumed, so it was cleared" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_952_claude_without_usage_still_clears() -> None:
+    """#952: Claude reports turns, so a failed resume with no result (no
+    usage at all) keeps the original #45 auto-clear."""
+    cleared, _texts, _logs = await _run_failed_resume_952(
+        CLAUDE_ENGINE, "claude failed (rc=1)."
+    )
+    assert [t.value for t in cleared] == ["healthy-session"]
+
+
+@pytest.mark.anyio
+async def test_952_reported_turns_win_over_error_text() -> None:
+    """#952: an explicit turn count decides, whatever the error says."""
+    cleared, _texts, _logs = await _run_failed_resume_952(
+        "codex", "no rollout found", usage={"num_turns": 2}
+    )
+    assert cleared == []
 
 
 # ---------------------------------------------------------------------------
@@ -4431,7 +4562,9 @@ async def test_stall_tool_active_suppressed_even_with_frozen_ring() -> None:
 
 @pytest.mark.anyio
 async def test_stall_threshold_elevated_with_active_children() -> None:
-    """When child processes exist, use the subagent threshold (900s) instead of normal (300s)."""
+    """When child processes exist, use the subagent threshold (900s) instead of normal (300s).
+
+    Claude only: its children are Agent/Bash work (#953 keeps this path)."""
     from unittest.mock import patch
 
     from untether.utils.proc_diag import ProcessDiag
@@ -4439,7 +4572,7 @@ async def test_stall_threshold_elevated_with_active_children() -> None:
     transport = FakeTransport()
     presenter = _KeyboardPresenter()
     clock = _FakeClock(start=100.0)
-    edits = _make_edits(transport, presenter, clock=clock)
+    edits = _make_edits(transport, presenter, clock=clock, engine="claude")
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05  # 50ms
     edits._STALL_THRESHOLD_SUBAGENT = 0.5  # 500ms
@@ -4795,7 +4928,7 @@ async def test_stall_message_active_children() -> None:
     transport = FakeTransport()
     presenter = _KeyboardPresenter()
     clock = _FakeClock(start=100.0)
-    edits = _make_edits(transport, presenter, clock=clock)
+    edits = _make_edits(transport, presenter, clock=clock, engine="claude")
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
     edits._STALL_THRESHOLD_SUBAGENT = 0.05  # match so it triggers
@@ -4841,6 +4974,115 @@ async def test_stall_message_active_children() -> None:
         f"{[c['message'].text for c in transport.send_calls]}"
     )
     assert "3 children" in stall_msgs[0]["message"].text
+
+
+async def _run_stall_953(
+    engine: str, *, state: str = "S", tree_cpu_grows: bool = False
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """#953: drive one stall window with a permanent child pid (Codex's npm
+    shim / OpenCode's MCP servers). Normal threshold 50 ms, subagent 500 ms;
+    the clock sits at 100 ms, so only the normal threshold can fire."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock, engine=engine)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.5
+    edits._stall_repeat_seconds = 0.5
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    ticks = iter(range(1_000_000))
+
+    def diag(pid: int) -> ProcessDiag:
+        tree = 3000 + (next(ticks) * 10 if tree_cpu_grows else 0)
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state=state,
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001],
+            tree_cpu_utime=tree,
+            tree_cpu_stime=600,
+        )
+
+    with (
+        patch("untether.utils.proc_diag.collect_proc_diag", side_effect=diag),
+        structlog.testing.capture_logs() as logs,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # A few diag samples first, so the tree-CPU baseline exists
+                # before the silence crosses the normal threshold (60 s
+                # sampling vs a 300 s threshold in production).
+                await anyio.sleep(0.03)
+                clock.set(100.1)
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    return [c["message"].text for c in transport.send_calls], logs
+
+
+def _threshold_reasons(logs: list[dict[str, Any]]) -> set[str]:
+    return {
+        r["reason"]
+        for r in logs
+        if r.get("event") == "progress_edits.stall_threshold_selected"
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["codex", "opencode"])
+async def test_953_idle_permanent_child_uses_normal_threshold(engine: str) -> None:
+    """#953: a permanent wrapper/MCP child on an idle tree no longer earns the
+    15-min subagent threshold, and the warning doesn't blame child processes."""
+    texts, logs = await _run_stall_953(engine)
+
+    assert _threshold_reasons(logs) == {"normal"}
+    assert any("No progress" in t for t in texts), texts
+    assert not any("child processes" in t.lower() for t in texts)
+
+
+@pytest.mark.anyio
+async def test_953_busy_child_tree_keeps_subagent_threshold() -> None:
+    """#953: a non-Claude child tree that is burning CPU still gets the
+    subagent threshold (no warning inside it)."""
+    texts, logs = await _run_stall_953("codex", tree_cpu_grows=True)
+
+    assert _threshold_reasons(logs) == set()
+    assert texts == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("engine", ["codex", "claude"])
+async def test_953_stopped_engine_says_stopped(engine: str) -> None:
+    """#953: a SIGSTOPped engine (state T) isn't waiting on children — normal
+    threshold, and the warning says the engine process is stopped."""
+    texts, logs = await _run_stall_953(engine, state="T")
+
+    assert _threshold_reasons(logs) == {"normal"}
+    assert any("Engine process is stopped (state T" in t for t in texts), texts
+    assert not any("child processes" in t.lower() for t in texts)
+
+
+@pytest.mark.anyio
+async def test_953_claude_idle_children_unchanged() -> None:
+    """#953 regression guard: Claude's children keep the subagent threshold
+    even on an idle tree."""
+    texts, logs = await _run_stall_953("claude")
+
+    assert _threshold_reasons(logs) == set()
+    assert texts == []
 
 
 @pytest.mark.anyio
@@ -7101,6 +7343,149 @@ async def test_heartbeat_mutates_schedule_wakeup_countdown() -> None:
     assert action_state.action.detail["countdown_s"] >= 0
 
 
+def test_954_heartbeat_ticks_header_during_silent_generation() -> None:
+    """#954: no events and no open action (pure generation) — the heartbeat
+    still re-renders once per interval so the header's elapsed time moves."""
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    edits._heartbeat_tick()  # never rendered, but no engine event yet either
+    # event_seq stays 0 — the no_pid_no_events auto-cancel's signal.
+    assert edits.event_seq == 0
+    edits.event_seq = before = 1  # the engine's first event...
+    edits._last_render_at = 95.0  # ...rendered 5 s ago
+    edits._heartbeat_tick()
+    assert edits.event_seq == before  # rendered recently — nothing to refresh
+    clock.set(125.0)
+    edits._heartbeat_tick()
+    assert edits.event_seq == before + 1
+
+
+def test_954_heartbeat_header_tick_quiet_when_finalizing_or_live_idle() -> None:
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    before = edits.event_seq
+    # A live session sitting between turns isn't running anything.
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(
+            live_mode=True, completed_turns=1, turn_open=False
+        )
+    )
+    edits._heartbeat_tick()
+    assert edits.event_seq == before
+    # Once the final answer is being delivered, no more repaints.
+    edits.stream = None
+    edits._finalizing = True
+    edits._heartbeat_tick()
+    assert edits.event_seq == before
+
+
+@pytest.mark.anyio
+async def test_954_silent_run_header_elapsed_advances() -> None:
+    """End to end through the render loop: the progress message's elapsed
+    time is edited forward with no engine events at all."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=5.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._heartbeat_interval = 30.0
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()  # the first render (an event at 5 s)
+        await anyio.sleep(0.02)
+        clock.set(65.0)  # a minute of silent generation
+        edits._heartbeat_tick()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert texts == ["working 5s", "working 65s"]
+
+
+@pytest.mark.anyio
+async def test_948_debounced_repaint_never_lands_after_the_final() -> None:
+    """#948: a repaint waiting out the render debounce when the turn is
+    finalised must not be sent after the final ``cancelled`` edit."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=10.0)
+    gate = anyio.Event()
+    sleeping = anyio.Event()
+
+    async def _sleep(_s: float) -> None:
+        sleeping.set()
+        await gate.wait()
+
+    edits = ProgressEdits(
+        transport=transport,
+        presenter=_KeyboardPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=ProgressTracker(engine="claude", clock=clock),
+        started_at=0.0,
+        clock=clock,
+        last_rendered=None,
+        min_render_interval=2.0,
+        sleep=_sleep,
+    )
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()  # first render — no debounce
+        await anyio.sleep(0.02)
+        clock.set(11.0)
+        edits._bump_heartbeat()  # second render waits out the debounce
+        await sleeping.wait()
+        # The turn is cancelled meanwhile and its final edit goes out
+        # (``note_final`` sets the flag the same way, synchronously).
+        edits._finalizing = True
+        await transport.edit(
+            ref=edits.progress_ref, message=RenderedMessage(text="cancelled")
+        )
+        gate.set()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert texts == ["working 10s", "cancelled"]
+
+
+@pytest.mark.anyio
+async def test_948_stop_repaints_waits_for_an_edit_being_sent() -> None:
+    """#948: a repaint already handed to the transport finishes before
+    ``stop_repaints`` returns, so the final edit is always ordered after it
+    (and supersedes it in the outbox)."""
+    order: list[str] = []
+    release = anyio.Event()
+    entered = anyio.Event()
+
+    class _SlowTransport(FakeTransport):
+        async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+            if message.text.startswith("working"):
+                entered.set()
+                await release.wait()
+            order.append(message.text)
+            return ref
+
+    transport = _SlowTransport()
+    clock = _FakeClock(start=7.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        edits._bump_heartbeat()
+        await entered.wait()
+
+        async def _finalise() -> None:
+            await edits.stop_repaints()
+            await transport.edit(
+                ref=edits.progress_ref, message=RenderedMessage(text="cancelled")
+            )
+
+        tg.start_soon(_finalise)
+        await anyio.sleep(0.02)
+        assert order == []  # the final waits for the in-flight repaint
+        release.set()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    assert order == ["working 7s", "cancelled"]
+
+
 # ---------------------------------------------------------------------------
 # #333 Tier 2 — post-result limbo lets auto-cancel fire when watchdog fails
 # ---------------------------------------------------------------------------
@@ -7472,6 +7857,87 @@ async def test_591_error_result_waits_for_post_return_path() -> None:
             "error result must not be delivered while the generator is open"
         )
         hang.set()
+
+
+class _StallAfterFinalSendTransport(FakeTransport):
+    """A final send (``options.replace`` set) lands, then the call stalls —
+    the #928 shape: Telegram's replace-delete of the progress message hit a
+    ``ReadTimeout`` retry after the final was already on the wire."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stalled = False
+
+    async def send(
+        self,
+        *,
+        channel_id: int | str,
+        message: RenderedMessage,
+        options: SendOptions | None = None,
+    ) -> MessageRef:
+        ref = await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+        if options is not None and options.replace is not None and not self.stalled:
+            self.stalled = True
+            await anyio.sleep_forever()
+        return ref
+
+
+@pytest.mark.anyio
+async def test_928_early_delivery_timeout_after_send_does_not_redeliver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#928: the early final's send landed but the call then outlived the
+    early-delivery bound. The bound cancelled delivery before the sent flag
+    was recorded, so the post-return path at session close delivered the
+    same final again — a second ``runner.completed`` and a duplicate
+    message. The send is committed once handed to the transport; a timeout
+    is logged, never redelivered."""
+    import untether.runner_bridge as rb
+
+    monkeypatch.setattr(rb, "_EARLY_DELIVERY_TIMEOUT_S", 0.2)
+    transport = _StallAfterFinalSendTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # The generator returns at session close with the same result.
+        [Emit(_completed_591()), Wait(hang), Return(answer="early answer 591")],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    def _final_sends() -> list[dict]:
+        return [
+            c for c in transport.send_calls if "early answer 591" in c["message"].text
+        ]
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def _run() -> None:
+                await handle_message(
+                    cfg,
+                    runner=runner,
+                    incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                    resume_token=None,
+                )
+
+            tg.start_soon(_run)
+            with anyio.fail_after(5.0):
+                while not any(
+                    r.get("event") == "final.early_delivery_timeout" for r in logs
+                ):
+                    await anyio.sleep(0.01)
+            # Session closes: the run generator returns.
+            hang.set()
+
+    assert len(_final_sends()) == 1, "final delivered twice"
+    completed = [r for r in logs if r.get("event") == "runner.completed"]
+    assert len(completed) == 1, completed
 
 
 def test_591_note_final_records_without_repaint() -> None:
@@ -11198,6 +11664,9 @@ class _LiveErrorThenAnswerRunner(MockRunner):
         # Runs just before the errored result is yielded — no checkpoint in
         # between, so the bridge sees the result before ``wait_cancel`` runs.
         self.before_result: Callable[[], None] | None = None
+        # Runs once the bridge has consumed the errored result, while the
+        # session holds — models a later wake turn's result (#905).
+        self.after_result: Callable[[], None] | None = None
 
     async def run(self, prompt, resume):
         from untether.runner import publish_run_stream
@@ -11219,6 +11688,8 @@ class _LiveErrorThenAnswerRunner(MockRunner):
                     error=self.error,
                     usage=self.usage,
                 )
+                if self.after_result is not None:
+                    self.after_result()
                 await self.hang.wait()
             else:
                 yield CompletedEvent(
@@ -11323,6 +11794,65 @@ async def test_900_error_held_for_the_stream_idle_retry(monkeypatch) -> None:
     assert not any("boom-900" in t for t in texts)
     assert any("Recovered 900." in t for t in texts)
     assert len(runner.calls) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("wake_class", [None, "type_b"], ids=["ok", "type_b"])
+async def test_905_wake_result_does_not_mask_the_runs_stream_idle_class(
+    monkeypatch, wake_class: str | None
+) -> None:
+    """#905: the Claude runner rewrites ``stream_idle_class`` on every
+    ``result``, so a wake turn's result landing before the live session
+    closes used to replace the run's own Type-A class — the post-return
+    #572 retry then read the wake's class and silently didn't retry."""
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    runner = _LiveErrorThenAnswerRunner(
+        hang=anyio.Event(),
+        stream_idle_class="type_a",
+        error=_572_STREAM_IDLE_ERROR + " boom-900",
+        usage=dict(_572_USAGE),
+    )
+
+    def _wake_result() -> None:
+        runner.stream.engine_state.stream_idle_class = wake_class
+
+    runner.after_result = _wake_result
+    transport, early, logs = await _900_drive(
+        runner, resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-900")
+    )
+    assert not early
+    events = [r.get("event") for r in logs]
+    assert "claude.stream_idle.auto_retry" in events
+    texts = _900_texts(transport)
+    assert not any("boom-900" in t for t in texts)
+    assert any("Recovered 900." in t for t in texts)
+    assert len(runner.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_905_wake_type_a_does_not_retry_a_non_stream_idle_error(
+    monkeypatch,
+) -> None:
+    """#905 converse: the run's own (non-stream-idle) error is not retried
+    just because a later wake result was a Type-A stall."""
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    runner = _LiveErrorThenAnswerRunner(
+        hang=anyio.Event(),
+        stream_idle_class=None,
+        usage=dict(_572_USAGE),
+    )
+
+    def _wake_result() -> None:
+        runner.stream.engine_state.stream_idle_class = "type_a"
+
+    runner.after_result = _wake_result
+    transport, _early, logs = await _900_drive(
+        runner, resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-900")
+    )
+    events = [r.get("event") for r in logs]
+    assert "claude.stream_idle.auto_retry" not in events
+    assert sum("boom-900" in t for t in _900_texts(transport)) == 1
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.anyio

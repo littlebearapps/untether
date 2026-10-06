@@ -7,7 +7,7 @@ Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and 
 - Python 3.12+, anyio for async, msgspec for JSONL parsing, structlog for logging
 - Ruff for linting/formatting, pytest + anyio for testing (80% coverage threshold)
 - Australian English in user-facing text (realise, colour, behaviour, licence)
-- Conventional commits: feat:, fix:, docs:, refactor:, test:
+- Conventional commits: feat:, fix:, docs:, refactor:, test:, chore:
 
 ## Architecture
 
@@ -37,7 +37,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 - Stub subprocess runners with fake CLI scripts
 - FakeTransport protocol doubles (not real Telegram clients)
 - Verify 3-event contract in runner tests
-- Run: uv run pytest, uv run ruff check src/ tests/
+- Run: uv run pytest, uv run ruff format --check src/ tests/, uv run ruff check src/ tests/
 
 ## Key files
 
@@ -47,5 +47,5 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 - runner_bridge.py — Runner-to-transport bridge
 - cost_tracker.py — Per-run/daily cost tracking
 - telegram/bridge.py — Telegram message rendering
-- commands/claude_control.py — Approve/Deny/Discuss callback handler
+- telegram/commands/claude_control.py — Approve/Deny/Discuss callback handler
 - markdown.py — Progress/final message formatting

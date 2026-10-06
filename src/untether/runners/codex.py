@@ -496,13 +496,16 @@ def _translate_item_event(
         case codex_schema.ErrorItem(id=action_id, message=message):
             if phase != "completed":
                 return []
+            # #987: a non-fatal warning (e.g. an ignored config key), not a
+            # failed step — ok=True with a leading ⚠️ renders the ⚠️ as the
+            # row's status instead of ✗ (#868).
             return [
                 factory.action_completed(
                     action_id=action_id,
                     kind="warning",
-                    title=message,
+                    title=f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} {message}",
                     detail={"message": message},
-                    ok=False,
+                    ok=True,
                     message=message,
                     level="warning",
                 ),
@@ -710,6 +713,8 @@ class CodexRunState:
     final_answer: str | None = None
     turn_agent_messages: list[_AgentMessageSummary] = field(default_factory=list)
     turn_index: int = 0
+    # #987: Codex emits each config warning twice (two item ids, one message).
+    seen_warnings: set[str] = field(default_factory=set)
     # The argv build_args produced for this run (the prompt goes via stdin),
     # kept for the #830 `codex.argv.rejected` diagnostic.
     argv: list[str] | None = None
@@ -889,6 +894,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     state.final_answer = selected
                 if len(state.turn_agent_messages) > 1:
                     logger.debug("codex.multiple_agent_messages")
+            case codex_schema.ItemCompleted(
+                item=codex_schema.ErrorItem(message=message)
+            ):
+                if message in state.seen_warnings:
+                    return []
+                state.seen_warnings.add(message)
             case _:
                 pass
 

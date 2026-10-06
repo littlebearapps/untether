@@ -104,6 +104,8 @@ Live-updates the Telegram progress message:
 - `delete_ephemeral()` cleans up notification messages on run completion
 - Stall monitor reads the run's **own** `JsonlStreamState`/PID from the per-run `RunStreamHandle` (ContextVar bound in `run_runner_with_cancel`), never the shared `runner.current_stream`/`last_pid` (#510)
 - Expected waits (rate-limit `rejected` latch #790, `api_retry` back-off #792, approvals) demote stall warnings; live-idle holds between turns raise no stall WARN and are reported as `peak_live_idle_seconds` in `session.summary`, not `peak_idle_seconds` (#787)
+- Child processes earn the 15-min subagent threshold unconditionally only on Claude; on other engines only while the process tree uses CPU (Codex's npm shim and OpenCode's MCP servers are permanent children); a stopped engine (state `T`) is reported as "Engine process is stopped" (#953)
+- The heartbeat repaints the header's elapsed time once nothing has repainted for a heartbeat interval (30 s), so silent generation still ticks (#954); `stop_repaints()` must precede any final / cancelled edit so a debounced repaint can't land over it (#948)
 - Approval reminder (#919/#920): first at 10 min, then every 30 min; each repeat replaces the previous reminder (`_approval_reminder_ref`) and it is deleted once the request is answered or the run ends
 - `edits.orphan_approvals` (`orphan_approvals.py`, #929): a background agent's `can_use_tool` that arrives while the live session is idle gets its own pushed Approve / Deny message (same 10 / 30 min re-post, retired once answered). It never auto-denies; writes go through the transport only
 
@@ -253,6 +255,7 @@ Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
 - `claude_control:discuss:<request_id>` — pause & outline plan
 - `claude_control:chat:<request_id>` — let's discuss (holds the request open)
 - synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>` / `aq:other`
+- opt-in `[transports.telegram] approval_originator_only` (#388): `claude_control:` / `aq:` taps (and typed AskUserQuestion answers) are accepted only from the user whose message started the run; cron / webhook / `/at` / loop runs have no originator, so any allowed user may answer
 
 ## Running tasks
 

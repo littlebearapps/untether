@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from ..logging import get_logger
+from ..transport import message_kind
 from .client_api import RetryAfter
 
 logger = get_logger(__name__)
@@ -45,6 +46,9 @@ class OutboxOp:
     queued_at: float
     chat_id: int | None
     label: str | None = None
+    #: #823: the caller's ``message_kind`` at enqueue, re-applied on the
+    #: worker task so the request's error lines name the surface.
+    kind: str | None = None
     #: Result handed to this op's waiter when the outbox drops it before
     #: dispatch (supersede / drop_pending / retry-after collision). Defaults to
     #: ``None``; edit ops set it to ``SUPERSEDED`` so a coalesced edit is not
@@ -200,7 +204,8 @@ class TelegramOutbox:
 
     async def execute_op(self, op: OutboxOp) -> Any:
         try:
-            return await op.execute()
+            with message_kind(op.kind):
+                return await op.execute()
         except Exception as exc:
             if isinstance(exc, RetryAfter):
                 logger.info(
@@ -213,6 +218,7 @@ class TelegramOutbox:
             logger.error(
                 "outbox.op.failed",
                 label=op.label,
+                kind=op.kind,
                 chat_id=op.chat_id,
                 error=str(exc),
                 error_type=exc.__class__.__name__,

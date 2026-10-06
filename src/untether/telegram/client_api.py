@@ -10,6 +10,7 @@ import httpx
 import msgspec
 
 from ..logging import get_logger
+from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
 
 logger = get_logger(__name__)
@@ -366,6 +367,7 @@ class HttpBotClient:
                 payload=payload,
                 chat_id=chat_id,
                 message_id=message_id,
+                kind=current_message_kind(),
             )
             self._record_api_error(
                 method,
@@ -449,6 +451,7 @@ class HttpBotClient:
                 error_type=exc.__class__.__name__,
                 chat_id=chat_id,
                 message_id=message_id,
+                kind=current_message_kind(),
             )
             self._record_api_error(
                 method, request_payload, f"network error: {exc.__class__.__name__}"
@@ -500,6 +503,7 @@ class HttpBotClient:
                     description=description,
                     chat_id=chat_id,
                     message_id=message_id,
+                    kind=current_message_kind(),
                 )
                 self._note_benign_rejection(method, benign, chat_id, message_id)
             else:
@@ -514,6 +518,7 @@ class HttpBotClient:
                     # (message_ids are per chat, so both are needed).
                     chat_id=chat_id,
                     message_id=message_id,
+                    kind=current_message_kind(),
                 )
             # #746 D4: record the readable Telegram description when there is
             # one (matches the envelope path), else the raw body.

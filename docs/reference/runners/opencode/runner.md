@@ -6,8 +6,30 @@ Shipped in Untether v0.5.0.
 ## Installation
 
 ```bash
-npm i -g opencode-ai@latest
+npm i -g opencode-ai@1
 ```
+
+### Supported versions
+
+Untether supports the **OpenCode 1.x CLI** (npm package `opencode-ai`;
+tested on 1.14–1.18). **OpenCode 2.x** (the separate npm package
+`@opencode/cli`, which also installs a binary called `opencode`) is **not
+supported yet**: its `run` command sends prompts to a shared per-user
+background service unless `--standalone` is passed, which would put the agent
+outside Untether's process control (environment, working directory,
+`/cancel`, stall watchdog), and its `run --format json` output is unverified.
+
+Before each run, Untether checks `opencode --version` (once per installed
+binary; an upgrade re-checks). On 2.x it refuses the run with
+`🛑 OpenCode 2.x.y isn't supported yet…` and spawns nothing; the chat's saved
+session is kept. To go back to 1.x:
+
+```bash
+npm uninstall -g @opencode/cli && npm install -g opencode-ai@1
+```
+
+If the version can't be read (the probe fails or prints something unexpected),
+the run goes ahead and Untether logs `opencode.version.unknown`.
 
 ## Configuration
 

@@ -47,6 +47,7 @@ AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner, `x
 runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier. Antigravity
 CLI (#558, ships in v0.36.1) is a new engine and must not reuse the `gemini` id.
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
+OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 
 ## Commands
 

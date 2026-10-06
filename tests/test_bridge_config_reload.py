@@ -97,6 +97,19 @@ class TestUpdateFrom:
         assert cfg.forward_coalesce_s == 3.5
         assert cfg.media_group_debounce_s == 2.5
 
+    def test_388_approval_originator_only_hot_reloads(self, cfg: TelegramBridgeConfig):
+        """#388: opt-in, off by default, and not restart-required."""
+        assert _settings().approval_originator_only is False
+        assert cfg.approval_originator_only is False
+        cfg.update_from(_settings(approval_originator_only=True))
+        assert cfg.approval_originator_only is True
+        cfg.update_from(_settings())
+        assert cfg.approval_originator_only is False
+        assert (
+            "approval_originator_only"
+            not in TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+        )
+
     def test_update_from_swaps_files_object(self, cfg: TelegramBridgeConfig):
         original = cfg.files
         new_files = TelegramFilesSettings(

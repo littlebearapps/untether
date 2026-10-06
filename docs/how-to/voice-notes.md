@@ -74,6 +74,8 @@ voice_transcription_prompt = "Claude Code, CLAUDE.md, Codex, Trello, happy-gadge
 - Keep it to a comma-separated list of names, well under Whisper's ~224-token prompt window (Whisper keeps only the last ~224 tokens). The value is limited to 1,000 characters.
 - The prompt is never written to the logs, so private project names are safe to include.
 
+A hint only nudges the model, and Whisper still often writes the name *Claude* as "Clawde". Untether therefore also fixes the known misspellings in the transcript itself ([#789](https://github.com/littlebearapps/untether/issues/789)): "Clawde" / "Clawd" become `Claude`, "Clawed Code" / "Corde Code" become `Claude Code`, and "Claw.md" / "Clawde.md" become `CLAUDE.md`. Ordinary words are left alone ("the cat clawed" stays as it is). This applies whatever your `voice_transcription_prompt` is, and the `🎙` echo shows the corrected text.
+
 ## Behaviour
 
 When you send a voice note, Untether transcribes it and runs the result as a normal text message.

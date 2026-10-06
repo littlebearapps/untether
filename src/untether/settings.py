@@ -168,6 +168,11 @@ class TelegramTransportSettings(BaseModel):
     # to True is logged at INFO on every boot so the deviation is
     # visible in journalctl.
     allow_any_user: bool = False
+    # #388: opt-in for multi-user chats — a Claude approval button or an
+    # AskUserQuestion answer is accepted only from the user whose message
+    # started the run. Runs with no human originator (cron, webhook, /at,
+    # loop fires) stay answerable by any allowed user. Hot-reloads.
+    approval_originator_only: bool = False
     message_overflow: Literal["trim", "split"] = "split"
     voice_transcription: bool = False
     voice_max_bytes: StrictInt = 10 * 1024 * 1024

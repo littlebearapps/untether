@@ -69,6 +69,7 @@ Permission requests and plan mode buttons use Telegram inline keyboards:
 - Callback data format: `<prefix>:<action>:<id>` (max 64 bytes)
 - Must call `answerCallbackQuery` promptly to clear the spinner
 - Early answering: set `answer_early = True` on the backend to clear the spinner immediately with a toast
+- `approval_originator_only` (#388, opt-in): a `claude_control:` / `aq:` tap from anyone but the run's originator gets `answerCallbackQuery` with "Only the person who started this run can answer this." and is dropped — checked before the early answer (`telegram/approval_originator.py`)
 
 ## Long polling (`getUpdates`)
 
@@ -105,14 +106,14 @@ Key formats (include `chat_id` to avoid cross-chat collisions):
 - Per-chat pacing: `private_chat_rps` (default 1.0 msg/s), `group_chat_rps` (default 20/60 msg/s)
 - Per-chat `_next_at[chat_id]` timestamps — worker picks from unblocked chats; global `retry_at` blocks all on 429
 - On 429: `RetryAfter` raised using `parameters.retry_after`; op requeued if no newer op superseded it
-- Non-429 errors: logged and dropped. The HTTP layer retries a message call once on a fresh connection only when the request never left (edits/deletes/callback answers also after a read timeout; a `sendMessage` that may have arrived is never repeated, #861); error logs carry `chat_id`/`message_id` (#823)
+- Non-429 errors: logged and dropped. The HTTP layer retries a message call once on a fresh connection only when the request never left (edits/deletes/callback answers also after a read timeout; a `sendMessage` that may have arrived is never repeated, #861); error logs carry `chat_id`/`message_id` and `kind` — the surface (`progress`, `final`, `bg_status`, `approval_surface`, …) set by a `with message_kind("…")` block around the transport call (`transport.py`); the outbox op captures it at enqueue and re-applies it on the worker (#823)
 
 ## Replace progress messages
 
 `send_message(replace_message_id=...)`:
 1. Drops any pending edit for the progress message
 2. Enqueues the send at highest priority
-3. On success, enqueues a delete for the old progress message
+3. On success, queues a delete for the old progress message without awaiting it (`wait=False`, #928) — a slow delete must not hold a final past its delivery bound
 
 ## Voice transcription
 
@@ -127,6 +128,8 @@ voice_transcription_model = "gpt-4o-mini-transcribe"
 3. Route transcript through same command/directive pipeline as typed text
 
 Optional `voice_transcription_language` (ISO-639-1 hint) and `voice_transcription_prompt` (vocabulary bias). Unset prompt → `DEFAULT_VOICE_TRANSCRIPTION_PROMPT` in `telegram/voice.py` (`Claude`, `Claude Code`, `CLAUDE.md`, `AGENTS.md`, Codex, OpenCode and product terms — no deprecated or out-of-scope engine names, #703/#789); a value replaces it, `""` disables it.
+
+After transcription, `correct_known_mishears()` rewrites the known Claude mishears ("Clawde"/"Clawd" → Claude, "Clawed Code" → Claude Code, "Claw.md" → CLAUDE.md; whole words only, a bare "clawed" is kept) and logs `voice.transcript.corrected` with a count, never the text (#789).
 
 ## Forum topics
 

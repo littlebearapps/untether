@@ -733,6 +733,53 @@ async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
     assert [c.file_deny_globs for c in backend.contexts] == [("x/**",), ("w",)]
 
 
+@pytest.mark.anyio
+async def test_950_command_context_carries_engine_default_and_context(
+    monkeypatch,
+) -> None:
+    """#950: a command sees the topic/chat engine default and the ambient
+    (topic/chat-bound) context a plain prompt in that chat would use."""
+    from untether.context import RunContext
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+    ambient = RunContext(project="beta", branch="feat")
+    await _dispatch_command(
+        cfg,
+        msg,
+        "/test_cmd",
+        "test_cmd",
+        "",
+        {},
+        AsyncMock(),
+        None,
+        False,
+        "opencode",
+        None,
+        ambient_context=ambient,
+    )
+    await _dispatch_command(
+        cfg, msg, "/test_cmd", "test_cmd", "", {}, AsyncMock(), None, False, None, None
+    )
+
+    assert backend.contexts[0].default_engine_override == "opencode"
+    assert backend.contexts[0].ambient_context == ambient
+    assert backend.contexts[1].default_engine_override is None
+    assert backend.contexts[1].ambient_context is None
+
+
 # ---------------------------------------------------------------------------
 # #418 — CommandResult.attachment is delivered as a Telegram document
 # ---------------------------------------------------------------------------
@@ -1071,3 +1118,111 @@ async def test_388_dispatch_foreign_chat_tap_gets_not_found(
     assert nf and nf[0]["reason"] == "channel_mismatch"
     assert nf[0]["channel_id"] == 123
     assert nf[0]["origin_channel_id"] == 111
+
+
+# ---------------------------------------------------------------------------
+# #388 phase 2 — opt-in "only the originator can approve"
+# ---------------------------------------------------------------------------
+
+
+def _originator_setup(monkeypatch, claude_mod, *, enabled: bool, originator):
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    stdin = _register_request(claude_mod, "req-orig")
+    if originator is not None:
+        claude_mod._REQUEST_TO_ORIGINATOR["req-orig"] = originator
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg.approval_originator_only = enabled
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+    return cfg, transport, stdin
+
+
+@pytest.mark.anyio
+async def test_388_originator_only_rejects_other_user(
+    monkeypatch, control_registries
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.approval_originator import NOT_ORIGINATOR_TEXT
+
+    claude_mod = control_registries
+    cfg, transport, stdin = _originator_setup(
+        monkeypatch, claude_mod, enabled=True, originator=2
+    )
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        await _dispatch_control(cfg, "claude_control:approve:req-orig", "cb-o1")
+
+    assert [c["text"] for c in bot.callback_calls] == [NOT_ORIGINATOR_TEXT]
+    assert stdin.send.await_count == 0
+    assert "req-orig" in claude_mod._REQUEST_TO_SESSION
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+    assert transport.send_calls == []
+    warn = [r for r in logs if r.get("event") == "callback.not_originator"]
+    assert len(warn) == 1
+    assert warn[0]["log_level"] == "warning"
+    assert warn[0]["sender_id"] == 1
+    assert warn[0]["originator_id"] == 2
+    assert warn[0]["request_id"] == "req-orig"
+    assert warn[0]["chat_id"] == 123
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("enabled", "originator"),
+    [(True, 1), (True, None), (False, 2)],
+    ids=["same-user", "no-originator", "setting-off"],
+)
+async def test_388_originator_only_allows(
+    monkeypatch, control_registries, enabled, originator
+) -> None:
+    """The originator, a run with no human originator (cron/webhook/at/loop)
+    and the default (off) all approve as before."""
+    claude_mod = control_registries
+    cfg, _transport, stdin = _originator_setup(
+        monkeypatch, claude_mod, enabled=enabled, originator=originator
+    )
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+
+    await _dispatch_control(cfg, "claude_control:approve:req-orig", "cb-o2")
+
+    assert [c["text"] for c in bot.callback_calls] == ["Approved"]
+    assert stdin.send.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_388_originator_only_rejects_ask_option_tap(
+    monkeypatch, control_registries
+) -> None:
+    """An AskUserQuestion option tap from another user is refused and the
+    flow is left untouched."""
+    from untether.telegram.approval_originator import NOT_ORIGINATOR_TEXT
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+
+    claude_mod = control_registries
+    _register_request(claude_mod, "req-ask")
+    claude_mod._REQUEST_TO_ORIGINATOR["req-ask"] = 2
+    flow = claude_mod.AskQuestionState(
+        request_id="req-ask",
+        channel_id=123,
+        questions=[{"question": "Pick?", "options": [{"label": "A"}]}],
+    )
+    claude_mod._ASK_QUESTION_FLOWS["req-ask"] = flow
+    cfg = make_cfg(FakeTransport())
+    cfg.approval_originator_only = True
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: AskQuestionCommand()
+    )
+    try:
+        await _dispatch_control(cfg, "aq:opt:0", "cb-aq")
+        assert [c["text"] for c in bot.callback_calls] == [NOT_ORIGINATOR_TEXT]
+        assert flow.current_index == 0
+        assert flow.answers == {}
+        assert claude_mod._ASK_QUESTION_FLOWS["req-ask"] is flow
+    finally:
+        claude_mod._ASK_QUESTION_FLOWS.pop("req-ask", None)

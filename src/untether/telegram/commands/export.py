@@ -206,7 +206,10 @@ def _format_export_markdown(
                 # Skip thinking blocks for brevity
                 continue
             elif kind == "warning":
-                lines.append(f"- {symbol} ⚠️ {title}")
+                # #987: a title that already leads with ⚠️ (Codex warnings)
+                # isn't given a second one.
+                icon = "" if title.startswith("⚠") else "⚠️ "
+                lines.append(f"- {symbol} {icon}{title}")
             else:
                 lines.append(f"- {symbol} {title}")
         elif evt_type == "turn":

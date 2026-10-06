@@ -57,7 +57,7 @@ bars, no keyboard, no notification tray.
 ## Tier 4: Supporting screenshots (12 images)
 
 - [ ] `planmode-on.jpg` — `/planmode on` confirmation. (iPhone) **RECAPTURE (post-#747): the reply now reads "permission mode on for this chat: …" ([#783](https://github.com/littlebearapps/untether/issues/783)).**
-- [ ] `planmode-auto.jpg` — `/planmode auto` confirmation. (iPhone) **RECAPTURE (post-#747) as `planmode-plan-auto.jpg`: `/planmode plan-auto` confirmation, for the #741 rename ([#783](https://github.com/littlebearapps/untether/issues/783)).**
+- [ ] `planmode-auto.jpg` — `/planmode plan-auto` confirmation (the current file still shows the old `/planmode auto` reply). (iPhone) **RECAPTURE (post-#747) as `planmode-plan-auto.jpg`: `/planmode plan-auto` confirmation, for the #741 rename ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [ ] `planmode-show.jpg` — `/planmode show` output. (iPhone) **RECAPTURE (post-#747): `/planmode show` with the mode set to `plan-auto` ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [x] `project-command.jpg` — `/<project>` command with ctx: footer. (iPhone)
 - [ ] `branch-directive.jpg` — `@branch` directive response with ctx: project @branch footer. (iPhone)
@@ -99,4 +99,4 @@ file to use; docs reference the same image via relative paths.
 
 ## Retired
 
-- `cooldown-auto-deny.jpg` — removed in v0.35.5 ([#783](https://github.com/littlebearapps/untether/issues/783)); the progressive cooldown it illustrated was retired in v0.35.4 ([#570](https://github.com/littlebearapps/untether/issues/570)), and the file was a byte-for-byte copy of `post-outline-buttons.jpg`. Don't recapture.
+- `cooldown-auto-deny.jpg` — removed in v0.36.0 ([#783](https://github.com/littlebearapps/untether/issues/783)); the progressive cooldown it illustrated was retired in v0.35.4 ([#570](https://github.com/littlebearapps/untether/issues/570)), and the file was a byte-for-byte copy of `post-outline-buttons.jpg`. Don't recapture.

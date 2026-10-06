@@ -118,6 +118,10 @@ Each request can be answered once. A second tap (yours or someone else's in a gr
 
 An unanswered request is denied automatically after 5 minutes (`⏱️ Timed out: auto-denied after 5 min`). Untether checks for this when another approval request arrives, so a single request on its own waits for you.
 
+## Who can answer in a group
+
+In a chat with several allowed users, any of them can answer any request by default. Set `approval_originator_only = true` under `[transports.telegram]` to accept approvals and question answers only from the person whose message started the run; anyone else gets `Only the person who started this run can answer this.` Cron, webhook, `/at` and loop runs have no originator, so any allowed user can still answer them ([#388](https://github.com/littlebearapps/untether/issues/388)). See [Group chat](group-chat.md#only-the-person-who-started-the-run-can-approve-opt-in).
+
 ## Push notifications
 
 When approval buttons appear, Untether sends a separate notification message so you don't miss it — even if your phone is locked or you're in another app.

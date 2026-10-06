@@ -224,6 +224,11 @@ def _format_size(size: int) -> str:
     return f"{size // (1024 * 1024)}m"
 
 
+def _count(n: int, noun: str) -> str:
+    """``1 file`` / ``2 files`` (#984)."""
+    return f"{n} {noun}{'s' if n != 1 else ''}"
+
+
 def _format_listing(
     dirpath: Path,
     root: Path,
@@ -287,18 +292,18 @@ def _format_listing(
 
     counts = []
     if dirs:
-        counts.append(f"{len(dirs)} dirs")
+        counts.append(_count(len(dirs), "dir"))
     if files:
-        counts.append(f"{len(files)} files")
+        counts.append(_count(len(files), "file"))
     if counts:
         text_lines.append(" · ".join(counts))
 
     if truncated_dirs or truncated_files:
         parts = []
         if truncated_dirs:
-            parts.append(f"{truncated_dirs} dirs")
+            parts.append(_count(truncated_dirs, "dir"))
         if truncated_files:
-            parts.append(f"{truncated_files} files")
+            parts.append(_count(truncated_files, "file"))
         text_lines.append(f"…and {' + '.join(parts)} not shown")
 
     return "\n".join(text_lines), buttons

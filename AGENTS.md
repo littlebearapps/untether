@@ -3,6 +3,7 @@
 Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
+OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 
 ## Architecture
 
@@ -74,6 +75,13 @@ uv run pytest tests/test_*.py -x # specific file
 | `/steer` / `/queue` | Claude: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
 | `/verbose` | Toggle verbose progress mode |
 | `/restart` | Gracefully restart Untether |
+
+## Branches, releases and test bots (never break these)
+
+- Work on `feature/*` / `fix/*` / `docs/*` branches → PR to `dev` (publishes an rc to TestPyPI). `master` always matches the latest PyPI release.
+- Never push to `master`/`main`, create `v*` tags or create GitHub releases — merging the `dev`→`master` PR is the release, and only Nathan approves it.
+- Test local changes on the dev bot (`untether-dev.service`, `@untether_dev_bot`), never staging (`untether.service`, which runs a PyPI/TestPyPI wheel). Never restart Untether from inside an active Untether session — config hot-reloads, and the restart drain drops the final message.
+- Every bug fix or significant change needs a GitHub issue, linked from `CHANGELOG.md` under the current `## vX.Y.Z (unreleased)` heading.
 
 ## Before committing
 

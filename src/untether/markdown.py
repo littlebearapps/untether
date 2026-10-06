@@ -296,6 +296,7 @@ def format_action_line(
 
     #481: ``elapsed_seconds`` triggers the long-running tail. When the
     action is non-completed AND age > 60 s, append ``· <elapsed> · <key arg>``
+    (just ``· <elapsed>`` when the title already shows the key arg, #986)
     so a glancing user can answer "is it alive? what is it doing? for how
     long?" without waiting for the next JSONL event. The tail fires
     regardless of formatter verbosity — verbose mode keeps its existing
@@ -304,7 +305,8 @@ def format_action_line(
     """
     if phase != "completed":
         status = STATUS["update"] if phase == "updated" else STATUS["running"]
-        line = f"{status} {format_action_title(action, command_width=command_width)}"
+        title = format_action_title(action, command_width=command_width)
+        line = f"{status} {title}"
         if elapsed_seconds is not None and elapsed_seconds > 60:
             elapsed_str = format_duration(elapsed_seconds)
             detail = format_verbose_detail(action, width=_TAIL_DETAIL_WIDTH)
@@ -313,6 +315,9 @@ def format_action_line(
                 # ``▸ Bash · 3m 47s · npm run build`` rather than
                 # ``▸ Bash · 3m 47s · → npm run build``.
                 detail_clean = detail.lstrip("→ ").strip()
+                if _title_shows_detail(action, title, detail_clean):
+                    detail = None
+            if detail:
                 tail = f" · {elapsed_str} · {_fit_detail(action, detail_clean, _TAIL_DETAIL_WIDTH)}"
             else:
                 tail = f" · {elapsed_str}"
@@ -342,6 +347,24 @@ _TAIL_DETAIL_WIDTH = 80
 # Verbose details that carry a code span, built to fit the caller's width so
 # nobody shortens (and cuts) them afterwards (#871).
 _FENCED_DETAIL_NAMES = frozenset({"Edit", "edit", "Grep", "grep", "Glob", "glob"})
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.replace("`", "").split())
+
+
+def _title_shows_detail(action: Action, title: str, detail: str) -> bool:
+    """Whether the long-running tail's detail only repeats the title (#986).
+
+    A file change's title already names its file(s), so the tail adds only
+    the elapsed time (``▸ files: update x.txt · 9m 54s``, not ``… · x.txt``).
+    Otherwise the detail is dropped when the title already contains it, e.g.
+    a command, ``read:`` path or ``grep:`` pattern shown in full.
+    """
+    if action.kind == "file_change":
+        return True
+    plain_detail = _plain(detail).rstrip("…").strip('"')
+    return bool(plain_detail) and plain_detail in _plain(title)
 
 
 def _fit_detail(action: Action, detail: str, width: int) -> str:

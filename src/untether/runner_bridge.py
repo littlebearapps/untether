@@ -63,6 +63,7 @@ from .transport import (
     SendOptions,
     ThreadId,
     Transport,
+    message_kind,
 )
 
 logger = get_logger(__name__)
@@ -238,7 +239,8 @@ async def delete_outline_messages(session_id: str) -> None:
     transport, refs = entry
     for ref in refs:
         try:
-            await transport.delete(ref=ref)
+            with message_kind("outline"):
+                await transport.delete(ref=ref)
         except Exception:  # noqa: BLE001
             logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
@@ -2143,6 +2145,14 @@ def _approval_reminder_headline(info: _PendingRequestInfo | None, mins: int) -> 
     return f"⏳ Waiting for your approval ({mins} min) — tap a button above. {tail}"
 
 
+# #953: /proc states — T/t stopped or traced, D uninterruptible I/O wait.
+_STOPPED_PROC_STATES = frozenset({"T", "t"})
+_BLOCKED_PROC_STATES = frozenset({"D"})
+# #953: engines whose child processes are real work (Agent subagents, Bash
+# tools), not a permanent wrapper binary or MCP servers.
+_CHILD_WORK_ENGINES = frozenset({"claude"})
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -2198,6 +2208,9 @@ class ProgressEdits:
         self._sleep = sleep
         self._last_render_at: float = 0.0
         self._has_rendered: bool = False
+        # #948: held while a repaint is handed to the transport;
+        # ``stop_repaints`` takes it so a final edit is ordered after it.
+        self._edit_lock = anyio.Lock()
         self._last_event_at: float = clock()
         self._stall_warned: bool = False
         self._stall_warn_count: int = 0
@@ -2322,6 +2335,10 @@ class ProgressEdits:
            is older than 60 s — this keeps the elapsed-time tail current
            in the chat (otherwise the message looks frozen during long
            BashOutput polling cycles).
+        4. (#777) refresh a live background-task block.
+        5. (#954) otherwise, re-render when nothing has for a heartbeat
+           interval, so the header's elapsed time keeps moving while the
+           engine generates silently.
         """
         stream = self.stream
         engine_state = getattr(stream, "engine_state", None) if stream else None
@@ -2395,7 +2412,22 @@ class ProgressEdits:
                 continue
             if (now - action_state.started_at) > 60.0:
                 self._bump_heartbeat()
-                break
+                return
+
+        # 5) #954: an engine generating silently (no events, no open action)
+        #    would otherwise leave the header's elapsed time frozen. Re-render
+        #    once nothing has repainted for a full heartbeat interval, so a
+        #    busy run gains no edits and a silent one gains one per interval
+        #    (30 s default) — well inside Telegram's edit budget. Only once
+        #    the engine has produced an event: ``event_seq == 0`` is the
+        #    ``no_pid_no_events`` auto-cancel's "never started" signal.
+        if (
+            self.event_seq > 0
+            and not self._finalizing
+            and not self._is_live_session_idle()
+            and now - self._last_render_at >= self._heartbeat_interval
+        ):
+            self._bump_heartbeat()
 
     async def _flush_pending_closing_message(self) -> None:
         """#470: send the one-shot post-result closing Telegram message.
@@ -2622,7 +2654,7 @@ class ProgressEdits:
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
-            elif self._has_active_children(diag):
+            elif self._children_extend_threshold(diag, tree_active):
                 threshold = self._STALL_THRESHOLD_SUBAGENT
                 threshold_reason = "active_children"
             elif self._has_running_tool():
@@ -3291,6 +3323,22 @@ class ProgressEdits:
                         and _approval_info.question
                     ):
                         parts.append(f"❓ {_approval_info.question}")
+                elif (
+                    diag is not None
+                    and diag.alive
+                    and diag.state in _STOPPED_PROC_STATES | _BLOCKED_PROC_STATES
+                ):
+                    # #953: say what the engine process itself is doing.
+                    if diag.state in _STOPPED_PROC_STATES:
+                        parts = [
+                            f"⏳ Engine process is stopped (state {diag.state},"
+                            f" {mins} min)"
+                        ]
+                    else:
+                        parts = [
+                            f"⏳ Engine process is blocked on I/O (state"
+                            f" {diag.state}, {mins} min)"
+                        ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -4001,6 +4049,23 @@ class ProgressEdits:
             break  # only check the most recent
         return None
 
+    def _children_extend_threshold(self, diag: Any, tree_active: bool | None) -> bool:
+        """Whether child-process work earns the longer subagent threshold.
+
+        #953: a stopped engine process can't be waiting on subagent work, and
+        outside Claude (whose children are Agent/Bash work) a child pid is
+        usually permanent — Codex's npm shim wraps the real binary, OpenCode
+        keeps MCP servers — so there it counts only while the process tree is
+        burning CPU (or on the TCP signal, unchanged).
+        """
+        if diag is not None and diag.state in _STOPPED_PROC_STATES:
+            return False
+        if not self._has_active_children(diag):
+            return False
+        if self.tracker.engine in _CHILD_WORK_ENGINES:
+            return True
+        return tree_active is True or diag.tcp_total > self._TCP_ACTIVE_THRESHOLD
+
     def _has_active_children(self, diag: Any) -> bool:
         """True if the process has active child processes or elevated TCP.
 
@@ -4381,15 +4446,18 @@ class ProgressEdits:
 
                         async def _send_notify(text: str) -> None:
                             try:
-                                self._approval_notify_ref = await self.transport.send(
-                                    channel_id=self.channel_id,
-                                    message=RenderedMessage(text=text),
-                                    options=SendOptions(
-                                        notify=True,
-                                        reply_to=self.progress_ref,
-                                        thread_id=self.thread_id,
-                                    ),
-                                )
+                                with message_kind("approval_notify"):
+                                    self._approval_notify_ref = (
+                                        await self.transport.send(
+                                            channel_id=self.channel_id,
+                                            message=RenderedMessage(text=text),
+                                            options=SendOptions(
+                                                notify=True,
+                                                reply_to=self.progress_ref,
+                                                thread_id=self.thread_id,
+                                            ),
+                                        )
+                                    )
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_send_failed",
@@ -4405,7 +4473,8 @@ class ProgressEdits:
 
                         async def _delete_notify(ref: MessageRef) -> None:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("approval_notify"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_delete_failed",
@@ -4430,7 +4499,8 @@ class ProgressEdits:
                     ) -> None:
                         for ref in refs:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("outline"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.outline_delete_failed",
@@ -4444,39 +4514,45 @@ class ProgressEdits:
                 if self._outline_sent and not source_has_approval:
                     self._outline_sent = False
 
-                if rendered != self.last_rendered:
-                    # Log keyboard transitions at info level for #103/#104 diagnostics
-                    if has_approval and not had_approval:
-                        logger.info(
-                            "progress_edits.keyboard_attach",
+                # #948: the debounce sleep and sends above can outlast the
+                # turn being finalised. Re-check under the lock
+                # ``stop_repaints`` takes, so a stale repaint is never sent
+                # after (and over) the final edit.
+                async with self._edit_lock:
+                    if rendered != self.last_rendered and not self._finalizing:
+                        # Log keyboard transitions at info level for #103/#104 diagnostics
+                        if has_approval and not had_approval:
+                            logger.info(
+                                "progress_edits.keyboard_attach",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                                request_id=_kb_request_id,
+                                tool_name=_kb_tool,
+                            )
+                        logger.debug(
+                            "transport.edit_message",
                             channel_id=self.channel_id,
                             message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
-                            request_id=_kb_request_id,
-                            tool_name=_kb_tool,
+                            rendered=rendered.text,
                         )
-                    logger.debug(
-                        "transport.edit_message",
-                        channel_id=self.channel_id,
-                        message_id=self.progress_ref.message_id,
-                        rendered=rendered.text,
-                    )
-                    edited = await self.transport.edit(
-                        ref=self.progress_ref,
-                        message=rendered,
-                        wait=has_approval and not had_approval,
-                    )
-                    if edited is not None:
-                        self.last_rendered = rendered
-                        self._last_render_at = self.clock()
-                        self._has_rendered = True
-                    elif has_approval:
-                        logger.warning(
-                            "progress_edits.keyboard_edit_failed",
-                            channel_id=self.channel_id,
-                            message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
-                        )
+                        with message_kind("progress"):
+                            edited = await self.transport.edit(
+                                ref=self.progress_ref,
+                                message=rendered,
+                                wait=has_approval and not had_approval,
+                            )
+                        if edited is not None:
+                            self.last_rendered = rendered
+                            self._last_render_at = self.clock()
+                            self._has_rendered = True
+                        elif has_approval:
+                            logger.warning(
+                                "progress_edits.keyboard_edit_failed",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                            )
             except Exception:  # noqa: BLE001
                 # Transport errors (timeouts, network issues) are best-effort —
                 # never crash a run because a progress edit failed to send.
@@ -4514,6 +4590,18 @@ class ProgressEdits:
     # result idle past this point with no other expected-wait signal,
     # Tier 1 missed an edge case — stop suppressing auto-cancel.
     _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
+
+    async def stop_repaints(self) -> None:
+        """#948: stop progress repaints before a final edit of this message.
+
+        Sets ``_finalizing`` (no new repaint starts), then waits for a repaint
+        already being handed to the transport, so the caller's final edit is
+        enqueued after it — the outbox coalesces same-message edits, so the
+        final supersedes it or follows it, and never the other way round.
+        """
+        self._finalizing = True
+        async with self._edit_lock:
+            pass
 
     def note_final(self, evt: UntetherEvent) -> None:
         """#591: record a terminal CompletedEvent WITHOUT scheduling a repaint.
@@ -4628,15 +4716,16 @@ class ProgressEdits:
                     extra: dict[str, Any] = {"entities": entities}
                     if approval_keyboard and idx == last_idx:
                         extra["reply_markup"] = approval_keyboard
-                    ref = await self.transport.send(
-                        channel_id=self.channel_id,
-                        message=RenderedMessage(text=rendered_text, extra=extra),
-                        options=SendOptions(
-                            reply_to=self.progress_ref,
-                            notify=False,
-                            thread_id=self.thread_id,
-                        ),
-                    )
+                    with message_kind("outline"):
+                        ref = await self.transport.send(
+                            channel_id=self.channel_id,
+                            message=RenderedMessage(text=rendered_text, extra=extra),
+                            options=SendOptions(
+                                reply_to=self.progress_ref,
+                                notify=False,
+                                thread_id=self.thread_id,
+                            ),
+                        )
                     if ref:
                         self._outline_refs.append(ref)
                 except Exception:  # noqa: BLE001
@@ -4664,11 +4753,12 @@ class ProgressEdits:
         self._approval_first_reminder_sent = True
         previous = self._approval_reminder_ref
         try:
-            ref = await self.transport.send(
-                channel_id=self.channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(thread_id=self.thread_id, replace=previous),
-            )
+            with message_kind("approval_reminder"):
+                ref = await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(thread_id=self.thread_id, replace=previous),
+                )
         except Exception:  # noqa: BLE001
             logger.debug("progress_edits.stall_notify_failed", exc_info=True)
             return
@@ -4699,11 +4789,12 @@ class ProgressEdits:
             self._approval_first_reminder_sent = False
         deleted = False
         try:
-            deleted = bool(await self.transport.delete(ref=ref))
+            with message_kind("approval_reminder"):
+                deleted = bool(await self.transport.delete(ref=ref))
         except Exception:  # noqa: BLE001
             deleted = False
         if not deleted:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception), message_kind("approval_reminder"):
                 await self.transport.edit(
                     ref=ref, message=RenderedMessage(text="✅ No longer waiting.")
                 )
@@ -4736,7 +4827,8 @@ class ProgressEdits:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
             try:
-                await self.transport.delete(ref=self._approval_notify_ref)
+                with message_kind("approval_notify"):
+                    await self.transport.delete(ref=self._approval_notify_ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.delete.failed",
@@ -4769,7 +4861,8 @@ class ProgressEdits:
             _OUTLINE_REGISTRY_TS.pop(sid, None)  # #203: keep ts map in sync
         for ref in self._outline_refs:
             try:
-                await self.transport.delete(ref=ref)
+                with message_kind("outline"):
+                    await self.transport.delete(ref=ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.outline_delete.failed",
@@ -4786,7 +4879,8 @@ class ProgressEdits:
             _EPHEMERAL_MSGS_TS.pop(key, None)  # #203: keep ts map in sync
             for ref in refs:
                 try:
-                    await self.transport.delete(ref=ref)
+                    with message_kind("ephemeral"):
+                        await self.transport.delete(ref=ref)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "ephemeral.delete.failed",
@@ -4828,16 +4922,17 @@ async def send_initial_progress(
         elapsed_s=0.0,
         label=label,
     )
-    sent_ref, _ = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=initial_rendered,
-        edit_ref=progress_ref,
-        reply_to=reply_to,
-        notify=False,
-        replace_ref=progress_ref,
-        thread_id=thread_id,
-    )
+    with message_kind("progress"):
+        sent_ref, _ = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=initial_rendered,
+            edit_ref=progress_ref,
+            reply_to=reply_to,
+            notify=False,
+            replace_ref=progress_ref,
+            thread_id=thread_id,
+        )
     if sent_ref is not None:
         last_rendered = initial_rendered
         logger.debug(
@@ -4867,6 +4962,15 @@ class RunOutcome:
     cancelled: bool = False
     completed: CompletedEvent | None = None
     resume: ResumeToken | None = None
+    # #905: ``completed``'s #572 stream-idle class, captured as it is
+    # consumed. The engine state's copy is rewritten by every later result,
+    # so a live session's wake turn would otherwise mask the run's own.
+    stream_idle_class: str | None = None
+
+
+#: #614/#618: the bound on the shielded early final delivery (#591). 60 s,
+#: not less — a 4-chunk final under group-chat outbox pacing takes 15 s+.
+_EARLY_DELIVERY_TIMEOUT_S = 60.0
 
 
 async def run_runner_with_cancel(
@@ -4957,6 +5061,19 @@ async def run_runner_with_cancel(
                             first_completed = outcome.completed is None
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
+                            # #905: the runner set this result's class just
+                            # before yielding it and is suspended at the
+                            # yield, so this read belongs to ``evt``.
+                            run_stream = (
+                                stream_handle.stream
+                                if stream_handle.stream is not None
+                                else edits.stream
+                            )
+                            outcome.stream_idle_class = getattr(
+                                getattr(run_stream, "engine_state", None),
+                                "stream_idle_class",
+                                None,
+                            )
                             # #591: deliver the final answer NOW — the run
                             # generator may not return for up to the full
                             # post-result limbo window (MCP children holding
@@ -5003,8 +5120,18 @@ async def run_runner_with_cancel(
                                     # timeout that fires between the last
                                     # chunk and the sent-flag re-creates the
                                     # spurious-cancelled artifact.
-                                    with anyio.move_on_after(60, shield=True):
+                                    with anyio.move_on_after(
+                                        _EARLY_DELIVERY_TIMEOUT_S, shield=True
+                                    ) as delivery_scope:
                                         await on_completed(evt, outcome)
+                                    if delivery_scope.cancelled_caught:
+                                        # #928: was silent — a send that
+                                        # landed then stalled (e.g. on the
+                                        # replace-delete) looked undelivered.
+                                        logger.warning(
+                                            "final.early_delivery_timeout",
+                                            timeout_s=_EARLY_DELIVERY_TIMEOUT_S,
+                                        )
                                 except Exception:  # noqa: BLE001
                                     logger.warning(
                                         "final.early_delivery_failed",
@@ -5178,16 +5305,17 @@ async def send_result_message(
 ) -> MessageRef | None:
     """Send (or edit in) a final; returns its message ref (#890), or None
     when the transport delivered nothing."""
-    final_msg, edited = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=message,
-        edit_ref=edit_ref,
-        reply_to=reply_to,
-        notify=notify,
-        replace_ref=replace_ref,
-        thread_id=thread_id,
-    )
+    with message_kind("final"):
+        final_msg, edited = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=message,
+            edit_ref=edit_ref,
+            reply_to=reply_to,
+            notify=notify,
+            replace_ref=replace_ref,
+            thread_id=thread_id,
+        )
     if final_msg is None:
         return None
     if (
@@ -5201,7 +5329,8 @@ async def send_result_message(
             message_id=progress_ref.message_id,
             tag=delete_tag,
         )
-        await cfg.transport.delete(ref=progress_ref)
+        with message_kind("progress"):
+            await cfg.transport.delete(ref=progress_ref)
     return final_msg
 
 
@@ -5957,6 +6086,38 @@ class FollowupTurnRouter:
         await self._finish(ctx)
 
 
+# #952: engines whose CompletedEvent.usage carries a turn count. For these a
+# failed resume with ``num_turns == 0`` (or no result at all) means the
+# session never got going (#45). Codex, OpenCode and Pi never report turns,
+# so for them only an error that names the resume itself clears the session.
+_TURN_COUNT_ENGINES = frozenset({"claude", "amp"})
+_RESUME_FAILURE_RE = re.compile(
+    r"no rollout found"  # codex: thread/resume failed
+    r"|thread/resume failed"
+    r"|session not found"  # opencode: NotFoundError
+    r"|no session found"  # pi: No session found matching '…'
+    r"|finished but no session_id"  # codex/opencode: never confirmed it
+    r"|failed to load on resume",  # pi: zero events on a resumed run
+    re.IGNORECASE,
+)
+_SESSION_CLEARED_NOTICE = (
+    "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} The saved session couldn't"
+    " be resumed, so it was cleared \N{EM DASH} your next message starts a new"
+    " session."
+)
+
+
+def _resume_failure_clears_session(
+    engine: str, usage: Mapping[str, Any] | None, error: object
+) -> bool:
+    """Whether a failed resumed run should clear the saved session (#45, #952)."""
+    if usage and "num_turns" in usage:
+        return not usage.get("num_turns")
+    if engine in _TURN_COUNT_ENGINES:
+        return True
+    return bool(error) and _RESUME_FAILURE_RE.search(str(error)) is not None
+
+
 async def handle_message(
     cfg: ExecBridgeConfig,
     *,
@@ -6585,6 +6746,7 @@ async def handle_message(
         # #838: a pre-spawn guard block (RAM / concurrency) never ran the
         # engine, so the saved session is fine — keep it.
         _blocked = prespawn_blocked_reason(completed.usage)
+        _session_auto_cleared = False
         if (
             turn is None
             and run_ok is False
@@ -6605,10 +6767,9 @@ async def handle_message(
             and resume_token is not None
             and on_resume_failed is not None
         ):
-            _num_turns = 0
-            if completed.usage:
-                _num_turns = completed.usage.get("num_turns", 0) or 0
-            if _num_turns == 0:
+            if _resume_failure_clears_session(
+                resume_token.engine, completed.usage, run_error
+            ):
                 try:
                     await on_resume_failed(resume_token)
                     logger.info(
@@ -6616,8 +6777,18 @@ async def handle_message(
                         engine=resume_token.engine,
                         resume=resume_token.value,
                     )
+                    _session_auto_cleared = True
                 except Exception:  # noqa: BLE001
                     logger.debug("session.auto_clear_failed", exc_info=True)
+            else:
+                # #952: a non-resume failure (bad model, auth, rate limit)
+                # on an engine that reports no turn count — keep the session.
+                logger.info(
+                    "session.auto_clear_skipped",
+                    reason="not_resume_failure",
+                    engine=resume_token.engine,
+                    resume=resume_token.value,
+                )
 
         if run_ok is False and run_error:
             raw_error = str(run_error)
@@ -6653,6 +6824,9 @@ async def handle_message(
                     )
                 else:
                     final_answer = f"```\n{raw_error}\n```"
+        if _session_auto_cleared:
+            # #952: say so — the card's resume line still names the old session.
+            final_answer = f"{final_answer}\n\n{_SESSION_CLEARED_NOTICE}".lstrip()
 
         # #596: a 0-turn / $0 / empty-answer completion with ok=True is a
         # no-op resume (upstream: the resumed session considers itself
@@ -6977,9 +7151,9 @@ async def handle_message(
         ):
             delivery["sent"] = True
             if t_edits is not None:
-                t_edits._finalizing = True
+                await t_edits.stop_repaints()
             if t_progress_ref is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception), message_kind("progress"):
                     await cfg.transport.delete(ref=t_progress_ref)
                 _release_progress(t_progress_ref, reason="folded")
             return
@@ -7005,9 +7179,9 @@ async def handle_message(
         ):
             delivery["sent"] = True
             if t_edits is not None:
-                t_edits._finalizing = True
+                await t_edits.stop_repaints()
             if t_progress_ref is not None:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception), message_kind("progress"):
                     await cfg.transport.delete(ref=t_progress_ref)
                 _release_progress(t_progress_ref, reason="capped_repeat")
             return
@@ -7022,21 +7196,30 @@ async def handle_message(
         # can't overwrite the final message. (The early path already set
         # this via note_final; this covers the post-return path.)
         if t_edits is not None:
-            t_edits._finalizing = True
+            await t_edits.stop_repaints()
 
-        final_ref = await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=t_reply_to,
-            progress_ref=t_progress_ref,
-            message=final_rendered,
-            notify=t_notify,
-            edit_ref=edit_ref,
-            replace_ref=t_progress_ref,
-            delete_tag="final",
-            thread_id=incoming.thread_id,
-        )
+        # #928: committed once handed to the transport. The outbox delivers a
+        # queued send even if this await is cut short (the early path's
+        # bounded scope), so a timeout after the send landed — e.g. stalled on
+        # the replace-delete — must not let the post-return path send it
+        # again. Only a raised send (nothing queued) stays undelivered.
         delivery["sent"] = True
+        try:
+            final_ref = await send_result_message(
+                cfg,
+                channel_id=incoming.channel_id,
+                reply_to=t_reply_to,
+                progress_ref=t_progress_ref,
+                message=final_rendered,
+                notify=t_notify,
+                edit_ref=edit_ref,
+                replace_ref=t_progress_ref,
+                delete_tag="final",
+                thread_id=incoming.thread_id,
+            )
+        except Exception:
+            delivery["sent"] = False
+            raise
         if (
             capped_head is not None
             and final_ref is not None
@@ -7243,10 +7426,10 @@ async def handle_message(
         completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
     ) -> bool:
         stream = edits.stream
-        engine_state = getattr(stream, "engine_state", None) if stream else None
         return _should_stream_idle_retry(
             watchdog=watchdog,
-            stream_idle_class=getattr(engine_state, "stream_idle_class", None),
+            # #905: the run's own class, not the engine state's latest.
+            stream_idle_class=run_outcome.stream_idle_class,
             run_ok=completed.ok,
             cancelled=run_outcome.cancelled,
             resume_present=(completed.resume or run_outcome.resume) is not None,
@@ -7418,7 +7601,7 @@ async def handle_message(
         )
         if ctx.edits is not None:
             # Stop progress repaints so a queued render can't overwrite it.
-            ctx.edits._finalizing = True
+            await ctx.edits.stop_repaints()
         await send_result_message(
             cfg,
             channel_id=incoming.channel_id,

@@ -146,8 +146,10 @@ def _make_ctx(
     chat_id: int = 12345,
     *,
     runtime: Any = None,
+    thread_id: int | None = None,
+    **extra: Any,
 ) -> CommandContext:
-    message = MessageRef(channel_id=chat_id, message_id=1)
+    message = MessageRef(channel_id=chat_id, message_id=1, thread_id=thread_id)
     return CommandContext(
         command="at",
         text=f"/at {args_text}",
@@ -160,6 +162,7 @@ def _make_ctx(
         plugin_config={},
         runtime=runtime if runtime is not None else _FakeRuntime(),
         executor=None,  # type: ignore[arg-type]
+        **extra,
     )
 
 
@@ -285,6 +288,61 @@ class TestAtCommand:
                 assert pending[0].context is not None
                 assert pending[0].context.project == "acme"
                 assert pending[0].context.trigger_source == f"at:{pending[0].token}"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_uses_chat_agent_default_over_project(self):
+        """#950 — the chat's /agent default (or a topic default) beats the
+        project and global defaults, as it does for a plain prompt."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi"},
+            global_default="codex",
+        )
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, RunJobRecorder(), FakeTransport(), 12345)
+            try:
+                await AtCommand().handle(
+                    _make_ctx(
+                        "60s probe",
+                        runtime=runtime,
+                        thread_id=10,
+                        default_engine_override="opencode",
+                    )
+                )
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                assert pending[0].engine_override == "opencode"
+                assert pending[0].thread_id == 10
+                assert pending[0].context is not None
+                assert pending[0].context.project == "acme"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_uses_ambient_context_for_project_default(self):
+        """#950 — a topic/chat bound with /ctx resolves its project (and that
+        project's engine) like a plain prompt there, not the chat's mapping."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi", "beta": "claude"},
+            global_default="codex",
+        )
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, RunJobRecorder(), FakeTransport(), 12345)
+            try:
+                await AtCommand().handle(
+                    _make_ctx(
+                        "60s probe",
+                        runtime=runtime,
+                        ambient_context=RunContext(project="beta", branch="feat"),
+                    )
+                )
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                assert pending[0].engine_override == "claude"
+                assert pending[0].context is not None
+                assert pending[0].context.project == "beta"
+                assert pending[0].context.branch == "feat"
             finally:
                 tg.cancel_scope.cancel()
 

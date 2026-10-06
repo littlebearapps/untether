@@ -58,8 +58,10 @@ Untether uses the official Claude Code CLI, so your existing Claude subscription
 ### OpenCode
 
 ```sh
-npm install -g opencode-ai@latest
+npm install -g opencode-ai@1
 ```
+
+Untether drives the OpenCode **1.x** CLI (npm `opencode-ai`). OpenCode 2.x (npm `@opencode/cli`, whose binary is also called `opencode`) isn't supported yet: it runs prompts on a shared background service outside Untether's control, so Untether checks `opencode --version` before each run and refuses 2.x with a `🛑 OpenCode 2.x isn't supported yet` message and the commands to switch back ([#970](https://github.com/littlebearapps/untether/issues/970)).
 
 OpenCode supports logging in with Anthropic for your Claude subscription or with OpenAI for your ChatGPT subscription, and it can connect to 75+ providers via Models.dev (including local models).
 
@@ -302,7 +304,7 @@ untether runs these engines on your computer. switch anytime with /agent.
   ───────────────────────────────────────────
   codex     ✓ installed
   claude    ✓ installed
-  opencode  ✗ not found    npm install -g opencode-ai@latest
+  opencode  ✗ not found    npm install -g opencode-ai@1
   pi        ✗ not found    npm install -g @mariozechner/pi-coding-agent
   gemini    ✗ not found    npm install -g @google/gemini-cli
   amp       ✗ not found    npm install -g @sourcegraph/amp

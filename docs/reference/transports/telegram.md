@@ -145,6 +145,8 @@ you care about in your own value (the default no longer lists Gemini, Amp or Pi,
 [#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
+After transcription, Untether rewrites the known mishears of the name Claude, whatever the prompt ([#789](https://github.com/littlebearapps/untether/issues/789)): `Clawde` / `Clawd` → `Claude`; `Clawde|Clawd|Clawed|Corde` + `Code` → `Claude Code`; `Clawde|Clawd|Clawed|Claw|Corde` + `.md` → `CLAUDE.md` (whole words, case-insensitive; a bare "clawed" is a real word and is kept). A rewrite logs INFO `voice.transcript.corrected` with the `corrections` count, never the text.
+
 ### Listen mode (mentions-only)
 
 Telegram’s bot privacy mode stops bots from seeing every message by default, but
@@ -543,6 +545,20 @@ reads as expired and answers nothing
 ([#388](https://github.com/littlebearapps/untether/issues/388)). Other callback
 families already act only on the tapping chat.
 
+With `approval_originator_only = true` (opt-in, hot-reloads), `_dispatch_callback`
+also refuses a `claude_control:` or `aq:` tap from anyone but the run's
+originator, **before** the early answer reserves a claim: toast
+`Only the person who started this run can answer this.`, WARNING
+`callback.not_originator` (`chat_id`, `request_id`, `sender_id`,
+`originator_id`). The originator comes from the triggering message: the loop
+notes `(chat_id, message_id) → sender_id` for every allowed message
+(`telegram/approval_originator.py`, bounded), `_run_engine` sets the run's
+sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the Claude
+runner records it per request in `_REQUEST_TO_ORIGINATOR`. Cron, webhook, `/at`
+and loop fires start from a bot notice, so they have no originator and any
+allowed user may answer. A typed AskUserQuestion answer is gated the same way
+(`ask_user_question.not_originator`, reply instead of answering).
+
 Backends that want a visible toast ("Approved" / "Denied" / …) set
 `answer_early = True` and provide `early_answer_toast(args_text) -> str | None`.
 Dispatch hits `answerCallbackQuery` via that path **before** calling
@@ -591,7 +607,7 @@ the cause.
   returns `None`.
 - Non-429 HTTP errors are logged at ERROR (`telegram.http_error`) and dropped (no retry).
 - Benign `editMessage*` / `deleteMessage` rejections ("message is not modified", "message to edit not found", "message to delete not found", "message can't be edited", "message can't be deleted") are classified by their `description` (case-insensitive substring; Telegram's `error_code` is 400 for all of them and documented as unstable) and logged at INFO as `telegram.benign_rejection` with a `reason_class` (`not_modified`, `target_gone`, `not_editable`, `not_deletable`), instead of ERROR. A missing, zero or negative `message_id`, `MESSAGE_ID_INVALID`, a benign-looking string on any other method, and every non-400 status stay at ERROR. When 5 rejections of one `(method, reason_class)` arrive within 60 s, one WARNING `telegram.benign_rejection.burst` (with `distinct_messages`, `message_ids`, `chat_ids`) is logged per window, so a wrong-id bug or a stuck edit loop still surfaces ([#746](https://github.com/littlebearapps/untether/issues/746)).
-- `telegram.http_error`, `telegram.network_error` and `telegram.api_error` carry the target `chat_id` and `message_id` (when the request had them), and `telegram.network_retry` the `chat_id`, so a failed edit can be tied to its chat ([#823](https://github.com/littlebearapps/untether/issues/823)).
+- `telegram.http_error`, `telegram.network_error` and `telegram.api_error` carry the target `chat_id` and `message_id` (when the request had them), and `telegram.network_retry` the `chat_id`, so a failed edit can be tied to its chat. They, `telegram.benign_rejection`, `outbox.op.failed` and `transport.send/edit/delete.failed` also carry `kind`: the Untether surface the call was for — `progress` (a run's or follow-up turn's progress message), `final`, `bg_status`, `approval_surface`, `approval_notify`, `approval_reminder`, `outline` or `ephemeral` — or `null` for an untagged call (commands, notices, triggers). The kind is a context variable set by the caller and carried on the outbox op onto the worker task ([#823](https://github.com/littlebearapps/untether/issues/823)).
 - The recorded failure reason (`transport.edit.failed error=`, `startup.orphan_cleanup.edit_failed reason=`) is Telegram's `description` when the response carries one, else `http <status>: <body>`.
 - On `RetryAfter`, the op is retried unless a newer op superseded the same key.
 

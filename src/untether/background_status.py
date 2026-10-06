@@ -31,7 +31,13 @@ import anyio
 
 from .logging import get_logger
 from .markdown import HARD_BREAK, shorten
-from .transport import MessageRef, RenderedMessage, SendOptions, Transport
+from .transport import (
+    MessageRef,
+    RenderedMessage,
+    SendOptions,
+    Transport,
+    message_kind,
+)
 
 logger = get_logger(__name__)
 
@@ -427,6 +433,10 @@ class BackgroundStatusPanel:
         # task whose end the runner paired with that turn claims exactly
         # that note — never merely the latest one.
         self._note_turns: dict[int, str] = {}
+        # #985: unattributed notes folded while tasks were still running —
+        # interim narration ("… hasn't finished") that an all-done finish
+        # supersedes.
+        self._interim_notes: set[str] = set()
         self.folds = 0
         # Wake turns delivered as their own pushed message while this was the
         # run's status message (see ``wake_fold_decision``'s batch rule).
@@ -518,6 +528,17 @@ class BackgroundStatusPanel:
     def _ack_lines(self, task: Any) -> list[str]:
         return [f"   ↳ {ack}" for ack in self.acks.get(self._tid(task), [])]
 
+    def _drop_interim_notes(self) -> None:
+        """#985: every task is done, so a note written while some still ran
+        ("… hasn't finished") now contradicts the header — drop it, and its
+        turn key, so a later claim can't bring it back as a row ack."""
+        interim = self._interim_notes
+        self.notes = [n for n in self.notes if n not in interim]
+        self._note_turns = {
+            t: n for t, n in self._note_turns.items() if n not in interim
+        }
+        self._interim_notes = set()
+
     def _claim_turn_notes(self, target: str, turns: Iterable[int]) -> bool:
         """#813: move the unattributed acks of ``turns`` onto ``target``'s
         row — the CLI answered one finish twice, first in a turn no task
@@ -567,6 +588,7 @@ class BackgroundStatusPanel:
             {k: list(v) for k, v in self.acks.items()},
             list(self.notes),
             dict(self._note_turns),
+            set(self._interim_notes),
         )
         ack = _one_line(_ack_plain(text))
         target = next((tid for tid in task_ids if tid in self.tasks), None)
@@ -580,10 +602,12 @@ class BackgroundStatusPanel:
             else:
                 if ack not in self.notes:
                     self.notes.append(ack)
+                    if not self.finalised and self.live():
+                        self._interim_notes.add(ack)
                 if turn is not None:
                     self._note_turns[turn] = ack
         if len(self.render()) >= STATUS_MAX_CHARS:  # would be truncated
-            self.acks, self.notes, self._note_turns = saved
+            self.acks, self.notes, self._note_turns, self._interim_notes = saved
             return False
         self.folds += 1
         if not self.finalised and not self.live():
@@ -604,13 +628,14 @@ class BackgroundStatusPanel:
     async def open(self, reply_to: MessageRef | None) -> bool:
         text = self.render()
         try:
-            ref = await self._transport.send(
-                channel_id=self._channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(
-                    reply_to=reply_to, notify=False, thread_id=self._thread_id
-                ),
-            )
+            with message_kind("bg_status"):
+                ref = await self._transport.send(
+                    channel_id=self._channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(
+                        reply_to=reply_to, notify=False, thread_id=self._thread_id
+                    ),
+                )
         except Exception:  # noqa: BLE001 — a status panel is best-effort
             logger.warning("background_status.send_failed", exc_info=True)
             return False
@@ -635,7 +660,10 @@ class BackgroundStatusPanel:
             self._last_sig = self._signature()
             return
         try:
-            await self._transport.edit(ref=self.ref, message=RenderedMessage(text=text))
+            with message_kind("bg_status"):
+                await self._transport.edit(
+                    ref=self.ref, message=RenderedMessage(text=text)
+                )
         except Exception:  # noqa: BLE001
             logger.debug("background_status.edit_failed", exc_info=True)
             return
@@ -671,6 +699,10 @@ class BackgroundStatusPanel:
         ):
             self.close_reason = reason
         self.finalised = True
+        if self._interim_notes and all(
+            _end_mark(t)[1] == "done" for t in self.tasks.values()
+        ):
+            self._drop_interim_notes()
         await self._edit(self.render())
         self._persist(register=False)
         logger.info(
@@ -698,13 +730,14 @@ class BackgroundStatusPanel:
         self.quiet_notice_sent = True
         text = self._header(self._clock())
         try:
-            await self._transport.send(
-                channel_id=self._channel_id,
-                message=RenderedMessage(text=text),
-                options=SendOptions(
-                    reply_to=self.reply_to, notify=True, thread_id=self._thread_id
-                ),
-            )
+            with message_kind("bg_status"):
+                await self._transport.send(
+                    channel_id=self._channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(
+                        reply_to=self.reply_to, notify=True, thread_id=self._thread_id
+                    ),
+                )
         except Exception:  # noqa: BLE001
             logger.warning("background_status.quiet_notice_failed", exc_info=True)
             return False

@@ -629,7 +629,8 @@ def test_871_heredoc_pr_body_progress_line() -> None:
     out_lines = text.splitlines()
     assert len(out_lines) == 3
     assert out_lines[2].startswith("▸ timeout 590")
-    assert " · 3m 30s · " in out_lines[2]
+    # #986: the title already shows the whole command, so no repeat.
+    assert out_lines[2].endswith(" · 3m 30s")
     codes = _code_texts(text, entities)
     assert all("·" not in c and "▸" not in c and "✓" not in c for c in codes)
     assert "`" not in text.replace("`setup-python-env`", "").replace(
@@ -648,13 +649,14 @@ def test_871_long_running_tail_fences_command_detail() -> None:
         ),
         "started",
         None,
-        command_width=300,
+        # A title cut narrower than the command keeps the tail detail (#986).
+        command_width=12,
         elapsed_seconds=210,
     )
     assert line.endswith(" · 3m 30s · ``echo `date` && sleep 300``")
     text, entities = render_markdown(line)
-    assert text == f"▸ {cmd} · 3m 30s · {cmd}"
-    assert _code_texts(text, entities) == [cmd, cmd]
+    assert text == f"▸ echo `date`… · 3m 30s · {cmd}"
+    assert _code_texts(text, entities) == ["echo `date`…", cmd]
 
 
 def test_871_long_running_tail_edit_detail_keeps_span_closed() -> None:

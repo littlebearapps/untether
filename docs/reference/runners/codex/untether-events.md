@@ -367,10 +367,11 @@ Cheatsheet: this is a **non-fatal warning** (different from top-level fatal `err
 → Untether `action`:
 
 * `kind="warning"`
-* `title=item.message`, `detail={ message }`, `message=item.message`
+* `title="⚠️ " + item.message`, `detail={ message }`, `message=item.message`
 * `level="warning"`
 * `phase="completed"` (started/updated lines are ignored)
-* `ok=false` (rendered as a warning; it does not end the run)
+* `ok=true`: the progress row shows the ⚠️ as its status, not ✗; it does not end the run ([#987](https://github.com/littlebearapps/untether/issues/987))
+* a repeat of a message already shown in the run is dropped: Codex 0.160 emits each config warning (e.g. an ignored `[project]` table in `~/.codex/config.toml`) twice, under two item ids
 
 ---
 

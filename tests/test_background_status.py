@@ -782,6 +782,58 @@ async def test_fold_without_a_task_is_a_note_then_filed_by_the_restatement() -> 
     assert not any(ln.startswith("💬") for ln in lines)
 
 
+async def test_985_all_done_drops_interim_notes() -> None:
+    """#985: a note folded while tasks still ran is superseded by all-done."""
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    interim = "This is only an interim update: sweep two hasn't finished."
+    assert await panel.fold(interim, turn=2)
+    assert transport.edit_calls[-1]["message"].text.endswith(f"💬 {interim}")
+    a2.status, a2.ended_at = "completed", clock.t + 2
+    await panel.sync([a1, a2])
+    assert panel.finalised
+    text = transport.edit_calls[-1]["message"].text
+    assert text.startswith("✅ all 2 background tasks done")
+    assert "interim update" not in text
+    # A later claim of that turn can't resurrect it as a row ack.
+    await panel.attribute_turn_notes(["a2"], [2])
+    assert "interim update" not in panel.render()
+
+
+async def test_985_note_folded_after_the_last_task_stays() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    assert await panel.fold("Sweep one is in; waiting on two.", turn=2)
+    a2.status, a2.ended_at = "completed", clock.t + 2
+    assert await panel.fold("Both sweeps are back.", turn=3)
+    assert panel.finalised
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    assert lines[0] == "✅ all 2 background tasks done"
+    assert lines[-1] == "💬 Both sweeps are back."
+    assert not any("waiting on two" in ln for ln in lines)
+
+
+async def test_985_stopped_batch_keeps_interim_notes() -> None:
+    """Only an all-done finish supersedes the notes; a stopped batch keeps
+    them (they may say what was still pending)."""
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    assert await panel.fold("Sweep two hasn't finished.", turn=2)
+    await panel.finalise("cancel")
+    assert transport.edit_calls[-1]["message"].text.endswith(
+        "💬 Sweep two hasn't finished."
+    )
+
+
 async def test_fold_ending_the_last_task_finalises() -> None:
     transport = FakeTransport()
     clock = _Clock()

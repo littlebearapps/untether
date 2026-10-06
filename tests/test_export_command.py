@@ -183,6 +183,29 @@ class TestFormatExportMarkdown:
             None,
         )
 
+    @pytest.mark.parametrize(
+        ("title", "line"),
+        [
+            ("⚠️ `project` is ignored.", "- ✓ ⚠️ `project` is ignored."),
+            ("Permission resolved", "- ✓ ⚠️ Permission resolved"),
+        ],
+    )
+    def test_warning_gets_one_warning_sign(self, title: str, line: str):
+        """#987: a Codex warning title already leads with ⚠️."""
+        md = _format_export_markdown(
+            "s",
+            [
+                {
+                    "type": "action",
+                    "phase": "completed",
+                    "ok": True,
+                    "action": {"id": "1", "kind": "warning", "title": title},
+                }
+            ],
+            None,
+        )
+        assert line in md
+
     def test_command_with_backticks_is_a_safe_code_span(self):
         """#871/#418: an inner backtick can't close the code span."""
         assert "- ✓ `` echo `date` ``" in self._command_md("echo `date`")

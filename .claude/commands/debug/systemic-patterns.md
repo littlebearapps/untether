@@ -79,8 +79,8 @@ For each pattern:
 ### 12. Stall watchdog threshold mismatch (MCP vs local tool)
 - **Sig**: stall fired at 10-min mark while an MCP tool was active; expected 15-min threshold
 - **Class**: stall-liveness-watchdog
-- **Canonical**: `[watchdog]` config — `tool_timeout` (10m default) vs `mcp_tool_timeout` (15m default); detection via tool_name + MCP server name in stall context
-- **Posture**: regression-watch — MCP-aware threshold detection must use the right context field.
+- **Canonical**: `[watchdog]` config — `tool_timeout` (10m default) vs `mcp_tool_timeout` / `subagent_timeout` (15m default); detection via tool_name + MCP server name in stall context. The chosen threshold is logged as `progress_edits.stall_threshold_selected reason=…`
+- **Posture**: regression-watch — MCP-aware threshold detection must use the right context field. For a Codex/OpenCode stall that only warned at 15 min with `reason=active_children`, see §25.
 
 ### 13. Outbox deny-glob false positive
 - **Sig**: `file_transfer.denied` for a legitimate file the user expected to receive
@@ -141,6 +141,36 @@ For each pattern:
 - **Class**: control-channel
 - **Canonical**: #749 (`### breaking`) — the prompting modes now prompt; `--allowedTools` is no longer sent there
 - **Posture**: **by-design**. Point at an autonomous mode (`plan-auto`, `auto`, `dontAsk`) or an explicit `[engines.claude] allowed_tools`.
+
+### 23. Live-session final delivered twice at close (#928)
+- **Sig**: the same answer posted twice for one turn, the second when the live session closes; a second `runner.completed` with `turn_cost_usd=0.0`; `final.early_delivery_timeout` (silent before rc2); slow `deleteMessage` / ReadTimeout retries on the replaced progress message just before
+- **Class**: telegram-transport (final delivery)
+- **Canonical**: #928 (0.36.0rc2) — a final counts as sent once handed to the transport (`delivery["sent"]` set before `send_result_message`, reset only if it raises); the replace-delete is queued with `wait=False`. `.claude/rules/runner-development.md` §Final delivery
+- **Posture**: regression-watch. Shared root to look for: any "was it sent?" flag set only after the awaited send returns — the outbox still delivers an op whose waiter was cancelled. Known gaps (rc2): when the bound fires, the rest of `_on_run_completed` (outbox files, budget stop) is skipped, and a timeout mid split-final can leave later chunks unsent.
+
+### 24. Non-Claude session cleared (or kept) after a failed resume (#952)
+- **Sig**: `session.auto_cleared engine=codex|opencode|pi` after a bad model / missing key / rate limit, and the next message starts a new session; or the inverse — a resume that keeps failing with "session not found" while `session.auto_clear_skipped reason=not_resume_failure` repeats
+- **Class**: session-resume-lock
+- **Canonical**: #952 (0.36.0rc2) — the `num_turns == 0` gate (#45) is **Claude/AMP-only** (`_TURN_COUNT_ENGINES`); Codex/OpenCode/Pi never report turns and clear only when the error matches `_RESUME_FAILURE_RE`. A cleared session adds `ℹ️ The saved session couldn't be resumed, so it was cleared` to the error card. Pre-spawn blocks (`session.auto_clear_skipped reason=prespawn_blocked`, #838) never clear
+- **Posture**: `auto_clear_skipped reason=not_resume_failure` on a non-resume error is **by-design**. A non-resume error that clears, or a genuine "not found" that never clears (the engine's wording missing from `_RESUME_FAILURE_RE` — check after a CLI upgrade), is a `bug`.
+
+### 25. Permanent child processes forcing the 15-min stall threshold (#953)
+- **Sig**: a Codex or OpenCode stall warns only after ~15 min with `stall_threshold_selected reason=active_children` / `⏳ Child processes idle (N children, …)`; or a `kill -STOP`-ed engine reported as child-idle
+- **Class**: stall-liveness-watchdog
+- **Canonical**: #953 (0.36.0rc2) — children earn the subagent threshold unconditionally only on Claude (`_CHILD_WORK_ENGINES`); elsewhere (Codex npm shim, OpenCode MCP servers) only while the process tree uses CPU. A stopped/D-state engine now reads `⏳ Engine process is stopped (state T, N min)` / `blocked on I/O`
+- **Posture**: regression-watch. "Engine process is stopped" is by-design reporting — look for who stopped the process (a debugger, `kill -STOP`, a suspended terminal), not at the watchdog.
+
+### 26. OpenCode run refused before spawning (`opencode.version.unsupported`)
+- **Sig**: `🛑 OpenCode 2.x isn't supported yet, so this run wasn't started`; `opencode.version.unsupported version=2.…`; no engine process
+- **Class**: runner-subprocess (opencode only)
+- **Canonical**: #970 (0.36.0rc2) — only the OpenCode 1.x CLI (npm `opencode-ai`) is supported; 2.x (`@opencode/cli`) runs prompts on a shared background service outside Untether's process control. The chat's session is kept
+- **Posture**: **by-design** — the fix is on the host (`npm uninstall -g @opencode/cli && npm install -g opencode-ai@1`), not code. `opencode.version.unknown` / `probe_failed` fail open and are noise unless runs then hang.
+
+### 27. Stale repaint over a final ("working" card with a dead cancel button)
+- **Sig**: after `/cancel` of a live follow-up or wake turn, the card still reads `working · Ns` with a cancel button that does nothing
+- **Class**: telegram-transport (progress)
+- **Canonical**: #948 (0.36.0rc2) — a debounced repaint could be enqueued after the `cancelled` edit and coalesce over it; `ProgressEdits.stop_repaints()` now orders every final edit after any in-flight repaint
+- **Posture**: regression-watch — a new final/cancel path that sets `_finalizing` directly instead of awaiting `stop_repaints()` reintroduces it.
 
 ## How to use this list
 

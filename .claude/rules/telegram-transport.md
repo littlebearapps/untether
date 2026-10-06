@@ -27,6 +27,9 @@ For time-sensitive callbacks (approval buttons), use early answering:
 - Set `answer_early = True` on the callback backend
 - Provide `early_answer_toast()` returning the toast text ("Approved", "Denied", etc.)
 - Dispatch calls `answerCallbackQuery` before processing the action
+- With `approval_originator_only` on (#388, default off, hot-reloads via `update_from`), `_dispatch_callback` refuses
+  a `claude_control:` / `aq:` tap from anyone but the run's originator **before** the early answer — the early toast
+  reserves a control claim, so never move the check after it. Logic: `telegram/approval_originator.py`
 
 ## Ephemeral messages
 
@@ -39,6 +42,11 @@ Messages that should auto-delete when a run finishes:
 - Per-chat pacing: private 1.0 msg/s, groups 20/60 msg/s
 - On 429: `RetryAfter` raised, op requeued unless superseded
 - Non-429 errors: logged and dropped
+- Error lines carry `kind` (#823): wrap the transport calls for an Untether surface in `with message_kind("…")`
+  (`transport.py`). The outbox op captures the kind at enqueue and re-applies it on the worker, so set it around the
+  `transport.*` call, not inside the outbox
+- `send_message(replace_message_id=…)` queues the replaced message's delete with `wait=False` (#928) — a slow delete
+  must never hold a final's delivery
 
 ## Message limits
 
@@ -77,6 +85,11 @@ Freshness (#924): only entries changed since the dispatch's `outbox_since` are s
 ## /at command (#288)
 
 `telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id, thread_filter=…)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
+
+`/at` freezes the engine and context a plain prompt in that chat/topic would use (#950): `CommandContext.default_engine_override`
+(topic/chat `/agent` default) and `ambient_context` (topic/chat `/ctx` binding), both filled by `dispatch_command`, then the
+project → global defaults. Never call `resolve_engine(engine_override=None, …)` for a run a command starts — that skips
+the topic/chat `/agent` default and can fire on a different engine than a plain message would.
 
 ## Markdown rendering (`telegram/render.py`)
 

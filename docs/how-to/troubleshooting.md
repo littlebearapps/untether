@@ -74,8 +74,8 @@ npm install -g @openai/codex
 # Claude Code
 npm install -g @anthropic-ai/claude-code
 
-# OpenCode
-npm install -g opencode-ai@latest
+# OpenCode (the 1.x CLI; 2.x isn't supported yet)
+npm install -g opencode-ai@1
 
 # Pi
 npm install -g @mariozechner/pi-coding-agent
@@ -90,6 +90,18 @@ npm install -g @sourcegraph/amp
 Verify with `which codex` (or `which claude`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH.
 
 The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
+
+## OpenCode says "isn't supported yet, so this run wasn't started"
+
+**Symptoms:** An OpenCode run replies `🛑 OpenCode 2.x.y isn't supported yet, so this run wasn't started.` and nothing runs.
+
+Untether drives the OpenCode **1.x** CLI (npm `opencode-ai`). OpenCode 2.x (npm `@opencode/cli`, whose binary is also called `opencode`) sends prompts to a shared background service outside Untether's environment allowlist, working directory, `/cancel` and stall watchdog, so Untether checks `opencode --version` before each run and refuses 2.x without starting anything ([#970](https://github.com/littlebearapps/untether/issues/970)). The chat's saved session is kept. Switch back to the 1.x CLI on that host:
+
+```sh
+npm uninstall -g @opencode/cli && npm install -g opencode-ai@1
+```
+
+The version is checked again whenever the `opencode` binary changes, so the next message runs normally — no restart needed. If the version can't be read, Untether logs `opencode.version.unknown` and runs anyway.
 
 ## Permission denied or auth errors
 
@@ -183,6 +195,10 @@ Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model
 - `approval_policy = "untrusted" is no longer supported; remove this setting` (every Codex run, Full auto included): your own `~/.codex/config.toml` (or a `--profile` file) sets the retired value. **Fix:** remove the `approval_policy = "untrusted"` line. Untether's error hint names this case.
 - A `sandbox_mode` and `default_permissions` conflict is possible if `[engines.codex] extra_args` sets `-c default_permissions=…` while the chat is in **Safe** (Safe sets the sandbox itself). Drop the `-c default_permissions` override, or use Full auto.
 
+### Codex: a `⚠️` row in the progress message
+
+A progress row such as `⚠️ Codex is ignoring …` is a non-fatal warning from Codex (for example a key in `~/.codex/config.toml` it doesn't recognise), not a failed step; the run carries on. Codex emits each config warning twice, and Untether shows it once ([#987](https://github.com/littlebearapps/untether/issues/987)). To make it go away, fix or remove the setting it names.
+
 ### OpenCode: unsupported event warning
 
 If OpenCode emits a JSONL event type that Untether doesn't recognise (e.g. a `question` or `permission` event from a newer OpenCode version), Untether v0.35.0+ shows a visible warning in Telegram: "opencode emitted unsupported event: {type}". In older versions, these events were silently dropped, leaving the user with no feedback until the stall watchdog fired.
@@ -205,9 +221,14 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
 | MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
 | Child processes / subagents running | 15 min (`subagent_timeout`) | `⏳ Waiting for child processes (…)` or `⏳ Child processes idle (…)` |
+| Engine process stopped (`kill -STOP`, state `T`) or blocked on I/O (state `D`) | 5 min (10 min while a tool runs) | `⏳ Engine process is stopped (state T, N min)` or `⏳ Engine process is blocked on I/O (state D, N min)` |
 | Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
 
 The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan". The reminder is removed once you answer, and a later reminder replaces the earlier one.
+
+For Codex, OpenCode and Pi, a child process only earns the 15 min threshold while the process tree is using CPU: Codex's npm wrapper and OpenCode's MCP servers are always there, so an idle engine falls back to 5 min ([#953](https://github.com/littlebearapps/untether/issues/953)).
+
+**If the warning says "Engine process is stopped"**, the engine process itself has been suspended — for example by `kill -STOP` or a debugger — and won't produce anything until it is resumed. Resume it with `kill -CONT <pid>` or `/cancel` the run. A stopped engine never gets the longer child-process threshold. **"Engine process is blocked on I/O"** means it is waiting on the disk or a network filesystem.
 
 **If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
 
@@ -447,6 +468,7 @@ Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
+- If a resumed run fails and its error card ends with `ℹ️ The saved session couldn't be resumed, so it was cleared — your next message starts a new session.`, the saved session couldn't be found (Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`) or, for Claude, the run ended with no turns. Just send your message again. For Codex, OpenCode and Pi, a resumed run that fails for an unrelated reason (a bad `/model`, a missing API key) keeps the saved session, so fix the cause and carry on in the same conversation ([#952](https://github.com/littlebearapps/untether/issues/952)).
 - If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.36.0 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
 
 ## Follow-up message says it's "queued"
@@ -659,8 +681,14 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `cost_budget.run_blocked` | WARNING | Stop at limit refused a new run (`scope=per_day`; `trigger` names a skipped cron/webhook) |
 | `cost_budget.run_anyway` | WARNING | Someone tapped **Run anyway** past the daily budget |
 | `cost_budget.run_stopped` | WARNING | Stop at limit ended a live session after the reply that passed the budget (`scope=per_run` or `per_day`) |
+| `callback.not_originator` / `ask_user_question.not_originator` | WARNING | With `approval_originator_only = true`, someone other than the run's originator tried to answer an approval or question ([#388](https://github.com/littlebearapps/untether/issues/388)) |
+| `opencode.version.unsupported` | ERROR | The installed OpenCode CLI is 2.x; the run was refused before starting ([#970](https://github.com/littlebearapps/untether/issues/970)) |
+| `session.auto_clear_skipped` | INFO | A resumed Codex/OpenCode/Pi run failed for a reason other than the resume, so the saved session was kept (`reason=not_resume_failure`, [#952](https://github.com/littlebearapps/untether/issues/952)) |
+| `final.early_delivery_timeout` | WARNING | A live session's first answer took over 60 s to hand to Telegram ([#928](https://github.com/littlebearapps/untether/issues/928)) |
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
+
+Telegram failures (`telegram.http_error`, `telegram.api_error`, `telegram.network_error`, `telegram.benign_rejection`, `outbox.op.failed`, `transport.send.failed` / `edit.failed` / `delete.failed`) carry a `kind` field naming the message they were for — `progress`, `final`, `bg_status`, `approval_surface`, `approval_notify`, `approval_reminder`, `outline` or `ephemeral` (`null` when untagged) ([#823](https://github.com/littlebearapps/untether/issues/823)).
 
 Telegram bot tokens, OpenAI API keys (`sk-...`), GitHub tokens (`ghp_`, `ghs_`, `github_pat_`), `Authorization:`/`Bearer` credentials, JWTs, and `api_key=`/`token=`/`secret=`/`password=` values are automatically redacted in all log output. Token *counts* such as `total_tokens=52000` are left alone.
 

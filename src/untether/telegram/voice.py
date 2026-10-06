@@ -33,6 +33,7 @@ __all__ = [
     "VoiceEndpointVerdict",
     "check_voice_endpoint",
     "classify_voice_endpoint",
+    "correct_known_mishears",
     "format_voice_endpoint_refusal",
     "resolve_transcription_prompt",
     "transcribe_voice",
@@ -64,6 +65,34 @@ DEFAULT_VOICE_TRANSCRIPTION_PROMPT = (
     "Claude, Claude Code, CLAUDE.md, AGENTS.md, Codex, OpenCode, "
     "Untether, Telegram, MCP, CLI, repo, changelog, PyPI"
 )
+
+
+# #789 (rc2): the bare "Claude" in the prompt did not help — fleet transcripts
+# after rc15 still heard "Clawde" in ~27% of the mentions. A prompt only biases
+# the decoder; these spellings are fixed deterministically after transcription.
+# Only non-words, or a word followed by "Code" / ".md", so "the cat clawed"
+# and "Cloud Code" are never touched. Order matters: filename, then product,
+# then the bare name.
+_MISHEAR_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\b(?:clawde|clawd|clawed|claw|corde)\.md\b", re.IGNORECASE),
+        "CLAUDE.md",
+    ),
+    (
+        re.compile(r"\b(?:clawde|clawd|clawed|corde)(\s+)code\b", re.IGNORECASE),
+        r"Claude\1Code",
+    ),
+    (re.compile(r"\bclawde?\b", re.IGNORECASE), "Claude"),
+)
+
+
+def correct_known_mishears(text: str) -> tuple[str, int]:
+    """#789: fix the known "Claude" mishears; returns ``(text, corrections)``."""
+    total = 0
+    for pattern, replacement in _MISHEAR_FIXES:
+        text, count = pattern.subn(replacement, text)
+        total += count
+    return text, total
 
 
 def resolve_transcription_prompt(configured: str | None) -> str | None:
@@ -469,6 +498,10 @@ async def transcribe_voice(
             prompt_configured=prompt is not None,
             audio_size=len(audio_bytes),
         )
+        text, corrections = correct_known_mishears(text)
+        if corrections:
+            # Counts only: the transcript is the user's message.
+            logger.info("voice.transcript.corrected", corrections=corrections)
         return text
     except OpenAIError as exc:
         # #594: include the resolved endpoint and the underlying cause.

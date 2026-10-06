@@ -9,7 +9,7 @@ paths:
 
 The thin shared slice for Untether's agentic loop commands (`/debug`, `/fix`,
 `/plan`, `/implement`, `/qa`, `/pr-dev`, `/pr-main`, `/kaizen`, `/kaizen-review`,
-`/handover`). Every one of those command files cites this rule in its header. It
+`/handover`, `/docs`). Every one of those command files cites this rule in its header. It
 does two jobs: **route** work to the right command, and load the **cross-cutting
 rules** every workflow command must obey.
 
@@ -32,6 +32,7 @@ bundle. See `docs/LOOPS.md` for the loop registry and
 | **release** it → merge + verify PyPI, after Nathan's explicit go | `/pr-main X.Y.Z --merge` |
 | capture a **process learning** | `/kaizen` |
 | **pausing** mid-work | `/handover` |
+| docs drifted with **no code change** to deliver | `/docs` |
 
 When a command discovers it's the wrong tool (a "bug" that's really net-new →
 `/plan`; an "idea" that's really a defect → `/fix`), STOP and route rather than

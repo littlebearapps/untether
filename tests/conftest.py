@@ -109,11 +109,13 @@ def _clear_request_channel_bindings() -> Iterator[None]:
     """#388: ``_REQUEST_TO_CHANNEL`` binds request ids to chats. Tests reuse
     ids (``req-1``…) across files; a binding left by one test would make
     another test's tap from a different chat read ``channel_mismatch``."""
-    from untether.runners.claude import _REQUEST_TO_CHANNEL
+    from untether.runners.claude import _REQUEST_TO_CHANNEL, _REQUEST_TO_ORIGINATOR
 
     _REQUEST_TO_CHANNEL.clear()
+    _REQUEST_TO_ORIGINATOR.clear()
     yield
     _REQUEST_TO_CHANNEL.clear()
+    _REQUEST_TO_ORIGINATOR.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -281,3 +283,28 @@ def _no_cli_help_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     claude_runner._HOOK_EVENTS_SUPPORT.clear()
     yield
     claude_runner._HOOK_EVENTS_SUPPORT.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_cli_version_cache() -> Iterator[None]:
+    """#951: /config → About caches each engine's ``--version`` per process;
+    a probe cached by one test must not answer another test's stub."""
+    from untether.telegram.backend import _CLI_VERSION_CACHE
+
+    _CLI_VERSION_CACHE.clear()
+    yield
+    _CLI_VERSION_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_opencode_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """#970: ``OpenCodeRunner.run_impl`` asks ``opencode --version`` (once per
+    binary) whether it's the unsupported 2.x CLI. Unit tests must never spawn
+    the host's real CLI for that, so the probe reports "unknown" (→ the run
+    is allowed) unless a test stubs ``_probe_opencode_version`` itself."""
+    from untether.runners import opencode as opencode_runner
+
+    monkeypatch.setattr(opencode_runner, "_probe_opencode_version", lambda path: None)
+    opencode_runner._VERSION_CACHE.clear()
+    yield
+    opencode_runner._VERSION_CACHE.clear()

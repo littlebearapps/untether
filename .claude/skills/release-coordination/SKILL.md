@@ -281,7 +281,7 @@ Before tagging a final release, publish a release candidate to TestPyPI and roll
 ### Enter the rc cycle
 
 ```bash
-# Bump to rc version on the batch's feature/fix branch (no changelog entry needed)
+# Bump to rc version on the batch's feature/fix branch (entries go under `## vX.Y.Z (unreleased)`; no per-rc heading)
 # Edit pyproject.toml: version = "X.Y.Zrc1"
 uv lock
 git add pyproject.toml uv.lock
@@ -311,7 +311,7 @@ scripts/fleet-rollout.sh X.Y.Zrc1 --only mac         # one host
 When the rc cycle is stable, bump to the final version (no rc suffix), follow the same flow:
 
 ```bash
-# Bump pyproject.toml to X.Y.Z, add CHANGELOG entry, then:
+# Bump pyproject.toml to X.Y.Z, date the `(unreleased)` CHANGELOG heading (/pr-main does both), then:
 scripts/run-integration-tests.sh X.Y.Z --manual --notes "Final cut; rc cycle stable"
 scripts/fleet-rollout.sh X.Y.Z                       # all 5 hosts parallel
 ```
@@ -333,7 +333,7 @@ systemctl --user restart untether
 ### Conventions
 
 - rc versions are **NOT** git-tagged (avoids triggering `release.yml`)
-- rc versions do **NOT** require changelog entries (`validate_release.py` skips them)
+- rc versions get no changelog heading of their own (`validate_release.py` skips them); their entries accumulate under the line's `## vX.Y.Z (unreleased)` heading, dated at the release merge
 - Commit message: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare bump is `chore(release): X.Y.ZrcN`
 - Attestation marker is **per-version** — `0.36.0rc1` → `0.36.0rc2` each get their own
 - Partial fleet failures are reported but NOT auto-rolled-back; operator decides

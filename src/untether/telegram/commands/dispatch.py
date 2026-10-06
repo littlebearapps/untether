@@ -8,6 +8,7 @@ import anyio
 
 from ...commands import CommandContext, CommandResult, get_command
 from ...config import ConfigError
+from ...context import RunContext
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
 from ...runner_bridge import RunningTasks, _utf16_len, register_ephemeral_message
@@ -177,6 +178,8 @@ async def _dispatch_command(
     default_engine_override: EngineId | None,
     engine_overrides_resolver: Callable[[EngineId], Awaitable[EngineRunOptions | None]]
     | None,
+    *,
+    ambient_context: RunContext | None = None,
 ) -> None:
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
@@ -254,6 +257,8 @@ async def _dispatch_command(
         trigger_manager=cfg.trigger_manager,
         default_chat_id=cfg.chat_id,
         file_deny_globs=tuple(cfg.files.deny_globs),
+        default_engine_override=default_engine_override,  # #950
+        ambient_context=ambient_context,
     )
     try:
         result = await backend.handle(ctx)
@@ -331,6 +336,32 @@ async def _dispatch_callback(
                 callback_query_id, text="Not authorised"
             )
         return
+
+    # #388: opt-in "only the originator can approve". Checked before the
+    # early answer, which reserves a claim and toasts "Approved".
+    if cfg.approval_originator_only:
+        from ..approval_originator import (
+            NOT_ORIGINATOR_TEXT,
+            callback_originator_mismatch,
+        )
+
+        mismatch = callback_originator_mismatch(
+            command_id, args_text, msg.chat_id, msg.sender_id
+        )
+        if mismatch is not None:
+            logger.warning(
+                "callback.not_originator",
+                chat_id=msg.chat_id,
+                command=command_id,
+                request_id=mismatch[0],
+                sender_id=msg.sender_id,
+                originator_id=mismatch[1],
+            )
+            if callback_query_id is not None:
+                await cfg.bot.answer_callback_query(
+                    callback_query_id, text=NOT_ORIGINATOR_TEXT
+                )
+            return
 
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id

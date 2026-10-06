@@ -49,7 +49,7 @@ OpenCode: {"type":"step_finish","part":{"reason":"stop","tokens":{...},"cost":0.
 Untether:   CompletedEvent(engine="opencode", ok=True, answer="<accumulated text>", usage={...})
 ```
 
-The answer is all `text` parts concatenated, or the last tool error when there was no text.
+The answer is all `text` parts joined with a blank line (`opencode run` emits each part once, complete; a repeated `part.id` replaces its earlier text), or the last tool error when there was no text.
 
 If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with the accumulated usage. A clean exit with no `step_finish` at all completes with `ok=False` (`opencode finished without a result event`), as does one with no `sessionID`; a non-zero exit code emits a warning plus `CompletedEvent(ok=False)` with a stderr excerpt.
 

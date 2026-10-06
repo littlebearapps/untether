@@ -94,9 +94,14 @@ class AtCommand:
         # freeze-at-dispatch behaviour. Capture the *resolved* engine (not
         # None) so a later config change to the global default doesn't
         # drift the frozen run.
-        context = ctx.runtime.default_context_for_chat(chat_id)
+        # #950: the same chain as a plain prompt — the topic/chat `/agent`
+        # default first, then the ambient (topic/chat `/ctx`-bound) project's
+        # default, then the global default.
+        context = ctx.ambient_context
+        if context is None:
+            context = ctx.runtime.default_context_for_chat(chat_id)
         engine_override = ctx.runtime.resolve_engine(
-            engine_override=None, context=context
+            engine_override=ctx.default_engine_override, context=context
         )
 
         try:

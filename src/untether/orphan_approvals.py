@@ -33,7 +33,13 @@ import anyio
 from .background_status import escape_markdown
 from .logging import get_logger
 from .markdown import HARD_BREAK
-from .transport import MessageRef, RenderedMessage, SendOptions, Transport
+from .transport import (
+    MessageRef,
+    RenderedMessage,
+    SendOptions,
+    Transport,
+    message_kind,
+)
 
 logger = get_logger(__name__)
 
@@ -333,16 +339,17 @@ class OrphanApprovalSurface:
         self, message: RenderedMessage, *, reply_to: MessageRef | None, replace: Any
     ) -> MessageRef | None:
         try:
-            return await self._transport.send(
-                channel_id=self._channel_id,
-                message=message,
-                options=SendOptions(
-                    reply_to=reply_to,
-                    notify=True,
-                    replace=replace,
-                    thread_id=self._thread_id,
-                ),
-            )
+            with message_kind("approval_surface"):
+                return await self._transport.send(
+                    channel_id=self._channel_id,
+                    message=message,
+                    options=SendOptions(
+                        reply_to=reply_to,
+                        notify=True,
+                        replace=replace,
+                        thread_id=self._thread_id,
+                    ),
+                )
         except Exception:  # noqa: BLE001 - retried on the next tick
             logger.debug("approval_surface.send_error", exc_info=True)
             return None
@@ -438,14 +445,16 @@ class OrphanApprovalSurface:
             return
         deleted = False
         try:
-            deleted = bool(await self._transport.delete(ref=ref))
+            with message_kind("approval_surface"):
+                deleted = bool(await self._transport.delete(ref=ref))
         except Exception:  # noqa: BLE001
             deleted = False
         if not deleted:
             try:
-                await self._transport.edit(
-                    ref=ref, message=RenderedMessage(text=_RETIRED_TEXT)
-                )
+                with message_kind("approval_surface"):
+                    await self._transport.edit(
+                        ref=ref, message=RenderedMessage(text=_RETIRED_TEXT)
+                    )
             except Exception:  # noqa: BLE001 - a user-deleted copy fails both
                 logger.debug("approval_surface.retire_edit_failed", exc_info=True)
         logger.info(

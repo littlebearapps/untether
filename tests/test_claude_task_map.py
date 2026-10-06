@@ -967,6 +967,39 @@ async def test_829_bash_output_activity_reads_mtime_and_skips_monitors(
     assert await _bash_output_activity(state) is None
 
 
+@pytest.mark.anyio
+async def test_959_unchanged_output_file_maps_to_the_same_activity_time(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#959: the hold re-arms when ``output.at > hold_started``. Re-deriving
+    the monotonic time of an unchanged write from fresh wall/monotonic
+    samples drifts by the sampling gap, so the same write could re-arm the
+    hold again on every poll after the command stopped printing."""
+    import os
+
+    from untether.runners import claude as claude_mod
+
+    state = ClaudeStreamState()
+    _feed(state, _started_bash("b1", "toolu_b"))
+    out = tmp_path / "b1.output"
+    out.write_text("tick\n")
+    state.bg_output_files = {"toolu_b": str(out)}
+    stamp = time.time() - 1
+    os.utime(out, (stamp, stamp))
+    first = await _bash_output_activity(state)
+    # The monotonic clock runs ahead of the wall clock between the samples
+    # (a thread switch between them, or NTP slew).
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(claude_mod.time, "monotonic", lambda: real_monotonic() + 0.01)
+    second = await _bash_output_activity(state)
+    assert first is not None and second is not None
+    assert second.at == first.at
+    # A new write is newer activity.
+    os.utime(out, (stamp + 0.5, stamp + 0.5))
+    third = await _bash_output_activity(state)
+    assert third is not None and third.at > first.at
+
+
 # ── #872: declared waits (background Bash timeout, pending wake-up) ─────────
 
 

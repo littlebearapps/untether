@@ -132,7 +132,7 @@ permissions, questions and compaction (`permission.asked`, `question.asked`, `se
 | `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` (`ok=False` if `metadata.exit` is non-zero) |
 | `tool_use` | `ActionEvent(phase="completed", ok=False)` | `status == "error"` |
 | `tool_use` | `ActionEvent(phase="started")` | any other status |
-| `text` | (accumulate text) | - |
+| `text` | (collect the part; parts are joined with a blank line) | - |
 | `step_finish` | `CompletedEvent` (with accumulated cost/tokens) | `reason == "stop"` |
 | `step_finish` | (cost/tokens accumulated only) | `reason == "tool-calls"` or absent |
 | `error` | `CompletedEvent(ok=False)` | - |
