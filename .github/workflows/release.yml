@@ -55,6 +55,11 @@ jobs:
           print(f"OK: tag {tag!r} matches version {project_version!r}")
           PY
 
+      - name: Check the release announcement (#1008)
+        # The user-facing Discussions post must exist before anything ships;
+        # /pr-main writes it and validate_release.py gates the release PR.
+        run: python3 scripts/release_announcement.py check
+
       - name: Run tests
         run: uv run pytest
 
@@ -125,4 +130,20 @@ jobs:
           files: |
             dist/*
 
+  announce:
+    name: Post release announcement to Discussions
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # link the discussion from the GitHub release body
+      discussions: write  # create the Announcements discussion
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Post announcement (idempotent)
+        # Reuses an existing discussion with the same title, so a re-run never
+        # double-posts. A failure turns this run red — re-run this job.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release_announcement.py post

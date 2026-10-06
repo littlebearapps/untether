@@ -1,0 +1,35 @@
+title: "[Q&A] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about installing, configuring or using Untether. Mark the reply that solves it as the answer so others can find it.
+        The [help centre](https://littlebearapps.com/help/untether/) and [FAQ](https://github.com/littlebearapps/untether/blob/master/docs/faq/faq.md) cover the most common questions.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Untether version
+      description: "Run `untether --version`."
+      placeholder: "0.36.0"
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options:
+        - Claude Code
+        - Codex CLI
+        - OpenCode
+        - Pi
+        - Not engine-specific
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Relevant config (remove your bot token and API keys!), OS, how you installed, and logs from `untether doctor`.

@@ -23,6 +23,7 @@ paths:
 2. Add a CHANGELOG.md section: `## vX.Y.Z (YYYY-MM-DD)`
 3. Every changelog entry must link to a GitHub issue: `[#N](https://github.com/littlebearapps/untether/issues/N)`
 4. Run `uv lock` to sync the lockfile
+4b. **Stable releases: write the user-facing announcement** `.github/release-announcements/vX.Y.Z.md` (template + rules in that folder's `TEMPLATE.md`; `/pr-main` step M-3b). It's a plain-English post for users — benefits, fixes they'll notice, under-the-hood work, and a `Heads up` for every breaking change or deprecation. `validate_release.py` fails the release PR without it, `release.yml` refuses to build without it, and the `announce` job posts it to Discussions → Announcements after PyPI ([#1008](https://github.com/littlebearapps/untether/issues/1008))
 5. **Run integration tests against `@untether_dev_bot`** — see below and `docs/reference/integration-testing.md`
 6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. Never delete, move or truncate it (`help-faq-protect.sh` blocks Bash `rm`/`mv`/`>`); Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 
@@ -80,7 +81,7 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 - rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
 - Commit message convention: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare version bump is `chore(release): X.Y.ZrcN`
 - Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`
-- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. Nathan's explicit approval of the release is the only manual gate (he merges, or Claude via `/pr-main X.Y.Z --merge` and the guard asks him to confirm, #917) — no PyPI environment gate, no manual tag step.
+- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release → Discussions announcement (`announce` job). Nathan's explicit approval of the release is the only manual gate (he merges, or Claude via `/pr-main X.Y.Z --merge` and the guard asks him to confirm, #917) — no PyPI environment gate, no manual tag step.
 - See `docs/reference/dev-instance.md` for the full staging workflow.
 
 ## Release guard
@@ -156,6 +157,7 @@ gh issue list --repo littlebearapps/untether \
 - Date is valid ISO format
 - All entries have issue links `[#N]`
 - Subsection headings are from the allowed set
+- The stable release's Discussions announcement exists and passes `scripts/release_announcement.py check` (title names the version, required sections, `Heads up` when breaking/deprecating, no placeholders, length fits the release type)
 
 Run locally: `python3 scripts/validate_release.py`
 

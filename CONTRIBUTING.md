@@ -151,7 +151,7 @@ See [Architecture](docs/explanation/architecture.md) for the full breakdown.
 
 ## Reporting issues
 
-Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report bugs or request features. Include:
+Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report bugs. For feature requests, start in [Discussions → Ideas](https://github.com/littlebearapps/untether/discussions/categories/ideas) — ideas that gather support become tracked issues. Bug reports should include:
 
 - Untether version (`untether --version`)
 - Engine and version (e.g., `claude --version`)
@@ -161,5 +161,6 @@ Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report
 
 ## Questions?
 
-- Open a [discussion](https://github.com/littlebearapps/untether/issues) on GitHub
+- Ask in [Discussions → Q&A](https://github.com/littlebearapps/untether/discussions/categories/q-a) on GitHub
+- Every stable release gets a plain-English post in [Discussions → Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements)
 - Join the [Telegram group](https://t.me/+qBtYAMZLW_JkYWEy)

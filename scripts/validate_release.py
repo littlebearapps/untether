@@ -6,6 +6,7 @@ Checks:
   - Changelog date is valid ISO format
   - Changelog entries reference GitHub issues
   - Changelog subsection headings are from the allowed set
+  - A user-facing release announcement exists and is publishable (#1008)
 
 Exit codes:
   0 = all checks pass
@@ -19,6 +20,9 @@ import sys
 import tomllib
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_announcement import check as check_announcement  # noqa: E402
 
 REPO_URL = "https://github.com/littlebearapps/untether"
 ALLOWED_SUBSECTIONS = {"fixes", "changes", "breaking", "docs", "tests"}
@@ -147,6 +151,17 @@ def main() -> int:
         else:
             print("OK: all changelog entries have issue links and valid subsections")
             passed += 1
+
+    # 5. User-facing GitHub Discussions announcement (#1008)
+    problems = check_announcement(version)
+    if problems:
+        print(f"FAIL: release announcement for v{version}:")
+        for problem in problems:
+            print(f"  {problem}")
+        failed += 1
+    else:
+        print(f"OK: release announcement for v{version} is ready")
+        passed += 1
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
