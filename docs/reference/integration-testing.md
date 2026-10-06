@@ -1437,7 +1437,7 @@ Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untethe
 
 ## 0.36.0rc2 scenarios / results
 
-0.36.0rc2 fixes the 0.36.0rc1 integration-run and soak findings plus the open v0.36.0 bugs. This run is **targeted**: each fix was verified live where it can be triggered on demand, with a regression pass over the paths the fixes touched. It is not the full Minor matrix, so **no attestation marker was written** for 0.36.0rc2; run the Minor tiers before a fleet rollout.
+0.36.0rc2 fixes the 0.36.0rc1 integration-run and soak findings plus the open v0.36.0 bugs. This run is **targeted**: each fix was verified live where it can be triggered on demand, with a regression pass over the paths the fixes touched. The full **Minor** tiers followed on 2026-10-06 (see "0.36.0rc2 Minor tiers" below), and the marker was written from that run.
 
 - **When and what:** 2026-10-05 22:48–23:50 UTC, on the dev bot (and the `untether-dev-ws` forum for [#826](https://github.com/littlebearapps/untether/issues/826)), feature branch `feature/v0.36.0rc2`.
 - **CLIs:** Claude 2.1.289, Codex 0.160.0, OpenCode 1.14.33, Pi 0.78.0.
@@ -1472,3 +1472,31 @@ Also run U1 on Claude and Codex, T3 (`/file get CLAUDE.md`), `/file get .untethe
 **Unit-test only (can't be triggered on demand):** [#905](https://github.com/littlebearapps/untether/issues/905) (stream-idle class vs a wake result), [#928](https://github.com/littlebearapps/untether/issues/928) residual (needs a slow `deleteMessage` after a sent final), [#959](https://github.com/littlebearapps/untether/issues/959) (clock-mapping race), [#789](https://github.com/littlebearapps/untether/issues/789) (voice mishear map), [#970](https://github.com/littlebearapps/untether/issues/970) 2.x refusal.
 
 **Filed during rc2 (v0.36.0, label `0.36.0rc3`):** [#989](https://github.com/littlebearapps/untether/issues/989) (#985 attributed variant), [#990](https://github.com/littlebearapps/untether/issues/990) (steer fallback from General), [#991](https://github.com/littlebearapps/untether/issues/991) (#928 timeout edges), [#992](https://github.com/littlebearapps/untether/issues/992) (unattributed `reason=unknown` wakes on staging), [#993](https://github.com/littlebearapps/untether/issues/993) (OpenCode install pin / About probe command), [#994](https://github.com/littlebearapps/untether/issues/994) (`event_seq` double duty).
+
+### 0.36.0rc2 Minor tiers (2026-10-06, head `a899252`)
+
+Run on the dev bot by three parallel QA agents (one per set of chats) plus the coordinator for the restart tests, 00:49–01:18 UTC. CLIs: Claude 2.1.289/2.1.290, Codex 0.160.0, OpenCode 1.14.33, Pi 0.78.0.
+
+- **Marker:** `~/.untether-dev/integration-test-pass-0.36.0rc2.json`, bound to `a899252`.
+- **Rolled out:** lba-1, nsd, channelo and mac with `scripts/fleet-rollout.sh 0.36.0rc2 --only <host>`, and each bot answered the `/ping` sweep. sl was held back because a long Claude Code batch was running there.
+
+| Tier | Result | Note |
+|---|---|---|
+| Tier 7 Q1–Q16 (DM) | PASS | Q14 `/at` fired on the DM's `/agent` engine (claude), confirming [#950](https://github.com/littlebearapps/untether/issues/950). Q16: triggers temporarily on, with a far-future cron for the Pi chat and a restart, gave `⏰ triggers: 1 cron (it-0360rc2-q16, 0 3 1 1 *)`; config restored afterwards |
+| `/config` home / About / Engine & model | PASS | About: `Version: 0.36.0rc2` … `pi 0.78.0`; gemini and amp marked ⚠️ deprecated |
+| Tier 1 U1–U10, Claude | PASS | U3 split into 8 messages, U4 resume, U6 cancel with no orphan, U9 export attached |
+| Tier 1 U1–U10, Codex / OpenCode | PASS | U5 with valid model ids (the Codex ChatGPT account rejects some ids, an environment limit rendered with a 💡 hint) |
+| Tier 1 U1–U10, Pi | PASS (env note) | U1 blocked by lba-1's `pi-permission-system` extension; U1b/U2b with a temporary project allow config: PASS. U8 still has no token counts (#899) |
+| Tier 2 C1–C5, C7 | PASS | C3 outline → Approve / Deny / Let's discuss; C5 `📝 /tmp/c5.txt` / `+ hello` |
+| Tier 2 C6 | PARTIAL | Keyboard lingered about 9 s / 7 s, the known pacing issue ([#945](https://github.com/littlebearapps/untether/issues/945)) |
+| B-LIVE-1 / 7 | PASS | |
+| B-LIVE-2 | PASS on re-run | First attempt: the subagent's bare `sleep 45` was blocked by Claude Code, and its early finish raced a steered follow-up, producing a `reason=unknown` wake (reproduction added to [#992](https://github.com/littlebearapps/untether/issues/992)). Use a loop in this recipe |
+| Tier 3 T1 (TTS OGG via `send_voice`), T2, T3, T6, T7, T8, T11 | PASS | T6, T7 and T11 entities checked by re-rendering the raw engine answers through Untether's renderer |
+| Tier 4 O1, O2, O4, O6, O8, O9 | PASS | O8: `/agent set pi` in the Codex chat survived a dev restart |
+| Tier 4 O5 | PARTIAL | The first prompt after `/ctx set` was injected into the chat's idle live Claude session and ran in the old cwd ([#996](https://github.com/littlebearapps/untether/issues/996); predates rc2). `/browse` also ignores `/ctx` ([#997](https://github.com/littlebearapps/untether/issues/997)) |
+| Tier 6 S2, S4, S7, S8, S9 | PASS | S7: 5 messages, all answered in order; S8: 4041 characters intact; S9: second tap → `Already answered` |
+| Tier 6 S1 | PASS (rc2 run) | Codex SIGSTOP, see [#953](https://github.com/littlebearapps/untether/issues/953) above |
+| Upgrade path | PASS | rc2 `load_settings` parses the live lba-1, nsd, channelo and mac configs. rc2's only new key is `approval_originator_only` (default off) and no state format changed. Rollback target 0.35.5rc20 is still on TestPyPI |
+| Logs | PASS | No Traceback. Every warning and error is explained (placeholder startup `chat_id = 123`, a deliberate bad Pi model, the triggers `restart_required` notice, webhook port already bound by another instance, one benign `stdout_held_after_exit`); 11 FDs, 0 zombies |
+
+**Filed:** [#996](https://github.com/littlebearapps/untether/issues/996) (`/ctx` vs a live session), [#997](https://github.com/littlebearapps/untether/issues/997) (`/browse` ignores `/ctx`), [#998](https://github.com/littlebearapps/untether/issues/998) (`/model clear` keeps the resumed session's model).
