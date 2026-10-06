@@ -65,8 +65,10 @@ line ([#506](https://github.com/littlebearapps/untether/issues/506)). Set
 `UNTETHER_SETTINGS_CACHE=0` to turn the cache off (see
 [environment variables](env-vars.md)).
 
-The authoritative list lives on each settings model as `RESTART_REQUIRED_FIELDS`
-(see `src/untether/settings.py`) so code, docs, and UI can't drift. Editing
+The authoritative list for the Telegram transport lives on
+`TelegramTransportSettings.RESTART_REQUIRED_FIELDS` (see `src/untether/settings.py`)
+so code, docs, and UI can't drift; the other rows below are enforced where each
+resource is created. Editing
 `untether.toml` to update one of these while the service runs logs the warning
 and sends the Telegram notice, but the new value won't take effect until you
 restart.
@@ -535,8 +537,9 @@ Runtime security knobs. Defaults are safe — operators only flip these when inv
 
 Each engine reads a table keyed by its id, written either as `[engines.<id>]`
 (e.g. `[engines.claude]`) or as a top-level `[<id>]` (e.g. `[claude]`). The two
-layouts don't mix: once any `[engines.*]` table exists, top-level engine tables
-are ignored. Built-in engines are listed here; plugin engines should document
+layouts don't mix: once an `[engines]` table exists (even an empty one, or a
+single `[engines.<id>]`), every flat `[claude]` / `[codex]`-style table is ignored
+(`UntetherSettings.engine_config`). Built-in engines are listed here; plugin engines should document
 their own keys.
 
 An invalid engine table stops Untether from starting when it belongs to the

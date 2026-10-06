@@ -120,6 +120,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now untether
 ```
 
+The service doesn't read your shell rc or direnv `.envrc`. Put variables that engines and their MCP wrapper scripts need (for example `BWS_ACCESS_TOKEN`) in `~/.untether/.env`, one `KEY=value` per line; the unit loads it with `EnvironmentFile=`. A wrapper script under `set -u` that references an unset variable kills its MCP server at session start, so guard references as described in [MCP wrapper scripts under `set -u`](../reference/env-vars.md#mcp-wrapper-set-u) ([#454](https://github.com/littlebearapps/untether/issues/454)).
+
 See the [dev instance reference](../reference/dev-instance.md) for full service file documentation.
 
 ## Auto-continue (Claude Code)

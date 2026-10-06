@@ -4,10 +4,10 @@
 
 | Version | Supported |
 |---------|-----------|
-| Latest release on PyPI (currently 0.35.4) | Yes |
+| Latest release on PyPI (currently 0.36.0) | Yes |
 | Older releases | No |
 
-Only the latest published release receives security fixes. Please upgrade before reporting. When v0.36.0 is published, the 0.36.x line becomes the supported one and 0.35.x stops receiving fixes.
+Only the latest published release receives security fixes. Please upgrade before reporting. Since v0.36.0, the 0.36.x line is the supported one and 0.35.x no longer receives fixes.
 
 ## Reporting a vulnerability
 
@@ -45,7 +45,7 @@ Include:
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
 
-## Security improvements in v0.36.0 (upcoming)
+## Security improvements in v0.36.0
 
 v0.36.0 (published to TestPyPI as release candidates 0.35.5rc1–rc20, then 0.36.0rcN) closes several approval, sandbox and file-access gaps. Upgrade notes:
 
@@ -64,7 +64,7 @@ v0.36.0 (published to TestPyPI as release candidates 0.35.5rc1–rc20, then 0.36
 - **Log redaction widened** ([#800](https://github.com/littlebearapps/untether/issues/800), [#679](https://github.com/littlebearapps/untether/issues/679)). Process titles are scanned in full, and bearer credentials, JWTs and `api_key=` / `token=` / `secret=` / `password=` values are redacted; `ssrf.*` log lines redact URL userinfo.
 - **Dependency advisories** — `anyio` 4.15.1 (CVE-2026-63374, CVE-2026-64847; [#773](https://github.com/littlebearapps/untether/issues/773)) and `aiohttp` 3.14.3 (`PYSEC-2026-3545`/`3546`/`3547`) in the lockfile.
 
-See [CHANGELOG v0.36.0](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0360-unreleased) for the full entry list.
+See the [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) (v0.36.0 section) for the full entry list.
 
 ## Security improvements in v0.35.3
 

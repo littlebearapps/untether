@@ -111,7 +111,7 @@ Integration tests        Merge to dev → TestPyPI         PR dev → master, me
 2. Add full changelog entry covering all changes since last stable release
 3. Run `uv lock`, commit to `dev` (`/pr-main X.Y.Z` does steps 1–4)
 4. PR `dev` → `master`. Nathan approves the release and either squash-merges it or says go for `/pr-main X.Y.Z --merge` (the guard asks him to confirm, [#917](https://github.com/littlebearapps/untether/issues/917)) — **his approval is the single release gate**
-5. `auto-tag-on-master.yml` detects the stable version and creates `vX.Y.Z`; `release.yml` fires on the tag, runs full CI, publishes to PyPI via OIDC, and creates the GitHub Release. **No manual tag, no PyPI environment approval.**
+5. `auto-tag-on-master.yml` detects the stable version and creates `vX.Y.Z`, then dispatches `release.yml` against the tag ([#376](https://github.com/littlebearapps/untether/issues/376); a tag pushed by the workflow token would not trigger it), which runs full CI, publishes to PyPI via OIDC, and creates the GitHub Release. **No manual tag, no PyPI environment approval.**
 6. After PyPI publishes: attest and run `scripts/fleet-rollout.sh X.Y.Z` (all five hosts), or for lba-1 staging alone `scripts/staging.sh reset && systemctl --user restart untether`
 
 ### Rollback from staging

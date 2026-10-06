@@ -15,11 +15,12 @@ Start here:
 
 ## Routing, sessions, and continuation
 
-Untether is stateless by default, but can provide “continuation” in multiple ways:
+Untether's config default is stateless (the onboarding wizard's assistant and workspace workflows turn on chat sessions), and it can provide “continuation” in multiple ways:
 
 - reply-to-continue (always available)
 - per-topic resume (Telegram forum topics)
 - per-chat sessions (auto-resume)
+- Claude Code live sessions, which keep the process open for background work, queued and steered follow-ups
 
 - [Routing & sessions](routing-and-sessions.md)
 

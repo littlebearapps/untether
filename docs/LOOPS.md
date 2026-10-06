@@ -59,7 +59,7 @@ Automated (non-agentic — already live)
   A3   fleet-rollout.sh / fleet-rollback.sh / fleet-status.sh — operator, attestation-gated
   A4   run-integration-tests.sh — writes the per-VERSION attestation marker
   A5   CI (format/ruff/ty/pytest 3.12-3.14/build/lockfile/install-test/pip-audit/bandit/codeql/docs)
-  A6   release pipeline (auto-tag-on-master.yml → release.yml, OIDC → PyPI) — OPERATOR gate
+  A6   release pipeline (auto-tag-on-master.yml → release.yml, OIDC → PyPI → GitHub Release → Discussions announcement) — OPERATOR gate
 
 Intentionally NOT built
   /paid-run       — no billable CLI calls of Untether's own
@@ -123,7 +123,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 
 - **Trigger:** `dev` is green + ahead of `master` and a stable `X.Y.Z` is decided.
 - **Driver:** `/pr-main`.
-- **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the opened `dev`→`master` PR (release body), then **STOP**.
+- **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the plain-English release announcement (`.github/release-announcements/vX.Y.Z.md`, [#1008](https://github.com/littlebearapps/untether/issues/1008)) + the opened `dev`→`master` PR (release body), then **STOP**.
 - **Authority:** prepares and opens the release PR, then stops. `--merge` merges it only after Nathan explicitly approves that version; the guard checks head = `dev` + green CI and asks him to confirm (#917). Never tags or runs `gh release create` (the pipeline does); runs `fleet-rollout.sh` only once PyPI has the version and Nathan says so.
 
 ### L7 · `/kaizen` — capture a process learning  ·  Status: **available**
@@ -187,7 +187,7 @@ Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the 
 | A3 | `fleet-rollout.sh` / `fleet-rollback.sh` / `fleet-status.sh` — parallel upgrade/rollback/status, attestation-gated | `scripts/` (operator-run) |
 | A4 | `run-integration-tests.sh` — writes the per-VERSION attestation marker | `scripts/` |
 | A5 | CI — format / ruff / ty / pytest 3.12–3.14 / build / lockfile / install-test / pip-audit / bandit / codeql / docs | `.github/workflows/` |
-| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI) | OPERATOR gate: the `dev`→`master` PR merge (Nathan, or `/pr-main X.Y.Z --merge` after his explicit go; the guard asks) |
+| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI → GitHub Release → `announce` job posts to Discussions → Announcements) | OPERATOR gate: the `dev`→`master` PR merge (Nathan, or `/pr-main X.Y.Z --merge` after his explicit go; the guard asks) |
 
 ---
 

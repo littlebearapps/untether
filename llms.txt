@@ -2,6 +2,8 @@
 
 > Telegram bridge for AI coding agents. Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere. Works with Claude Code, Codex, OpenCode and Pi (Gemini CLI and Amp still load but are deprecated and no longer supported).
 
+Website: [untether.cc](https://untether.cc) · User guides: [help centre](https://littlebearapps.com/help/untether/) · Source and docs below: [GitHub](https://github.com/littlebearapps/untether)
+
 ## Tutorials
 
 - [Install and onboard](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/install.md): Setup wizard walkthrough — create a bot, pick a workflow, generate config

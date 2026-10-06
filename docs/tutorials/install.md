@@ -24,6 +24,8 @@ uv python install 3.14
 uv tool install -U untether
 ```
 
+Prefer `pipx`? `pipx install untether` works too (Python 3.12+).
+
 Verify it's installed:
 
 ```sh
@@ -314,7 +316,7 @@ untether runs these engines on your computer. switch anytime with /agent.
    claude
 ```
 
-Pick whichever you prefer. You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode or Pi. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 
@@ -340,6 +342,13 @@ Press **y** or **Enter** to save. You'll see:
 
 ```
 ✓ setup complete. starting untether...
+
+  next steps:
+  • send a message to test: what is 2+2?
+  • change settings from telegram: /config
+  • enable voice notes: add voice_transcription = true to config
+  • set up projects: see littlebearapps.com/help/untether/projects/
+  • bot is locked to your account (user id 123456789)
 ```
 
 Untether is now running and listening for messages!
@@ -371,6 +380,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.allowed_user_ids '[123456789]'
         untether config set transports.telegram.session_mode "chat"
         untether config set transports.telegram.show_resume_line false
         untether config set transports.telegram.topics.enabled false
@@ -404,6 +414,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id -1001234567890
+        untether config set transports.telegram.allowed_user_ids '[123456789, 234567890]'
         untether config set transports.telegram.session_mode "chat"
         untether config set transports.telegram.show_resume_line false
         untether config set transports.telegram.topics.enabled true
@@ -437,6 +448,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.allowed_user_ids '[123456789]'
         untether config set transports.telegram.session_mode "stateless"
         untether config set transports.telegram.show_resume_line true
         untether config set transports.telegram.topics.enabled false
@@ -460,6 +472,8 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         enabled = false
         scope = "auto"
         ```
+
+The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that.
 
 This config file controls all of Untether's behaviour. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 

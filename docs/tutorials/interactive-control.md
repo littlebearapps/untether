@@ -246,11 +246,11 @@ Key concepts:
 
 **Approval buttons don't appear**
 
-Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and which permission mode is active (`/planmode show`). In `plan-auto` and `auto` no plan buttons appear by design; tool buttons appear in Accept edits / `default`, or with Diff preview on. Other engines don't support interactive approval.
+Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and which permission mode is active (`/planmode show`). **engine default** with no `[engines.claude] permission_mode` in `untether.toml` (a fresh install) means Claude Code runs under its own settings with no buttons — set a mode with `/planmode`. In `plan-auto` and `auto` no plan buttons appear by design; tool buttons appear in Accept edits / `default`, or with Diff preview on. Other engines don't support interactive approval.
 
 **Buttons appear but nothing happens when I tap them**
 
-Check your internet connection. If the tap doesn't register, try again — Untether answers callbacks immediately so there should be no delay. A toast saying `Already answered`, `No longer needed` or `This request has expired` means the request was already settled (or Claude Code withdrew it), so the tap was ignored. Buttons also only work in the chat they were posted in.
+Check your internet connection. If the tap doesn't register, try again — Untether answers callbacks immediately so there should be no delay. A toast saying `Already answered`, `No longer needed` or `This request has expired` means the request was already settled (or Claude Code withdrew it), so the tap was ignored. Buttons also only work in the chat they were posted in, and in a group with `approval_originator_only = true` only the person who started the run can answer them.
 
 **Claude Code keeps retrying after I tap "Pause & Outline Plan"**
 

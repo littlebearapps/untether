@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Documentation
-    url: https://github.com/littlebearapps/untether/tree/master/docs
-    about: Check the docs for setup guides, configuration reference, and troubleshooting
+  - name: Help centre
+    url: https://littlebearapps.com/help/untether/
+    about: Setup guides, configuration reference and troubleshooting
   - name: Ask a question (Q&A)
     url: https://github.com/littlebearapps/untether/discussions/categories/q-a
     about: Setup, configuration and how-to questions get answered in Discussions

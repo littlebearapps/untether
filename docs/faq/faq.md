@@ -6,7 +6,7 @@ description: "Common questions about Untether: installation, supported engines, 
 # Frequently Asked Questions
 
 > Quick answers to the questions users ask most often. Also surfaced at
-> <https://littlebearapps.com/help/untether/faq/>.
+> <https://littlebearapps.com/help/untether/faq/>. Website: <https://untether.cc>.
 
 ## What is Untether?
 
@@ -16,7 +16,7 @@ Your machine still does all the work. Untether is the wire between your phone an
 
 ## How do I install Untether?
 
-Untether is published to PyPI. With [`uv`](https://docs.astral.sh/uv/) installed:
+Untether is published to PyPI and needs Python 3.12 or newer. With [`uv`](https://docs.astral.sh/uv/) installed:
 
 ```sh
 uv tool install untether
@@ -30,7 +30,7 @@ pipx install untether
 untether
 ```
 
-The first run launches a setup wizard that creates a Telegram bot via [BotFather](https://t.me/BotFather), picks one of three workflow modes (assistant, workspace, or handoff), and writes `~/.untether/untether.toml`. After the wizard finishes, send a message to your bot in Telegram and the agent runs on your machine.
+The first run launches a setup wizard that walks you through creating a Telegram bot with [BotFather](https://t.me/BotFather), picks one of three workflow modes (assistant, workspace, or handoff), connects your chat, picks a default engine from the agent CLIs it finds installed, and writes `~/.untether/untether.toml` with the bot locked to your Telegram account (`allowed_user_ids`). After the wizard finishes, send a message to your bot in Telegram and the agent runs on your machine.
 
 Already have a bot token? Answer **yes** when the wizard asks whether you have one, paste it in, and the BotFather walkthrough is skipped. To re-run the wizard later, use `untether --onboard`. Full walkthrough: [Install and onboard](https://littlebearapps.com/help/untether/install/).
 
@@ -48,7 +48,7 @@ Two further engines are still included and still load, but are **deprecated and 
 - **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google [retired Gemini CLI for individual accounts (free, Google AI Pro and Ultra) on 18 June 2026](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the engine still loads, but Untether no longer tests it or fixes bugs in it. Antigravity CLI support ships as a separate `antigravity` engine in v0.36.1.
 - **[Amp](https://ampcode.com)** — Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that cadence, so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself.
 
-You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [README](https://github.com/littlebearapps/untether#-supported-engines).
+You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [engine compatibility reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md#engine-compatibility).
 
 ## Do I need an API key to use Untether?
 
@@ -56,7 +56,7 @@ In most cases, no. Untether uses whatever authentication your agent CLI already 
 
 The two [deprecated engines](#which-ai-coding-agents-does-untether-support) are the exception: Gemini CLI no longer authenticates individual or free Google accounts at all (upstream EOL, 18 June 2026), and Amp requires a current client that Untether does not track. Both fail with an authentication or version error rather than falling back to anything — Untether never silently reroutes a run to a different provider.
 
-API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether itself doesn't make any API calls — it just spawns the agent CLI as a subprocess.
+API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether doesn't run any models itself — it spawns the agent CLI as a subprocess. For Claude it also reads your subscription quota from Anthropic using Claude Code's existing login (for `/usage` and the quota footer), so there's nothing extra to set up.
 
 The one exception is voice transcription: Untether ships with optional Whisper-via-Groq support. That's a separate API key (`voice_transcription_api_key`) which is masked in logs as `SecretStr` and only sent to your configured transcription endpoint — as are credentials embedded in a configured URL (`https://user:pass@host/v1`), which are masked in every log line.
 
@@ -67,7 +67,7 @@ Untether runs entirely on your machine (or your server). Your repo, your environ
 - **Telegram** sees the messages you exchange with your bot — that's the user-content channel by design. Messages are encrypted in transit but Telegram does have access to them on its servers, so treat the bot like any other chat: don't paste production secrets into prompts.
 - **Your agent CLI** sees whatever you send in the message plus your project's filesystem (subject to whatever permission controls the engine has — Claude's `--permission-mode`, Codex's sandbox (`--sandbox`), etc.).
 - **The agent's vendor** (Anthropic / OpenAI / Google / Sourcegraph / etc.) sees whatever the agent CLI sends to its API — same as if you ran the CLI directly in a terminal.
-- **Untether itself** doesn't phone home, doesn't send analytics, doesn't have a remote service. Crash logs stay on your machine. The bot token, allowlisted user IDs, and any optional voice-transcription API key live in your local `untether.toml` and are masked in operational logs.
+- **Untether itself** doesn't phone home, doesn't send analytics, doesn't have a remote service. Crash logs stay on your machine. The bot token, allowlisted user IDs, and any optional voice-transcription API key live in your local `untether.toml` and are masked in operational logs. Its only outbound calls are the Telegram Bot API, Anthropic's subscription-usage endpoint after Claude runs (with Claude Code's own login), the voice-transcription endpoint you configure, and any URLs your own cron or webhook triggers fetch or forward to.
 
 If you want stricter sandboxing, run Untether inside a container or on a VM. The whole bridge is one Python process and a few state files in `~/.untether/`.
 
@@ -77,7 +77,7 @@ When Claude Code wants to do something that needs approval — run a shell comma
 
 If you click "Pause & Outline Plan", Claude writes a plain-language summary of what it's about to do, and you get a second round of buttons: ✅ Approve Plan / ❌ Deny / 💬 Let's discuss. Approving here also auto-approves the next plan-exit so you don't get prompted twice for the same plan. An approval covers that reply only: your next message, and any background wake-up in plan mode, starts in plan mode again — once any background agents that reply started have finished their work (until then, replies say `⚠️ Not re-planned`).
 
-Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear:
+Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear. A fresh install sets none: until you pick a mode (or set `[engines.claude] permission_mode` in `untether.toml`), Claude Code runs under its own settings with no buttons, and `/planmode show` says **engine default**.
 
 - **on** — Claude plans without editing files, and you approve the plan before changes start.
 - **plan-auto** — plan mode, with the plan transition approved for you, so no buttons appear.
@@ -93,7 +93,7 @@ For non-Claude engines, approval is enforced per-engine pre-run — Codex runs i
 Untether is built around the assumption that your phone is unreliable but your computer isn't. Two things matter here:
 
 1. **Your agent keeps running.** It's a subprocess on your machine. It doesn't care whether your phone is connected, whether Telegram is open, or whether you've gone to sleep. Progress messages buffer locally; reconnection rendering is automatic.
-2. **Untether catches the common failure modes.** If a Claude Code session exits prematurely after a tool result without processing it (a known upstream bug), Untether auto-resumes it. If a resume comes back empty — 0 turns and no answer, another upstream turn-state bug — Untether quarantines that session and automatically retries your message on a fresh one, telling you it did so. When Claude hands work to a background task or subagent and ends its turn, Untether keeps the session open (in any chat with a permission mode set through `/planmode`, `/config` or `[engines.claude] permission_mode` — the same control channel the approval buttons use): the task's result comes back as a new `🔔 Background task finished` message, and anything you send meanwhile goes into that same session rather than a new one. While tasks run, a `⏳ background (N)` block and a status message show each one's elapsed time and progress. A session waits up to 30 minutes after the last sign of background activity (the 30 minutes restart whenever an agent makes progress), or longer when Claude gave a background command a longer timeout (up to 2 hours) or scheduled a wake-up (up to 1 hour), with a 4-hour cap per session. If you `/cancel` or Untether restarts while background tasks are running, it stops them cleanly and tells you which ones, and a closing line says whether your next message continues the same session. If the bot is restarted while a run is in progress, ephemeral approval messages are cleaned up and orphaned progress messages get a `⚠️ interrupted by restart` marker. Stalls that look "alive but silent" trigger progressive warnings, and the watchdog auto-cancels truly dead processes. If a saved session can't be resumed at all (it no longer exists), Untether clears it and the error says so (`ℹ️ The saved session couldn't be resumed, so it was cleared`); a Codex, OpenCode or Pi run that fails for some other reason, such as a bad model name, keeps the session so you can fix the cause and carry on.
+2. **Untether catches the common failure modes.** If a Claude Code session exits prematurely after a tool result without processing it (a known upstream bug), Untether auto-resumes it. If a resume comes back empty — 0 turns and no answer, another upstream turn-state bug — Untether quarantines that session and automatically retries your message on a fresh one, telling you it did so. When Claude hands work to a background task or subagent and ends its turn, Untether keeps the session open (in any chat with a permission mode set through `/planmode`, `/config` or `[engines.claude] permission_mode` — the same control channel the approval buttons use): the task's result comes back as a new `🔔 Background task finished` message, and anything you send meanwhile goes into that same session rather than a new one. While tasks run, a `⏳ background (N)` block and a status message show each one's elapsed time and progress. A session waits up to 30 minutes after the last sign of background activity (the 30 minutes restart whenever an agent makes progress), or longer when Claude gave a background command a longer timeout (up to 2 hours) or scheduled a wake-up (up to 1 hour), with a 4-hour cap per session. If you `/cancel` or Untether restarts while background tasks are running, it stops them cleanly and tells you which ones, and a closing line says whether your next message continues the same session. If something outside Untether kills an open session (the OOM killer, a `kill`, a crash between turns), you get one `⚠️ The Claude session ended unexpectedly` notice naming any background tasks that were stopped. If the bot is restarted while a run is in progress, ephemeral approval messages are cleaned up and orphaned progress messages get a `⚠️ interrupted by restart` marker. Stalls that look "alive but silent" trigger progressive warnings, and the watchdog auto-cancels truly dead processes. If a saved session can't be resumed at all (it no longer exists), Untether clears it and the error says so (`ℹ️ The saved session couldn't be resumed, so it was cleared`); a Codex, OpenCode or Pi run that fails for some other reason, such as a bad model name, keeps the session so you can fix the cause and carry on.
 
 Everything important — Telegram update offsets, active progress message references, trigger fire history — is persisted to disk so a restart picks up where you left off without dropping or duplicating messages.
 
@@ -153,7 +153,7 @@ Yes, in three ways, and none needs a restart:
 
 Trigger-started runs show where they came from in the footer (`⏰ cron:<id>`, `⚡ webhook:<id>`), `/ping` summarises each chat's triggers, and `/config → ⏰ Triggers` lists them with a master pause/resume toggle. A cron or webhook that names a `project` but no `engine` runs on that project's default engine.
 
-Give every Claude cron that should act on its own an explicit `permission_mode`. Nobody is there to tap a button when a cron or webhook fires, so Untether denies anything the run would have asked about — a plan approval, a question, or a tool its mode asks about — and lists the denials in the run's final message. Without a `permission_mode` the cron takes the chat's `/planmode`, then the engine default (`plan` unless you changed it), so it ends with a plan instead of doing the work. For unattended crons set `permission_mode = "plan-auto"`, `"auto"` or `"bypassPermissions"` on the cron itself; webhooks follow the chat's mode. Untether logs `trigger.unattended_approval_risk` (and the startup message lists such crons), and every denial logs `permission.unattended_deny`. `/at` runs aren't affected: their buttons work as usual. If Telegram is briefly unreachable when a trigger fires, Untether retries the announcement before giving up instead of silently skipping the run. Full guides: [Schedule tasks](https://littlebearapps.com/help/untether/schedule-tasks/) and [Webhooks and cron](https://littlebearapps.com/help/untether/webhooks-and-cron/).
+Give every Claude cron that should act on its own an explicit `permission_mode`. Nobody is there to tap a button when a cron or webhook fires, so Untether denies anything the run would have asked about — a plan approval, a question, or a tool its mode asks about — and lists the denials in the run's final message. Without a `permission_mode` the cron takes the chat's `/planmode`, then `[engines.claude] permission_mode`; if that's `plan` or a mode that asks, the run ends with a plan or a report instead of doing the work. For unattended crons set `permission_mode = "plan-auto"`, `"auto"` or `"bypassPermissions"` on the cron itself; webhooks follow the chat's mode. Untether logs `trigger.unattended_approval_risk` (and the startup message lists such crons), and every denial logs `permission.unattended_deny`. `/at` runs aren't affected: their buttons work as usual. If Telegram is briefly unreachable when a trigger fires, Untether retries the announcement before giving up instead of silently skipping the run. Full guides: [Schedule tasks](https://littlebearapps.com/help/untether/schedule-tasks/) and [Webhooks and cron](https://littlebearapps.com/help/untether/webhooks-and-cron/).
 
 ## Can a scheduled run use a cheaper model than the chat?
 
@@ -220,9 +220,9 @@ Then restart the running bot to pick up the new wheel. If you're running interac
 systemctl --user restart untether
 ```
 
-Untether follows semver: patch versions (e.g. `0.35.3 → 0.35.4`) are mostly bug fixes, and minor versions (`0.35.x → 0.36.0`) add features. While Untether is pre-1.0, a minor release can carry breaking changes, and occasionally a patch release does too when a fix needs one; these are listed under **breaking** in the changelog. Pre-release `rcN` wheels publish to TestPyPI for staging dogfooding. The [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) lists every change with linked GitHub issues.
+Untether follows semver: patch versions (e.g. `0.35.3 → 0.35.4`) are mostly bug fixes, and minor versions (`0.35.x → 0.36.0`) add features. While Untether is pre-1.0, a minor release can carry breaking changes, and occasionally a patch release does too when a fix needs one; these are listed under **breaking** in the changelog. Pre-release `rcN` wheels publish to TestPyPI for staging dogfooding. The [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) lists every change with linked GitHub issues, and every stable release gets a plain-English summary in [Discussions → Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements).
 
-Upgrading to **v0.36.0** (published to TestPyPI as release candidates 0.35.5rc1–rc20, then 0.36.0rcN)? Read [Upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) first. Untether's old `auto` permission mode is now called `plan-auto` (`auto` now means Claude Code's own auto mode). `/planmode off` now asks before shell commands, web fetches and MCP tools. An `extra_args` that carries an approval- or sandbox-bypass flag now stops the engine loading. Codex **safe** mode is now a real read-only sandbox, so edits, tests and builds fail there. Unattended cron and webhook runs deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself.
+Upgrading from v0.35.4 or earlier to **v0.36.0**? Read [Upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) first. Untether's old `auto` permission mode is now called `plan-auto` (`auto` now means Claude Code's own auto mode). `/planmode off` now asks before shell commands, web fetches and MCP tools. An `extra_args` that carries an approval- or sandbox-bypass flag now stops the engine loading. Codex **safe** mode is now a real read-only sandbox, so edits, tests and builds fail there. Unattended cron and webhook runs deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. With Loop mode off, Claude can no longer schedule recurring tasks itself.
 
 ## How do I uninstall Untether?
 
@@ -240,9 +240,11 @@ The Telegram bot itself lives on Telegram's side — to delete it entirely, talk
 
 ## Where can I get help or report a bug?
 
-- **Documentation** — [`docs/`](https://github.com/littlebearapps/untether/tree/master/docs) covers tutorials, how-to guides, engine references, and architecture.
+- **Website** — <https://untether.cc>
 - **Help centre** — <https://littlebearapps.com/help/untether/>
-- **Bug reports and feature requests** — [GitHub Issues](https://github.com/littlebearapps/untether/issues) with the `bug` or `enhancement` label.
+- **Documentation** — [`docs/`](https://github.com/littlebearapps/untether/tree/master/docs) covers tutorials, how-to guides, engine references, and architecture.
+- **Questions and ideas** — [GitHub Discussions](https://github.com/littlebearapps/untether/discussions): ask in [Q&A](https://github.com/littlebearapps/untether/discussions/categories/q-a), suggest features in [Ideas](https://github.com/littlebearapps/untether/discussions/categories/ideas), and follow [Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements) for release summaries.
+- **Bug reports** — [GitHub Issues](https://github.com/littlebearapps/untether/issues/new/choose).
 - **Security issues** — see [SECURITY.md](https://github.com/littlebearapps/untether/blob/master/SECURITY.md) for the responsible-disclosure path.
 
 When filing an issue, include your Untether version (`untether --version`), the engine + version that reproduced the bug, and a relevant excerpt from `journalctl --user -u untether` (or the equivalent log path for your runtime). Sensitive paths and secrets are scrubbed from logs by default but spot-check before pasting.

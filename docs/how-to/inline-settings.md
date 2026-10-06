@@ -74,7 +74,7 @@ When you tap a setting button:
 Some settings have more than two states and use a different layout:
 
 - **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
-- **Approval mode** (Gemini) — three options (read-only / edit files / full access)
+- **Approval mode** (Gemini, deprecated) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
 - **Reasoning** (Codex) — low / medium / high / xhigh
 

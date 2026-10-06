@@ -53,13 +53,14 @@ Untether shells out to engine CLIs. Install them and make sure they’re on your
     release. Gemini CLI no longer authenticates individual or free Google
     accounts (upstream end-of-life, 18 June 2026, [announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) — use [Antigravity CLI](https://antigravity.google) instead;
     Untether support for it is planned for v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)),
-    and Untether's Amp integration is unmaintained. See
+    and Untether's Amp integration is unmaintained. `/config` → **Engine & model**
+    marks both with ⚠️; they can still be selected. See
     [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines)
     in the README.
 
 ## Feature differences
 
-Not all features are available on every engine. See the [engine compatibility matrix](https://github.com/littlebearapps/untether#engine-compatibility) in the README for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
+Not all features are available on every engine. See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md) for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
 
 ## Related
 

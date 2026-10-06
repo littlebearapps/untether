@@ -2,6 +2,8 @@
 
 Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi; Gemini CLI and Amp deprecated). It runs on the user's machine and bridges agents to Telegram, so users can send tasks by voice or text, approve changes, and read results from their phone — while agents work in the background.
 
+Website: https://untether.cc · Help centre (user docs, synced flat from `docs/` on `master`): `https://littlebearapps.com/help/untether/<file-stem>/`
+
 ## Stack
 
 - Python 3.12+, anyio (async), msgspec (JSONL parsing), structlog (logging)

@@ -19,6 +19,8 @@ This document was split into smaller Diátaxis pages.
 - [Environment variables](reference/env-vars.md)
 - [Telegram transport](reference/transports/telegram.md)
 - [Runners](reference/runners/index.md)
+- [Feature catalog](reference/feature-catalog.md) and [test catalog](reference/test-catalog.md) — which file owns each feature, and what each test file covers
+- [Integration testing](reference/integration-testing.md) and the [loop registry](LOOPS.md) — release validation and the maintainer workflows
 
 ## Extending Untether
 
