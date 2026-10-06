@@ -79,6 +79,27 @@ release). Key points:
 - Run `python3 scripts/validate_release.py` until clean (section exists, ISO
   date, issue links present, allowed subsection headings).
 
+### M-3b. Write the release announcement (required — CI blocks the PR without it)
+
+Every stable release posts a plain-English **Discussions → Announcements** post
+([#1008](https://github.com/littlebearapps/untether/issues/1008)). Write
+`.github/release-announcements/vX.Y.Z.md` from the collapsed CHANGELOG section,
+following `.github/release-announcements/TEMPLATE.md`:
+
+- Audience = everyday users and would-be contributors. Benefits first, plain
+  English, Australian spelling, no internal jargon, no rc numbers.
+- `## TL;DR` + `## ⬆️ Upgrade` always; at least one of `## ✨ What's new for you` /
+  `## 🛠️ Fixes you'll notice` / `## 🧹 Under the hood`; **`## ⚠️ Heads up`
+  whenever the section has `### breaking` or a deprecation** (what changed, who's
+  affected, what to do — deprecated engines: still shipped? supported? removal?).
+- No Links section — `render` appends changelog / release / PyPI / help / Discussions links.
+- `python3 scripts/release_announcement.py check X.Y.Z` until clean (also run by
+  `validate_release.py` and by `release.yml` before anything is built), then paste
+  `render X.Y.Z` into the PR body under `## Announcement` for Nathan to review.
+- `release.yml`'s `announce` job posts it after PyPI + the GitHub Release
+  (idempotent; links the discussion from the release). If that job fails, re-run
+  it — never post by hand with different text.
+
 ### M-4. FAQ final pass
 
 Per `.claude/rules/help-faq.md`, scan the collapsed changelog against
@@ -116,6 +137,10 @@ pyproject.toml → X.Y.Z · uv.lock synced
 - validate_release.py — clean
 - attestation: integration-test-pass-X.Y.Z.json (head_sha=…, tiers=…, <ts>)
 
+## Announcement
+<output of `python3 scripts/release_announcement.py render X.Y.Z` — posted to
+Discussions → Announcements by release.yml after PyPI>
+
 ## Release note
 Merging this PR IS the release → auto-tag vX.Y.Z → release.yml → PyPI.
 Merged by Nathan, or by Claude via `/pr-main X.Y.Z --merge` once Nathan approves.
@@ -143,7 +168,7 @@ approves the release** (or merges it himself) → auto-tag → PyPI →
 3. **Merge.** `gh pr merge <n> --squash --admin` (no `--delete-branch`). The guard
    asks Nathan to confirm — if he declines, or the call is denied, STOP; never
    retry another way.
-4. **Verify the publish.** `gh run list --workflow auto-tag-on-master.yml` then
+4. **Verify the publish** (including the `announce` job's Discussions link). `gh run list --workflow auto-tag-on-master.yml` then
    `--workflow release.yml` until both succeed; the `vX.Y.Z` tag and GitHub release
    exist; PyPI serves it (`curl -s https://pypi.org/pypi/untether/json | jq -r
    .info.version`). If auto-tag succeeded but `release.yml` never ran (the #376

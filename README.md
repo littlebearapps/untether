@@ -353,7 +353,7 @@ Untether runs on your machine and bridges your agents to Telegram. Here's exactl
 
 ## 🤝 Contributing
 
-Found a bug? Got an idea? [Open an issue](https://github.com/littlebearapps/untether/issues) — we'd love to hear from you.
+Found a bug? [Open an issue](https://github.com/littlebearapps/untether/issues/new/choose). Got a question or an idea? Join us in [GitHub Discussions](https://github.com/littlebearapps/untether/discussions) — ask in [Q&A](https://github.com/littlebearapps/untether/discussions/categories/q-a), suggest features in [Ideas](https://github.com/littlebearapps/untether/discussions/categories/ideas), and follow [Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements) for a plain-English summary of every release.
 
 Want to contribute code? See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
 

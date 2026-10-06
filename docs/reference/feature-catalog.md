@@ -236,7 +236,8 @@ GitHub Actions CI runs on push to master/dev and on PRs:
 | install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
 | testpypi-publish | Publishes to TestPyPI on dev push (OIDC, `skip-existing: true`) |
 | auto-tag-on-master | On master push: detects stable version bump in `pyproject.toml`, creates and pushes `vX.Y.Z` tag (skips pre-releases) |
-| release-validation | PR-only: validates changelog format, issue links, date when version changes |
+| release-validation | PR-only: validates changelog format, issue links, date when version changes; for a stable version also requires the user-facing Discussions announcement (#1008) |
+| release → announce | After PyPI + the GitHub Release: posts `.github/release-announcements/vX.Y.Z.md` to Discussions → Announcements (idempotent) and links it from the release; `release.yml`'s build refuses to start without a passing announcement (#1008) |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB), every dependency group incl. docs (#875) |
 | bandit | Python SAST (security static analysis) |
 | codeql | CodeQL code scanning (Python + Actions), blocks PRs on new alerts |

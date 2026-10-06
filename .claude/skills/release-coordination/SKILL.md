@@ -363,6 +363,7 @@ That's it. No tag creation, no PyPI environment approval. The git tag and PyPI p
    - Builds wheel + sdist via `uv build`, validates with `twine check` and `check-wheel-contents`
    - Publishes to PyPI via OIDC trusted publishing (no manual approval — the PR merge was the approval)
    - Creates a GitHub Release with auto-generated notes and uploads the dist artifacts
+   - `announce` job posts `.github/release-announcements/vX.Y.Z.md` (plus a links footer) to **Discussions → Announcements** and links it from the release; idempotent, re-run the job if it fails ([#1008](https://github.com/littlebearapps/untether/issues/1008)). The build job refuses to start without a passing announcement (`scripts/release_announcement.py check`)
 
 ### Why the single gate is safe
 
