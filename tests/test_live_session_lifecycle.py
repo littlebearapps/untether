@@ -58,6 +58,8 @@ _ENV = (
     # #872 R17-01a
     "FAKE_CLAUDE_WAKE_HOOK_S",
     "FAKE_CLAUDE_WAKE_DELAY_S",
+    # #1001
+    "FAKE_CLAUDE_DEATH",
 )
 
 
@@ -2041,3 +2043,154 @@ async def test_wake_cap_close_expires_pending_untether_wakeups(
         finally:
             claude_mod._LIVE_SESSIONS.pop(sid, None)
             tg.cancel_scope.cancel()
+
+
+# ── #1001: an idle live session killed outside Untether ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("death", "rc", "sig", "cause"),
+    [
+        # The real CLI handles SIGTERM: it ends its tasks (snapshot +
+        # ``task_updated{failed}``) and exits 143 (sl, 0.35.5rc20).
+        ("term", 143, 15, "external_signal"),
+        # SIGKILL / the OOM killer: nothing said, the tasks still "running".
+        ("kill", -9, 9, "external_signal"),
+        ("crash", 1, None, "crash"),
+    ],
+)
+async def test_1001_idle_session_killed_externally_reports_died(
+    monkeypatch: pytest.MonkeyPatch,
+    quarantine: QuarantineStore,
+    death: str,
+    rc: int,
+    sig: int | None,
+    cause: str,
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    os.environ["FAKE_CLAUDE_DEATH"] = death
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, events = await _run("killed_while_idle", on_event=clock.on_event)
+    assert isinstance(events[-1], CompletedEvent) and events[-1].ok is True
+    state = _engine_state(runner)
+    assert runner.current_stream.proc_returncode == rc
+    assert state.live_close_reason is None
+    assert state.live_exit_cause == cause
+    # The tasks the exit took down read "stopped", not "failed" / "running".
+    assert {t.task_id: t.status for t in state.tasks.values()} == {
+        "b1": "stopped",
+        "b2": "stopped",
+    }
+    assert all(t.ended_at is not None for t in state.tasks.values())
+    assert clock.kinds() == ["died"]
+    died, _ = clock.first("died")
+    assert died["rc"] == rc and died["signal"] == sig
+    assert died["exit_cause"] == cause
+    assert died["tasks"] == ["bg b1", "bg b2"]
+    assert died["task_ids"] == ["b1", "b2"]
+    assert died["quarantined"] is False
+    (logged,) = _events(logs, "claude.live_session.died_unexpectedly")
+    assert logged["log_level"] == "warning"
+    assert logged["rc"] == rc and logged["signal"] == sig
+    assert logged["exit_cause"] == cause and logged["live_tasks"] == 2
+    # #820's classification is unchanged: the CLI ended without a close.
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "reader_done" and exited["close_reason"] is None
+    assert not quarantine.is_quarantined("claude", SID)
+
+
+async def test_1001_untether_close_of_the_same_session_is_not_a_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A max_hold close (Untether's own) keeps the #829 closing/closed pair
+    and never reports ``died``."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("killed_while_idle", wake_s=30, on_event=clock.on_event)
+    state = _engine_state(runner)
+    assert state.live_close_reason == "max_hold"
+    assert state.live_exit_cause is None
+    assert clock.kinds() == ["closing", "closed"]
+    assert not _events(logs, "claude.live_session.died_unexpectedly")
+
+
+async def test_1001_no_death_notice_while_untether_is_shutting_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart takes the CLIs down with it; the drain notice covers that."""
+    from untether.shutdown import request_shutdown, reset_shutdown
+
+    _settings(monkeypatch)
+    clock = _CloseClock()
+    request_shutdown()
+    try:
+        runner, _ = await _run("killed_while_idle", on_event=clock.on_event)
+    finally:
+        reset_shutdown()
+    assert _engine_state(runner).live_exit_cause is None
+    assert clock.kinds() == []
+
+
+async def test_1001_clean_exit_without_tasks_is_not_a_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rc 0 with nothing left running is a natural end (#820), not a death."""
+    _settings(monkeypatch)
+    clock = _CloseClock()
+    runner, _ = await _run("exit_after_result", on_event=clock.on_event)
+    assert _engine_state(runner).live_exit_cause is None
+    assert clock.kinds() == []
+
+
+@pytest.mark.parametrize(
+    ("rc", "sig", "cause"),
+    [
+        (143, 15, "external_signal"),
+        (137, 9, "external_signal"),
+        (-15, 15, "external_signal"),
+        (-9, 9, "external_signal"),
+        (1, None, "crash"),
+        (255, None, "crash"),
+        (0, None, "exited"),
+        (None, None, "exited"),
+    ],
+)
+def test_1001_exit_signal_and_cause(
+    rc: int | None, sig: int | None, cause: str
+) -> None:
+    assert claude_mod._exit_signal(rc) == sig
+    assert claude_mod._exit_cause(rc) == cause
+
+
+def test_1001_signal_name() -> None:
+    assert claude_mod._signal_name(15) == "SIGTERM"
+    assert claude_mod._signal_name(9) == "SIGKILL"
+    assert claude_mod._signal_name(None) is None
+    assert claude_mod._signal_name(200) == "signal 200"
+
+
+def test_1001_tasks_stopped_by_exit_window() -> None:
+    """Live tasks and ones the dying CLI ended unsuccessfully inside the
+    window count; a success, an older failure and a foreground task don't."""
+    state = ClaudeStreamState()
+    task = claude_mod.ClaudeTask
+    state.tasks = {
+        "live": task("live", is_backgrounded=True, status="running"),
+        "dying": task("dying", is_backgrounded=True, status="failed", ended_at=105.0),
+        "provisional": task(
+            "provisional", is_backgrounded=True, status="ended", ended_at=104.0
+        ),
+        "done": task("done", is_backgrounded=True, status="completed", ended_at=105.0),
+        "old_fail": task(
+            "old_fail", is_backgrounded=True, status="failed", ended_at=50.0
+        ),
+        "fg": task("fg", is_backgrounded=False, status="running"),
+    }
+    stopped = claude_mod._tasks_stopped_by_exit(state, since=100.0)
+    assert [t.task_id for t in stopped] == ["live", "dying", "provisional"]

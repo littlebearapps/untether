@@ -575,6 +575,64 @@ async def test_manager_run_loop_polls_and_aclose_finalises() -> None:
     assert transport.edit_calls[-1]["message"].text == final
 
 
+async def test_1001_session_died_refinalises_a_message_the_poll_finalised() -> None:
+    """The dying CLI ends its tasks as ``failed`` first, so the poll has
+    already finalised the message; the runner then marks them stopped and
+    the ``died`` reason re-finalises it — ⏹️ stopped, no ❌, no ✅ notice."""
+    transport = FakeTransport()
+    tasks = [_bash("b1", "sleep 600"), _bash("b2", "watch build", started=1.0)]
+    manager = _manager(transport, _Store(tasks))
+    await manager.after_turn()
+    for task in tasks:
+        task.status, task.ended_at = "failed", 5.0
+    await manager.poll_once()
+    assert manager.panel is not None and manager.panel.finalised
+    assert "2 failed" in transport.edit_calls[-1]["message"].text
+    for task in tasks:
+        task.status = "stopped"  # what the runner does on the death (#1001)
+    await manager.session_died(["b1", "b2"])
+    final = transport.edit_calls[-1]["message"].text
+    assert final.splitlines()[0] == (
+        "⏹️ background tasks ended · 2 stopped (session ended unexpectedly)"
+    )
+    assert "❌" not in final
+    edits = len(transport.edit_calls)
+    await manager.aclose("died")  # the run's end: nothing more to say
+    assert len(transport.edit_calls) == edits
+    assert len(transport.send_calls) == 1  # no quiet "done" notice
+
+
+async def test_1001_session_died_finalises_an_active_message() -> None:
+    transport = FakeTransport()
+    task = _agent()
+    manager = _manager(transport, _Store([task]))
+    await manager.after_turn()
+    task.status, task.ended_at = "stopped", 5.0
+    await manager.session_died(["a1"])
+    assert manager.panel is not None and manager.panel.finalised
+    assert transport.edit_calls[-1]["message"].text.startswith(
+        "⏹️ background tasks ended · 1 stopped (session ended unexpectedly)"
+    )
+
+
+async def test_1001_session_died_leaves_an_unrelated_earlier_message() -> None:
+    """A message finalised for an earlier batch (other task ids), or one
+    already closed with a reason, is not relabelled."""
+    transport = FakeTransport()
+    task = _bash("b1", "old job")
+    manager = _manager(transport, _Store([task]))
+    await manager.after_turn()
+    task.status, task.ended_at = "completed", 2.0
+    await manager.poll_once()
+    edits = len(transport.edit_calls)
+    await manager.session_died(["b9"])
+    assert len(transport.edit_calls) == edits
+    assert manager.panel is not None and manager.panel.close_reason is None
+    # No panel at all: a no-op.
+    empty = _manager(FakeTransport(), _Store([]))
+    await empty.session_died(["b1"])
+
+
 async def test_manager_hot_reloads_row_cap() -> None:
     transport = FakeTransport()
     tasks = [_bash(f"b{i}", f"job {i}", started=float(i)) for i in range(4)]

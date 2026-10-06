@@ -1273,6 +1273,54 @@ def scenario_exit_after_result(first: dict) -> None:
     os._exit(0)
 
 
+def scenario_killed_while_idle(first: dict) -> None:
+    """#1001: idle, held open by two background Bash tasks, then killed from
+    outside Untether. ``FAKE_CLAUDE_DEATH``:
+
+    - ``term`` (default): a SIGTERM the CLI handles as it dies, like the real
+      one (sl, rc=143) — an empty snapshot ends both tasks, ``task_updated``
+      marks them ``failed``, exit 143;
+    - ``kill``: SIGKILL — nothing said, the tasks still read ``running``;
+    - ``crash``: exit 1 between turns, no frames.
+    """
+    death = os.environ.get("FAKE_CLAUDE_DEATH", "term")
+
+    def _on_sigterm(*_: object) -> None:
+        ended = list(_live_tasks)
+        _live_tasks.clear()
+        snapshot()
+        for task_id in ended:
+            emit(
+                {
+                    "type": "system",
+                    "subtype": "task_updated",
+                    "task_id": task_id,
+                    "patch": {"status": "failed", "end_time": int(time.time() * 1000)},
+                }
+            )
+        sys.stdout.flush()
+        os._exit(143)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    init()
+    for task_id, tool_id in (("b1", "toolu_bg1"), ("b2", "toolu_bg2")):
+        tool_use("Bash", tool_id, {"command": "sleep 600", "run_in_background": True})
+        start_bg(task_id, tool_id)
+        tool_result(tool_id, f"Command running in background with ID: {task_id}.")
+    text("waiting")
+    result("waiting", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    if death == "kill":
+        os.kill(os.getpid(), signal.SIGKILL)
+    elif death == "crash":
+        sys.stdout.flush()
+        os._exit(1)
+    else:
+        os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(30)
+
+
 def _maybe_ignore_sigint() -> None:
     # #791: FAKE_CLAUDE_IGNORE_SIGINT=1 models a CLI that is also deaf to
     # the Ctrl-C path, so the close escalates on to SIGTERM.
@@ -2677,6 +2725,7 @@ _SCENARIOS = {
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
     "exit_after_result": scenario_exit_after_result,
+    "killed_while_idle": scenario_killed_while_idle,  # #1001
 }
 
 

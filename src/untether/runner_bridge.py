@@ -5220,6 +5220,16 @@ async def run_runner_with_cancel(
     suppression_summary = ",".join(
         f"{k}:{v}" for k, v in sorted(suppression_counts.items())
     )
+    summary_ok = outcome.completed.ok if outcome.completed else None
+    # #1001: a live session whose process died between turns without a close
+    # by Untether did not end cleanly, whatever its first result said.
+    exit_cause = getattr(
+        getattr(edits.stream, "engine_state", None), "live_exit_cause", None
+    )
+    exit_fields: dict[str, Any] = {}
+    if isinstance(exit_cause, str):
+        summary_ok = False
+        exit_fields["exit_cause"] = exit_cause
     logger.info(
         "session.summary",
         session_id=outcome.resume.value if outcome.resume else None,
@@ -5243,7 +5253,8 @@ async def run_runner_with_cancel(
         if edits.stream
         else False,
         cancelled=outcome.cancelled,
-        ok=outcome.completed.ok if outcome.completed else None,
+        ok=summary_ok,
+        **exit_fields,
         # #776: turns delivered after the run's own result (live session).
         followup_turns=turn_router.turns_delivered if turn_router else 0,
         stall_suppressions=suppression_summary,
@@ -5680,6 +5691,38 @@ def _live_closed_notice(quarantined: bool) -> str:
         "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to continue "
         "in the same session."
     )
+
+
+def _live_died_notice(
+    *,
+    rc: int | None,
+    signal_name: str | None,
+    tasks: list[str],
+    quarantined: bool,
+) -> str:
+    """#1001: an idle live session's process died without a close by
+    Untether (killed from outside, OOM, a crash between turns). Says how it
+    ended and which background tasks it took down, then whether the next
+    message continues the same session (the #829 wording)."""
+    if signal_name:
+        how = f"terminated by {signal_name}"
+        if rc is not None and rc > 0:
+            how += f" / exit {rc}"
+    elif rc:
+        how = f"exit code {rc}"
+    else:
+        how = "the process exited"
+    head = f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The Claude session ended unexpectedly ({how})"
+    n = len(tasks)
+    if n:
+        names = ", ".join(t[:60] for t in tasks[:3])
+        if n > 3:
+            names += f" (+{n - 3} more)"
+        noun = f"{n} background task{'s' if n != 1 else ''}"
+        head += f" — {noun} {'was' if n == 1 else 'were'} stopped: {names}."
+    else:
+        head += "."
+    return f"{head}\n{_live_closed_notice(quarantined)}"
 
 
 # #383 C4: the turn runs unplanned because the approved plan's background
@@ -7318,7 +7361,55 @@ async def handle_message(
     # the "closed" outcome get its own line.
     closing_named_tasks: dict[str, str] = {}
 
+    async def _on_live_died(payload: dict[str, Any]) -> None:
+        """#1001: the idle live session's process died without a close by
+        Untether. Re-finalise the status message (its rows were ended by the
+        dying CLI and may read ❌ failed) and say so in the chat, replying to
+        the message that launched the background work."""
+        tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
+        task_ids = [t for t in payload.get("task_ids", []) if isinstance(t, str)]
+        try:
+            await bg_status.session_died(task_ids)
+        except Exception:  # noqa: BLE001 — the status message is best-effort
+            logger.warning("background_status.died_failed", exc_info=True)
+        target = bg_status.fold_target
+        reply_to = (
+            target.reply_to
+            if target is not None
+            and target.reply_to is not None
+            and any(tid in target.tasks for tid in task_ids)
+            else turn_router.last_reply_to
+        )
+        raw_rc = payload.get("rc")
+        text = _live_died_notice(
+            rc=raw_rc
+            if isinstance(raw_rc, int) and not isinstance(raw_rc, bool)
+            else None,
+            signal_name=(
+                payload.get("signal_name")
+                if isinstance(payload.get("signal_name"), str)
+                else None
+            ),
+            tasks=tasks,
+            quarantined=payload.get("quarantined") is True,
+        )
+        try:
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(
+                    reply_to=reply_to,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("live_session.notice_failed", exc_info=True)
+
     async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "died":
+            await _on_live_died(payload)
+            return
         if kind == "closed":
             reason = closing_named_tasks.pop("reason", None)
             if reason is None:
@@ -7917,6 +8008,8 @@ async def handle_message(
         reason = getattr(engine_state, "live_close_reason", None)
         if isinstance(reason, str):
             return reason
+        if isinstance(getattr(engine_state, "live_exit_cause", None), str):
+            return "died"  # #1001: the process died without a close
         if running_task is not None and running_task.cancel_requested.is_set():
             return "cancel"
         return None

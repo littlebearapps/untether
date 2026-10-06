@@ -272,3 +272,55 @@ async def test_steer_preserves_selected_reply_context(
     else:
         assert len(runner.calls) == 1
         assert runner.calls[0][0].count("Selected reference") == 1
+
+
+async def test_996_live_session_checks_resolve_the_chats_ctx_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#996 wiring: the steer helper and the scheduler's live-follow-up
+    injector both get the directory the chat's current /ctx binding resolves
+    to — the value compared with a live process's spawn cwd."""
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.context import RunContext
+    from untether.scheduler import ThreadJob
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    projects = ProjectsConfig(
+        projects={
+            "proj": ProjectConfig(
+                alias="proj", path=project_dir, worktrees_dir=Path(".worktrees")
+            )
+        },
+        default_project=None,
+    )
+    prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "untether.toml"))
+    await prefs.set_context(123, RunContext(project="proj"))
+    schedulers: list[Any] = []
+    real_scheduler = telegram_loop.ThreadScheduler
+
+    def recording_scheduler(**kw: Any) -> Any:
+        schedulers.append(kw)
+        return real_scheduler(**kw)
+
+    monkeypatch.setattr(telegram_loop, "ThreadScheduler", recording_scheduler)
+    calls, _runner, _ = await _loop(
+        tmp_path, monkeypatch, [_msg("reply with pwd")], projects=projects
+    )
+    (call,) = calls
+    assert await call["run_cwd"]() == project_dir
+
+    (sched_kw,) = schedulers
+    cwd_for = sched_kw["inject_job"].keywords["cwd_for"]
+
+    def job(context: RunContext | None) -> ThreadJob:
+        return ThreadJob(
+            chat_id=123,
+            user_msg_id=9,
+            text="x",
+            resume_token=ResumeToken(engine="claude", value="s"),
+            context=context,
+        )
+
+    assert await cwd_for(job(RunContext(project="proj"))) == project_dir
+    assert await cwd_for(job(None)) is None

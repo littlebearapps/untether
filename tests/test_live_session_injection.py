@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import time
 from typing import Any
@@ -1012,3 +1013,202 @@ async def test_921_written_followup_whose_session_dies_still_warns(
     assert len(warns) == 1 and warns[0]["log_level"] == "warning"
     assert rb._FOLLOWUP_ANCHORS == {}
     assert rb._FOLLOWUP_IN_FLIGHT == {}
+
+
+# ── #996: a context change (/ctx set, /ctx clear) never injects ─────────────
+
+
+def _closing_pipe(pipe: _Pipe) -> list[bool]:
+    closed: list[bool] = []
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+    return closed
+
+
+def _cwd(path: Any):
+    async def cwd_for(job: ThreadJob) -> Any:
+        if isinstance(path, Exception):
+            raise path
+        return path
+
+    return cwd_for
+
+
+async def test_996_same_cwd_still_injects(cleanup, tmp_path) -> None:
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_cwd = tmp_path / "proj-a"
+    ok = await inject_live_followup(_job("sid-inj"), cwd_for=_cwd(tmp_path / "proj-a"))
+    assert ok is True
+    assert len(pipe.sent) == 1
+
+
+async def test_996_no_project_on_both_sides_still_injects(cleanup) -> None:
+    """No /ctx binding: spawned in Untether's own cwd (None) and the chat
+    still resolves to None — the ordinary follow-up keeps injecting."""
+    _live, pipe = _install("sid-inj", idle=True)
+    assert await inject_live_followup(_job("sid-inj"), cwd_for=_cwd(None)) is True
+    assert len(pipe.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("spawned", "wanted"),
+    [
+        pytest.param(None, "proj-b", id="ctx-set-from-no-project"),
+        pytest.param("proj-a", "proj-b", id="ctx-set-other-project"),
+        pytest.param("proj-a", None, id="ctx-clear"),
+    ],
+)
+async def test_996_changed_context_closes_instead_of_injecting(
+    cleanup, tmp_path, spawned: str | None, wanted: str | None
+) -> None:
+    """The bug: after /ctx set the next prompt was written into the idle live
+    process and ran in the old cwd. It must close (options_changed) so the
+    message resumes the session in the new directory."""
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_cwd = tmp_path / spawned if spawned else None
+    closed = _closing_pipe(pipe)
+    want = tmp_path / wanted if wanted else None
+    with capture_logs() as logs:
+        ok = await inject_live_followup(_job("sid-inj"), cwd_for=_cwd(want))
+    assert ok is False
+    assert pipe.sent == []
+    assert closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+    (event,) = [e for e in logs if e["event"] == "claude.live_session.context_changed"]
+    assert event["log_level"] == "info"
+    assert event["closed"] is True
+    assert event["spawn_cwd"] == (str(tmp_path / spawned) if spawned else None)
+    assert event["cwd"] == (str(want) if want else None)
+
+
+async def test_996_unresolvable_context_closes_instead_of_injecting(
+    cleanup, tmp_path
+) -> None:
+    """A context that no longer resolves (project removed from the config,
+    worktree error) must not fall through to a write into the old cwd: the
+    session closes and the resume path reports the error."""
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_cwd = tmp_path / "proj-a"
+    closed = _closing_pipe(pipe)
+    with capture_logs() as logs:
+        ok = await inject_live_followup(
+            _job("sid-inj"), cwd_for=_cwd(RuntimeError("unknown project"))
+        )
+    assert ok is False
+    assert pipe.sent == [] and closed == [True]
+    (event,) = [e for e in logs if e["event"] == "claude.live_session.context_changed"]
+    assert event["resolve_error"] == "RuntimeError"
+
+
+async def test_996_mid_turn_context_change_waits_then_closes(cleanup, tmp_path) -> None:
+    """Mid-turn the close is refused (only_if_idle) and nothing is written —
+    the scheduler re-offers the job; once the turn ends the session closes.
+    The refused attempts don't spam INFO."""
+    live, pipe = _install("sid-inj", idle=False)
+    live.state.spawn_cwd = tmp_path / "proj-a"
+    closed = _closing_pipe(pipe)
+    cwd_for = _cwd(tmp_path / "proj-b")
+    with capture_logs() as logs:
+        assert await inject_live_followup(_job("sid-inj"), cwd_for=cwd_for) is False
+    assert pipe.sent == [] and closed == []
+    assert not live.closing
+    (event,) = [e for e in logs if e["event"] == "claude.live_session.context_changed"]
+    assert event["log_level"] == "debug" and event["closed"] is False
+
+    live.state.turn_open = False  # the turn ended
+    assert await inject_live_followup(_job("sid-inj"), cwd_for=cwd_for) is False
+    assert pipe.sent == [] and closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+
+
+async def test_996_live_process_records_its_spawn_cwd_and_ctx_change_resumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """End to end (real ClaudeRunner + fake CLI): the live process records
+    the cwd it was spawned in; a follow-up whose context resolves elsewhere
+    is not written into it — the session closes and the job takes the
+    resume path (one resume, no injection)."""
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _watchdog(monkeypatch, post_result_limbo_grace=1.0)
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    resumed: list[ThreadJob] = []
+    seen_spawn_cwd: list[Any] = []
+
+    async def run_job(job: ThreadJob) -> None:
+        resumed.append(job)
+
+    async def follow_up(sched: ThreadScheduler) -> None:
+        with anyio.fail_after(20):
+            while True:
+                live = claude_mod.get_live_session(SID)
+                if live is not None and live.idle:
+                    break
+                await anyio.sleep(0.02)
+        seen_spawn_cwd.append(live.state.spawn_cwd)
+        await sched.enqueue(_job())
+
+    async def drive() -> None:
+        token = set_run_base_dir(proj_a)
+        try:
+            await _drive("followup")
+        finally:
+            reset_run_base_dir(token)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            sched = ThreadScheduler(
+                task_group=tg,
+                run_job=run_job,
+                inject_job=functools.partial(
+                    inject_live_followup, cwd_for=_cwd(proj_b)
+                ),
+            )
+            tg.start_soon(follow_up, sched)
+            tg.start_soon(drive)
+
+    assert seen_spawn_cwd == [proj_a]
+    assert [j.text for j in resumed] == ["again"]
+    assert not any(e["event"] == "claude.live_session.injected" for e in logs)
+    changed = [e for e in logs if e["event"] == "claude.live_session.context_changed"]
+    assert changed and changed[-1]["closed"] is True
+    assert rb._FOLLOWUP_ANCHORS == {}
+    os.environ.pop("FAKE_CLAUDE_SCENARIO", None)
+
+
+async def test_996_steer_into_idle_session_in_other_cwd_falls_back(
+    cleanup, tmp_path
+) -> None:
+    """Steer mode shares the root cause: an idle steer is the next turn, so a
+    changed cwd returns options_changed (the queue path closes + resumes); a
+    mid-turn steer still folds into the running turn, like changed options."""
+    from untether.runners.claude import steer_into_session
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_cwd = tmp_path / "proj-a"
+    with capture_logs() as logs:
+        out = await steer_into_session(
+            "sid-inj", "pwd", command_uuid="u996", cwd=tmp_path / "proj-b"
+        )
+    assert out == "options_changed"
+    assert pipe.sent == []
+    assert any(
+        e["event"] == "claude.live_session.context_changed" and e["source"] == "steer"
+        for e in logs
+    )
+    out = await steer_into_session(
+        "sid-inj", "pwd", command_uuid="u997", cwd=tmp_path / "proj-a"
+    )
+    assert out == "written_idle"
+
+    live.state.turn_open = True  # busy: the steer joins the running turn
+    out = await steer_into_session(
+        "sid-inj", "also", command_uuid="u998", cwd=tmp_path / "proj-b"
+    )
+    assert out == "steered"
