@@ -316,8 +316,17 @@ def post(
     if cat is None:
         raise SystemExit(f"no '{CATEGORY_SLUG}' discussion category in {repo}")
 
+    # Only reuse a post in Announcements, where only maintainers can start
+    # discussions — anyone can open a same-titled thread in General or Ideas,
+    # and that must never be linked from the official release.
     existing = next(
-        (d["url"] for d in data["discussions"]["nodes"] if d["title"] == title), None
+        (
+            d["url"]
+            for d in data["discussions"]["nodes"]
+            if d["title"] == title
+            and (d.get("category") or {}).get("slug") == CATEGORY_SLUG
+        ),
+        None,
     )
     if existing:
         log(f"already posted: {existing}")

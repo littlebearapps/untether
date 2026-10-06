@@ -209,7 +209,13 @@ def test_post_is_idempotent(tmp_path: Path) -> None:
     root = _repo(tmp_path, "1.3.0", GOOD)
     url = "https://github.com/o/r/discussions/9"
     gh = FakeGitHub(
-        discussions=[{"title": "Untether 1.3.0 — smoother approvals", "url": url}],
+        discussions=[
+            {
+                "title": "Untether 1.3.0 — smoother approvals",
+                "url": url,
+                "category": {"slug": "announcements"},
+            }
+        ],
         release={"id": 7, "body": f"notes\n\n💬 **Discuss this release:** {url}\n"},
     )
     assert ra.post("1.3.0", gh, repo="o/r", root=root, log=lambda _: None) == url
@@ -219,6 +225,26 @@ def test_post_is_idempotent(tmp_path: Path) -> None:
         if p and "query" in p
     )
     assert not any(m == "PATCH" for m, _, _ in gh.calls)
+
+
+def test_post_ignores_same_title_outside_announcements(tmp_path: Path) -> None:
+    """A user's same-titled thread in another category is never reused or linked."""
+    root = _repo(tmp_path, "1.3.0", GOOD)
+    squat = "https://github.com/o/r/discussions/5"
+    gh = FakeGitHub(
+        discussions=[
+            {
+                "title": "Untether 1.3.0 — smoother approvals",
+                "url": squat,
+                "category": {"slug": "general"},
+            }
+        ],
+        release={"id": 7, "body": ""},
+    )
+    url = ra.post("1.3.0", gh, repo="o/r", root=root, log=lambda _: None)
+    assert url == "https://github.com/o/r/discussions/9"
+    patch = next(p for m, _, p in gh.calls if m == "PATCH")
+    assert squat not in patch["body"]
 
 
 def test_post_dry_run_writes_nothing(tmp_path: Path) -> None:
