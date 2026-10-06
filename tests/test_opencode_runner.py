@@ -916,6 +916,7 @@ def test_build_runner_no_opencode_config(
         ("1.14.33\n", (1, 14, 33)),
         ("2.0.23", (2, 0, 23)),
         ("opencode 2.0.23\nextra", (2, 0, 23)),
+        ("opencode v2.0.24\n", (2, 0, 24)),  # real @opencode/cli 2.0.24 output
         ("v1.18.4", (1, 18, 4)),
         ("", None),
         ("not a version", None),
