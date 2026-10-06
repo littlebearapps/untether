@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..logging import get_logger
@@ -138,6 +139,7 @@ async def maybe_steer(
     chat_prefs: ChatPrefsStore | None,
     topic_store: TopicStateStore | None,
     run_options: Callable[[ResumeToken], Awaitable[object]] | None = None,
+    run_cwd: Callable[[], Awaitable[Path | None]] | None = None,
 ) -> bool:
     """Steer ``prompt_text`` into the chat's live Claude session if the
     resolved follow-up mode says so. Returns True when it was written (the
@@ -191,6 +193,15 @@ async def maybe_steer(
                 except Exception:  # noqa: BLE001 — unknown options: let queue decide
                     logger.warning("steer.options_resolve_failed", exc_info=True)
                     return False
+            cwd: Path | None = None
+            if run_cwd is not None:
+                try:
+                    cwd = await run_cwd()
+                except Exception:  # noqa: BLE001 — unresolvable: let queue decide
+                    # #996: the queue path closes the live session and the
+                    # resume reports the error.
+                    logger.info("steer.fallback", chat_id=chat_id, reason="cwd_error")
+                    return False
             from ..budget_gate import daily_gate
 
             if daily_gate(options) is not None:
@@ -222,6 +233,8 @@ async def maybe_steer(
             kwargs: dict[str, Any] = {"command_uuid": command_uuid}
             if has_options:
                 kwargs["run_options"] = options
+            if run_cwd is not None:
+                kwargs["cwd"] = cwd  # #996
             outcome: str | None = None
             try:
                 outcome = await steer_into_session(session_id, prompt_text, **kwargs)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from .logging import get_logger
@@ -24,10 +25,17 @@ logger = get_logger(__name__)
 
 
 OptionsFor = Callable[[ThreadJob], Awaitable[Any]]
+# #996: the working directory ``job`` would run in (its context's resolved
+# project/branch cwd; None = Untether's own cwd). Raises when it can't be
+# resolved (unknown project, worktree error).
+CwdFor = Callable[[ThreadJob], Awaitable[Path | None]]
 
 
 async def inject_live_followup(
-    job: ThreadJob, *, options_for: OptionsFor | None = None
+    job: ThreadJob,
+    *,
+    options_for: OptionsFor | None = None,
+    cwd_for: CwdFor | None = None,
 ) -> bool:
     token = job.resume_token
     if token.engine != "claude":
@@ -86,6 +94,42 @@ async def inject_live_followup(
             logger.info(
                 "claude.live_session.options_changed",
                 session_id=session_id,
+                closed=closed,
+            )
+            return False
+    if cwd_for is not None:
+        live = get_live_session(session_id)
+        spawn_cwd = live.state.spawn_cwd if live is not None else None
+        resolve_error: str | None = None
+        try:
+            wanted_cwd: Path | None = await cwd_for(job)
+        except Exception as exc:  # noqa: BLE001 — unresolvable: don't inject
+            wanted_cwd = None
+            resolve_error = exc.__class__.__name__
+        if live is not None and (resolve_error is not None or wanted_cwd != spawn_cwd):
+            # #996: the chat's project/branch changed since this process
+            # started (/ctx set, /ctx clear, a topic rebind): a follow-up
+            # written into it would run in the old directory — possibly the
+            # wrong repo. Close it (once idle, like options_changed) so the
+            # message resumes the session in the new directory. A context
+            # that no longer resolves takes the same path, so the resume
+            # reports the error instead of writing into the old cwd.
+            from .runners.claude import close_live_session
+
+            closed = await close_live_session(
+                session_id, "options_changed", notice=True, only_if_idle=True
+            )
+            # Mid-turn the close is refused and the pump retries every tick:
+            # only the close itself is worth an INFO line.
+            log = logger.info if closed else logger.debug
+            log(
+                "claude.live_session.context_changed",
+                session_id=session_id,
+                chat_id=job.chat_id,
+                source="scheduler",
+                spawn_cwd=None if spawn_cwd is None else str(spawn_cwd),
+                cwd=None if wanted_cwd is None else str(wanted_cwd),
+                resolve_error=resolve_error,
                 closed=closed,
             )
             return False

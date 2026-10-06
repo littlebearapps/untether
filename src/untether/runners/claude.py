@@ -1239,6 +1239,11 @@ SteerOutcome = Literal[
 _UNSET_OPTIONS: Any = object()
 
 
+def _cwd_label(cwd: Any) -> str | None:
+    """#996: a working directory as logged (None = Untether's own cwd)."""
+    return None if cwd is None else str(cwd)
+
+
 async def close_steer_window(session_id: str, reason: str) -> bool:
     """Stop accepting steers into ``session_id`` (#775 race guard).
 
@@ -1267,6 +1272,7 @@ async def steer_into_session(
     *,
     command_uuid: str,
     run_options: Any = _UNSET_OPTIONS,
+    cwd: Any = _UNSET_OPTIONS,
 ) -> SteerOutcome:
     """Steer mode (#775): write ``text`` into the live session *now*.
 
@@ -1283,6 +1289,8 @@ async def steer_into_session(
     ``run_options``: when given and the session is idle between turns, a
     mismatch with the options the process was spawned with returns
     ``options_changed`` — the queue path then restarts it with the new ones.
+    ``cwd`` (#996): the same for the chat's resolved working directory — an
+    idle session spawned in another project/branch isn't written into.
     """
     live = _LIVE_SESSIONS.get(session_id)
     if live is None:
@@ -1295,6 +1303,15 @@ async def steer_into_session(
             and live.idle
             and run_options != live.state.spawn_run_options
         ):
+            return "options_changed"
+        if cwd is not _UNSET_OPTIONS and live.idle and cwd != live.state.spawn_cwd:
+            logger.info(
+                "claude.live_session.context_changed",
+                session_id=session_id,
+                source="steer",
+                spawn_cwd=_cwd_label(live.state.spawn_cwd),
+                cwd=_cwd_label(cwd),
+            )
             return "options_changed"
         state = live.state
         if live.idle and live.result_unaccounted:
@@ -2034,6 +2051,12 @@ class ClaudeStreamState:
     # flags + runtime toggles). A follow-up is only written into the live
     # process when the chat's current options still match.
     spawn_run_options: Any = None
+    # #996: the working directory this process was spawned in (the run's
+    # resolved project/branch cwd; None = Untether's own cwd). A follow-up is
+    # only written into the live process while the chat's context still
+    # resolves to it — after /ctx set or /ctx clear it must resume in the new
+    # directory instead.
+    spawn_cwd: Path | None = None
     # #776: a ScheduleWakeup the CLI will fire itself while stdin stays open
     # (F9). Monotonic deadline = announced fire time + 60 s grace; the
     # tool_use handle is cleared by its own confirmation tool_result, so it
@@ -12479,6 +12502,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     state.live_mode = True
                     stream.followup_turns = True
                     state.spawn_run_options = get_run_options()
+                    state.spawn_cwd = cwd  # #996
                 state.live_session_max_s = live_session_max_s
                 state.bg_max_hold_s = post_result_bg_max_hold_s
 

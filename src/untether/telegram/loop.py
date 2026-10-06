@@ -2563,10 +2563,23 @@ async def run_main_loop(
                     options, job.context, engine=job.resume_token.engine, log=False
                 )
 
+            async def _job_run_cwd(job: ThreadJob) -> Path | None:
+                # #996: the directory run_job would spawn in — a live process
+                # only takes a follow-up while the chat's context (/ctx,
+                # topic binding) still resolves to its spawn cwd. Off the
+                # event loop: a branch context looks up its worktree.
+                return await anyio.to_thread.run_sync(
+                    cfg.runtime.resolve_run_cwd, job.context
+                )
+
             scheduler = ThreadScheduler(
                 task_group=tg,
                 run_job=run_thread_job,
-                inject_job=partial(inject_live_followup, options_for=_job_run_options),
+                inject_job=partial(
+                    inject_live_followup,
+                    options_for=_job_run_options,
+                    cwd_for=_job_run_cwd,
+                ),
             )
 
             # --- /at one-shot delayed runs (#288) ---
@@ -2946,6 +2959,13 @@ async def run_main_loop(
                         options, resolved.context, engine=target.engine, log=False
                     )
 
+                async def run_cwd_for() -> Path | None:
+                    # #996: an idle live session spawned in another
+                    # project/branch takes the queue path (close + resume).
+                    return await anyio.to_thread.run_sync(
+                        cfg.runtime.resolve_run_cwd, resolved.context
+                    )
+
                 return await maybe_steer(
                     cfg,
                     chat_id=msg.chat_id,
@@ -2961,6 +2981,7 @@ async def run_main_loop(
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                     run_options=run_options_for,
+                    run_cwd=run_cwd_for,
                 )
 
             async def run_prompt_from_upload(

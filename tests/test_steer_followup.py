@@ -229,6 +229,7 @@ async def _steer(
     running: dict | None = None,
     chat_prefs: Any = None,
     run_options: Any = None,
+    run_cwd: Any = None,
     text: str = "also the hostname",
     user_msg_id: int = 42,
 ) -> bool:
@@ -246,6 +247,7 @@ async def _steer(
         chat_prefs=chat_prefs,
         topic_store=None,
         run_options=run_options,
+        run_cwd=run_cwd,
     )
 
 
@@ -867,3 +869,51 @@ async def test_session_resolved_lazily_only_when_steering() -> None:
     assert looked_up == []
     assert await run(_cfg("steer")) is True
     assert looked_up == [1]
+
+
+# ── #996: a /ctx change never steers into the old cwd ──────────────────────
+
+
+def _cwd_fn(value: Any):
+    async def run_cwd() -> Any:
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    return run_cwd
+
+
+async def test_996_idle_steer_after_ctx_change_takes_queue_path(
+    tmp_path: Path,
+) -> None:
+    live, pipe = _install(idle=True)
+    live.state.spawn_cwd = tmp_path / "old"
+    cfg = _cfg("steer")
+    assert await _steer(cfg, run_cwd=_cwd_fn(tmp_path / "new")) is False
+    assert pipe.sent == [] and _texts(cfg) == []  # silent: queue path says it
+    assert rb._FOLLOWUP_ANCHORS == {}
+
+
+async def test_996_idle_steer_same_cwd_still_written(tmp_path: Path) -> None:
+    live, pipe = _install(idle=True)
+    live.state.spawn_cwd = tmp_path / "proj"
+    assert await _steer(_cfg("steer"), run_cwd=_cwd_fn(tmp_path / "proj")) is True
+    assert len(pipe.sent) == 1
+
+
+async def test_996_unresolvable_cwd_never_steers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    live, pipe = _install(idle=True)
+    live.state.spawn_cwd = tmp_path / "proj"
+    called: list[str] = []
+
+    async def fake(*_a: Any, **_k: Any) -> str:  # pragma: no cover
+        called.append("steer")
+        return "written_idle"
+
+    monkeypatch.setattr(claude_mod, "steer_into_session", fake)
+    out = await _steer(_cfg("steer"), run_cwd=_cwd_fn(RuntimeError("gone")))
+    assert out is False
+    assert called == [] and pipe.sent == []
+    assert rb._FOLLOWUP_ANCHORS == {}
