@@ -89,6 +89,13 @@ OOMPolicy=continue
 
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Untether's process env comes from here, not from your shell (~/.bashrc and
+# direnv .envrc are never read). Put variables that engines and their MCP
+# wrapper scripts need in this file, one KEY=value per line, e.g.
+#   BWS_ACCESS_TOKEN=...
+# A wrapper under `set -u` that references an unset variable dies at session
+# start and its MCP server shows as failed. Guard references with ${VAR:-} or
+# : "${VAR:?message}". See docs/reference/env-vars.md#mcp-wrapper-set-u (#454).
 EnvironmentFile=%h/.untether/.env
 WorkingDirectory=%h
 
