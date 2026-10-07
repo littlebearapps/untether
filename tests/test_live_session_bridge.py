@@ -322,6 +322,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.created: list[int] = []
         self.closed: list[int] = []
+        self.discarded: list[int] = []
         self.delivered: list[tuple[int, bool, str, str | None, bool, int]] = []
 
     async def create(self, ctx: rb._TurnCtx) -> None:
@@ -339,6 +340,11 @@ class _Recorder:
 
     async def close(self, ctx: rb._TurnCtx) -> None:
         self.closed.append(ctx.turn)
+
+    async def discard(self, ctx: rb._TurnCtx) -> None:
+        # #1015: only a turn whose progress message exists has one to delete.
+        if ctx.edits is not None:
+            self.discarded.append(ctx.turn)
 
     async def deliver(self, completed, ctx: rb._TurnCtx) -> None:
         ctx.delivery["sent"] = True
@@ -366,6 +372,7 @@ def _router(
         default_reply_to=USER_REF,
         followup_notify=False,
         anchor_for=(anchors or {}).get,
+        discard_progress=rec.discard,
     )
 
 
@@ -865,14 +872,16 @@ _TOKEN = ResumeToken(engine="claude", value="sess-798")
 
 
 async def _run_with_turn(
-    *turn_steps: Emit, end_mid_turn: bool = False
+    *turn_steps: Emit,
+    end_mid_turn: bool = False,
+    transport: FakeTransport | None = None,
 ) -> tuple[FakeTransport, MessageRef]:
     """A run whose first result carried the #333 marker (as the Claude runner
     sends it), then one live turn. ``end_mid_turn``: the run's result comes
     first (the real live order) and the stream ends with the turn still open.
     Returns the transport and the run's own progress ref."""
     first = CompletedEvent(engine="claude", resume=_TOKEN, ok=True, answer="FIRST")
-    transport = FakeTransport()
+    transport = transport if transport is not None else FakeTransport()
     runner = ScriptRunner(
         [
             Emit(StartedEvent(engine="claude", resume=_TOKEN, meta={"model": "opus"})),
@@ -1992,8 +2001,102 @@ async def test_928_router_no_query_closes_created_progress() -> None:
         await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
     assert rec.closed == [3]
     assert rec.delivered == []
+    # #1015: no final replaces it, so the progress message is discarded.
+    assert rec.discarded == [3]
     (dropped,) = [e for e in logs if e["event"] == "live_turn.no_query_dropped"]
     assert dropped["had_progress"] is True
+
+
+async def test_1015_no_query_discards_progress_before_close() -> None:
+    """#1015: a wake turn that grew a progress message and then ended as
+    ``no_query`` discards that message (no final will replace it), before
+    the turn's close, and delivers nothing."""
+    rec = _Recorder()
+    order: list[str] = []
+    real_discard, real_close = rec.discard, rec.close
+
+    async def discard(ctx):
+        order.append("discard")
+        await real_discard(ctx)
+
+    async def close(ctx):
+        order.append("close")
+        await real_close(ctx)
+
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+        discard_progress=discard,
+    )
+    await router.on_turn(_turn("started", 3, "unknown"))
+    await router.on_event(_action())
+    assert rec.created == [3]
+    await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.discarded == [3]
+    assert rec.closed == [3]
+    assert rec.delivered == []
+    assert order == ["discard", "close"]
+    assert router.current is None
+
+
+async def test_1015_drop_without_discard_callback_still_closes() -> None:
+    """The callback is optional: a router without one keeps the #928 drop."""
+    rec = _Recorder()
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=rec.close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+    )
+    await router.on_turn(_turn("started", 3, "unknown"))
+    await router.on_event(_action())
+    await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.closed == [3]
+    assert rec.delivered == []
+
+
+async def test_1015_progress_never_created_for_a_finished_turn() -> None:
+    """#1015 latent race: a progress request that passed its "is this turn
+    still current" check, then waited on the lock the ``no_query`` drop
+    held, must not create a progress message for the finished turn."""
+    rec = _Recorder()
+    lock_held = anyio.Event()
+
+    async def slow_close(ctx):
+        rec.closed.append(ctx.turn)
+        lock_held.set()
+        await anyio.sleep(0.05)  # the drop still holds the lock
+
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=slow_close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+        discard_progress=rec.discard,
+    )
+    await router.on_turn(_turn("started", 3, "unknown"))
+    ctx = router.current
+    assert ctx is not None
+
+    async def late_request() -> None:
+        # A caller that saw the turn current a moment ago.
+        await lock_held.wait()
+        await router._ensure_progress(ctx)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(late_request)
+        await router.on_turn(_turn("completed", 3, "no_query", ok=True, answer=""))
+    assert rec.created == []
+    assert rec.delivered == []
+    assert rec.closed == [3]
 
 
 @pytest.mark.parametrize("opened_as", ["hook_rewake", "unknown"])
@@ -2051,3 +2154,57 @@ def test_928_record_export_event_marks_no_query_dropped(monkeypatch) -> None:
         _turn("completed", 3, "no_query", ok=True, answer=""), resume
     )
     assert recorded == [{"type": "turn_dropped", "turn": 3, "reason": "no_query"}]
+
+
+class _OrderedTransport(FakeTransport):
+    """Records sends, edits and deletes in one ordered log."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ops: list[tuple[str, MessageRef]] = []
+
+    async def send(self, **kw):
+        ref = await super().send(**kw)
+        self.ops.append(("send", ref))
+        return ref
+
+    async def edit(self, **kw):
+        self.ops.append(("edit", kw["ref"]))
+        return await super().edit(**kw)
+
+    async def delete(self, *, ref):
+        self.ops.append(("delete", ref))
+        return await super().delete(ref=ref)
+
+
+async def test_1015_no_query_turn_deletes_its_progress_message() -> None:
+    """#1015 end to end: a wake turn that showed a progress message (an
+    action forced it) and then closed as ``no_query`` deletes that message,
+    rather than leaving an orphan ``working · 0s`` with a live cancel button,
+    and sends no final for the turn."""
+    transport = _OrderedTransport()
+    _, run_progress = await _run_with_turn(
+        Emit(_turn("started", 3, reason="unknown")),
+        Emit(_action()),
+        Emit(_turn("completed", 3, reason="no_query", ok=True, answer="")),
+        transport=transport,
+    )
+    turn_progress = [
+        c["ref"]
+        for c in transport.send_calls
+        if c["ref"] != run_progress and "working" in c["message"].text
+    ]
+    assert len(turn_progress) == 1, transport.send_calls
+    (ref,) = turn_progress
+    assert ref in transport.delete_calls
+    # Deleted last: no repaint (with its cancel keyboard) lands after it.
+    touches = [op for op, r in transport.ops if r == ref]
+    assert touches[-1] == "delete", touches
+    # The turn sent nothing but its progress message (the run's own FIRST
+    # final is the only other send).
+    others = [
+        c
+        for c in transport.send_calls
+        if c["ref"] not in (run_progress, ref) and "FIRST" not in c["message"].text
+    ]
+    assert others == [], others
