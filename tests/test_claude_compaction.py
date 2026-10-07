@@ -39,7 +39,11 @@ COMPACTING = "🗜️ Compacting context…"
 
 
 @pytest.fixture(autouse=True)
-def _clear_context_caches() -> None:
+def _clear_context_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows are learned from the fixtures (no seed) and persisted to tmp.
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(tmp_path / "untether.toml"))
+    monkeypatch.setattr(claude_mod, "_KNOWN_CONTEXT_WINDOWS", {})
+    monkeypatch.setattr(claude_mod, "_CONTEXT_WINDOWS_LOADED", False)
     claude_mod._CONTEXT_WINDOWS.clear()
     claude_mod._CONTEXT_WINDOW_MISSES.clear()
     claude_mod._CONTEXT_OVER_WINDOW_WARNED.clear()

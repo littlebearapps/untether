@@ -63,8 +63,9 @@ from ..runner import (
 )
 from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
-from ..settings import load_settings_if_exists
+from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
+from ..utils.json_state import atomic_write_json
 from ..utils.paths import get_run_base_dir, get_run_channel_id, get_run_sender_id
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
@@ -4709,6 +4710,21 @@ class _SystemSubtypeHandler(Protocol):
 # across runs and chats: the window is a property of the model, not a run.
 _CONTEXT_WINDOWS: dict[str, int] = {}
 _CONTEXT_WINDOWS_MAX = 64
+# Learned windows persist next to the config (lazy-loaded on first lookup).
+_CONTEXT_WINDOWS_FILE = "context_windows.json"
+_CONTEXT_WINDOWS_LOADED = False
+# Seeded so known models show % ctx from the first step after a restart;
+# learned windows still win, so a changed window corrects itself.
+_KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-5-5": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000,
+    "claude-fable-5-1": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-haiku-4-5-20251001": 200_000,
+    "claude-haiku-4-5": 200_000,
+}
 _CONTEXT_ONE_M_SUFFIX = "[1m]"
 _CONTEXT_ONE_M_WINDOW = 1_000_000
 # (model, init model) pairs already logged as a window miss (DEBUG, once).
@@ -4748,7 +4764,8 @@ def _context_window_for(model: str | None, session_model: str | None) -> int | N
        stripped base → 1 000 000. This wins over a cache hit on the stripped
        id, which may hold the base window learned from a non-``[1m]``
        session.
-    2. Exact cache hit on *model*, then on *session_model*.
+    2. Exact hit on *model*, then on *session_model*: the learned window
+       (persisted across restarts), else the seeded one.
 
     Dated ids are never fuzzy-matched to a base id: a miss is logged instead
     (``claude.context.window_miss``) so a capture shows the real keys.
@@ -4758,8 +4775,12 @@ def _context_window_for(model: str | None, session_model: str | None) -> int | N
             base = one[: -len(_CONTEXT_ONE_M_SUFFIX)]
             if other is None or other in (one, base):
                 return _CONTEXT_ONE_M_WINDOW
+    _load_context_windows()
     for key in (model, session_model):
-        if key and (window := _CONTEXT_WINDOWS.get(key)) is not None:
+        if not key:
+            continue
+        window = _CONTEXT_WINDOWS.get(key) or _KNOWN_CONTEXT_WINDOWS.get(key)
+        if window is not None:
             return window
     miss = (model, session_model)
     if miss not in _CONTEXT_WINDOW_MISSES and len(_CONTEXT_WINDOW_MISSES) < (
@@ -4784,15 +4805,57 @@ def _context_pct(used: int, window: int) -> int:
     return max(0, (used * 200 + window) // (2 * window))
 
 
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _context_windows_path() -> Path:
+    """``context_windows.json`` beside the active config (as the quarantine
+    file: ``UNTETHER_CONFIG_PATH`` respected)."""
+    return _resolve_config_path(None).with_name(_CONTEXT_WINDOWS_FILE)
+
+
+def _load_context_windows() -> None:
+    """Merge the persisted windows into the cache once per process. Bad
+    entries are dropped; an unreadable file is a WARN, never an error."""
+    global _CONTEXT_WINDOWS_LOADED
+    if _CONTEXT_WINDOWS_LOADED:
+        return
+    _CONTEXT_WINDOWS_LOADED = True
+    path = _context_windows_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "claude.context.windows_load_failed", path=str(path), error=str(exc)
+        )
+        return
+    if not isinstance(data, dict):
+        logger.warning(
+            "claude.context.windows_load_failed", path=str(path), error="not a dict"
+        )
+        return
+    for model, window in data.items():
+        if len(_CONTEXT_WINDOWS) >= _CONTEXT_WINDOWS_MAX:
+            break
+        if isinstance(model, str) and model and _positive_int(window):
+            _CONTEXT_WINDOWS.setdefault(model, window)
+
+
 def _learn_context_windows(model_usage: Any) -> None:
-    """Record every ``modelUsage.<model>.contextWindow`` (positive int)."""
+    """Record every ``modelUsage.<model>.contextWindow`` (positive int) and
+    persist the cache when a value changed."""
     if not isinstance(model_usage, dict):
         return
+    _load_context_windows()
+    changed = False
     for model, entry in model_usage.items():
         if not isinstance(model, str) or not model or not isinstance(entry, dict):
             continue
         window = entry.get("contextWindow")
-        if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+        if not _positive_int(window):
             continue
         if _CONTEXT_WINDOWS.get(model) == window:
             continue
@@ -4801,7 +4864,17 @@ def _learn_context_windows(model_usage: Any) -> None:
         ):
             continue
         _CONTEXT_WINDOWS[model] = window
+        changed = True
         logger.info("claude.context.window_learned", model=model, context_window=window)
+    if not changed:
+        return
+    path = _context_windows_path()
+    try:
+        atomic_write_json(path, dict(_CONTEXT_WINDOWS))
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "claude.context.windows_save_failed", path=str(path), error=str(exc)
+        )
 
 
 def _context_value(

@@ -51,7 +51,7 @@ The first line of every progress message and final answer is the status line:
 done · claude · 1m 36s · step 10 · 62% ctx
 ```
 
-It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known — at the latest by the final of the first run on a model after a restart — and disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
+It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known: for current Claude models it shows from the first step, and for any other model it appears by the final of the first run on that model. Learned windows are saved in `context_windows.json` next to your config, so the value survives a restart. It disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
 
 When Claude compacts its context, the progress message shows one row for it (a single step):
 

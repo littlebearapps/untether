@@ -161,8 +161,17 @@ SONNET = "claude-sonnet-5-5"
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+# The shipped seed table; the autouse fixture empties it so the learn-path
+# tests exercise an unknown model, and the seed tests restore it.
+KNOWN_WINDOWS = dict(claude_mod._KNOWN_CONTEXT_WINDOWS)
+
+
 @pytest.fixture(autouse=True)
-def _clear_context_caches() -> None:
+def _clear_context_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Persistence goes next to a tmp config, never the real ~/.untether.
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(tmp_path / "untether.toml"))
+    monkeypatch.setattr(claude_mod, "_KNOWN_CONTEXT_WINDOWS", {})
+    monkeypatch.setattr(claude_mod, "_CONTEXT_WINDOWS_LOADED", False)
     claude_mod._CONTEXT_WINDOWS.clear()
     claude_mod._CONTEXT_WINDOW_MISSES.clear()
     claude_mod._CONTEXT_OVER_WINDOW_WARNED.clear()
@@ -384,6 +393,158 @@ def test_dated_model_id_is_a_miss_not_a_fuzzy_match() -> None:
 def test_session_model_cache_hit_used_when_message_model_unknown() -> None:
     claude_mod._CONTEXT_WINDOWS[HAIKU] = 200_000
     assert _context_window_for("claude-other", HAIKU) == 200_000
+
+
+# ── seeded windows: known models resolve before any result ─────────────────
+
+
+@pytest.fixture
+def seeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(claude_mod, "_KNOWN_CONTEXT_WINDOWS", dict(KNOWN_WINDOWS))
+
+
+def _windows_file(tmp_path: Path) -> Path:
+    return tmp_path / "context_windows.json"
+
+
+def test_seed_table_contents() -> None:
+    assert KNOWN_WINDOWS == {
+        "claude-opus-5-5": 1_000_000,
+        "claude-sonnet-5-5": 1_000_000,
+        "claude-fable-5-1": 1_000_000,
+        "claude-fable-5": 1_000_000,
+        "claude-opus-5": 1_000_000,
+        "claude-sonnet-5": 1_000_000,
+        "claude-haiku-4-5-20251001": 200_000,
+        "claude-haiku-4-5": 200_000,
+    }
+
+
+@pytest.mark.usefixtures("seeded")
+def test_seeded_model_has_pct_on_first_assistant_frame() -> None:
+    opus = "claude-opus-5-5"
+    state = _state(opus)
+    assert claude_mod._CONTEXT_WINDOWS == {}
+    assert _pcts(_translate(state, _assistant(_usage(250_000), model=opus))) == [25]
+
+
+@pytest.mark.usefixtures("seeded")
+def test_learned_window_overrides_seed() -> None:
+    claude_mod._CONTEXT_WINDOWS[SONNET] = 200_000
+    assert _context_window_for(SONNET, SONNET) == 200_000
+
+
+@pytest.mark.usefixtures("seeded")
+def test_one_m_rule_wins_over_200k_seed() -> None:
+    assert _context_window_for(HAIKU, f"{HAIKU}[1m]") == 1_000_000
+    assert _context_window_for(HAIKU, HAIKU) == 200_000
+
+
+@pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize(
+    "model", ["claude-opus-5-5-20261001", "claude-opus-4-7", "claude-opus-5-5x"]
+)
+def test_unknown_or_dated_id_misses_despite_seed(model: str) -> None:
+    assert _context_window_for(model, None) is None
+
+
+@pytest.mark.usefixtures("seeded")
+def test_frame_model_seed_beats_session_model_seed() -> None:
+    # A Haiku frame in an Opus session uses Haiku's window.
+    assert _context_window_for(HAIKU, "claude-opus-5-5") == 200_000
+
+
+# ── persisted learned windows ───────────────────────────────────────────────
+
+
+def test_learned_window_persists_across_restart(tmp_path: Path) -> None:
+    claude_mod._learn_context_windows(_mu("claude-new", 400_000))
+    assert json.loads(_windows_file(tmp_path).read_text()) == {"claude-new": 400_000}
+    # A restart: memory gone, file stays.
+    claude_mod._CONTEXT_WINDOWS.clear()
+    claude_mod._CONTEXT_WINDOWS_LOADED = False
+    assert _context_window_for("claude-new", None) == 400_000
+
+
+def test_persisted_path_follows_config_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "inst" / "untether.toml"
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg))
+    assert claude_mod._context_windows_path() == cfg.with_name("context_windows.json")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        "[1, 2]",
+        '{"claude-x": -5, "claude-y": 0, "claude-z": "1", "claude-b": true}',
+    ],
+)
+def test_bad_persisted_file_ignored(tmp_path: Path, content: str) -> None:
+    _windows_file(tmp_path).write_text(content)
+    assert _context_window_for("claude-x", None) is None
+    assert claude_mod._CONTEXT_WINDOWS == {}
+
+
+def test_persisted_file_keeps_valid_entries(tmp_path: Path) -> None:
+    _windows_file(tmp_path).write_text('{"claude-x": -5, "claude-ok": 300000}')
+    assert _context_window_for("claude-ok", None) == 300_000
+    assert claude_mod._CONTEXT_WINDOWS == {"claude-ok": 300_000}
+
+
+def test_unreadable_persisted_file_warns(tmp_path: Path) -> None:
+    _windows_file(tmp_path).write_text("{not json")
+    with capture_logs() as logs:
+        assert _context_window_for("claude-x", None) is None
+    warns = [e for e in logs if e["event"] == "claude.context.windows_load_failed"]
+    assert len(warns) == 1 and warns[0]["log_level"] == "warning"
+
+
+def test_missing_persisted_file_is_silent() -> None:
+    with capture_logs() as logs:
+        assert _context_window_for("claude-x", None) is None
+    assert not [e for e in logs if e["log_level"] == "warning"]
+
+
+def test_write_failure_logs_and_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_: Any, **__: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(claude_mod, "atomic_write_json", boom)
+    with capture_logs() as logs:
+        claude_mod._learn_context_windows(_mu("claude-new", 400_000))
+    assert claude_mod._CONTEXT_WINDOWS == {"claude-new": 400_000}
+    warns = [e for e in logs if e["event"] == "claude.context.windows_save_failed"]
+    assert len(warns) == 1 and warns[0]["log_level"] == "warning"
+
+
+def test_no_write_when_window_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes: list[dict[str, int]] = []
+    monkeypatch.setattr(
+        claude_mod, "atomic_write_json", lambda _path, data, **_: writes.append(data)
+    )
+    for _ in range(3):
+        claude_mod._learn_context_windows(_mu("claude-new", 400_000))
+    claude_mod._learn_context_windows(_mu(window="bad"))
+    assert writes == [{"claude-new": 400_000}]
+
+
+def test_window_cap_holds_across_load_and_learn(tmp_path: Path) -> None:
+    cap = claude_mod._CONTEXT_WINDOWS_MAX
+    _windows_file(tmp_path).write_text(
+        json.dumps({f"m{i}": 1000 + i for i in range(cap + 10)})
+    )
+    claude_mod._learn_context_windows(_mu("claude-extra", 400_000))
+    assert len(claude_mod._CONTEXT_WINDOWS) == cap
+    assert "claude-extra" not in claude_mod._CONTEXT_WINDOWS
+    # A known model may still update its window at the cap.
+    claude_mod._learn_context_windows(_mu("m0", 5))
+    assert claude_mod._CONTEXT_WINDOWS["m0"] == 5
+    assert len(json.loads(_windows_file(tmp_path).read_text())) == cap
 
 
 # ── translation ─────────────────────────────────────────────────────────────
