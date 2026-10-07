@@ -1812,6 +1812,32 @@ async def test_890_repeat_capped_wake_errors_fold_into_the_first() -> None:
     assert "Background task finished" in edits[-1]
 
 
+async def test_823_capped_repeat_counter_edit_names_final_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#823: the #890 counter edit rewrites an error *final*, so a failed
+    edit (e.g. the user deleted that message) must log ``kind=final``, not
+    ``kind=None``."""
+    from tests import telegram_fakes
+    from untether.transport import current_message_kind
+
+    kinds: list[tuple[MessageRef, str | None]] = []
+    base_edit = telegram_fakes.FakeTransport.edit
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[no-untyped-def]
+        kinds.append((ref, current_message_kind()))
+        return await base_edit(self, ref=ref, message=message, wait=wait)
+
+    monkeypatch.setattr(telegram_fakes.FakeTransport, "edit", edit)
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2), *_capped_turn(3), end_mid_turn=True
+    )
+    ref = _cap_messages(transport)[0]["ref"]
+    counter_kinds = [kind for edited, kind in kinds if edited == ref]
+    assert counter_kinds, "the first error final was never updated"
+    assert set(counter_kinds) == {"final"}
+
+
 async def test_890_consolidation_off_keeps_one_message_per_wake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

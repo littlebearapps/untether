@@ -25,10 +25,10 @@
 
 ---
 
-Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai) and [Pi](https://github.com/mariozechner/pi-coding-agent) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
+Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai) and [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/master/docs/assets/screenshots/hero-collage.jpg" alt="Send tasks by voice, approve changes remotely, configure from Telegram" width="100%" />
+  <img src="https://raw.githubusercontent.com/littlebearapps/untether/master/docs/assets/screenshots/hero-collage.jpg" alt="Send tasks by voice, approve plans remotely, and get reports back from background agents and CI" width="100%" />
 </p>
 <p align="center"><sub>* Feature availability varies by engine — see <a href="#engine-compatibility">engine compatibility</a></sub></p>
 
@@ -80,7 +80,7 @@ Every command is listed in the [commands reference](https://littlebearapps.com/h
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context — and all interactive features |
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@1` | 75+ providers via Models.dev, local models (**1.x only** — 2.x is refused before it starts) |
-| [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
+| [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
 Use your existing Claude or ChatGPT subscription — no extra API keys needed unless you want API billing. Switch engines per message (`/codex …`) or per chat (`/agent set claude`) — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/).
 

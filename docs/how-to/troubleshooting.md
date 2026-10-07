@@ -690,7 +690,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
 
-Telegram failures (`telegram.http_error`, `telegram.api_error`, `telegram.network_error`, `telegram.benign_rejection`, `outbox.op.failed`, `transport.send.failed` / `edit.failed` / `delete.failed`) carry a `kind` field naming the message they were for — `progress`, `final`, `bg_status`, `approval_surface`, `approval_notify`, `approval_reminder`, `outline` or `ephemeral` (`null` when untagged) ([#823](https://github.com/littlebearapps/untether/issues/823)).
+Telegram failures (`telegram.http_error`, `telegram.api_error`, `telegram.network_error`, `telegram.benign_rejection`, `outbox.op.failed`, `transport.send.failed` / `edit.failed` / `delete.failed`) carry a `kind` field naming the message they were for — `progress`, `final`, `bg_status`, `approval_surface`, `approval_notify`, `approval_reminder`, `outline`, `ephemeral` or `followup_notice` (`null` when untagged) ([#823](https://github.com/littlebearapps/untether/issues/823)).
 
 Telegram bot tokens, OpenAI API keys (`sk-...`), GitHub tokens (`ghp_`, `ghs_`, `github_pat_`), `Authorization:`/`Bearer` credentials, JWTs, and `api_key=`/`token=`/`secret=`/`password=` values are automatically redacted in all log output. Token *counts* such as `total_tokens=52000` are left alone.
 
