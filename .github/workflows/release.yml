@@ -153,9 +153,12 @@ jobs:
     # untether.cc reads the latest PyPI version and date at build time (the hero's "Latest
     # release" line), so a production rebuild right after publishing shows the new release
     # within minutes instead of at its next daily rebuild. CF_DEPLOY_HOOK_PRODUCTION is the
-    # Workers Builds Deploy Hook for the untether-cc Worker's `main` branch. It runs after the
-    # GitHub release so the site's "Release notes" link resolves. Never fails the release.
-    needs: github-release
+    # Workers Builds Deploy Hook for the untether-cc Worker's `main` branch. It waits for
+    # `announce`, because the site also shows the announcement's TL;DR and links its Discussion
+    # (read from this release's body). If `announce` fails, it still rebuilds once the GitHub
+    # release exists, and the site links the release instead. Never fails the release.
+    needs: [github-release, announce]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions: {}
     continue-on-error: true
