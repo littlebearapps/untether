@@ -4,6 +4,7 @@ Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and 
 
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
+Website: https://untether.cc · Help centre (user docs, synced flat from `docs/` on `master`): `https://littlebearapps.com/help/untether/<file-stem>/`
 
 ## Architecture
 

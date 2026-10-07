@@ -49,6 +49,9 @@ Remove the context binding to revert to the default:
 
 The chat or topic falls back to the chat's project (if the chat is a project chat via `projects.<alias>.chat_id`), then the default project (if configured), then the global startup directory.
 
+!!! note "Claude sessions that are still open"
+    If Claude Code is still holding a session open after its answer (for background tasks), `/ctx set`, `/ctx clear` or rebinding the topic closes that session, and your next message resumes it in the new project or branch, as after `/model` or `/planmode`. Background tasks still running in it are stopped with a "Settings changed" notice. Before v0.36.0 the next message could run in the old working directory ([#996](https://github.com/littlebearapps/untether/issues/996)).
+
 ## Create a bound topic
 
 In a forum-enabled group, use `/topic` to create a new forum topic pre-bound to a project and branch:

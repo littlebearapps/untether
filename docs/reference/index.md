@@ -50,7 +50,7 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 
 These are “engine adapter” implementation details: JSONL formats, mapping rules, and emitted events.
 
-- [Runners overview](runners/index.md)
+- [Runners overview](runners/index.md) — includes the [engine compatibility matrix](runners/index.md#engine-compatibility)
 - Claude Code:
   - [runner.md](runners/claude/runner.md)
   - [stream-json-cheatsheet.md](runners/claude/stream-json-cheatsheet.md)

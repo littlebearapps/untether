@@ -40,7 +40,8 @@ For each message, Untether:
 
 - parses directive prefixes (`/<engine-id>`, `/<project-alias>`, `@branch`) from the first non-empty line
 - attempts to extract a resume token by polling available runners
-- if a resume token is found, routes to the matching runner; otherwise uses the configured default engine
+- if a resume token is found, routes to the matching runner; otherwise uses the most specific default engine (topic → chat → project → global)
+- after routing, appends the replied-to message (or a selected quote) to the prompt as bounded, escaped reference data, so reply text can never change the engine, project or session ([#736](https://github.com/littlebearapps/untether/issues/736))
 
 ## Serialisation (why you don’t get overlapping runs)
 

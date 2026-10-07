@@ -357,7 +357,7 @@ trimming instead:
 
 Split mode sends multiple messages (~3500 body characters each). Follow-up
 chunks add a "continued (N/M)" header, and only the last chunk carries the
-footer: the meta line, the cost line (`💰`), a budget or run-outlier alert,
+footer: the meta line (`🏷 opus 5 · medium · plan` — model · effort · permission mode, prefixed by the `dir:` context when bound; see [footer metadata line](../runners/index.md#footer-metadata-line)), the cost line (`💰`), a budget or run-outlier alert,
 the subscription usage line (`⚡`) and the resume line, in that order
 ([#770](https://github.com/littlebearapps/untether/issues/770)). The ~600
 characters of headroom under the limit leave room for every footer line; in

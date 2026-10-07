@@ -6,6 +6,8 @@ title: untether
 
 Untether runs coding agents on your computer and bridges them to Telegram. Send a task from your phone while walking the dog, dictate the next one by voice at the gym, and review results on your tablet later — your agents keep working even if you close Telegram or lose signal. Scale from quick one-offs to multi-project workflows with topics and parallel worktrees.
 
+It works with Claude Code, Codex, OpenCode (1.x) and Pi; approval buttons, plan mode, questions and steering are Claude Code features. Gemini CLI and Amp still load but are deprecated and no longer supported. Website: [untether.cc](https://untether.cc).
+
 <div class="hero-demo">
 <div class="hero-chat">
 <div class="chat-messages"></div>
@@ -22,7 +24,9 @@ uv tool install -U untether
 untether --onboard
 ```
 
-Onboarding walks you through bot setup and asks how you want to work. [Full install guide →](tutorials/install.md)
+Untether needs Python 3.12 or newer. Onboarding walks you through bot setup and asks how you want to work. [Full install guide →](tutorials/install.md)
+
+Upgrading from v0.35.4 or earlier? v0.36.0 has breaking changes — read [Upgrading to v0.36.0](how-to/update.md#upgrading-to-v0360) first.
 
 ## Pick your workflow
 
@@ -86,3 +90,9 @@ Exact options, defaults, and contracts:
 - [Commands & directives](reference/commands-and-directives.md)
 - [Configuration](reference/config.md)
 - [Specification](reference/specification.md) — normative behaviour
+
+## Help and community
+
+- [FAQ](faq/faq.md) and the [help centre](https://littlebearapps.com/help/untether/)
+- Questions and ideas: [GitHub Discussions](https://github.com/littlebearapps/untether/discussions); bugs: [GitHub Issues](https://github.com/littlebearapps/untether/issues/new/choose)
+- Website: [untether.cc](https://untether.cc)

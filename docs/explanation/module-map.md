@@ -6,7 +6,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, …); loads settings, selects engine/transport, runs the transport backend. |
+| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, `onboarding_cmd.py`, `plugins.py`); loads settings, selects engine/transport, runs the transport backend. |
 | `telegram/backend.py` | Telegram transport backend: validates config, runs onboarding, builds and runs the Telegram bridge. |
 
 ## Orchestration and routing
@@ -19,6 +19,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `directives.py`, `context.py`, `worktrees.py` | Directive parsing (`/<engine>`, `/<project>`, `@branch`, `dir:` lines), run context types, and branch worktree creation. |
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
 | `cost_tracker.py` | Per-run and daily cost tracking with budget alerts (checked when a result arrives; the daily gate before a run lives in `budget_gate.py`). |
+| `budget_gate.py` | `[cost_budget] auto_cancel` ("Stop at limit"): refuses new runs once today's total reaches `max_cost_per_day`, until local midnight ([#896](https://github.com/littlebearapps/untether/issues/896)). |
 | `session_stats.py` | Per-engine run counts, actions and durations behind `/stats`. |
 | `error_hints.py` | Maps engine error text to the actionable hints shown in Telegram. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
@@ -67,6 +68,10 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
 | `telegram/reply_context.py` | Appends the replied-to message and any selected quote to the prompt as bounded, clearly marked context ([#736](https://github.com/littlebearapps/untether/issues/736)). |
 | `telegram/budget_notice.py` | Telegram side of the daily budget gate: the "Daily budget reached" notice and its one-shot **Run anyway** button ([#896](https://github.com/littlebearapps/untether/issues/896)). |
+| `telegram/approval_originator.py` | Opt-in `approval_originator_only`: only the person who started a run can answer its approval buttons and questions ([#388](https://github.com/littlebearapps/untether/issues/388)). |
+| `telegram/engine_defaults.py`, `telegram/engine_overrides.py` | Per-message engine resolution (topic → chat → project → global defaults) and the per-chat engine overrides (`/model`, `/reasoning`, `/planmode`, Loop mode), incl. the one-shot `auto` → `plan-auto` migration. |
+| `telegram/topics.py`, `telegram/listen_mode.py` | Forum-topic scope helpers (which topic `/new` and `/cancel` act on) and the per-chat listen mode (`all` / `mentions`). |
+| `telegram/offset_persistence.py`, `telegram/state_store.py` | Persisted Telegram `update_id` offset (`last_update_id.json`) and the versioned JSON state store behind the chat/topic state files. |
 
 ## Plugins
 
@@ -86,6 +91,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp). |
 | `runners/run_options.py` | Per-run options (model, reasoning, permission mode) and the Claude permission-mode tables. |
 | `runners/extra_args_guard.py` | Rejects approval- and sandbox-bypass flags in `extra_args`. |
+| `runners/tool_actions.py` | Shared tool-call → action kind and title mapping used by the runners' event translation. |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
 
 ## Triggers
@@ -100,6 +106,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → ⏰ Triggers`. |
 | `triggers/actions.py`, `triggers/fetch.py` | Non-agent webhook actions (`file_write`, `http_forward`, `notify_only`) and cron `fetch` steps. |
 | `triggers/auth.py`, `triggers/ssrf.py` | Webhook authentication and the SSRF guard for outbound trigger requests. |
+| `triggers/rate_limit.py`, `triggers/templating.py` | Token-bucket rate limiting for webhooks and prompt templating from webhook payloads. |
+| `triggers/run_once_state.py` | Persists fired and pending `run_once` crons (`run_once_fired.json`, `run_once_pending.json`) so one-shots never re-fire and a failed announce is retried. |
 
 ## Configuration and persistence
 
@@ -119,6 +127,9 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | Module | Responsibility |
 |--------|----------------|
 | `utils/env_policy.py` | Engine subprocess environment allowlist (`[security] env_extra_allow` / `env_extra_prefix_allow`). |
+| `utils/env_audit.py` | Checks a running engine's real environment against that allowlist. |
+| `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the quota footer. |
+| `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation; atomic JSON writes for state files. |
 | `utils/paths.py` | Path/command relativisation helpers. |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |

@@ -2,6 +2,29 @@
 
 Untether gives remote access to coding agents on your server, so locking down who can interact with the bot and what files they can access is important. This guide covers the key security controls — all manageable from [Telegram](https://telegram.org) on any device.
 
+## What Untether accesses
+
+Untether runs on your machine as your user and bridges your agents to Telegram. Here's what it touches:
+
+| Category | What | Details |
+|----------|------|---------|
+| **Network** | Telegram Bot API (`api.telegram.org`) | The transport: messages, buttons and file transfers. Always on |
+| **Network** | Agent APIs (Anthropic, OpenAI, …) | Called by the engine CLIs Untether spawns, not by Untether itself |
+| **Network** | Anthropic usage endpoint (`api.anthropic.com`) | Only for `/usage` and the opt-in subscription-usage footer (`[footer] show_subscription_usage`, off by default), using your local Claude Code login |
+| **Network** | Whisper-compatible transcription endpoint | Only when `voice_transcription = true` (off by default) |
+| **Network** | Webhook server | Only when `[triggers] enabled = true`; listens on `127.0.0.1:9876` by default (see [Bind webhook server to localhost](#bind-webhook-server-to-localhost)) |
+| **Network** | Cron `fetch` and webhook `http_forward` | Only when configured; outbound to URLs you set, [SSRF-protected](#ssrf-protection-for-outbound-requests) |
+| **Filesystem** | `~/.untether/untether.toml` | Config, including the bot token in plain text. Protect it with `chmod 600` (see [Protect your bot token](#protect-your-bot-token)) |
+| **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, cost and usage stats (listed in [Uninstall](uninstall.md)) |
+| **Filesystem** | Project directories | `/file put` uploads, `/file get` and `/browse` reads, and `.untether-outbox/` delivery, all subject to [deny globs](#file-transfer-deny-globs) |
+| **Filesystem** | Webhook `file_write` and cron `file_read` | Only when configured; paths you set, deny globs apply |
+| **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
+| **Credentials** | Telegram bot token, voice API key | Stored in `untether.toml`; redacted from logs |
+| **Credentials** | Claude Code login (`~/.claude/.credentials.json` or the macOS Keychain) | Read only to call the usage endpoint above |
+| **Credentials** | Engine API keys | Read by the engine CLIs from their own config or the environment; Untether doesn't store them |
+
+Untether sends no telemetry or analytics, doesn't phone home or update itself, and doesn't need root. Spawned agents, `/file put`, the outbox and webhook actions can all reach paths outside `~/.untether/` — that's the point — so use [`allowed_user_ids`](#restrict-access), deny globs and webhook auth to control who can trigger them.
+
 ## Restrict access
 
 `allowed_user_ids` is **required** as of v0.35.3 ([#377](https://github.com/littlebearapps/untether/issues/377)). Set it to a non-empty list of Telegram user IDs:
@@ -54,7 +77,7 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 ```
 
 !!! tip "Automatic log redaction"
-    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...` and `sk-proj-...` since v0.35.3 — [#213](https://github.com/littlebearapps/untether/issues/213)), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output — plus, since v0.36.0, generic credential shapes: `Authorization: <scheme> <credential>` and bare `Bearer <credential>`, JWTs (`eyJ…`, even when truncated), and `api_key=` / `token=` / `secret=` / `password=` values ([#800](https://github.com/littlebearapps/untether/issues/800)). The live-session close-grace process snapshot (`claude.live_session.close_grace_expired`) redacts secret-bearing command-line arguments (including MCP servers that carry their whole command line in `argv[0]`) before truncating them, so not even a token prefix is logged. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs. The Telegram voice transcription API key is wrapped in `SecretStr` so it never appears in `repr()`/tracebacks/structlog ([#378](https://github.com/littlebearapps/untether/issues/378)). Stderr path sanitisation also covers macOS (`/Users/<user>/`, `/private/var/...`), container roots (`/app/`, `/workspace/`), and other absolute paths beyond `/home/<user>/` (`/var/`, `/tmp/`, `/opt/`, `/srv/`, `/etc/`, `/usr/local/`, `/root/`) since v0.35.3 ([#208](https://github.com/littlebearapps/untether/issues/208)); path:line markers (`:42`) survive sanitisation so stack traces remain useful.
+    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...` and `sk-proj-...` since v0.35.3 — [#213](https://github.com/littlebearapps/untether/issues/213)), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output — plus, since v0.36.0, generic credential shapes: `Authorization: <scheme> <credential>` and bare `Bearer <credential>`, JWTs (`eyJ…`, even when truncated), and `api_key=` / `token=` / `secret=` / `password=` values ([#800](https://github.com/littlebearapps/untether/issues/800)), and credentials embedded in a URL (`https://user:pass@host/…`, [#841](https://github.com/littlebearapps/untether/issues/841)). The live-session close-grace process snapshot (`claude.live_session.close_grace_expired`) redacts secret-bearing command-line arguments (including MCP servers that carry their whole command line in `argv[0]`) before truncating them, so not even a token prefix is logged. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs. The Telegram voice transcription API key is wrapped in `SecretStr` so it never appears in `repr()`/tracebacks/structlog ([#378](https://github.com/littlebearapps/untether/issues/378)). Stderr path sanitisation also covers macOS (`/Users/<user>/`, `/private/var/...`), container roots (`/app/`, `/workspace/`), and other absolute paths beyond `/home/<user>/` (`/var/`, `/tmp/`, `/opt/`, `/srv/`, `/etc/`, `/usr/local/`, `/root/`) since v0.35.3 ([#208](https://github.com/littlebearapps/untether/issues/208)); path:line markers (`:42`) survive sanitisation so stack traces remain useful.
 
 !!! tip "Pi session directory permissions ([#207](https://github.com/littlebearapps/untether/issues/207))"
     Pi engine session directories are created with explicit `0o700` mode (and any pre-existing dir gets `chmod`'d to `0o700` on first use) so other users on shared hosts can't read Pi session JSONL files. Applies as of v0.35.3 — no operator action needed.

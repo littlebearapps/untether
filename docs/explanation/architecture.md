@@ -221,10 +221,10 @@ flowchart TD
     B --> C[Build Command]
 
     C --> D{Engine?}
-    D -->|Claude| D1["claude --output-format stream-json<br/>--input-format stream-json --verbose<br/>[--resume id] --permission-mode …<br/>(prompt as JSON on stdin)"]
+    D -->|Claude| D1["claude --output-format stream-json<br/>--input-format stream-json --verbose<br/>[--resume id] --permission-mode …<br/>(prompt as JSON on stdin;<br/>-p when no permission mode is set)"]
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
-    D -->|OpenCode| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;"]
+    D -->|OpenCode 1.x| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;<br/>(2.x refused before spawn)"]
     D -->|Gemini, deprecated| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
     D -->|Amp, deprecated| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
@@ -274,7 +274,7 @@ sequenceDiagram
 
 - **Turns.** Each later turn arrives as a `TurnEvent` segment and is delivered as its own Telegram message. Background work is tracked from Claude Code's own `system/task_*` events; the background status message ([`background_status.py`](module-map.md#rendering-and-progress)) is built from the same task map.
 - **Follow-ups.** `ThreadScheduler` still serialises jobs per thread, but a queued follow-up for a live session is written into the running process (`live_followup.py`) instead of waiting for it to exit and `--resume`-ing. A [steered](../how-to/steer-follow-ups.md) message is written straight away and read at the next tool boundary.
-- **Closing.** The session closes by closing stdin: about a minute after the last turn when nothing is running, after `[watchdog] post_result_bg_max_hold` (30 min) with no background activity, or at `live_session_max_s` (4 h). `/cancel`, `/new`, settings changes and restarts close it too, with a notice. A clean close is not quarantined, so the next message resumes the same session.
+- **Closing.** The session closes by closing stdin: about a minute after the last turn when nothing is running, after `[watchdog] post_result_bg_max_hold` (30 min) with no background activity, or at `live_session_max_s` (4 h). `/cancel`, `/new`, settings changes (including a `/ctx` change, so the next message resumes in the new directory, [#996](https://github.com/littlebearapps/untether/issues/996)) and restarts close it too, with a notice. A clean close is not quarantined, so the next message resumes the same session. A process killed from outside Untether while idle gets its own `⚠️ … ended unexpectedly` notice ([#1001](https://github.com/littlebearapps/untether/issues/1001)).
 - **Per-run state.** Runner instances are shared across chats, so each run publishes its own stream and PID through a per-run handle rather than shared runner attributes ([#510](https://github.com/littlebearapps/untether/issues/510)).
 
 `[watchdog] live_sessions = false` restores the stop-at-first-answer behaviour. Other engines are not affected. See the [Claude runner reference](../reference/runners/claude/runner.md#live-sessions-776) for the protocol details.
@@ -385,16 +385,19 @@ flowchart LR
     subgraph Config["~/.untether/"]
         toml[untether.toml]
         lock[untether.lock]
+        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history"]
     end
 
     subgraph toml_contents["untether.toml"]
         direction TB
-        global["transport<br/>default_engine<br/>default_project"]
-        telegram_cfg["[transports.telegram]<br/>bot_token = ...<br/>chat_id = ..."]
+        global["transport<br/>default_engine<br/>default_project<br/>watch_config"]
+        telegram_cfg["[transports.telegram]<br/>bot_token = ...<br/>chat_id = ...<br/>allowed_user_ids = [...]"]
         plugins_cfg["[plugins]<br/>enabled = [...]"]
         plugins_extra["[plugins.mycommand]<br/>setting = ..."]
-        claude_cfg["[claude]<br/>model = ..."]
-        codex_cfg["[codex]<br/>model = ..."]
+        claude_cfg["[engines.claude]<br/>model = ...<br/>permission_mode = ..."]
+        codex_cfg["[engines.codex]<br/>model = ..."]
+        runtime_cfg["[progress] [watchdog] [footer]<br/>[cost_budget] [loop] [security]"]
+        triggers_cfg["[triggers]<br/>[[triggers.crons]]<br/>[[triggers.webhooks]]"]
         projects_cfg["[projects.alias]<br/>path = ...<br/>worktrees_dir = ...<br/>default_engine = ..."]
     end
 

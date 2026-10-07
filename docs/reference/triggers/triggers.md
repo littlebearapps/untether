@@ -216,8 +216,8 @@ webhook fires, so Claude requests that would wait for a Telegram tap are **denie
 at once ([#835](https://github.com/littlebearapps/untether/issues/835)). Set an
 explicit `permission_mode` on every Claude cron that should act unattended: without
 one the run takes the chat's `/planmode`, then `[engines.claude] permission_mode`
-(`plan` by default), and a `plan` cron's plan approval and file-changing tools are
-denied. Webhooks have no `permission_mode` and always inherit. Per requested mode:
+(unset by default, which runs Claude non-interactively in `-p` mode with no approval
+prompts), and a `plan` cron's plan approval and file-changing tools are denied. Webhooks have no `permission_mode` and always inherit. Per requested mode:
 
 | Mode | Denied in an unattended run |
 |---|---|

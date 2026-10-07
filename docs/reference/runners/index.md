@@ -9,6 +9,60 @@ Interactive features (approval buttons, plan mode, AskUserQuestion, live session
 - OpenCode: [Runner](opencode/runner.md), [Stream JSON cheatsheet](opencode/stream-json-cheatsheet.md), [Untether events](opencode/untether-events.md)
 - Pi: [Runner](pi/runner.md), [Stream JSON cheatsheet](pi/stream-json-cheatsheet.md), [Untether events](pi/untether-events.md)
 
+## Engine compatibility
+
+| Feature | Claude Code | Codex CLI | OpenCode | Pi | Gemini CLI⁷ | Amp⁷ |
+|---------|:-----------:|:---------:|:--------:|:--:|:----------:|:---:|
+| **Support status** | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ |
+| **Progress streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
+| **Model in footer** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
+| **Approval mode in footer** | ✅ | ~⁴ | — | — | ~² | — |
+| **Voice input** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Preamble injection** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ~³ | ~³ |
+| **Interactive permissions** | ✅ | — | —⁸ | — | — | — |
+| **Approval policy** | ✅ | ~⁴ | — | — | ~² | — |
+| **Plan mode** | ✅ | — | — | — | — | — |
+| **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
+| **Diff preview** | ✅ | — | — | — | — | — |
+| **Auto-approve safe tools** | ✅ | — | — | — | — | — |
+| **Plan outline gate** | ✅ | — | — | — | — | — |
+| **Subscription usage** | ✅ | — | — | — | — | — |
+| **Reasoning/effort levels** | ✅ | ✅ | — | — | — | — |
+| **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — |
+| **Live sessions & background tasks** | ✅ | — | — | — | — | — |
+| **Steer follow-ups** | ✅ | — | — | — | — | — |
+| **Context % in status line** | ✅ | — | — | — | — | — |
+| **Context compaction** | ✅ | — | —⁹ | ✅ | — | — |
+| **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
+
+¹ Amp's model override maps to `--mode` (`deep`/`free`/`rush`/`smart`), and the footer shows that mode (or `[amp] model` as a label).
+² Defaults to full access (`--approval-mode=yolo`); `/config` → Approval mode can switch to edit files (`auto_edit`: edits allowed, no shell). The "read-only" option still runs with full access. A pre-run policy, not mid-run approval.
+³ Token counts only; no USD cost (Gemini and Amp pass a cost through only when the CLI reports one).
+⁴ `/config` → Approval policy toggles full auto (default; Codex's own sandbox setting) and safe (`--sandbox read-only`, edits blocked); only safe is shown in the footer. A pre-run policy, not mid-run approval.
+⁵ For OAuth subscriptions in headless mode, Pi needs `provider = "openai-codex"` in `[pi]`.
+⁶ Amp needs an explicit thread id; it has no "most recent" mode.
+⁷ **Deprecated** — see [Deprecated runners](#deprecated-runners) below. The ticks describe what the integration does today, not a support commitment.
+⁸ `opencode run` auto-rejects any tool your OpenCode permission rules set to `ask` (it never auto-approves) and denies OpenCode's question and plan tools. Set rules to `allow` for tools you want run unattended.
+⁹ OpenCode compacts long sessions itself, but `opencode run` doesn't report it, so Untether can't show it.
+
+Reasoning levels: Claude `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` needs Claude Code v2.1.114+); Codex `low`, `medium`, `high`, `xhigh`.
+OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning ([#970](https://github.com/littlebearapps/untether/issues/970)).
+
+### Footer metadata line
+
+Final messages (and progress messages once the engine reports it) end with a `🏷` line built by
+`format_meta_line` in `src/untether/markdown.py`: the context (`dir: project @branch`, when bound), then
+`|`, then model · effort · permission mode · trigger source, joined with ` · `. For example
+`🏷 opus 5 · medium · plan` or `🏷 dir: api @main | gpt-5.5 · high · safe`. Model comes from each
+engine's `StartedEvent.meta`; effort only from Claude and Codex reasoning overrides; the mode only from
+Claude (`system/init.permissionMode`), Codex safe mode and Gemini's approval tiers. Triggered runs add
+their source: `⏰ cron:<id>` / `⏰ at:<token>` for crons and `/at`, `⚡ webhook:<id>` for webhooks.
+
 ## ⚠️ Deprecated runners
 
 Both are **deprecated and no longer supported** as of **v0.36.0**. They still

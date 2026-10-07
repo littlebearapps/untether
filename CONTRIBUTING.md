@@ -161,6 +161,7 @@ Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report
 
 ## Questions?
 
+- Read the guides in the [help centre](https://littlebearapps.com/help/untether/), or start at [untether.cc](https://untether.cc)
 - Ask in [Discussions → Q&A](https://github.com/littlebearapps/untether/discussions/categories/q-a) on GitHub
 - Every stable release gets a plain-English post in [Discussions → Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements)
 - Join the [Telegram group](https://t.me/+qBtYAMZLW_JkYWEy)
