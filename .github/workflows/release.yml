@@ -147,3 +147,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/release_announcement.py post
+
+  rebuild-website:
+    name: Rebuild untether.cc
+    # untether.cc reads the latest PyPI version and date at build time (the hero's "Latest
+    # release" line), so a production rebuild right after publishing shows the new release
+    # within minutes instead of at its next daily rebuild. CF_DEPLOY_HOOK_PRODUCTION is the
+    # Workers Builds Deploy Hook for the untether-cc Worker's `main` branch. It waits for
+    # `announce`, because the site also shows the announcement's TL;DR and links its Discussion
+    # (read from this release's body). If `announce` fails, it still rebuilds once the GitHub
+    # release exists, and the site links the release instead. Never fails the release.
+    needs: [github-release, announce]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    continue-on-error: true
+    steps:
+      - name: Trigger the untether.cc production deploy hook
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.CF_DEPLOY_HOOK_PRODUCTION }}
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "::warning::CF_DEPLOY_HOOK_PRODUCTION isn't set, so untether.cc wasn't rebuilt."
+            exit 0
+          fi
+          curl --fail --silent --show-error --request POST "$DEPLOY_HOOK_URL" \
+            --output /dev/null --write-out "Deploy hook: HTTP %{http_code}\n"
