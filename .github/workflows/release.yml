@@ -107,9 +107,36 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create GitHub release + upload artifacts
+    outputs:
+      tag: ${{ steps.release-meta.outputs.tag }}
+      prerelease: ${{ steps.release-meta.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The release's tag (on a manual run from a branch, ref_name is the branch, so the tag
+      # comes from pyproject.toml), and whether it's a pre-release. Same PEP 440 rule as
+      # auto-tag-on-master.yml: stable is exactly vN.N.N; any rc/a/b/dev/post suffix is a
+      # pre-release, so a hand-pushed rc tag never becomes "Latest" (#1014).
+      - name: Resolve tag and pre-release flag
+        id: release-meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          else
+            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          fi
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prerelease=false
+          else
+            prerelease=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Release $tag (prerelease=$prerelease)"
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -127,6 +154,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.release-meta.outputs.prerelease }}
           files: |
             dist/*
 
@@ -173,3 +201,38 @@ jobs:
           fi
           curl --fail --silent --show-error --request POST "$DEPLOY_HOOK_URL" \
             --output /dev/null --write-out "Deploy hook: HTTP %{http_code}\n"
+
+  notify-littlebearapps:
+    name: Rebuild littlebearapps.com
+    # littlebearapps.com reads release data at build time (version badge, changelog, roadmap,
+    # softwareVersion) and syncs the help centre from master. A repository_dispatch to its
+    # deploy-auto.yml refreshes the github-proxy cache and rebuilds production.
+    # Done here, not in notify-website.yml: releases created with GITHUB_TOKEN don't fire
+    # `release: published`, so that workflow never ran after v0.34.2 (#1014). Pre-releases
+    # are skipped, so the site never shows an rc as the current version. Never fails the
+    # release, but a failed dispatch shows the job red instead of hiding it.
+    needs: [github-release]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && needs.github-release.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    continue-on-error: true
+    steps:
+      - name: Dispatch release-published to littlebearapps.com
+        env:
+          TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          TAG_NAME: ${{ needs.github-release.outputs.tag }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::WEBSITE_DISPATCH_TOKEN isn't set, so littlebearapps.com wasn't notified."
+            exit 1
+          fi
+          payload=$(jq -n --arg tag "$TAG_NAME" '{event_type:"release-published",client_payload:{repo:"untether",tag:$tag}}')
+          code=$(curl --silent --show-error --output "$RUNNER_TEMP/resp.json" --write-out '%{http_code}' \
+            -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $TOKEN" \
+            https://api.github.com/repos/littlebearapps/littlebearapps.com/dispatches -d "$payload")
+          if [ "$code" != "204" ]; then
+            echo "::error::littlebearapps.com dispatch returned HTTP $code (expected 204)"
+            cat "$RUNNER_TEMP/resp.json"
+            exit 1
+          fi
+          echo "littlebearapps.com notified for $TAG_NAME (HTTP 204)"
