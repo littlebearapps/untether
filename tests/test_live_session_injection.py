@@ -979,6 +979,18 @@ async def test_921_written_followup_whose_session_dies_still_warns(
         return True  # "written" — but nothing reaches the fake CLI
 
     monkeypatch.setattr(claude_mod, "inject_when_idle", wrote_nothing)
+    # #823: record the message kind each edit runs under.
+    from tests import telegram_fakes
+    from untether.transport import current_message_kind
+
+    edit_kinds: dict[MessageRef, list[str | None]] = {}
+    base_edit = telegram_fakes.FakeTransport.edit
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[no-untyped-def]
+        edit_kinds.setdefault(ref, []).append(current_message_kind())
+        return await base_edit(self, ref=ref, message=message, wait=wait)
+
+    monkeypatch.setattr(telegram_fakes.FakeTransport, "edit", edit)
 
     async def run_job(job: ThreadJob) -> None:  # pragma: no cover
         raise AssertionError("an injected follow-up must not resume")
@@ -1013,6 +1025,8 @@ async def test_921_written_followup_whose_session_dies_still_warns(
     assert len(warns) == 1 and warns[0]["log_level"] == "warning"
     assert rb._FOLLOWUP_ANCHORS == {}
     assert rb._FOLLOWUP_IN_FLIGHT == {}
+    # #823: a failed notice edit names its surface, not ``kind=None``.
+    assert edit_kinds[placeholder][-1] == "followup_notice"
 
 
 # ── #996: a context change (/ctx set, /ctx clear) never injects ─────────────

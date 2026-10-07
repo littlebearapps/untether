@@ -496,6 +496,71 @@ async def test_928_replace_send_returns_before_replace_delete() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["send", "edit"])
+@pytest.mark.parametrize("stalled_chunk", ["chunk 1", "chunk 2"])
+async def test_928_bounded_multichunk_send_queues_remaining_chunks(
+    mode: str, stalled_chunk: str
+) -> None:
+    """#928: the early final is delivered under a 60 s bound and counts as
+    sent once handed to the transport. A long final goes out chunk by chunk,
+    each awaited — so a bound firing part-way through left the unsent chunks
+    never queued: a silent partial final. The chunks still to go are handed
+    to the outbox when the send (or final edit) is cut short, in order, each
+    exactly once."""
+    from untether.telegram.bridge import TelegramTransport
+    from untether.transport import MessageRef, RenderedMessage
+
+    bot = FakeBot()
+    texts: list[str] = []
+    release = anyio.Event()
+    original_send = bot.send_message
+    original_edit = bot.edit_message_text
+
+    async def stalling_send(chat_id: int, text: str, *args: Any, **kwargs: Any):
+        if text == stalled_chunk:
+            await release.wait()  # e.g. a network retry on this chunk
+        texts.append(text)
+        return await original_send(chat_id, text, *args, **kwargs)
+
+    async def stalling_edit(chat_id: int, message_id: int, text: str, **kwargs: Any):
+        if text == stalled_chunk:
+            await release.wait()
+        texts.append(text)
+        return await original_edit(chat_id, message_id, text, **kwargs)
+
+    bot.send_message = stalling_send  # type: ignore[method-assign]
+    bot.edit_message_text = stalling_edit  # type: ignore[method-assign]
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
+    transport = TelegramTransport(client)
+    await client.send_message(chat_id=1, text="warm-up")  # starts the outbox
+    texts.clear()
+    message = RenderedMessage(
+        text="chunk 1",
+        extra={
+            "followups": [
+                RenderedMessage(text="chunk 2"),
+                RenderedMessage(text="chunk 3"),
+            ]
+        },
+    )
+
+    with anyio.move_on_after(0.2) as scope:
+        if mode == "send":
+            await transport.send(channel_id=1, message=message)
+        else:
+            ref = MessageRef(channel_id=1, message_id=7)
+            await transport.edit(ref=ref, message=message)
+    assert scope.cancelled_caught
+
+    release.set()
+    with anyio.fail_after(1):
+        while len(texts) < 3:
+            await anyio.sleep(0.01)
+    await anyio.sleep(0.05)  # nothing further (no duplicate) goes out
+    assert texts == ["chunk 1", "chunk 2", "chunk 3"]
+
+
+@pytest.mark.anyio
 async def test_retry_after_retries_once() -> None:
     bot = FakeBot()
     bot.retry_after = 0.0

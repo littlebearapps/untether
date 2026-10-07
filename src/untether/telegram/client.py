@@ -186,7 +186,10 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
+        wait: bool = True,
     ) -> Message | None:
+        """``wait=False`` queues the send and returns None at once (#928)."""
+
         async def execute() -> Message | None:
             return await self._client.send_message(
                 chat_id=chat_id,
@@ -212,6 +215,7 @@ class TelegramClient:
             execute=execute,
             priority=SEND_PRIORITY,
             chat_id=chat_id,
+            wait=wait,
         )
         if replace_message_id is not None and result is not None:
             # #928: queue the replaced message's delete without awaiting it —

@@ -173,6 +173,7 @@ class BotClient(Protocol):
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
+        wait: bool = True,
     ) -> Message | None: ...
 
     async def send_document(
@@ -694,6 +695,7 @@ class HttpBotClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
+        wait: bool = True,
     ) -> Message | None:
         params: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if disable_notification is not None:

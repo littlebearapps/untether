@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import anyio
 from pydantic import SecretStr
 
 from ..context import RunContext
@@ -260,6 +261,39 @@ class TelegramTransport:
             return []
         return [item for item in followups if isinstance(item, RenderedMessage)]
 
+    @staticmethod
+    def _followup_params(
+        followup: RenderedMessage,
+        *,
+        chat_id: int,
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        notify: bool,
+    ) -> dict[str, Any]:
+        return {
+            "chat_id": chat_id,
+            "text": followup.text,
+            "entities": followup.extra.get("entities"),
+            "parse_mode": followup.extra.get("parse_mode"),
+            "reply_markup": followup.extra.get("reply_markup"),
+            "reply_to_message_id": reply_to_message_id,
+            "message_thread_id": message_thread_id,
+            "disable_notification": not notify,
+        }
+
+    @staticmethod
+    def _edit_followup_route(message: RenderedMessage) -> dict[str, Any]:
+        """Where an edited message's follow-up chunks are sent."""
+        return {
+            "reply_to_message_id": cast(
+                int | None, message.extra.get("followup_reply_to_message_id")
+            ),
+            "message_thread_id": cast(
+                int | None, message.extra.get("followup_thread_id")
+            ),
+            "notify": bool(message.extra.get("followup_notify", True)),
+        }
+
     async def _send_followups(
         self,
         *,
@@ -269,18 +303,21 @@ class TelegramTransport:
         message_thread_id: int | None,
         notify: bool,
     ) -> None:
-        for followup in followups:
+        route = {
+            "chat_id": chat_id,
+            "reply_to_message_id": reply_to_message_id,
+            "message_thread_id": message_thread_id,
+            "notify": notify,
+        }
+        for index, followup in enumerate(followups):
             try:
-                await self._bot.send_message(
-                    chat_id=chat_id,
-                    text=followup.text,
-                    entities=followup.extra.get("entities"),
-                    parse_mode=followup.extra.get("parse_mode"),
-                    reply_markup=followup.extra.get("reply_markup"),
-                    reply_to_message_id=reply_to_message_id,
-                    message_thread_id=message_thread_id,
-                    disable_notification=not notify,
-                )
+                await self._bot.send_message(**self._followup_params(followup, **route))
+            except anyio.get_cancelled_exc_class():
+                # #928: a bounded caller (the early final delivery) cut the
+                # send short. This chunk is already queued; queue the rest
+                # too, or the final would silently end part-way.
+                await self._queue_followups(followups=followups[index + 1 :], **route)
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "transport.followup.failed",
@@ -288,6 +325,46 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    async def _queue_followups(
+        self,
+        *,
+        chat_id: int,
+        followups: list[RenderedMessage],
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        notify: bool,
+    ) -> None:
+        """#928: hand ``followups`` to the outbox in order without awaiting
+        delivery. Runs while the caller is being cancelled, so it is shielded
+        — queueing is immediate, it never waits on the network."""
+        if not followups:
+            return
+        logger.warning(
+            "transport.followups.queued_on_cancel",
+            chat_id=chat_id,
+            count=len(followups),
+        )
+        with anyio.CancelScope(shield=True):
+            for followup in followups:
+                try:
+                    await self._bot.send_message(
+                        **self._followup_params(
+                            followup,
+                            chat_id=chat_id,
+                            reply_to_message_id=reply_to_message_id,
+                            message_thread_id=message_thread_id,
+                            notify=notify,
+                        ),
+                        wait=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "transport.followup.failed",
+                        chat_id=chat_id,
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
 
     async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
         """#559: drain queued outbox sends (best-effort, bounded) before close."""
@@ -336,17 +413,29 @@ class TelegramTransport:
             )
             notify = bool(message.extra.get("followup_notify", True))
         followups = self._extract_followups(message)
-        sent = await self._bot.send_message(
-            chat_id=chat_id,
-            text=message.text,
-            entities=message.extra.get("entities"),
-            parse_mode=message.extra.get("parse_mode"),
-            reply_markup=message.extra.get("reply_markup"),
-            reply_to_message_id=reply_to_message_id,
-            message_thread_id=message_thread_id,
-            replace_message_id=replace_message_id,
-            disable_notification=not notify,
-        )
+        try:
+            sent = await self._bot.send_message(
+                chat_id=chat_id,
+                text=message.text,
+                entities=message.extra.get("entities"),
+                parse_mode=message.extra.get("parse_mode"),
+                reply_markup=message.extra.get("reply_markup"),
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                replace_message_id=replace_message_id,
+                disable_notification=not notify,
+            )
+        except anyio.get_cancelled_exc_class():
+            # #928: the first chunk is queued and still goes out — so must
+            # the rest of a multi-chunk message.
+            await self._queue_followups(
+                chat_id=chat_id,
+                followups=followups,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                notify=notify,
+            )
+            raise
         if sent is None:
             logger.warning(
                 "transport.send.failed",
@@ -386,15 +475,25 @@ class TelegramTransport:
         parse_mode = message.extra.get("parse_mode")
         reply_markup = message.extra.get("reply_markup")
         followups = self._extract_followups(message)
-        edited = await self._bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=message.text,
-            entities=entities,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-            wait=wait,
-        )
+        try:
+            edited = await self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message.text,
+                entities=entities,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                wait=wait,
+            )
+        except anyio.get_cancelled_exc_class():
+            # #928: the edit is queued and still lands — so must the rest of
+            # a multi-chunk message (see ``send``).
+            await self._queue_followups(
+                chat_id=chat_id,
+                followups=followups,
+                **self._edit_followup_route(message),
+            )
+            raise
         if edited is SUPERSEDED:
             # #598: a newer same-key edit (or a delete/replace) coalesced this
             # one out of the outbox before dispatch — the message ends in the
@@ -448,19 +547,10 @@ class TelegramTransport:
             )
             return ref
         if followups:
-            reply_to_message_id = cast(
-                int | None, message.extra.get("followup_reply_to_message_id")
-            )
-            message_thread_id = cast(
-                int | None, message.extra.get("followup_thread_id")
-            )
-            notify = bool(message.extra.get("followup_notify", True))
             await self._send_followups(
                 chat_id=chat_id,
                 followups=followups,
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-                notify=notify,
+                **self._edit_followup_route(message),
             )
         message_id = edited.message_id
         thread_id = (
