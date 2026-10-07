@@ -7758,18 +7758,20 @@ async def handle_message(
                 "— please send it again."
             )
             try:
-                if placeholder is not None:
-                    await cfg.transport.edit(
-                        ref=placeholder, message=RenderedMessage(text=text)
-                    )
-                else:
-                    await cfg.transport.send(
-                        channel_id=reply_to.channel_id,
-                        message=RenderedMessage(text=text),
-                        options=SendOptions(
-                            reply_to=reply_to, thread_id=reply_to.thread_id
-                        ),
-                    )
+                # #823: name the surface on a failed edit/send's error line.
+                with message_kind("followup_notice"):
+                    if placeholder is not None:
+                        await cfg.transport.edit(
+                            ref=placeholder, message=RenderedMessage(text=text)
+                        )
+                    else:
+                        await cfg.transport.send(
+                            channel_id=reply_to.channel_id,
+                            message=RenderedMessage(text=text),
+                            options=SendOptions(
+                                reply_to=reply_to, thread_id=reply_to.thread_id
+                            ),
+                        )
             except Exception:  # noqa: BLE001
                 logger.debug("live_followup.unrun_notice_failed", exc_info=True)
             logger.warning(
@@ -7961,9 +7963,11 @@ async def handle_message(
             f"\n+{repeats} more background {word} hit the same limit",
         )
         try:
-            edited = await cfg.transport.edit(
-                ref=capped_wake_error["ref"], message=rendered
-            )
+            # #823: this edits an error final — say so on a failure line.
+            with message_kind("final"):
+                edited = await cfg.transport.edit(
+                    ref=capped_wake_error["ref"], message=rendered
+                )
         except Exception:  # noqa: BLE001 — fall back to its own message
             logger.warning("live_turn.capped_repeat_edit_failed", exc_info=True)
             edited = None
