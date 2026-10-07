@@ -5842,6 +5842,7 @@ class FollowupTurnRouter:
         progress_for: Callable[[ActionEvent], bool] | None = None,
         deliver_cancelled: Callable[[_TurnCtx], Awaitable[None]] | None = None,
         on_turn_started: Callable[[], None] | None = None,
+        discard_progress: Callable[[_TurnCtx], Awaitable[None]] | None = None,
     ) -> None:
         self._new_tracker = new_tracker
         # Re-reads ``[progress]`` so a hot-reloaded toggle reaches turns of
@@ -5860,6 +5861,9 @@ class FollowupTurnRouter:
         self._progress_for = progress_for
         # #806: renders a turn the user cancelled (None = the error final).
         self._deliver_cancelled = deliver_cancelled
+        # #1015: removes a turn's progress message that no final will
+        # replace (a ``no_query`` drop). None = leave it (tests, old wiring).
+        self._discard_progress = discard_progress
         self._tg: Any = None
         self.current: _TurnCtx | None = None
         self.turns_delivered = 0
@@ -5946,6 +5950,11 @@ class FollowupTurnRouter:
 
     async def _ensure_progress(self, ctx: _TurnCtx) -> None:
         async with ctx.progress_lock:
+            # #1015: a request that queued on the lock behind the turn's
+            # close (a ``no_query`` drop) must not open a progress message
+            # for a turn that has already finished.
+            if self.current is not ctx:
+                return
             if ctx.edits is not None or ctx.delivery["sent"]:
                 return
             try:
@@ -5983,6 +5992,18 @@ class FollowupTurnRouter:
                 if ctx.lazy_scope is not None:
                     ctx.lazy_scope.cancel()
                 async with ctx.progress_lock:
+                    # #1015: no final replaces a progress message the turn
+                    # already showed — delete it, or it stays ``working ·
+                    # 0s`` with a live cancel button for the whole session.
+                    if self._discard_progress is not None:
+                        try:
+                            await self._discard_progress(ctx)
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "live_turn.discard_failed",
+                                turn=ctx.turn,
+                                exc_info=True,
+                            )
                     await self._finish(ctx)
             logger.debug(
                 "live_turn.no_query_dropped",
@@ -7674,6 +7695,23 @@ async def handle_message(
         if ctx.progress_ref is not None and running_tasks is not None:
             running_tasks.pop(ctx.progress_ref, None)
 
+    async def _discard_turn_progress(ctx: _TurnCtx) -> None:
+        """#1015: delete a turn's progress message that no final will
+        replace (the CLI closed the turn as ``no_query``).
+
+        A follow-up's progress message is its "⏳ queued" placeholder, edited
+        in place — that one is the user's anchor and is never deleted.
+        """
+        if ctx.edits is None or ctx.progress_ref is None:
+            return
+        if ctx.reason == "followup":
+            return
+        # Stop repaints first so a queued render can't land after the delete.
+        await ctx.edits.stop_repaints()
+        with contextlib.suppress(Exception), message_kind("progress"):
+            await cfg.transport.delete(ref=ctx.progress_ref)
+        _release_progress(ctx.progress_ref, reason="no_query")
+
     async def _deliver_turn_cancelled(ctx: _TurnCtx) -> None:
         """#806: a follow-up / wake turn the user cancelled renders exactly
         like a cancelled first turn (``cancelled · claude · Ns``), not as an
@@ -7787,6 +7825,7 @@ async def handle_message(
         new_tracker=_new_turn_tracker,
         create_progress=_create_turn_progress,
         close_progress=_close_turn_progress,
+        discard_progress=_discard_turn_progress,
         deliver=_deliver_turn,
         default_reply_to=user_ref,
         followup_notify=cfg.final_notify,

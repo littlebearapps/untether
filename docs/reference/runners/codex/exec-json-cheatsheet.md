@@ -404,6 +404,15 @@ If you want a compact UI, the following is usually enough:
   `codex exec --json` stream; `web_search` is emitted on `item.started`
   (empty query, `action.type = "other"`) and `item.completed` since 0.157.x.
 
+### Not emitted: context window, per-request usage, compaction
+
+`codex exec --json` carries no model context window, no per-request token usage
+(only the thread total on `turn.completed`, above) and no compaction event. So
+Untether can't show the `N% ctx` status segment or the 🗜️ compaction row for
+Codex, which the Claude runner does ([#819](https://github.com/littlebearapps/untether/issues/819)).
+Both are tracked in [#832](https://github.com/littlebearapps/untether/issues/832)
+(a rollout-file side-channel, or the app-server protocol).
+
 ## See also
 
 - [Error Reference](../../errors.md) — actionable hints for common engine errors
