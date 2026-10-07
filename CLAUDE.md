@@ -114,6 +114,11 @@ Pre-1.0, a line with any `### breaking` entry ships as a **minor**: the 0.35.5rc
 `[#N](https://github.com/littlebearapps/untether/issues/N)`. Auto-filed issues carry `auto:error-report` (issue-watcher
 daemon) or `auto:monitor-audit` (`/monitor`).
 
+**Milestone titles and descriptions are public:** littlebearapps.com shows open milestones as the Untether roadmap. Keep
+each description to one or two user-facing sentences (Australian English). No file paths, renaming history, status logs,
+issue chains or open security gaps — working notes go in the tracking issue or a gitignored `docs/plans/` file
+([#1018](https://github.com/littlebearapps/untether/issues/1018)).
+
 ## Conventions
 
 - Python 3.12+, anyio (async), msgspec (JSONL), structlog (logging), ruff, pytest + coverage
