@@ -403,7 +403,7 @@ context window.
 | Claude frame | Untether event |
 |---|---|
 | main-thread `assistant` with int `message.usage` input fields | `ActionEvent(kind="telemetry", id="claude.context", phase="updated", detail={context_pct, context_used, context_window, model})` — only when the integer % changes and the model's window is known |
-| `result.modelUsage.<model>.contextWindow` | learned into the per-process window cache; a first-known value is emitted as the same telemetry event **before** the supplementary `StartedEvent{complete}` / `CompletedEvent`; `usage["context"] = {pct, used, window, model}` (log field) |
+| `result.modelUsage.<model>.contextWindow` | learned into the window cache (seeded for current models, persisted to `context_windows.json`); a first-known value is emitted as the same telemetry event **before** the supplementary `StartedEvent{complete}` / `CompletedEvent`; `usage["context"] = {pct, used, window, model}` (log field) |
 | `system/status {"status":"compacting"}` | `ActionEvent(kind="note", id="claude.compaction.<n>", phase="started", title="🗜️ Compacting context…")`; a repeat (the 30 s heartbeat) is `phase="updated"` on the same id. Live session with no turn open (a `/compact` follow-up): a `TurnEvent(started)` first |
 | `system/status {"status":null,"compact_result":"success"}` | `phase="completed"`, `🗜️ Context compacted`, `ok=True` |
 | `system/status {"status":null,"compact_result":"failed"}` | `phase="completed"`, `🗜️ Compaction failed · <compact_error>`, `ok=False`, `level="warning"` |

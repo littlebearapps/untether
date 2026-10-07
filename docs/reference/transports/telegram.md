@@ -145,7 +145,7 @@ you care about in your own value (the default no longer lists Gemini, Amp or Pi,
 [#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
-After transcription, Untether rewrites the known mishears of the name Claude, whatever the prompt ([#789](https://github.com/littlebearapps/untether/issues/789)): `Clawde` / `Clawd` → `Claude`; `Clawde|Clawd|Clawed|Corde` + `Code` → `Claude Code`; `Clawde|Clawd|Clawed|Claw|Corde` + `.md` → `CLAUDE.md` (whole words, case-insensitive; a bare "clawed" is a real word and is kept). A rewrite logs INFO `voice.transcript.corrected` with the `corrections` count, never the text.
+After transcription, Untether rewrites the known mishears of the name Claude, whatever the prompt ([#789](https://github.com/littlebearapps/untether/issues/789)): `Clawde` / `Clawd` / `Clode` → `Claude`; `Clawde|Clawd|Clawed|Corde|Clode|Clod` + `Code` → `Claude Code`; `Clawde|Clawd|Clawed|Claw|Corde|Clode|Clod` + `.md` → `CLAUDE.md` (whole words, case-insensitive; a bare "clawed" or "clod" is a real word and is kept). A rewrite logs INFO `voice.transcript.corrected` with the `corrections` count, never the text.
 
 ### Listen mode (mentions-only)
 
