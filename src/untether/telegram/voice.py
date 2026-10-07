@@ -72,17 +72,22 @@ DEFAULT_VOICE_TRANSCRIPTION_PROMPT = (
 # the decoder; these spellings are fixed deterministically after transcription.
 # Only non-words, or a word followed by "Code" / ".md", so "the cat clawed"
 # and "Cloud Code" are never touched. Order matters: filename, then product,
-# then the bare name.
+# then the bare name. rc5: "clode"/"clod" heard on a dev-bot voice note; "clod"
+# is a real word, so it is only fixed before ".md" / "Code".
 _MISHEAR_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"\b(?:clawde|clawd|clawed|claw|corde)\.md\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:clawde|clawd|clawed|claw|corde|clode|clod)\.md\b", re.IGNORECASE
+        ),
         "CLAUDE.md",
     ),
     (
-        re.compile(r"\b(?:clawde|clawd|clawed|corde)(\s+)code\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:clawde|clawd|clawed|corde|clode|clod)(\s+)code\b", re.IGNORECASE
+        ),
         r"Claude\1Code",
     ),
-    (re.compile(r"\bclawde?\b", re.IGNORECASE), "Claude"),
+    (re.compile(r"\b(?:clawde?|clode)\b", re.IGNORECASE), "Claude"),
 )
 
 

@@ -1331,6 +1331,12 @@ def test_679_voice_endpoint_keys_changed() -> None:
         ("including Clawde.md and AGENTS.md", "including CLAUDE.md and AGENTS.md"),
         ("update the Claw.md file", "update the CLAUDE.md file"),
         ("check clawed.md, then", "check CLAUDE.md, then"),
+        # rc5 dev-bot voice note: "clode" (a non-word) for both forms.
+        ("open the clode.md file", "open the CLAUDE.md file"),
+        ("what clode code says", "what Claude Code says"),
+        ("thanks Clode", "thanks Claude"),
+        ("read clod.md first", "read CLAUDE.md first"),
+        ("in Clod Code", "in Claude Code"),
     ],
 )
 def test_789_known_claude_mishears_corrected(heard: str, fixed: str) -> None:
@@ -1349,6 +1355,7 @@ def test_789_known_claude_mishears_corrected(heard: str, fixed: str) -> None:
         "a claw machine and a corded drill",
         "Claude Code, CLAUDE.md and Claude are already right",
         "Cloud Code is a Google product",
+        "a clod of earth",  # real word, not before .md / Code
         "clawdeck",  # inside another word
         "",
     ],
