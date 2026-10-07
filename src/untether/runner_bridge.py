@@ -7245,7 +7245,9 @@ async def handle_message(
         # queued send even if this await is cut short (the early path's
         # bounded scope), so a timeout after the send landed — e.g. stalled on
         # the replace-delete — must not let the post-return path send it
-        # again. Only a raised send (nothing queued) stays undelivered.
+        # again. Only a raised send (nothing queued) stays undelivered. A
+        # multi-chunk final cut short part-way queues its remaining chunks
+        # in the transport, so it is neither duplicated nor left partial.
         delivery["sent"] = True
         try:
             final_ref = await send_result_message(
