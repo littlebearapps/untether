@@ -118,7 +118,7 @@ Notes:
 
 ### Permission modes
 
-Derived from **Claude Code CLI 2.1.228** (verified on lba-1, 2026-08-12). The
+Derived from **Claude Code CLI 2.1.228** (verified 2026-08-12). The
 canonical set lives in `runners/run_options.py`
 (`CLAUDE_CLI_PERMISSION_MODES`); `tests/test_claude_permission_modes.py`
 re-derives it from the installed binary and fails on drift.
