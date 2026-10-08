@@ -89,7 +89,7 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 
     The `gemini` engine is still included but **deprecated and no longer
     supported**: no bug fixes, no testing, and it may be removed in a future
-    release. Antigravity CLI support ships as a separate `antigravity` engine
+    release. Antigravity CLI support is planned as a separate `antigravity` engine
     in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)).
 
 ```sh
