@@ -30,6 +30,10 @@ class RunRequest:
 class RunResult:
     engine: EngineId
     message: RenderedMessage | None
+    # Why the run didn't start, or None when it ran. ``"daily_budget"``: the
+    # daily cost budget's "Stop at limit" refused it (#896); ``message`` then
+    # holds the refusal text.
+    refused: str | None = None
 
 
 class CommandExecutor(Protocol):
@@ -79,6 +83,33 @@ class CommandContext:
     # rc4 (#271): the default chat_id that unscoped triggers fall back to
     # (Telegram transport: cfg.chat_id).
     default_chat_id: int | None = None
+    # rc15 (#389): the live ``[transports.telegram.files] deny_globs`` so
+    # /browse applies the same policy as /file. ``None`` = defaults.
+    file_deny_globs: tuple[str, ...] | None = None
+    # rc15 (#685): the callback query id of a button tap, so a backend whose
+    # early toast reserved a claim can recognise its own claim in ``handle``.
+    # ``None`` for text commands and callbacks without an id.
+    callback_query_id: str | None = None
+    # #950: what a plain prompt in this chat/topic would run with — the
+    # topic or chat ``/agent`` default engine (``None`` = fall through to the
+    # project → global defaults) and the ambient run context (topic/chat
+    # ``/ctx`` binding or the chat's project; ``None`` = not known, use
+    # ``runtime.default_context_for_chat``).
+    default_engine_override: EngineId | None = None
+    ambient_context: RunContext | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommandAttachment:
+    """#418: a file a command replies with (Telegram: sent as a document).
+
+    ``CommandResult.text`` becomes the caption. ``fallback_text`` is sent as a
+    plain message instead when the upload fails or the file is too large.
+    """
+
+    filename: str
+    content: bytes
+    fallback_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +119,8 @@ class CommandResult:
     reply_to: MessageRef | None = None
     parse_mode: str | None = None
     skip_reply: bool = False
+    # #418: optional file attachment (text commands only; callbacks ignore it).
+    attachment: CommandAttachment | None = None
 
 
 @runtime_checkable

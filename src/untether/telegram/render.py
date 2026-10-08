@@ -4,13 +4,14 @@ import importlib.util
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 from sulguk import transform_html
 
-from ..markdown import MarkdownParts, assemble_markdown_parts
+from ..markdown import MarkdownParts, assemble_markdown_parts, starts_with_pictograph
 
 MAX_BODY_CHARS = 3500
 
@@ -83,8 +84,510 @@ def _normalize_nested_list_markers(md: str) -> str:
     return "".join(lines)
 
 
+# #786: a bare `<br>` / `<br/>` / `<br />` (any case, no attributes). Models
+# use it as a line break or spacer; with `html: False` it would otherwise be
+# escaped and shown literally. Nothing else HTML-shaped is let through (#713).
+_BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def _is_pipe_table_block(content: str) -> bool:
+    """True when every non-blank line of an inline block looks like a pipe
+    table row. commonmark renders no tables, so such rows stay plain text."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    return bool(lines) and all(line.startswith("|") for line in lines)
+
+
+def _text_token(content: str) -> Token:
+    return Token("text", "", 0, content=content)
+
+
+# #797: GFM pipe tables. commonmark has no table rule, so a table parses as
+# one paragraph whose row boundaries are softbreaks — rendered as spaces, the
+# whole table collapsed into one run-on line of pipes. A table is a line
+# holding a `|` followed by a delimiter row (`|---|:-:|`, outer pipes
+# optional); body rows are the following lines that hold a `|`. A pipe in
+# prose, or pipe-led lines with no delimiter row, are not tables.
+_TABLE_DELIM_CELL_RE = re.compile(r"\s*:?-+:?\s*")
+
+_TableRole = Literal["header", "delim", "body"]
+
+
+def _is_table_delimiter_row(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped or "-" not in stripped:
+        return False
+    stripped = stripped.removeprefix("|")
+    stripped = stripped.removesuffix("|")
+    return all(_TABLE_DELIM_CELL_RE.fullmatch(cell) for cell in stripped.split("|"))
+
+
+def _pipe_table_roles(lines: list[str]) -> list[_TableRole | None]:
+    """Classify each line as a pipe-table header, delimiter or body row
+    (None for anything else)."""
+    roles: list[_TableRole | None] = [None] * len(lines)
+    idx = 0
+    while idx < len(lines) - 1:
+        line = lines[idx]
+        if (
+            "|" in line
+            and not _is_table_delimiter_row(line)
+            and _is_table_delimiter_row(lines[idx + 1])
+        ):
+            roles[idx] = "header"
+            roles[idx + 1] = "delim"
+            idx += 2
+            while idx < len(lines) and "|" in lines[idx] and lines[idx].strip():
+                roles[idx] = "body"
+                idx += 1
+            continue
+        idx += 1
+    return roles
+
+
+def _format_pipe_tables(inline: Token) -> None:
+    """Keep each pipe-table row of an inline block on its own line (#797).
+
+    Row boundaries become ``hardbreak`` s (so do the breaks just before and
+    after the table when it shares a paragraph with prose), the delimiter
+    row — which carries only column alignment — is dropped, and the header
+    row is bolded so it still reads as a header. Cell text, inline code and
+    other formatting are kept as they are; a `<br>` inside a row becomes a
+    space so the row isn't split mid-cell (#786).
+
+    Rows stay as ``| a | b |`` text rather than a monospace ``<pre>`` grid:
+    real tables are usually wider than a phone's ~40 monospace columns, and
+    ``<pre>`` would drop the entities (code, bold, links) inside cells.
+    """
+    children = inline.children
+    if not children:
+        return
+    lines = inline.content.split("\n")
+    roles = _pipe_table_roles(lines)
+    if not any(roles):
+        return
+    # One segment per source line, each with the break token that ended it.
+    segments: list[tuple[list[Token], Token | None]] = []
+    current: list[Token] = []
+    for child in children:
+        if child.type in ("softbreak", "hardbreak"):
+            segments.append((current, child))
+            current = []
+        else:
+            current.append(child)
+    segments.append((current, None))
+    if len(segments) != len(lines):
+        # A code span spanning lines hides a newline from the token stream;
+        # rows can't be mapped reliably, so leave the block as it was.
+        return
+
+    rewritten: list[Token] = []
+    prev: int | None = None
+    for idx, (seg, _brk) in enumerate(segments):
+        role = roles[idx]
+        if role == "delim":
+            continue
+        if prev is not None:
+            if role or roles[prev]:
+                rewritten.append(Token("hardbreak", "br", 0))
+            else:
+                brk = segments[prev][1]
+                if brk is not None:
+                    rewritten.append(brk)
+        if role:
+            seg = [
+                _text_token(_BR_TAG_RE.sub(" ", t.content))
+                if t.type == "text" and _BR_TAG_RE.search(t.content)
+                else t
+                for t in seg
+            ]
+        if role == "header" and not any(t.type == "strong_open" for t in seg):
+            seg = [
+                Token("strong_open", "strong", 1, markup="**"),
+                *seg,
+                Token("strong_close", "strong", -1, markup="**"),
+            ]
+        rewritten.extend(seg)
+        prev = idx
+    inline.children = rewritten
+
+
+# #870: CommonMark renders a single newline inside a paragraph as a space, so
+# a digest written one item per line (emoji headers, indented ``#N`` items,
+# ``Key: value`` lines) collapsed into one run-on paragraph. A softbreak is
+# kept as a line break when the author evidently meant one; hard-wrapped prose
+# (a greedy wrapper's output) still reflows. Revert to ``breaks=True`` on
+# ``_MD_RENDERER`` if this heuristic misbehaves (D4).
+_LINE_BREAK_SHORT = 40  # rule (c): a line shorter than this was ended on purpose
+_INDENT_NBSP_MAX = 8  # cap on the NBSP indent re-added after a kept break
+_WRAP_TOKEN_MAX = 30  # rule (d): longer unbreakable tokens don't set the width
+_NBSP = "\u00a0"
+_LINE_LEAD_RE = re.compile(
+    r"^(?:"
+    r"[•·◦‣∙▪■□●○◆◇▸▹►→←↳↪✓✔✗✘☐☑☒–—>]"  # bullet / arrow / status glyph
+    r"|#\d"  # issue-style item: #123
+    r"|\d{1,3}[.)]\s"  # 1. / 2)
+    r"|\(?[A-Za-z0-9]{1,2}\)\s"  # (a) / b)
+    r"|\*\*[^*\n]{1,40}?(?::\*\*|\*\*:)"  # **Key:** / **Key**:
+    r"|\[[ xX]\]\s"  # [ ] / [x] checkbox
+    r"|[A-Z][\w'()/-]*(?: [\w'()/-]+){0,2}: "  # Key: value (≤3 words)
+    r")"
+)
+_PUNCTUATED_END = frozenset(".!?,;:-–—([/&+=\"'“‘")
+_FUNCTION_WORDS = frozenset(
+    (  # noqa: SIM905 - a word list reads best as one string
+        "a an the of to and or but by in on for with from at is are was as "
+        "that than via per"
+    ).split()
+)
+
+
+def _indent_cols(line: str) -> int:
+    cols = 0
+    for ch in line:
+        if ch == " ":
+            cols += 1
+        elif ch == "\t":
+            cols += 2
+        else:
+            break
+    return cols
+
+
+def _structural_lead(stripped: str) -> bool:
+    return starts_with_pictograph(stripped) or bool(_LINE_LEAD_RE.match(stripped))
+
+
+def _capital_after_open_clause(prev: str, nxt: str) -> bool:
+    """Rule (e): two unpunctuated clauses don't wrap into a capital."""
+    prev = prev.rstrip()
+    if not prev or not nxt or not nxt[0].isupper():
+        return False
+    if prev[-1] in _PUNCTUATED_END:
+        return False
+    last_word = prev.rsplit(None, 1)[-1].lower()
+    return last_word not in _FUNCTION_WORDS
+
+
+def _wrap_width(lines: list[str]) -> int:
+    """Rule (d)'s wrap width: the longest non-final line, ignoring lines that
+    hold an unbreakable token (URL, path) a wrapper couldn't have split."""
+    candidates = [
+        len(line.rstrip())
+        for line in lines[:-1]
+        if max((len(tok) for tok in line.split()), default=0) <= _WRAP_TOKEN_MAX
+    ]
+    if candidates:
+        return max(candidates)
+    return max((len(line.rstrip()) for line in lines), default=0)
+
+
+def _keep_break(prev: str, nxt: str, *, width: int | None) -> bool:
+    """Decide one softbreak (#870). ``width`` is None in the token-text
+    fallback, which has no reliable indentation or widths: rules (b), (c)
+    and (e) only."""
+    nxt_stripped = nxt.strip()
+    if not nxt_stripped:
+        return False
+    if width is not None and _indent_cols(nxt) >= 2:  # (a) indent
+        return True
+    if _structural_lead(nxt_stripped):  # (b) structural lead
+        return True
+    if len(prev.rstrip()) < _LINE_BREAK_SHORT:  # (c) short line
+        return True
+    if width is not None:  # (d) the next word would have fitted
+        first_word = nxt_stripped.split(None, 1)[0]
+        if len(prev.rstrip()) + 1 + len(first_word) <= width:
+            return True
+    return _capital_after_open_clause(prev, nxt_stripped)  # (e)
+
+
+def _keep_line_breaks(inline: Token) -> None:
+    """Keep author line breaks in line-structured paragraphs (#870).
+
+    A ``softbreak`` becomes a ``hardbreak`` when the next line (a) is
+    indented by 2+ columns, (b) starts with a structural lead (pictograph,
+    bullet/arrow/status glyph, ``#N``, ``1.``, ``(a)``, ``**Key:**``,
+    checkbox, ``Key: ``), (c) follows a line under 40 chars, (d) starts with
+    a word that would have fitted on the previous line (a greedy wrapper
+    never breaks early), or (e) starts with a capital after a line ending in
+    neither punctuation nor a function word. Breaks inside link text, and
+    next to pipe-table rows (#797 owns those), are left alone. An indented
+    next line keeps its indent as NBSP (≤ 8), which survives rendering.
+    """
+    children = inline.children
+    if not children or not any(c.type == "softbreak" for c in children):
+        return
+    lines = inline.content.split("\n")
+    breaks = [i for i, c in enumerate(children) if c.type in ("softbreak", "hardbreak")]
+    mapped = len(breaks) == len(lines) - 1
+    roles = _pipe_table_roles(lines) if mapped else [None] * len(lines)
+    width = _wrap_width(lines) if mapped else None
+    if not mapped:
+        # A code span crossing a line hides a newline from the token stream:
+        # fall back to the text of the segments between breaks.
+        segments: list[str] = []
+        current: list[str] = []
+        for child in children:
+            if child.type in ("softbreak", "hardbreak"):
+                segments.append("".join(current))
+                current = []
+            elif child.type in ("text", "code_inline"):
+                current.append(child.content)
+        segments.append("".join(current))
+        lines = segments
+
+    rewritten: list[Token] = []
+    link_depth = 0
+    boundary = 0
+    for child in children:
+        if child.type == "link_open":
+            link_depth += 1
+        elif child.type == "link_close":
+            link_depth = max(0, link_depth - 1)
+        if child.type not in ("softbreak", "hardbreak"):
+            rewritten.append(child)
+            continue
+        idx = boundary
+        boundary += 1
+        if (
+            child.type == "hardbreak"
+            or link_depth > 0
+            or roles[idx] is not None
+            or roles[idx + 1] is not None
+            or not _keep_break(lines[idx], lines[idx + 1], width=width)
+        ):
+            rewritten.append(child)
+            continue
+        rewritten.append(Token("hardbreak", "br", 0))
+        indent = _indent_cols(lines[idx + 1]) if mapped else 0
+        if indent >= 2:
+            rewritten.append(_text_token(_NBSP * min(indent, _INDENT_NBSP_MAX)))
+    inline.children = rewritten
+
+
+def _split_br(content: str, *, table: bool) -> list[Token]:
+    """Split a text token's content on bare `<br>` tags (#786).
+
+    Outside pipe tables each tag becomes a ``hardbreak`` (a real newline in
+    Telegram); inside a pipe-table row it becomes a space so the row — which
+    renders as one line of text (#797) — isn't split mid-cell.
+    """
+    if table:
+        return [_text_token(_BR_TAG_RE.sub(" ", content))]
+    parts = _BR_TAG_RE.split(content)
+    out: list[Token] = []
+    last = len(parts) - 1
+    for idx, part in enumerate(parts):
+        if idx > 0:
+            part = part.lstrip(" ")
+        if idx < last:
+            part = part.rstrip(" ")
+        if part:
+            out.append(_text_token(part))
+        if idx < last:
+            out.append(Token("hardbreak", "br", 0))
+    return out
+
+
+def _rewrite_br(inline: Token) -> bool:
+    """Rewrite `<br>` tags in one inline token's children, in place (#786).
+
+    Only ``text`` children are touched, so code spans (``code_inline``) and
+    code blocks (``fence`` / ``code_block``, which are block tokens with no
+    inline children) keep their content verbatim.
+
+    Returns True when the block was nothing but `<br>` tags (a spacer
+    paragraph) and should be dropped.
+    """
+    children = inline.children
+    if not children or not any(
+        c.type == "text" and _BR_TAG_RE.search(c.content) for c in children
+    ):
+        return False
+    table = _is_pipe_table_block(inline.content)
+    rewritten: list[Token] = []
+    for child in children:
+        if child.type == "text" and _BR_TAG_RE.search(child.content):
+            rewritten.extend(_split_br(child.content, table=table))
+            continue
+        if (
+            child.type in ("softbreak", "hardbreak")
+            and rewritten
+            and rewritten[-1].type == "hardbreak"
+        ):
+            # `text<br>\nmore`: the tag already broke the line (the newline
+            # may already be a hardbreak when a table row follows, #797).
+            continue
+        rewritten.append(child)
+    inline.children = rewritten
+    return all(
+        c.type in ("hardbreak", "softbreak")
+        or (c.type == "text" and not c.content.strip())
+        for c in rewritten
+    )
+
+
+# #788: a bare filename whose extension is also a country-code TLD. Telegram
+# clients (and our own linkify pass) turn `CLAUDE.md` into http://claude.md/,
+# `setup.sh` into http://setup.sh/ and so on; a code entity is never linked.
+# Only md/sh/py: other source extensions that are TLDs (.rs, .pl, .cc, .ps)
+# collide with real, frequently cited domains (docs.rs, allegro.pl), so
+# wrapping them would break genuine links.
+#
+# The lookbehind refuses to start a match mid-token — after a scheme colon,
+# a path separator, `@` (e-mail), `=` / `%` / `+` (query strings) — so text
+# that is part of a URL is never wrapped. The lookahead refuses a trailing
+# path, word char or further `.ext` (`a.md5`, `a.md.bak`, `a.mdx`) but lets
+# sentence punctuation (`CLAUDE.md.`, `run.sh!`) end the match. A trailing
+# `:line[:col]` (`render.py:86`) stays inside the code span — linkify would
+# otherwise read it as a port and link http://render.py:86.
+_FILENAME_EXTS = ("md", "sh", "py")
+_BARE_FILENAME_RE = re.compile(
+    r"(?<![\w./:@~%+=-])"
+    r"(~?[\w./-]*[\w-]\.(?:" + "|".join(_FILENAME_EXTS) + r")(?::\d+){0,2})"
+    r"(?![\w/-]|\.\w|:\d)",
+    re.IGNORECASE,
+)
+
+
+def _code_token(content: str) -> Token:
+    return Token("code_inline", "code", 0, content=content, markup="`")
+
+
+def _split_filenames(content: str) -> list[Token] | None:
+    """Split text around bare filenames, wrapping each in a code span.
+    Returns None when there is nothing to wrap."""
+    matches = list(_BARE_FILENAME_RE.finditer(content))
+    if not matches:
+        return None
+    out: list[Token] = []
+    pos = 0
+    for match in matches:
+        if match.start() > pos:
+            out.append(_text_token(content[pos : match.start()]))
+        out.append(_code_token(match.group(1)))
+        pos = match.end()
+    if pos < len(content):
+        out.append(_text_token(content[pos:]))
+    return out
+
+
+def _is_fuzzy_filename_link(link_open: Token, text: Token) -> bool:
+    """A linkify link produced from a bare filename (`CLAUDE.md` →
+    http://CLAUDE.md): no scheme or `www.` was written, and the link text is
+    exactly one bare filename."""
+    if link_open.markup != "linkify" or text.type != "text":
+        return False
+    href = str(link_open.attrs.get("href", ""))
+    content = text.content
+    if content.lower().startswith("www."):
+        return False
+    if href.lower() != f"http://{content}".lower():
+        return False
+    return _BARE_FILENAME_RE.fullmatch(content) is not None
+
+
+def _code_format_filenames(inline: Token) -> None:
+    """Render bare `name.md` / `.sh` / `.py` filenames as inline code (#788).
+
+    Works on the token stream, so existing code spans (``code_inline``) and
+    code blocks are never touched or double-wrapped, text inside explicit
+    markdown links is left alone, and real URLs — which linkify already
+    turned into link tokens — keep their links. Linkify links that were
+    generated from a bare filename are unwrapped into a code span.
+    """
+    children = inline.children
+    if not children:
+        return
+    rewritten: list[Token] = []
+    link_depth = 0
+    idx = 0
+    while idx < len(children):
+        child = children[idx]
+        if (
+            child.type == "link_open"
+            and idx + 2 < len(children)
+            and children[idx + 2].type == "link_close"
+            and _is_fuzzy_filename_link(child, children[idx + 1])
+        ):
+            rewritten.append(_code_token(children[idx + 1].content))
+            idx += 3
+            continue
+        if child.type == "link_open":
+            link_depth += 1
+        elif child.type == "link_close":
+            link_depth = max(0, link_depth - 1)
+        elif child.type == "text" and link_depth == 0:
+            split = _split_filenames(child.content)
+            if split is not None:
+                rewritten.extend(split)
+                idx += 1
+                continue
+        rewritten.append(child)
+        idx += 1
+    inline.children = rewritten
+
+
+def _normalise_tokens(tokens: list[Token]) -> list[Token]:
+    out: list[Token] = []
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
+        if tok.type == "inline":
+            _keep_line_breaks(tok)
+            _format_pipe_tables(tok)
+            drop = _rewrite_br(tok)
+            _code_format_filenames(tok)
+        else:
+            drop = False
+        if (
+            drop
+            and out
+            and out[-1].type == "paragraph_open"
+            and nxt is not None
+            and nxt.type == "paragraph_close"
+        ):
+            # Drop a paragraph that held only `<br>` spacers (#786).
+            out.pop()
+            idx += 2
+            continue
+        out.append(tok)
+        idx += 1
+    return out
+
+
+def _number_ordered_lists(tokens: list[Token]) -> None:
+    """#886: keep an ordered list's own start number.
+
+    markdown-it renders ``42. x`` as ``<ol start="42">``, but sulguk ignores
+    ``start`` and numbers every list from 1 — so a reply that continues a
+    numbered list (or a continuation chunk of a long answer) restarted at
+    ``1.``. sulguk does honour ``<li value>``, and later items count on from
+    it, so the start is moved onto the list's first item."""
+    for idx, tok in enumerate(tokens):
+        if tok.type != "ordered_list_open":
+            continue
+        start = tok.attrGet("start")
+        if start is None:
+            continue
+        for item in tokens[idx + 1 :]:
+            if item.level < tok.level + 1:
+                break  # an empty list: nothing to number
+            if item.type == "list_item_open" and item.level == tok.level + 1:
+                item.attrSet("value", str(start))
+                break
+
+
+def _render_html(md: str) -> str:
+    env: dict[str, Any] = {}
+    tokens = _normalise_tokens(_MD_RENDERER.parse(md, env))
+    _number_ordered_lists(tokens)
+    return _MD_RENDERER.renderer.render(tokens, _MD_RENDERER.options, env)
+
+
 def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
-    html = _MD_RENDERER.render(_normalize_nested_list_markers(md or ""))
+    html = _render_html(_normalize_nested_list_markers(md or ""))
     rendered = transform_html(html)
 
     text = _BULLET_RE.sub(r"\1-", rendered.text)
@@ -106,6 +609,41 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
         entities.append(ed)
     entities = _sanitise_entities(entities)
     return text, entities
+
+
+def _bare_link(url: str) -> str:
+    return url.removeprefix("mailto:").split("://", 1)[-1].rstrip("/")
+
+
+def markdown_to_plain(md: str) -> str:
+    """*md* as the text ``render_markdown`` would show, without entities —
+    for a surface sent as plain text (#891: background-panel acks). Emphasis
+    and code marks go; intraword underscores, a lone ``*``, URLs and
+    escaped text stay as written. A link's URL would be lost with its
+    ``text_link`` entity, so it follows its text in brackets."""
+    text, entities = render_markdown(md)
+    links = [
+        e
+        for e in entities
+        if e.get("type") == "text_link" and isinstance(e.get("url"), str)
+    ]
+    if not links:
+        return text
+    units = text.encode("utf-16-le")
+    out: list[bytes] = []
+    pos = 0
+    for e in sorted(links, key=lambda e: e["offset"] + e["length"]):
+        url = e["url"]
+        end = (e["offset"] + e["length"]) * 2
+        if end < pos:
+            continue
+        out.append(units[pos:end])
+        pos = end
+        shown = units[e["offset"] * 2 : end].decode("utf-16-le")
+        if _bare_link(shown) != _bare_link(url):  # not a linkified bare URL
+            out.append(f" ({url})".encode("utf-16-le"))
+    out.append(units[pos:])
+    return b"".join(out).decode("utf-16-le")
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # nosec B104
@@ -182,18 +720,61 @@ def _split_long_line(line: str, max_chars: int) -> list[str]:
     return parts
 
 
-def _split_block(block: str, max_chars: int) -> list[str]:
+def _table_header_prefixes(
+    lines: list[str], fence: _FenceState | None
+) -> list[str | None]:
+    """For each line that is a pipe-table body row outside a code fence,
+    the table's header + delimiter lines; None otherwise (#797)."""
+    stripped = [_split_line_ending(line)[0] for line in lines]
+    in_fence: list[bool] = []
+    for line in stripped:
+        was_open = fence is not None
+        fence = _update_fence_state(line, fence)
+        # A fence marker line and everything inside a fence are code.
+        in_fence.append(was_open or fence is not None)
+    roles = _pipe_table_roles(
+        [
+            "" if fenced else line
+            for line, fenced in zip(stripped, in_fence, strict=True)
+        ]
+    )
+    prefixes: list[str | None] = [None] * len(lines)
+    header = ""
+    for idx, role in enumerate(roles):
+        if role == "header":
+            header = stripped[idx] + "\n" + stripped[idx + 1] + "\n"
+        elif role == "body":
+            prefixes[idx] = header
+    return prefixes
+
+
+def _split_block(
+    block: str, max_chars: int, fence: _FenceState | None = None
+) -> list[str]:
     if len(block) <= max_chars:
         return [block]
+    lines = block.splitlines(keepends=True)
+    table_prefixes = _table_header_prefixes(lines, fence)
     pieces: list[str] = []
     current = ""
-    for line in block.splitlines(keepends=True):
-        for part in _split_long_line(line, max_chars):
+    for line, table_prefix in zip(lines, table_prefixes, strict=True):
+        for part_idx, part in enumerate(_split_long_line(line, max_chars)):
             if not part:
                 continue
             if current and len(current) + len(part) > max_chars:
                 pieces.append(current)
                 current = ""
+            if (
+                not current
+                and pieces
+                and part_idx == 0
+                and table_prefix
+                and len(table_prefix) <= max_chars // 2
+                and len(table_prefix) + len(part) <= max_chars
+            ):
+                # A table split across chunks: repeat its header so the
+                # continuation still renders as a table (#797).
+                current = table_prefix
             current += part
             if len(current) == max_chars:
                 pieces.append(current)
@@ -253,7 +834,7 @@ def split_markdown_body(body: str, max_chars: int) -> list[str]:
     current = ""
     state: _FenceState | None = None
     for block in blocks:
-        for piece in _split_block(block, max_chars):
+        for piece in _split_block(block, max_chars, state):
             if not current:
                 current = piece
                 state = _scan_fence_state(piece, state)

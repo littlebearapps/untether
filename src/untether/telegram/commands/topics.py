@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from ...context import RunContext
 from ...logging import get_logger
 from ...markdown import MarkdownParts
-from ...runner_bridge import RunningTasks
+from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
 from ...transport import RenderedMessage, SendOptions
 from ...transport_runtime import TransportRuntime
 from ..chat_prefs import ChatPrefsStore
@@ -22,11 +22,13 @@ from ..files import split_command_args
 from ..render import prepare_telegram
 from ..topic_state import TopicStateStore
 from ..topics import (
+    ThreadFilter,
     _maybe_rename_topic,
     _topic_key,
     _topic_title,
     _topics_chat_project,
     _topics_command_error,
+    thread_filter_for,
 )
 from ..types import TelegramIncomingMessage
 from .reply import make_reply
@@ -37,28 +39,98 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _cancel_chat_tasks(
+class _CancelCounts(NamedTuple):
+    """What ``/new`` cancelled: runs + pending loop entries, and how many of
+    those were idle post-result live sessions (#895)."""
+
+    cancelled: int
+    idle: int = 0
+
+    @property
+    def only_idle(self) -> bool:
+        return self.cancelled > 0 and self.idle == self.cancelled
+
+
+def _cancel_chat_tasks_counted(
     chat_id: int,
     running_tasks: RunningTasks | None,
-) -> int:
-    """Cancel all running tasks for a chat.
+    *,
+    thread_filter: ThreadFilter | None = None,
+    thread_id: int | None = None,
+) -> _CancelCounts:
+    """Cancel the running tasks for a chat (or one of its threads).
 
-    Returns the number of tasks cancelled.  Also drops any pending /loop
-    entries for the chat (#289) so ``/new`` cleanly resets loop state in
-    addition to running runs.
+    Also drops any pending /loop entries for the chat (#289) so ``/new``
+    cleanly resets loop state in addition to running runs.
+
+    #826: ``thread_filter`` (from :func:`thread_filter_for`) limits both to
+    the runs / loops of the sender's thread — ``/new`` in one forum topic
+    never cancels another topic's work.  ``None`` = the whole chat.
+    ``thread_id`` is the sender's thread, for the log only.
+
+    #895: ``idle`` counts the cancelled runs that were live sessions idling
+    after their answer (nothing in flight) — cancelling one only closes it.
     """
     cancelled = 0
+    idle = 0
+    skipped: set[int] = set()
     if running_tasks:
         for ref, task in running_tasks.items():
-            if ref.channel_id == chat_id and not task.cancel_requested.is_set():
-                task.cancel_requested.set()
-                cancelled += 1
+            if ref.channel_id != chat_id or task.cancel_requested.is_set():
+                continue
+            if thread_filter is not None and not thread_filter(task.thread_id):
+                # #776: a live run sits under several refs — count it once.
+                skipped.add(id(task))
+                continue
+            if running_task_is_idle_after_result(task):
+                idle += 1
+            task.cancel_requested.set()
+            cancelled += 1
+    if cancelled or skipped:
+        logger.info(
+            "new.cancel_scope",
+            chat_id=chat_id,
+            thread_id=thread_id,
+            scoped=thread_filter is not None,
+            cancelled=cancelled,
+            idle=idle,
+            skipped_other_threads=len(skipped),
+        )
     # #289: drop pending loop entries for the chat too.  Mirror the at
     # scheduler integration in handle_cancel — /new should leave no trace.
     from ... import loop_scheduler
 
-    cancelled += loop_scheduler.cancel_pending_for_chat(chat_id)
-    return cancelled
+    cancelled += loop_scheduler.cancel_pending_for_chat(
+        chat_id, thread_filter=thread_filter
+    )
+    return _CancelCounts(cancelled=cancelled, idle=idle)
+
+
+def _cancel_chat_tasks(
+    chat_id: int,
+    running_tasks: RunningTasks | None,
+    *,
+    thread_filter: ThreadFilter | None = None,
+    thread_id: int | None = None,
+) -> int:
+    """:func:`_cancel_chat_tasks_counted`, returning only the total."""
+    return _cancel_chat_tasks_counted(
+        chat_id, running_tasks, thread_filter=thread_filter, thread_id=thread_id
+    ).cancelled
+
+
+def _cancelled_label(counts: _CancelCounts) -> str | None:
+    """#895: the ``/new`` reply's verb phrase for what it cancelled — None
+    when nothing was. An idle post-result live session holds no run the user
+    can see, so "cancelled run" would point at nothing; any in-flight work
+    (a turn, background task, queued follow-up or loop) keeps it."""
+    if not counts.cancelled:
+        return None
+    if counts.only_idle:
+        return (
+            "closed the idle sessions" if counts.idle > 1 else "closed the idle session"
+        )
+    return "cancelled run"
 
 
 async def _handle_ctx_command(
@@ -246,6 +318,32 @@ async def _handle_chat_ctx_command(
     )
 
 
+def _cancel_for_new(
+    msg: TelegramIncomingMessage, running_tasks: RunningTasks | None
+) -> _CancelCounts:
+    """``/new``'s cancel step, scoped to the sender's thread (#826)."""
+    cancelled = _cancel_chat_tasks_counted(
+        msg.chat_id,
+        running_tasks,
+        thread_filter=thread_filter_for(msg),
+        thread_id=msg.thread_id,
+    )
+    if cancelled.cancelled:
+        logger.info(
+            "new.cancelled_running",
+            chat_id=msg.chat_id,
+            thread_id=msg.thread_id,
+            count=cancelled.cancelled,
+            idle=cancelled.idle,
+        )
+    return cancelled
+
+
+def _cleared_label(cancelled: _CancelCounts) -> str:
+    label = _cancelled_label(cancelled)
+    return f"{label} and cleared" if label else "cleared"
+
+
 async def _handle_new_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -269,12 +367,11 @@ async def _handle_new_command(
     if tkey is None:
         await reply(text="this command only works inside a topic.")
         return
-    cancelled = _cancel_chat_tasks(msg.chat_id, running_tasks)
-    if cancelled:
-        logger.info("new.cancelled_running", chat_id=msg.chat_id, count=cancelled)
+    cancelled = _cancel_for_new(msg, running_tasks)
     await store.clear_sessions(*tkey)
-    label = "cancelled run and cleared" if cancelled else "cleared"
-    await reply(text=f"\N{BROOM} {label} stored sessions for this topic.")
+    await reply(
+        text=f"\N{BROOM} {_cleared_label(cancelled)} stored sessions for this topic."
+    )
 
 
 async def _handle_chat_new_command(
@@ -285,15 +382,13 @@ async def _handle_chat_new_command(
     running_tasks: RunningTasks | None = None,
 ) -> None:
     reply = make_reply(cfg, msg)
-    cancelled = _cancel_chat_tasks(msg.chat_id, running_tasks)
-    if cancelled:
-        logger.info("new.cancelled_running", chat_id=msg.chat_id, count=cancelled)
-    if session_key is None and not cancelled:
+    cancelled = _cancel_for_new(msg, running_tasks)
+    if session_key is None and not cancelled.cancelled:
         await reply(text="no stored sessions to clear for this chat.")
         return
     if session_key is not None:
         await store.clear_sessions(session_key[0], session_key[1])
-    label = "cancelled run and cleared" if cancelled else "cleared"
+    label = _cleared_label(cancelled)
     if msg.chat_type == "private":
         text = f"\N{BROOM} {label} stored sessions for this chat."
     else:

@@ -27,7 +27,7 @@ command references these by path and does not duplicate their content.
 | `~/.claude/commands/monitor/signal-categories.md` | Bug + enhancement signal taxonomy |
 | `../../rules/runner-development.md` | Runner contract: 3-event sequence, session locking, signal-death handling |
 | `../../rules/telegram-transport.md` | Outbox model, callback_data limits, ephemeral cleanup |
-| `../../rules/control-channel.md` | PTY lifecycle, session registries, cooldown, ask-question flow |
+| `../../rules/control-channel.md` | PTY lifecycle, session registries, outline gate, permission modes, live sessions |
 | `../../rules/dev-workflow.md` | Dev/staging separation — NEVER restart staging to test |
 | `../../rules/release-discipline.md` | Branch model, integration test gate, fleet rollout |
 | `../../rules/testing-conventions.md` | pytest patterns, stub subprocess scripts |

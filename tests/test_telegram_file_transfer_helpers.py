@@ -144,7 +144,7 @@ async def test_save_document_payload_denied_path(tmp_path: Path) -> None:
         force=False,
     )
 
-    assert result.error == "path denied by rule: .git/**"
+    assert result.error == "path denied by rule: `.git/**`"
 
 
 @pytest.mark.anyio
@@ -296,7 +296,7 @@ def test_resolve_file_put_paths_denied_rule(tmp_path: Path) -> None:
 
     assert base_dir is None
     assert rel_path is None
-    assert error == "path denied by rule: .env"
+    assert error == "path denied by rule: `.env`"
 
 
 def test_resolve_file_put_paths_target_is_file(tmp_path: Path) -> None:
@@ -1114,8 +1114,14 @@ async def test_handle_file_get_escape_root(tmp_path: Path, monkeypatch) -> None:
     transport = FakeTransport()
     cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
     msg = _msg("/file get")
-
-    monkeypatch.setattr(transfer, "resolve_path_within_root", lambda *_a, **_k: None)
+    # A real escape (was a mock of the removed resolve_path_within_root call,
+    # #390): an in-root symlink pointing outside the project.
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (tmp_path / "note.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported")
 
     await transfer._handle_file_get(
         cfg,
@@ -1233,3 +1239,383 @@ async def test_handle_file_get_at_size_limit_succeeds(
         "file is too large" in call["message"].text for call in transport.send_calls
     )
     assert not too_large
+
+
+# ---------------------------------------------------------------------------
+# #390 — deny globs hold for the symlink-resolved path (F1-F12)
+# ---------------------------------------------------------------------------
+
+
+def _link(link: Path, target: Path | str) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported")
+
+
+def _put_cfg(tmp_path: Path, name: str = "x.bin", payload: bytes = b"PAYLOAD"):
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime(tmp_path),
+        bot=_FileBot(file_info=File(file_path=f"files/{name}"), payload=payload),
+    )
+    return transport, cfg
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_denies_symlink_into_git(tmp_path: Path) -> None:
+    # F1
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    _link(tmp_path / "docs" / "x", Path("../.git/hooks"))
+    _, cfg = _put_cfg(tmp_path, "pre-commit")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="pre-commit"),
+        run_root=tmp_path,
+        rel_path=Path("docs/x/pre-commit"),
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.error is not None
+    assert result.error.startswith("path denied by rule: `.git/**`")
+    assert "resolves to `.git/hooks/pre-commit`" in result.error
+    assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_uploads_dir_symlinked_to_git_hooks(
+    tmp_path: Path,
+) -> None:
+    # F2: the malicious-repo vector — ``incoming -> .git/hooks``.
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    _link(tmp_path / "incoming", Path(".git/hooks"))
+    _, cfg = _put_cfg(tmp_path, "pre-commit")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="pre-commit"),
+        run_root=tmp_path,
+        rel_path=None,
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.error is not None
+    assert result.error.startswith("path denied by rule: `.git/**`")
+    assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_force_via_symlink_to_env_denied(
+    tmp_path: Path,
+) -> None:
+    # F3
+    (tmp_path / ".env").write_text("SECRET", encoding="utf-8")
+    _link(tmp_path / "cfg.txt", Path(".env"))
+    _, cfg = _put_cfg(tmp_path, "cfg.txt")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="cfg.txt"),
+        run_root=tmp_path,
+        rel_path=Path("cfg.txt"),
+        base_dir=None,
+        force=True,
+    )
+
+    assert result.error == "path denied by rule: `.env` (resolves to `.env`)"
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "SECRET"
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_benign_symlink_reports_resolved_path(
+    tmp_path: Path,
+) -> None:
+    # F4
+    (tmp_path / "data" / "inbox").mkdir(parents=True)
+    _link(tmp_path / "inbox", Path("data/inbox"))
+    _, cfg = _put_cfg(tmp_path, "a.txt", b"hello")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="a.txt"),
+        run_root=tmp_path,
+        rel_path=Path("inbox/a.txt"),
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.error is None
+    assert result.rel_path == Path("data/inbox/a.txt")
+    assert (tmp_path / "data" / "inbox" / "a.txt").read_bytes() == b"hello"
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_symlinked_run_root_dedup_no_crash(
+    tmp_path: Path,
+) -> None:
+    # F5: ``target.relative_to(run_root)`` raised ValueError on a symlinked
+    # project path and took the bot down.
+    real = tmp_path / "real"
+    (real / "incoming").mkdir(parents=True)
+    (real / "incoming" / "report.txt").write_text("existing", encoding="utf-8")
+    _link(tmp_path / "link", Path("real"))
+    _, cfg = _put_cfg(tmp_path, "report.txt", b"new")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="report.txt"),
+        run_root=tmp_path / "link",
+        rel_path=None,
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.error is None
+    assert result.rel_path == Path("incoming/report_1.txt")
+    assert (real / "incoming" / "report.txt").read_text(encoding="utf-8") == (
+        "existing"
+    )
+    assert (real / "incoming" / "report_1.txt").read_bytes() == b"new"
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_symlink_loop_returns_error(
+    tmp_path: Path,
+) -> None:
+    # F6
+    _link(tmp_path / "loop1", Path("loop2"))
+    _link(tmp_path / "loop2", Path("loop1"))
+    _, cfg = _put_cfg(tmp_path, "x.txt")
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="x.txt"),
+        run_root=tmp_path,
+        rel_path=Path("loop1/x.txt"),
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.error is not None
+    assert "could not be resolved" in result.error
+
+
+def test_resolve_file_put_paths_symlinked_dir_into_git_denied(
+    tmp_path: Path,
+) -> None:
+    # F7
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    _link(tmp_path / "docs" / "x", Path("../.git/hooks"))
+    _, cfg = _put_cfg(tmp_path)
+
+    result = transfer.resolve_file_put_paths(
+        _plan(tmp_path, path_value="docs/x/"), cfg=cfg, require_dir=False
+    )
+
+    assert result == (
+        None,
+        None,
+        "path denied by rule: `.git/**` (resolves to `.git/hooks`)",
+    )
+
+
+@pytest.mark.anyio
+async def test_save_file_put_group_symlinked_ssh_dir_denies_each_file(
+    tmp_path: Path,
+) -> None:
+    # F8: the dir-level check passes (``r/.ssh`` has no ancestor matching
+    # ``**/.ssh``); the per-file check on ``r/.ssh/<name>`` denies.
+    (tmp_path / "r" / ".ssh").mkdir(parents=True)
+    _link(tmp_path / "keys", Path("r/.ssh"))
+    _, cfg = _put_cfg(tmp_path)
+    msg = _msg("/file put keys/", document=_document(file_id="a", file_name="a.txt"))
+    extra = _msg(
+        "/file put keys/",
+        message_id=2,
+        document=_document(file_id="b", file_name="b.txt"),
+    )
+
+    result = await transfer._save_file_put_group(
+        cfg, msg, "keys/", [msg, extra], ambient_context=None, topic_store=None
+    )
+
+    assert result is not None
+    assert result.saved == []
+    assert len(result.failed) == 2
+    for item in result.failed:
+        assert item.error is not None
+        assert "**/.ssh/**" in item.error
+    assert list((tmp_path / "r" / ".ssh").iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_denies_symlink_to_env(tmp_path: Path) -> None:
+    # F9
+    (tmp_path / ".env").write_text("SECRET", encoding="utf-8")
+    _link(tmp_path / "cfg.txt", Path(".env"))
+    transport = FakeTransport()
+    bot = FakeBot()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path), bot=bot)
+
+    await transfer._handle_file_get(
+        cfg, _msg("/file get"), "cfg.txt", ambient_context=None, topic_store=None
+    )
+
+    assert "path denied by rule: .env" in transport.send_calls[-1]["message"].text
+    assert bot.document_calls == []
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_denies_dir_symlink_into_git(tmp_path: Path) -> None:
+    # F10
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    _link(tmp_path / "docs" / "x", Path("../.git"))
+    transport = FakeTransport()
+    bot = FakeBot()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path), bot=bot)
+
+    await transfer._handle_file_get(
+        cfg, _msg("/file get"), "docs/x", ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert "path denied by rule: .git/**" in text
+    assert "resolves to .git" in text
+    assert bot.document_calls == []
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_symlinked_dir_zip_denies_on_real_path(
+    tmp_path: Path,
+) -> None:
+    # F11: members are deny-checked on the real path but keep the requested
+    # ``bench/`` prefix in the archive.
+    import io
+    import zipfile
+
+    (tmp_path / "benchmarks").mkdir()
+    (tmp_path / "benchmarks" / "ok.txt").write_text("ok", encoding="utf-8")
+    (tmp_path / "benchmarks" / "secret.txt").write_text("no", encoding="utf-8")
+    _link(tmp_path / "bench", Path("benchmarks"))
+    transport = FakeTransport()
+    bot = FakeBot()
+    base = make_cfg(transport)
+    files = base.files.model_copy(
+        update={
+            "deny_globs": [*base.files.deny_globs, "benchmarks/secret.txt"],
+        }
+    )
+    cfg = replace(base, runtime=_runtime(tmp_path), bot=bot, files=files)
+
+    await transfer._handle_file_get(
+        cfg, _msg("/file get"), "bench", ambient_context=None, topic_store=None
+    )
+
+    assert len(bot.document_calls) == 1
+    call = bot.document_calls[0]
+    assert call["filename"] == "bench.zip"
+    with zipfile.ZipFile(io.BytesIO(call["content"])) as archive:
+        assert archive.namelist() == ["bench/ok.txt"]
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_symlinked_file_keeps_requested_name(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "data.txt").write_text("r15 ok", encoding="utf-8")
+    _link(tmp_path / "link.txt", Path("data.txt"))
+    transport = FakeTransport()
+    bot = FakeBot()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path), bot=bot)
+
+    await transfer._handle_file_get(
+        cfg, _msg("/file get"), "link.txt", ambient_context=None, topic_store=None
+    )
+
+    assert bot.document_calls[-1]["filename"] == "link.txt"
+    assert bot.document_calls[-1]["content"] == b"r15 ok"
+
+
+@pytest.mark.anyio
+async def test_path_denied_log_fields(tmp_path: Path) -> None:
+    # F12
+    from structlog.testing import capture_logs
+
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    _link(tmp_path / "docs" / "x", Path("../.git/hooks"))
+    _, cfg = _put_cfg(tmp_path, "pre-commit")
+
+    with capture_logs() as logs:
+        await transfer._save_document_payload(
+            cfg,
+            document=_document(file_name="pre-commit"),
+            run_root=tmp_path,
+            rel_path=Path("docs/x/pre-commit"),
+            base_dir=None,
+            force=False,
+        )
+
+    denied = [e for e in logs if e["event"] == "file_transfer.path_denied"]
+    assert len(denied) == 1
+    entry = denied[0]
+    assert entry["direction"] == "put"
+    assert entry["via_symlink"] is True
+    assert entry["rule"] == ".git/**"
+    assert entry["requested"] == "docs/x/pre-commit"
+    assert entry["resolved"] == ".git/hooks/pre-commit"
+    assert entry["log_level"] == "warning"
+    for value in entry.values():
+        assert not (isinstance(value, str) and value.startswith("/"))
+
+
+@pytest.mark.anyio
+async def test_path_denied_log_info_without_symlink(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    with capture_logs() as logs:
+        await transfer._handle_file_get(
+            cfg, _msg("/file get"), "key.pem", ambient_context=None, topic_store=None
+        )
+
+    assert "path denied by rule: **/*.pem" in transport.send_calls[-1]["message"].text
+    denied = [e for e in logs if e["event"] == "file_transfer.path_denied"]
+    assert len(denied) == 1
+    assert denied[0]["direction"] == "get"
+    assert denied[0]["via_symlink"] is False
+    assert denied[0]["log_level"] == "info"
+
+
+def test_path_denied_reply_keeps_glob_stars_when_rendered() -> None:
+    # Replies go through Markdown; a bare ``**/.ssh/**`` used to render as a
+    # bold ``/.ssh/`` (rc15 integration finding, R15-3c).
+    from untether.markdown import MarkdownParts
+    from untether.telegram.files import PathAccess
+    from untether.telegram.render import prepare_telegram
+
+    check = PathAccess(
+        root=Path("/repo"),
+        target=None,
+        rel=None,
+        reason="denied",
+        rule="**/.ssh/**",
+        via_symlink=True,
+        resolved=Path("r15/real/.ssh/key.txt"),
+    )
+    text = transfer._path_access_error(
+        "put", Path("r15/keys/key.txt"), check, kind="upload"
+    )
+    rendered, _entities = prepare_telegram(MarkdownParts(header=text))
+    assert rendered == (
+        "path denied by rule: **/.ssh/** (resolves to r15/real/.ssh/key.txt)"
+    )

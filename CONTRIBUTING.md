@@ -12,7 +12,7 @@ This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By particip
 
 - **Python 3.12+** — `uv python install 3.14`
 - **uv** — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, `pi`, `gemini`, or `amp`
+- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, or `pi` (`gemini` and `amp` are still included but deprecated and no longer supported — they're excluded from testing, and when a change breaks their runners, `xfail`/`skip` the test rather than fixing the runner)
 
 ### Development setup
 
@@ -86,14 +86,14 @@ Key test patterns:
 
 - Use **stub subprocess runners** with fake CLI scripts for engine tests
 - Use **`FakeTransport`** protocol doubles instead of real Telegram clients
-- Verify the **3-event contract**: `StartedEvent` → `ActionEvent(s)` → `CompletedEvent`
+- Verify the **3-event contract**: `StartedEvent` → `ActionEvent(s)` → `CompletedEvent` (Claude live sessions may follow it with `TurnEvent` segments, never a second `CompletedEvent`)
 - Use **pytest + anyio** for async tests
 
 ### Linting
 
 ```sh
 uv run ruff check src tests             # lint
-uv run ruff format src tests            # auto-format
+uv run ruff format src tests            # auto-format (CI also checks formatting)
 ```
 
 ## Architecture overview
@@ -124,10 +124,10 @@ See [Architecture](docs/explanation/architecture.md) for the full breakdown.
 ## Submitting changes
 
 1. Fork the repository
-2. Create a feature branch from `master`
+2. Create a feature branch from `dev` (or from `master` if no `dev` branch exists yet)
 3. Make your changes with tests
-4. Verify: `uv run pytest && uv run ruff check src tests`
-5. Push and open a pull request
+4. Verify: `uv run pytest && uv run ruff check src tests && uv run ruff format --check src tests`
+5. Push and open a pull request against `dev` — `master` only receives release merges and always matches the latest PyPI release
 
 ### Pull request guidelines
 
@@ -151,7 +151,7 @@ See [Architecture](docs/explanation/architecture.md) for the full breakdown.
 
 ## Reporting issues
 
-Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report bugs or request features. Include:
+Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report bugs. For feature requests, start in [Discussions → Ideas](https://github.com/littlebearapps/untether/discussions/categories/ideas) — ideas that gather support become tracked issues. Bug reports should include:
 
 - Untether version (`untether --version`)
 - Engine and version (e.g., `claude --version`)
@@ -161,5 +161,7 @@ Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report
 
 ## Questions?
 
-- Open a [discussion](https://github.com/littlebearapps/untether/issues) on GitHub
+- Read the guides in the [help centre](https://littlebearapps.com/help/untether/), or start at [untether.cc](https://untether.cc)
+- Ask in [Discussions → Q&A](https://github.com/littlebearapps/untether/discussions/categories/q-a) on GitHub
+- Every stable release gets a plain-English post in [Discussions → Announcements](https://github.com/littlebearapps/untether/discussions/categories/announcements)
 - Join the [Telegram group](https://t.me/+qBtYAMZLW_JkYWEy)

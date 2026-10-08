@@ -62,6 +62,38 @@ class TestShortModelName:
     def test_no_bracket_unchanged(self) -> None:
         assert _short_model_name("claude-opus-4-6") == "opus 4.6"
 
+    # #688: the Claude 5 family ships major-only IDs and a new `fable` family.
+    # Before the fix these all fell through to the lossy family fallback:
+    # `claude-opus-5` → `opus`, `claude-fable-5` → `claude-fable-5` (raw).
+
+    def test_opus_5_major_only(self) -> None:
+        assert _short_model_name("claude-opus-5") == "opus 5"
+
+    def test_opus_5_with_1m_context(self) -> None:
+        # Regression guard: the old regex dropped the 1M marker entirely, so a
+        # 1M run was indistinguishable from a standard one in the footer.
+        assert _short_model_name("claude-opus-5[1m]") == "opus 5 (1M)"
+
+    def test_fable_5(self) -> None:
+        # The exact string observed raw in the nsd `blogs` footer.
+        assert _short_model_name("claude-fable-5") == "fable 5"
+
+    def test_sonnet_5_major_only(self) -> None:
+        assert _short_model_name("claude-sonnet-5") == "sonnet 5"
+
+    def test_opus_5_dated_does_not_read_date_as_minor(self) -> None:
+        # Regression guard for the `(?!\d)` lookahead: without it the date is
+        # captured as a minor version and renders as `opus 5.20260725`.
+        assert _short_model_name("claude-opus-5-20260725") == "opus 5"
+
+    def test_opus_5_real_minor_still_parses(self) -> None:
+        # Forward-compat: a genuine 5.x minor must not be swallowed by the
+        # optional-minor change.
+        assert _short_model_name("claude-opus-5-1") == "opus 5.1"
+
+    def test_bare_fable_family_fallback(self) -> None:
+        assert _short_model_name("claude-fable") == "fable"
+
 
 class TestFormatMetaLine:
     def test_full_model_and_permission(self) -> None:
@@ -77,6 +109,12 @@ class TestFormatMetaLine:
     def test_model_only(self) -> None:
         result = format_meta_line({"model": "claude-haiku-4-5-20251001"})
         assert result == "haiku 4.5"
+
+    def test_claude_5_footer_end_to_end(self) -> None:
+        # #688: reproduces the footer observed live in the nsd `blogs` chat,
+        # which rendered `claude-fable-5 \N{MIDDLE DOT} plan` with the raw model ID.
+        result = format_meta_line({"model": "claude-fable-5", "permissionMode": "plan"})
+        assert result == "fable 5 \N{MIDDLE DOT} plan"
 
     def test_permission_only(self) -> None:
         result = format_meta_line({"permissionMode": "plan"})

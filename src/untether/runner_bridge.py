@@ -1,24 +1,59 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
+import re
 import signal as _signal
+import threading
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import anyio
 
+from .background_status import (
+    CONTINUED_SUFFIX,
+    FOLDABLE_REASONS,
+    BackgroundStatusManager,
+    count_substantive_actions,
+    format_tokens,
+    is_collection_action,
+    live_shown,
+    register_live_count_source,
+    render_background_block,
+    task_label,
+    unregister_live_count_source,
+    wake_fold_decision,
+)
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
+from .events import EventFactory
 from .logging import bind_run_context, get_logger
-from .markdown import format_meta_line, render_event_cli
-from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
+from .markdown import _short_model_name, format_meta_line, render_event_cli
+from .model import (
+    TURN_COMPLETE_MARKER,
+    ActionEvent,
+    CompletedEvent,
+    ResumeToken,
+    StartedEvent,
+    TurnEvent,
+    UntetherEvent,
+)
+from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
 from .progress import ProgressTracker
-from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
+from .runner import (
+    _APPROVAL_PENDING_REFIRE_S,
+    Runner,
+    RunStreamHandle,
+    prespawn_blocked_reason,
+    reset_run_stream_handle,
+    set_run_stream_handle,
+)
+from .session_costs import TokenScope, token_counts
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -28,6 +63,7 @@ from .transport import (
     SendOptions,
     ThreadId,
     Transport,
+    message_kind,
 )
 
 logger = get_logger(__name__)
@@ -53,6 +89,33 @@ class _StuckAfterToolResultState:
 # npm bridge) is the specific adapter implicated in #322; other
 # `@modelcontextprotocol/*` stdio bridges share the same failure mode.
 _MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
+
+
+def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
+    """#695: resolved model as loggable fields, or ``{}`` when unknown.
+
+    The model lives only in ``StartedEvent.meta``, which until now was
+    consumed for rendering and never logged — so a footer regression like
+    #688 (``claude-opus-5[1m]`` shortening to a bare ``opus``, silently
+    dropping the 1M-context marker) was invisible to log-side auditing and
+    to the log-only ``untether-issue-watcher``.
+
+    Both halves are logged deliberately: ``model`` is the raw ID from the
+    engine, ``model_display`` is the *same string the footer renders*, taken
+    from ``_short_model_name`` rather than re-derived, so the pair makes a
+    shortener regression self-evident from logs alone.
+
+    Returns an empty dict rather than ``model=None`` when meta carries no
+    model — some engines ship it late (pi sends the model from
+    ``message_end`` via a supplementary ``StartedEvent``, per
+    ``.claude/rules/runner-development.md``), and an absent key reads as
+    "not reported" where ``None`` reads as "reported as nothing".
+    """
+    model = (meta or {}).get("model")
+    if not isinstance(model, str) or not model:
+        return {}
+    return {"model": model, "model_display": _short_model_name(model)}
+
 
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
@@ -82,6 +145,63 @@ def register_ephemeral_message(
     key = (channel_id, anchor_message_id)
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
     _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# #709: AskUserQuestion tracked-action registry
+# ---------------------------------------------------------------------------
+# Two writers own the progress message and only one of them had state. The
+# ``aq`` callback handler advances a multi-question flow by editing the
+# message directly, but the ProgressTracker still held the AskUserQuestion
+# control action with its INTERCEPT-time title and keyboard — so the next
+# heartbeat re-render regenerated the message from that unchanged model and
+# clobbered the edit, showing Q1's text and Q1's option labels while Q2 was
+# outstanding. This registry lets the handler advance the model too.
+#
+# Keyed by request_id (which the flow already carries). Same TTL sweep as the
+# other run-scoped registries above.
+
+_ASK_ACTION_MODEL: dict[str, tuple[ProgressTracker, str]] = {}
+_ASK_ACTION_MODEL_TS: dict[str, float] = {}
+
+
+def register_ask_action_model(
+    request_id: str, tracker: ProgressTracker, action_id: str
+) -> None:
+    """Record which tracked action renders *request_id*'s question."""
+    import time as _time
+
+    _ASK_ACTION_MODEL[request_id] = (tracker, action_id)
+    _ASK_ACTION_MODEL_TS[request_id] = _time.monotonic()
+
+
+def advance_ask_action_model(
+    request_id: str,
+    *,
+    title: str,
+    buttons: list[list[dict[str, str]]] | None,
+) -> bool:
+    """Point the tracked action at the flow's CURRENT question.
+
+    ``buttons=None`` clears the keyboard from the model — used when the flow
+    is answered, so the renderer's newest-first keyboard scan (#683) stops
+    finding this action instead of the handler racing an edit against it.
+    """
+    entry = _ASK_ACTION_MODEL.get(request_id)
+    if entry is None:
+        return False
+    tracker, action_id = entry
+    detail = dict(tracker.action_detail(action_id) or {})
+    if buttons is None:
+        detail.pop("inline_keyboard", None)
+    else:
+        detail["inline_keyboard"] = {"buttons": buttons}
+    return tracker.update_action(action_id, title=title, detail=detail)
+
+
+def clear_ask_action_model(request_id: str) -> None:
+    _ASK_ACTION_MODEL.pop(request_id, None)
+    _ASK_ACTION_MODEL_TS.pop(request_id, None)
 
 
 # Outline message cleanup registry.
@@ -119,7 +239,8 @@ async def delete_outline_messages(session_id: str) -> None:
     transport, refs = entry
     for ref in refs:
         try:
-            await transport.delete(ref=ref)
+            with message_kind("outline"):
+                await transport.delete(ref=ref)
         except Exception:  # noqa: BLE001
             logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
@@ -149,9 +270,70 @@ def sweep_stale_registries(now: float | None = None) -> int:
             _OUTLINE_REGISTRY.pop(sid, None)
             _OUTLINE_REGISTRY_TS.pop(sid, None)
             pruned += 1
+    for rid, ts in list(_ASK_ACTION_MODEL_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _ASK_ACTION_MODEL.pop(rid, None)
+            _ASK_ACTION_MODEL_TS.pop(rid, None)
+            pruned += 1
     if pruned:
         logger.info("runner_bridge.registries_swept", pruned=pruned)
     return pruned
+
+
+# #684: callback-data prefixes of buttons that can answer a Claude control
+# request (approval / plan buttons, AskUserQuestion options).
+_CONTROL_CALLBACK_PREFIXES = ("claude_control:", "aq:")
+
+
+def control_callbacks_in(rendered: RenderedMessage | None) -> frozenset[str]:
+    """callback_data of every ``claude_control:`` / ``aq:`` button on a
+    rendered message (#684). The cancel row and other buttons are ignored."""
+    if rendered is None:
+        return frozenset()
+    markup = rendered.extra.get("reply_markup")
+    rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+    if not isinstance(rows, list):
+        return frozenset()
+    found: set[str] = set()
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for button in row:
+            data = button.get("callback_data") if isinstance(button, dict) else None
+            if isinstance(data, str) and data.startswith(_CONTROL_CALLBACK_PREFIXES):
+                found.add(data)
+    return frozenset(found)
+
+
+def build_control_surface_probe(
+    edits: ProgressEdits, turn_router: Any
+) -> Callable[[], frozenset[str]]:
+    """#684: a probe for the control buttons the user can see right now —
+    turn 1's progress message (until the run's result), the open follow-up /
+    wake turn's progress message (``turn_router.current``), and ``"outline"``
+    while an outline message is up (the Pause & Outline Approve/Deny keyboard
+    lives there, not on the progress message; bound to the message's
+    lifetime, not the TTL-swept ``_OUTLINE_REGISTRY``)."""
+
+    def _probe() -> frozenset[str]:
+        callbacks: set[str] = set()
+        engine_state = getattr(edits.stream, "engine_state", None)
+        if not getattr(engine_state, "completed_turns", 0):
+            callbacks |= control_callbacks_in(edits.last_rendered)
+        current = getattr(turn_router, "current", None)
+        turn_edits = getattr(current, "edits", None)
+        if turn_edits is not None:
+            callbacks |= control_callbacks_in(turn_edits.last_rendered)
+        # #929: buttons on the standalone approval messages count too.
+        if edits.orphan_approvals is not None:
+            callbacks |= edits.orphan_approvals.callbacks()
+        if edits.has_outline_messages or (
+            turn_edits is not None and turn_edits.has_outline_messages
+        ):
+            callbacks.add("outline")
+        return frozenset(callbacks)
+
+    return _probe
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +425,44 @@ def _load_auto_continue_settings():
         return AutoContinueSettings()
 
 
+def _load_outbox_settings(cfg: ExecBridgeConfig) -> Any | None:
+    """#924: the outbox settings to use for THIS delivery (hot-reload).
+
+    ``cfg.outbox_config`` is frozen at startup (``telegram/backend.py``) and
+    ``TelegramBridgeConfig.update_from`` never refreshes it, so every
+    ``outbox_*`` edit used to need a restart. Read per delivery instead,
+    following ``_load_auto_continue_settings`` (cheap: #506 parse cache).
+
+    - ``None`` when the outbox wasn't enabled at startup (no send callable —
+      turning ``files.enabled`` on still needs a restart) or is now disabled
+      in the live config;
+    - the frozen ``cfg.outbox_config`` when no config file is loadable (tests,
+      API users) **or the file doesn't parse** (amendment 3: a half-edited
+      toml must not silently swap in hard defaults mid-run);
+    - otherwise the live ``[transports.telegram.files]``.
+    """
+    frozen = cfg.outbox_config
+    if cfg.send_file is None or frozen is None:
+        return None
+    try:
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+    except Exception:  # noqa: BLE001
+        logger.warning("outbox_settings.load_failed", exc_info=True)
+        return frozen
+    if result is None:
+        return frozen
+    settings, _ = result
+    try:
+        files = settings.transports.telegram.files
+    except AttributeError:
+        return frozen
+    if not (files.enabled and files.outbox_enabled):
+        return None
+    return files
+
+
 def _is_signal_death(rc: int | None) -> bool:
     """Return True if the return code indicates the process was killed by a signal.
 
@@ -265,6 +485,7 @@ def _should_auto_continue(
     auto_continued_count: int,
     max_retries: int,
     proc_returncode: int | None = None,
+    saw_result: bool = False,
 ) -> bool:
     """Detect a Claude Code run that exited without processing its tool results.
 
@@ -296,10 +517,36 @@ def _should_auto_continue(
     for Claude it is now always populated (`runners/claude.py`, run_impl).
     14 days of fleet data showed 47/49 auto-continues at rc=0 and 2 at
     rc=143 — the latter being exactly the leak this gate now closes.
+
+    #716 — the ``a result frame would exclude the predicate entirely``
+    claim above was **assumed, never enforced**. It reads
+    ``last_event_type``, a running value that records the last frame seen
+    rather than whether the run reached its result, and the two come apart:
+    106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    ``last_event_type=user``, satisfying every gate here. Nothing but the
+    caller's ``final_delivery["sent"]`` check stopped a salvage re-spawn of
+    a finished run.
+
+    The claim is now enforced by ``saw_result``, a monotonic per-run latch
+    set when a ``result`` frame is parsed. That is the sound
+    discriminator for this predicate: neither upstream defect emits a
+    ``result`` at all (claude-code#34142 skips the assistant continuation
+    after a tool_result; #30333 never emits ResultMessage with background
+    subagents), so gating on it preserves both mitigations exactly while
+    excluding runs that finished.
+
+    Note what this does NOT claim: the trailing-frame mechanism #716
+    hypothesised is disproven — a frame after the terminal ``result``
+    cannot reach the stream, because the CompletedEvent breaks the read
+    loop (see ``JsonlStreamState.saw_result``). A ``user`` value on a
+    completed run means the result never landed on that stream object, and
+    the reason for that is tracked separately.
     """
     if cancelled:
         return False
     if engine != "claude":
+        return False
+    if saw_result:
         return False
     if last_event_type != "user":
         return False
@@ -331,12 +578,81 @@ def _format_outbox_skipped_notice(skipped: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+_OUTBOX_NOTICE_NAME_CAP = 5
+
+
+def _format_outbox_stale_notice(
+    stale: list[tuple[str, float]],
+    *,
+    archived_to: str | None,
+    cleanup: bool,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: one block for outbox entries that predate the run (not sent).
+
+    Newest first, up to 5 names, plus the count and the date range.
+    """
+    from datetime import datetime
+
+    count = len(stale)
+    noun, verb = ("file", "was") if count == 1 else ("files", "were")
+    times = [t for _, t in stale]
+    first = datetime.fromtimestamp(min(times)).strftime("%Y-%m-%d")
+    last = datetime.fromtimestamp(max(times)).strftime("%Y-%m-%d")
+    span = first if first == last else f"{first} – {last}"
+    lines = [
+        f"\U0001f4ce {count} older {noun} {verb} already in {outbox_dir}/ "
+        f"before this run ({span}), so they weren't sent:"
+    ]
+    items = sorted(stale, key=lambda kv: kv[1], reverse=True)
+    for name, _ in items[:_OUTBOX_NOTICE_NAME_CAP]:
+        lines.append(f"- {name}")
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        lines.append(f"- … and {count - _OUTBOX_NOTICE_NAME_CAP} more")
+    if archived_to is not None:
+        graveyard = archived_to.rstrip("/")
+        lines.append(
+            f"Moved to {archived_to} — /file get {graveyard} fetches them as a zip."
+        )
+    elif not cleanup:
+        lines.append("Left in place (outbox_cleanup is off).")
+    else:
+        lines.append("Left in place (moving them aside failed).")
+    return "\n".join(lines)
+
+
+def _format_outbox_overflow_notice(
+    overflow: list[str],
+    *,
+    max_files: int | None,
+    archived_to: str | None,
+    outbox_dir: str = ".untether-outbox",
+) -> str:
+    """#924: fresh files beyond ``outbox_max_files`` — previously hidden."""
+    count = len(overflow)
+    noun, verb = ("file", "wasn't") if count == 1 else ("files", "weren't")
+    names = ", ".join(overflow[:_OUTBOX_NOTICE_NAME_CAP])
+    if count > _OUTBOX_NOTICE_NAME_CAP:
+        names += f" and {count - _OUTBOX_NOTICE_NAME_CAP} more"
+    where = (
+        f"moved to {archived_to}"
+        if archived_to is not None
+        else f"left in {outbox_dir}/"
+    )
+    return (
+        f"\U0001f4ce {count} more {noun} {verb} sent "
+        f"(limit outbox_max_files = {max_files}): {names} — {where}."
+    )
+
+
 async def _surface_outbox_skipped(
     cfg: ExecBridgeConfig,
     incoming: IncomingMessage,
     user_ref: MessageRef,
     skipped: list[tuple[str, str]],
     outbox_config: Any,
+    *,
+    result: Any | None = None,
 ) -> None:
     """#524 rc20 follow-up: send the 📎 Outbox skipped notice as a follow-up
     Telegram message. Extracted so the same surface fires from both the
@@ -347,15 +663,40 @@ async def _surface_outbox_skipped(
     The "..." pseudo-entry is the max-files-exceeded notice which we keep
     in logs but skip from the user-facing block (the per-file reason there
     isn't actionable).
+
+    #924: pass the delivery's ``OutboxResult`` as ``result`` to add the
+    stale-files block and the overflow block. All three blocks go out as one
+    message, all gated by ``outbox_notify_skipped``.
     """
-    if not skipped:
-        return
     if not getattr(outbox_config, "outbox_notify_skipped", True):
         return
+    blocks: list[str] = []
     notable = [(name, reason) for (name, reason) in skipped if name != "..."]
-    if not notable:
+    if notable:
+        blocks.append(_format_outbox_skipped_notice(notable))
+    if result is not None:
+        outbox_dir = getattr(result, "outbox_dir", ".untether-outbox")
+        if getattr(result, "stale", None):
+            blocks.append(
+                _format_outbox_stale_notice(
+                    result.stale,
+                    archived_to=result.stale_archived_to,
+                    cleanup=result.cleanup,
+                    outbox_dir=outbox_dir,
+                )
+            )
+        if getattr(result, "overflow", None):
+            blocks.append(
+                _format_outbox_overflow_notice(
+                    result.overflow,
+                    max_files=result.overflow_limit,
+                    archived_to=result.overflow_archived_to,
+                    outbox_dir=outbox_dir,
+                )
+            )
+    if not blocks:
         return
-    text = _format_outbox_skipped_notice(notable)
+    text = "\n\n".join(blocks)
     try:
         await cfg.transport.send(
             channel_id=incoming.channel_id,
@@ -436,6 +777,37 @@ def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
         return False
 
 
+def _should_stream_idle_retry(
+    *,
+    watchdog: Any,
+    stream_idle_class: str | None,
+    run_ok: bool,
+    cancelled: bool,
+    resume_present: bool,
+    retried_count: int,
+    proc_returncode: int | None,
+    usage: dict[str, Any] | None,
+) -> bool:
+    """#572: whether the bounded Type-A stream-idle auto-retry acts on a
+    failed result. Type-B (cold-start zero-byte stall) never retries.
+
+    #900: shared by the post-return retry gate and the live-session early
+    error delivery, which must hold a result this retry would act on. A
+    still-running process has ``proc_returncode=None`` — not a signal death,
+    so the early check errs towards holding."""
+    if watchdog is None or not getattr(watchdog, "stream_idle_auto_retry", False):
+        return False
+    if stream_idle_class != "type_a" or run_ok is not False:
+        return False
+    if cancelled or not resume_present:
+        return False
+    if retried_count >= getattr(watchdog, "stream_idle_max_retries", 1):
+        return False
+    if _is_signal_death(proc_returncode):
+        return False
+    return not _stream_idle_retry_budget_blocked(usage)
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -447,15 +819,18 @@ _DEFAULT_PREAMBLE = (
     "user's requested content. Hook concerns are secondary — briefly note them "
     "AFTER the main content, never instead of it.\n\n"
     "Configuration changes (`untether.toml`):\n"
-    "- Untether hot-reloads `~/.untether/untether.toml` automatically — "
+    "- Untether hot-reloads its `untether.toml` (default "
+    "`~/.untether/untether.toml`) automatically — "
     "edits take effect within ~1 second of saving.\n"
-    "- Do NOT run `systemctl --user restart untether` after editing config. "
+    "- Do NOT restart the Untether service after editing config "
+    "(`systemctl --user restart untether`, an `untether-*` instance unit, or "
+    "`launchctl kickstart … untether`). "
     "The restart is unnecessary, and because it shuts down the very session "
     "issuing the command, the graceful drain will time out (120s) and your "
     "final answer to the user will be silently dropped.\n"
     "- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, "
-    "`message_overflow`) are flagged at reload time — if you didn't see "
-    "such a warning, no restart is needed.\n\n"
+    "`message_overflow`, turning on `[triggers] enabled`) are flagged at "
+    "reload time — if you didn't see such a warning, no restart is needed.\n\n"
     "Plan-mode requirements (when you call `ExitPlanMode`):\n"
     "- Your `plan` parameter MUST be a concise 3–5 bullet summary of your "
     "findings, decisions, or proposed changes — never just a file path. "
@@ -483,6 +858,9 @@ _DEFAULT_PREAMBLE = (
     "  - To send files to the user, write them to `.untether-outbox/`\n"
     "  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n"
     "  - Files are delivered as Telegram documents when the run completes\n"
+    "  - Only files written or copied into it during this run are sent — "
+    "older leftovers are moved aside. To resend an older file, copy it in "
+    "again.\n"
     "  - The user can also request any project file with `/file get <path>`\n"
     "  ### Next Steps\n"
     "  - [Remaining work, if any]\n"
@@ -573,6 +951,7 @@ def _resolve_presenter(
                 max_actions=default_presenter._formatter.max_actions,
                 command_width=default_presenter._formatter.command_width,
                 verbosity=override,
+                show_context_usage=default_presenter._formatter.show_context_usage,
             )
             return TelegramPresenter(
                 formatter=formatter,
@@ -581,6 +960,35 @@ def _resolve_presenter(
     except Exception:  # noqa: BLE001
         logger.debug("resolve_presenter.failed", exc_info=True)
     return default_presenter
+
+
+def _refresh_progress_settings(
+    presenter: Presenter, override: Presenter | None = None
+) -> Any:
+    """Push the current ``[progress]`` settings into ``presenter`` (#269).
+
+    ``override`` is a per-chat ``/verbose`` presenter built at run start: it
+    takes the refreshed values too, except the verbosity it overrides.
+    Returns the settings snapshot.
+    """
+    from .telegram.bridge import TelegramPresenter
+
+    progress_cfg = _load_progress_settings()
+    refresh = getattr(presenter, "refresh_progress_settings", None)
+    if callable(refresh):
+        try:
+            refresh(progress_cfg)
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_settings.refresh_failed", exc_info=True)
+    if (
+        override is not None
+        and override is not presenter
+        and isinstance(override, TelegramPresenter)
+        and isinstance(presenter, TelegramPresenter)
+    ):
+        override._formatter.max_actions = presenter._formatter.max_actions
+        override._formatter.show_context_usage = presenter._formatter.show_context_usage
+    return progress_cfg
 
 
 # #410: schema-mismatch surfacing — promoted from one-shot per-process to
@@ -660,11 +1068,7 @@ async def _maybe_append_usage_footer(
         if always_show:
             compact = format_usage_compact(data)
             if compact:
-                footer = f"\n\u26a1 {compact}"
-                return RenderedMessage(
-                    text=_insert_before_resume(msg.text, footer),
-                    extra=msg.extra,
-                )
+                return _insert_footer_line(msg, f"\n\u26a1 {compact}")
             return msg
 
         # Threshold-based warning (existing behaviour)
@@ -689,31 +1093,146 @@ async def _maybe_append_usage_footer(
             _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
             footer = f"\n\u26a15h: {pct_5h:.0f}% ({reset}){_7d_part}"
 
-        return RenderedMessage(
-            text=_insert_before_resume(msg.text, footer), extra=msg.extra
-        )
+        return _insert_footer_line(msg, footer)
     except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
 
 
-def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
-    """Format run cost/usage from CompletedEvent into a footer line."""
+def _apply_cost_delta(
+    engine: str,
+    session_id: str | None,
+    usage: dict[str, Any] | None,
+    *,
+    resumed: bool,
+) -> dict[str, Any] | None:
+    """Return ``usage`` with ``total_cost_usd`` replaced by the spend since
+    the previous result of the same session (#778).
+
+    Claude only: its ``total_cost_usd`` is session-cumulative (probe F12).
+    Other engines' values are per-run as far as we know and pass through.
+    The cumulative value is kept as ``session_total_cost_usd``.
+    """
+    if engine != "claude" or not usage or not session_id:
+        return usage
+    raw = usage.get("total_cost_usd")
+    if not isinstance(raw, (int, float)):
+        return usage
+    from .session_costs import get_session_cost_ledger
+
+    baseline = usage.get("session_cost_baseline")
+    try:
+        result = get_session_cost_ledger().record(
+            engine,
+            session_id,
+            float(raw),
+            resumed=resumed,
+            baseline=float(baseline) if isinstance(baseline, (int, float)) else None,
+        )
+    except Exception:  # noqa: BLE001 — accounting must never break delivery
+        logger.warning("cost.delta_failed", exc_info=True)
+        return usage
+    logger.info(
+        "cost.turn_delta",
+        engine=engine,
+        session_id=session_id,
+        delta_usd=round(result.delta, 6),
+        cumulative_usd=round(result.cumulative, 6),
+        source=result.source,
+        **_background_log_fields(engine, usage),
+    )
+    return {
+        **usage,
+        "total_cost_usd": result.delta,
+        "session_total_cost_usd": result.cumulative,
+    }
+
+
+# #419: engines whose CompletedEvent token usage needs the session ledger.
+# Codex's turn.completed.usage is the thread's running total (every earlier
+# ``exec resume`` run included), so runs report the delta.
+_TOKEN_LEDGER_SCOPES: dict[str, TokenScope] = {
+    "codex": "thread_cumulative",
+    # #417: OpenCode reports per run; the ledger keeps a session total.
+    "opencode": "per_run",
+}
+
+
+def _apply_token_delta(
+    engine: str,
+    session_id: str | None,
+    usage: dict[str, Any] | None,
+    *,
+    resumed: bool,
+) -> dict[str, Any] | None:
+    """Return ``usage`` with its token fields rewritten to this run's share
+    (#419). Passthrough (the same object, no ``token_delta_source``) when the
+    engine is not in ``_TOKEN_LEDGER_SCOPES``, there is no session id, or the
+    usage carries no token counts."""
+    scope = _TOKEN_LEDGER_SCOPES.get(engine)
+    if scope is None or not usage or not session_id:
+        return usage
+    counts = token_counts(usage)
+    if counts is None:
+        return usage
+    from .session_costs import get_session_cost_ledger
+
+    try:
+        result = get_session_cost_ledger().record_tokens(
+            engine, session_id, counts, scope=scope, resumed=resumed
+        )
+    except Exception:  # noqa: BLE001 — accounting must never break delivery
+        logger.warning("usage.token_delta_failed", exc_info=True)
+        return usage
+    logger.info(
+        "usage.token_delta",
+        engine=engine,
+        session_id=session_id,
+        source=result.source,
+        input_delta=result.delta.get("input_tokens", 0),
+        output_delta=result.delta.get("output_tokens", 0),
+        reasoning_delta=result.delta.get("reasoning_output_tokens", 0),
+        cumulative_input=result.cumulative.get("input_tokens", 0),
+        cumulative_output=result.cumulative.get("output_tokens", 0),
+        runs=result.runs,
+    )
+    if scope == "per_run":
+        # The per-run figures are already this run's; add the session total.
+        return {**usage, "session_total_usage": result.cumulative}
+    # The flat fields now mean *this run*, like total_cost_usd after #778.
+    return {
+        **usage,
+        **result.delta,
+        "thread_total_usage": result.cumulative,
+        "token_delta_source": result.source,
+    }
+
+
+def _format_run_cost(
+    usage: dict[str, Any] | None, *, thread_cumulative: bool = False
+) -> str | None:
+    """Format run cost/usage from CompletedEvent into a footer line.
+
+    Token counts come from either usage shape via ``token_counts()``
+    (#417): nested ``usage["usage"]`` (Claude, OpenCode) or flat (Codex).
+    ``thread_cumulative`` marks an engine whose raw usage is a running thread
+    total (#419): when the ledger did not turn it into a per-run delta
+    (``token_delta_source`` missing, or ``baseline_unknown``) the figure is
+    labelled `` · thread total``.
+    """
     if not usage:
         return None
     cost = usage.get("total_cost_usd")
-    token_usage = usage.get("usage")
-    has_tokens = isinstance(token_usage, dict) and (
-        token_usage.get("input_tokens", 0) or token_usage.get("output_tokens", 0)
-    )
-    if cost is None and not has_tokens:
+    counts = token_counts(usage)
+    if cost is None and counts is None:
         return None
     parts: list[str] = []
     if cost is not None:
-        if cost >= 0.01:
-            parts.append(f"${cost:.2f}")
-        else:
-            parts.append(f"${cost:.4f}")
+        cost_part = f"${cost:.2f}" if cost >= 0.01 else f"${cost:.4f}"
+        if agents := _background_agents(usage):
+            # #821: the figure includes background agents' spend.
+            cost_part += f" · incl. {_plural(agents, 'bg agent')}"
+        parts.append(cost_part)
     turns = usage.get("num_turns")
     if turns is not None:
         parts.append(f"{turns} tn")
@@ -726,20 +1245,214 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
             parts.append(f"{mins}m {remaining}s")
         else:
             parts.append(f"{secs:.1f}s")
-    if has_tokens:
-        input_tokens = token_usage.get("input_tokens", 0)
-        output_tokens = token_usage.get("output_tokens", 0)
-        if input_tokens or output_tokens:
+    if counts is not None:
+        input_tokens = counts.get("input_tokens", 0)
+        output_tokens = counts.get("output_tokens", 0)
 
-            def _fmt_tokens(n: int) -> str:
-                if n >= 1_000_000:
-                    return f"{n / 1_000_000:.1f}M"
-                if n >= 1_000:
-                    return f"{n / 1_000:.1f}k"
-                return str(n)
+        def _fmt_tokens(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
 
-            parts.append(f"{_fmt_tokens(input_tokens)}/{_fmt_tokens(output_tokens)}")
+        token_part = f"{_fmt_tokens(input_tokens)}/{_fmt_tokens(output_tokens)}"
+        if thread_cumulative and usage.get("token_delta_source") in (
+            None,
+            "baseline_unknown",
+        ):
+            token_part += " · thread total"
+        parts.append(token_part)
     return " · ".join(parts) or None
+
+
+# #658: one-shot per process — see _warn_cost_visibility_gap.
+_cost_visibility_gap_warned = False
+_cost_visibility_gap_lock = threading.Lock()
+
+
+def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) -> None:
+    """#658: emit ONE ``config.cost_visibility_gap`` WARNING per process when
+    real API spend is neither displayed (``[footer] show_api_cost=false``)
+    nor bounded (no effective ``[cost_budget]``) — without it the operator
+    has no in-product moment to learn the burn rate. Pure config-shape
+    inspection; no billing inference. The fleet's issue watcher ingests
+    WARNING-level events, so log-only still reaches the operator.
+    """
+    global _cost_visibility_gap_warned
+    budget_cfg = settings.cost_budget
+    no_effective_budget = not budget_enabled or (
+        budget_cfg.max_cost_per_run is None and budget_cfg.max_cost_per_day is None
+    )
+    footer = settings.footer
+    if not no_effective_budget or footer.show_api_cost:
+        return
+    with _cost_visibility_gap_lock:
+        if _cost_visibility_gap_warned:
+            return
+        _cost_visibility_gap_warned = True
+    logger.warning(
+        "config.cost_visibility_gap",
+        total_cost_usd=cost,
+        cost_budget_enabled=budget_enabled,
+        has_per_run_budget=budget_cfg.max_cost_per_run is not None,
+        has_per_day_budget=budget_cfg.max_cost_per_day is not None,
+        show_api_cost=footer.show_api_cost,
+        show_subscription_usage=footer.show_subscription_usage,
+    )
+
+
+def _background_agents(usage: dict[str, Any] | None) -> int:
+    """#821: background agents active since the previous result, as the
+    Claude runner reports on ``usage["background"]`` (0 when absent)."""
+    background = (usage or {}).get("background")
+    if not isinstance(background, dict):
+        return 0
+    agents = background.get("agents")
+    if isinstance(agents, int) and not isinstance(agents, bool) and agents > 0:
+        return agents
+    return 0
+
+
+def _background_log_fields(
+    engine: str | None, usage: dict[str, Any] | None
+) -> dict[str, Any]:
+    """#821: the ``cost.turn_delta`` / ``cost.run_outlier`` fields naming the
+    background agents whose spend a Claude cost delta includes. Claude's
+    ``total_cost_usd`` counts subagent requests with no per-agent split, so
+    this labels the figure rather than dividing it. ``engine=None``: decide
+    from the presence of ``usage["background"]``. Other engines: none."""
+    background = (usage or {}).get("background")
+    if engine is None:
+        if not isinstance(background, dict):
+            return {}
+    elif engine != "claude":
+        return {}
+    fields: dict[str, Any] = {"bg_agents": _background_agents(usage)}
+    if isinstance(background, dict):
+        for key, field_name in (
+            ("agents_live", "bg_agents_live"),
+            ("agents_ended", "bg_agents_ended"),
+            ("task_ids", "bg_task_ids"),
+        ):
+            if key in background:
+                fields[field_name] = background[key]
+    return fields
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _run_shape_fields(usage: dict[str, Any], cost: float) -> dict[str, Any]:
+    """#717: the ``cost.run_outlier`` fields that explain a spend figure.
+
+    ``num_turns`` is the single highest-value discriminator; ``duration_api_ms``
+    separates "slow and expensive" from "fast and expensive"; the cache-read /
+    input token pair makes the context-bloat case self-evident (a high
+    cache-read-to-input ratio is the 2-turn/$20 signature). ``usd_per_turn``
+    is derived, but it is the number an operator reads first.
+
+    Every field is best-effort: engines other than Claude may populate a
+    different subset, so anything absent is simply omitted rather than logged
+    as ``None``. Never raises — the caller is on the delivery path.
+    """
+    fields: dict[str, Any] = {}
+    num_turns = usage.get("num_turns")
+    if isinstance(num_turns, int):
+        fields["num_turns"] = num_turns
+        if num_turns > 0:
+            fields["usd_per_turn"] = round(cost / num_turns, 4)
+    for key in ("duration_ms", "duration_api_ms"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            fields[key] = value
+    tokens = usage.get("usage")
+    if isinstance(tokens, dict):
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            value = tokens.get(key)
+            if isinstance(value, int):
+                fields[key] = value
+    return fields
+
+
+def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
+    """#702: emit ``cost.run_outlier`` for any single run above the threshold,
+    **regardless of whether a ``[cost_budget]`` is configured**, and return the
+    one-line chat notice (or ``None``).
+
+    #658's ``config.cost_visibility_gap`` is a once-per-process config-shape
+    diagnostic and works as designed — but it means a session can spend
+    unboundedly after that single line. ``check_run_budget`` returns early
+    without a configured budget, so ``warn_at_pct`` never evaluates and no
+    alert can fire at any spend level. This is the signal that survives an
+    empty ``[cost_budget]``.
+
+    Fail-open like :func:`_check_cost_budget`: a config read that blows up must
+    never take down the delivery path.
+    """
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None or cost <= 0:
+        return None
+    try:
+        from .cost_tracker import DEFAULT_RUN_OUTLIER_USD
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return None
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        threshold = budget_cfg.warn_run_above_usd
+        if threshold is None:
+            threshold = DEFAULT_RUN_OUTLIER_USD
+        if threshold <= 0 or cost < threshold:
+            return None
+        footer = settings.footer
+        logger.warning(
+            "cost.run_outlier",
+            total_cost_usd=cost,
+            threshold_usd=threshold,
+            budget_configured=budget_cfg.enabled,
+            show_api_cost=footer.show_api_cost,
+            show_subscription_usage=footer.show_subscription_usage,
+            # #717: the shape of the spend, not just its size. Without these
+            # a 2-turn $20.50 run and a 40-turn $19.58 run are identical in
+            # the log, and they call for opposite operator responses — the
+            # first says "this session's context has grown expensive, start
+            # a fresh one", the second says "big task, nothing to do".
+            # All of it already sits in the `usage` dict this function
+            # receives (`_usage_payload` in runners/claude.py); it was
+            # simply not forwarded.
+            **_run_shape_fields(usage, cost),
+            # #821: background agents whose spend this figure includes.
+            **_background_log_fields(None, usage),
+        )
+        if not budget_cfg.notify_run_outlier:
+            return None
+        notice = (
+            f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+        )
+        if agents := _background_agents(usage):
+            notice += (
+                f" \N{EM DASH} includes spend by "
+                f"{_plural(agents, 'background agent')} since the previous reply"
+            )
+        return notice
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cost.run_outlier_check_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+        return None
 
 
 def _check_cost_budget(
@@ -783,6 +1496,7 @@ def _check_cost_budget(
             budget_enabled = run_options.budget_enabled
         else:
             budget_enabled = budget_cfg.enabled
+        _warn_cost_visibility_gap(cost, settings, budget_enabled)
         if not budget_enabled:
             return None, None
 
@@ -810,6 +1524,92 @@ def _check_cost_budget(
         return None, None
 
 
+@dataclass(frozen=True, slots=True)
+class _CompletionAccounting:
+    """What ``_account_completion`` settled for one result (#806): the
+    per-run / per-turn usage (#778 delta applied) plus the budget and
+    outlier notices the final message may render."""
+
+    resume_value: str | None
+    run_usage: dict[str, Any] | None
+    cost_alert_text: str | None
+    cost_alert: object | None
+    outlier_text: str | None
+    # #896: "Stop at limit" footer line when this result ends the session.
+    budget_stop_text: str | None = None
+
+
+def _note_budget_run_cost(
+    state: dict[str, Any],
+    run_usage: dict[str, Any] | None,
+    *,
+    engine: str,
+    session_id: str | None,
+) -> str | None:
+    """#896: add a result's spend to the run's cumulative cost and decide
+    whether its live session must end after this reply.
+
+    ``run_usage`` is the #778 per-run / per-turn delta, so the running sum is
+    the whole live run's spend. Returns the stop line the first time the
+    budget is passed (the session id is then kept in ``state["sid"]`` for
+    ``close`` after delivery); ``None`` otherwise. Never raises.
+
+    Synchronous on purpose: when it stops, the live session refuses further
+    input (``stop_live_session_input``) before the caller awaits anything, so
+    a follow-up queued in ``inject_when_idle`` (or a steer) can't be written
+    while the stopping reply is still being sent. Either way the result is
+    then marked accounted, releasing any follow-up waiting on the check.
+    """
+    cost = (run_usage or {}).get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+        state["run_cost"] += float(cost)
+    if engine != "claude" or not session_id:
+        return None
+    try:
+        return _decide_budget_stop(state, session_id)
+    finally:
+        with contextlib.suppress(Exception):
+            from .runners.claude import note_turn_accounted
+
+            note_turn_accounted(session_id)
+
+
+def _decide_budget_stop(state: dict[str, Any], session_id: str) -> str | None:
+    if state["sid"] is not None:
+        return None  # already stopped (and input already refused)
+    try:
+        from .budget_gate import run_stop, run_stop_text
+        from .runners.claude import get_live_session, stop_live_session_input
+        from .runners.run_options import get_run_options
+
+        live = get_live_session(session_id)
+        if live is None or getattr(live, "closing", False):
+            return None  # the run has already ended: nothing to stop
+        stop = run_stop(state["run_cost"], get_run_options())
+        if stop is not None:
+            # Before any await: nothing queued behind this reply may start
+            # another paid turn. A follow-up refused here takes the resume
+            # path — refused there too by the daily gate when the day's
+            # budget is spent; after a per-run stop it starts a fresh run,
+            # which has its own per-run budget.
+            stop_live_session_input(session_id)
+    except Exception:  # noqa: BLE001 — a budget check must never break delivery
+        logger.warning("cost_budget.stop_check_failed", exc_info=True)
+        return None
+    if stop is None:
+        return None
+    state["sid"] = session_id
+    logger.warning(
+        "cost_budget.run_stopped",
+        scope=stop[0],
+        spent=round(stop[1], 4),
+        budget=stop[2],
+        run_cost=round(state["run_cost"], 4),
+        session_id=session_id,
+    )
+    return run_stop_text(stop)
+
+
 def _format_budget_suffix(alert: object) -> str:
     """Format a CostAlert as an inline suffix for the cost line."""
     level = getattr(alert, "level", "")
@@ -833,6 +1633,17 @@ def _record_export_event(
             session_id = evt.resume.value
         if not session_id:
             return
+        if isinstance(evt, ActionEvent) and evt.action.kind == "telemetry":
+            # #819: per-frame status-line values are not session history.
+            return
+        if (
+            isinstance(evt, ActionEvent)
+            and evt.phase == "updated"
+            and str(evt.action.id).startswith("claude.compaction.")
+        ):
+            # #819: the 30 s compacting heartbeats — the export keeps one
+            # start and one finish per compaction.
+            return
         event_dict: dict[str, Any] = {"type": evt.type}
         if isinstance(evt, StartedEvent):
             event_dict["engine"] = evt.engine
@@ -851,6 +1662,28 @@ def _record_export_event(
             event_dict["error"] = evt.error
             if evt.usage:
                 record_session_usage(session_id, evt.usage, channel_id=channel_id)
+        elif isinstance(evt, TurnEvent):
+            # #418: a live session's later turns (follow-ups, wake turns).
+            # The opening boundary marks the turn; the closing one carries
+            # its answer, so it is recorded as that turn's ``completed``.
+            if evt.phase == "completed" and evt.reason == "no_query":
+                # #928: not a turn — the export drops its opening heading.
+                event_dict = {"type": "turn_dropped"}
+            elif evt.phase == "completed":
+                event_dict = {
+                    "type": "completed",
+                    "ok": evt.ok,
+                    "answer": evt.answer,
+                    "error": evt.error,
+                }
+                if evt.usage:
+                    # Session-cumulative for the live process, i.e. this
+                    # run so far — what the export's "last run" line shows.
+                    record_session_usage(session_id, evt.usage, channel_id=channel_id)
+            else:
+                event_dict["phase"] = evt.phase
+            event_dict["turn"] = evt.turn
+            event_dict["reason"] = evt.reason
         record_session_event(session_id, event_dict, channel_id=channel_id)
         if isinstance(evt, ActionEvent):
             logger.debug(
@@ -892,15 +1725,259 @@ def _flatten_exception_group(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+async def _close_runner_events(events: object) -> None:
+    """Close a runner's event generator in the calling task.
+
+    No new cancel scope around the close: while the generator is suspended
+    at a ``yield`` inside its own task group (Claude's ``run_impl``), that
+    group's scope is still this task's current scope, so a scope opened here
+    would exit after it and anyio raises "Attempted to exit a cancel scope
+    that isn't the current tasks's current cancel scope" (rc15 integration
+    finding). Teardown under a pending cancel is the same path every
+    ``/cancel`` already takes. The task group reports the close as a group
+    of ``GeneratorExit``/cancellation, which is a clean close here.
+    """
+    aclose = getattr(events, "aclose", None)
+    if aclose is None:
+        return
+    cancel_exc = anyio.get_cancelled_exc_class()
+    try:
+        await aclose()
+    except BaseExceptionGroup as eg:
+        leaves = _flatten_exception_group(eg)
+        if not all(isinstance(e, (GeneratorExit, cancel_exc)) for e in leaves):
+            raise
+        logger.debug("runner.events_closed", leaves=len(leaves))
+
+
 _RESUME_LINE_MARKER = "\n\n\u21a9\ufe0f "  # ↩️ with variation selector
 
 
-def _insert_before_resume(text: str, insertion: str) -> str:
-    """Insert text before the resume line, or append at end if no resume line."""
-    if _RESUME_LINE_MARKER in text:
-        idx = text.index(_RESUME_LINE_MARKER)
-        return text[:idx] + insertion + text[idx:]
-    return text + insertion
+# Telegram's message text limit; measured in UTF-16 code units here, which is
+# never less than the character count Telegram applies.
+_TELEGRAM_TEXT_LIMIT = 4096
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _insert_into_chunk(msg: RenderedMessage, insertion: str) -> RenderedMessage:
+    """Insert text before the message's resume line (or at its end if it has
+    none), keeping its entities aligned: those after the insertion point (the
+    resume line's ``code`` span) move by the inserted UTF-16 length."""
+    text = msg.text
+    idx = text.index(_RESUME_LINE_MARKER) if _RESUME_LINE_MARKER in text else len(text)
+    extra = dict(msg.extra)
+    entities = extra.get("entities")
+    if isinstance(entities, list) and entities:
+        at = _utf16_len(text[:idx])
+        delta = _utf16_len(insertion)
+        shifted: list[Any] = []
+        for entity in entities:
+            if isinstance(entity, dict):
+                entity = dict(entity)
+                offset = entity.get("offset", 0)
+                length = entity.get("length", 0)
+                if offset >= at:
+                    entity["offset"] = offset + delta
+                elif offset + length > at:
+                    entity["length"] = length + delta
+            shifted.append(entity)
+        extra["entities"] = shifted
+    return RenderedMessage(text=text[:idx] + insertion + text[idx:], extra=extra)
+
+
+def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage:
+    """Add a footer line (cost, budget alert, #702 outlier, usage) to a final.
+
+    #770: a split final keeps chunk 1 in ``msg.text`` and the rest — the
+    last of which carries the meta/resume footer — in ``extra["followups"]``,
+    so the line goes into the LAST chunk, before its resume line. A line that
+    would push that chunk past Telegram's limit is sent as its own trailing
+    message instead of risking the whole final being rejected.
+    """
+    followups = msg.extra.get("followups")
+    has_followups = (
+        isinstance(followups, list)
+        and bool(followups)
+        and isinstance(followups[-1], RenderedMessage)
+    )
+    last = followups[-1] if has_followups else msg
+    if _utf16_len(last.text) + _utf16_len(insertion) > _TELEGRAM_TEXT_LIMIT:
+        logger.warning(
+            "final.footer_overflow",
+            chunk_len=_utf16_len(last.text),
+            insertion_len=_utf16_len(insertion),
+        )
+        extra_chunk = RenderedMessage(
+            text=insertion.lstrip("\n"),
+            extra={"entities": [], "reply_markup": msg.extra.get("reply_markup")},
+        )
+        return RenderedMessage(
+            text=msg.text,
+            extra={
+                **msg.extra,
+                "followups": [*(followups if has_followups else []), extra_chunk],
+            },
+        )
+    updated = _insert_into_chunk(last, insertion)
+    if not has_followups:
+        return updated
+    return RenderedMessage(
+        text=msg.text, extra={**msg.extra, "followups": [*followups[:-1], updated]}
+    )
+
+
+# #814: Claude safeguard stops. The runner carries a per-turn tally on
+# ``usage["safeguard"]``; the final gets a footer flag and, once per
+# session, a pointer to the guidance (bounded, oldest evicted first).
+SAFEGUARD_CVP_URL = (
+    "https://support.claude.com/en/articles/"
+    "14604842-real-time-cyber-safeguards-on-claude"
+)
+SAFEGUARD_FALLBACK_URL = (
+    "https://code.claude.com/docs/en/model-config#automatic-model-fallback"
+)
+_SAFEGUARD_HINTED: dict[str, None] = {}
+_SAFEGUARD_HINTED_MAX = 512
+
+
+def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    raw = (usage or {}).get("safeguard")
+    if not isinstance(raw, dict):
+        return None
+    stops = raw.get("stops")
+    if not isinstance(stops, int) or isinstance(stops, bool) or stops <= 0:
+        return None
+    return raw
+
+
+# #835: unattended (cron / webhook) runs. The runner carries the turn's
+# denials on ``usage["unattended"]``; the final gets one footer line and, once
+# per trigger per process, what to change (bounded, oldest evicted first).
+_UNATTENDED_HINTED: dict[str, None] = {}
+_UNATTENDED_HINTED_MAX = 256
+_UNATTENDED_ASK_CLASS_MODES = frozenset({"auto", "bypassPermissions"})
+
+
+def _unattended_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    raw = (usage or {}).get("unattended")
+    if not isinstance(raw, dict):
+        return None
+    denied = raw.get("denied")
+    if not isinstance(denied, dict) or not denied:
+        return None
+    return raw
+
+
+def _unattended_footer(unattended: Mapping[str, Any]) -> str:
+    """``🔒 unattended (cron:x) · denied Write (x2), ExitPlanMode — nobody to
+    approve`` plus, the first time a trigger hits it, what to change."""
+    trigger = str(unattended.get("trigger") or "?")
+    parts = []
+    denied: Mapping[str, Any] = unattended["denied"]
+    for tool, count in denied.items():
+        n = count if isinstance(count, int) and not isinstance(count, bool) else 1
+        parts.append(f"{tool} \N{MULTIPLICATION SIGN}{n}" if n > 1 else str(tool))
+    line = (
+        f"\n\N{LOCK} unattended ({trigger}) \N{MIDDLE DOT} denied "
+        f"{', '.join(parts)} \N{EM DASH} nobody to approve"
+    )
+    if trigger in _UNATTENDED_HINTED:
+        return line
+    _UNATTENDED_HINTED[trigger] = None
+    while len(_UNATTENDED_HINTED) > _UNATTENDED_HINTED_MAX:
+        _UNATTENDED_HINTED.pop(next(iter(_UNATTENDED_HINTED)))
+    if unattended.get("mode") in _UNATTENDED_ASK_CLASS_MODES:
+        hint = (
+            "these always ask (an ask rule, a hook, a tool that needs a person, "
+            "or auto mode falling back after repeated blocks) \N{EM DASH} "
+            "change the rule or run it attended"
+        )
+    elif trigger.startswith("webhook:"):
+        hint = (
+            "webhooks use the chat's permission mode \N{EM DASH} set /planmode "
+            "plan-auto or auto in this chat, or pre-approve the tools"
+        )
+    else:
+        hint = (
+            "set permission_mode on the cron (plan-auto, auto or "
+            "bypassPermissions), or pre-approve the tools"
+        )
+    return f"{line}\n\N{ELECTRIC LIGHT BULB} {hint}"
+
+
+def _safeguard_footer(safeguard: Mapping[str, Any], session_key: str | None) -> str:
+    """``🛡️ safeguards stopped N response(s) · <outcome>`` plus, the first
+    time a session sees one, a guidance link: the Cyber Verification
+    Program for category ``cyber``, else the fallback-model docs."""
+    stops = int(safeguard["stops"])
+    noun = "response" if stops == 1 else "responses"
+    line = f"\n\N{SHIELD}\N{VARIATION SELECTOR-16} safeguards stopped {stops} {noun}"
+    label = safeguard.get("outcome_label")
+    if isinstance(label, str) and label:
+        line += f" · {label}"
+    key = session_key or ""
+    if key and key in _SAFEGUARD_HINTED:
+        return line
+    if key:
+        _SAFEGUARD_HINTED[key] = None
+        while len(_SAFEGUARD_HINTED) > _SAFEGUARD_HINTED_MAX:
+            _SAFEGUARD_HINTED.pop(next(iter(_SAFEGUARD_HINTED)))
+    if safeguard.get("category") == "cyber":
+        hint = f"about cyber safeguards: {SAFEGUARD_CVP_URL}"
+    else:
+        hint = f"about fallback models: {SAFEGUARD_FALLBACK_URL}"
+    return f"{line}\n\N{ELECTRIC LIGHT BULB} {hint}"
+
+
+def _safeguard_empty_body(safeguard: Mapping[str, Any]) -> str:
+    """The body for a stopped, not-retried turn with no answer — explains
+    the silence instead of rendering an empty error."""
+    model = safeguard.get("model")
+    if isinstance(model, str) and model:
+        who = f"{model}'s safeguards"
+    else:
+        who = "Anthropic's safeguards"
+    return (
+        f"\N{SHIELD}\N{VARIATION SELECTOR-16} {who} stopped this response and "
+        "it wasn't retried, so there is no answer. Rephrasing the request, "
+        "or switching model with /model, may help."
+    )
+
+
+def _compaction_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """#819: the runner's ``usage["compaction"]`` (Claude), or None."""
+    raw = (usage or {}).get("compaction")
+    return raw if isinstance(raw, dict) else None
+
+
+def _compaction_manual_success(usage: Mapping[str, Any] | None) -> bool:
+    """#819 §4.5: the narrow exemption from the #596/#631 empty-result
+    recovery — only a successful *manual* compaction (the runner checks
+    manual trigger + ``success`` + not an error). Auto or failed
+    compactions keep the anomaly path, so a poisoned session that
+    auto-compacts on resume still reaches quarantine."""
+    compaction = _compaction_usage(usage)
+    return compaction is not None and compaction.get("manual_success") is True
+
+
+def _compaction_empty_body(compaction: Mapping[str, Any]) -> str:
+    """The body of a successful ``/compact`` — its result is 0-turn and
+    empty by design, which would otherwise render as an ``error`` final."""
+    body = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
+    pre = compaction.get("pre_tokens")
+    post = compaction.get("post_tokens")
+    if isinstance(pre, int) and not isinstance(pre, bool):
+        if isinstance(post, int) and not isinstance(post, bool):
+            body += f" · {format_tokens(pre)} → {format_tokens(post)} tokens"
+        else:
+            body += f" · {format_tokens(pre)} tokens before"
+    trigger = compaction.get("trigger")
+    if isinstance(trigger, str) and trigger:
+        body += f" ({trigger})"
+    return body
 
 
 def _format_error(error: BaseException) -> str:
@@ -948,6 +2025,12 @@ class RunningTask:
     cancel_requested: anyio.Event = field(default_factory=anyio.Event)
     done: anyio.Event = field(default_factory=anyio.Event)
     context: RunContext | None = None
+    # #690: live ProgressEdits for this run — exposes the engine subprocess
+    # PID (edits.pid) so the drain's self-restart evidence scan can walk the
+    # run's process tree.
+    edits: ProgressEdits | None = None
+    # #826: the originating message's thread (topic) — scopes /new and /cancel
+    thread_id: ThreadId | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -1009,6 +2092,67 @@ async def _send_or_edit_message(
     return sent, False
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingRequestInfo:
+    """#919: what the pending control request is, for the reminder copy.
+
+    ``kind``: ``question`` (AskUserQuestion), ``plan`` (ExitPlanMode / Pause
+    & Outline hold / ``da:`` discuss approval), ``tool`` (any other tool
+    permission, incl. hook callbacks with no tool name) or ``unknown``.
+    """
+
+    kind: str
+    request_id: str | None = None
+    tool_name: str | None = None
+    question: str | None = None
+    answerable_by_text: bool = True
+
+
+_ASK_TITLE_PREFIX_RE = re.compile(r"^❓\s*(?:Question \d+ of \d+:\s*)?")
+
+
+def _trim_line(text: str, limit: int) -> str:
+    """#919: first line of ``text``, stripped, truncated to ``limit`` chars
+    (``…`` included)."""
+    line = (text or "").strip().split("\n", 1)[0].strip()
+    if len(line) > limit:
+        return line[: max(0, limit - 1)] + "…"
+    return line
+
+
+def _approval_reminder_headline(info: _PendingRequestInfo | None, mins: int) -> str:
+    """#919: user-facing headline for the pending-approval stall reminder."""
+    tail = "The session is paused, not stuck."
+    kind = info.kind if info is not None else "unknown"
+    if kind == "question":
+        how = (
+            "tap an option above or reply with your answer"
+            if info is None or info.answerable_by_text
+            else "tap an option above"
+        )
+        return f"⏳ Waiting for your answer ({mins} min) — {how}. {tail}"
+    if kind == "plan":
+        return (
+            f"⏳ Waiting for you to approve the plan ({mins} min) — tap a "
+            f"button above. {tail}"
+        )
+    tool = _trim_line(info.tool_name or "", 40) if info is not None else ""
+    if kind == "tool" and tool:
+        return (
+            f"⏳ Waiting for your approval to use {tool} ({mins} min) — tap "
+            f"Approve or Deny above. {tail}"
+        )
+    return f"⏳ Waiting for your approval ({mins} min) — tap a button above. {tail}"
+
+
+# #953: /proc states — T/t stopped or traced, D uninterruptible I/O wait.
+_STOPPED_PROC_STATES = frozenset({"T", "t"})
+_BLOCKED_PROC_STATES = frozenset({"D"})
+# #953: engines whose child processes are real work (Agent subagents, Bash
+# tools), not a permanent wrapper binary or MCP servers.
+_CHILD_WORK_ENGINES = frozenset({"claude"})
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -1042,21 +2186,49 @@ class ProgressEdits:
         self.thread_id = thread_id
         self._approval_notified: bool = False
         self._approval_notify_ref: MessageRef | None = None
+        # #920: the pending-approval stall reminder is owned like
+        # ``_approval_notify_ref``: one visible copy (a refire replaces it),
+        # deleted once its request resolves or the run/turn ends.
+        self._approval_reminder_ref: MessageRef | None = None
+        self._approval_reminder_request_id: str | None = None
+        # #920: reminder-specific "first reminder already sent" flag. Picks
+        # the 10-min vs 30-min approval threshold; reset whenever no approval
+        # is pending so each approval in a run gets its own 10-min reminder.
+        # (``_last_approval_pending_emit_at`` stays the #526 log-pacing clock,
+        # shared with the rate-limit / api-retry / compacting waits.)
+        self._approval_first_reminder_sent: bool = False
         # #591: set once the final answer has been (or is about to be)
         # delivered ahead of subprocess exit. Suppresses further progress
         # repaints and the #470 post-result closing message so neither can
         # overwrite or trail the already-delivered answer.
         self._finalizing: bool = False
+        # #776: True for the run's own ProgressEdits (not a follow-up turn's).
+        self.run_level: bool = False
         self._min_render_interval = min_render_interval
         self._sleep = sleep
         self._last_render_at: float = 0.0
         self._has_rendered: bool = False
+        # #948: held while a repaint is handed to the transport;
+        # ``stop_repaints`` takes it so a final edit is ordered after it.
+        self._edit_lock = anyio.Lock()
         self._last_event_at: float = clock()
         self._stall_warned: bool = False
         self._stall_warn_count: int = 0
         self._total_stall_warn_count: int = 0
         self._last_stall_warn_at: float = 0.0
         self._peak_idle: float = 0.0
+        # #787: the longest event gap seen while a live Claude session sat
+        # between turns. Kept apart from ``_peak_idle`` so that metric keeps
+        # meaning "longest stall"; a live-idle hold is silent by design.
+        self._peak_live_idle: float = 0.0
+        # #811: live-session turn boundaries, fed by run_runner_with_cancel.
+        # The run-level ``_last_event_at`` freezes during follow-up / wake
+        # turns (their events go to the turn router), so the live-idle gap is
+        # measured from the later of the last run event and the last turn's
+        # completion, and never accrues while a turn is open.
+        self._live_idle_baseline: float | None = None
+        self._turn_active: bool = False
+        self._live_idle_logged: bool = False
         self._prev_diag: Any = None
         # #650/#593: clock() timestamp of the last stall tick that observed
         # the subprocess alive. Once the process is gone every /proc-derived
@@ -1100,6 +2272,38 @@ class ProgressEdits:
         self._outline_refs: list[MessageRef] = []
         self._outline_just_resolved: bool = False
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
+        # #777: renders the pre-result "⏳ background (N)" block (markdown)
+        # from the run's native task map; None when off / not Claude.
+        self.background_provider: Callable[[], str | None] | None = None
+        # #684: detect-only ``control_request.unanswerable``. The probe
+        # returns the control callbacks visible on the run's messages (plus
+        # "outline" while an outline message is up); None = unknown, so only
+        # ``no_session_writer`` can fire. Wired by ``handle_message``.
+        self.control_surface_probe: Callable[[], frozenset[str]] | None = None
+        self._detect_unanswerable: bool = True
+        self._unanswerable_warned: set[str] = set()
+        # #929: standalone pushed approval messages for requests with no
+        # visible keyboard (a background agent asking while live-idle). Owned
+        # by the run-level edits; follow-up turn edits get a read-only
+        # reference so their approval state ignores surfaced requests.
+        self.orphan_approvals: OrphanApprovalSurface | None = None
+
+    @property
+    def has_outline_messages(self) -> bool:
+        """#684: True exactly while this run's Pause & Outline messages (and
+        their Approve/Deny buttons) are on screen. Unlike ``_OUTLINE_REGISTRY``
+        it is not TTL-swept after an hour."""
+        return bool(self._outline_refs)
+
+    def _background_block(self) -> str | None:
+        provider = self.background_provider
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:  # noqa: BLE001 — cosmetic; never break a render
+            logger.debug("progress_edits.background_block_failed", exc_info=True)
+            return None
 
     async def run(self) -> None:
         if self.progress_ref is None:
@@ -1131,6 +2335,10 @@ class ProgressEdits:
            is older than 60 s — this keeps the elapsed-time tail current
            in the chat (otherwise the message looks frozen during long
            BashOutput polling cycles).
+        4. (#777) refresh a live background-task block.
+        5. (#954) otherwise, re-render when nothing has for a heartbeat
+           interval, so the header's elapsed time keeps moving while the
+           engine generates silently.
         """
         stream = self.stream
         engine_state = getattr(stream, "engine_state", None) if stream else None
@@ -1188,6 +2396,13 @@ class ProgressEdits:
             # one-element queue field.
             self._pending_closing_message = text
 
+        # 4) #777: live background tasks report progress via system events
+        #    that produce no Untether event — refresh their block (elapsed,
+        #    tokens, current step) on the heartbeat.
+        if not self._finalizing and self._background_block() is not None:
+            self._bump_heartbeat()
+            return
+
         # 3) Long-running tail refresh — bump event_seq so the renderer
         #    redraws with the fresh elapsed-time tail.
         for action_state in self.tracker._actions.values():
@@ -1197,7 +2412,22 @@ class ProgressEdits:
                 continue
             if (now - action_state.started_at) > 60.0:
                 self._bump_heartbeat()
-                break
+                return
+
+        # 5) #954: an engine generating silently (no events, no open action)
+        #    would otherwise leave the header's elapsed time frozen. Re-render
+        #    once nothing has repainted for a full heartbeat interval, so a
+        #    busy run gains no edits and a silent one gains one per interval
+        #    (30 s default) — well inside Telegram's edit budget. Only once
+        #    the engine has produced an event: ``event_seq == 0`` is the
+        #    ``no_pid_no_events`` auto-cancel's "never started" signal.
+        if (
+            self.event_seq > 0
+            and not self._finalizing
+            and not self._is_live_session_idle()
+            and now - self._last_render_at >= self._heartbeat_interval
+        ):
+            self._bump_heartbeat()
 
     async def _flush_pending_closing_message(self) -> None:
         """#470: send the one-shot post-result closing Telegram message.
@@ -1327,12 +2557,43 @@ class ProgressEdits:
             # Heartbeat tick — cheap (no proc_diag, just dict scans).
             self._heartbeat_tick()
             await self._flush_pending_closing_message()
+            # #920: retire a reminder whose request was answered or replaced.
+            # Before the live-idle ``continue`` below, so a run-level monitor
+            # standing down while live-idle still cleans up.
+            try:
+                await self._maybe_retire_approval_reminder()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug(
+                    "progress_edits.approval_reminder_retire_failed", exc_info=True
+                )
+            # #929: then the standalone approval surfaces (retire answered,
+            # retry failed sends, re-post due) — fixed order after #920's
+            # retire (review amendment 5), also before the live-idle continue.
+            try:
+                await self._sync_orphan_approvals()
+            except Exception:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.orphan_sync_failed", exc_info=True)
 
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
             sweep_stale_registries()
+            # #684: before the live-idle ``continue`` below, so it also covers
+            # a live session held open by a request nobody can answer.
+            self._check_unanswerable_control_requests()
             elapsed = self.clock() - self._last_event_at
-            self._peak_idle = max(self._peak_idle, elapsed)
+            # #787: a live session between turns is silent by design (its
+            # runner lifecycle owns teardown). Its hold must not read as a
+            # stall in ``session.summary peak_idle_seconds``.
+            live_idle = self._is_live_session_idle()
+            if live_idle:
+                # #811: only a gap with no turn open is live-idle time.
+                if not self._turn_active:
+                    self._peak_live_idle = max(
+                        self._peak_live_idle, self._live_idle_gap()
+                    )
+            else:
+                self._peak_idle = max(self._peak_idle, elapsed)
+                self._live_idle_logged = False
 
             # Collect diagnostics on every cycle so we always have a CPU
             # baseline for the next check (fixes cpu_active=None on first
@@ -1361,7 +2622,10 @@ class ProgressEdits:
                 # get a visible "no action needed" message in the same
                 # window as a normal stall), subsequent reminders gated
                 # by the 1800 s refire threshold.
-                if self._last_approval_pending_emit_at == 0.0:
+                # #920: a reminder-specific flag, not the shared #526
+                # log-pacing clock (a prior rate-limit wait set that one and
+                # pushed the first approval reminder out to 30 min).
+                if not self._approval_first_reminder_sent:
                     threshold = self._STALL_THRESHOLD_APPROVAL_FIRST
                 else:
                     threshold = self._STALL_THRESHOLD_APPROVAL
@@ -1372,10 +2636,25 @@ class ProgressEdits:
                 # thresholds; this is an expected wait, not a stall.
                 threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "rate_limit_waiting"
+            elif self._is_api_retry_waiting():
+                # #792: the CLI is backing off before retrying a failed API
+                # call (``system/api_retry``) — same expected-wait handling
+                # as a rate-limit window.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "api_retry_waiting"
+            elif self._is_compacting():
+                # #819: the CLI is compacting the context (``system/status:
+                # compacting``, re-sent every 30 s). Bounded by the engine's
+                # latch, so a wedged compaction falls back to the branches
+                # below once its heartbeats stop. Sits before
+                # ``running_tool``: the open 🗜️ row counts as a running
+                # action.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "compacting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
-            elif self._has_active_children(diag):
+            elif self._children_extend_threshold(diag, tree_active):
                 threshold = self._STALL_THRESHOLD_SUBAGENT
                 threshold_reason = "active_children"
             elif self._has_running_tool():
@@ -1386,13 +2665,6 @@ class ProgressEdits:
                 threshold_reason = "normal"
             if elapsed < threshold:
                 continue
-            logger.info(
-                "progress_edits.stall_threshold_selected",
-                channel_id=self.channel_id,
-                threshold=threshold,
-                reason=threshold_reason,
-                elapsed=round(elapsed, 1),
-            )
 
             # #650: a dead subprocess whose run already emitted its final
             # CompletedEvent is a normally-completed run being reaped late,
@@ -1409,6 +2681,19 @@ class ProgressEdits:
                 and diag.alive is False
                 and bool(getattr(self.stream, "did_emit_completed", False))
             ):
+                # The bridge may still be delivering a follow-up turn's final
+                # (a slow Telegram call holds the event loop off the stream).
+                # Reaping then cancels that delivery and the turn reads "the
+                # session ended before this turn finished" (rc15 integration
+                # finding). A bounded delivery ends well inside this grace,
+                # after which the stream ends on its own.
+                dead_for = (
+                    self.clock() - self._last_alive_at
+                    if self._last_alive_at is not None
+                    else None
+                )
+                if dead_for is not None and dead_for < self._REAP_DEAD_GRACE_S:
+                    continue
                 logger.info(
                     "progress_edits.reaped_after_delivery",
                     channel_id=self.channel_id,
@@ -1430,11 +2715,53 @@ class ProgressEdits:
                 self.signal_send.close()
                 return
 
+            if live_idle and not (diag is not None and diag.alive is False):
+                # #787: no stall WARN, no stall_warnings count, no chat
+                # warning while live-idle — whatever the child-process or
+                # wake-up state. Before #510 the run-level monitor could read
+                # another chat's stream here; now it reads its own, and a
+                # live hold (pending ScheduleWakeup, background tasks) is by
+                # definition not a hang. A dead process still falls through
+                # to the process_dead arm below.
+                self._frozen_ring_count = 0
+                if not self._live_idle_logged:
+                    self._live_idle_logged = True
+                    self._bump_stall_suppression("live_idle")
+                    logger.info(
+                        "progress_edits.stall_live_idle_suppressed",
+                        channel_id=self.channel_id,
+                        seconds_since_last_event=round(self._live_idle_gap(), 1),
+                        threshold_reason=threshold_reason,
+                        run_level=self.run_level,
+                        pid=self.pid,
+                        # #929: requests shown on standalone approval messages.
+                        orphan_approvals=(
+                            self.orphan_approvals.surfaced_count
+                            if self.orphan_approvals is not None
+                            else 0
+                        ),
+                    )
+                continue
+
+            logger.info(
+                "progress_edits.stall_threshold_selected",
+                channel_id=self.channel_id,
+                threshold=threshold,
+                reason=threshold_reason,
+                elapsed=round(elapsed, 1),
+            )
+
             now = self.clock()
-            if (
-                self._stall_warned
-                and (now - self._last_stall_warn_at) < self._stall_repeat_seconds
-            ):
+            # #920: an approval wait repeats every 30 min (as documented),
+            # not every ``stall_repeat_seconds`` once past the 30-min mark —
+            # elapsed never resets while the request waits. Paced here, not
+            # in the send block, so paced ticks don't bump ``stall_warn_count``.
+            repeat_s = (
+                self._STALL_THRESHOLD_APPROVAL
+                if threshold_reason == "pending_approval"
+                else self._stall_repeat_seconds
+            )
+            if self._stall_warned and (now - self._last_stall_warn_at) < repeat_s:
                 continue
 
             self._stall_warned = True
@@ -1474,6 +2801,7 @@ class ProgressEdits:
             _post_result_age = self._post_result_idle_age_seconds()
             _post_result_limbo = (
                 _post_result_idle
+                and not self._is_live_session_idle()
                 and _post_result_age is not None
                 and _post_result_age > self._POST_RESULT_LIMBO_THRESHOLD_S
             )
@@ -1490,6 +2818,8 @@ class ProgressEdits:
             _expected_wait_reason = threshold_reason in (
                 "pending_approval",
                 "rate_limit_waiting",
+                "api_retry_waiting",
+                "compacting",
             )
             _expected_wait = (
                 (_post_result_idle and not _post_result_limbo)
@@ -1527,8 +2857,8 @@ class ProgressEdits:
             # deliberating on an approval, demote the WARN to a different
             # structured INFO (``subprocess.approval_pending``) and pace it
             # to once per 30 minutes. The chat-side rendering below still
-            # emits the friendly "⏳ Awaiting your approval (N min)" copy
-            # (#494-C) — operators just stop getting warn-filter spam for
+            # emits the friendly "⏳ Waiting for your … (N min)" copy
+            # (#494-C, #919) — operators just stop getting warn-filter spam for
             # what is by definition not a hang. The daemon
             # (``untether-issue-watcher``) and ``/monitor`` are configured
             # to treat WARNs as auto-fileable, so this also stops
@@ -1536,7 +2866,12 @@ class ProgressEdits:
             # #495/#499/#500: ``rate_limit_waiting`` joins ``pending_approval``
             # as a demoted reason — an upstream throttle resumes by itself, so
             # it is by definition not a hang either.
-            if threshold_reason in ("pending_approval", "rate_limit_waiting"):
+            if threshold_reason in (
+                "pending_approval",
+                "rate_limit_waiting",
+                "api_retry_waiting",
+                "compacting",
+            ):
                 if (
                     self._last_approval_pending_emit_at == 0.0
                     or now - self._last_approval_pending_emit_at
@@ -1719,7 +3054,9 @@ class ProgressEdits:
             # rather than merely skipping the escalation: otherwise the moment
             # the user finally clicks Approve, a counter of 85 would trip an
             # immediate false escalation on the very next tick.
-            if _expected_wait_reason:
+            if _expected_wait_reason or self._is_live_session_idle():
+                # #776: a live session between turns is silent by design —
+                # its runner lifecycle, not the stall detector, ends it.
                 self._frozen_ring_count = 0
 
             # Suppress Telegram notification when process is CPU-active
@@ -1771,7 +3108,14 @@ class ProgressEdits:
             # event so journalctl can audit which rule fired. The
             # heartbeat bump keeps the elapsed-time tail current
             # without resetting stall counters.
-            if not frozen_escalate and _post_result_idle:
+            # #920 (live R20-920e): an approval wait is not a stall — its
+            # reminder must not be swallowed by the activity suppressions
+            # below. The open AskUserQuestion / tool row counts as a running
+            # tool and MCP children keep CPU busy while the main process
+            # sleeps, which silenced every reminder after the first.
+            _approval_wait = threshold_reason == "pending_approval"
+            _notify_anyway = frozen_escalate or _approval_wait
+            if not _notify_anyway and _post_result_idle:
                 self._bump_stall_suppression("post_result")
                 logger.info(
                     "progress_edits.stall_post_result_suppressed",
@@ -1781,7 +3125,7 @@ class ProgressEdits:
                     pid=self.pid,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _wakeup_state is not None:
+            elif not _notify_anyway and _wakeup_state is not None:
                 soonest, count = _wakeup_state
                 logger.info(
                     "progress_edits.stall_schedule_wakeup_suppressed",
@@ -1793,7 +3137,7 @@ class ProgressEdits:
                     wakeup_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _monitor_state is not None:
+            elif not _notify_anyway and _monitor_state is not None:
                 soonest, count = _monitor_state
                 logger.info(
                     "progress_edits.stall_monitor_active_suppressed",
@@ -1805,7 +3149,7 @@ class ProgressEdits:
                     monitor_count=count,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_grace:
+            elif not _notify_anyway and _bash_grace:
                 logger.info(
                     "progress_edits.stall_bash_grace_suppressed",
                     channel_id=self.channel_id,
@@ -1815,7 +3159,7 @@ class ProgressEdits:
                     bash_grace_seconds=self._bash_grace_seconds,
                 )
                 self._bump_heartbeat()
-            elif not frozen_escalate and _bash_fresh:
+            elif not _notify_anyway and _bash_fresh:
                 logger.info(
                     "progress_edits.stall_long_bash_suppressed",
                     channel_id=self.channel_id,
@@ -1825,7 +3169,7 @@ class ProgressEdits:
                     freshness_threshold_s=round(threshold / 2.0, 1),
                 )
                 self._bump_heartbeat()
-            elif cpu_active is True and not frozen_escalate and not main_sleeping:
+            elif cpu_active is True and not _notify_anyway and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
@@ -1849,6 +3193,7 @@ class ProgressEdits:
                 and main_sleeping
                 and _tool_running
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Tool subprocess actively working — first warning already
                 # sent, suppress repeats until CPU goes idle.  The ring
@@ -1877,6 +3222,7 @@ class ProgressEdits:
                 and main_sleeping
                 and self._has_active_children(diag)
                 and self._stall_warn_count > 1
+                and not _approval_wait
             ):
                 # Subagent child processes actively working — first warning
                 # already sent, suppress repeats.  Similar to tool-active
@@ -1908,6 +3254,9 @@ class ProgressEdits:
                 # _genuinely_stuck predicate below can reference it safely
                 # from every branch.
                 _tool_name: str | None = None
+                # #919/#920: set by the pending_approval branch below.
+                _approval_info: _PendingRequestInfo | None = None
+                _is_approval_reminder = False
                 if mcp_hung:
                     self._count_stall_warning()
                     logger.warning(
@@ -1961,10 +3310,35 @@ class ProgressEdits:
                     # users cancelling at ~13 min because the original copy
                     # didn't make the "tap a button" affordance explicit
                     # enough — they assumed the session had hung.
-                    parts = [
-                        f"⏳ Awaiting your approval ({mins} min) — tap a "
-                        "button above to proceed (no action needed otherwise)"
-                    ]
+                    # #919: say what is pending (an answer, a plan approval
+                    # or a named tool's approval) instead of "approval" for
+                    # everything; no ``Last:`` line (it only repeated the
+                    # request, in its internal log form).
+                    _approval_info = self._pending_request_info()
+                    _is_approval_reminder = True
+                    parts = [_approval_reminder_headline(_approval_info, mins)]
+                    if (
+                        _approval_info is not None
+                        and _approval_info.kind == "question"
+                        and _approval_info.question
+                    ):
+                        parts.append(f"❓ {_approval_info.question}")
+                elif (
+                    diag is not None
+                    and diag.alive
+                    and diag.state in _STOPPED_PROC_STATES | _BLOCKED_PROC_STATES
+                ):
+                    # #953: say what the engine process itself is doing.
+                    if diag.state in _STOPPED_PROC_STATES:
+                        parts = [
+                            f"⏳ Engine process is stopped (state {diag.state},"
+                            f" {mins} min)"
+                        ]
+                    else:
+                        parts = [
+                            f"⏳ Engine process is blocked on I/O (state"
+                            f" {diag.state}, {mins} min)"
+                        ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -2002,7 +3376,12 @@ class ProgressEdits:
                         parts = [f"⏳ Still working ({mins} min, CPU active)"]
                     else:
                         parts = [f"⏳ No progress for {mins} min"]
-                if self._stall_warn_count > 1:
+                # #919: an approval wait is expected, so no alarm-style
+                # repeat counter on its reminder.
+                if (
+                    self._stall_warn_count > 1
+                    and threshold_reason != "pending_approval"
+                ):
                     parts[0] += f" (warned {self._stall_warn_count}x)"
                 # "session may be stuck" — only when genuinely stuck
                 # (no tool identified, cpu not active, not MCP/frozen,
@@ -2018,15 +3397,17 @@ class ProgressEdits:
                 )
                 if _genuinely_stuck:
                     parts.append("— session may be stuck.")
-                if last_action:
-                    _summary = (
-                        last_action
-                        if len(last_action) <= 80
-                        else last_action[:77] + "..."
-                    )
-                    parts.append(f"Last: {_summary}")
+                # #919: plain action title for the chat; the raw
+                # ``kind:title (status)`` form stays in the log fields.
+                if threshold_reason != "pending_approval" and (
+                    _disp := self._last_action_display()
+                ):
+                    parts.append(f"Last: {_disp}")
                 parts.append("/cancel to stop.")
                 text = "\n".join(parts)
+                if _is_approval_reminder:
+                    await self._send_approval_reminder(text, _approval_info, mins)
+                    continue
                 try:
                     await self.transport.send(
                         channel_id=self.channel_id,
@@ -2091,12 +3472,53 @@ class ProgressEdits:
         stream = self.stream
         if stream is None:
             return False
+        engine_state = getattr(stream, "engine_state", None)
+        if self._is_live_session_idle():
+            # #776: a live Claude session between turns emits task /
+            # command_lifecycle lines while idle, so last_event_type is not a
+            # reliable "past the result" signal — the turn state is.
+            return True
         if getattr(stream, "last_event_type", None) != "result":
             return False
-        engine_state = getattr(stream, "engine_state", None)
         if engine_state is None:
             return False
         return getattr(engine_state, "result_received_at", None) is not None
+
+    def note_turn_boundary(self, phase: str) -> None:
+        """#811: a live-session follow-up / wake turn opened or closed.
+
+        Metric-only: feeds ``peak_live_idle_seconds``. Stall suppression is
+        unchanged — run-level edits keep standing down during turns."""
+        if phase == "started":
+            self._turn_active = True
+        elif phase == "completed":
+            self._turn_active = False
+            self._live_idle_baseline = self.clock()
+
+    def _live_idle_gap(self) -> float:
+        """#811: seconds since the later of the last run event and the last
+        live-session turn's completion."""
+        since = self._last_event_at
+        if self._live_idle_baseline is not None:
+            since = max(since, self._live_idle_baseline)
+        return self.clock() - since
+
+    def _is_live_session_idle(self) -> bool:
+        """#776: a live Claude session sitting between turns (the runner's
+        live-session lifecycle owns its teardown, so it is never limbo)."""
+        stream = self.stream
+        engine_state = getattr(stream, "engine_state", None) if stream else None
+        if engine_state is None or not getattr(engine_state, "live_mode", False):
+            return False
+        if not getattr(engine_state, "completed_turns", 0):
+            return False
+        if self.run_level:
+            # The run's own progress monitor stands down after the run's
+            # result: each follow-up turn has its own ProgressEdits watching
+            # it, and this one no longer receives the turn's events (review
+            # finding — it would warn/auto-cancel a healthy wake turn).
+            return True
+        return not getattr(engine_state, "turn_open", True)
 
     def _post_result_idle_age_seconds(self) -> float | None:
         """#333 Tier 2: seconds since ``result_received_at`` was armed.
@@ -2249,6 +3671,92 @@ class ProgressEdits:
                 return True
         return False
 
+    def _check_unanswerable_control_requests(self) -> None:
+        """#684: WARN once per request that has waited past ``tool_timeout``
+        with nothing that can answer it — no approval/option button on any
+        live message of the run and no text-reply route (``no_keyboard``), or
+        no stdin writer for the session (``no_session_writer``).
+
+        Never auto-denies and leaves the registry and the live-session hold
+        untouched (decisions D3/D4). #929: before the WARN, a request waiting
+        past ``_ORPHAN_RESCUE_GRACE_S`` with no button visible anywhere (other
+        than other standalone surfaces) is *rescued* — queued on the run's
+        standalone approval surface, sent on the next tick. The kill switch
+        ``detect_unanswerable_control_requests`` disables both. Run-level
+        only: this monitor lives for the whole run (pre-result, follow-up
+        turns, live idle) and reads the run's own stream (#510).
+        """
+        if not (self.run_level and self._detect_unanswerable):
+            return
+        try:
+            es = getattr(self.stream, "engine_state", None) if self.stream else None
+            probe = getattr(es, "control_request_snapshot", None)
+            if not callable(probe):
+                return
+            all_snaps = list(probe())
+            if not all_snaps:
+                return
+            surface = self.control_surface_probe
+            visible = surface() if surface is not None else None
+            orphans = self.orphan_approvals
+            if orphans is not None and visible is not None:
+                # Other surfaces' buttons answer only their own request.
+                others = visible - orphans.callbacks()
+                if not others:
+                    owned = orphans.request_ids()
+                    for snap in all_snaps:
+                        if (
+                            snap.age_s >= self._ORPHAN_RESCUE_GRACE_S
+                            and snap.writer_ok
+                            and not snap.answerable_by_text
+                            and snap.request_id not in owned
+                        ):
+                            orphans.rescue(
+                                snap,
+                                action=self._tracked_action_for_request(
+                                    snap.request_id
+                                ),
+                            )
+            snaps = [
+                snap
+                for snap in all_snaps
+                if snap.request_id not in self._unanswerable_warned
+                and snap.age_s >= self._STALL_THRESHOLD_TOOL
+            ]
+            if not snaps:
+                return
+            live_idle = self._is_live_session_idle()
+            rescued = orphans.request_ids() if orphans is not None else frozenset()
+            for snap in snaps:
+                reasons: list[str] = []
+                if not snap.writer_ok:
+                    reasons.append("no_session_writer")
+                # A request shadowed by a newer pending one's buttons is not
+                # unanswerable: answering that one brings its keyboard back.
+                if visible is not None and not visible and not snap.answerable_by_text:
+                    reasons.append("no_keyboard")
+                if not reasons:
+                    continue
+                self._unanswerable_warned.add(snap.request_id)
+                logger.warning(
+                    "control_request.unanswerable",
+                    request_id=snap.request_id,
+                    session_id=snap.session_id,
+                    channel_id=self.channel_id,
+                    tool_name=snap.tool_name,
+                    kind=snap.kind,
+                    age_s=round(snap.age_s, 1),
+                    reasons=reasons,
+                    live_idle=live_idle,
+                    holds_live_session=live_idle,
+                    visible_buttons=len(visible or ()),
+                    # #929: queued / shown on a standalone approval message.
+                    rescued=snap.request_id in rescued,
+                    pid=self.pid,
+                )
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.unanswerable_probe_failed", error=str(exc))
+
     def _has_pending_approval(self) -> bool:
         """True while the run is blocked on a user approval.
 
@@ -2266,18 +3774,200 @@ class ProgressEdits:
         predicate meaningful for engines with no control channel.
         """
         es = getattr(self.stream, "engine_state", None) if self.stream else None
-        probe = getattr(es, "awaiting_user_approval", None)
-        if callable(probe):
-            try:
-                if probe():
+        excluded = self._surfaced_request_ids()
+        if excluded:
+            # #929 (review amendment 4): a request shown on the run's
+            # standalone approval surface is a background agent's wait, not
+            # this turn's — it must not turn this turn's genuine stall into a
+            # silent expected wait. Only other requests count.
+            snaps = self._control_snapshots()
+            if snaps is not None:
+                if any(s.request_id not in excluded for s in snaps):
                     return True
-            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
-                logger.debug("progress_edits.approval_probe_failed", error=str(exc))
+            else:
+                excluded = frozenset()
+        if not excluded:
+            probe = getattr(es, "awaiting_user_approval", None)
+            if callable(probe):
+                try:
+                    if probe():
+                        return True
+                except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                    logger.debug("progress_edits.approval_probe_failed", error=str(exc))
         for action_state in reversed(list(self.tracker._actions.values())):
             if not action_state.completed:
-                return bool(action_state.action.detail.get("inline_keyboard"))
+                detail = action_state.action.detail
+                if excluded and detail.get("request_id") in excluded:
+                    return False
+                return bool(detail.get("inline_keyboard"))
             break  # only check the most recent
         return False
+
+    def _control_snapshots(self) -> list[Any] | None:
+        """The engine's pending control requests, or None when the engine has
+        no registry (non-Claude) or the probe failed."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "control_request_snapshot", None)
+        if not callable(probe):
+            return None
+        try:
+            return list(probe())
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.request_info_probe_failed", error=str(exc))
+            return None
+
+    def _surfaced_request_ids(self) -> frozenset[str]:
+        """#929: requests a follow-up / wake turn's edits must ignore — they
+        live on the run's standalone approval surface. The run-level edits
+        never exclude (a pre-result wait on a surfaced request is still this
+        run's wait)."""
+        if self.run_level or self.orphan_approvals is None:
+            return frozenset()
+        return self.orphan_approvals.request_ids()
+
+    def _tracked_action_for_request(self, request_id: str) -> Any:
+        """#929: the newest uncompleted tracked action for ``request_id``."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            if action_state.action.detail.get("request_id") == request_id:
+                return action_state.action
+        return None
+
+    def _feed_orphan_completions(self) -> None:
+        """#929: complete the run-level tracker's action for each retired
+        surface, so ``_has_pending_approval()``'s presentation fallback can't
+        stay True on a stale action (a background agent's tool_result never
+        reaches this tracker while live-idle)."""
+        orphans = self.orphan_approvals
+        if orphans is None:
+            return
+        factory = EventFactory(self.tracker.engine)
+        for action_id, reason in orphans.drain_retired_actions():
+            if reason == "completed":
+                continue  # the completion event itself already did it
+            self.tracker.note_event(
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="warning",
+                    title="Permission resolved",
+                    ok=True,
+                )
+            )
+
+    async def _flush_orphans(self) -> None:
+        """#929: event-path send / retire of standalone approval surfaces."""
+        if self.orphan_approvals is None:
+            return
+        try:
+            await self.orphan_approvals.flush()
+            self._feed_orphan_completions()
+        except Exception:  # noqa: BLE001 - never break the render loop
+            logger.debug("progress_edits.orphan_flush_failed", exc_info=True)
+
+    async def _sync_orphan_approvals(self) -> None:
+        """#929 heartbeat: retire surfaces whose request is no longer
+        registered, retry failed sends, re-post due ones. Run-level only."""
+        if not self.run_level or self.orphan_approvals is None:
+            return
+        snaps = self._control_snapshots()
+        if snaps is None:
+            # No registry / probe failure: never read that as "all answered".
+            await self.orphan_approvals.flush()
+        else:
+            await self.orphan_approvals.sync({s.request_id for s in snaps})
+        self._feed_orphan_completions()
+
+    def _ask_question_text(self, request_id: str | None) -> str | None:
+        """#919: the outstanding question of a pending AskUserQuestion.
+
+        Prefers the action's current title — #709's ``advance_ask_action_model``
+        keeps it on the outstanding question of a multi-question flow, while
+        ``detail["ask_question"]`` stays on Q1 — then falls back to the detail.
+        """
+        match = None
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if request_id is not None and detail.get("request_id") == request_id:
+                match = action_state.action
+                break
+            if match is None and detail.get("ask_question"):
+                match = action_state.action
+        if match is None:
+            return None
+        title = _ASK_TITLE_PREFIX_RE.sub("", _trim_line(match.title or "", 400))
+        text = _trim_line(title, 80)
+        if not text:
+            text = _trim_line(str(match.detail.get("ask_question") or ""), 80)
+        return text or None
+
+    def _pending_request_info(self) -> _PendingRequestInfo | None:
+        """#919: classify the pending request the reminder is about.
+
+        Engine registry first (``control_request_snapshot()``, newest request
+        wins — the one whose buttons are visible), else the newest uncompleted
+        tracked action carrying an inline keyboard.
+        """
+        # #929: requests on the run's standalone approval surface are not
+        # this turn's to remind about — remind about the newest other one.
+        excluded = self._surfaced_request_ids()
+        snaps = [
+            s for s in (self._control_snapshots() or []) if s.request_id not in excluded
+        ]
+        if snaps:
+            snap = min(snaps, key=lambda s: s.age_s)
+            tool_name = snap.tool_name or None
+            if snap.kind == "ask":
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=snap.request_id,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(snap.request_id),
+                    answerable_by_text=bool(snap.answerable_by_text),
+                )
+            if (
+                snap.kind in ("outline_hold", "synthetic")
+                or tool_name == "ExitPlanMode"
+            ):
+                kind = "plan"
+            else:
+                kind = "tool"
+            return _PendingRequestInfo(
+                kind=kind, request_id=snap.request_id, tool_name=tool_name
+            )
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                continue
+            detail = action_state.action.detail
+            if not detail.get("inline_keyboard"):
+                continue
+            rid = detail.get("request_id")
+            rid = rid if isinstance(rid, str) and rid else None
+            if rid is not None and rid in excluded:
+                continue
+            tool_name = detail.get("tool_name") or None
+            if detail.get("ask_question"):
+                return _PendingRequestInfo(
+                    kind="question",
+                    request_id=rid,
+                    tool_name=tool_name,
+                    question=self._ask_question_text(rid),
+                )
+            if (
+                detail.get("request_type") == "DiscussApproval"
+                or tool_name == "ExitPlanMode"
+            ):
+                return _PendingRequestInfo(
+                    kind="plan", request_id=rid, tool_name=tool_name
+                )
+            if tool_name:
+                return _PendingRequestInfo(
+                    kind="tool", request_id=rid, tool_name=tool_name
+                )
+            return _PendingRequestInfo(kind="unknown", request_id=rid)
+        return None
 
     def _count_stall_warning(self) -> None:
         """Record that a genuine stall WARNING was emitted (#495).
@@ -2305,6 +3995,35 @@ class ProgressEdits:
                 return False
         return False
 
+    def _is_api_retry_waiting(self) -> bool:
+        """#792: True while the engine is backing off before retrying a
+        failed API call (Claude's ``system/api_retry``). Duck-typed like
+        :meth:`_is_rate_limit_waiting`; engines without the probe → False."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_api_retry", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.api_retry_probe_failed", error=str(exc))
+                return False
+        return False
+
+    def _is_compacting(self) -> bool:
+        """#819: True while the engine is compacting its context (Claude's
+        ``system/status: compacting``, latched for a bounded window after
+        each heartbeat). Duck-typed like :meth:`_is_api_retry_waiting`;
+        engines without the probe → False."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_compaction", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.compaction_probe_failed", error=str(exc))
+                return False
+        return False
+
     def _has_running_tool(self) -> bool:
         """Check if any action is still running (e.g. Bash command, TaskOutput)."""
         for action_state in reversed(list(self.tracker._actions.values())):
@@ -2329,6 +4048,23 @@ class ProgressEdits:
                     return parts[1] if len(parts) >= 2 else name
             break  # only check the most recent
         return None
+
+    def _children_extend_threshold(self, diag: Any, tree_active: bool | None) -> bool:
+        """Whether child-process work earns the longer subagent threshold.
+
+        #953: a stopped engine process can't be waiting on subagent work, and
+        outside Claude (whose children are Agent/Bash work) a child pid is
+        usually permanent — Codex's npm shim wraps the real binary, OpenCode
+        keeps MCP servers — so there it counts only while the process tree is
+        burning CPU (or on the TCP signal, unchanged).
+        """
+        if diag is not None and diag.state in _STOPPED_PROC_STATES:
+            return False
+        if not self._has_active_children(diag):
+            return False
+        if self.tracker.engine in _CHILD_WORK_ENGINES:
+            return True
+        return tree_active is True or diag.tcp_total > self._TCP_ACTIVE_THRESHOLD
 
     def _has_active_children(self, diag: Any) -> bool:
         """True if the process has active child processes or elevated TCP.
@@ -2380,6 +4116,16 @@ class ProgressEdits:
         if cpu_active is not True:
             return False
         if self._has_pending_approval():
+            return False
+        if self._is_compacting():
+            # #819: auto-compaction lands exactly after a tool_result and
+            # runs silently between heartbeats — the pattern this detector
+            # hunts, but not a wedge.
+            logger.info(
+                "progress_edits.stuck_after_tool_result.suppressed",
+                reason="compacting",
+                tr_elapsed=tr_elapsed,
+            )
             return False
         # #346: skip the detector when the session has legitimate background
         # work armed (Monitor, Bash run_in_background, ScheduleWakeup, etc.).
@@ -2547,6 +4293,14 @@ class ProgressEdits:
             return f"{a.kind}:{a.title} ({status})"
         return None
 
+    def _last_action_display(self) -> str | None:
+        """#919: user-facing ``Last:`` text — the newest action's title, first
+        line only, no ``kind:`` prefix and no ``(status)`` suffix. The raw
+        :meth:`_last_action_summary` form stays for log fields."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            return _trim_line(action_state.action.title or "", 80) or None
+        return None
+
     async def _run_loop(self, bg_tg: anyio.abc.TaskGroup) -> None:
         while True:
             while self.rendered_seq == self.event_seq:
@@ -2560,6 +4314,9 @@ class ProgressEdits:
             # render can't overwrite the final message.
             if self._finalizing:
                 self.rendered_seq = self.event_seq
+                # #929: surface a request that has nowhere else to render.
+                if self.orphan_approvals is not None and self.orphan_approvals.has_work:
+                    bg_tg.start_soon(self._flush_orphans)
                 continue
 
             # Debounce: never delay the first render; after that, batch events.
@@ -2575,6 +4332,8 @@ class ProgressEdits:
                 context_line=self.context_line,
                 meta_formatter=format_meta_line,
             )
+            if (block := self._background_block()) is not None:
+                state = dataclasses.replace(state, background=block)
             rendered = self.presenter.render_progress(
                 state,
                 elapsed_s=now - self.started_at,
@@ -2600,11 +4359,27 @@ class ProgressEdits:
             # message has the canonical approval buttons.  (#163)
             # Only strip for outline-related approvals (DiscussApproval),
             # not for regular tool approvals (e.g. Write with diff preview).
-            _current_is_outline = any(
-                a.action.detail.get("request_type") == "DiscussApproval"
-                for a in state.actions
-                if not a.completed
-            )
+            # #683: ask the action that actually SUPPLIED the rendered keyboard,
+            # not "is any uncompleted DiscussApproval action around". The
+            # synthetic claude.discuss_approve.N action used to linger
+            # uncompleted for the whole run, so this `any()` stayed True and
+            # stripped EVERY later approval keyboard down to the cancel row —
+            # an AskUserQuestion rendered its question text with no option
+            # buttons and the run was unanswerable. Matches the newest-first
+            # convention in TelegramPresenter.render_progress and
+            # _has_pending_approval.
+            _current_is_outline = False
+            _kb_tool: str | None = None  # #822
+            _kb_request_id: str | None = None
+            for _a in reversed(state.actions):
+                if _a.completed or not _a.action.detail.get("inline_keyboard"):
+                    continue
+                _current_is_outline = (
+                    _a.action.detail.get("request_type") == "DiscussApproval"
+                )
+                _kb_tool = _a.action.detail.get("tool_name")
+                _kb_request_id = _a.action.detail.get("request_id")
+                break
             if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
@@ -2671,15 +4446,18 @@ class ProgressEdits:
 
                         async def _send_notify(text: str) -> None:
                             try:
-                                self._approval_notify_ref = await self.transport.send(
-                                    channel_id=self.channel_id,
-                                    message=RenderedMessage(text=text),
-                                    options=SendOptions(
-                                        notify=True,
-                                        reply_to=self.progress_ref,
-                                        thread_id=self.thread_id,
-                                    ),
-                                )
+                                with message_kind("approval_notify"):
+                                    self._approval_notify_ref = (
+                                        await self.transport.send(
+                                            channel_id=self.channel_id,
+                                            message=RenderedMessage(text=text),
+                                            options=SendOptions(
+                                                notify=True,
+                                                reply_to=self.progress_ref,
+                                                thread_id=self.thread_id,
+                                            ),
+                                        )
+                                    )
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_send_failed",
@@ -2695,7 +4473,8 @@ class ProgressEdits:
 
                         async def _delete_notify(ref: MessageRef) -> None:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("approval_notify"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.notify_delete_failed",
@@ -2720,7 +4499,8 @@ class ProgressEdits:
                     ) -> None:
                         for ref in refs:
                             try:
-                                await self.transport.delete(ref=ref)
+                                with message_kind("outline"):
+                                    await self.transport.delete(ref=ref)
                             except Exception:  # noqa: BLE001
                                 logger.debug(
                                     "progress_edits.outline_delete_failed",
@@ -2734,37 +4514,45 @@ class ProgressEdits:
                 if self._outline_sent and not source_has_approval:
                     self._outline_sent = False
 
-                if rendered != self.last_rendered:
-                    # Log keyboard transitions at info level for #103/#104 diagnostics
-                    if has_approval and not had_approval:
-                        logger.info(
-                            "progress_edits.keyboard_attach",
+                # #948: the debounce sleep and sends above can outlast the
+                # turn being finalised. Re-check under the lock
+                # ``stop_repaints`` takes, so a stale repaint is never sent
+                # after (and over) the final edit.
+                async with self._edit_lock:
+                    if rendered != self.last_rendered and not self._finalizing:
+                        # Log keyboard transitions at info level for #103/#104 diagnostics
+                        if has_approval and not had_approval:
+                            logger.info(
+                                "progress_edits.keyboard_attach",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                                request_id=_kb_request_id,
+                                tool_name=_kb_tool,
+                            )
+                        logger.debug(
+                            "transport.edit_message",
                             channel_id=self.channel_id,
                             message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
+                            rendered=rendered.text,
                         )
-                    logger.debug(
-                        "transport.edit_message",
-                        channel_id=self.channel_id,
-                        message_id=self.progress_ref.message_id,
-                        rendered=rendered.text,
-                    )
-                    edited = await self.transport.edit(
-                        ref=self.progress_ref,
-                        message=rendered,
-                        wait=has_approval and not had_approval,
-                    )
-                    if edited is not None:
-                        self.last_rendered = rendered
-                        self._last_render_at = self.clock()
-                        self._has_rendered = True
-                    elif has_approval:
-                        logger.warning(
-                            "progress_edits.keyboard_edit_failed",
-                            channel_id=self.channel_id,
-                            message_id=self.progress_ref.message_id,
-                            keyboard_rows=len(new_kb),
-                        )
+                        with message_kind("progress"):
+                            edited = await self.transport.edit(
+                                ref=self.progress_ref,
+                                message=rendered,
+                                wait=has_approval and not had_approval,
+                            )
+                        if edited is not None:
+                            self.last_rendered = rendered
+                            self._last_render_at = self.clock()
+                            self._has_rendered = True
+                        elif has_approval:
+                            logger.warning(
+                                "progress_edits.keyboard_edit_failed",
+                                channel_id=self.channel_id,
+                                message_id=self.progress_ref.message_id,
+                                keyboard_rows=len(new_kb),
+                            )
             except Exception:  # noqa: BLE001
                 # Transport errors (timeouts, network issues) are best-effort —
                 # never crash a run because a progress edit failed to send.
@@ -2785,6 +4573,13 @@ class ProgressEdits:
     # deliberations.
     _STALL_THRESHOLD_APPROVAL_FIRST: float = 600.0
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # refire threshold after first
+    # #929: how long a registered request may sit with no visible button
+    # before the rescue path surfaces it on a standalone message.
+    _ORPHAN_RESCUE_GRACE_S: float = 30.0
+    # How long a dead, already-answered run's process must stay dead before
+    # the #650 silent reap: longer than a bounded Telegram delivery
+    # (twice the client's 30 s message timeout) still holding the stream.
+    _REAP_DEAD_GRACE_S: float = 90.0
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
     _TCP_ACTIVE_THRESHOLD: int = 20  # TCP connections above this suggest active work
@@ -2795,6 +4590,18 @@ class ProgressEdits:
     # result idle past this point with no other expected-wait signal,
     # Tier 1 missed an edge case — stop suppressing auto-cancel.
     _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
+
+    async def stop_repaints(self) -> None:
+        """#948: stop progress repaints before a final edit of this message.
+
+        Sets ``_finalizing`` (no new repaint starts), then waits for a repaint
+        already being handed to the transport, so the caller's final edit is
+        enqueued after it — the outbox coalesces same-message edits, so the
+        final supersedes it or follows it, and never the other way round.
+        """
+        self._finalizing = True
+        async with self._edit_lock:
+            pass
 
     def note_final(self, evt: UntetherEvent) -> None:
         """#591: record a terminal CompletedEvent WITHOUT scheduling a repaint.
@@ -2812,6 +4619,30 @@ class ProgressEdits:
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
             return
+        # #709: an AskUserQuestion control action is advanced by the `aq`
+        # callback handler, not by further engine events — bind it to this
+        # tracker so the handler can move the MODEL and the heartbeat
+        # re-render agrees with what the user was just shown.
+        if isinstance(evt, ActionEvent) and evt.action.detail.get("ask_flow"):
+            _ask_rid = evt.action.detail.get("request_id")
+            if isinstance(_ask_rid, str) and _ask_rid:
+                register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
+        # #929: a keyboard action reaching the run-level edits after the run's
+        # final was delivered (``_finalizing``) has no visible host — the
+        # turn router took no turn for it (a background agent asking while
+        # the live session is idle). Hand it to the standalone surface; the
+        # ``_run_loop`` wakeup below flushes it. Completions retire surfaces.
+        orphans = self.orphan_approvals
+        if orphans is not None and isinstance(evt, ActionEvent):
+            if evt.phase == "completed":
+                orphans.note_completed(str(evt.action.id))
+            elif (
+                evt.phase == "started"
+                and self.run_level
+                and self._finalizing
+                and evt.action.detail.get("inline_keyboard")
+            ):
+                orphans.offer(evt.action)
         if self.progress_ref is None:
             return
         now = self.clock()
@@ -2885,15 +4716,16 @@ class ProgressEdits:
                     extra: dict[str, Any] = {"entities": entities}
                     if approval_keyboard and idx == last_idx:
                         extra["reply_markup"] = approval_keyboard
-                    ref = await self.transport.send(
-                        channel_id=self.channel_id,
-                        message=RenderedMessage(text=rendered_text, extra=extra),
-                        options=SendOptions(
-                            reply_to=self.progress_ref,
-                            notify=False,
-                            thread_id=self.thread_id,
-                        ),
-                    )
+                    with message_kind("outline"):
+                        ref = await self.transport.send(
+                            channel_id=self.channel_id,
+                            message=RenderedMessage(text=rendered_text, extra=extra),
+                            options=SendOptions(
+                                reply_to=self.progress_ref,
+                                notify=False,
+                                thread_id=self.thread_id,
+                            ),
+                        )
                     if ref:
                         self._outline_refs.append(ref)
                 except Exception:  # noqa: BLE001
@@ -2909,11 +4741,94 @@ class ProgressEdits:
 
         bg_tg.start_soon(_do_send)
 
+    async def _send_approval_reminder(
+        self, text: str, info: _PendingRequestInfo | None, mins: int
+    ) -> None:
+        """#920: send (or replace) the one pending-approval reminder.
+
+        ``SendOptions.replace`` makes the outbox delete the previous copy only
+        after the new one landed, so a failed send never leaves zero
+        reminders; on a failed send the previous ref is kept.
+        """
+        self._approval_first_reminder_sent = True
+        previous = self._approval_reminder_ref
+        try:
+            with message_kind("approval_reminder"):
+                ref = await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(thread_id=self.thread_id, replace=previous),
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_edits.stall_notify_failed", exc_info=True)
+            return
+        if ref is None:
+            return
+        self._approval_reminder_ref = ref
+        self._approval_reminder_request_id = info.request_id if info else None
+        logger.info(
+            "progress_edits.approval_reminder_sent",
+            channel_id=self.channel_id,
+            request_kind=info.kind if info else "unknown",
+            request_id=self._approval_reminder_request_id,
+            mins=mins,
+            replaced=previous is not None,
+            message_id=ref.message_id,
+        )
+
+    async def _retire_approval_reminder(self, reason: str) -> None:
+        """#920: delete the pending-approval reminder (edit it to "no longer
+        waiting" if the delete fails, e.g. a > 48 h old message)."""
+        ref = self._approval_reminder_ref
+        if ref is None:
+            return
+        request_id = self._approval_reminder_request_id
+        self._approval_reminder_ref = None
+        self._approval_reminder_request_id = None
+        if reason in ("resolved", "superseded"):
+            self._approval_first_reminder_sent = False
+        deleted = False
+        try:
+            with message_kind("approval_reminder"):
+                deleted = bool(await self.transport.delete(ref=ref))
+        except Exception:  # noqa: BLE001
+            deleted = False
+        if not deleted:
+            with contextlib.suppress(Exception), message_kind("approval_reminder"):
+                await self.transport.edit(
+                    ref=ref, message=RenderedMessage(text="✅ No longer waiting.")
+                )
+        logger.info(
+            "progress_edits.approval_reminder_retired",
+            channel_id=self.channel_id,
+            request_id=request_id,
+            reason=reason,
+            deleted=deleted,
+            message_id=ref.message_id,
+        )
+
+    async def _maybe_retire_approval_reminder(self) -> None:
+        """#920: heartbeat check — retire the reminder once its request is
+        answered (``resolved``) or replaced by a newer one (``superseded``)."""
+        if not self._has_pending_approval():
+            self._approval_first_reminder_sent = False
+            await self._retire_approval_reminder("resolved")
+            return
+        rid = self._approval_reminder_request_id
+        if self._approval_reminder_ref is None or rid is None:
+            return
+        snaps = self._control_snapshots()
+        if snaps is None:
+            return
+        if rid not in {snap.request_id for snap in snaps}:
+            await self._retire_approval_reminder("superseded")
+
     async def delete_ephemeral(self) -> None:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
             try:
-                await self.transport.delete(ref=self._approval_notify_ref)
+                with message_kind("approval_notify"):
+                    await self.transport.delete(ref=self._approval_notify_ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.delete.failed",
@@ -2923,6 +4838,16 @@ class ProgressEdits:
                     error_type=exc.__class__.__name__,
                 )
             self._approval_notify_ref = None
+        # #920: then the pending-approval reminder (run end / turn close).
+        await self._retire_approval_reminder("run_end")
+        # #929: then (run-level only — turn edits share the reference) the
+        # standalone approval surfaces; the session is closing, and closing
+        # stdin rejects their requests.
+        if self.run_level and self.orphan_approvals is not None:
+            try:
+                await self.orphan_approvals.aclose("run_end")
+            except Exception:  # noqa: BLE001
+                logger.debug("progress_edits.orphan_close_failed", exc_info=True)
         # Safety-net: delete any outline messages not already cleaned up
         # (e.g. run cancelled while outline is visible).
         # Also remove from the module-level registry to avoid stale entries.
@@ -2936,7 +4861,8 @@ class ProgressEdits:
             _OUTLINE_REGISTRY_TS.pop(sid, None)  # #203: keep ts map in sync
         for ref in self._outline_refs:
             try:
-                await self.transport.delete(ref=ref)
+                with message_kind("outline"):
+                    await self.transport.delete(ref=ref)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ephemeral.outline_delete.failed",
@@ -2953,7 +4879,8 @@ class ProgressEdits:
             _EPHEMERAL_MSGS_TS.pop(key, None)  # #203: keep ts map in sync
             for ref in refs:
                 try:
-                    await self.transport.delete(ref=ref)
+                    with message_kind("ephemeral"):
+                        await self.transport.delete(ref=ref)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "ephemeral.delete.failed",
@@ -2995,16 +4922,17 @@ async def send_initial_progress(
         elapsed_s=0.0,
         label=label,
     )
-    sent_ref, _ = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=initial_rendered,
-        edit_ref=progress_ref,
-        reply_to=reply_to,
-        notify=False,
-        replace_ref=progress_ref,
-        thread_id=thread_id,
-    )
+    with message_kind("progress"):
+        sent_ref, _ = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=initial_rendered,
+            edit_ref=progress_ref,
+            reply_to=reply_to,
+            notify=False,
+            replace_ref=progress_ref,
+            thread_id=thread_id,
+        )
     if sent_ref is not None:
         last_rendered = initial_rendered
         logger.debug(
@@ -3034,6 +4962,15 @@ class RunOutcome:
     cancelled: bool = False
     completed: CompletedEvent | None = None
     resume: ResumeToken | None = None
+    # #905: ``completed``'s #572 stream-idle class, captured as it is
+    # consumed. The engine state's copy is rewritten by every later result,
+    # so a live session's wake turn would otherwise mask the run's own.
+    stream_idle_class: str | None = None
+
+
+#: #614/#618: the bound on the shielded early final delivery (#591). 60 s,
+#: not less — a 4-chunk final under group-chat outbox pacing takes 15 s+.
+_EARLY_DELIVERY_TIMEOUT_S = 60.0
 
 
 async def run_runner_with_cancel(
@@ -3046,9 +4983,29 @@ async def run_runner_with_cancel(
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
     channel_id: ChannelId = 0,
     on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
+    turn_router: FollowupTurnRouter | None = None,
+    deliver_error_early: Callable[[CompletedEvent, RunOutcome], bool] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
+    runner_finished = anyio.Event()
+    # #510: this run's own stream + pid. The runner instance is shared
+    # across chats, so ``runner.current_stream`` / ``runner.last_pid`` are
+    # "latest spawn in ANY chat" and must never be read here. The handle is
+    # bound to the context BEFORE the task group starts so ``run_runner``
+    # (which iterates the generator, i.e. executes ``run_impl``) inherits it.
+    stream_handle = RunStreamHandle()
+    stream_token = set_run_stream_handle(stream_handle)
+
+    def bind_run_stream() -> None:
+        """Bind edits to this run's published stream/pid. Idempotent, so a
+        supplementary ``StartedEvent`` (e.g. Claude's per-result
+        ``meta={"complete": ...}``) can never rebind to another chat."""
+        if stream_handle.stream is not None:
+            edits.stream = stream_handle.stream
+        if isinstance(stream_handle.pid, int):
+            edits.pid = stream_handle.pid
+
     try:
         async with anyio.create_task_group() as tg:
 
@@ -3057,6 +5014,28 @@ async def run_runner_with_cancel(
                 try:
                     async for evt in events:
                         _log_runner_event(evt)
+                        _consume_absorbed_anchor(evt)
+                        # #776: follow-up turns of a live session get their
+                        # own messages; the run's progress/final stay put.
+                        if isinstance(evt, TurnEvent):
+                            # #811: the run-level monitor's live-idle clock.
+                            edits.note_turn_boundary(evt.phase)
+                            # #418: every turn of the session is exported,
+                            # not just the run's first.
+                            _record_export_event(
+                                evt,
+                                outcome.resume or evt.resume,
+                                channel_id=channel_id,
+                            )
+                            if turn_router is not None:
+                                await turn_router.on_turn(evt)
+                            continue
+                        if turn_router is not None and turn_router.active:
+                            _record_export_event(
+                                evt, outcome.resume, channel_id=channel_id
+                            )
+                            await turn_router.on_event(evt)
+                            continue
                         if isinstance(evt, StartedEvent):
                             outcome.resume = evt.resume
                             bind_run_context(
@@ -3068,9 +5047,7 @@ async def run_runner_with_cancel(
                                 pid = evt.meta.get("pid")
                                 if isinstance(pid, int):
                                     edits.pid = pid
-                            _cs = getattr(runner, "current_stream", None)
-                            if _cs is not None:
-                                edits.stream = _cs
+                            bind_run_stream()
                             if running_task is not None and running_task.resume is None:
                                 running_task.resume = evt.resume
                                 try:
@@ -3084,6 +5061,19 @@ async def run_runner_with_cancel(
                             first_completed = outcome.completed is None
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
+                            # #905: the runner set this result's class just
+                            # before yielding it and is suspended at the
+                            # yield, so this read belongs to ``evt``.
+                            run_stream = (
+                                stream_handle.stream
+                                if stream_handle.stream is not None
+                                else edits.stream
+                            )
+                            outcome.stream_idle_class = getattr(
+                                getattr(run_stream, "engine_state", None),
+                                "stream_idle_class",
+                                None,
+                            )
                             # #591: deliver the final answer NOW — the run
                             # generator may not return for up to the full
                             # post-result limbo window (MCP children holding
@@ -3094,10 +5084,22 @@ async def run_runner_with_cancel(
                             # so auto-continue / error formatting still see
                             # them first. Failures here leave the run
                             # untouched — the post-return path retries.
+                            # #900: an errored result also qualifies when
+                            # ``deliver_error_early`` says no post-return
+                            # recovery would act on it (a live session
+                            # would otherwise hold it until it closes,
+                            # while wake finals overtake it).
                             if (
                                 on_completed is not None
-                                and evt.ok is True
                                 and first_completed
+                                and (
+                                    evt.ok is True
+                                    or (
+                                        evt.ok is False
+                                        and deliver_error_early is not None
+                                        and deliver_error_early(evt, outcome)
+                                    )
+                                )
                             ):
                                 edits.note_final(evt)
                                 _record_export_event(
@@ -3118,8 +5120,18 @@ async def run_runner_with_cancel(
                                     # timeout that fires between the last
                                     # chunk and the sent-flag re-creates the
                                     # spurious-cancelled artifact.
-                                    with anyio.move_on_after(60, shield=True):
+                                    with anyio.move_on_after(
+                                        _EARLY_DELIVERY_TIMEOUT_S, shield=True
+                                    ) as delivery_scope:
                                         await on_completed(evt, outcome)
+                                    if delivery_scope.cancelled_caught:
+                                        # #928: was silent — a send that
+                                        # landed then stalled (e.g. on the
+                                        # replace-delete) looked undelivered.
+                                        logger.warning(
+                                            "final.early_delivery_timeout",
+                                            timeout_s=_EARLY_DELIVERY_TIMEOUT_S,
+                                        )
                                 except Exception:  # noqa: BLE001
                                     logger.warning(
                                         "final.early_delivery_failed",
@@ -3131,39 +5143,52 @@ async def run_runner_with_cancel(
                         await edits.on_event(evt)
                 finally:
                     # #614: close the runner generator in THIS task. When the
-                    # async-for is abandoned mid-body (e.g. /cancel lands
-                    # while on_completed is awaiting), the generator is left
-                    # suspended at a yield and would be finalized later by
-                    # the event loop's async-generator hook in a DIFFERENT
+                    # async-for is abandoned mid-body (e.g. a cancel lands
+                    # while a Telegram send is stalled), the generator is
+                    # left suspended at a yield and would be finalized later
+                    # by the event loop's async-generator hook in a DIFFERENT
                     # task — and run_impl's anyio task group then raises
                     # "Attempted to exit cancel scope in a different task
-                    # than it was entered in" as an unretrieved task
-                    # exception. Shielded so the pending bridge-level
-                    # cancellation can't interrupt generator teardown
-                    # (subprocess kill, registry cleanup); bounded so a
-                    # wedged teardown can't hang the bridge.
-                    aclose = getattr(events, "aclose", None)
-                    if aclose is not None:
-                        with anyio.move_on_after(30, shield=True):
-                            await aclose()
+                    # than it was entered in". The base runner's wrappers
+                    # close run_impl with ``aclosing`` so this reaches it.
+                    try:
+                        await _close_runner_events(events)
+                    finally:
+                        runner_finished.set()
                     tg.cancel_scope.cancel()
 
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
+                if task.resume is not None and task.resume.engine == "claude":
+                    # #775: no steer may land in a run being cancelled — it
+                    # would be killed with the process. Later messages fall
+                    # back to the queue path (and --resume).
+                    from .runners.claude import close_steer_window
+
+                    await close_steer_window(task.resume.value, "cancel")
+                # #776: /cancel (or /new) on a live session that is only
+                # holding between turns closes its stdin — the CLI stops its
+                # background tasks and exits cleanly (no SIGTERM, nothing
+                # quarantined). An active turn is still killed as before.
+                if running_task_is_live_idle(task) and task.resume is not None:
+                    from .runners.claude import close_live_session
+
+                    if await close_live_session(
+                        task.resume.value, "cancel", notice=True
+                    ):
+                        with anyio.move_on_after(20):
+                            await runner_finished.wait()
                 tg.cancel_scope.cancel()
 
             async def thread_pid() -> None:
-                """Poll for early PID from subprocess spawn before StartedEvent."""
-                for _ in range(50):  # poll up to 5s
-                    pid = getattr(runner, "last_pid", None)
-                    if isinstance(pid, int):
-                        edits.pid = pid
-                        cs = getattr(runner, "current_stream", None)
-                        if cs is not None:
-                            edits.stream = cs
-                        return
-                    await anyio.sleep(0.1)
+                """Bind this run's PID + stream as soon as the runner publishes
+                them at spawn — before any StartedEvent, so stall diagnostics
+                aren't blind when a run never gets that far (#593). Bounded:
+                runners that never publish leave edits unbound (#510)."""
+                with anyio.move_on_after(5):
+                    await stream_handle.ready.wait()
+                    bind_run_stream()
 
             tg.start_soon(run_runner)
             tg.start_soon(thread_pid)
@@ -3182,6 +5207,8 @@ async def run_runner_with_cancel(
         ]
         if non_cancelled:
             raise non_cancelled[0] from eg
+    finally:
+        reset_run_stream_handle(stream_token)
 
     # Session completion summary
     duration = time.monotonic() - start_time
@@ -3193,6 +5220,16 @@ async def run_runner_with_cancel(
     suppression_summary = ",".join(
         f"{k}:{v}" for k, v in sorted(suppression_counts.items())
     )
+    summary_ok = outcome.completed.ok if outcome.completed else None
+    # #1001: a live session whose process died between turns without a close
+    # by Untether did not end cleanly, whatever its first result said.
+    exit_cause = getattr(
+        getattr(edits.stream, "engine_state", None), "live_exit_cause", None
+    )
+    exit_fields: dict[str, Any] = {}
+    if isinstance(exit_cause, str):
+        summary_ok = False
+        exit_fields["exit_cause"] = exit_cause
     logger.info(
         "session.summary",
         session_id=outcome.resume.value if outcome.resume else None,
@@ -3203,10 +5240,34 @@ async def run_runner_with_cancel(
         # #494: subprocess-health canary, separate from user-facing stall_warnings
         liveness_stalls=edits.stream.liveness_stalls if edits.stream else 0,
         peak_idle_seconds=round(edits._peak_idle, 1),
+        # #787: live-session holds between turns, reported apart from
+        # peak_idle so the stall metric isn't inflated by by-design waits.
+        peak_live_idle_seconds=round(edits._peak_live_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
+        # #716: `last_event_type` alone cannot answer "did this run reach its
+        # result?" — a trailing frame overwrites it. Logging the latch makes
+        # `session.summary` self-describing for log-side auditing, so a
+        # `last_event_type=user` line can be read as healthy-with-trailing-
+        # frame rather than as a stuck-after-tool_result candidate.
+        saw_result=bool(getattr(edits.stream, "saw_result", False))
+        if edits.stream
+        else False,
         cancelled=outcome.cancelled,
-        ok=outcome.completed.ok if outcome.completed else None,
+        ok=summary_ok,
+        **exit_fields,
+        # #776: turns delivered after the run's own result (live session).
+        followup_turns=turn_router.turns_delivered if turn_router else 0,
         stall_suppressions=suppression_summary,
+        # #684: requests flagged by the detect-only unanswerable canary.
+        unanswerable_control_requests=len(edits._unanswerable_warned),
+        # #929: standalone approval messages sent (incl. re-posts).
+        approval_surfaces=getattr(
+            getattr(edits, "orphan_approvals", None), "sent_total", 0
+        ),
+        # #695: both events carry the model so a single grep over either
+        # answers "which model ran this session?".
+        **_model_log_fields(edits.tracker.meta),
+        **_hook_summary_fields(edits.stream),
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -3217,6 +5278,19 @@ async def run_runner_with_cancel(
         )
 
     return outcome
+
+
+def _hook_summary_fields(stream: Any) -> dict[str, Any]:
+    """#812: ``hooks_started`` for engines that track hook lifecycle frames
+    (Claude with ``--include-hook-events``); #928: ``no_query_results``
+    (the CLI's empty no-query results absorbed). Absent for the rest."""
+    engine_state = getattr(stream, "engine_state", None)
+    fields: dict[str, Any] = {}
+    for key in ("hooks_started", "no_query_results"):
+        value = getattr(engine_state, key, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            fields[key] = value
+    return fields
 
 
 def sync_resume_token(
@@ -3239,19 +5313,22 @@ async def send_result_message(
     replace_ref: MessageRef | None = None,
     delete_tag: str = "final",
     thread_id: ThreadId | None = None,
-) -> None:
-    final_msg, edited = await _send_or_edit_message(
-        cfg.transport,
-        channel_id=channel_id,
-        message=message,
-        edit_ref=edit_ref,
-        reply_to=reply_to,
-        notify=notify,
-        replace_ref=replace_ref,
-        thread_id=thread_id,
-    )
+) -> MessageRef | None:
+    """Send (or edit in) a final; returns its message ref (#890), or None
+    when the transport delivered nothing."""
+    with message_kind("final"):
+        final_msg, edited = await _send_or_edit_message(
+            cfg.transport,
+            channel_id=channel_id,
+            message=message,
+            edit_ref=edit_ref,
+            reply_to=reply_to,
+            notify=notify,
+            replace_ref=replace_ref,
+            thread_id=thread_id,
+        )
     if final_msg is None:
-        return
+        return None
     if (
         progress_ref is not None
         and (edit_ref is None or not edited)
@@ -3263,7 +5340,846 @@ async def send_result_message(
             message_id=progress_ref.message_id,
             tag=delete_tag,
         )
-        await cfg.transport.delete(ref=progress_ref)
+        with message_kind("progress"):
+            await cfg.transport.delete(ref=progress_ref)
+    return final_msg
+
+
+def unique_running_tasks(
+    running_tasks: Mapping[MessageRef, RunningTask],
+) -> list[tuple[MessageRef, RunningTask]]:
+    """One entry per run (#776): a live run is registered under its progress
+    message *and* each follow-up turn's message, so counting keys over-counts."""
+    seen: set[int] = set()
+    out: list[tuple[MessageRef, RunningTask]] = []
+    for ref, task in running_tasks.items():
+        if id(task) in seen:
+            continue
+        seen.add(id(task))
+        out.append((ref, task))
+    return out
+
+
+def running_task_is_live_idle(task: Any) -> bool:
+    """True when the run is a live Claude session sitting between turns — it
+    is holding for background work or a follow-up, not doing work (#776)."""
+    stream = getattr(getattr(task, "edits", None), "stream", None)
+    engine_state = getattr(stream, "engine_state", None)
+    if engine_state is None or not getattr(engine_state, "live_mode", False):
+        return False
+    return bool(getattr(engine_state, "completed_turns", 0)) and not getattr(
+        engine_state, "turn_open", True
+    )
+
+
+def running_task_shows_progress(task: Any, ref: MessageRef) -> bool:
+    """#904: True while ``ref`` (a ``running_tasks`` key) still shows the
+    run's progress render rather than a final.
+
+    The run's first progress message is edited into (or replaced by) its
+    final once delivered — ``_finalizing`` — yet a live session keeps it
+    mapped between turns. Per-turn progress messages are unmapped as soon as
+    their turn closes, so while mapped they are progress."""
+    edits = getattr(task, "edits", None)
+    first_ref = getattr(edits, "progress_ref", None)
+    shows_final = (
+        first_ref is not None
+        and first_ref.channel_id == ref.channel_id
+        and first_ref.message_id == ref.message_id
+        and bool(getattr(edits, "_finalizing", False))
+    )
+    return not shows_final
+
+
+def running_task_is_idle_after_result(task: Any) -> bool:
+    """#895: a live session that has answered and has nothing left in flight
+    — between turns, no background task holding it open (#801) and no queued
+    follow-up waiting for its turn. Cancelling it only closes the session;
+    the user's answer is already delivered (``handle.cancelled_after_delivery``)."""
+    if not running_task_is_live_idle(task):
+        return False
+    engine_state = task.edits.stream.engine_state
+    tasks = getattr(engine_state, "tasks", None)
+    if isinstance(tasks, dict) and any(
+        getattr(t, "holds_session", False) for t in tasks.values()
+    ):
+        return False
+    resume = getattr(task, "resume", None)
+    return resume is None or all(
+        entry[0] != resume.value for entry in _FOLLOWUP_ANCHORS.values()
+    )
+
+
+async def close_idle_live_sessions(
+    running_tasks: Mapping[MessageRef, RunningTask], reason: str
+) -> int:
+    """Gracefully close every idle live session (drain / restart, #776 D-7)."""
+    closed = 0
+    for _ref, task in unique_running_tasks(running_tasks):
+        if not running_task_is_live_idle(task) or task.resume is None:
+            continue
+        if task.resume.engine != "claude":
+            continue
+        from .runners.claude import close_live_session
+
+        if await close_live_session(task.resume.value, reason, notice=True):
+            closed += 1
+    return closed
+
+
+# ── #776 live-session follow-up turns ──────────────────────────────────────
+
+# command_uuid -> (session_id, reply_to, queued placeholder) for follow-ups
+# written into a live session (phase 06). The router consumes the anchor when
+# the matching turn opens; leftovers are resolved when the run ends.
+_FOLLOWUP_ANCHORS: dict[str, tuple[str, MessageRef, MessageRef | None]] = {}
+
+
+@dataclass(slots=True)
+class _InFlightFollowup:
+    session_id: str
+    settled: anyio.Event = field(default_factory=anyio.Event)
+    written: bool | None = None
+
+
+# #921: anchors whose write into the live session is still being decided
+# (``inject_when_idle`` waiting for the turn to end, or a steer waiting for
+# the lock). The writer owns them until it settles: the run-end sweep must
+# not claim one, or a cancel racing a queued follow-up tells the user to
+# "send it again" while the scheduler re-dispatches it anyway.
+_FOLLOWUP_IN_FLIGHT: dict[str, _InFlightFollowup] = {}
+# How long the run-end sweep waits for in-flight writers. The run's process
+# has already exited, so a waiting inject sees the session gone on its next
+# 0.2 s poll; this is a safety bound, not an expected path.
+_FOLLOWUP_SETTLE_S = 2.0
+
+
+def register_followup_anchor(
+    command_uuid: str,
+    *,
+    session_id: str,
+    reply_to: MessageRef,
+    placeholder: MessageRef | None,
+    in_flight: bool = False,
+) -> None:
+    _FOLLOWUP_ANCHORS[command_uuid] = (session_id, reply_to, placeholder)
+    if in_flight:
+        _FOLLOWUP_IN_FLIGHT[command_uuid] = _InFlightFollowup(session_id)
+
+
+def settle_followup_anchor(command_uuid: str, *, written: bool) -> None:
+    """#921: the writer's verdict on an in-flight anchor — call exactly once.
+
+    ``written=False``: the line never reached the session and the message
+    falls back (resume / queue path), so nothing is owed — drop the anchor.
+    ``written=True``: keep it; the router consumes it when the turn opens,
+    or the run-end sweep reports it if the session dies first.
+    """
+    if not written:
+        _FOLLOWUP_ANCHORS.pop(command_uuid, None)
+    flight = _FOLLOWUP_IN_FLIGHT.pop(command_uuid, None)
+    if flight is not None:
+        flight.written = written
+        flight.settled.set()
+
+
+async def _await_in_flight_followups(session_id: str) -> None:
+    """#921: give in-flight writers for ``session_id`` up to
+    :data:`_FOLLOWUP_SETTLE_S` to settle before the run-end sweep drains."""
+    pending = [
+        (uuid, flight)
+        for uuid, flight in _FOLLOWUP_IN_FLIGHT.items()
+        if flight.session_id == session_id
+    ]
+    if not pending:
+        return
+    with anyio.move_on_after(_FOLLOWUP_SETTLE_S):
+        for _, flight in pending:
+            await flight.settled.wait()
+    for uuid, flight in pending:
+        if not flight.settled.is_set():
+            from .runners.claude import get_live_session
+
+            # Expected when a newer process owns the session id (#816): the
+            # writer is waiting on *that* process, whose router takes it.
+            logger.info(
+                "claude.live_session.followup_settle_timeout",
+                session_id=session_id,
+                command_uuid=uuid,
+                live_owner_present=get_live_session(session_id) is not None,
+            )
+        elif not flight.written:
+            logger.info(
+                "claude.live_session.followup_requeued",
+                session_id=session_id,
+                command_uuid=uuid,
+            )
+
+
+def pop_followup_anchor(
+    command_uuid: str | None,
+) -> tuple[MessageRef, MessageRef | None] | None:
+    if not command_uuid:
+        return None
+    entry = _FOLLOWUP_ANCHORS.pop(command_uuid, None)
+    return None if entry is None else (entry[1], entry[2])
+
+
+def _consume_absorbed_anchor(evt: UntetherEvent) -> None:
+    """#775: a steered/injected line the CLI folded into an already-running
+    turn never opens a turn of its own — drop its anchor so the run-end sweep
+    doesn't report it as "not run". Its answer is that turn's answer."""
+    if not isinstance(evt, ActionEvent):
+        return
+    detail = evt.action.detail or {}
+    command_uuid = detail.get("absorbed_command_uuid")
+    if isinstance(command_uuid, str) and pop_followup_anchor(command_uuid):
+        logger.info("live_followup.anchor_absorbed", command_uuid=command_uuid)
+
+
+def drain_followup_anchors(
+    session_id: str,
+) -> list[tuple[MessageRef, MessageRef | None]]:
+    """Anchors whose follow-up never got a turn (the session ended first).
+
+    #921: anchors still in flight belong to their writer and are skipped."""
+    leftovers = [
+        (uuid, entry)
+        for uuid, entry in _FOLLOWUP_ANCHORS.items()
+        if entry[0] == session_id and uuid not in _FOLLOWUP_IN_FLIGHT
+    ]
+    for uuid, _ in leftovers:
+        _FOLLOWUP_ANCHORS.pop(uuid, None)
+    return [(entry[1], entry[2]) for _, entry in leftovers]
+
+
+_TURN_HEADERS: dict[str, str] = {
+    "task_finished": "\N{BELL} Background task finished",
+    "scheduled_wakeup": "\N{ALARM CLOCK} Scheduled wake-up",
+    "monitor_event": "\N{SATELLITE ANTENNA} Monitor",
+    # #812: an asyncRewake hook's findings (e.g. security-guidance's commit
+    # review). Always pushed, never folded (D-4 — see FOLDABLE_REASONS).
+    "hook_rewake": "\N{HOOK} Hook feedback",
+    "unknown": "\N{BELL} Claude continued",
+}
+# Reasons whose final is pushed (the user is waiting for it); Monitor ticks
+# can be many per minute, so they arrive silently (#776 D-6).
+_TURN_PUSH_REASONS = frozenset(
+    {"task_finished", "scheduled_wakeup", "hook_rewake", "unknown"}
+)
+# A wake turn gets a progress message only if it outlives this, uses a tool
+# or raises an approval (#776 D-10) — short turns send just their final.
+_TURN_LAZY_PROGRESS_S = 5.0
+# #806: run-close reasons meaning the user cancelled an in-flight turn. /new
+# sets the same ``cancel_requested`` event as /cancel, so both arrive here
+# as "cancel" (``_bg_close_reason``); closes the lifecycle initiates itself
+# (abs_cap, error, idle_no_tasks, …) keep the error final.
+_TURN_CANCEL_REASONS = frozenset({"cancel"})
+
+
+def _live_closing_hooks_notice(hooks: list[str], count: int | None = None) -> str:
+    """#812: an automatic close cut a background hook short — its feedback
+    (e.g. an asyncRewake security review) never reached the session.
+
+    ``count`` is how many were still running (the live hook processes);
+    ``hooks`` the distinct events they could be. Hook frames carry no pid,
+    so one running hook among Stop and UserPromptSubmit candidates reads
+    "a background hook (Stop or UserPromptSubmit)" — never "2 hooks".
+    Without ``count`` each entry is one hook (script labels)."""
+    n = len(hooks) if count is None else count
+    shown = [h[:40] for h in hooks[:3]]
+    more = f" (+{len(hooks) - 3} more)" if len(hooks) > 3 else ""
+    if n == 1:
+        names = (
+            shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} or {shown[-1]}"
+        ) + more
+        return (
+            f"\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
+            f"({names}) was still running; its feedback wasn't delivered."
+        )
+    names = ", ".join(shown) + more
+    return (
+        f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {n} background hooks "
+        f"({names}) were still running; their feedback wasn't delivered."
+    )
+
+
+def _format_hold_span(seconds: float) -> str:
+    """#829: "30 min" / "1 min" / "45 s" for the closing notice."""
+    if seconds < 60:
+        return f"{max(1, round(seconds))} s"
+    return f"{round(seconds / 60)} min"
+
+
+def _live_closing_notice(
+    reason: str,
+    tasks: list[str],
+    hooks: list[str] | None = None,
+    hook_count: int | None = None,
+    *,
+    max_hold_s: float | None = None,
+    rearm_on_progress: bool = True,
+) -> str:
+    """User-facing text for a live session closing over running background
+    tasks (#776) or background hooks (#812, automatic closes only).
+
+    #829: it never promises "reply to continue" — whether the next message
+    continues the same session is only known once the process has exited
+    (the ``"closed"`` follow-up, ``_live_closed_notice``)."""
+    if hooks:
+        hook_text = _live_closing_hooks_notice(hooks, hook_count)
+        if not tasks:
+            return hook_text
+        return f"{hook_text}\n{_live_closing_notice(reason, tasks, max_hold_s=max_hold_s, rearm_on_progress=rearm_on_progress)}"
+    n = len(tasks)
+    names = ", ".join(t[:60] for t in tasks[:3])
+    if n > 3:
+        names += f" (+{n - 3} more)"
+    noun = f"{n} background task{'s' if n != 1 else ''}"
+    if reason == "cancel":
+        return f"\N{BLACK SQUARE FOR STOP} Stopped {noun}: {names}."
+    if reason == "options_changed":
+        return (
+            f"\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping {noun}: "
+            f"{names}. Your message starts with the new settings."
+        )
+    if reason == "drain":
+        return (
+            f"\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping "
+            f"{noun}: {names}."
+        )
+    it = "it" if n == 1 else "them"
+    if reason == "max_hold" and rearm_on_progress and max_hold_s:
+        why = f"with no progress for {_format_hold_span(max_hold_s)}"
+    else:
+        limit = {
+            "max_hold": "the background hold limit",
+            "abs_cap": "the session time limit",
+            "budget_stop": "the cost budget",  # #896
+        }.get(reason, "the session limit")
+        why = f"at {limit}"
+    return (
+        f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {noun} still running "
+        f"{why}: {names}. Stopping {it}."
+    )
+
+
+def _wake_cap_notice(cap: Any) -> str:
+    """#925 §14.4: a self-paced wake-up chain hit ``[loop] max_iterations``
+    and the session closed, dropping the pending wake-up."""
+    count = (
+        f" ({cap} wake-ups)"
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0
+        else ""
+    )
+    return (
+        f"\N{ALARM CLOCK} Self-paced wake-up limit reached{count} — the "
+        "pending wake-up was cancelled. Reply to continue."
+    )
+
+
+def _live_closed_notice(quarantined: bool) -> str:
+    """#829: the silent follow-up once a close that stopped tasks has ended —
+    whether the next message continues the same session."""
+    if quarantined:
+        return (
+            "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The session didn't stop "
+            "cleanly, so your next message starts a fresh session (Claude won't "
+            "remember this run). Partial work may be left in the working tree."
+        )
+    return (
+        "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to continue "
+        "in the same session."
+    )
+
+
+def _live_died_notice(
+    *,
+    rc: int | None,
+    signal_name: str | None,
+    tasks: list[str],
+    quarantined: bool,
+) -> str:
+    """#1001: an idle live session's process died without a close by
+    Untether (killed from outside, OOM, a crash between turns). Says how it
+    ended and which background tasks it took down, then whether the next
+    message continues the same session (the #829 wording)."""
+    if signal_name:
+        how = f"terminated by {signal_name}"
+        if rc is not None and rc > 0:
+            how += f" / exit {rc}"
+    elif rc:
+        how = f"exit code {rc}"
+    else:
+        how = "the process exited"
+    head = f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The Claude session ended unexpectedly ({how})"
+    n = len(tasks)
+    if n:
+        names = ", ".join(t[:60] for t in tasks[:3])
+        if n > 3:
+            names += f" (+{n - 3} more)"
+        noun = f"{n} background task{'s' if n != 1 else ''}"
+        head += f" — {noun} {'was' if n == 1 else 'were'} stopped: {names}."
+    else:
+        head += "."
+    return f"{head}\n{_live_closed_notice(quarantined)}"
+
+
+# #383 C4: the turn runs unplanned because the approved plan's background
+# agents are still working (``TurnEvent.detail["plan_deferred"]``).
+_PLAN_DEFERRED_LINE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Not re-planned: the approved plan's"
+    " background agents are still running. Plan mode resumes when they finish."
+)
+
+
+def _turn_header(evt: TurnEvent) -> str | None:
+    header = _turn_title(evt)
+    if (evt.detail or {}).get("plan_deferred"):
+        return f"{header}\n{_PLAN_DEFERRED_LINE}" if header else _PLAN_DEFERRED_LINE
+    return header
+
+
+def _turn_title(evt: TurnEvent) -> str | None:
+    if evt.reason == "followup":
+        return None
+    base = _TURN_HEADERS.get(evt.reason, _TURN_HEADERS["unknown"])
+    tasks = [t for t in (evt.detail or {}).get("tasks", []) if isinstance(t, str)]
+    if evt.reason == "hook_rewake":
+        hook_event = (evt.detail or {}).get("hook_event")
+        if isinstance(hook_event, str) and hook_event:
+            return f"{base} — {hook_event[:60]}"
+        return base
+    if evt.reason == "monitor_event" and len(tasks) == 1:
+        return f"{base} — {tasks[0][:80]}"
+    if evt.reason == "task_finished" and tasks:
+        if len(tasks) == 1:
+            name, continued = _split_continued(tasks[0])
+            return f"{base} — {name[:80]}{continued}"
+        # #825: name them (first three, 40 chars each) — a bare count left
+        # the user guessing which finished.
+        names = " · ".join(_short_label(t) for t in tasks[:_TURN_TITLE_MAX_NAMES])
+        more = len(tasks) - _TURN_TITLE_MAX_NAMES
+        suffix = f" (+{more} more)" if more > 0 else ""
+        return f"\N{BELL} {len(tasks)} background tasks finished — {names}{suffix}"
+    return base
+
+
+_TURN_TITLE_MAX_NAMES = 3
+_TURN_TITLE_NAME_CHARS = 40
+
+
+def _split_continued(label: str) -> tuple[str, str]:
+    """#892: a continued task's label and its ``(continued)`` mark, apart —
+    the name is cut to fit, the mark always survives."""
+    if label.endswith(CONTINUED_SUFFIX) and len(label) > len(CONTINUED_SUFFIX):
+        return label[: -len(CONTINUED_SUFFIX)], CONTINUED_SUFFIX
+    return label, ""
+
+
+def _short_label(label: str) -> str:
+    label, continued = _split_continued(" ".join(label.split()))
+    if len(label) <= _TURN_TITLE_NAME_CHARS:
+        return label + continued
+    return (
+        label[: _TURN_TITLE_NAME_CHARS - 1].rstrip()
+        + "\N{HORIZONTAL ELLIPSIS}"
+        + continued
+    )
+
+
+@dataclass(slots=True)
+class _TurnCtx:
+    """Per-turn delivery state for one follow-up turn of a live session."""
+
+    turn: int
+    reason: str
+    tracker: ProgressTracker
+    reply_to: MessageRef
+    started_at: float
+    notify: bool
+    header: str | None
+    command_uuid: str | None = None
+    # The TurnEvent detail (task labels / ids / origin turn, #785/#795);
+    # replaced by the completion's detail when the runner retro-attributes.
+    detail: dict[str, Any] = field(default_factory=dict)
+    edits: ProgressEdits | None = None
+    progress_ref: MessageRef | None = None
+    edits_scope: anyio.CancelScope | None = None
+    lazy_scope: anyio.CancelScope | None = None
+    delivery: dict[str, bool] = field(default_factory=lambda: {"sent": False})
+    # #806: what ``_account_completion`` settled for this turn. A turn's
+    # spend is accounted once: an aborted turn accounts before its
+    # ``cancelled`` render, and if that render is interrupted ``aclose``'s
+    # synthetic final must not account it again (/stats, runner.completed).
+    accounting: _CompletionAccounting | None = None
+    # Serialises progress creation: the lazy timer and the first action can
+    # both ask for it (review finding, #776).
+    progress_lock: anyio.Lock = field(default_factory=anyio.Lock)
+
+
+class FollowupTurnRouter:
+    """Routes a live run's TurnEvent segments to per-turn Telegram messages.
+
+    Owned by ``handle_message``; ``run_runner_with_cancel`` hands it every
+    ``TurnEvent`` plus the events that arrive while a follow-up turn is open.
+    Everything Telegram-specific is injected, so the router is testable with
+    plain callables.
+    """
+
+    def __init__(
+        self,
+        *,
+        new_tracker: Callable[[], ProgressTracker],
+        create_progress: Callable[[_TurnCtx], Awaitable[None]],
+        close_progress: Callable[[_TurnCtx], Awaitable[None]],
+        deliver: Callable[[CompletedEvent, _TurnCtx], Awaitable[None]],
+        default_reply_to: MessageRef,
+        followup_notify: bool,
+        clock: Callable[[], float] = time.monotonic,
+        anchor_for: Callable[[str | None], tuple[MessageRef, MessageRef | None] | None]
+        | None = pop_followup_anchor,
+        progress_for: Callable[[ActionEvent], bool] | None = None,
+        deliver_cancelled: Callable[[_TurnCtx], Awaitable[None]] | None = None,
+        on_turn_started: Callable[[], None] | None = None,
+        discard_progress: Callable[[_TurnCtx], Awaitable[None]] | None = None,
+    ) -> None:
+        self._new_tracker = new_tracker
+        # Re-reads ``[progress]`` so a hot-reloaded toggle reaches turns of
+        # a live session, not only the next spawned run (rc15 integration
+        # finding: ``show_context_usage = false`` was ignored by follow-ups).
+        self._on_turn_started = on_turn_started
+        self._create_progress = create_progress
+        self._close_progress = close_progress
+        self._deliver = deliver
+        self._default_reply_to = default_reply_to
+        self._followup_notify = followup_notify
+        self._clock = clock
+        self._anchor_for = anchor_for
+        # #785 part 2: which actions force a turn's progress message into
+        # existence (None = every action, the rc11 behaviour).
+        self._progress_for = progress_for
+        # #806: renders a turn the user cancelled (None = the error final).
+        self._deliver_cancelled = deliver_cancelled
+        # #1015: removes a turn's progress message that no final will
+        # replace (a ``no_query`` drop). None = leave it (tests, old wiring).
+        self._discard_progress = discard_progress
+        self._tg: Any = None
+        self.current: _TurnCtx | None = None
+        self.turns_delivered = 0
+        # The message the live session's latest turn answered — where
+        # session-level notices (closing, restart) belong.
+        self.last_reply_to: MessageRef = default_reply_to
+        # #795: turn number -> the message that turn answered (turn 1 is the
+        # run's prompt). A wake turn replies to the turn that launched the
+        # task it reports on.
+        self._turn_anchors: dict[int, MessageRef] = {1: default_reply_to}
+
+    def bind_task_group(self, tg: Any) -> None:
+        self._tg = tg
+
+    @property
+    def active(self) -> bool:
+        return self.current is not None
+
+    def anchor_for_turn(self, turn: int | None) -> MessageRef:
+        """#795: the message turn ``turn`` answered (default: the run's)."""
+        if turn is None:
+            return self._default_reply_to
+        return self._turn_anchors.get(turn, self._default_reply_to)
+
+    def _origin_anchor(self, detail: dict[str, Any] | None) -> MessageRef | None:
+        origin = (detail or {}).get("origin_turn")
+        if isinstance(origin, int) and not isinstance(origin, bool):
+            return self._turn_anchors.get(origin)
+        return None
+
+    def _open(self, evt: TurnEvent) -> _TurnCtx:
+        anchor: MessageRef | None = None
+        placeholder: MessageRef | None = None
+        if self._anchor_for is not None and evt.command_uuid:
+            found = self._anchor_for(evt.command_uuid)
+            if found is not None:
+                anchor, placeholder = found
+        if anchor is None and evt.reason != "followup":
+            # #795: a wake turn about a background task replies to the
+            # message whose turn launched that task.
+            anchor = self._origin_anchor(evt.detail)
+        notify = (
+            self._followup_notify
+            if evt.reason == "followup"
+            else evt.reason in _TURN_PUSH_REASONS
+            # #785: the second wake turn for one background-task finish
+            # (the first already reported it) arrives without a push.
+            and not (evt.detail or {}).get("already_announced")
+        )
+        ctx = _TurnCtx(
+            turn=evt.turn,
+            reason=evt.reason,
+            tracker=self._new_tracker(),
+            reply_to=anchor or self._default_reply_to,
+            # #815: time the turn from when the CLI started it, not from its
+            # first frame — a tool-free turn's first frame is its answer.
+            started_at=self._clock() - max(0.0, evt.started_ago_s or 0.0),
+            notify=notify,
+            header=_turn_header(evt),
+            command_uuid=evt.command_uuid,
+            detail=dict(evt.detail or {}),
+            # A follow-up's "⏳ queued" placeholder becomes its progress
+            # message (edited in place) and is replaced by its final.
+            progress_ref=placeholder,
+        )
+        self.current = ctx
+        self.last_reply_to = ctx.reply_to
+        self._turn_anchors[ctx.turn] = ctx.reply_to
+        if self._tg is not None:
+            self._tg.start_soon(self._lazy_progress, ctx)
+        return ctx
+
+    async def _lazy_progress(self, ctx: _TurnCtx) -> None:
+        scope = anyio.CancelScope()
+        ctx.lazy_scope = scope
+        # Only the wait is cancellable: cancelling a create mid-send would
+        # orphan the message it just sent.
+        with scope:
+            await anyio.sleep(_TURN_LAZY_PROGRESS_S)
+        if scope.cancelled_caught:
+            return
+        if self.current is ctx:
+            await self._ensure_progress(ctx)
+
+    async def _ensure_progress(self, ctx: _TurnCtx) -> None:
+        async with ctx.progress_lock:
+            # #1015: a request that queued on the lock behind the turn's
+            # close (a ``no_query`` drop) must not open a progress message
+            # for a turn that has already finished.
+            if self.current is not ctx:
+                return
+            if ctx.edits is not None or ctx.delivery["sent"]:
+                return
+            try:
+                await self._create_progress(ctx)
+            except Exception:  # noqa: BLE001 — a progress message is best-effort
+                logger.warning(
+                    "live_turn.progress_failed", turn=ctx.turn, exc_info=True
+                )
+
+    async def on_turn(self, evt: TurnEvent) -> None:
+        if evt.phase == "started":
+            if self.current is not None:
+                await self._finish(self.current)
+            if self._on_turn_started is not None:
+                try:
+                    self._on_turn_started()
+                except Exception:  # noqa: BLE001
+                    logger.debug("live_turn.on_started_failed", exc_info=True)
+            ctx = self._open(evt)
+            logger.info(
+                "live_turn.started",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                command_uuid=ctx.command_uuid,
+                push=ctx.notify,
+            )
+            return
+        ctx = self.current
+        if evt.reason == "no_query":
+            # #928: the CLI's no-query result closed the turn ``init`` opened
+            # for it — no final, /stats, cost delta, fold, panel edit or push.
+            matched = ctx is not None and ctx.turn == evt.turn
+            had_progress = matched and ctx is not None and ctx.edits is not None
+            if matched and ctx is not None:
+                if ctx.lazy_scope is not None:
+                    ctx.lazy_scope.cancel()
+                async with ctx.progress_lock:
+                    # #1015: no final replaces a progress message the turn
+                    # already showed — delete it, or it stays ``working ·
+                    # 0s`` with a live cancel button for the whole session.
+                    if self._discard_progress is not None:
+                        try:
+                            await self._discard_progress(ctx)
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "live_turn.discard_failed",
+                                turn=ctx.turn,
+                                exc_info=True,
+                            )
+                    await self._finish(ctx)
+            logger.debug(
+                "live_turn.no_query_dropped",
+                turn=evt.turn,
+                matched=matched,
+                had_progress=had_progress,
+            )
+            return
+        if ctx is None or ctx.turn != evt.turn:
+            ctx = self._open(evt)
+        elif ctx.reason == "unknown" and evt.reason not in ("unknown", "followup"):
+            # #785: the runner attributed the turn at its completion (the
+            # task it answered ended during it) — deliver the real header.
+            ctx.reason = evt.reason
+            ctx.header = _turn_header(evt)
+            ctx.detail = dict(evt.detail or {})
+            # #795: now that the task is known, reply to the message that
+            # launched it (the final hasn't been sent yet).
+            if (origin := self._origin_anchor(ctx.detail)) is not None:
+                ctx.reply_to = origin
+                self.last_reply_to = origin
+                self._turn_anchors[ctx.turn] = origin
+            logger.info(
+                "live_turn.retro_attributed",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                header=ctx.header,
+            )
+        elif (
+            ctx.reason == "task_finished"
+            and evt.reason == "task_finished"
+            and (evt.detail or {}).get("late_tasks")
+        ):
+            # #825: another task finished during this wake turn — name every
+            # task in the header. Keep ``reply_to`` (the opening task's
+            # anchor); a turn that opened as an already-announced repeat now
+            # carries news, so it pushes.
+            ctx.header = _turn_header(evt)
+            ctx.detail = dict(evt.detail or {})
+            ctx.notify = True
+            logger.info(
+                "live_turn.late_tasks_attributed",
+                turn=ctx.turn,
+                header=ctx.header,
+            )
+        completed = CompletedEvent(
+            engine=evt.engine,
+            ok=bool(evt.ok),
+            answer=evt.answer or "",
+            resume=evt.resume,
+            error=evt.error,
+            usage=evt.usage,
+        )
+        if ctx.lazy_scope is not None:
+            ctx.lazy_scope.cancel()
+        # Wait out a progress send already in flight so the final replaces it
+        # rather than leaving it orphaned.
+        async with ctx.progress_lock:
+            try:
+                await self._deliver(completed, ctx)
+                self.turns_delivered += 1
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "live_turn.delivery_failed", turn=ctx.turn, exc_info=True
+                )
+        await self._finish(ctx)
+
+    async def on_event(self, evt: UntetherEvent) -> None:
+        ctx = self.current
+        if ctx is None:
+            return
+        if (
+            isinstance(evt, ActionEvent)
+            and ctx.edits is None
+            # #819: a status-line value never forces the turn's progress
+            # message (keeps the lazy progress and #785 folding intact).
+            and evt.action.kind != "telemetry"
+            and (self._progress_for is None or self._progress_for(evt))
+        ):
+            await self._ensure_progress(ctx)
+        if ctx.edits is not None:
+            await ctx.edits.on_event(evt)
+        else:
+            ctx.tracker.note_event(evt)
+
+    async def _finish(self, ctx: _TurnCtx) -> None:
+        if ctx.lazy_scope is not None:
+            ctx.lazy_scope.cancel()
+        if self.current is ctx:
+            self.current = None
+        try:
+            await self._close_progress(ctx)
+        except Exception:  # noqa: BLE001
+            logger.debug("live_turn.close_failed", turn=ctx.turn, exc_info=True)
+
+    async def aclose(self, reason: str | None = None) -> None:
+        """Run end: a turn still open lost its process (closed / killed
+        mid-turn) — tell the user rather than leave it silent or orphaned.
+
+        ``reason`` is why the run ended (the bridge's close reason). A turn
+        the user cancelled (/cancel or /new) renders like a cancelled first
+        turn (#806); anything else — crash, abs_cap, close grace — keeps the
+        error final."""
+        ctx = self.current
+        if ctx is None:
+            return
+        if (
+            not ctx.delivery["sent"]
+            and reason in _TURN_CANCEL_REASONS
+            and self._deliver_cancelled is not None
+        ):
+            logger.info(
+                "live_turn.cancelled",
+                turn=ctx.turn,
+                reason=reason,
+                turn_reason=ctx.reason,
+            )
+            if ctx.lazy_scope is not None:
+                ctx.lazy_scope.cancel()
+            async with ctx.progress_lock:
+                try:
+                    await self._deliver_cancelled(ctx)
+                except Exception:  # noqa: BLE001
+                    logger.debug("live_turn.cancel_delivery_failed", exc_info=True)
+        if not ctx.delivery["sent"]:
+            logger.info(
+                "live_turn.interrupted",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                close_reason=reason,
+            )
+            try:
+                await self._deliver(
+                    CompletedEvent(
+                        engine=ctx.tracker.engine,
+                        ok=False,
+                        answer="",
+                        error="the session ended before this turn finished",
+                    ),
+                    ctx,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("live_turn.interrupt_delivery_failed", exc_info=True)
+        await self._finish(ctx)
+
+
+# #952: engines whose CompletedEvent.usage carries a turn count. For these a
+# failed resume with ``num_turns == 0`` (or no result at all) means the
+# session never got going (#45). Codex, OpenCode and Pi never report turns,
+# so for them only an error that names the resume itself clears the session.
+_TURN_COUNT_ENGINES = frozenset({"claude", "amp"})
+_RESUME_FAILURE_RE = re.compile(
+    r"no rollout found"  # codex: thread/resume failed
+    r"|thread/resume failed"
+    r"|session not found"  # opencode: NotFoundError
+    r"|no session found"  # pi: No session found matching '…'
+    r"|finished but no session_id"  # codex/opencode: never confirmed it
+    r"|failed to load on resume",  # pi: zero events on a resumed run
+    re.IGNORECASE,
+)
+_SESSION_CLEARED_NOTICE = (
+    "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} The saved session couldn't"
+    " be resumed, so it was cleared \N{EM DASH} your next message starts a new"
+    " session."
+)
+
+
+def _resume_failure_clears_session(
+    engine: str, usage: Mapping[str, Any] | None, error: object
+) -> bool:
+    """Whether a failed resumed run should clear the saved session (#45, #952)."""
+    if usage and "num_turns" in usage:
+        return not usage.get("num_turns")
+    if engine in _TURN_COUNT_ENGINES:
+        return True
+    return bool(error) and _RESUME_FAILURE_RE.search(str(error)) is not None
 
 
 async def handle_message(
@@ -3282,10 +6198,17 @@ async def handle_message(
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
     quarantine_store: QuarantineStore | None = None,
+    outbox_since: float | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
     _stream_idle_retried_count: int = 0,
 ) -> None:
+    # #924: wall-clock start of this executor dispatch (same clock as the
+    # filesystem). Only outbox entries that changed since then are sent; the
+    # recovery re-entries below inherit it. Taken here when the caller (tests,
+    # API users) didn't supply one.
+    run_outbox_since = outbox_since if outbox_since is not None else time.time()
+    outbox_seen: set[tuple[str, int, int]] = set()
     logger.info(
         "handle.incoming",
         channel_id=incoming.channel_id,
@@ -3556,13 +6479,7 @@ async def handle_message(
     # apply on the next run. Per-chat /verbose overrides downstream of
     # _resolve_presenter() construct a fresh formatter from these refreshed
     # values, so the override picks up the new defaults too.
-    progress_cfg = _load_progress_settings()
-    refresh = getattr(cfg.presenter, "refresh_progress_settings", None)
-    if callable(refresh):
-        try:
-            refresh(progress_cfg)
-        except Exception:  # noqa: BLE001
-            logger.debug("progress_settings.refresh_failed", exc_info=True)
+    progress_cfg = _refresh_progress_settings(cfg.presenter)
 
     # Resolve effective presenter: check for per-chat verbose override
     effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)
@@ -3604,7 +6521,32 @@ async def handle_message(
     )
 
     # Apply watchdog settings to runner and edits
+    edits.run_level = True
     watchdog = _load_watchdog_settings()
+
+    def _configure_edits(target: ProgressEdits) -> None:
+        # #776: shared by the run's edits and each follow-up turn's edits.
+        if watchdog is None:
+            return
+        target._stall_repeat_seconds = watchdog.stall_repeat_seconds
+        target._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
+        target._STALL_THRESHOLD_MCP_TOOL = watchdog.mcp_tool_timeout
+        target._STALL_THRESHOLD_SUBAGENT = watchdog.subagent_timeout
+        target._stuck_after_tool_result_enabled = (
+            watchdog.detect_stuck_after_tool_result
+        )
+        target._stuck_after_tool_result_timeout = (
+            watchdog.stuck_after_tool_result_timeout
+        )
+        target._stuck_after_tool_result_recovery_enabled = (
+            watchdog.stuck_after_tool_result_recovery_enabled
+        )
+        target._stuck_after_tool_result_recovery_delay = (
+            watchdog.stuck_after_tool_result_recovery_delay
+        )
+        target._bash_grace_seconds = watchdog.bash_grace_seconds
+        target._detect_unanswerable = watchdog.detect_unanswerable_control_requests
+
     if watchdog is not None:
         edits._stall_repeat_seconds = watchdog.stall_repeat_seconds
         edits._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
@@ -3623,6 +6565,8 @@ async def handle_message(
         )
         # #481: bash grace window for the stall_bash_grace_suppressed branch.
         edits._bash_grace_seconds = watchdog.bash_grace_seconds
+        # #684: kill switch for the detect-only unanswerable canary.
+        edits._detect_unanswerable = watchdog.detect_unanswerable_control_requests
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):
@@ -3636,6 +6580,21 @@ async def handle_message(
     # reloads pick up new values on the next message (matches min_render_interval
     # pattern above).
     edits._heartbeat_interval = progress_cfg.heartbeat_interval
+
+    # ── #777 live background-task status ──────────────────────────────────
+    def _bg_tasks() -> list[Any]:
+        # The run's own native task map (Claude); empty for other engines.
+        tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
+        return list(tasks.values()) if isinstance(tasks, dict) else []
+
+    if progress_cfg.show_background_tasks:
+        _bg_max_rows = progress_cfg.background_tasks_max_rows
+        edits.background_provider = lambda: render_background_block(
+            _bg_tasks(), now=time.monotonic(), max_rows=_bg_max_rows
+        )
+    _bg_count_token = register_live_count_source(
+        incoming.channel_id, lambda: len(live_shown(_bg_tasks()))
+    )
 
     # #591: early final-answer delivery. The answer exists the moment the
     # CompletedEvent arrives, but the run generator may not return for up to
@@ -3653,16 +6612,180 @@ async def handle_message(
     # "↻ retrying" notice IS delivered).
     empty_resume = {"pending": False}
 
+    def _release_progress(ref: MessageRef | None, *, reason: str) -> None:
+        """#810: drop *ref*'s progress-persistence entry.
+
+        Every way out of this run — final, wake-ack fold, error, cancel and
+        the recovery re-entries — releases here, so a later restart's orphan
+        cleanup never relabels a correctly rendered message as "interrupted
+        by restart". Call it only AFTER the final / cancel render has been
+        sent: releasing earlier reopens the #149 orphan window (see the note
+        at the end of ``ProgressEdits.delete_ephemeral``). Idempotent — an
+        already-released or never-registered key is a silent no-op.
+        """
+        if ref is None or _PROGRESS_PERSISTENCE_PATH is None:
+            return
+        from .telegram.progress_persistence import unregister_progress
+
+        session_key = f"{incoming.channel_id}:{ref.message_id}"
+        if unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key):
+            logger.debug(
+                "progress_persistence.released",
+                reason=reason,
+                channel_id=incoming.channel_id,
+                message_id=ref.message_id,
+            )
+
+    # #896: this run's cumulative spend (every turn of a live session) and,
+    # once "Stop at limit" fires, the session to close after delivery.
+    budget_stop: dict[str, Any] = {"run_cost": 0.0, "sid": None, "closed": False}
+
+    async def _budget_stop_close() -> None:
+        """#896: end the live session after the reply that passed the budget.
+        Only at idle — a turn already running is never cut; the next turn
+        boundary retries."""
+        sid = budget_stop["sid"]
+        if sid is None or budget_stop["closed"]:
+            return
+        from .budget_gate import BUDGET_STOP_REASON
+        from .runners.claude import close_live_session
+
+        try:
+            closed = await close_live_session(
+                sid, BUDGET_STOP_REASON, notice=True, only_if_idle=True
+            )
+        except Exception:  # noqa: BLE001 — never break delivery
+            logger.warning("cost_budget.session_close_failed", exc_info=True)
+            return
+        budget_stop["closed"] = closed
+        logger.info("cost_budget.session_closed", session_id=sid, closed=closed)
+
+    def _account_completion(
+        completed: CompletedEvent,
+        final_resume: ResumeToken | None,
+        *,
+        turn: _TurnCtx | None,
+        elapsed_s: float,
+        answer_len: int,
+    ) -> _CompletionAccounting:
+        """#806: the accounting every delivered result owes, whatever it
+        renders as — the #778 session-cost delta (and its ledger write), the
+        daily total / budget check, ``cost.run_outlier``, the
+        ``runner.completed`` log and /stats. Shared by ``_deliver_final`` and
+        the aborted-turn path, which renders ``cancelled`` instead of a final
+        but still spent money."""
+        if turn is not None and turn.accounting is not None:
+            logger.debug("live_turn.already_accounted", turn=turn.turn)
+            return turn.accounting
+        t_tracker = turn.tracker if turn is not None else progress_tracker
+        resume_value = final_resume.value if final_resume is not None else None
+        # #778: Claude's total_cost_usd is cumulative per session (across
+        # --resume and across a live session's turns) — cost consumers below
+        # read the per-run / per-turn delta instead.
+        run_usage = _apply_cost_delta(
+            runner.engine,
+            resume_value,
+            completed.usage,
+            resumed=turn is not None or resume_token is not None,
+        )
+        cost_usage = run_usage
+        # #419: Codex token usage is a running thread total — same delta
+        # treatment, same exactly-once point (#806).
+        run_usage = _apply_token_delta(
+            runner.engine,
+            resume_value,
+            run_usage,
+            resumed=turn is not None or resume_token is not None,
+        )
+        usage_log: dict[str, object] = {}
+        if (
+            cost_usage
+            and cost_usage is not completed.usage
+            and "total_cost_usd" in cost_usage
+        ):
+            usage_log["turn_cost_usd"] = cost_usage.get("total_cost_usd")
+        if completed.usage:
+            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
+                val = completed.usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        if run_usage:
+            for key in ("input_tokens", "output_tokens", "token_delta_source"):
+                val = run_usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        # #819: the context-window use at the result.
+        ctx_usage = (completed.usage or {}).get("context")
+        if isinstance(ctx_usage, dict) and isinstance(ctx_usage.get("pct"), int):
+            usage_log["context_pct"] = ctx_usage["pct"]
+        # #819: compactions in this run / turn.
+        if (compaction := _compaction_usage(completed.usage)) is not None:
+            usage_log["compactions"] = compaction.get("count")
+            usage_log["compaction_trigger"] = compaction.get("trigger")
+        logger.info(
+            "runner.completed",
+            ok=completed.ok,
+            error=completed.error,
+            answer_len=answer_len,
+            elapsed_s=round(elapsed_s, 2),
+            action_count=t_tracker.action_count,
+            resume=resume_value,
+            **usage_log,
+            # #695: per-run model attribution. Also gives the cost fields
+            # above something to attribute to — `total_cost_usd` was
+            # previously logged with no record of which model produced it.
+            **_model_log_fields(t_tracker.meta),
+        )
+        # Record session stats for /stats command
+        from .session_stats import record_run as _record_stats_run
+
+        _record_stats_run(
+            engine=runner.engine,
+            actions=t_tracker.action_count,
+            duration_ms=int(elapsed_s * 1000),
+            triggered=bool(context and context.trigger_source),
+        )
+        # Records the daily total (record_run_cost) as well as checking it.
+        alert_text, alert = _check_cost_budget(run_usage)
+        acct = _CompletionAccounting(
+            resume_value=resume_value,
+            run_usage=run_usage,
+            cost_alert_text=alert_text,
+            cost_alert=alert,
+            outlier_text=_check_run_cost_outlier(run_usage),
+            budget_stop_text=_note_budget_run_cost(
+                budget_stop,
+                run_usage,
+                engine=runner.engine,
+                session_id=resume_value,
+            ),
+        )
+        if turn is not None:
+            turn.accounting = acct
+        return acct
+
     async def _deliver_final(
-        completed: CompletedEvent, run_outcome: RunOutcome
+        completed: CompletedEvent,
+        run_outcome: RunOutcome,
+        *,
+        turn: _TurnCtx | None = None,
     ) -> None:
+        # #776: ``turn`` is a follow-up turn of a live session (its own
+        # tracker / progress message / anchor / header); None is the run
+        # itself and behaves exactly as before.
+        delivery = turn.delivery if turn is not None else final_delivery
+        t_tracker = turn.tracker if turn is not None else progress_tracker
+        t_edits = turn.edits if turn is not None else edits
+        t_progress_ref = turn.progress_ref if turn is not None else progress_ref
+        t_reply_to = turn.reply_to if turn is not None else user_ref
+        t_notify = turn.notify if turn is not None else cfg.final_notify
         # Idempotence: the early path and the post-return path can both
         # reach here; only the first delivery wins.
-        if final_delivery["sent"]:
+        if delivery["sent"]:
             return
         run_ok = completed.ok
         run_error = completed.error
-        elapsed_final = clock() - started_at
+        elapsed_final = clock() - (turn.started_at if turn is not None else started_at)
 
         # #510: ``completed.answer`` already has the #508 ExitPlanMode
         # plan-body prepend applied at the runner level (claude.py, on the
@@ -3671,18 +6794,46 @@ async def handle_message(
         # — and leaked one chat's plan body into another concurrent chat's
         # final answer.
         final_answer = completed.answer
+        # #814: a safeguard stop is never an error; a not-retried stop with
+        # no answer gets an explanation instead of an empty body.
+        safeguard = _safeguard_usage(completed.usage)
+        unattended = _unattended_usage(completed.usage)  # #835
+        if (
+            safeguard is not None
+            and safeguard.get("outcome") == "not_retried"
+            and not final_answer.strip()
+        ):
+            final_answer = _safeguard_empty_body(safeguard)
 
         # Auto-clear broken session: if a resumed run failed with 0 turns,
         # clear the saved session so the next message starts fresh.
+        # #838: a pre-spawn guard block (RAM / concurrency) never ran the
+        # engine, so the saved session is fine — keep it.
+        _blocked = prespawn_blocked_reason(completed.usage)
+        _session_auto_cleared = False
         if (
-            run_ok is False
+            turn is None
+            and run_ok is False
+            and resume_token is not None
+            and on_resume_failed is not None
+            and _blocked is not None
+        ):
+            logger.info(
+                "session.auto_clear_skipped",
+                reason="prespawn_blocked",
+                blocked=_blocked,
+                engine=resume_token.engine,
+                resume=resume_token.value,
+            )
+        elif (
+            turn is None
+            and run_ok is False
             and resume_token is not None
             and on_resume_failed is not None
         ):
-            _num_turns = 0
-            if completed.usage:
-                _num_turns = completed.usage.get("num_turns", 0) or 0
-            if _num_turns == 0:
+            if _resume_failure_clears_session(
+                resume_token.engine, completed.usage, run_error
+            ):
                 try:
                     await on_resume_failed(resume_token)
                     logger.info(
@@ -3690,8 +6841,18 @@ async def handle_message(
                         engine=resume_token.engine,
                         resume=resume_token.value,
                     )
+                    _session_auto_cleared = True
                 except Exception:  # noqa: BLE001
                     logger.debug("session.auto_clear_failed", exc_info=True)
+            else:
+                # #952: a non-resume failure (bad model, auth, rate limit)
+                # on an engine that reports no turn count — keep the session.
+                logger.info(
+                    "session.auto_clear_skipped",
+                    reason="not_resume_failure",
+                    engine=resume_token.engine,
+                    resume=resume_token.value,
+                )
 
         if run_ok is False and run_error:
             raw_error = str(run_error)
@@ -3727,6 +6888,9 @@ async def handle_message(
                     )
                 else:
                     final_answer = f"```\n{raw_error}\n```"
+        if _session_auto_cleared:
+            # #952: say so — the card's resume line still names the old session.
+            final_answer = f"{final_answer}\n\n{_SESSION_CLEARED_NOTICE}".lstrip()
 
         # #596: a 0-turn / $0 / empty-answer completion with ok=True is a
         # no-op resume (upstream: the resumed session considers itself
@@ -3736,14 +6900,21 @@ async def handle_message(
         # Missing usage keys default to 1 (non-anomalous) — only an engine
         # that EXPLICITLY reported zero turns and zero API time qualifies;
         # engines without usage reporting never trip this.
+        # #819: a successful manual /compact is 0-turn / 0-ms / empty by
+        # design — exempt it (narrowly, see _compaction_manual_success). The
+        # anomaly is decided on the raw answer; the compaction body is only
+        # filled in after it.
+        compaction_ok = _compaction_manual_success(completed.usage)
         empty_result_anomaly = False
         if (
-            run_ok is True
+            turn is None
+            and run_ok is True
             and not run_outcome.cancelled
             and not final_answer.strip()
             and completed.usage
             and (completed.usage.get("num_turns", 1) or 0) == 0
             and (completed.usage.get("duration_api_ms", 1) or 0) == 0
+            and not compaction_ok
         ):
             empty_result_anomaly = True
             # #631 (W5-diag): derive WHY the anomaly branch will or will not
@@ -3839,6 +7010,16 @@ async def handle_message(
                     "start fresh with /new."
                 )
 
+        if (
+            compaction_ok
+            and run_ok is True
+            and not run_outcome.cancelled
+            and not final_answer.strip()
+        ):
+            final_answer = _compaction_empty_body(
+                _compaction_usage(completed.usage) or {}
+            )
+
         # #632 (W2): a run that completed with real work proves the session
         # is healthy — clear any forced-teardown quarantine marker for the
         # session id it reports so a reused session id is never stuck
@@ -3870,36 +7051,17 @@ async def handle_message(
                 else ("done" if final_answer.strip() else "error")
             )
         )
-        resume_value = None
         final_resume = completed.resume or run_outcome.resume
-        if final_resume is not None:
-            resume_value = final_resume.value
-        usage_log: dict[str, object] = {}
-        if completed.usage:
-            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
-                val = completed.usage.get(key)
-                if val is not None:
-                    usage_log[key] = val
-        logger.info(
-            "runner.completed",
-            ok=run_ok,
-            error=run_error,
+        acct = _account_completion(
+            completed,
+            final_resume,
+            turn=turn,
+            elapsed_s=elapsed_final,
             answer_len=len(final_answer or ""),
-            elapsed_s=round(elapsed_final, 2),
-            action_count=progress_tracker.action_count,
-            resume=resume_value,
-            **usage_log,
         )
-        # Record session stats for /stats command
-        from .session_stats import record_run as _record_stats_run
-
-        _record_stats_run(
-            engine=runner.engine,
-            actions=progress_tracker.action_count,
-            duration_ms=int(elapsed_final * 1000),
-            triggered=bool(context and context.trigger_source),
-        )
-        sync_resume_token(progress_tracker, final_resume)
+        resume_value = acct.resume_value
+        run_usage = acct.run_usage
+        sync_resume_token(t_tracker, final_resume)
 
         # Post-outline guidance: if the session was outline-pending (user
         # clicked "Pause & Outline Plan" but Claude Code ended the run
@@ -3919,11 +7081,29 @@ async def handle_message(
                     '"approved" to proceed, or send feedback to revise.'
                 )
 
-        state = progress_tracker.snapshot(
+        if turn is not None and turn.header:
+            final_answer = (
+                f"{turn.header}\n\n{final_answer}"
+                if final_answer.strip()
+                else turn.header
+            )
+
+        state = t_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
             meta_formatter=format_meta_line,
         )
+        if turn is not None and run_ok is True:
+            # #798: the #333 footer marker. The runner only emits it on the
+            # run's first result, so a live follow-up / wake turn adds it
+            # here — to the final's snapshot only: the turn's tracker (read
+            # by its still-running progress edits) never carries it.
+            state = replace(
+                state,
+                meta_line=format_meta_line(
+                    {**(t_tracker.meta or {}), "complete": TURN_COMPLETE_MARKER}
+                ),
+            )
         final_rendered = effective_presenter.render_final(
             state,
             elapsed_s=elapsed_final,
@@ -3941,29 +7121,62 @@ async def handle_message(
         _show_cost = footer_cfg.show_api_cost
         if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
             _show_cost = _footer_run_opts.show_api_cost
-        _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
+        _cost_alert_text, _cost_alert_obj = acct.cost_alert_text, acct.cost_alert
         if _show_cost and run_ok is not False:
-            cost_line = _format_run_cost(completed.usage)
+            cost_line = _format_run_cost(
+                run_usage,
+                thread_cumulative=(
+                    _TOKEN_LEDGER_SCOPES.get(runner.engine) == "thread_cumulative"
+                ),
+            )
             if cost_line:
                 budget_suffix = (
                     _format_budget_suffix(_cost_alert_obj)
                     if _cost_alert_obj is not None
                     else ""
                 )
-                final_rendered = RenderedMessage(
-                    text=_insert_before_resume(
-                        final_rendered.text,
-                        f"\n\U0001f4b0{cost_line}{budget_suffix}",
-                    ),
-                    extra=final_rendered.extra,
+                # #417 D9: 💰 implies money — a token-only footer uses 🔢.
+                _cost_val = run_usage.get("total_cost_usd") if run_usage else None
+                _prefix = (
+                    "\U0001f4b0"
+                    if isinstance(_cost_val, (int, float))
+                    and not isinstance(_cost_val, bool)
+                    else "\U0001f522"
+                )
+                # #770: footer lines go on the LAST chunk of a split final.
+                final_rendered = _insert_footer_line(
+                    final_rendered, f"\n{_prefix}{cost_line}{budget_suffix}"
                 )
         elif _cost_alert_text:
             # Budget exceeded but cost display is off — show standalone alert
-            final_rendered = RenderedMessage(
-                text=_insert_before_resume(
-                    final_rendered.text, f"\n{_cost_alert_text}"
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{_cost_alert_text}"
+            )
+
+        # #702: the outlier notice is deliberately NOT gated on `_show_cost` —
+        # the operator with the most need to know is the one who turned the
+        # footer off. Suppressed only when a budget alert already surfaced this
+        # run's spend, so a configured budget doesn't produce two lines.
+        _outlier_text = acct.outlier_text
+        if _outlier_text and _cost_alert_obj is None:
+            final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
+        if acct.budget_stop_text:  # #896
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{acct.budget_stop_text}"
+            )
+
+        if safeguard is not None:
+            final_rendered = _insert_footer_line(
+                final_rendered,
+                _safeguard_footer(
+                    safeguard,
+                    f"{runner.engine}:{resume_value}" if resume_value else None,
                 ),
-                extra=final_rendered.extra,
+            )
+
+        if unattended is not None:
+            final_rendered = _insert_footer_line(
+                final_rendered, _unattended_footer(unattended)
             )
 
         # Append usage footer for Claude Code engine runs
@@ -3984,41 +7197,867 @@ async def handle_message(
             status=status,
         )
 
-        can_edit_final = progress_ref is not None
-        edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
+        if turn is not None and run_ok is True:
+            # #890: a turn got through, so the limit has lifted — the next
+            # cap starts afresh (cleared before the fold below returns early).
+            capped_wake_error.clear()
+        # #785 part 2: a short "ack" wake turn is folded into the background
+        # status message (an edit — no new message, no push). Accounting
+        # above has already run; only the send is replaced.
+        if (
+            turn is not None
+            and _cost_alert_obj is None
+            and not _outlier_text
+            # #814: a stopped response always gets its own message.
+            and safeguard is None
+            and not acct.budget_stop_text  # #896: the stop line is seen
+            and await _fold_wake_turn(turn, completed)
+        ):
+            delivery["sent"] = True
+            if t_edits is not None:
+                await t_edits.stop_repaints()
+            if t_progress_ref is not None:
+                with contextlib.suppress(Exception), message_kind("progress"):
+                    await cfg.transport.delete(ref=t_progress_ref)
+                _release_progress(t_progress_ref, reason="folded")
+            return
+        # #890: a later wake failing on the same latched usage limit edits
+        # a counter into the first such error instead of pushing its own.
+        capped_head = (
+            _capped_wake_error_head(turn, completed)
+            if turn is not None
+            and run_ok is False
+            and _cost_alert_obj is None
+            and not _outlier_text
+            and safeguard is None
+            # #896: the error that ends the session keeps its own final, so
+            # its stop line is seen (a counter edit would drop it).
+            and not acct.budget_stop_text
+            and _consolidating()
+            else None
+        )
+        if (
+            turn is not None
+            and capped_head is not None
+            and await _coalesce_capped_wake_error(turn, capped_head)
+        ):
+            delivery["sent"] = True
+            if t_edits is not None:
+                await t_edits.stop_repaints()
+            if t_progress_ref is not None:
+                with contextlib.suppress(Exception), message_kind("progress"):
+                    await cfg.transport.delete(ref=t_progress_ref)
+                _release_progress(t_progress_ref, reason="capped_repeat")
+            return
+        if turn is not None:
+            _promote_quiet_breakout(turn)
+            t_notify = turn.notify  # a quiet batch's breakout always pushes
+
+        can_edit_final = t_progress_ref is not None
+        edit_ref = None if t_notify or not can_edit_final else t_progress_ref
 
         # #591: stop progress repaints BEFORE the send so a queued render
         # can't overwrite the final message. (The early path already set
         # this via note_final; this covers the post-return path.)
-        edits._finalizing = True
+        if t_edits is not None:
+            await t_edits.stop_repaints()
 
-        await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
-            message=final_rendered,
-            notify=cfg.final_notify,
-            edit_ref=edit_ref,
-            replace_ref=progress_ref,
-            delete_tag="final",
-            thread_id=incoming.thread_id,
-        )
-        final_delivery["sent"] = True
+        # #928: committed once handed to the transport. The outbox delivers a
+        # queued send even if this await is cut short (the early path's
+        # bounded scope), so a timeout after the send landed — e.g. stalled on
+        # the replace-delete — must not let the post-return path send it
+        # again. Only a raised send (nothing queued) stays undelivered. A
+        # multi-chunk final cut short part-way queues its remaining chunks
+        # in the transport, so it is neither duplicated nor left partial.
+        delivery["sent"] = True
+        try:
+            final_ref = await send_result_message(
+                cfg,
+                channel_id=incoming.channel_id,
+                reply_to=t_reply_to,
+                progress_ref=t_progress_ref,
+                message=final_rendered,
+                notify=t_notify,
+                edit_ref=edit_ref,
+                replace_ref=t_progress_ref,
+                delete_tag="final",
+                thread_id=incoming.thread_id,
+            )
+        except Exception:
+            delivery["sent"] = False
+            raise
+        if (
+            capped_head is not None
+            and final_ref is not None
+            and not final_rendered.extra.get("followups")
+        ):
+            # #890: the first error of this limit — later repeats edit it.
+            capped_wake_error.clear()
+            capped_wake_error.update(
+                head=capped_head, ref=final_ref, rendered=final_rendered, repeats=0
+            )
+        if turn is not None and turn.notify and turn.reason in FOLDABLE_REASONS:
+            # #785 part 2: this batch of background work has pushed once.
+            bg_status.note_breakout()
 
         # Unregister progress persistence after the final message is sent.
         # Must happen AFTER send_result_message() so a crash between
         # delete_ephemeral() and here still has an orphan cleanup pointer.
-        if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
-            from .telegram.progress_persistence import unregister_progress
-
-            session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
-            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+        _release_progress(t_progress_ref, reason="final")
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
-        running_task = RunningTask(context=context)
+        running_task = RunningTask(
+            context=context, edits=edits, thread_id=incoming.thread_id
+        )
         running_tasks[progress_ref] = running_task
+
+    # ── #776 live-session follow-up turns ─────────────────────────────────
+    outbox_early = {"delivered": False}
+
+    def _is_live_run() -> bool:
+        engine_state = getattr(edits.stream, "engine_state", None)
+        return bool(getattr(engine_state, "live_mode", False))
+
+    def _outbox_cutoffs(oc: Any, run_root: Path) -> tuple[float | None, float | None]:
+        """#924: (send_after, archive_before) for this delivery. Send uses
+        this dispatch's own start; archive uses the oldest active run on the
+        same project root, so one chat finishing can't quarantine a file a
+        concurrent, earlier-started run (same project) is about to deliver.
+        ``send`` policy = no age classification (legacy kill switch)."""
+        if getattr(oc, "outbox_stale_policy", "archive") == "send":
+            return None, None
+        from .telegram.outbox_delivery import (
+            _OUTBOX_FRESH_GRACE_S,
+            oldest_active_since,
+        )
+
+        send_after = run_outbox_since - _OUTBOX_FRESH_GRACE_S
+        archive_before = (
+            min(oldest_active_since(run_root, run_outbox_since), run_outbox_since)
+            - _OUTBOX_FRESH_GRACE_S
+        )
+        return send_after, archive_before
+
+    async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
+        """Deliver ``.untether-outbox/`` right after a live turn's final —
+        a live run's generator only returns when the session closes, which
+        would hold turn files back until then. #924: the cutoff is the
+        session's (dispatch's) start, not the turn's — a background task
+        started in turn 2 can write before the wake turn that reports it."""
+        oc = _load_outbox_settings(cfg)
+        if cfg.send_file is None or oc is None:
+            return
+        from .telegram.outbox_delivery import deliver_outbox_files
+        from .utils.paths import get_run_base_dir
+
+        run_root = get_run_base_dir()
+        if run_root is None:
+            return
+        outbox_early["delivered"] = True
+        send_after, archive_before = _outbox_cutoffs(oc, run_root)
+        try:
+            result = await deliver_outbox_files(
+                send_file=cfg.send_file,
+                channel_id=incoming.channel_id,
+                thread_id=incoming.thread_id,
+                reply_to_msg_id=reply_to_msg_id,
+                run_root=run_root,
+                outbox_dir=oc.outbox_dir,
+                deny_globs=oc.deny_globs,
+                max_download_bytes=oc.max_download_bytes,
+                max_files=oc.outbox_max_files,
+                cleanup=oc.outbox_cleanup,
+                deliver_directories=getattr(oc, "outbox_deliver_directories", "off"),
+                send_after=send_after,
+                archive_before=archive_before,
+                seen=outbox_seen,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("outbox.delivery_failed", exc_info=True)
+            return
+        await _surface_outbox_skipped(
+            cfg, incoming, user_ref, result.skipped, oc, result=result
+        )
+
+    # #829: whether this run's closing notice named tasks — only then does
+    # the "closed" outcome get its own line.
+    closing_named_tasks: dict[str, str] = {}
+
+    async def _on_live_died(payload: dict[str, Any]) -> None:
+        """#1001: the idle live session's process died without a close by
+        Untether. Re-finalise the status message (its rows were ended by the
+        dying CLI and may read ❌ failed) and say so in the chat, replying to
+        the message that launched the background work."""
+        tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
+        task_ids = [t for t in payload.get("task_ids", []) if isinstance(t, str)]
+        try:
+            await bg_status.session_died(task_ids)
+        except Exception:  # noqa: BLE001 — the status message is best-effort
+            logger.warning("background_status.died_failed", exc_info=True)
+        target = bg_status.fold_target
+        reply_to = (
+            target.reply_to
+            if target is not None
+            and target.reply_to is not None
+            and any(tid in target.tasks for tid in task_ids)
+            else turn_router.last_reply_to
+        )
+        raw_rc = payload.get("rc")
+        text = _live_died_notice(
+            rc=raw_rc
+            if isinstance(raw_rc, int) and not isinstance(raw_rc, bool)
+            else None,
+            signal_name=(
+                payload.get("signal_name")
+                if isinstance(payload.get("signal_name"), str)
+                else None
+            ),
+            tasks=tasks,
+            quarantined=payload.get("quarantined") is True,
+        )
+        try:
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(
+                    reply_to=reply_to,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("live_session.notice_failed", exc_info=True)
+
+    async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "died":
+            await _on_live_died(payload)
+            return
+        if kind == "closed":
+            reason = closing_named_tasks.pop("reason", None)
+            if reason is None:
+                return
+            quarantined = payload.get("quarantined") is True
+            if reason == "options_changed" and not quarantined:
+                return  # the queued message already resumes the session
+            try:
+                await cfg.transport.send(
+                    channel_id=incoming.channel_id,
+                    message=RenderedMessage(text=_live_closed_notice(quarantined)),
+                    options=SendOptions(
+                        reply_to=turn_router.last_reply_to,
+                        notify=False,
+                        thread_id=incoming.thread_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("live_session.notice_failed", exc_info=True)
+            return
+        if kind != "closing":
+            return
+        tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
+        hooks = [h for h in payload.get("hooks", []) if isinstance(h, str)]
+        raw_count = payload.get("hook_count")
+        hook_count = (
+            raw_count
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+            else None
+        )
+        if hooks and hook_count is not None and hook_count <= 0:
+            hooks = []  # #812: nothing was still running
+        if not tasks and not hooks:
+            if payload.get("reason") == "wake_cap":
+                # #925 §14.4: say why the self-paced loop stopped.
+                try:
+                    await cfg.transport.send(
+                        channel_id=incoming.channel_id,
+                        message=RenderedMessage(
+                            text=_wake_cap_notice(payload.get("wake_cap"))
+                        ),
+                        options=SendOptions(
+                            reply_to=turn_router.last_reply_to,
+                            notify=True,
+                            thread_id=incoming.thread_id,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("live_session.notice_failed", exc_info=True)
+            return
+        raw_hold = payload.get("max_hold_s")
+        text = _live_closing_notice(
+            str(payload.get("reason")),
+            tasks,
+            hooks,
+            hook_count,
+            max_hold_s=(
+                float(raw_hold)
+                if isinstance(raw_hold, int | float) and not isinstance(raw_hold, bool)
+                else None
+            ),
+            rearm_on_progress=payload.get("rearm_on_progress") is not False,
+        )
+        if tasks:
+            closing_named_tasks["reason"] = str(payload.get("reason"))
+        try:
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(
+                    reply_to=turn_router.last_reply_to,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("live_session.notice_failed", exc_info=True)
+
+    # ── Post-return recovery gates (#900: shared with the early path) ─────
+    # Each answers "would this recovery act on the run's result?" from the
+    # same inputs whether asked post-return or the moment an errored result
+    # arrives in a live session — so the two paths cannot drift.
+    def _empty_resend_due() -> bool:
+        """#596/#631: the empty-resume auto-resend (armed by _deliver_final
+        for an ok 0-turn result only)."""
+        return empty_resume["pending"] and _empty_resent_count < 1
+
+    def _auto_continue_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, ac: Any
+    ) -> bool:
+        stream = edits.stream
+        resume = completed.resume or run_outcome.resume
+        return bool(ac.enabled) and _should_auto_continue(
+            last_event_type=stream.last_event_type if stream else None,
+            engine=runner.engine,
+            cancelled=run_outcome.cancelled,
+            resume_value=resume.value if resume else None,
+            auto_continued_count=_auto_continued_count,
+            max_retries=ac.max_retries,
+            proc_returncode=stream.proc_returncode if stream else None,
+            saw_result=bool(getattr(stream, "saw_result", False)),
+        )
+
+    def _stream_idle_retry_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
+    ) -> bool:
+        stream = edits.stream
+        return _should_stream_idle_retry(
+            watchdog=watchdog,
+            # #905: the run's own class, not the engine state's latest.
+            stream_idle_class=run_outcome.stream_idle_class,
+            run_ok=completed.ok,
+            cancelled=run_outcome.cancelled,
+            resume_present=(completed.resume or run_outcome.resume) is not None,
+            retried_count=_stream_idle_retried_count,
+            proc_returncode=stream.proc_returncode if stream else None,
+            usage=completed.usage,
+        )
+
+    def _deliver_error_early(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> bool:
+        """#900: deliver an errored first result now instead of post-return.
+
+        A live session's run generator only returns when the session closes
+        — after any background work it is holding for — while each wake
+        final is delivered as it arrives, so a held error final was
+        overtaken (mac 2026-10-02: a wake error 14 s before the run's own).
+        Only a real CLI ``result`` in a live session qualifies, and only
+        when no post-return recovery (empty-resume resend, auto-continue,
+        #572 retry) would act on it; cancels and interrupted turns keep the
+        post-return render. Anything else keeps today's path.
+        """
+        if completed.ok is not False or not _is_live_run():
+            return False
+        stream = edits.stream
+        # A synthesized stream-end error arrives as the stream ends — there
+        # is no hold to cut short.
+        if not getattr(stream, "saw_result", False):
+            return False
+        from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+        if (completed.usage or {}).get(
+            "terminal_reason"
+        ) in CLAUDE_ABORTED_TERMINAL_REASONS:
+            return False
+        if run_outcome.cancelled or (
+            running_task is not None and running_task.cancel_requested.is_set()
+        ):
+            return False
+        sid = completed.resume or run_outcome.resume
+        if (
+            _empty_resend_due()
+            or _auto_continue_due(
+                completed, run_outcome, _load_auto_continue_settings()
+            )
+            or _stream_idle_retry_due(completed, run_outcome, _load_watchdog_settings())
+        ):
+            logger.info(
+                "final.error_held_for_recovery",
+                session_id=sid.value if sid else None,
+            )
+            return False
+        logger.info(
+            "final.error_delivered_early", session_id=sid.value if sid else None
+        )
+        return True
+
+    async def _on_run_completed(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> None:
+        await _deliver_final(completed, run_outcome)
+        if completed.ok is False:
+            # #900: an early error final. A failed run sends no outbox files
+            # (the post-return path still surfaces skipped ones), and its
+            # live session is already closing — no listener, no status.
+            return
+        if not _is_live_run():
+            await _budget_stop_close()  # #896
+            return
+        await _deliver_outbox_now(user_ref.message_id)
+        sid = completed.resume or run_outcome.resume
+        if sid is not None and runner.engine == "claude":
+            from .runners.claude import add_live_session_listener
+
+            add_live_session_listener(sid.value, _on_live_notice)
+        # #777: background work outlives the answer — open its status message.
+        await _bg_after_turn()
+        await _budget_stop_close()  # #896
+
+    def _new_turn_tracker() -> ProgressTracker:
+        tracker = ProgressTracker(engine=runner.engine, clock=clock)
+        if progress_tracker.meta:
+            tracker.meta = {
+                k: v for k, v in progress_tracker.meta.items() if k != "complete"
+            }
+        tracker.resume = progress_tracker.resume
+        return tracker
+
+    async def _create_turn_progress(ctx: _TurnCtx) -> None:
+        st = await send_initial_progress(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=ctx.reply_to,
+            label="working",
+            tracker=ctx.tracker,
+            progress_ref=ctx.progress_ref,
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            thread_id=incoming.thread_id,
+        )
+        if st.ref is None:
+            return
+        turn_edits = ProgressEdits(
+            transport=cfg.transport,
+            presenter=effective_presenter,
+            channel_id=incoming.channel_id,
+            progress_ref=st.ref,
+            tracker=ctx.tracker,
+            started_at=ctx.started_at,
+            clock=clock,
+            last_rendered=st.last_rendered,
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            thread_id=incoming.thread_id,
+            min_render_interval=progress_cfg.min_render_interval,
+        )
+        _configure_edits(turn_edits)
+        turn_edits._heartbeat_interval = progress_cfg.heartbeat_interval
+        turn_edits.stream = edits.stream
+        turn_edits.pid = edits.pid
+        # #929: read-only — the turn ignores surfaced requests and never
+        # offers (``run_level`` is False); only the run-level edits retire.
+        turn_edits.orphan_approvals = edits.orphan_approvals
+        if running_task is not None:
+            turn_edits.cancel_event = running_task.cancel_requested
+        ctx.edits = turn_edits
+        ctx.progress_ref = st.ref
+        scope = anyio.CancelScope()
+        ctx.edits_scope = scope
+
+        async def _run_turn_edits() -> None:
+            try:
+                with scope:
+                    await turn_edits.run()
+            except cancel_exc_type:
+                return
+
+        if turn_task_group["tg"] is not None:
+            turn_task_group["tg"].start_soon(_run_turn_edits)
+        if running_task is not None and running_tasks is not None:
+            # Replies / /cancel on this turn's messages reach the live run.
+            running_tasks[st.ref] = running_task
+
+    async def _close_turn_progress(ctx: _TurnCtx) -> None:
+        if ctx.edits is not None:
+            await ctx.edits.delete_ephemeral()
+        if ctx.edits_scope is not None:
+            ctx.edits_scope.cancel()
+        if ctx.progress_ref is not None and running_tasks is not None:
+            running_tasks.pop(ctx.progress_ref, None)
+
+    async def _discard_turn_progress(ctx: _TurnCtx) -> None:
+        """#1015: delete a turn's progress message that no final will
+        replace (the CLI closed the turn as ``no_query``).
+
+        A follow-up's progress message is its "⏳ queued" placeholder, edited
+        in place — that one is the user's anchor and is never deleted.
+        """
+        if ctx.edits is None or ctx.progress_ref is None:
+            return
+        if ctx.reason == "followup":
+            return
+        # Stop repaints first so a queued render can't land after the delete.
+        await ctx.edits.stop_repaints()
+        with contextlib.suppress(Exception), message_kind("progress"):
+            await cfg.transport.delete(ref=ctx.progress_ref)
+        _release_progress(ctx.progress_ref, reason="no_query")
+
+    async def _deliver_turn_cancelled(ctx: _TurnCtx) -> None:
+        """#806: a follow-up / wake turn the user cancelled renders exactly
+        like a cancelled first turn (``cancelled · claude · Ns``), not as an
+        error. One send — it runs under the run-end shielded timeout."""
+        if ctx.delivery["sent"]:
+            return
+        # #890: a cancelled turn ends a run of capped repeats too.
+        capped_wake_error.clear()
+        state = ctx.tracker.snapshot(
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            meta_formatter=format_meta_line,
+        )
+        rendered = effective_presenter.render_progress(
+            state,
+            elapsed_s=clock() - ctx.started_at,
+            label="`cancelled`",
+        )
+        if ctx.edits is not None:
+            # Stop progress repaints so a queued render can't overwrite it.
+            await ctx.edits.stop_repaints()
+        await send_result_message(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=ctx.reply_to,
+            progress_ref=ctx.progress_ref,
+            message=rendered,
+            notify=False,
+            edit_ref=ctx.progress_ref,
+            replace_ref=ctx.progress_ref,
+            delete_tag="cancel",
+            thread_id=incoming.thread_id,
+        )
+        ctx.delivery["sent"] = True
+        _release_progress(ctx.progress_ref, reason="cancelled")
+
+    async def _deliver_turn(completed: CompletedEvent, ctx: _TurnCtx) -> None:
+        from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+        terminal_reason = (completed.usage or {}).get("terminal_reason")
+        if terminal_reason in CLAUDE_ABORTED_TERMINAL_REASONS:
+            # #806: the CLI reported the turn as interrupted.
+            logger.info(
+                "live_turn.cancelled",
+                turn=ctx.turn,
+                reason=terminal_reason,
+                turn_reason=ctx.reason,
+            )
+            if not ctx.delivery["sent"]:
+                # It still spent money: account it before rendering
+                # ``cancelled`` (budget/outlier notices are not rendered).
+                _account_completion(
+                    completed,
+                    completed.resume,
+                    turn=ctx,
+                    elapsed_s=clock() - ctx.started_at,
+                    answer_len=len(completed.answer or ""),
+                )
+            await _deliver_turn_cancelled(ctx)
+            await _deliver_outbox_now(ctx.reply_to.message_id)
+            await _bg_after_turn()
+            await _budget_stop_close()  # #896
+            return
+        await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
+        await _deliver_outbox_now(ctx.reply_to.message_id)
+        # #777: a later turn may have launched (more) background work.
+        await _bg_after_turn()
+        await _budget_stop_close()  # #896
+
+    async def _resolve_unrun_followups() -> None:
+        """Follow-ups written into the live session whose turn never started
+        (the session ended first) must not sit on "⏳ queued" forever."""
+        sid = progress_tracker.resume or getattr(
+            getattr(edits, "stream", None), "found_session", None
+        )
+        if sid is None:
+            return
+        # #921: a follow-up whose write is still in flight is its writer's
+        # to resolve — wait (bounded) for its verdict before draining.
+        await _await_in_flight_followups(sid.value)
+        for reply_to, placeholder in drain_followup_anchors(sid.value):
+            text = (
+                "\N{WARNING SIGN} The session ended before this message ran "
+                "— please send it again."
+            )
+            try:
+                # #823: name the surface on a failed edit/send's error line.
+                with message_kind("followup_notice"):
+                    if placeholder is not None:
+                        await cfg.transport.edit(
+                            ref=placeholder, message=RenderedMessage(text=text)
+                        )
+                    else:
+                        await cfg.transport.send(
+                            channel_id=reply_to.channel_id,
+                            message=RenderedMessage(text=text),
+                            options=SendOptions(
+                                reply_to=reply_to, thread_id=reply_to.thread_id
+                            ),
+                        )
+            except Exception:  # noqa: BLE001
+                logger.debug("live_followup.unrun_notice_failed", exc_info=True)
+            logger.warning(
+                "claude.live_session.followup_not_run",
+                session_id=sid.value,
+                user_msg_id=reply_to.message_id,
+            )
+
+    turn_task_group: dict[str, Any] = {"tg": None}
+    turn_router = FollowupTurnRouter(
+        new_tracker=_new_turn_tracker,
+        create_progress=_create_turn_progress,
+        close_progress=_close_turn_progress,
+        discard_progress=_discard_turn_progress,
+        deliver=_deliver_turn,
+        default_reply_to=user_ref,
+        followup_notify=cfg.final_notify,
+        clock=clock,
+        # #785 part 2: a thinking note alone doesn't open a progress message
+        # for a wake turn that may fold into the status message — nor does a
+        # read-only result-collection call (#813).
+        progress_for=lambda evt: (
+            not _consolidating()
+            or (evt.action.kind != "note" and not is_collection_action(evt.action))
+        ),
+        deliver_cancelled=_deliver_turn_cancelled,
+        on_turn_started=lambda: _refresh_progress_settings(
+            cfg.presenter, effective_presenter
+        ),
+    )
+
+    edits.control_surface_probe = build_control_surface_probe(edits, turn_router)
+
+    # #929: standalone approval messages for requests with no visible host.
+    def _orphan_task(agent_id: str | None) -> Any:
+        if not agent_id:
+            return None
+        tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
+        return tasks.get(agent_id) if isinstance(tasks, dict) else None
+
+    def _orphan_label(agent_id: str | None) -> str | None:
+        task = _orphan_task(agent_id)
+        return task_label(task) if task is not None else None
+
+    def _orphan_anchor(agent_id: str | None) -> MessageRef | None:
+        # #795 pattern: reply to the prompt whose turn launched the agent;
+        # else the message the live session's latest turn answered (never
+        # turn 1's progress ref — the final may have replaced it).
+        task = _orphan_task(agent_id)
+        origin = getattr(task, "origin_turn", None) if task is not None else None
+        if isinstance(origin, int) and not isinstance(origin, bool):
+            return turn_router.anchor_for_turn(origin)
+        return turn_router.last_reply_to
+
+    edits.orphan_approvals = OrphanApprovalSurface(
+        transport=cfg.transport,
+        channel_id=incoming.channel_id,
+        thread_id=incoming.thread_id,
+        clock=clock,
+        label_for=_orphan_label,
+        anchor_for=_orphan_anchor,
+        first_s=edits._STALL_THRESHOLD_APPROVAL_FIRST,
+        repeat_s=edits._STALL_THRESHOLD_APPROVAL,
+    )
+
+    def _bg_session_idle() -> bool:
+        # The live session sits between turns: no wake / follow-up turn is
+        # running that could still break out and push (#785).
+        engine_state = getattr(edits.stream, "engine_state", None)
+        return (
+            bool(getattr(engine_state, "completed_turns", 0))
+            and not getattr(engine_state, "turn_open", True)
+            and not turn_router.active
+        )
+
+    def _bg_status_anchor(live: list[Any]) -> MessageRef:
+        # #795: reply to the prompt that launched the (most recent) tasks.
+        latest = max(live, key=lambda t: getattr(t, "started_at", 0.0) or 0.0)
+        origin = getattr(latest, "origin_turn", None)
+        return turn_router.anchor_for_turn(origin if isinstance(origin, int) else None)
+
+    bg_status = BackgroundStatusManager(
+        transport=cfg.transport,
+        channel_id=incoming.channel_id,
+        thread_id=incoming.thread_id,
+        tasks_source=_bg_tasks,
+        anchor_for=_bg_status_anchor,
+        settings_source=_load_progress_settings,
+        persistence_path=_PROGRESS_PERSISTENCE_PATH,
+        idle_source=_bg_session_idle,
+    )
+    bg_status_scope = anyio.CancelScope()
+
+    async def _bg_after_turn() -> None:
+        try:
+            await bg_status.after_turn()
+        except Exception:  # noqa: BLE001 — the status message is best-effort
+            logger.warning("background_status.after_turn_failed", exc_info=True)
+
+    async def _run_bg_status() -> None:
+        try:
+            with bg_status_scope:
+                await bg_status.run()
+        except cancel_exc_type:
+            return
+
+    def _consolidating() -> bool:
+        settings = bg_status.settings()
+        return bool(getattr(settings, "consolidate_wake_turns", True))
+
+    def _substantive_actions(tracker: ProgressTracker) -> int:
+        # Tools, approvals and questions — not thinking / rate-limit notes,
+        # nor a few read-only result-collection calls (#813).
+        return count_substantive_actions(a.action for a in tracker.snapshot().actions)
+
+    async def _fold_wake_turn(ctx: _TurnCtx, completed: CompletedEvent) -> bool:
+        target = bg_status.fold_target
+        if target is None or not _consolidating():
+            return False
+        detail = ctx.detail or {}
+        already = bool(detail.get("already_announced"))
+        decision = wake_fold_decision(
+            reason=ctx.reason,
+            ok=completed.ok and not completed.error,
+            answer=completed.answer or "",
+            substantive_actions=_substantive_actions(ctx.tracker),
+            already_announced=already,
+            live_tasks_remaining=len(live_shown(_bg_tasks())),
+            batch_announced=target.breakouts > 0,
+        )
+        task_ids = [t for t in detail.get("task_ids", []) if isinstance(t, str)]
+        # #813: the wake turn(s) the runner paired this task's end with.
+        announced_turns = [
+            t
+            for t in detail.get("announced_turns", [])
+            if isinstance(t, int) and not isinstance(t, bool)
+        ]
+        if decision != "fold" and already:
+            # The finish this turn restates was folded silently as an
+            # unattributed ack (the ack turn raced the task's end): that ack
+            # belongs on the task's row, whatever this turn's own outcome.
+            # (A breakout's push comes from _promote_quiet_breakout.)
+            await bg_status.attribute_turn_notes(task_ids, announced_turns)
+        folded = decision == "fold" and await bg_status.fold(
+            completed.answer or "",
+            task_ids=task_ids,
+            already_announced=already,
+            turn=ctx.turn,
+            announced_turns=announced_turns,
+        )
+        if decision == "fold" and not folded and target.breakouts > 0:
+            # An ack the status message couldn't take, after the batch has
+            # pushed: deliver it, but never as a second push for a no-op.
+            ctx.notify = False
+        logger.info(
+            "live_turn.fold_decision",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            decision=decision,
+            folded=folded,
+        )
+        return folded
+
+    # #890: the first wake-turn error final of a latched usage limit (its
+    # head line, message ref, rendered text and how many repeats folded in).
+    capped_wake_error: dict[str, Any] = {}
+
+    def _capped_wake_error_head(ctx: _TurnCtx, completed: CompletedEvent) -> str | None:
+        """#890: the error's first line when this failed turn is a background
+        wake on a latched usage limit (the runner's ``usage_limit_latched``),
+        else None. A user's own follow-up always gets its own reply."""
+        if ctx.reason not in FOLDABLE_REASONS:
+            return None
+        if (completed.usage or {}).get("usage_limit_latched") is not True:
+            return None
+        head = str(completed.error or "").split("\n", 1)[0].strip()
+        return head or None
+
+    async def _coalesce_capped_wake_error(ctx: _TurnCtx, head: str) -> bool:
+        """#890: fold a repeat of the latched limit error into the first one —
+        an edit with a counter, no new message, no push. False (deliver as
+        usual) when there is no first error with the same head, or the edit
+        failed."""
+        if capped_wake_error.get("head") != head:
+            return False
+        repeats = int(capped_wake_error.get("repeats", 0)) + 1
+        word = "wake-up" if repeats == 1 else "wake-ups"
+        rendered = _insert_footer_line(
+            capped_wake_error["rendered"],
+            f"\n+{repeats} more background {word} hit the same limit",
+        )
+        try:
+            # #823: this edits an error final — say so on a failure line.
+            with message_kind("final"):
+                edited = await cfg.transport.edit(
+                    ref=capped_wake_error["ref"], message=rendered
+                )
+        except Exception:  # noqa: BLE001 — fall back to its own message
+            logger.warning("live_turn.capped_repeat_edit_failed", exc_info=True)
+            edited = None
+        if edited is None:
+            capped_wake_error.clear()
+            return False
+        capped_wake_error["repeats"] = repeats
+        logger.info(
+            "live_turn.capped_repeat_folded",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            repeats=repeats,
+        )
+        return True
+
+    def _promote_quiet_breakout(ctx: _TurnCtx) -> None:
+        """#785: while consolidating, a wake turn that is delivered as its own
+        message (any non-fold outcome — report, long answer, tools, approval,
+        error, a budget notice) pushes if its batch hasn't pushed yet. Its
+        ``already_announced`` flag (router: no push) may refer to a finish that
+        was only folded silently — or was paired with an unrelated ``unknown``
+        turn — so it must never leave a batch with content but no push."""
+        target = bg_status.fold_target
+        if (
+            ctx.notify
+            or target is None
+            or target.breakouts > 0
+            or ctx.reason not in FOLDABLE_REASONS
+            or not _consolidating()
+        ):
+            return
+        ctx.notify = True
+        logger.info(
+            "live_turn.push_promoted",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            already_announced=bool((ctx.detail or {}).get("already_announced")),
+        )
+
+    def _bg_close_reason() -> str | None:
+        engine_state = getattr(edits.stream, "engine_state", None)
+        reason = getattr(engine_state, "live_close_reason", None)
+        if isinstance(reason, str):
+            return reason
+        if isinstance(getattr(engine_state, "live_exit_cause", None), str):
+            return "died"  # #1001: the process died without a close
+        if running_task is not None and running_task.cancel_requested.is_set():
+            return "cancel"
+        return None
 
     cancel_exc_type = anyio.get_cancelled_exc_class()
     edits_scope = anyio.CancelScope()
@@ -4037,6 +8076,9 @@ async def handle_message(
     async with anyio.create_task_group() as tg:
         if progress_ref is not None:
             tg.start_soon(run_edits)
+        tg.start_soon(_run_bg_status)
+        turn_task_group["tg"] = tg
+        turn_router.bind_task_group(tg)
 
         try:
             outcome = await run_runner_with_cancel(
@@ -4047,7 +8089,9 @@ async def handle_message(
                 running_task=running_task,
                 on_thread_known=on_thread_known,
                 channel_id=incoming.channel_id,
-                on_completed=_deliver_final,
+                on_completed=_on_run_completed,
+                turn_router=turn_router,
+                deliver_error_early=_deliver_error_early,
             )
         except Exception as exc:
             error = exc
@@ -4057,6 +8101,18 @@ async def handle_message(
                 error_type=exc.__class__.__name__,
             )
         finally:
+            # #776: an unfinished follow-up turn (session closed mid-turn)
+            # still gets a final so its progress message isn't orphaned.
+            with anyio.move_on_after(60, shield=True):
+                await turn_router.aclose(_bg_close_reason())
+                await _resolve_unrun_followups()
+                # #777: never leave a status message saying "running".
+                try:
+                    await bg_status.aclose(_bg_close_reason())
+                except Exception:  # noqa: BLE001
+                    logger.warning("background_status.close_failed", exc_info=True)
+            bg_status_scope.cancel()
+            unregister_live_count_source(_bg_count_token)
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
                 if progress_ref is not None:
@@ -4068,499 +8124,559 @@ async def handle_message(
             await edits.delete_ephemeral()
             edits_scope.cancel()
 
-    elapsed = clock() - started_at
+    # #810 (D-9): one release for every way out of the run below — final,
+    # error, cancel, and the auto-resend / auto-continue / stream-idle retry
+    # re-entries (which never finalise the original progress message; they
+    # only stop a restart from relabelling it). The finally runs after each
+    # branch's final / cancel send, preserving the #149 ordering. An
+    # exception escaping here may mean that send never landed, so the entry
+    # is kept for the restart cleanup to relabel. The re-entries also release
+    # right after their notice lands and before recursing: an exception from
+    # the nested run must not keep THIS (already-noticed) entry alive.
+    release_reason: str | None = "final"
+    try:
+        elapsed = clock() - started_at
 
-    if error is not None and final_delivery["sent"]:
-        # #591: the answer was already delivered before the teardown error —
-        # don't overwrite the delivered final message with an error render.
-        logger.warning(
-            "handle.error_after_final_delivery",
-            error=str(error),
-            error_type=error.__class__.__name__,
-            elapsed_s=round(elapsed, 2),
-        )
-        return
-
-    if error is not None:
-        sync_resume_token(progress_tracker, outcome.resume)
-        err_body = _format_error(error)
-        hint = _get_error_hint(err_body)
-        if hint:
-            err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
-        else:
-            err_body = f"```\n{err_body}\n```"
-        state = progress_tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
-        )
-        final_rendered = effective_presenter.render_final(
-            state,
-            elapsed_s=elapsed,
-            status="error",
-            answer=err_body,
-        )
-
-        # Append usage footer for Claude Code engine runs (even on error)
-        if runner.engine == "claude":
-            footer_cfg = _load_footer_settings()
-            from .runners.run_options import get_run_options
-
-            _err_run_opts = get_run_options()
-            _show_sub = footer_cfg.show_subscription_usage
-            if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
-                _show_sub = _err_run_opts.show_subscription_usage
-            final_rendered = await _maybe_append_usage_footer(
-                final_rendered, always_show=_show_sub
-            )
-
-        logger.debug(
-            "handle.error.rendered",
-            error=err_body,
-            rendered=final_rendered.text,
-        )
-        await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
-            message=final_rendered,
-            notify=False,
-            edit_ref=progress_ref,
-            replace_ref=progress_ref,
-            delete_tag="error",
-            thread_id=incoming.thread_id,
-        )
-        return
-
-    if outcome.cancelled and final_delivery["sent"]:
-        # #591: the run completed and its answer was delivered before the
-        # user's /cancel landed (the channelo msg-5815 shape — a cancel of
-        # an already-done run). The cancel only tears the subprocess down;
-        # the delivered answer must not be replaced by a "cancelled" render.
-        logger.info(
-            "handle.cancelled_after_delivery",
-            resume=outcome.resume.value if outcome.resume else None,
-            elapsed_s=elapsed,
-        )
-        return
-
-    if outcome.cancelled:
-        resume = sync_resume_token(progress_tracker, outcome.resume)
-        logger.info(
-            "handle.cancelled",
-            resume=resume.value if resume else None,
-            elapsed_s=elapsed,
-        )
-        state = progress_tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
-        )
-        final_rendered = effective_presenter.render_progress(
-            state,
-            elapsed_s=elapsed,
-            label="`cancelled`",
-        )
-        await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
-            message=final_rendered,
-            notify=False,
-            edit_ref=progress_ref,
-            replace_ref=progress_ref,
-            delete_tag="cancel",
-            thread_id=incoming.thread_id,
-        )
-        return
-
-    if outcome.completed is None:
-        raise RuntimeError("runner finished without a completed event")
-
-    completed = outcome.completed
-    run_ok = completed.ok
-
-    # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
-    # _deliver_final already delivered the "↻ retrying automatically…" notice
-    # (early, ~5s in). Now that the run generator has fully returned (the
-    # empty run's subprocess is done), resend the ORIGINAL prompt once.
-    # #631: the resumed session may be POISONED — an upstream dangling turn
-    # left over from a forced teardown will keep returning empty 0-turn
-    # resumes if resumed again. When empty_resume_fresh is on (default),
-    # clear the stored token, quarantine the poisoned session id so it is
-    # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
-    # (resume=None). When the flag is off, preserve the exact #596
-    # same-session resend behaviour. Single-shot via _empty_resent_count;
-    # mutually exclusive with auto-continue (that fires only when there was
-    # no result at all).
-    if empty_resume["pending"] and _empty_resent_count < 1:
-        _er_settings = _load_auto_continue_settings()
-        # Fall back to the original resume_token so a completion that omits a
-        # resume value never silently starts a FRESH session by accident.
-        _poison = completed.resume or outcome.resume or resume_token
-        if _er_settings.empty_resume_fresh and _poison is not None:
-            # #631 W1: clear the stored session token and quarantine the
-            # poisoned session id, then retry as a FRESH session.
-            if on_resume_failed is not None:
-                try:
-                    await on_resume_failed(_poison)
-                except Exception:  # noqa: BLE001
-                    logger.debug("session.clear_failed", exc_info=True)
-            if _qstore is not None:
-                try:
-                    _qstore.quarantine(
-                        runner.engine,
-                        _poison.value,
-                        reason="empty_zero_turn_resume",
-                    )
-                except Exception:  # noqa: BLE001 — a store failure must
-                    # never crash message handling; the other quarantine
-                    # call sites in this function already tolerate this.
-                    logger.debug("session.quarantine_failed", exc_info=True)
+        if error is not None and final_delivery["sent"]:
+            release_reason = "error_after_final"
+            # #591: the answer was already delivered before the teardown error —
+            # don't overwrite the delivered final message with an error render.
             logger.warning(
-                "session.auto_resend_fresh",
-                old_session_id=_poison.value,
-                engine=runner.engine,
-                attempt=_empty_resent_count + 1,
+                "handle.error_after_final_delivery",
+                error=str(error),
+                error_type=error.__class__.__name__,
+                elapsed_s=round(elapsed, 2),
             )
-            _er_resume = None
-        else:
-            # Legacy same-session path (flag off): preserve #596 behaviour
-            # byte-for-byte.
-            _er_resume = _poison
-            logger.warning(
-                "session.auto_resend_empty",
-                session_id=_er_resume.value if _er_resume else None,
-                engine=runner.engine,
-                attempt=_empty_resent_count + 1,
+            return
+
+        if error is not None:
+            release_reason = "error"
+            sync_resume_token(progress_tracker, outcome.resume)
+            err_body = _format_error(error)
+            hint = _get_error_hint(err_body)
+            if hint:
+                err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
+            else:
+                err_body = f"```\n{err_body}\n```"
+            state = progress_tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
             )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
+            final_rendered = effective_presenter.render_final(
+                state,
+                elapsed_s=elapsed,
+                status="error",
+                answer=err_body,
+            )
+
+            # Append usage footer for Claude Code engine runs (even on error)
+            if runner.engine == "claude":
+                footer_cfg = _load_footer_settings()
+                from .runners.run_options import get_run_options
+
+                _err_run_opts = get_run_options()
+                _show_sub = footer_cfg.show_subscription_usage
+                if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
+                    _show_sub = _err_run_opts.show_subscription_usage
+                final_rendered = await _maybe_append_usage_footer(
+                    final_rendered, always_show=_show_sub
+                )
+
+            logger.debug(
+                "handle.error.rendered",
+                error=err_body,
+                rendered=final_rendered.text,
+            )
+            await send_result_message(
+                cfg,
                 channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text=incoming.text,
-                reply_to=incoming.reply_to,
+                reply_to=user_ref,
+                progress_ref=progress_ref,
+                message=final_rendered,
+                notify=False,
+                edit_ref=progress_ref,
+                replace_ref=progress_ref,
+                delete_tag="error",
                 thread_id=incoming.thread_id,
-            ),
-            resume_token=_er_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            # #631 (T6): thread the resolved store through so an
-            # injected/singleton store survives this recursive re-entry.
-            quarantine_store=_qstore,
-            # Carry ALL recovery counters so an alternating empty-resume ↔
-            # auto-continue ↔ stream-idle-retry chain can't reset another
-            # guard and loop.
-            _auto_continued_count=_auto_continued_count,
-            _empty_resent_count=_empty_resent_count + 1,
-            _stream_idle_retried_count=_stream_idle_retried_count,
-        )
-        return
-    # --- End auto-resend ---
+            )
+            return
 
-    # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
-    # When Claude Code's turn state machine incorrectly ends a session
-    # after receiving tool results (last JSONL event is "user" type),
-    # auto-resume so the user doesn't have to manually continue.
-    ac_settings = _load_auto_continue_settings()
-    _ac_resume = completed.resume or outcome.resume
-    _ac_last_event = edits.stream.last_event_type if edits.stream else None
-    _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-    # #591: a run whose answer was already delivered can never need the
-    # auto-continue salvage (belt-and-braces — _should_auto_continue already
-    # excludes last_event_type == "result").
-    if (
-        ac_settings.enabled
-        and not final_delivery["sent"]
-        and _should_auto_continue(
-            last_event_type=_ac_last_event,
-            engine=runner.engine,
-            cancelled=outcome.cancelled,
-            resume_value=_ac_resume.value if _ac_resume else None,
-            auto_continued_count=_auto_continued_count,
-            max_retries=ac_settings.max_retries,
-            proc_returncode=_ac_proc_rc,
-        )
-    ):
-        # #568: emit the fields a future narrowing decision would need.
-        # The two upstream defects this mitigates are indistinguishable at
-        # this point, so rather than guess we record the cohort markers and
-        # let fleet data decide. `background_observed` in particular is the
-        # candidate discriminator for the NOT_PLANNED claude-code#30333 path
-        # (which is scoped to background subagents) — measure how many
-        # successful salvages have it False before ever gating on it.
-        # #640: `proc_returncode` was previously absent, which is why the
-        # broken signal-death guard needed log-line correlation to detect.
-        _ac_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-        logger.warning(
-            "session.auto_continue",
-            session_id=_ac_resume.value if _ac_resume else None,
-            engine=runner.engine,
-            last_event_type=_ac_last_event,
-            attempt=_auto_continued_count + 1,
-            max_retries=ac_settings.max_retries,
-            proc_returncode=_ac_proc_rc,
-            background_observed=bool(
-                getattr(edits.stream, "background_observed", False)
-                or getattr(_ac_es, "background_observed", False)
-            ),
-            event_count=getattr(edits.stream, "event_count", None),
-        )
+        if outcome.cancelled and final_delivery["sent"]:
+            release_reason = "cancelled_after_delivery"
+            # #591: the run completed and its answer was delivered before the
+            # user's /cancel landed (the channelo msg-5815 shape — a cancel of
+            # an already-done run). The cancel only tears the subprocess down;
+            # the delivered answer must not be replaced by a "cancelled" render.
+            logger.info(
+                "handle.cancelled_after_delivery",
+                resume=outcome.resume.value if outcome.resume else None,
+                elapsed_s=elapsed,
+            )
+            return
 
-        # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
-        # subprocess 2 spawns. Without this, any files the agent wrote
-        # to ``.untether-outbox/`` during the stuck-after-tool-results
-        # window are orphaned (subprocess 2 starts fresh and the
-        # original outbox is never scanned). ~3.6% silent loss observed
-        # on lba-1 before this fix. Failure to deliver must NOT block
-        # auto-continue itself \u2014 the recovery is more important than
-        # any single batch of files.
-        if cfg.send_file is not None and cfg.outbox_config is not None:
-            from .telegram.outbox_delivery import deliver_outbox_files
+        if outcome.cancelled:
+            release_reason = "cancelled"
+            resume = sync_resume_token(progress_tracker, outcome.resume)
+            logger.info(
+                "handle.cancelled",
+                resume=resume.value if resume else None,
+                elapsed_s=elapsed,
+            )
+            state = progress_tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
+            )
+            final_rendered = effective_presenter.render_progress(
+                state,
+                elapsed_s=elapsed,
+                label="`cancelled`",
+            )
+            await send_result_message(
+                cfg,
+                channel_id=incoming.channel_id,
+                reply_to=user_ref,
+                progress_ref=progress_ref,
+                message=final_rendered,
+                notify=False,
+                edit_ref=progress_ref,
+                replace_ref=progress_ref,
+                delete_tag="cancel",
+                thread_id=incoming.thread_id,
+            )
+            return
+
+        if outcome.completed is None:
+            raise RuntimeError("runner finished without a completed event")
+
+        completed = outcome.completed
+        run_ok = completed.ok
+
+        # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
+        # _deliver_final already delivered the "↻ retrying automatically…" notice
+        # (early, ~5s in). Now that the run generator has fully returned (the
+        # empty run's subprocess is done), resend the ORIGINAL prompt once.
+        # #631: the resumed session may be POISONED — an upstream dangling turn
+        # left over from a forced teardown will keep returning empty 0-turn
+        # resumes if resumed again. When empty_resume_fresh is on (default),
+        # clear the stored token, quarantine the poisoned session id so it is
+        # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
+        # (resume=None). When the flag is off, preserve the exact #596
+        # same-session resend behaviour. Single-shot via _empty_resent_count;
+        # mutually exclusive with auto-continue (that fires only when there was
+        # no result at all).
+        if _empty_resend_due():
+            release_reason = "auto_resend"
+            _er_settings = _load_auto_continue_settings()
+            # Fall back to the original resume_token so a completion that omits a
+            # resume value never silently starts a FRESH session by accident.
+            _poison = completed.resume or outcome.resume or resume_token
+            if _er_settings.empty_resume_fresh and _poison is not None:
+                # #631 W1: clear the stored session token and quarantine the
+                # poisoned session id, then retry as a FRESH session.
+                if on_resume_failed is not None:
+                    try:
+                        await on_resume_failed(_poison)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("session.clear_failed", exc_info=True)
+                if _qstore is not None:
+                    try:
+                        _qstore.quarantine(
+                            runner.engine,
+                            _poison.value,
+                            reason="empty_zero_turn_resume",
+                        )
+                    except Exception:  # noqa: BLE001 — a store failure must
+                        # never crash message handling; the other quarantine
+                        # call sites in this function already tolerate this.
+                        logger.debug("session.quarantine_failed", exc_info=True)
+                logger.warning(
+                    "session.auto_resend_fresh",
+                    old_session_id=_poison.value,
+                    engine=runner.engine,
+                    attempt=_empty_resent_count + 1,
+                )
+                _er_resume = None
+            else:
+                # Legacy same-session path (flag off): preserve #596 behaviour
+                # byte-for-byte.
+                _er_resume = _poison
+                logger.warning(
+                    "session.auto_resend_empty",
+                    session_id=_er_resume.value if _er_resume else None,
+                    engine=runner.engine,
+                    attempt=_empty_resent_count + 1,
+                )
+            # #810: the "↻ retrying" notice is already delivered — release
+            # now, so a nested run that raises (drain cancel included) can't
+            # leave this message for a restart to relabel.
+            _release_progress(progress_ref, reason=release_reason)
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text=incoming.text,
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_er_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                # #631 (T6): thread the resolved store through so an
+                # injected/singleton store survives this recursive re-entry.
+                quarantine_store=_qstore,
+                # #924: the dispatch's outbox cutoff survives the re-entry.
+                outbox_since=run_outbox_since,
+                # Carry ALL recovery counters so an alternating empty-resume ↔
+                # auto-continue ↔ stream-idle-retry chain can't reset another
+                # guard and loop.
+                _auto_continued_count=_auto_continued_count,
+                _empty_resent_count=_empty_resent_count + 1,
+                _stream_idle_retried_count=_stream_idle_retried_count,
+            )
+            return
+        # --- End auto-resend ---
+
+        # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
+        # When Claude Code's turn state machine incorrectly ends a session
+        # after receiving tool results (last JSONL event is "user" type),
+        # auto-resume so the user doesn't have to manually continue.
+        ac_settings = _load_auto_continue_settings()
+        _ac_resume = completed.resume or outcome.resume
+        _ac_last_event = edits.stream.last_event_type if edits.stream else None
+        _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
+        # #591: a run whose answer was already delivered can never need the
+        # auto-continue salvage.
+        # #716: this delivery check used to be described as "belt-and-braces"
+        # against a predicate that "already excludes last_event_type ==
+        # 'result'". That had it backwards — the predicate read a *running*
+        # value that says nothing about whether the run reached its result, so
+        # on the 106 nsd runs that ended `last_event_type=user` while healthy,
+        # `final_delivery["sent"]` was the ONLY thing holding the line. The
+        # predicate now discriminates on its own via `saw_result`; this stays
+        # as a genuine second gate, not a redundant one.
+        # #900: the gate itself is ``_auto_continue_due``, shared with the
+        # live-session early error delivery.
+        if not final_delivery["sent"] and _auto_continue_due(
+            completed, outcome, ac_settings
+        ):
+            release_reason = "auto_continue"
+            # #568: emit the fields a future narrowing decision would need.
+            # The two upstream defects this mitigates are indistinguishable at
+            # this point, so rather than guess we record the cohort markers and
+            # let fleet data decide. `background_observed` in particular is the
+            # candidate discriminator for the NOT_PLANNED claude-code#30333 path
+            # (which is scoped to background subagents) — measure how many
+            # successful salvages have it False before ever gating on it.
+            # #640: `proc_returncode` was previously absent, which is why the
+            # broken signal-death guard needed log-line correlation to detect.
+            _ac_es = (
+                getattr(edits.stream, "engine_state", None) if edits.stream else None
+            )
+            logger.warning(
+                "session.auto_continue",
+                session_id=_ac_resume.value if _ac_resume else None,
+                engine=runner.engine,
+                last_event_type=_ac_last_event,
+                attempt=_auto_continued_count + 1,
+                max_retries=ac_settings.max_retries,
+                proc_returncode=_ac_proc_rc,
+                background_observed=bool(
+                    getattr(edits.stream, "background_observed", False)
+                    or getattr(_ac_es, "background_observed", False)
+                ),
+                event_count=getattr(edits.stream, "event_count", None),
+            )
+
+            # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
+            # subprocess 2 spawns. Without this, any files the agent wrote
+            # to ``.untether-outbox/`` during the stuck-after-tool-results
+            # window are orphaned (subprocess 2 starts fresh and the
+            # original outbox is never scanned). ~3.6% silent loss observed
+            # on lba-1 before this fix. Failure to deliver must NOT block
+            # auto-continue itself \u2014 the recovery is more important than
+            # any single batch of files.
+            _ac_oc = _load_outbox_settings(cfg)
+            if cfg.send_file is not None and _ac_oc is not None:
+                from .telegram.outbox_delivery import deliver_outbox_files
+                from .utils.paths import get_run_base_dir
+
+                _run_root = get_run_base_dir()
+                if _run_root is not None:
+                    _oc = _ac_oc
+                    _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
+                    try:
+                        result = await deliver_outbox_files(
+                            send_file=cfg.send_file,
+                            channel_id=incoming.channel_id,
+                            thread_id=incoming.thread_id,
+                            reply_to_msg_id=user_ref.message_id,
+                            run_root=_run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                            cleanup=True,  # subprocess 2 starts fresh
+                            deliver_directories=getattr(
+                                _oc, "outbox_deliver_directories", "off"
+                            ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
+                        )
+                        logger.info(
+                            "outbox.delivered_pre_auto_continue",
+                            sent=len(result.sent),
+                            skipped=len(result.skipped),
+                            cleaned=result.cleaned,
+                        )
+                        # #524 rc20 follow-up: surface skipped items from the
+                        # pre-auto-continue scan too. Without this, agents that
+                        # write a directory (e.g. ``guides/``) and then hit the
+                        # stuck-after-tool-results recovery never tell the user
+                        # the deliverable existed — the directory is left in
+                        # place for subprocess 2 to re-find, but the user sees
+                        # nothing in chat about the first attempt.
+                        await _surface_outbox_skipped(
+                            cfg,
+                            incoming,
+                            user_ref,
+                            result.skipped,
+                            _oc,
+                            result=result,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "outbox.auto_continue_delivery_failed", exc_info=True
+                        )
+
+            # #551 Tier 1: reworded notice signals recovery, not failure.
+            # The \ud83d\udd01 prefix distinguishes auto-resume from a fresh start
+            # and discourages users from /cancel-ing the salvage.
+            notice = _format_auto_continue_notice(_auto_continued_count)
+            notice_msg = RenderedMessage(text=notice, extra={})
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=notice_msg,
+                options=SendOptions(
+                    reply_to=user_ref,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+            # #810: release only after the notice send (#149), and before
+            # the nested run — its failure must not relabel this message.
+            _release_progress(progress_ref, reason=release_reason)
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text="continue",
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_ac_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                # #631 (T6): thread the resolved store through so an
+                # injected/singleton store survives this recursive re-entry.
+                quarantine_store=_qstore,
+                # #924: files subprocess 1 wrote stay fresh for subprocess 2.
+                outbox_since=run_outbox_since,
+                _auto_continued_count=_auto_continued_count + 1,
+                # Carry the other recovery guards so they can't be reset by an
+                # interleaved auto-continue (see #596 auto-resend / #572 retry).
+                _empty_resent_count=_empty_resent_count,
+                _stream_idle_retried_count=_stream_idle_retried_count,
+            )
+            return
+        # --- End auto-continue ---
+
+        # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
+        # A Type-A failure is a mid-generation SSE stall after real output began
+        # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
+        # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
+        # the session instead of surfacing a terminal error with only a "raise
+        # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
+        # retrying hammers a down API. Error finals ride the post-return path
+        # (the #591 early delivery is ok=True-only; #900's live-session early
+        # error delivery holds any result this gate would act on), so
+        # returning here fully suppresses the terminal error message. The
+        # retry re-enters handle_message as a normal resumed run — quarantine
+        # divert, session-owner serialisation and the RAM guard apply to it
+        # exactly as to a user-initiated run. Budgets: it skips
+        # ``_run_engine``, so the #896 daily gate does NOT refuse it (like
+        # auto-continue and the empty-resume resend, it salvages a run that
+        # already started). What applies is the read-only guard in
+        # ``_stream_idle_retry_due`` (no retry once the failed run hit a
+        # per-run or daily limit), then the nested run's own post-result
+        # accounting (daily total, alerts) and its "Stop at limit" per-run
+        # stop, counted from the retry's own spend.
+        _si_ws = _load_watchdog_settings()
+        _si_resume = completed.resume or outcome.resume
+        _si_rc = edits.stream.proc_returncode if edits.stream else None
+        _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
+        if (
+            not final_delivery["sent"]
+            and _si_resume is not None
+            and _stream_idle_retry_due(completed, outcome, _si_ws)
+        ):
+            release_reason = "stream_idle_retry"
+            logger.warning(
+                "claude.stream_idle.auto_retry",
+                session_id=_si_resume.value,
+                engine=runner.engine,
+                attempt=_stream_idle_retried_count + 1,
+                max_retries=_si_max,
+                proc_returncode=_si_rc,
+                num_turns=(completed.usage or {}).get("num_turns"),
+                duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
+                total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
+            )
+            notice_msg = RenderedMessage(
+                text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
+                extra={},
+            )
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=notice_msg,
+                options=SendOptions(
+                    reply_to=user_ref,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+            # #810: release only after the notice send (#149), and before
+            # the nested run — its failure must not relabel this message.
+            _release_progress(progress_ref, reason=release_reason)
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text="continue",
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_si_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                quarantine_store=_qstore,
+                outbox_since=run_outbox_since,  # #924
+                # Carry the other recovery counters so an alternating chain
+                # can't reset another guard and loop.
+                _auto_continued_count=_auto_continued_count,
+                _empty_resent_count=_empty_resent_count,
+                _stream_idle_retried_count=_stream_idle_retried_count + 1,
+            )
+            return
+        # --- End #572 stream-idle auto-retry ---
+
+        # #591: deliver the final answer unless the early path already did.
+        if not final_delivery["sent"]:
+            await _deliver_final(completed, outcome)
+
+        # Deliver outbox files (agent-initiated file delivery).
+        # #524 rc20 follow-up: surface skipped items even when run_ok is False.
+        # Delivery of *sent* files still requires a successful run (failures
+        # may leave the outbox in a partially-written state), but the user
+        # should always learn what the agent intended to send.
+        _end_oc = (
+            _load_outbox_settings(cfg)
+            if cfg.send_file is not None and not outbox_early["delivered"]
+            else None
+        )
+        if _end_oc is not None:
+            from .telegram.outbox_delivery import (
+                OutboxResult,
+                classify_outbox,
+                deliver_outbox_files,
+            )
             from .utils.paths import get_run_base_dir
 
             _run_root = get_run_base_dir()
             if _run_root is not None:
-                _oc = cfg.outbox_config
-                try:
-                    result = await deliver_outbox_files(
-                        send_file=cfg.send_file,
-                        channel_id=incoming.channel_id,
-                        thread_id=incoming.thread_id,
-                        reply_to_msg_id=user_ref.message_id,
-                        run_root=_run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                        cleanup=True,  # subprocess 2 starts fresh
-                        deliver_directories=getattr(
-                            _oc, "outbox_deliver_directories", "off"
-                        ),
-                    )
-                    logger.info(
-                        "outbox.delivered_pre_auto_continue",
-                        sent=len(result.sent),
-                        skipped=len(result.skipped),
-                        cleaned=result.cleaned,
-                    )
-                    # #524 rc20 follow-up: surface skipped items from the
-                    # pre-auto-continue scan too. Without this, agents that
-                    # write a directory (e.g. ``guides/``) and then hit the
-                    # stuck-after-tool-results recovery never tell the user
-                    # the deliverable existed — the directory is left in
-                    # place for subprocess 2 to re-find, but the user sees
-                    # nothing in chat about the first attempt.
+                _oc = _end_oc
+                _send_after, _archive_before = _outbox_cutoffs(_oc, _run_root)
+                _outbox_result: OutboxResult | None = None
+                if run_ok is not False:
+                    try:
+                        _outbox_result = await deliver_outbox_files(
+                            send_file=cfg.send_file,
+                            channel_id=incoming.channel_id,
+                            thread_id=incoming.thread_id,
+                            reply_to_msg_id=user_ref.message_id,
+                            run_root=_run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                            cleanup=_oc.outbox_cleanup,
+                            deliver_directories=getattr(
+                                _oc, "outbox_deliver_directories", "off"
+                            ),
+                            send_after=_send_after,
+                            archive_before=_archive_before,
+                            seen=outbox_seen,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("outbox.delivery_failed", exc_info=True)
+                        _outbox_result = None
+                else:
+                    # Failed run: skip file delivery but still scan so the user
+                    # gets the 📎 Outbox skipped notice for any directory or
+                    # blocked entry the agent left behind. #924: fresh entries
+                    # only — no stale reporting or archiving on a failed run
+                    # (stale entries wait for the next successful run).
+                    try:
+                        _failed_skipped = classify_outbox(
+                            _run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                            send_after=_send_after,
+                            archive_before=None,
+                            seen=outbox_seen,
+                        ).skipped
+                    except Exception:  # noqa: BLE001
+                        logger.debug("outbox.failed_run_scan_error", exc_info=True)
+                        _failed_skipped = []
+                    _outbox_result = OutboxResult(skipped=_failed_skipped)
+
+                if _outbox_result is not None:
                     await _surface_outbox_skipped(
                         cfg,
                         incoming,
                         user_ref,
-                        result.skipped,
+                        _outbox_result.skipped,
                         _oc,
+                        result=_outbox_result,
                     )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "outbox.auto_continue_delivery_failed", exc_info=True
-                    )
-
-        # #551 Tier 1: reworded notice signals recovery, not failure.
-        # The \ud83d\udd01 prefix distinguishes auto-resume from a fresh start
-        # and discourages users from /cancel-ing the salvage.
-        notice = _format_auto_continue_notice(_auto_continued_count)
-        notice_msg = RenderedMessage(text=notice, extra={})
-        await cfg.transport.send(
-            channel_id=incoming.channel_id,
-            message=notice_msg,
-            options=SendOptions(
-                reply_to=user_ref,
-                notify=True,
-                thread_id=incoming.thread_id,
-            ),
-        )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
-                channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text="continue",
-                reply_to=incoming.reply_to,
-                thread_id=incoming.thread_id,
-            ),
-            resume_token=_ac_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            # #631 (T6): thread the resolved store through so an
-            # injected/singleton store survives this recursive re-entry.
-            quarantine_store=_qstore,
-            _auto_continued_count=_auto_continued_count + 1,
-            # Carry the other recovery guards so they can't be reset by an
-            # interleaved auto-continue (see #596 auto-resend / #572 retry).
-            _empty_resent_count=_empty_resent_count,
-            _stream_idle_retried_count=_stream_idle_retried_count,
-        )
-        return
-    # --- End auto-continue ---
-
-    # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
-    # A Type-A failure is a mid-generation SSE stall after real output began
-    # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
-    # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
-    # the session instead of surfacing a terminal error with only a "raise
-    # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
-    # retrying hammers a down API. Error finals ride the post-return path
-    # (the #591 early delivery is ok=True-only), so returning here fully
-    # suppresses the terminal error message. The retry re-enters
-    # handle_message as a normal resumed run — quarantine divert, session-
-    # owner serialisation, RAM guard and per-run budget checks all apply to
-    # it exactly as to a user-initiated run.
-    _si_ws = _load_watchdog_settings()
-    _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-    _si_class = getattr(_si_es, "stream_idle_class", None)
-    _si_resume = completed.resume or outcome.resume
-    _si_rc = edits.stream.proc_returncode if edits.stream else None
-    _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
-    if (
-        _si_ws is not None
-        and getattr(_si_ws, "stream_idle_auto_retry", False)
-        and _si_class == "type_a"
-        and run_ok is False
-        and not outcome.cancelled
-        and not final_delivery["sent"]
-        and _si_resume is not None
-        and _stream_idle_retried_count < _si_max
-        and not _is_signal_death(_si_rc)
-        and not _stream_idle_retry_budget_blocked(completed.usage)
-    ):
-        logger.warning(
-            "claude.stream_idle.auto_retry",
-            session_id=_si_resume.value,
-            engine=runner.engine,
-            attempt=_stream_idle_retried_count + 1,
-            max_retries=_si_max,
-            proc_returncode=_si_rc,
-            num_turns=(completed.usage or {}).get("num_turns"),
-            duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
-            total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
-        )
-        notice_msg = RenderedMessage(
-            text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
-            extra={},
-        )
-        await cfg.transport.send(
-            channel_id=incoming.channel_id,
-            message=notice_msg,
-            options=SendOptions(
-                reply_to=user_ref,
-                notify=True,
-                thread_id=incoming.thread_id,
-            ),
-        )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
-                channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text="continue",
-                reply_to=incoming.reply_to,
-                thread_id=incoming.thread_id,
-            ),
-            resume_token=_si_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            quarantine_store=_qstore,
-            # Carry the other recovery counters so an alternating chain
-            # can't reset another guard and loop.
-            _auto_continued_count=_auto_continued_count,
-            _empty_resent_count=_empty_resent_count,
-            _stream_idle_retried_count=_stream_idle_retried_count + 1,
-        )
-        return
-    # --- End #572 stream-idle auto-retry ---
-
-    # #591: deliver the final answer unless the early path already did.
-    if not final_delivery["sent"]:
-        await _deliver_final(completed, outcome)
-
-    # Deliver outbox files (agent-initiated file delivery).
-    # #524 rc20 follow-up: surface skipped items even when run_ok is False.
-    # Delivery of *sent* files still requires a successful run (failures
-    # may leave the outbox in a partially-written state), but the user
-    # should always learn what the agent intended to send.
-    if cfg.send_file is not None and cfg.outbox_config is not None:
-        from .telegram.outbox_delivery import (
-            OutboxResult,
-            deliver_outbox_files,
-            scan_outbox,
-        )
-        from .utils.paths import get_run_base_dir
-
-        _run_root = get_run_base_dir()
-        if _run_root is not None:
-            _oc = cfg.outbox_config
-            _outbox_result: OutboxResult | None = None
-            if run_ok is not False:
-                try:
-                    _outbox_result = await deliver_outbox_files(
-                        send_file=cfg.send_file,
-                        channel_id=incoming.channel_id,
-                        thread_id=incoming.thread_id,
-                        reply_to_msg_id=user_ref.message_id,
-                        run_root=_run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                        cleanup=_oc.outbox_cleanup,
-                        deliver_directories=getattr(
-                            _oc, "outbox_deliver_directories", "off"
-                        ),
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning("outbox.delivery_failed", exc_info=True)
-                    _outbox_result = None
-            else:
-                # Failed run: skip file delivery but still scan so the user
-                # gets the 📎 Outbox skipped notice for any directory or
-                # blocked entry the agent left behind.
-                try:
-                    _, _failed_skipped = scan_outbox(
-                        _run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.debug("outbox.failed_run_scan_error", exc_info=True)
-                    _failed_skipped = []
-                _outbox_result = OutboxResult(skipped=_failed_skipped)
-
-            if _outbox_result is not None:
-                await _surface_outbox_skipped(
-                    cfg,
-                    incoming,
-                    user_ref,
-                    _outbox_result.skipped,
-                    _oc,
-                )
+    except BaseException:
+        release_reason = None
+        raise
+    finally:
+        if release_reason is not None:
+            _release_progress(progress_ref, reason=release_reason)

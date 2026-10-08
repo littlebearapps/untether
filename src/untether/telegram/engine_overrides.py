@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import msgspec
 
+from ..runners.run_options import EngineRunOptions
+
 OverrideSource = Literal["topic_override", "chat_default", "default"]
 
-REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Fallback for engines without an entry below (they don't support reasoning).
+# #416: no `minimal` — every allowed tuple must only hold levels that have a
+# /config button.
+REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
-    "codex": ("minimal", "low", "medium", "high", "xhigh"),
+    # #416: no model in Codex 0.157.1's catalogue lists `minimal`, and the
+    # server rejects it alongside the default web_search tool. Pinned by
+    # test_codex_cli_schema_drift.py::test_bundled_catalogue_has_no_minimal
+    # (and ::test_listed_models_support_untether_codex_levels).
+    "codex": ("low", "medium", "high", "xhigh"),
 }
 
 
@@ -45,6 +54,17 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     loop_enabled: bool | None = None
 
 
+def with_override(
+    current: EngineOverrides | None, **changes: object
+) -> EngineOverrides:
+    """Copy *current* (or an empty override) with *changes* applied.
+
+    Setters must use this rather than rebuilding ``EngineOverrides`` field by
+    field: a field left out of a rebuild is silently cleared (#903).
+    """
+    return msgspec.structs.replace(current or EngineOverrides(), **changes)
+
+
 @dataclass(frozen=True, slots=True)
 class OverrideValueResolution:
     value: str | None
@@ -58,6 +78,40 @@ def normalize_override_value(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def migrate_legacy_permission_mode(engine: str, mode: str | None) -> str | None:
+    """Rewrite pre-0.35.5rc8 Claude ``auto`` prefs to ``plan-auto`` (#741).
+
+    Stored chat prefs were only ever written by Untether's own ``/planmode``
+    and ``/config`` buttons, so an ``auto`` there unambiguously meant the
+    plan-gate sugar — migrating it preserves the behaviour the user chose.
+    Hand-authored TOML is deliberately NOT migrated: there ``auto`` now means
+    the CLI's own auto mode, and the runner logs a one-shot WARN instead.
+
+    Claude-only by construction: ``auto`` is a legitimate, differently-meaning
+    value for Codex, so it must not be rewritten there.
+    """
+    from ..runners.run_options import (
+        CLAUDE_PLAN_AUTO_MODE,
+        LEGACY_CLAUDE_PLAN_AUTO_MODE,
+    )
+
+    if engine == "claude" and mode == LEGACY_CLAUDE_PLAN_AUTO_MODE:
+        return CLAUDE_PLAN_AUTO_MODE
+    return mode
+
+
+def migrate_legacy_overrides(
+    engine: str, overrides: EngineOverrides | None
+) -> EngineOverrides | None:
+    """Apply :func:`migrate_legacy_permission_mode` to a stored override."""
+    if overrides is None:
+        return None
+    migrated = migrate_legacy_permission_mode(engine, overrides.permission_mode)
+    if migrated == overrides.permission_mode:
+        return overrides
+    return msgspec.structs.replace(overrides, permission_mode=migrated)
 
 
 def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | None:
@@ -223,6 +277,28 @@ def allowed_reasoning_levels(engine: str) -> tuple[str, ...]:
 
 def supports_reasoning(engine: str) -> bool:
     return engine in REASONING_SUPPORTED_ENGINES
+
+
+def drop_unsupported_reasoning(
+    engine: str, options: EngineRunOptions | None
+) -> EngineRunOptions | None:
+    """#416: drop a stored reasoning level the engine no longer allows.
+
+    A chat or topic can hold a level saved before it was retired (Codex
+    ``minimal``). The run uses the engine default instead, and
+    ``ignored_reasoning`` carries the dropped level so the executor can tell
+    the user. Engines without reasoning support are left alone (the executor
+    notes and ignores their override). Pure and idempotent — it runs on every
+    resolution, including the live follow-up / steer option comparisons, so
+    it must not log.
+    """
+    if options is None or not options.reasoning:
+        return options
+    if not supports_reasoning(engine):
+        return options
+    if options.reasoning in allowed_reasoning_levels(engine):
+        return options
+    return replace(options, reasoning=None, ignored_reasoning=options.reasoning)
 
 
 _ENGINE_REASONING_LABEL: dict[str, str] = {

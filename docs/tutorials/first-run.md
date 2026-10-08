@@ -16,12 +16,12 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 untether (v0.35.4)
+    🐕 **untether is ready** (v0.36.0)
 
     *default engine:* `codex`<br>
-    *installed engines:* claude, codex, opencode<br>
-    *directories:* 3<br>
-    mode: assistant
+    *installed engines:* `claude, codex, opencode`<br>
+    *mode:* `assistant`<br>
+    *directories:* `api, happy-gadgets, website`
 
     Send a message to start, or /config for settings.
 
@@ -29,8 +29,8 @@ Untether keeps running in your terminal. In Telegram, your bot will post a start
 
 The message is compact by default — diagnostic lines only appear when they carry signal. This tells you:
 
-- Which engine is the default and how many projects are registered
-- Which directory Untether will run in
+- Which engine is the default and which engines are installed
+- Which projects (`directories`) are registered — `none` means Untether runs in the directory you started it from
 - Which **workflow mode** you're in (`assistant`, `workspace`, or `handoff`)
 - Any engine issues (missing, misconfigured) when relevant
 
@@ -83,7 +83,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 
 <img src="../assets/screenshots/final-answer-footer.jpg" alt="Final answer with model/cost footer and resume line" width="360" loading="lazy" />
 
-The footer shows which engine, model, and mode were used, plus cost if available. When resume lines are enabled, a line like `codex resume abc123` appears too—that's how Untether knows which conversation to continue.
+The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx`. When resume lines are enabled, a line like `codex resume abc123` appears too—that's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 
@@ -108,14 +108,17 @@ Untether extracts the resume token from the message you replied to and continues
 
 !!! tip "Reply-to-continue still works in chat mode"
     If resume lines are visible, replying to any older message branches the conversation from that point.
-    Use `show_resume_line = true` if you want this behavior all the time.
+    Use `show_resume_line = true` if you want this behaviour all the time.
 
 !!! tip "Reset with /new"
     `/new` cancels any running task and clears stored sessions for the current chat or topic.
 
+!!! tip "Sending while the agent is still working"
+    A message you send mid-run is queued: it runs as the next turn once the current one finishes. With Claude Code you can send `/steer <text>` instead to slip it into the running turn — see [Steer follow-ups](../how-to/steer-follow-ups.md).
+
 ## 6. Cancel a run
 
-Sometimes you want to stop a run in progress—maybe you realize you asked the wrong question, or it's taking too long.
+Sometimes you want to stop a run in progress—maybe you realise you asked the wrong question, or it's taking too long.
 
 While the progress message is showing, tap the **cancel** button or reply to it with:
 
@@ -148,7 +151,7 @@ Want to use a different engine for one message? Prefix your message with `/<engi
 
 This uses Claude Code for just this message. The resume line will show `claude --resume ...`, and replies will automatically use Claude Code.
 
-Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/gemini`, `/amp`.
+Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
 
 !!! tip "Set a default engine"
     Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.

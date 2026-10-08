@@ -3,9 +3,9 @@
 This guide explains how to add a **new engine runner** to Untether.
 
 A *runner* is the adapter between an engine-specific CLI (Codex, Claude Code, …) and Untether’s
-**normalized event model** (`StartedEvent`, `ActionEvent`, `CompletedEvent`).
+**normalised event model** (`StartedEvent`, `ActionEvent`, `CompletedEvent`).
 
-If you are building an external plugin package, read `docs/plugins.md` first.
+If you are building an external plugin package, read [Write a plugin](write-a-plugin.md) first.
 
 Untether is designed so that adding a runner usually means **adding one new module** under
 `src/untether/runners/` plus a small **msgspec schema** module under `src/untether/schemas/`—
@@ -42,6 +42,9 @@ Untether’s core types live in `untether.model`:
 - `CompletedEvent(engine, ok, answer, resume?, error?, usage?)`
 
 Runners **must not** invent new event types. They translate engine output into these.
+
+!!! note "`TurnEvent` (live sessions)"
+    Since v0.36.0 `untether.model` also has `TurnEvent`. Only a runner that keeps its process open after the first result emits it (today, Claude Code in control-channel mode): each later turn in the same process is a `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segment *after* the run's `CompletedEvent` ([#776](https://github.com/littlebearapps/untether/issues/776)). A new runner doesn't need it; the invariants below still describe the run itself.
 
 ### 2) The runner contract (invariants)
 
@@ -150,7 +153,7 @@ Untether provides `JsonlSubprocessRunner`, which:
 - drains stderr and logs it
 - reads stdout line-by-line as JSONL bytes
 - calls your `decode_jsonl(...)` and then `translate(...)` to convert each event into Untether events
-- guarantees “exactly one CompletedEvent” behavior
+- guarantees “exactly one CompletedEvent” behaviour
 - provides safe fallbacks for rc != 0 or stream ending without a completion event
 
 #### Define a state object
@@ -254,7 +257,7 @@ Claude Code keeps translation logic in a standalone function (`translate_claude_
 This makes it easy to unit test without spawning a subprocess.
 
 Do the same for Acme. Use pattern matching against msgspec shapes, and rely on the
-`EventFactory` (as in Codex/Claude Code) to standardize event creation:
+`EventFactory` (as in Codex/Claude Code) to standardise event creation:
 
 ```py
 def translate_acme_event(
@@ -507,7 +510,7 @@ Depending on how robust you want the integration, consider adding:
   unless configured to use API billing).
 - `invalid_json_events(...)`: emit a helpful warning `ActionEvent` on malformed JSONL.
 - `decode_error_events(...)`: log + drop `msgspec.DecodeError` if the engine emits garbage.
-- `process_error_events(...)`: customize rc != 0 behavior.
+- `process_error_events(...)`: customise rc != 0 behaviour.
 - `stream_end_events(...)`: handle “process exited cleanly but never emitted a final event”.
 
 Claude Code uses these to produce better failures instead of silent hangs.
@@ -591,11 +594,11 @@ If you use msgspec, also add a tiny schema sanity test (pattern from
 `tests/test_codex_schema.py`) that decodes your fixture with
 `untether.schemas.<engine>.decode_event`.
 
-#### 3) Lock/serialization tests (optional, but great)
+#### 3) Lock/serialisation tests (optional, but great)
 
 Claude Code has async tests proving that:
 
-- two runs with the same resume token serialize (`max_in_flight == 1`)
+- two runs with the same resume token serialise (`max_in_flight == 1`)
 - a new session run locks correctly after it emits `StartedEvent`
 
 If your runner uses `JsonlSubprocessRunner`, you get most of this for free, but having
@@ -619,7 +622,7 @@ one targeted test catches regressions.
     in `stream_end_events(...)`.
 
 - **Unhelpful error reporting**
-  - Include stderr tail in a warning action (Claude Code includes `stderr_tail` in `detail`).
+  - Include a stderr excerpt in a warning action (the base runner appends one via `_stderr_excerpt`).
 
 - **Resume line gets truncated**
   - Ensure `is_resume_line()` matches your `format_resume()` output. Untether tries to preserve

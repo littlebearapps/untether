@@ -16,7 +16,9 @@ triggers:
 
 # Codex, OpenCode, and Pi Runner Protocols
 
-These three engines are **non-interactive only** — no control channel, no permission prompts. They extend `JsonlSubprocessRunner` directly (unlike ClaudeRunner which overrides `run_impl`).
+These three engines are **non-interactive only** — no control channel, no permission prompts. They extend `JsonlSubprocessRunner` and use its `run_impl` (ClaudeRunner replaces it; OpenCodeRunner only wraps it with a pre-spawn version check, #970).
+
+A failed **resumed** run keeps the chat's saved session unless the error names the resume itself (`_RESUME_FAILURE_RE` in `runner_bridge.py`: Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`, …) — none of the three reports `num_turns`, so the Claude-style 0-turn rule can't apply (#952). A new "session not found" wording must be added there.
 
 ## Quick comparison
 
@@ -45,12 +47,15 @@ These three engines are **non-interactive only** — no control channel, no perm
 ### CLI invocation
 
 ```bash
-codex exec --json --skip-git-repo-check --color=never \
-  [--model MODEL] [--session THREAD_ID -] [-]
+codex [extra_args…] [--profile P] [--model MODEL] [-c model_reasoning_effort=LEVEL] \
+  exec --json --skip-git-repo-check --color=never \
+  [--sandbox read-only] [resume <thread_id> | resume --last] -
 ```
 
 - Prompt on stdin (trailing `-` means read stdin)
-- Resume: `--session <thread_id> -`
+- Resume: `resume <thread_id> -` (`resume --last -` for `/continue`)
+- Safe mode is genuinely read-only: `--sandbox read-only` (exec-level, so it outranks a root-level sandbox flag), only in `safe` permission mode and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
+- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209)
 - `--skip-git-repo-check --color=never` for clean output
 
 ### JSONL events
@@ -72,11 +77,11 @@ codex exec --json --skip-git-repo-check --color=never \
 | `command_execution` | `command` | ok = (status=="completed" && exit_code==0) |
 | `mcp_tool_call` | `tool` | Title: `server.tool` |
 | `file_change` | `file_change` | `detail.changes = [{path, kind}]` |
-| `web_search` | `web_search` | Title: query |
+| `web_search` | `web_search` | Title: query / url / pattern from the untyped `action`; placeholder `web search` on started (#419) |
 | `todo_list` | `note` | `detail.done`, `detail.total` |
 | `reasoning` | `note` | Reasoning text |
 | `agent_message` | (not emitted) | Stored as final answer candidate |
-| `error` (item) | `warning` | Non-fatal error |
+| `error` (item) | `warning` | Non-fatal warning: `ok=True`, title prefixed `⚠️` (one ⚠️ row, not ✗); Codex emits each config warning twice, so a repeated message is dropped per run (#987) |
 
 ### Final answer selection
 
@@ -116,6 +121,14 @@ opencode run --format json [--session SESSION_ID] [--model MODEL] -- <prompt>
 - Prompt as positional arg after `--`
 - Resume: `--session ses_XXX`
 - Session IDs: `ses_` prefix + 20+ chars
+- **Supported CLI: OpenCode 1.x (npm `opencode-ai`) only** (#970). `run_impl` probes `opencode --version` off the
+  event loop (cached per binary path + mtime; failed probes aren't cached) and refuses 2.x (`@opencode/cli`, which runs
+  prompts on a shared background service outside Untether's process control) with one `completed_error` carrying
+  `PRESPAWN_BLOCKED_KEY`, so nothing spawns and the saved session is kept. An unparsable version fails open
+  (`opencode.version.unknown`). Tests stub the probe via an autouse fixture in `tests/conftest.py`
+- `run` auto-**rejects** `ask` permissions (never auto-approves; only `--dangerously-skip-permissions`, which Untether
+  doesn't pass) and denies `question`/`plan_enter`/`plan_exit`. OpenCode does auto-compact, but `run --format json`
+  doesn't report it (#969)
 
 ### JSONL events
 
@@ -124,7 +137,7 @@ opencode run --format json [--session SESSION_ID] [--model MODEL] -- <prompt>
 | `step_start` (first, with `sessionID`) | `StartedEvent(resume=sessionID)` |
 | `tool_use` (status="completed") | `ActionEvent(phase="completed", ok=exit==0)` |
 | `tool_use` (status="error") | `ActionEvent(phase="completed", ok=False)` |
-| `text` | Accumulated as final answer (no action) |
+| `text` | Final-answer part (no action): each event is one complete part, keyed by `part.id` and joined with a blank line (#955) |
 | `step_finish` (reason="stop") | `CompletedEvent(ok=True, answer=text)` |
 | `error` | `CompletedEvent(ok=False, error=message)` |
 
@@ -140,15 +153,17 @@ opencode run --format json [--session SESSION_ID] [--model MODEL] -- <prompt>
 | `task` | `tool` |
 | (other) | `tool` |
 
-### Not yet implemented
+### Usage
 
-Usage accumulation: OpenCode's `step_finish` may include token/cost data but the runner does not currently extract it. `CompletedEvent.usage` is not populated.
+Each `step_finish`'s cost and tokens accumulate into `OpenCodeStreamState`; `_build_usage()` puts them on
+`CompletedEvent.usage` (`total_cost_usd` + `usage{input,output,reasoning,cache_*}_tokens`). The bridge accumulates
+them per session for `/usage` and `/export` (#417).
 
 ### Config keys
 
 ```toml
 [opencode]
-model = "claude-sonnet-4-5-20250929"
+model = "anthropic/claude-sonnet-5-5"   # must be OpenCode's provider/model form; bare names fail
 ```
 
 ---

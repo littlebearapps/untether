@@ -1,3 +1,14 @@
+---
+paths:
+  - "CHANGELOG.md"
+  - "pyproject.toml"
+  - "uv.lock"
+  - "scripts/validate_release.py"
+  - "scripts/fleet-*.sh"
+  - "scripts/run-integration-tests.sh"
+  - ".github/workflows/**"
+---
+
 # Release & Issue Tracking Discipline
 
 ## When fixing bugs
@@ -12,14 +23,18 @@
 2. Add a CHANGELOG.md section: `## vX.Y.Z (YYYY-MM-DD)`
 3. Every changelog entry must link to a GitHub issue: `[#N](https://github.com/littlebearapps/untether/issues/N)`
 4. Run `uv lock` to sync the lockfile
+4b. **Stable releases: write the user-facing announcement** `.github/release-announcements/vX.Y.Z.md` (template + rules in that folder's `TEMPLATE.md`; `/pr-main` step M-3b). It's a plain-English post for users — benefits, fixes they'll notice, under-the-hood work, and a `Heads up` for every breaking change or deprecation. `validate_release.py` fails the release PR without it, `release.yml` refuses to build without it, and the `announce` job posts it to Discussions → Announcements after PyPI ([#1008](https://github.com/littlebearapps/untether/issues/1008))
 5. **Run integration tests against `@untether_dev_bot`** — see below and `docs/reference/integration-testing.md`
-6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. The file is gate-protected — Bash `rm`/`mv`/`>` are blocked by `help-faq-protect.sh`, but Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. Never delete, move or truncate it (`help-faq-protect.sh` blocks Bash `rm`/`mv`/`>`); Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 
 ## Semantic versioning
 
 - **Patch**: bug fixes, schema updates, dependency bumps
 - **Minor**: new features, new commands, new engines, config additions
 - **Major**: breaking changes to config, runner protocol, or public API
+- **Pre-1.0 (`0.x`)**: a line with any `### breaking` entry ships as the next **minor**, never a patch — anyone pinned
+  to `~=0.35` must not get breaking changes. That is why the 0.35.5rc1–rc20 line ships as **v0.36.0** (rcs continue as
+  `0.36.0rcN`; [#947](https://github.com/littlebearapps/untether/issues/947)).
 
 ## MANDATORY integration testing before release
 
@@ -28,14 +43,18 @@
 | Release type | Required integration test tiers | Time |
 |---|---|---|
 | **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + Tier 3 (transport, if changed) + Tier 4 (overrides, if changed) + Tier 6 + upgrade path | ~75 min |
-| **Major** | ALL tiers (1-7), ALL engines, full upgrade path testing | ~120 min |
+| **Minor** | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport, if changed) + Tier 4 (overrides, if changed) + Tier 6 + upgrade path | ~75 min |
+| **Major** | ALL tiers (1-7), all supported engines, full upgrade path testing | ~120 min |
+
+Deprecated engines (`gemini`, `amp`) are **excluded from every tier** — both are
+currently non-functional upstream and cannot pass U1. See
+[`runner-development.md`](./runner-development.md) → "Deprecated engines — sweep exemption".
 
 **NEVER skip integration testing.** Unit tests alone are insufficient — production bugs consistently slip through areas only exercisable via live Telegram interaction.
 
 **ALWAYS use `@untether_dev_bot`** (dev service) for initial integration testing. NEVER use `@hetz_lba1_bot` (staging) for dev testing — use `@untether_dev_bot` first. Stage rc versions on `@hetz_lba1_bot` only after dev integration tests pass.
 
-Integration tests are automated via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`). Claude Code sends test prompts to the 6 `ut-dev:` engine chats, reads back responses, and verifies expected behaviour. See `docs/reference/integration-testing.md` for chat IDs, workflow, and test details.
+Integration tests are automated via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`). Claude Code sends test prompts to the 4 supported `ut-dev:` engine chats, reads back responses, and verifies expected behaviour. See `docs/reference/integration-testing.md` for chat IDs, workflow, and test details.
 
 ### Pre-rollout integration test attestation
 
@@ -47,9 +66,9 @@ scripts/run-integration-tests.sh ${VERSION} --manual \
   --notes "U1-U8 all pass on @untether_dev_bot; tier 6 stress ok"
 ```
 
-This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timestamp, tester, tier list, and notes. `scripts/fleet-rollout.sh ${VERSION}` REQUIRES this marker to exist — it refuses to roll the rc/stable to nsd, channelo, or mac without it. The only way around the gate is `--skip-test-gate`, which prints a loud warning and is not recommended for any change that touches production hosts.
+This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timestamp, tester, tier list, and notes. `scripts/fleet-rollout.sh ${VERSION}` REQUIRES this marker to exist — it refuses to roll the rc/stable to any host (lba-1, nsd, channelo, sl, mac) without it. The only way around the gate is `--skip-test-gate`, which prints a loud warning and is not recommended for any change that touches production hosts.
 
-**The marker is per-version, not per-host.** One pass on `@untether_dev_bot` is enough to gate the fleet rollout because the dev bot exercises the same code paths every host runs. Re-test if the version number changes (e.g. rc14 → rc15 each get their own marker).
+**The marker is per-version, not per-host.** One pass on `@untether_dev_bot` is enough to gate the fleet rollout because the dev bot exercises the same code paths every host runs. Re-test if the version number changes (e.g. `0.36.0rc1` → `0.36.0rc2` each get their own marker).
 
 **Markers are durable.** Delete them manually if you want to invalidate a rollout (e.g. discovered a regression post-test): `rm ~/.untether-dev/integration-test-pass-${VERSION}.json` then the rollout script will refuse to run.
 
@@ -58,23 +77,28 @@ This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timesta
 Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` before final release:
 
 - rc versions live on the `dev` branch — merged via PR from feature branches
-- rc versions do **NOT** require changelog entries — `validate_release.py` skips them
+- rc versions get no changelog heading of their own — `validate_release.py` skips them. Each fix is still logged as it lands, under the line's single `## vX.Y.Z (unreleased)` heading (newest at the top of each subsection), and that heading is dated at the `dev`→`master` release merge
 - rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
-- Commit message convention: `chore: staging X.Y.ZrcN`
+- Commit message convention: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare version bump is `chore(release): X.Y.ZrcN`
 - Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`
-- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. The master PR review is the only manual approval — no PyPI environment gate, no manual tag step.
+- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release → Discussions announcement (`announce` job). Nathan's explicit approval of the release is the only manual gate (he merges, or Claude via `/pr-main X.Y.Z --merge` and the guard asks him to confirm, #917) — no PyPI environment gate, no manual tag step.
 - See `docs/reference/dev-instance.md` for the full staging workflow.
+
+## Release guard
+
+Rules: `CLAUDE.md` §Release guard. Hooks: registered in `.claude/settings.json` ([#915](https://github.com/littlebearapps/untether/issues/915),
+[#917](https://github.com/littlebearapps/untether/issues/917)). Tests: `bash .claude/hooks/tests/test-release-guard.sh`.
 
 ## Fleet rollout (rc and stable)
 
 Untether ships from one repo to **five hosts**: lba-1 staging, nsd VPS, channelo VPS, sl VPS, and Nathan's Mac. All hosts are rolled in parallel after integration tests pass (no separate dogfood window — the integration tests are the quality gate). sl was added to the fleet 2026-07-14; before that it was upgraded manually.
 
 ```bash
-scripts/run-integration-tests.sh 0.35.3rc14 --manual    # write attestation marker
-scripts/fleet-rollout.sh 0.35.3rc14                     # parallel upgrade across 5 hosts
-scripts/fleet-rollout.sh 0.35.3rc14 --dry-run           # preview without executing
-scripts/fleet-rollout.sh 0.35.3rc14 --only mac          # roll one host
-scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to known-good
+scripts/run-integration-tests.sh X.Y.ZrcN --manual    # write attestation marker
+scripts/fleet-rollout.sh X.Y.ZrcN                     # parallel upgrade across 5 hosts
+scripts/fleet-rollout.sh X.Y.ZrcN --dry-run           # preview without executing
+scripts/fleet-rollout.sh X.Y.ZrcN --only mac          # roll one host
+scripts/fleet-rollback.sh <known-good> --only mac     # revert one host to known-good
 ```
 
 **Order of operations:**
@@ -87,9 +111,9 @@ scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to kno
 
 **Partial failure handling:** if one host fails (network glitch, SSH timeout, etc.), the script reports the failure but does NOT roll back successful hosts. Operator decides whether to roll forward (rerun) or roll back the failed host (`fleet-rollback.sh <prev> --only <host>`).
 
-**Rc supersede:** if rc14 is already deployed and rc15 is ready, just run `fleet-rollout.sh 0.35.3rc15` — the script detects the supersede and proceeds. `--force-downgrade` is required for older-than-current versions.
+**Rc supersede:** if rcN is already deployed and rcN+1 is ready, just run `fleet-rollout.sh X.Y.Zrc<N+1>` — the script detects the supersede and proceeds. `--force-downgrade` is required for older-than-current versions.
 
-**Strategic plan:** [`docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md`](../../docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md) (Phase 4). See also `.claude/rules/dev-workflow.md` for dev/staging separation rules that still apply per-host.
+**Strategic plan:** `docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md` (Phase 4; `docs/plans/` is gitignored — lba-1 checkout only). See also `.claude/rules/dev-workflow.md` for dev/staging separation rules that still apply per-host.
 
 ## Audit-filed issues (release triage)
 
@@ -101,10 +125,10 @@ Two automated systems file GitHub issues into this repo. Recognise them by label
 Before tagging a release, scan both:
 
 ```bash
-# Open audit findings against the current milestone, ranked by severity
+# Open audit findings against the current milestone (e.g. v0.36.0), ranked by severity
 gh issue list --repo littlebearapps/untether \
   --label auto:monitor-audit --state open \
-  --milestone v0.35.3 --json number,title,labels,milestone
+  --milestone vX.Y.Z --json number,title,labels,milestone
 
 # Just the release-blockers
 gh issue list --repo littlebearapps/untether \
@@ -112,6 +136,13 @@ gh issue list --repo littlebearapps/untether \
 ```
 
 `severity:critical` and `severity:major` should be resolved before tag; `severity:minor` and `severity:trivial` can defer to the next patch if scope-pressured. Enhancements (`enhancement` label) are routed to `next_patch`/`next_minor`/`Future` milestones by the auditor and don't block release.
+
+## Dependabot alerts track `master`
+
+- Dependabot alerts are raised against the **default branch's** `uv.lock` (`master` = latest PyPI), so a fix merged to `dev` leaves the alert open until the dev→master stable merge. That's expected, not a failure.
+- Verify dev-lock fixes with `uv sync --frozen --all-groups && uv run --no-sync pip-audit --skip-editable` (what CI runs), not the alert list. A dated, commented `--ignore-vuln` with an issue link is the only escape hatch.
+- Shipped CVE fixes also need a `pyproject.toml` floor, not just a lock bump: `pip install -U` / `pipx upgrade` keep an older dependency that still satisfies the published `Requires-Dist`.
+- Dependabot uses the `uv` ecosystem with version updates targeting `dev`. Keep Dependabot *security updates* disabled: they always open PRs against `master`, which breaks the release guard.
 
 ## Changelog format
 
@@ -126,6 +157,7 @@ gh issue list --repo littlebearapps/untether \
 - Date is valid ISO format
 - All entries have issue links `[#N]`
 - Subsection headings are from the allowed set
+- The stable release's Discussions announcement exists and passes `scripts/release_announcement.py check` (title names the version, required sections, `Heads up` when breaking/deprecating, no placeholders, length fits the release type)
 
 Run locally: `python3 scripts/validate_release.py`
 

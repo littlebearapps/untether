@@ -1,5 +1,17 @@
 # Gemini -> Untether event mapping (spec)
 
+!!! warning "Deprecated"
+
+    The `gemini` engine is **deprecated and no longer supported** (as of
+    v0.36.0): it still loads, but gets no fixes, is excluded from testing, and
+    may be removed in a future release
+    ([#722](https://github.com/littlebearapps/untether/issues/722)). Google ended
+    Gemini CLI support for individual accounts (free, Google AI Pro and Ultra) on **18 June 2026**
+    (`IneligibleTierError`); under Untether the subprocess hangs until the
+    watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
+    Antigravity CLI ships as a separate engine in v0.36.1
+    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
+
 This document describes how the Gemini runner translates Gemini CLI `--output-format stream-json` JSONL events into Untether events.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/gemini.py` and the translation logic is in `src/untether/runners/gemini.py`. When in doubt, refer to the code.
@@ -11,11 +23,11 @@ This document describes how the Gemini runner translates Gemini CLI `--output-fo
 Gemini CLI emits **one JSON object per line** (JSONL) when invoked with:
 
 ```
-gemini -p --output-format stream-json <prompt>
+gemini --output-format stream-json --approval-mode <mode> --prompt=<prompt>
 ```
 
 Notes:
-- `-p` is required for non-interactive (print) mode.
+- `--prompt=` (long form of `-p`) selects non-interactive (headless) mode.
 - `--output-format stream-json` enables JSONL output.
 - All events have a `type` field used as the discriminator.
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent
@@ -35,6 +35,11 @@ class ProgressState:
     resume_line: str | None
     context_line: str | None
     meta_line: str | None = None
+    # #777: pre-result background-task block (markdown), set by the bridge.
+    background: str | None = None
+    # #819: context-window use in percent (Claude), from ``telemetry``
+    # ActionEvents. None when unknown or just after a compaction.
+    context_pct: int | None = None
 
 
 class ProgressTracker:
@@ -55,6 +60,8 @@ class ProgressTracker:
         self.action_count = 0
         self._actions: dict[str, ActionState] = {}
         self._seq = 0
+        # #819: latest context-window use (percent), header-only.
+        self.context_pct: int | None = None
 
     def note_event(self, event: UntetherEvent) -> bool:
         match event:
@@ -72,6 +79,11 @@ class ProgressTracker:
             case ActionEvent(action=action, phase=phase, ok=ok):
                 if action.kind == "turn":
                     return False
+                if action.kind == "telemetry":
+                    # #819: a value for the header, not a step — never
+                    # stored as an action (no step bump, no running-tool,
+                    # keyboard or fold bookkeeping).
+                    return self._note_telemetry(action.detail)
                 action_id = str(action.id or "")
                 if not action_id:
                     return False
@@ -107,6 +119,70 @@ class ProgressTracker:
             case _:
                 return False
 
+    def _note_telemetry(self, detail: dict[str, Any]) -> bool:
+        """#819: apply a ``telemetry`` ActionEvent. True only when the shown
+        value changed (a re-render is owed)."""
+        if "context_pct" not in detail:
+            return False
+        value = detail["context_pct"]
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 0 <= value <= 100
+        ):
+            return False
+        if value == self.context_pct:
+            return False
+        self.context_pct = value
+        return True
+
+    def action_detail(self, action_id: str) -> dict[str, Any] | None:
+        """The tracked action's current ``detail``, or None when unknown."""
+        existing = self._actions.get(action_id)
+        return None if existing is None else existing.action.detail
+
+    def update_action(
+        self,
+        action_id: str,
+        *,
+        title: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> bool:
+        """Replace a tracked action's ``title`` / ``detail`` in place.
+
+        #709: some actions are advanced by a *callback handler* rather than by
+        a new engine event — most notably a multi-question AskUserQuestion
+        flow, where answering Q1 edits the progress message to show Q2. Without
+        this the tracker keeps the intercept-time title and keyboard, and the
+        next heartbeat re-render regenerates the message from that stale model
+        and wins: the user is shown Q1's text and Q1's option labels while Q2
+        is outstanding.
+
+        ``detail`` REPLACES the action's detail dict wholesale (callers pass a
+        merged dict) so a key can be removed as well as changed — clearing
+        ``inline_keyboard`` is how the flow's final keyboard strip becomes a
+        model change rather than an edit racing the renderer.
+
+        Returns False when *action_id* is unknown, so callers can fall back to
+        a plain edit rather than assume the model was updated.
+        """
+        existing = self._actions.get(action_id)
+        if existing is None:
+            return False
+        action = existing.action
+        self._seq += 1
+        self._actions[action_id] = replace(
+            existing,
+            action=replace(
+                action,
+                title=action.title if title is None else title,
+                detail=action.detail if detail is None else detail,
+            ),
+            last_update=self._seq,
+            last_update_at=self._clock(),
+        )
+        return True
+
     def set_resume(self, resume: ResumeToken | None) -> None:
         if resume is not None:
             self.resume = resume
@@ -135,4 +211,5 @@ class ProgressTracker:
             resume_line=resume_line,
             context_line=context_line,
             meta_line=meta_line,
+            context_pct=self.context_pct,
         )

@@ -106,21 +106,35 @@ Fields:
 - `sessionID`: Session identifier
 - `error.name`: Error type
 - `error.data.message`: Human-readable error (when available)
+- `message` (optional): Alternative top-level message; Untether prefers it over `error` when present
 
 Example:
 ```json
 {"type":"error","timestamp":1767036065000,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","error":{"name":"APIError","data":{"message":"Rate limit exceeded","statusCode":429,"isRetryable":true}}}
 ```
 
+### What `run` doesn't emit
+
+`run --format json` is a thin client over OpenCode's server and forwards only the five types above. Server events for
+permissions, questions and compaction (`permission.asked`, `question.asked`, `session.compacted`) never reach stdout:
+
+- `run` answers every `ask` permission with a rejection itself (unless `--dangerously-skip-permissions`, which Untether
+  doesn't pass). The rejected call arrives as a `tool_use` with `state.status == "error"` and the rejection in
+  `state.error`.
+- `run` creates its sessions with the `question`, `plan_enter` and `plan_exit` tools denied.
+- OpenCode still auto-compacts long sessions; the compaction just isn't reported here.
+
 ## Mapping to Untether Events
 
 | OpenCode Event | Untether Event | Condition |
 |----------------|--------------|-----------|
 | `step_start` | `StartedEvent` | First occurrence |
-| `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` |
-| `text` | (accumulate text) | - |
-| `step_finish` | `CompletedEvent` | `reason == "stop"` |
-| `step_finish` | (ignored) | `reason == "tool-calls"` |
+| `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` (`ok=False` if `metadata.exit` is non-zero) |
+| `tool_use` | `ActionEvent(phase="completed", ok=False)` | `status == "error"` |
+| `tool_use` | `ActionEvent(phase="started")` | any other status |
+| `text` | (collect the part; parts are joined with a blank line) | - |
+| `step_finish` | `CompletedEvent` (with accumulated cost/tokens) | `reason == "stop"` |
+| `step_finish` | (cost/tokens accumulated only) | `reason == "tool-calls"` or absent |
 | `error` | `CompletedEvent(ok=False)` | - |
 
 If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with accumulated usage.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-# Headless JSONL schema derived from tag rust-v0.77.0 (git 112f40e91c12af0f7146d7e03f20283516a8af0b).
+# Headless JSONL schema derived from tag rust-v0.77.0 (git 112f40e91c12af0f7146d7e03f20283516a8af0b);
+# Usage/WebSearchItem re-derived at rust-v0.157.1 (2026-09-30, #419).
 from typing import Any, Literal
 
 import msgspec
@@ -34,9 +35,20 @@ type CollabToolCallStatus = Literal[
 
 
 class Usage(msgspec.Struct, kw_only=True):
+    """``turn.completed.usage`` — the thread's RUNNING TOTAL, not this turn's
+    (``usage_from_last_total``; #419). ``cached_input_tokens`` is a subset of
+    ``input_tokens`` and ``reasoning_output_tokens`` a subset of
+    ``output_tokens`` — never add them on top."""
+
     input_tokens: int
     cached_input_tokens: int
     output_tokens: int
+    cache_write_input_tokens: int = 0  # upstream #33454 (serde default)
+    reasoning_output_tokens: int = 0  # upstream #19308; SUBSET of output_tokens
+
+
+# The five usage field names — single source for tests and drift probes.
+CODEX_USAGE_FIELDS: tuple[str, ...] = Usage.__struct_fields__
 
 
 class ThreadError(msgspec.Struct, kw_only=True):
@@ -129,7 +141,18 @@ class CollabToolCallItem(msgspec.Struct, tag="collab_tool_call", kw_only=True):
 
 class WebSearchItem(msgspec.Struct, tag="web_search", kw_only=True):
     id: str
-    query: str
+    # Upstream sends "" on item.started; tolerate null / omission too.
+    query: str | None = None
+    # Deliberately UNTYPED (#419). web_search is a known item type, so a
+    # DecodeError is not rescued by _decode_unknown_item_fallback: the whole
+    # line would be lost and jsonl.msgspec.invalid would fire (the issue
+    # watcher files it). Neither a tagged union nor a typed struct is lenient
+    # enough — a null inside ``queries`` already fails a ``list[str]`` field.
+    # Shape checks live in runners/codex.py:_web_search_title().
+    # Expected: {"type": "search"|"open_page"|"find_in_page"|"other", ...}
+    action: Any = None
+    # Expected: a list of opaque result objects; only len() is used.
+    results: Any = None
 
 
 class ErrorItem(msgspec.Struct, tag="error", kw_only=True):

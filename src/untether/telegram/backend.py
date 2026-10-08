@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
+from collections.abc import Collection
 from pathlib import Path
 
 import anyio
@@ -19,6 +21,7 @@ from ..settings import (
 )
 from ..transport_runtime import TransportRuntime
 from ..transports import SetupResult, TransportBackend
+from ..triggers.run_once_state import load_fired_state, resolve_state_path
 from .bridge import (
     TelegramBridgeConfig,
     TelegramPresenter,
@@ -53,43 +56,84 @@ def _expect_transport_settings(transport_config: object) -> TelegramTransportSet
     raise TypeError("transport_config must be TelegramTransportSettings")
 
 
+def _parse_cli_version(output: str) -> str | None:
+    """First line of ``--version`` output → a bare version (``v1.2.3`` → ``1.2.3``)."""
+    lines = output.strip().splitlines()
+    if not lines:
+        return None
+    text = lines[0]
+    for token in text.split():
+        cleaned = token.lstrip("vV")
+        if cleaned and cleaned[0].isdigit():
+            return cleaned
+    return text
+
+
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
         # #202: cmd comes from EngineBackend.cli_cmd (e.g. "claude", "codex"),
         # a fixed table of engine entrypoints configured in pyproject.toml.
-        # No shell, fixed argv, 3-second timeout.
+        # No shell, fixed argv, 5-second timeout (#951: the probes now run
+        # side by side, so Node start-up is slower than the ~2-3 s serial).
         result = subprocess.run(  # nosec B603
             [cmd, "--version"],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=5,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            # Extract just the version number from output like "claude v1.0.20"
-            text = result.stdout.strip().splitlines()[0]
-            # Try to find a version-like substring
-            for token in text.split():
-                cleaned = token.lstrip("vV")
-                if cleaned and cleaned[0].isdigit():
-                    return cleaned
-            return text
+        if result.returncode == 0:
+            # #951: Pi prints its version to stderr.
+            return _parse_cli_version(result.stdout) or _parse_cli_version(
+                result.stderr or ""
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     return None
 
 
-def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
-    """Build a ``py X.Y.Z · engine X.Y.Z`` versions line."""
+# #951: engine versions only change on an upgrade, so /config → About reuses
+# a probe for a few minutes instead of spawning every CLI on each tap.
+_CLI_VERSION_TTL_S = 300.0
+_CLI_VERSION_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+async def _cli_version(cmd: str) -> str | None:
+    cached = _CLI_VERSION_CACHE.get(cmd)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _CLI_VERSION_TTL_S:
+        return cached[1]
+    # A worker thread, so the ~2-3 s Node start-up never blocks the event loop.
+    version = await anyio.to_thread.run_sync(_detect_cli_version, cmd)
+    _CLI_VERSION_CACHE[cmd] = (now, version)
+    return version
+
+
+async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
+    """Build a ``py X.Y.Z · engine X.Y.Z`` versions line.
+
+    #951: the engines are probed concurrently, off the event loop.
+    """
     py = (
         f"py {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
+    engines = sorted(engine_ids)
+    versions: dict[str, str | None] = {}
+
+    async def probe(engine: str) -> None:
+        versions[engine] = await _cli_version(engine)
+
+    async with anyio.create_task_group() as tg:
+        for engine in engines:
+            tg.start_soon(probe, engine)
     parts = [py]
-    for engine in sorted(engine_ids):
-        version = _detect_cli_version(engine)
-        if version:
-            parts.append(f"{engine} {version}")
+    parts.extend(f"{e} {versions[e]}" for e in engines if versions.get(e))
     return " · ".join(parts) if len(parts) > 1 else None
+
+
+def _count(n: int, noun: str) -> str:
+    """``1 webhook`` / ``2 webhooks`` (#869, the /health idiom)."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _resolve_mode_label(
@@ -104,6 +148,53 @@ def _resolve_mode_label(
     return "assistant"
 
 
+def _unattended_startup_line(
+    runtime: TransportRuntime,
+    trigger_config: dict,
+    spent_cron_ids: Collection[str],
+) -> str | None:
+    """#836: the ``unattended approvals`` line, or None.
+
+    Recomputes #751's pure audit (no logging — the WARN stays owned by
+    ``build_runtime_spec``) with the runtime's own engine resolution, so the
+    line reflects what dispatch will do (#862). Never raises: a startup
+    message must not fail on it.
+    """
+    try:
+        from ..context import RunContext
+        from ..permission_audit import (
+            CLAUDE_ENGINE,
+            audit_claude_permission_modes,
+            format_unattended_entries,
+        )
+        from ..triggers.settings import parse_trigger_config
+
+        if CLAUDE_ENGINE not in runtime.engine_ids:
+            return None
+        try:
+            triggers = parse_trigger_config(trigger_config)
+        except (ValueError, TypeError):
+            return None  # reported as triggers.init_failed elsewhere
+        runner = runtime.resolve_runner(
+            resume_token=None, engine_override=CLAUDE_ENGINE
+        ).runner
+        mode = getattr(runner, "permission_mode", None)
+        if getattr(runner, "dangerously_skip_permissions", None) is True:
+            mode = "bypassPermissions"  # overrides the configured mode
+        audit = audit_claude_permission_modes(
+            engine_mode=mode if isinstance(mode, str) else None,
+            triggers=triggers,
+            resolve_engine=lambda engine, project: runtime.resolve_engine(
+                engine_override=engine, context=RunContext(project=project)
+            ),
+            spent_cron_ids=spent_cron_ids,
+        )
+        return format_unattended_entries(audit)
+    except Exception:  # noqa: BLE001
+        logger.debug("startup.unattended_line_failed", exc_info=True)
+        return None
+
+
 def _build_startup_message(
     runtime: TransportRuntime,
     *,
@@ -111,6 +202,7 @@ def _build_startup_message(
     topics: TelegramTopicsSettings,
     session_mode: str = "stateless",
     trigger_config: dict | None = None,
+    spent_cron_ids: Collection[str] = (),
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
 
@@ -162,8 +254,24 @@ def _build_startup_message(
     # triggers — only shown when enabled
     if trigger_config and trigger_config.get("enabled"):
         n_wh = len(trigger_config.get("webhooks", []))
-        n_cr = len(trigger_config.get("crons", []))
-        details.append(f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons)`")
+        # #809: count only crons that will actually be scheduled — a fired
+        # run_once cron stays in the TOML but TriggerManager drops it (same
+        # filter as manager.py). Spent one-shots get their own suffix.
+        crons = trigger_config.get("crons", [])
+        spent = set(spent_cron_ids)
+        active = [
+            c for c in crons if not (isinstance(c, dict) and c.get("id") in spent)
+        ]
+        n_cr = len(active)
+        n_spent = len(crons) - n_cr
+        spent_note = f", {_count(n_spent, 'spent one-shot')}" if n_spent else ""
+        counts = f"{_count(n_wh, 'webhook')}, {_count(n_cr, 'cron')}{spent_note}"
+        details.append(f"_triggers:_ `enabled ({counts})`")
+        # #836: Claude crons whose approvals will be auto-denied (#835).
+        if (
+            line := _unattended_startup_line(runtime, trigger_config, spent)
+        ) is not None:
+            details.append(line)
 
     _DOCS_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
@@ -224,12 +332,17 @@ class TelegramBackend(TransportBackend):
         except (OSError, ValueError, KeyError) as exc:
             logger.debug("triggers.config.read_skipped", error=str(exc))
 
+        # #809: fired run_once crons (run_once_fired.json, sibling of the
+        # toml) are not scheduled, so the startup count must skip them.
+        spent_cron_ids = set(load_fired_state(resolve_state_path(config_path)))
+
         startup_msg = _build_startup_message(
             runtime,
             chat_id=chat_id,
             topics=settings.topics,
             session_mode=settings.session_mode,
             trigger_config=trigger_config,
+            spent_cron_ids=spent_cron_ids,
         )
         progress_cfg = _load_progress_settings()
         bot = TelegramClient(token, group_chat_rps=progress_cfg.group_chat_rps)
@@ -237,6 +350,7 @@ class TelegramBackend(TransportBackend):
         formatter = MarkdownFormatter(
             max_actions=progress_cfg.max_actions,
             verbosity=progress_cfg.verbosity,
+            show_context_usage=progress_cfg.show_context_usage,
         )
         presenter = TelegramPresenter(
             formatter=formatter,
@@ -277,12 +391,14 @@ class TelegramBackend(TransportBackend):
             exec_cfg=exec_cfg,
             session_mode=settings.session_mode,
             show_resume_line=settings.show_resume_line,
+            followup_mode=settings.followup_mode,
             voice_transcription=settings.voice_transcription,
             voice_max_bytes=int(settings.voice_max_bytes),
             voice_transcription_model=settings.voice_transcription_model,
             voice_transcription_base_url=settings.voice_transcription_base_url,
             voice_transcription_api_key=settings.voice_transcription_api_key,
             voice_transcription_language=settings.voice_transcription_language,
+            voice_transcription_prompt=settings.voice_transcription_prompt,
             voice_show_transcription=settings.voice_show_transcription,
             voice_transcription_url_allowlist=tuple(
                 settings.voice_transcription_url_allowlist
@@ -291,6 +407,7 @@ class TelegramBackend(TransportBackend):
             media_group_debounce_s=settings.media_group_debounce_s,
             allowed_user_ids=tuple(settings.allowed_user_ids),
             allow_any_user=settings.allow_any_user,
+            approval_originator_only=settings.approval_originator_only,
             topics=settings.topics,
             files=settings.files,
             trigger_config=trigger_config,

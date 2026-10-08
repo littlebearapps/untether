@@ -2,7 +2,7 @@
 # context-structural-change.sh
 # Hook: PostToolUse (Write|Edit, matching structural files)
 # Purpose: Remind about context file updates after structural changes
-# Installed by: /contextdocs:context-guard install
+# Installed by: /contextdocs:context-guard install — NOT registered in .claude/settings.json (inactive)
 #
 # Claude Code only — OpenCode, Codex CLI, Cursor, and other tools
 # do not support Claude Code hooks.

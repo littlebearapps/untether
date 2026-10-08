@@ -300,6 +300,71 @@ def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_language is None
 
 
+def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
+    """#691: vocabulary-bias prompt is stripped at parse time."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = " Trello, Untether, Claude Code "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert (
+        settings.transports.telegram.voice_transcription_prompt
+        == "Trello, Untether, Claude Code"
+    )
+
+
+def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
+    """#691/#703: omitted → None at the settings layer. None now MEANS
+    "use the shipped default" — the resolution lives at the transport
+    boundary (voice.resolve_transcription_prompt), not here."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt is None
+
+
+def test_voice_transcription_prompt_empty_preserved_as_optout(tmp_path: Path) -> None:
+    """#703: an explicitly-empty value must survive validation as "" so it
+    stays distinguishable from unset — collapsing it to None would make the
+    opt-out silently re-enable the shipped default."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_prompt = "   "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt == ""
+
+
+def test_voice_transcription_prompt_rejects_over_1000_chars(tmp_path: Path) -> None:
+    """#691: reject rather than silently truncate — invisible truncation
+    would change the configured bias without telling the operator."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        f'voice_transcription_prompt = "{"x" * 1001}"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="voice_transcription_prompt"):
+        load_settings(config_path)
+
+
 def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:
     """#638: a typo like 'english' fails at boot, not silently at the API."""
     config_path = tmp_path / "untether.toml"
@@ -383,6 +448,60 @@ def test_voice_url_allowlist_invalid_entry_rejected(tmp_path: Path) -> None:
     }
     with pytest.raises(ConfigError, match="voice_transcription_url_allowlist"):
         validate_settings_data(data, config_path=config_path)
+
+
+def _voice_url_data(base_url: str) -> dict:
+    return {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": base_url,
+            }
+        },
+    }
+
+
+def test_679_ip_literal_loopback_error_names_allowlist_key(tmp_path: Path) -> None:
+    """#679: the load-time rejection names the key that opts the address in."""
+    with pytest.raises(ConfigError) as info:
+        validate_settings_data(
+            _voice_url_data("http://127.0.0.1:8000/v1"),
+            config_path=tmp_path / "untether.toml",
+        )
+    msg = str(info.value)
+    assert "voice_transcription_url_allowlist" in msg
+    assert '"127.0.0.0/8"' in msg
+
+
+def test_679_metadata_ip_error_does_not_suggest_allowlist(tmp_path: Path) -> None:
+    """#679: a link-local / cloud-metadata literal is never suggested."""
+    with pytest.raises(ConfigError) as info:
+        validate_settings_data(
+            _voice_url_data("http://169.254.169.254/latest"),
+            config_path=tmp_path / "untether.toml",
+        )
+    msg = str(info.value)
+    assert "can't be allowlisted" in msg
+    assert '"169.254' not in msg
+
+
+def test_679_settings_validator_is_dns_free(tmp_path: Path) -> None:
+    """#679 / #506: a `localhost` base_url loads without any DNS lookup — the
+    validator runs on every load and reload, so it must stay DNS-free."""
+    from unittest.mock import patch
+
+    with patch("socket.getaddrinfo", side_effect=AssertionError("DNS in validator")):
+        settings = validate_settings_data(
+            _voice_url_data("http://localhost:8000/v1"),
+            config_path=tmp_path / "untether.toml",
+        )
+    assert (
+        settings.transports.telegram.voice_transcription_base_url
+        == "http://localhost:8000/v1"
+    )
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -797,6 +916,24 @@ def test_files_outbox_dir_rejects_absolute() -> None:
         TelegramFilesSettings(outbox_dir="/tmp/outbox")
 
 
+@pytest.mark.parametrize("value", ["..", "../Downloads", "out/../../x"])
+def test_files_outbox_dir_rejects_parent_components(value: str) -> None:
+    """#924 review: `..` would let the outbox (and its stale archiving)
+    reach outside the project."""
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError, match=r"'\.\.'"):
+        TelegramFilesSettings(outbox_dir=value)
+
+
+def test_files_outbox_dir_allows_nested_relative() -> None:
+    from untether.settings import TelegramFilesSettings
+
+    assert TelegramFilesSettings(outbox_dir="out/box").outbox_dir == "out/box"
+
+
 def test_files_outbox_max_files_range() -> None:
     from pydantic import ValidationError
 
@@ -806,6 +943,27 @@ def test_files_outbox_max_files_range() -> None:
         TelegramFilesSettings(outbox_max_files=0)
     with pytest.raises(ValidationError):
         TelegramFilesSettings(outbox_max_files=51)
+
+
+def test_files_outbox_stale_policy_default_archive() -> None:
+    """#924: decided default — older outbox leftovers are quarantined."""
+    from untether.settings import TelegramFilesSettings, TelegramTransportSettings
+
+    assert TelegramFilesSettings().outbox_stale_policy == "archive"
+    assert TelegramFilesSettings(outbox_stale_policy="send").outbox_stale_policy == (
+        "send"
+    )
+    # hot-reloadable, not restart-only
+    assert "files" not in TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+
+
+def test_files_outbox_stale_policy_rejects_unknown() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(outbox_stale_policy="skip")
 
 
 # ── AutoContinueSettings ──
@@ -1087,3 +1245,11 @@ def test_589_concurrency_guard_bounds() -> None:
         WatchdogSettings(max_concurrent_engine_runs=-1)
     with pytest.raises(ValidationError):
         WatchdogSettings(prespawn_ram_per_run_reserve_mb=-1)
+
+
+def test_684_watchdog_detect_unanswerable_default_true_and_toggle() -> None:
+    from untether.settings import WatchdogSettings
+
+    assert WatchdogSettings().detect_unanswerable_control_requests is True
+    off = WatchdogSettings(detect_unanswerable_control_requests=False)
+    assert off.detect_unanswerable_control_requests is False

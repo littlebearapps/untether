@@ -97,10 +97,12 @@ def _trigger_summary(ctx: CommandContext) -> str:
 def _today_cost_line(config_path: Path | None) -> str | None:
     """Show today's accumulated cost across all engines, if tracker is active."""
     try:
-        from ...cost_tracker import get_daily_cost
+        from ...cost_tracker import ensure_daily_cost_loaded, get_daily_cost
     except ImportError:
         return None
     try:
+        # #898: read the persisted total if startup didn't load it.
+        ensure_daily_cost_loaded(config_path)
         total = get_daily_cost()
     except Exception:  # noqa: BLE001 — /health must never crash on cost loader
         return None

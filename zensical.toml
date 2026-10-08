@@ -2,7 +2,7 @@
 site_name = "untether"
 site_description = "Run coding agents on your computer, control them via Telegram. Send tasks from anywhere, stream progress live, pick up where you left off at the terminal."
 site_author = "Little Bear Apps"
-site_url = "https://littlebearapps.com/tools/untether/"
+site_url = "https://untether.cc/"
 repo_url = "https://github.com/littlebearapps/untether"
 repo_name = "littlebearapps/untether"
 edit_uri = "edit/master/docs/"
@@ -40,6 +40,7 @@ nav = [
     { "Plan mode" = "how-to/plan-mode.md" },
     { "Model & reasoning" = "how-to/model-reasoning.md" },
     { "Verbose progress" = "how-to/verbose-progress.md" },
+    { "Steer follow-ups" = "how-to/steer-follow-ups.md" },
     { "Voice notes" = "how-to/voice-notes.md" },
     { "File transfer" = "how-to/file-transfer.md" },
     { "Schedule tasks" = "how-to/schedule-tasks.md" },
@@ -64,6 +65,7 @@ nav = [
     { "Configuration" = "reference/config.md" },
     { "Workflow modes" = "reference/modes.md" },
     { "Environment variables" = "reference/env-vars.md" },
+    { "Error reference" = "reference/errors.md" },
     { "Changelog" = "reference/changelog.md" },
     { "Specification" = "reference/specification.md" },
     { "Plugin API" = "reference/plugin-api.md" },
@@ -118,6 +120,7 @@ nav = [
     { "Plugin system" = "explanation/plugin-system.md" },
     { "Module map" = "explanation/module-map.md" },
   ] },
+  { "FAQ" = "faq/faq.md" },
 ]
 
 [project.extra]

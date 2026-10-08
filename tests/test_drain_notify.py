@@ -26,7 +26,13 @@ class FakeTransport:
         if int(channel_id) in self._fail_channels:
             raise RuntimeError("transport error")
         ref = MessageRef(channel_id=channel_id, message_id=1)
-        self.send_calls.append({"channel_id": channel_id, "text": message.text})
+        self.send_calls.append(
+            {
+                "channel_id": channel_id,
+                "text": message.text,
+                "thread_id": options.thread_id if options is not None else None,
+            }
+        )
         return ref
 
 
@@ -35,6 +41,17 @@ def _make_tasks(*channel_ids: int) -> dict[MessageRef, RunningTask]:
     tasks: dict[MessageRef, RunningTask] = {}
     for i, cid in enumerate(channel_ids):
         ref = MessageRef(channel_id=cid, message_id=i + 100)
+        tasks[ref] = RunningTask()
+    return tasks
+
+
+def _make_topic_tasks(
+    *targets: tuple[int, int | None],
+) -> dict[MessageRef, RunningTask]:
+    """Create running_tasks with explicit (channel_id, thread_id) targets."""
+    tasks: dict[MessageRef, RunningTask] = {}
+    for i, (cid, tid) in enumerate(targets):
+        ref = MessageRef(channel_id=cid, message_id=i + 100, thread_id=tid)
         tasks[ref] = RunningTask()
     return tasks
 
@@ -148,3 +165,52 @@ class TestNotifyDrainTimeout:
         transport = FakeTransport()
         await _notify_drain_timeout(transport, {}, remaining=0)
         assert transport.send_calls == []
+
+
+class TestNotifyThreadRouting:
+    """#665: notices must land in the run's forum topic, not General."""
+
+    @pytest.mark.anyio
+    async def test_start_notice_routes_to_thread(self) -> None:
+        transport = FakeTransport()
+        tasks = _make_topic_tasks((111, 37))
+
+        await _notify_drain_start(transport, tasks)
+
+        assert transport.send_calls == [
+            {
+                "channel_id": 111,
+                "text": transport.send_calls[0]["text"],
+                "thread_id": 37,
+            }
+        ]
+
+    @pytest.mark.anyio
+    async def test_timeout_notice_routes_to_thread(self) -> None:
+        transport = FakeTransport()
+        tasks = _make_topic_tasks((111, 37))
+
+        await _notify_drain_timeout(transport, tasks, remaining=1)
+
+        assert transport.send_calls[0]["thread_id"] == 37
+
+    @pytest.mark.anyio
+    async def test_same_channel_different_topics_both_notified(self) -> None:
+        transport = FakeTransport()
+        tasks = _make_topic_tasks((111, 37), (111, 42))
+
+        await _notify_drain_timeout(transport, tasks, remaining=2)
+
+        targets = sorted(
+            (c["channel_id"], c["thread_id"]) for c in transport.send_calls
+        )
+        assert targets == [(111, 37), (111, 42)]
+
+    @pytest.mark.anyio
+    async def test_same_topic_deduplicated(self) -> None:
+        transport = FakeTransport()
+        tasks = _make_topic_tasks((111, 37), (111, 37))
+
+        await _notify_drain_start(transport, tasks)
+
+        assert len(transport.send_calls) == 1

@@ -1,15 +1,22 @@
+---
+paths:
+  - ".claude/commands/**"
+  - ".claude/agents/**"
+  - "docs/LOOPS.md"
+---
+
 # Workflow Commands — routing + cross-cutting rules
 
-The thin always-on slice for Untether's agentic loop commands (`/debug`, `/fix`,
+The thin shared slice for Untether's agentic loop commands (`/debug`, `/fix`,
 `/plan`, `/implement`, `/qa`, `/pr-dev`, `/pr-main`, `/kaizen`, `/kaizen-review`,
-`/handover`). Every one of those command files cites this rule in its header. It
+`/handover`, `/docs`). Every one of those command files cites this rule in its header. It
 does two jobs: **route** work to the right command, and load the **cross-cutting
 rules** every workflow command must obey.
 
 This rule sequences and guards. It never re-describes how to code, and never
 re-quotes the 8-step protocol — that lives in the `.claude/commands/debug/`
 bundle. See `docs/LOOPS.md` for the loop registry and
-`docs/plans/agentic-loops-and-commands/README.md` for the full design.
+`docs/plans/agentic-loops-and-commands/README.md` for the full design (`docs/plans/` is gitignored — lba-1 checkout only).
 
 ## Routing — which command for which work shape
 
@@ -21,9 +28,11 @@ bundle. See `docs/LOOPS.md` for the loop registry and
 | net-new capability — **build** an approved phase | `/implement` |
 | **validate** a target enough for its risk | `/qa` |
 | finalise a branch → **PR to `dev`** (→ TestPyPI) | `/pr-dev` |
-| prepare a **stable release** → open `dev`→`master` PR | `/pr-main` (stops at Nathan's merge) |
+| prepare a **stable release** → open `dev`→`master` PR | `/pr-main` (stops at the open PR) |
+| **release** it → merge + verify PyPI, after Nathan's explicit go | `/pr-main X.Y.Z --merge` |
 | capture a **process learning** | `/kaizen` |
 | **pausing** mid-work | `/handover` |
+| docs drifted with **no code change** to deliver | `/docs` |
 
 When a command discovers it's the wrong tool (a "bug" that's really net-new →
 `/plan`; an "idea" that's really a defect → `/fix`), STOP and route rather than
@@ -31,18 +40,21 @@ pushing on. Record the redirect in the run summary.
 
 ## Cross-cutting rules (every workflow command obeys these)
 
-1. **Untether-mode aware.** When run via Telegram, `AskUserQuestion` /
-   `ExitPlanMode` return empty — never block on them. State assumptions in text
-   and STOP for a reply. Final summaries stay brief (≈500–1500 chars, 3–7
+1. **Untether-mode aware.** When run via Telegram, `ExitPlanMode` works
+   (Approve/Deny buttons; an approved result is approved) and `AskUserQuestion`
+   shows buttons only when ask mode is on — so don't use it for simple
+   confirmations: state assumptions in text and STOP for a reply. Final summaries stay brief (≈500–1500 chars, 3–7
    bullets); never re-paste a full plan body (see
    `feedback_telegram_summary_brevity`).
 
-2. **Release-guard obedience.** Never `git push`/merge to `master`/`main`, never
-   `git tag`, never `gh release create`. Every PR targets **`dev`**.
-   `gh pr merge <n> --squash` is allowed **only** when base = `dev`. Local hooks
-   are defense-in-depth; the real authorization boundary is the GitHub branch
-   ruleset + CODEOWNERS. Never edit `hooks.json` or the guard scripts
-   (self-protected). See `.claude/rules/release-discipline.md`.
+2. **Release-guard obedience.** Never `git push` to `master`/`main`, never
+   `git tag`, never `gh release create`. Every PR targets **`dev`** except the
+   `/pr-main` release PR. `gh pr merge <n> --squash` is allowed when base = `dev`.
+   The `dev`→`master` merge is allowed **only** in `/pr-main X.Y.Z --merge`, after
+   Nathan explicitly approves that version — the guard (#915/#917) then checks
+   head = `dev` + green CI and asks him to confirm. No other command merges to
+   `master`. Never infer approval, never edit `.claude/settings.json` or the guard
+   scripts, and never work around a block or a declined prompt. See `.claude/rules/release-discipline.md`.
 
 3. **Dev/staging separation.** Never restart `untether.service` (staging) to test
    code — always `untether-dev.service`. Respect hot-reload: never
@@ -51,7 +63,7 @@ pushing on. Record the redirect in the run summary.
    `.claude/rules/dev-workflow.md`.
 
 4. **Reuse, don't duplicate.** Defer to the `.claude/commands/debug/` bundle, the
-   8 rules under `.claude/rules/`, and the superpowers skills (via the Skill
+   rules under `.claude/rules/`, and the superpowers skills (via the Skill
    tool). A command sequences + guards; it never re-describes how to code or
    re-quotes the 8-step protocol.
 
@@ -80,7 +92,7 @@ pushing on. Record the redirect in the run summary.
 | `/implement` | yes (approved phase) | no | no | no |
 | `/qa` | no | no | no | no |
 | `/pr-dev` | no | to `dev` | to `dev` only (`--merge` + confirm) | no |
-| `/pr-main` | version bump + changelog + lock | opens `dev`→`master` PR | no | no |
+| `/pr-main` | version bump + changelog + lock | opens `dev`→`master` PR | `--merge` only, after Nathan's go (guard asks) | via the merge (pipeline tags + publishes) |
 | `/kaizen` | no (one comment) | no | no | no |
 | `/kaizen-review` | no (propose-only) | no | no | no |
 | `/handover` | handover doc only | no | no | no |
@@ -90,5 +102,7 @@ Advisory reviewer agents (`debug-reviewer` · `delivery-reviewer` · `qa-reviewe
 under `.claude/agents/`) are **non-authoring** — read-only verdicts, no code, no
 filing, no merge.
 
-The one action reserved for Nathan across the whole suite: **merging the
-`dev`→`master` PR** (→ auto-tag → PyPI → `fleet-rollout.sh`).
+The one decision reserved for Nathan across the whole suite: **approving a
+release**. Claude may merge the `dev`→`master` PR (→ auto-tag → PyPI →
+`fleet-rollout.sh`) only via `/pr-main X.Y.Z --merge` after his explicit go,
+and the guard asks him to confirm the merge itself.

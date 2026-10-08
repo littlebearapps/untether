@@ -6,8 +6,8 @@
 #          substantive (>= KAIZEN_MIN_EDITS file edits) OR friction
 #          (a tool error / guardrail block occurred). Advisory only.
 # Tier: 1 (Nudge) — does not force; Claude can still stop.
-# Installed by: Nathan wires the Stop entry into .claude/hooks.json
-#               (this script is authored by Claude; hooks.json is
+# Installed by: Nathan wires the Stop entry into .claude/settings.json
+#               (this script is authored by Claude; settings.json is
 #               Edit/Write-protected, so registration is a propose-to-Nathan
 #               step). Until wired, /kaizen self-invokes — no functional gap.
 #

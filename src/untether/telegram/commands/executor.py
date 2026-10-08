@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import anyio
 
@@ -30,11 +32,21 @@ from ...transport_runtime import TransportRuntime
 from ...utils.paths import (
     reset_run_base_dir,
     reset_run_channel_id,
+    reset_run_sender_id,
+    reset_run_thread_id,
     set_run_base_dir,
     set_run_channel_id,
+    set_run_sender_id,
+    set_run_thread_id,
 )
+from ..approval_originator import message_sender
 from ..bridge import send_plain
-from ..engine_overrides import supports_reasoning
+from ..engine_overrides import (
+    allowed_reasoning_levels,
+    drop_unsupported_reasoning,
+    supports_reasoning,
+)
+from ..outbox_delivery import outbox_run_scope
 
 logger = get_logger(__name__)
 
@@ -46,10 +58,6 @@ class _ResumeLineProxy:
     @property
     def engine(self) -> str:
         return self.runner.engine
-
-    @property
-    def current_stream(self) -> Any:
-        return getattr(self.runner, "current_stream", None)
 
     def is_resume_line(self, line: str) -> bool:
         return self.runner.is_resume_line(line)
@@ -75,10 +83,6 @@ class _PreludeRunner:
     def engine(self) -> str:
         return self.runner.engine
 
-    @property
-    def current_stream(self) -> Any:
-        return getattr(self.runner, "current_stream", None)
-
     def is_resume_line(self, line: str) -> bool:
         return self.runner.is_resume_line(line)
 
@@ -93,18 +97,14 @@ class _PreludeRunner:
     ) -> AsyncIterator[UntetherEvent]:
         for event in self.prelude_events:
             yield event
-        async for event in self.runner.run(prompt, resume):
-            yield event
+        # ``aclosing`` so closing this wrapper also closes the runner's
+        # generator in the same task (see ``BaseRunner.run_with_resume_lock``).
+        async with contextlib.aclosing(self.runner.run(prompt, resume)) as events:
+            async for event in events:
+                yield event
 
 
-def _reasoning_warning(
-    *, engine: str, run_options: EngineRunOptions | None
-) -> ActionEvent | None:
-    if run_options is None or not run_options.reasoning:
-        return None
-    if supports_reasoning(engine):
-        return None
-    message = f"reasoning override is not supported for `{engine}`; ignoring."
+def _reasoning_note(engine: str, message: str) -> ActionEvent:
     return ActionEvent(
         engine=engine,
         action=Action(
@@ -116,6 +116,40 @@ def _reasoning_warning(
         phase="completed",
         ok=True,
     )
+
+
+def _resolve_reasoning_override(
+    *, engine: str, run_options: EngineRunOptions | None
+) -> tuple[EngineRunOptions | None, ActionEvent | None]:
+    """Sanitise the run's reasoning level and build the note to show, if any.
+
+    ``_resolve_engine_run_options`` already drops a retired level (#416);
+    re-applying the pure helper here covers callers that pass raw options and
+    is a no-op for resolver output. The INFO log lives here, not in the
+    helper, so it fires once per run and never per option comparison.
+    """
+    run_options = drop_unsupported_reasoning(engine, run_options)
+    if run_options is None:
+        return None, None
+    if run_options.ignored_reasoning:
+        level = run_options.ignored_reasoning
+        logger.info(
+            "run.reasoning.unsupported_level_ignored",
+            engine=engine,
+            # Not ``level=``: structlog's add_log_level overwrites that key.
+            reasoning_level=level,
+            allowed=list(allowed_reasoning_levels(engine)),
+        )
+        message = (
+            f"reasoning level `{level}` isn't supported for `{engine}` any more;"
+            " using the engine default. Pick a level in /config \N{RIGHTWARDS ARROW}"
+            " Reasoning."
+        )
+        return run_options, _reasoning_note(engine, message)
+    if run_options.reasoning and not supports_reasoning(engine):
+        message = f"reasoning override is not supported for `{engine}`; ignoring."
+        return run_options, _reasoning_note(engine, message)
+    return run_options, None
 
 
 def _should_show_resume_line(
@@ -175,6 +209,7 @@ async def _run_engine(
     show_resume_line: bool = True,
     progress_ref: MessageRef | None = None,
     run_options: EngineRunOptions | None = None,
+    budget_bypass: bool = False,
 ) -> None:
     reply = partial(
         send_plain,
@@ -190,6 +225,49 @@ async def _run_engine(
     if is_shutting_down():
         await reply(text="Untether is restarting — try again shortly.")
         return
+
+    # #896: "Stop at limit" — refuse new runs once today's spend reached the
+    # daily budget. Every run start (prompts, /continue, crons, webhooks,
+    # /at, loop fires, command runs) passes here.
+    if not budget_bypass:
+        from ...budget_gate import daily_gate
+
+        blocked = daily_gate(run_options)
+        if blocked is not None:
+            from ..budget_notice import refuse_run
+
+            rerun = partial(
+                _run_engine,
+                exec_cfg=exec_cfg,
+                runtime=runtime,
+                running_tasks=running_tasks,
+                chat_id=chat_id,
+                user_msg_id=user_msg_id,
+                text=text,
+                resume_token=resume_token,
+                context=context,
+                reply_ref=reply_ref,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                engine_override=engine_override,
+                thread_id=thread_id,
+                show_resume_line=show_resume_line,
+                progress_ref=None,
+                run_options=run_options,
+                budget_bypass=True,
+            )
+            await refuse_run(
+                exec_cfg.transport,
+                chat_id=chat_id,
+                user_msg_id=user_msg_id,
+                thread_id=thread_id,
+                context=context,
+                progress_ref=progress_ref,
+                daily=blocked[0],
+                limit=blocked[1],
+                rerun=rerun,
+            )
+            return
 
     logger.debug(
         "handle.engine_start",
@@ -212,7 +290,11 @@ async def _run_engine(
             effective_resume = run_options.show_resume_line
         if not effective_resume:
             runner = cast(Runner, _ResumeLineProxy(runner))
-        warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
+        # #416: reassign before apply_run_options so build_args, the footer,
+        # runner_bridge and spawn_run_options all see the sanitised level.
+        run_options, warning = _resolve_reasoning_override(
+            engine=runner.engine, run_options=run_options
+        )
         if warning is not None:
             runner = cast(Runner, _PreludeRunner(runner, [warning]))
         if not entry.available:
@@ -240,6 +322,11 @@ async def _run_engine(
         )
         run_base_token = set_run_base_dir(cwd)
         run_channel_token = set_run_channel_id(chat_id)
+        # #826: loop registrations record the run's topic.
+        run_thread_token = set_run_thread_id(thread_id)
+        # #388: the user whose message started the run (None for cron,
+        # webhook, /at and loop fires) — pending approvals record it.
+        run_sender_token = set_run_sender_id(message_sender(chat_id, user_msg_id))
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -261,7 +348,14 @@ async def _run_engine(
                 reply_to=reply_ref,
                 thread_id=thread_id,
             )
-            with apply_run_options(run_options):
+            # #924: one outbox cutoff per dispatch (wall clock, before the
+            # engine spawns), registered against the run's cwd so a
+            # concurrent same-project run can't quarantine this run's files.
+            outbox_since = time.time()
+            with (
+                apply_run_options(run_options),
+                outbox_run_scope(cwd, outbox_since),
+            ):
                 await handle_message(
                     exec_cfg,
                     runner=runner,
@@ -274,10 +368,13 @@ async def _run_engine(
                     on_thread_known=on_thread_known,
                     on_resume_failed=on_resume_failed,
                     progress_ref=progress_ref,
+                    outbox_since=outbox_since,
                 )
         finally:
             reset_run_base_dir(run_base_token)
             reset_run_channel_id(run_channel_token)
+            reset_run_thread_id(run_thread_token)
+            reset_run_sender_id(run_sender_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",
@@ -440,6 +537,32 @@ class _TelegramCommandExecutor(CommandExecutor):
             else self._on_thread_known
         )
         if mode == "capture":
+            from ...budget_gate import daily_block_text, daily_gate
+
+            blocked = daily_gate(run_options)
+            if blocked is not None:
+                # #896: a captured run has nobody to show a notice or a Run
+                # anyway button to (its transport is private) — hand the
+                # refusal back to the plugin instead.
+                logger.warning(
+                    "cost_budget.run_blocked",
+                    scope="per_day",
+                    chat_id=self._chat_id,
+                    thread_id=self._thread_id,
+                    trigger=(
+                        request.context.trigger_source if request.context else None
+                    ),
+                    mode="capture",
+                    daily_cost=round(blocked[0], 4),
+                    budget=blocked[1],
+                )
+                return RunResult(
+                    engine=engine,
+                    message=RenderedMessage(
+                        text=daily_block_text(*blocked, skipped=None)
+                    ),
+                    refused="daily_budget",
+                )
             capture = _CaptureTransport()
             exec_cfg = ExecBridgeConfig(
                 transport=capture,

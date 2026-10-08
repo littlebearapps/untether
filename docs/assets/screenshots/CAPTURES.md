@@ -12,7 +12,7 @@ bars, no keyboard, no notification tray.
 
 - [x] `hero-voice-to-result.jpg` — Voice waveform bubble → progress streaming (3-4 actions) → final result with footer. Crop to chat area only. *This single image tells the entire story.*
 - [x] `approval-diff-preview.jpg` — Edit tool showing `- old` / `+ new` lines with Approve/Deny/Pause buttons. Crop to approval message + buttons.
-- [x] `plan-outline-approve.jpg` — Outline text + Approve Plan / Deny buttons. Crop to outline + buttons.
+- [ ] `plan-outline-approve.jpg` — Outline text + Approve Plan / Deny buttons. Crop to outline + buttons. **RECAPTURE (post-#383): `✅ Approve Plan` label + caption ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 
 ## Tier 1: Website extras (4 images)
 
@@ -28,7 +28,7 @@ bars, no keyboard, no notification tray.
 - [x] `cancel-button.jpg` — Cancel button on progress and the resulting "cancelled" status.
 - [x] `deny-response.jpg` — Claude acknowledging a denial and explaining intent.
 - [x] `plan-outline-text.jpg` — Claude's written outline/plan as visible text in chat.
-- [x] `post-outline-buttons.jpg` — Post-outline Approve Plan / Deny buttons.
+- [ ] `post-outline-buttons.jpg` — Post-outline Approve Plan / Deny buttons. **RECAPTURE (post-#383): `✅ Approve Plan` / `❌ Deny` / `💬 Let's discuss` + caption ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [x] `ask-question-options.jpg` — AskUserQuestion with option buttons.
 - [x] `ask-reply-continue.jpg` — User replying with text to AskUserQuestion, Claude continuing.
 - [x] `chat-auto-resume.jpg` — Follow-up message auto-resuming without reply.
@@ -36,14 +36,13 @@ bars, no keyboard, no notification tray.
 - [ ] `botfather-newbot.jpg` — BotFather /newbot flow. **REDACT the bot token.**
 - [ ] `onboarding-wizard.jpg` — Terminal showing the workflow selection step.
 
-## Tier 3: How-to screenshots (16 images)
+## Tier 3: How-to screenshots (15 images)
 
 - [x] `approval-buttons-howto.jpg` — Approval message with Approve/Deny/Pause inline buttons + tool summary.
 - [ ] `approval-diff-howto.jpg` — Diff preview on approval (Edit with `- old` / `+ new` lines).
 - [x] `ask-text-reply-howto.jpg` — AskUserQuestion with option buttons and "Other (type reply)".
-- [x] `exit-planmode-buttons.jpg` — ExitPlanMode with Approve/Deny/Pause buttons.
+- [ ] `exit-planmode-buttons.jpg` — ExitPlanMode with Approve/Deny/Pause buttons. **RECAPTURE (post-#383): `✅ Approve Plan` label + approval caption ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [ ] `outline-approve-buttons.jpg` — Written outline + Approve Plan / Deny buttons below.
-- [x] `cooldown-auto-deny.jpg` — Auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons.
 - [x] `cost-warning-alert.jpg` — Cost warning alert showing budget threshold exceeded.
 - [x] `voice-transcription.jpg` — Voice note followed by transcribed text and agent output. (iPhone)
 - [x] `file-put.jpg` — Document upload with `/file put` caption and saved confirmation. (iPhone)
@@ -57,9 +56,9 @@ bars, no keyboard, no notification tray.
 
 ## Tier 4: Supporting screenshots (12 images)
 
-- [x] `planmode-on.jpg` — `/planmode on` confirmation. (iPhone)
-- [x] `planmode-auto.jpg` — `/planmode auto` confirmation. (iPhone)
-- [x] `planmode-show.jpg` — `/planmode show` output. (iPhone)
+- [ ] `planmode-on.jpg` — `/planmode on` confirmation. (iPhone) **RECAPTURE (post-#747): the reply now reads "permission mode on for this chat: …" ([#783](https://github.com/littlebearapps/untether/issues/783)).**
+- [ ] `planmode-auto.jpg` — `/planmode plan-auto` confirmation (the current file still shows the old `/planmode auto` reply). (iPhone) **RECAPTURE (post-#747) as `planmode-plan-auto.jpg`: `/planmode plan-auto` confirmation, for the #741 rename ([#783](https://github.com/littlebearapps/untether/issues/783)).**
+- [ ] `planmode-show.jpg` — `/planmode show` output. (iPhone) **RECAPTURE (post-#747): `/planmode show` with the mode set to `plan-auto` ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [x] `project-command.jpg` — `/<project>` command with ctx: footer. (iPhone)
 - [ ] `branch-directive.jpg` — `@branch` directive response with ctx: project @branch footer. (iPhone)
 - [x] `agent-resolution.jpg` — `/agent` command output showing engine resolution layers. (MacBook)
@@ -97,3 +96,7 @@ file to use; docs reference the same image via relative paths.
 | `verbose-progress.jpg` | how-to/verbose-progress | Docs use this name, not `verbose-vs-compact` |
 | `browse-directory.jpg` | how-to/browse-files (Tier 1 and Tier 3 share) | |
 | `usage-command.jpg` | how-to/cost-budgets (Tier 1 and Tier 3 share) | |
+
+## Retired
+
+- `cooldown-auto-deny.jpg` — removed in v0.36.0 ([#783](https://github.com/littlebearapps/untether/issues/783)); the progressive cooldown it illustrated was retired in v0.35.4 ([#570](https://github.com/littlebearapps/untether/issues/570)), and the file was a byte-for-byte copy of `post-outline-buttons.jpg`. Don't recapture.

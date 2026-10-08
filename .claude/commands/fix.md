@@ -30,8 +30,8 @@ cross-cutting rules. In particular for `/fix`:
 - **Redaction.** Scrub tokens/keys/env/chat-content/fleet identifiers from any
   evidence before it lands in a PR or issue (see
   `.claude/commands/debug/step-evidence.md`).
-- **Untether-mode.** `AskUserQuestion`/`ExitPlanMode` return empty under
-  Telegram — state assumptions in text and STOP for a reply. Keep the run report
+- **Untether-mode.** Don't gate on `AskUserQuestion` under Telegram (buttons
+  only with ask mode on) — state assumptions in text and STOP for a reply. Keep the run report
   brief (≈500–1500 chars).
 
 ## Boundary vs `/debug`
@@ -73,8 +73,10 @@ gh issue list --repo littlebearapps/untether --state open --limit 200 \
 
 Actionable = a defect with a clear repro or evidence and no blocking question.
 **Exclude**: `enhancement`-only, `needs-verification` (already handed off, awaiting
-Nathan's close), by-design signals (cross-check `systemic-patterns.md`), and
-anything already carrying an open PR. De-dupe against closed issues (regression
+Nathan's close), by-design signals (cross-check `systemic-patterns.md`),
+runner defects in the deprecated `gemini` / `amp` engines (no fixes — `xfail`/`skip`
+a broken test instead; security and doc-accuracy fixes still apply, see
+`.claude/rules/runner-development.md`), and anything already carrying an open PR. De-dupe against closed issues (regression
 check) with a 90-day `closed:>=` search.
 
 In scoped mode (`#NN ...`), the list is exactly those issues (still filtered for
@@ -131,8 +133,9 @@ For each ranked issue (respecting F-3/F-4), follow the debug bundle:
 6. **Verify** — reproduce with a stub-subprocess test (or live dev repro).
 7. **Fix** (`step-fix.md`) — minimal change on `fix/<issue-N>-<slug>` (or a
    cohesive shared branch per F-4); `uv run pytest tests/test_<area>.py -x` →
-   `uv run pytest`; `uv run ruff check src/` + `uv run ruff format src/ tests/`;
-   CHANGELOG entry (issue-linked; **rc versions skip** per `validate_release.py`).
+   `uv run pytest`; `uv run ruff check src/ tests/` + `uv run ruff format src/ tests/`;
+   CHANGELOG entry (issue-linked, under the current `## vX.Y.Z (unreleased)` heading —
+   rc numbers never get their own heading).
 8. **Verify** (`step-verify.md`) — confirm the target signature is absent on
    fresh `untether-dev` logs; run the integration tier the change scope requires.
 
@@ -152,7 +155,7 @@ section:
 
 ## Tests
 - uv run pytest — <N> passed, <M>% coverage
-- uv run ruff check src/ — clean
+- uv run ruff check src/ tests/ — clean
 - integration tiers run: <list, or "pending /qa">
 ```
 

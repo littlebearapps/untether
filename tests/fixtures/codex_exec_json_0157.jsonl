@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"0199f000-0419-7000-8000-000000000157"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"web_search","id":"ws_search","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_0","type":"web_search","id":"ws_search","query":"","action":{"type":"search","queries":["codex cli release","codex changelog","openai codex npm","codex rust-v0.157.1"]},"results":[{"url":"https://example.com/a","content":"Codex CLI release notes"},{"url":"https://example.com/b","error":{"message":"fetch failed"}}]}}
+{"type":"item.started","item":{"id":"item_1","type":"web_search","id":"ws_open","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_1","type":"web_search","id":"ws_open","query":"","action":{"type":"open_page","url":"https://example.com/releases"},"results":[]}}
+{"type":"item.started","item":{"id":"item_2","type":"web_search","id":"ws_find","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_2","type":"web_search","id":"ws_find","query":"","action":{"type":"find_in_page","url":"https://example.com/releases","pattern":"0.157.1"}}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Codex 0.157.1 is the latest release."}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"cache_write_input_tokens":128,"output_tokens":122,"reasoning_output_tokens":64}}

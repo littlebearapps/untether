@@ -4,7 +4,11 @@ from untether.runners.codex import CodexRunner
 from untether.runners.opencode import OpenCodeRunner, OpenCodeStreamState
 from untether.runners.pi import ENGINE as PI_ENGINE
 from untether.runners.pi import PiRunner, PiStreamState
-from untether.runners.run_options import EngineRunOptions, apply_run_options
+from untether.runners.run_options import (
+    CLAUDE_PLAN_AUTO_MODE,
+    EngineRunOptions,
+    apply_run_options,
+)
 
 
 def test_codex_run_options_override_model_and_reasoning() -> None:
@@ -20,8 +24,6 @@ def test_codex_run_options_override_model_and_reasoning() -> None:
         "gpt-4.1-mini",
         "-c",
         "model_reasoning_effort=low",
-        "--ask-for-approval",
-        "never",
         "exec",
         "--json",
         "--skip-git-repo-check",
@@ -62,9 +64,23 @@ def test_pi_run_options_override_model() -> None:
     assert args[model_idx] == "pi-override"
 
 
-def test_claude_auto_mode_passes_plan_to_cli() -> None:
-    """permission_mode 'auto' produces '--permission-mode plan' in CLI args."""
+def test_claude_auto_mode_passes_auto_to_cli() -> None:
+    """#741 permission_mode 'auto' now reaches the CLI verbatim.
+
+    Until 0.35.5rc8 it was rewritten to 'plan', which shadowed Claude Code's
+    own classifier-gated auto mode and made it unreachable.
+    """
     runner = ClaudeRunner(claude_cmd="claude", permission_mode="auto")
+    args = runner.build_args("hi", None, state=None)
+
+    assert "--permission-mode" in args
+    mode_idx = args.index("--permission-mode") + 1
+    assert args[mode_idx] == "auto"
+
+
+def test_claude_plan_auto_mode_passes_plan_to_cli() -> None:
+    """Untether's renamed sugar still starts the CLI in plan mode (#741)."""
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode=CLAUDE_PLAN_AUTO_MODE)
     args = runner.build_args("hi", None, state=None)
 
     assert "--permission-mode" in args

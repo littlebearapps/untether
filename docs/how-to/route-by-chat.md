@@ -10,7 +10,7 @@ Run:
 untether chat-id --project happy-gadgets
 ```
 
-Then send any message in the target chat. Untether captures the `chat_id` and updates your config:
+The project must already exist (`untether init happy-gadgets`); otherwise the command stops with an `Unknown project` error telling you to run `untether init` first. Then send any message in the target chat. Untether captures the `chat_id` and updates your config:
 
 === "untether config"
 
@@ -46,6 +46,7 @@ Messages from that chat now default to the project.
 
 - Each `projects.*.chat_id` must be unique.
 - A project `chat_id` must not match `transports.telegram.chat_id`.
+- A project that breaks either rule is skipped at startup (logged as `project.skipped.duplicate_chat_id` or `project.skipped.chat_id_matches_transport`); the rest of the config still loads.
 - Telegram uses positive IDs for private chats and negative IDs for groups/supergroups.
 
 ## Capture a chat id without saving

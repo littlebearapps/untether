@@ -16,7 +16,7 @@ triggers:
 
 # JSONL Subprocess Runner Framework
 
-All Untether engine runners (Claude, Codex, OpenCode, Pi) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
+All Untether engine runners (Claude, Codex, OpenCode, Pi; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
 
 ## Key files
 
@@ -37,9 +37,11 @@ Runner (Protocol)
   BaseRunner (SessionLockMixin)
     JsonlSubprocessRunner
       CodexRunner
-      OpenCodeRunner
+      OpenCodeRunner (wraps run_impl: refuses OpenCode 2.x before spawning, #970)
       PiRunner
+      GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
+  (each concrete runner also mixes in ResumeTokenMixin)
 ```
 
 ## Template methods to override
@@ -140,7 +142,11 @@ Locking rules:
 1. new_state(prompt, resume)           → create per-run state
 2. build_args(prompt, resume, state)   → construct CLI command
 3. stdin_payload(prompt, resume, state) → optional stdin data
+   _check_prespawn_ram_guard(...)      → RAM / max_concurrent_engine_runs gate before ANY spawn
+                                          (#350/#589; every spawn site incl. ClaudeRunner, pinned by #838)
 4. manage_subprocess(cmd, ...)         → spawn with PIPE for stdin/stdout/stderr
+   publish_run_stream(stream, pid)     → create JsonlStreamState, publish stream + PID
+                                          together to the per-run RunStreamHandle (#510)
 5. _send_payload(proc, payload)        → send stdin, close stdin
 6. drain_stderr(proc.stderr)           → log stderr concurrently (task group)
 7. _iter_jsonl_events(proc.stdout)     → parse JSONL, call translate()
@@ -159,12 +165,15 @@ class JsonlStreamState:
     did_emit_completed: bool                # guard: exactly one CompletedEvent
     ignored_after_completed: bool           # drop lines after CompletedEvent
     jsonl_seq: int                          # line counter for logging
+    followup_turns: bool                    # #776: Claude live sessions read past CompletedEvent
+    # ... plus activity / stall-diagnostic fields (last_event_type, saw_result, proc_returncode, …)
 ```
 
 Key invariants:
-- **Exactly one CompletedEvent per run** — after emitting, all subsequent lines are dropped
+- **Exactly one CompletedEvent per run** — after emitting, all subsequent lines are dropped, unless the runner sets `followup_turns = True` (Claude live sessions, #776), where later turns become `TurnEvent` segments
+- **Per-run stream binding (#510)** — runner instances are shared across chats, so `runner.current_stream` / `runner.last_pid` are diagnostics only ("latest spawn in any chat"). The bridge binds a `RunStreamHandle` via ContextVar in `run_runner_with_cancel`; runners publish into it with `publish_run_stream()`. Bridge code reads the handle, never the runner attributes
 - **Session verification** — if expected_session is set and stream yields a different session_id, raise RuntimeError
-- **Duplicate StartedEvent suppression** — only the first StartedEvent is yielded
+- **Duplicate StartedEvent suppression** — a repeat StartedEvent without `meta` is dropped; one carrying `meta` passes through as a supplementary event (#225, e.g. Pi's late model) and `ProgressTracker.note_event` merges it
 
 ## Error handling
 
@@ -175,6 +184,7 @@ Key invariants:
 | Translation error | `translate_error_events()` → warning ActionEvent, continue |
 | Non-zero exit code | `process_error_events()` → CompletedEvent(ok=False) |
 | Stream ends without result | `stream_end_events()` → CompletedEvent(ok=False) |
+| Pre-spawn block (RAM, concurrency, unsupported CLI version) | `completed_error(..., usage={PRESPAWN_BLOCKED_KEY: reason})`, nothing spawned; the bridge keeps the saved session (#838) |
 
 ## Resume token mixin
 
@@ -215,6 +225,8 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+gemini = "untether.runners.gemini:BACKEND"  # deprecated
+amp = "untether.runners.amp:BACKEND"        # deprecated
 ```
 
 Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`

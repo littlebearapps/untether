@@ -14,7 +14,9 @@ from ...logging import get_logger
 from ...transport_runtime import ResolvedMessage
 from ..context import _format_context
 from ..files import (
+    PathAccess,
     ZipTooLargeError,
+    check_path_access,
     deduplicate_target,
     default_upload_name,
     default_upload_path,
@@ -23,7 +25,6 @@ from ..files import (
     normalize_relative_path,
     parse_file_command,
     parse_file_prompt,
-    resolve_path_within_root,
     write_bytes_atomic,
     zip_directory,
 )
@@ -72,6 +73,43 @@ class _SavedFilePutGroup:
     failed: list[_FilePutResult]
 
 
+def _log_path_denied(direction: str, requested: Path, check: PathAccess) -> None:
+    """Log a deny-glob refusal (#390). Relative paths only, never absolute.
+
+    Deliberately not ``file_transfer.denied`` (watcher-tracked): this is
+    user-initiated policy enforcement, not a defect. WARNING only when a
+    symlink was involved.
+    """
+    log = logger.warning if check.via_symlink else logger.info
+    log(
+        "file_transfer.path_denied",
+        direction=direction,
+        rule=check.rule,
+        reason=check.reason,
+        via_symlink=check.via_symlink,
+        requested=requested.as_posix(),
+        resolved=check.resolved.as_posix() if check.resolved is not None else None,
+    )
+
+
+def _path_access_error(
+    direction: str, requested: Path, check: PathAccess, *, kind: str
+) -> str:
+    """Map a refused :func:`check_path_access` result to the reply text."""
+    if check.reason in {"denied", "hidden"}:
+        _log_path_denied(direction, requested, check)
+        # Code spans: replies are rendered as Markdown, so a glob such as
+        # ``**/.ssh/**`` would otherwise lose its ``**`` pairs to bold.
+        rule = f"`{check.rule}`" if check.rule is not None else "hidden path"
+        text = f"path denied by rule: {rule}"
+        if check.via_symlink and check.resolved is not None:
+            text = f"{text} (resolves to `{check.resolved.as_posix()}`)"
+        return text
+    if check.reason == "unresolvable":
+        return f"{kind} path could not be resolved (symlink loop?)."
+    return f"{kind} path escapes the repo root."
+
+
 def resolve_file_put_paths(
     plan: _FilePutPlan,
     *,
@@ -85,13 +123,18 @@ def resolve_file_put_paths(
         base_dir = normalize_relative_path(path_value)
         if base_dir is None:
             return None, None, "invalid upload path."
-        deny_rule = deny_reason(base_dir, cfg.files.deny_globs)
-        if deny_rule is not None:
-            return None, None, f"path denied by rule: {deny_rule}"
-        base_target = resolve_path_within_root(plan.run_root, base_dir)
-        if base_target is None:
-            return None, None, "upload path escapes the repo root."
-        if base_target.exists() and not base_target.is_dir():
+        # #390: deny on the requested *and* the symlink-resolved path. Still
+        # returns the requested dir; the per-file check in
+        # ``_save_document_payload`` is authoritative (dir-level globs such
+        # as ``**/.ssh/**`` only match the directory's children).
+        check = check_path_access(plan.run_root, base_dir, cfg.files.deny_globs)
+        if not check.ok or check.target is None:
+            return (
+                None,
+                None,
+                _path_access_error("put", base_dir, check, kind="upload"),
+            )
+        if check.target.exists() and not check.target.is_dir():
             return None, None, "upload path is a file."
         return base_dir, None, None
     rel_path = normalize_relative_path(path_value)
@@ -244,22 +287,22 @@ async def _save_document_payload(
             )
         else:
             resolved_path = base_dir / name
-    deny_rule = deny_reason(resolved_path, cfg.files.deny_globs)
-    if deny_rule is not None:
+    # #390: check deny globs on the requested path and on where it resolves
+    # after following symlinks, so an in-root link (``docs/x -> .git/hooks``,
+    # ``cfg.txt -> .env``) can't route an upload past them. Runs before any
+    # download, so a refused upload costs no bandwidth.
+    check = check_path_access(run_root, resolved_path, cfg.files.deny_globs)
+    if not check.ok or check.target is None or check.rel is None:
         return _FilePutResult(
             name=name,
             rel_path=None,
             size=None,
-            error=f"path denied by rule: {deny_rule}",
+            error=_path_access_error("put", resolved_path, check, kind="upload"),
         )
-    target = resolve_path_within_root(run_root, resolved_path)
-    if target is None:
-        return _FilePutResult(
-            name=name,
-            rel_path=None,
-            size=None,
-            error="upload path escapes the repo root.",
-        )
+    target = check.target
+    # Report where the file actually lands (#390 D5); identical to the
+    # requested path unless an in-root symlink was followed.
+    resolved_path = check.rel
     if target.exists():
         if target.is_dir():
             return _FilePutResult(
@@ -270,7 +313,18 @@ async def _save_document_payload(
             )
         if not force:
             target = deduplicate_target(target)
-            resolved_path = target.relative_to(run_root)
+            # ``check.root`` is resolved and ``target`` is under it, so this
+            # can't raise on a symlinked project path (it used to crash the
+            # bot with ValueError, #390).
+            resolved_path = target.relative_to(check.root)
+            deny_rule = deny_reason(resolved_path, cfg.files.deny_globs)
+            if deny_rule is not None:
+                return _FilePutResult(
+                    name=name,
+                    rel_path=None,
+                    size=None,
+                    error=f"path denied by rule: `{deny_rule}`",
+                )
             name = target.name
     payload = await cfg.bot.download_file(file_path)
     if payload is None:
@@ -562,24 +616,26 @@ async def _handle_file_get(
     if rel_path is None:
         await reply(text="invalid download path.")
         return
-    deny_rule = deny_reason(rel_path, cfg.files.deny_globs)
-    if deny_rule is not None:
-        await reply(text=f"path denied by rule: {deny_rule}")
+    # #390: deny on the requested and the symlink-resolved path, before any
+    # existence check (no oracle), so ``cfg.txt -> .env`` can't leak ``.env``.
+    check = check_path_access(run_root, rel_path, cfg.files.deny_globs)
+    if not check.ok or check.target is None or check.rel is None:
+        await reply(text=_path_access_error("get", rel_path, check, kind="download"))
         return
-    target = resolve_path_within_root(run_root, rel_path)
-    if target is None:
-        await reply(text="download path escapes the repo root.")
-        return
+    target = check.target
     if not target.exists():
         await reply(text="file does not exist.")
         return
     if target.is_dir():
         try:
+            # Walk and deny-check the real path; keep the requested names
+            # in the archive (#390 D5b).
             payload = zip_directory(
-                run_root,
-                rel_path,
+                check.root,
+                check.rel,
                 cfg.files.deny_globs,
                 max_bytes=cfg.files.max_download_bytes,
+                arc_prefix=rel_path,
             )
         except ZipTooLargeError:
             await reply(text="file is too large to send.")
@@ -607,7 +663,8 @@ async def _handle_file_get(
         if len(payload) > max_bytes:
             await reply(text="file is too large to send.")
             return
-        filename = target.name
+        # The requested name, not the link destination's (#390 D5b).
+        filename = rel_path.name
     if len(payload) > cfg.files.max_download_bytes:
         await reply(text="file is too large to send.")
         return

@@ -2,25 +2,25 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.35.4"
-keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "gemini-cli", "amp", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
-description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp to Telegram with interactive permissions, voice input, cost tracking, and live progress."
+version = "0.36.0"
+keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
+description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, and Pi to Telegram with interactive permissions, voice input, cost tracking, and live progress."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-  "aiohttp>=3.9.0",
-  "anyio>=4.12.0",
-  "httpx>=0.28.1",
+  "aiohttp>=3.14.3",  # GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7 (#875)
+  "anyio>=4.14.2",  # GHSA-82r6-8w77-94w6, GHSA-5p39-cfhj-2xmp (#875)
+  "httpx>=0.28.1,<1",  # #782: httpx 1.x drops AsyncClient
   "markdown-it-py[linkify]",
   "msgspec>=0.20.0",
   "openai>=2.15.0",
   "pydantic>=2.12.5",
   "pydantic-settings>=2.12.0",
   "questionary>=2.1.1",
-  "rich>=14.2.0",
-  "structlog>=25.5.0",
+  "rich>=15.0.0",
+  "structlog>=26.1.0",
   "sulguk>=0.11.1",
   "tomli-w>=1.2.0",
   "typer>=0.21.0",
@@ -43,10 +43,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/littlebearapps/untether"
+Homepage = "https://untether.cc"
 Repository = "https://github.com/littlebearapps/untether"
 Issues = "https://github.com/littlebearapps/untether/issues"
-Documentation = "https://littlebearapps.com/tools/untether/"
+Documentation = "https://littlebearapps.com/help/untether/"
 Changelog = "https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md"
 Upstream = "https://github.com/banteg/takopi"
 
@@ -80,6 +80,8 @@ auth = "untether.telegram.commands.auth:BACKEND"
 threads = "untether.telegram.commands.threads:BACKEND"
 at = "untether.telegram.commands.at:BACKEND"
 health = "untether.telegram.commands.health:BACKEND"
+steer = "untether.telegram.commands.followup:STEER_BACKEND"
+queue = "untether.telegram.commands.followup:QUEUE_BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.12.0"]
@@ -89,15 +91,16 @@ build-backend = "uv_build"
 dev = [
     "bandit>=1.8.0",
     "mutmut>=3.4.0",
-    "pip-audit>=2.7.0",
-    "pytest>=9.0.3",
+    "pip-audit>=2.10.1",
+    "pytest>=9.1.1",
     "pytest-anyio>=0.0.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.10",
     "ty>=0.0.8",
 ]
 docs = [
-    "mkdocstrings-python>=2.0.1",
+    "mkdocstrings-python>=2.0.5",
+    "pymdown-extensions>=11.0.1",  # docs-only; ReDoS/path-traversal advisories (#875)
     "zensical>=0.0.15",
 ]
 
@@ -106,6 +109,7 @@ addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov
 testpaths = ["tests"]
 markers = [
     "cancel_enforcement: opts a test out of the autouse #593 cancel-enforcement neutraliser",
+    "allow_network: opts a test out of the autouse #808 non-loopback network block",
 ]
 
 [tool.mutmut]

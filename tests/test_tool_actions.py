@@ -28,8 +28,10 @@ def test_tool_input_path_picks_first_match() -> None:
         ("write", {"path": "notes.txt"}, "file_change", "notes.txt"),
         ("read", {"path": "README.md"}, "tool", "read: `README.md`"),
         ("glob", {"pattern": "*.py"}, "tool", "glob: `*.py`"),
-        ("grep", {"pattern": "TODO"}, "tool", "grep: TODO"),
-        ("find", {"pattern": "*.toml"}, "tool", "find: *.toml"),
+        # #871 D1: grep/find patterns are code spans too (no stray italics)
+        ("grep", {"pattern": "TODO"}, "tool", "grep: `TODO`"),
+        ("find", {"pattern": "*.toml"}, "tool", "find: `*.toml`"),
+        ("grep", {"pattern": "`foo`"}, "tool", "grep: `` `foo` ``"),
         ("ls", {"path": "src"}, "tool", "ls: `src`"),
         ("websearch", {"query": "untether"}, "web_search", "untether"),
         (
@@ -76,3 +78,15 @@ def test_tool_kind_and_title_task_kind_override() -> None:
 
     assert kind == "warning"
     assert title == "spawn worker"
+
+
+def test_871_tool_title_pattern_renders_without_italics() -> None:
+    from untether.telegram.render import render_markdown
+
+    kind, title = tool_actions.tool_kind_and_title(
+        "grep", {"pattern": "*x*"}, path_keys=("path",)
+    )
+    assert kind == "tool"
+    text, entities = render_markdown(title)
+    assert text == "grep: *x*"
+    assert [e["type"] for e in entities] == ["code"]

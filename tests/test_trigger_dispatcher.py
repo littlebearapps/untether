@@ -413,3 +413,337 @@ async def test_dispatch_webhook_history_failure_does_not_raise(monkeypatch, tmp_
         assert len(run_job.calls) == 1
     finally:
         history.reset_history()
+
+
+@dataclass
+class FlakyTransport(FakeTransport):
+    """Transport whose first N sends fail (return None) before recovering.
+
+    Models the #2535 class: a transient resolver blip at cron-fire time makes
+    the Telegram announce send fail, which previously aborted the whole
+    dispatch — the session was never spawned.
+    """
+
+    fail_first: int = 0
+    attempts: int = 0
+
+    async def send(
+        self,
+        *,
+        channel_id: int | str,
+        message: RenderedMessage,
+        options: SendOptions | None = None,
+    ) -> MessageRef | None:
+        self.attempts += 1
+        if self.attempts <= self.fail_first:
+            return None
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+@pytest.mark.anyio
+async def test_cron_dispatch_retries_transient_send_failure(monkeypatch):
+    """A transient announce-send failure is retried, and the job still runs."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=2)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert transport.attempts == 3  # 1 initial + 2 retries
+    assert len(run_job.calls) == 1  # the session is the payload — it spawned
+
+
+@pytest.mark.anyio
+async def test_cron_dispatch_aborts_after_retry_exhaustion(monkeypatch):
+    """A persistent send outage still fails loudly after the bounded retries."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert transport.attempts == 3  # bounded: 1 initial + len(SEND_RETRY_DELAYS)
+    assert run_job.calls == []
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_cron_passes_model_and_reasoning():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = CronConfig(
+            id="cheap",
+            schedule="0 9 * * 1",
+            engine="claude",
+            prompt="weekly report",
+            model="sonnet",
+            reasoning="low",
+        )
+        await dispatcher.dispatch_cron(cron)
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert (ctx.model, ctx.reasoning) == ("sonnet", "low")
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_cron_omits_model_and_reasoning_when_unset():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(
+            CronConfig(id="plain", schedule="* * * * *", prompt="hello")
+        )
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.model is None and ctx.reasoning is None
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_webhook_has_no_model_override():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_webhook(_make_webhook(), "Test prompt")
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.model is None and ctx.reasoning is None
+
+
+# ── #893: dispatch_cron reports whether the run was actually dispatched ──
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_returns_true_when_dispatched(monkeypatch):
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=1)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert result is True
+    assert len(run_job.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_returns_false_when_send_fails(monkeypatch):
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert result is False
+    assert run_job.calls == []
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_retry_delays_override_is_single_attempt(
+    monkeypatch,
+):
+    """``retry_delays=()`` makes exactly one send attempt (scheduler retry tick)."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron(), retry_delays=())
+        tg.cancel_scope.cancel()
+
+    assert result is False
+    assert transport.attempts == 1
+
+
+# ── #896: the daily budget refuses a trigger before it is announced ───────
+
+
+@pytest.mark.anyio
+async def test_896_refused_cron_is_not_announced_or_run() -> None:
+    from untether.triggers.dispatcher import DISPATCH_REFUSED
+
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+    checks: list[tuple] = []
+
+    async def budget_check(chat_id, context, engine_override) -> bool:
+        checks.append((chat_id, context.trigger_source, engine_override))
+        return True
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+            budget_check=budget_check,
+        )
+        result = await dispatcher.dispatch_cron(_make_cron(engine="claude"))
+    assert result == DISPATCH_REFUSED
+    assert run_job.calls == []
+    assert transport.sent == []  # no "Scheduled" announcement
+    assert checks == [(100, "cron:test-cron", "claude")]
+
+
+@pytest.mark.anyio
+async def test_896_refused_cron_skips_its_fetch(monkeypatch) -> None:
+    """A refused cron's fetch step (an HTTP call or file read) never runs."""
+    import untether.triggers.fetch as fetch_mod
+    from untether.triggers.settings import CronFetchConfig
+
+    fetched: list[str] = []
+
+    async def budget_check(chat_id, context, engine_override) -> bool:
+        return True
+
+    async def _execute_fetch(cfg):
+        fetched.append("x")
+        return True, "", "data"
+
+    monkeypatch.setattr(fetch_mod, "execute_fetch", _execute_fetch)
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=RunJobCapture(),
+            transport=FakeTransport(),
+            default_chat_id=100,
+            task_group=tg,
+            budget_check=budget_check,
+        )
+        cron = _make_cron(
+            fetch=CronFetchConfig(type="http_get", url="https://example.com")
+        )
+        await dispatcher.dispatch_cron(cron)
+    assert fetched == []
+
+
+@pytest.mark.anyio
+async def test_896_open_budget_dispatches_normally() -> None:
+    run_job = RunJobCapture()
+
+    async def budget_check(chat_id, context, engine_override) -> bool:
+        return False
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=FakeTransport(),
+            default_chat_id=100,
+            task_group=tg,
+            budget_check=budget_check,
+        )
+        assert await dispatcher.dispatch_cron(_make_cron()) is True
+    assert len(run_job.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_896_refused_webhook_is_not_announced_or_run() -> None:
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async def budget_check(chat_id, context, engine_override) -> bool:
+        return True
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+            budget_check=budget_check,
+        )
+        await dispatcher.dispatch_webhook(_make_webhook(), "Test prompt")
+    assert run_job.calls == []
+    assert transport.sent == []
+
+
+@pytest.mark.anyio
+async def test_896_budget_check_failure_fails_open() -> None:
+    """A broken check must not stop triggers (``_run_engine`` still gates)."""
+    run_job = RunJobCapture()
+
+    async def budget_check(chat_id, context, engine_override) -> bool:
+        raise RuntimeError("boom")
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=FakeTransport(),
+            default_chat_id=100,
+            task_group=tg,
+            budget_check=budget_check,
+        )
+        assert await dispatcher.dispatch_cron(_make_cron()) is True
+    assert len(run_job.calls) == 1

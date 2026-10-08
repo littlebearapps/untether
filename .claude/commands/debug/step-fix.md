@@ -14,19 +14,22 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
   master` is blocked.
 - **NEVER create tags.** `git tag v*` is blocked. `auto-tag-on-master.yml`
   creates tags from stable PR merges.
-- **NEVER merge PRs to master.** `gh pr merge` to master is blocked.
+- **NEVER merge PRs to master from a fix.** Only `/pr-main X.Y.Z --merge` does,
+  after Nathan approves the release (the guard asks him to confirm).
 - **NEVER run `gh release create`.** Release publishing is automated.
 - **NEVER use `--no-verify`, `--no-gpg-sign`, or any hook-skip flag.** Hooks
   block guard-script edits too.
 - **NEVER restart `untether.service` (staging) to test code changes.** Restart
   `untether-dev.service` instead. Restarting staging during dev is *always*
   wrong (see `dev-workflow.md`).
-- **NEVER edit guard scripts or `.claude/hooks.json`.** `release-guard-protect.sh`
-  blocks these. Only Nathan changes them outside Claude Code.
+- **NEVER edit guard scripts or `.claude/settings.json`.** Only Nathan changes
+  them outside Claude Code. The guard blocks Edit/Write on them; never work
+  around a block.
 
-The release pipeline is single-gate: `dev` push → TestPyPI; Nathan
-squash-merges a stable version PR to `master` → auto-tag → release.yml
-publishes to PyPI. The master PR review IS the release approval.
+The release pipeline is single-gate: `dev` push → TestPyPI; a stable version
+PR squash-merged to `master` (by Nathan, or by `/pr-main --merge` on his
+explicit go) → auto-tag → release.yml publishes to PyPI. Nathan's approval IS
+the release gate.
 
 ## The 7-step implementation checklist
 
@@ -53,9 +56,9 @@ Follow the area's rule file:
 - telegram-* changes → `telegram-transport.md` (outbox-only writes, 64-byte
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
-  cleanup, cooldown).
-- runner edits trigger `.claude/hooks/runner-edit-context.sh`; telegram edits
-  trigger `telegram-edit-context.sh` — these print contract reminders.
+  cleanup, outline gate, tap claims, plan re-arm).
+- No hook injects the area's contract reminders for runner, schema and telegram
+  edits; read the area rule yourself.
 
 ### 3. Run targeted tests
 
@@ -71,8 +74,8 @@ patterns. Coverage threshold is 80%.
 ### 4. Run full suite + lint + format
 
 ```bash
-uv run pytest               # 2372 tests, ~30 sec
-uv run ruff check src/      # lint
+uv run pytest               # full suite (~5.7k tests; count in docs/reference/test-catalog.md)
+uv run ruff check src/ tests/      # lint
 uv run ruff format src/ tests/   # format — CI checks formatting
 ```
 
@@ -81,10 +84,11 @@ If lint or format fails, fix and re-run. Never push code that doesn't pass
 
 ### 5. Update CHANGELOG
 
-Find the active rc/stable section in `CHANGELOG.md`. If a section for the
-current version doesn't exist yet, add one with header `## vX.Y.Z (YYYY-MM-DD)`.
-Add an entry under the correct subsection (`### fixes`, `### changes`,
-`### breaking`, `### docs`, `### tests`):
+Find the current release's section in `CHANGELOG.md` — `## vX.Y.Z (unreleased)`
+(e.g. `## v0.36.0 (unreleased)`; rc numbers never get their own heading, and
+`/pr-main` dates the heading at release). If none exists yet, add one. Add an
+entry under the correct subsection (`### breaking`, `### fixes`, `### changes`,
+`### docs`, `### tests`):
 
 ```markdown
 - description of the fix [#N](https://github.com/littlebearapps/untether/issues/N)
@@ -93,13 +97,13 @@ Add an entry under the correct subsection (`### fixes`, `### changes`,
 Every entry MUST include the issue link in the `[#N](https://...)` form.
 `scripts/validate_release.py` enforces this in CI.
 
-Note: rc versions (e.g. `0.35.3rc14`) don't require changelog entries —
-`validate_release.py` skips them.
+Note: `validate_release.py` skips rc versions (e.g. `0.36.0rc1`), so CI won't
+catch a missing entry mid-line — add it anyway; the stable release collects them.
 
 ### 6. Commit + push the feature branch
 
 ```bash
-git add -A    # only files you actually changed; never blanket-add
+git add <path> <path>    # only files you actually changed; never `git add -A`
 git commit -m "fix: <one-line description> (#N)"
 git push -u origin "fix/<N>-<slug>"
 ```
@@ -123,7 +127,7 @@ Fixes #<N>
 ## Test plan
 - [x] Targeted: uv run pytest tests/test_<area>.py
 - [x] Full suite: uv run pytest
-- [x] Lint: uv run ruff check src/
+- [x] Lint: uv run ruff check src/ tests/
 - [x] Format: uv run ruff format --check src/ tests/
 - [ ] Integration tests on @untether_dev_bot per release-discipline.md tier
 
@@ -132,8 +136,8 @@ EOF
 )"
 ```
 
-The PR targets `dev`. If you accidentally target `master`,
-`release-guard-mcp.sh` blocks the merge.
+The PR targets `dev`. If you accidentally target `master`, `release-guard.sh`
+denies a `master` merge whose head isn't `dev` (`release-guard-mcp.sh` covers MCP merges).
 
 ### 8. Apply `needs-verification` to the issue
 
@@ -167,12 +171,13 @@ EOF
 - **Restarting staging from inside an active session.** The 120s drain
   timeout drops your final response. See `feedback_agent_self_restart_pattern`.
   Use `untether-dev.service` and let hot-reload pick up config changes.
-- **Editing `.claude/hooks.json` or guard scripts.** Blocked. Don't try.
-- **Skipping the test step.** Pre-commit hook will fail; `--no-verify` is
-  blocked. Run tests locally first.
-- **Committing files with secrets.** `secret-warning` hook fires on
-  `git add`/`commit`. If it warns, fix the file before continuing — never
-  bypass.
+- **Editing `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`,
+  `help-faq-protect.sh`). Forbidden. Don't try.
+- **Skipping the test step.** There is no local pre-commit hook, so nothing
+  stops a broken commit until CI. Run tests locally first; never `--no-verify`.
+- **Committing files with secrets.** No hook in this repo scans for them —
+  check staged files before committing, and never bypass a warning from CI
+  secret scanning.
 - **Adding boilerplate to a tiny fix.** Don't add docstrings, don't refactor,
   don't add comments unless they explain a non-obvious why.
 - **Forgetting the FAQ touch-up check.** If the fix changes user-visible

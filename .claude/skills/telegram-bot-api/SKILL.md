@@ -23,7 +23,8 @@ Untether uses a **custom Telegram Bot API client** built on `httpx` (async) and 
 
 | File | Purpose |
 |------|---------|
-| `src/untether/telegram/client.py` | `TelegramClient` — all Bot API calls |
+| `src/untether/telegram/client.py` | `TelegramClient` — Bot API facade over the outbox, per-chat pacing |
+| `src/untether/telegram/client_api.py` | `HttpBotClient` — the httpx calls: 30 s message-call timeout, one safe retry (#861), benign-rejection classes (#746) |
 | `src/untether/telegram/outbox.py` | `TelegramOutbox` — queued send/edit/delete with rate limiting |
 | `src/untether/telegram/bridge.py` | `TelegramPresenter` — renders progress, inline keyboards, answers |
 | `src/untether/telegram/loop.py` | Long polling loop (`getUpdates`), callback dispatch |
@@ -32,10 +33,10 @@ Untether uses a **custom Telegram Bot API client** built on `httpx` (async) and 
 
 ## Bot API call pattern
 
-All calls go through `TelegramClient`, which wraps `httpx.AsyncClient`:
+All calls go through `TelegramClient`; the HTTP layer is `HttpBotClient` (`client_api.py`), which wraps `httpx.AsyncClient`:
 
 ```python
-# Typical Bot API call (inside TelegramClient)
+# Typical Bot API call (simplified; HttpBotClient._post)
 resp = await self._http.post(
     f"{self._base_url}/bot{self._token}/{method}",
     json=params,
@@ -57,9 +58,9 @@ Permission requests and plan mode buttons use Telegram inline keyboards:
 {
     "reply_markup": {
         "inline_keyboard": [
-            [{"text": "Approve", "callback_data": "ctrl:approve:<request_id>"}],
-            [{"text": "Deny", "callback_data": "ctrl:deny:<request_id>"}],
-            [{"text": "Pause & Outline Plan", "callback_data": "ctrl:discuss:<request_id>"}],
+            [{"text": "Approve", "callback_data": "claude_control:approve:<request_id>"}],
+            [{"text": "Deny", "callback_data": "claude_control:deny:<request_id>"}],
+            [{"text": "Pause & Outline Plan", "callback_data": "claude_control:discuss:<request_id>"}],
         ]
     }
 }
@@ -68,12 +69,13 @@ Permission requests and plan mode buttons use Telegram inline keyboards:
 - Callback data format: `<prefix>:<action>:<id>` (max 64 bytes)
 - Must call `answerCallbackQuery` promptly to clear the spinner
 - Early answering: set `answer_early = True` on the backend to clear the spinner immediately with a toast
+- `approval_originator_only` (#388, opt-in): a `claude_control:` / `aq:` tap from anyone but the run's originator gets `answerCallbackQuery` with "Only the person who started this run can answer this." and is dropped — checked before the early answer (`telegram/approval_originator.py`)
 
 ## Long polling (`getUpdates`)
 
 ```python
 # In telegram/loop.py
-updates = await client.get_updates(offset=last_offset + 1, timeout=30)
+updates = await client.get_updates(offset=last_offset + 1)  # timeout_s=50 long poll
 for update in updates:
     last_offset = update.update_id
     await handle_update(update)
@@ -104,14 +106,14 @@ Key formats (include `chat_id` to avoid cross-chat collisions):
 - Per-chat pacing: `private_chat_rps` (default 1.0 msg/s), `group_chat_rps` (default 20/60 msg/s)
 - Per-chat `_next_at[chat_id]` timestamps — worker picks from unblocked chats; global `retry_at` blocks all on 429
 - On 429: `RetryAfter` raised using `parameters.retry_after`; op requeued if no newer op superseded it
-- Non-429 errors: logged and dropped (no retry)
+- Non-429 errors: logged and dropped. The HTTP layer retries a message call once on a fresh connection only when the request never left (edits/deletes/callback answers also after a read timeout; a `sendMessage` that may have arrived is never repeated, #861); error logs carry `chat_id`/`message_id` and `kind` — the surface (`progress`, `final`, `bg_status`, `approval_surface`, …) set by a `with message_kind("…")` block around the transport call (`transport.py`); the outbox op captures it at enqueue and re-applies it on the worker (#823)
 
 ## Replace progress messages
 
 `send_message(replace_message_id=...)`:
 1. Drops any pending edit for the progress message
 2. Enqueues the send at highest priority
-3. On success, enqueues a delete for the old progress message
+3. On success, queues a delete for the old progress message without awaiting it (`wait=False`, #928) — a slow delete must not hold a final past its delivery bound
 
 ## Voice transcription
 
@@ -124,6 +126,10 @@ voice_transcription_model = "gpt-4o-mini-transcribe"
 1. Download voice payload from Telegram (`getFile` + HTTP fetch)
 2. Transcribe with OpenAI-compatible API (or local Whisper server)
 3. Route transcript through same command/directive pipeline as typed text
+
+Optional `voice_transcription_language` (ISO-639-1 hint) and `voice_transcription_prompt` (vocabulary bias). Unset prompt → `DEFAULT_VOICE_TRANSCRIPTION_PROMPT` in `telegram/voice.py` (`Claude`, `Claude Code`, `CLAUDE.md`, `AGENTS.md`, Codex, OpenCode and product terms — no deprecated or out-of-scope engine names, #703/#789); a value replaces it, `""` disables it.
+
+After transcription, `correct_known_mishears()` rewrites the known Claude mishears ("Clawde"/"Clawd" → Claude, "Clawed Code" → Claude Code, "Claw.md" → CLAUDE.md; whole words only, a bare "clawed" is kept) and logs `voice.transcript.corrected` with a count, never the text (#789).
 
 ## Forum topics
 
@@ -146,12 +152,20 @@ Comment + forwarded messages arrive as separate updates:
 - Wait `forward_coalesce_s` seconds for additional forwards
 - Forwards appended to the prompt; don't start their own runs
 - Forwarded messages alone don't start runs
+- A second plain prompt in the window is merged into the pending one (texts joined in order), never replacing it (#794); an unmergeable one (different reply target, voice vs text, leading directive, changed context) flushes the pending prompt as its own run first
 
 ## Message overflow
 
 - Default: split across multiple messages with "continued (N/M)" headers (~3500 chars per chunk)
 - Trim mode: truncate to single message (~3500 chars)
 - Configure via `message_overflow = "split" | "trim"`
+
+## Markdown rendering quirks (`telegram/render.py`)
+
+`render_markdown()` rewrites markdown-it text tokens before rendering (code spans/blocks untouched):
+- Bare `<br>`, `<br/>`, `<br />` → line break (a space inside a table row); other tags stay escaped text (#786)
+- Bare filenames ending `.md`, `.sh`, `.py` (country-code TLDs) → inline code, so neither linkify nor Telegram clients turn `CLAUDE.md` into `http://claude.md/` (#788)
+- GFM pipe tables keep one row per line with a bold header, repeated across split chunks (#797); single newlines in line-structured text are kept while wrapped prose reflows (#870); an ordered list keeps its own start number (#886)
 
 ## Approval push notifications
 

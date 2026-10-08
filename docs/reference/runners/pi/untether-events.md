@@ -4,7 +4,7 @@ This document describes how the Pi runner translates Pi CLI `--mode json` JSONL 
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/pi.py` and the translation logic is in `src/untether/runners/pi.py`. When in doubt, refer to the code.
 
-The goal is to make Pi feel identical to the Codex/Claude Code runners from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+The goal is to make Pi feel identical to the Codex/Claude Code runners from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event). Pi runs non-interactively: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only.
 
 ---
 
@@ -13,8 +13,11 @@ The goal is to make Pi feel identical to the Codex/Claude Code runners from the 
 Pi CLI emits **one JSON object per line** (JSONL) when invoked with:
 
 ```
-pi --print --mode json <prompt>
+pi [extra_args] --print --mode json [--provider <p>] [--model <m>] (--session <path-or-id> | --continue) <prompt>
 ```
+
+A new run passes a fresh session file path under the session dir; a resumed run
+passes the resume token; `/continue` passes `--continue`.
 
 Notes:
 - `--print` is required for non-interactive runs.
@@ -60,7 +63,7 @@ Untether requires **serialization per session token**:
 
 Pi emits `AgentSessionEvent` objects. Only a subset is required for Untether.
 
-**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (from `--model` config) and `provider` (from `--provider` config). The `meta.model` field is used for the `🏷` footer line on final messages.
+**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (the `/config` model override, else `pi.model`) and `provider` (`pi.provider`). The `meta.model` field is used for the `🏷` footer line on final messages.
 
 Priority order for `meta["model"]` (#225):
 1. `run_options.model` — per-run override set via `/model set`
@@ -133,12 +136,12 @@ Mapping:
 
 `auto_compaction_end` example:
 ```json
-{"type":"auto_compaction_end","result":{"newNumTokens":42000},"aborted":false}
+{"type":"auto_compaction_end","result":{"tokensBefore":42000},"aborted":false}
 ```
 
 Mapping:
-- Emit `action` with `phase="completed"`.
-- `action.title = "context compacted (42,000 tokens)"` (formatted with commas).
+- Emit `action` with `phase="completed"`, `ok = !aborted`, reusing the start action id.
+- `action.title = "context compacted (42,000 tokens)"` from `result.tokensBefore` (formatted with commas); `"context compacted"` when it is absent.
 - If `aborted=true`, title is `"context compaction aborted"`.
 
 ### 4.6 `auto_retry_start` / `auto_retry_end`
@@ -175,8 +178,16 @@ Mapping:
 
 ### 4.7 Other events
 
-Ignore unknown events. If a JSONL line is malformed, emit a warning action and
-continue (default `JsonlSubprocessRunner` behavior).
+Other known types (`agent_start`, `turn_*`, `message_start`, `message_update`,
+`tool_execution_update`) are decoded and ignored. A line with an unknown `type`
+or malformed JSON is dropped with a `jsonl.msgspec.invalid` warning log; no
+action is emitted.
+
+If the first translated event is not the `session` header, `started` is emitted
+on that event instead.
+
+A non-zero exit code emits a warning action plus a failing `completed`
+(`pi failed (rc=…)` with a stderr excerpt).
 
 ### 4.8 Stream-end fallback diagnostics (no `agent_end`)
 
@@ -198,16 +209,20 @@ fields so the issue-watcher can promote resumed-run failures to error tier.
 
 ## 5. Tool name -> ActionKind mapping heuristics
 
-Pi tool names are lower-case by default. Suggested mapping:
+Pi tool names are lower-case by default; matching is case-insensitive, using the
+shared `runners/tool_actions.py` mapping with `args.path` as the path key:
 
 | Tool name | ActionKind | Title logic |
 | --- | --- | --- |
-| `bash` | `command` | `args.command` |
-| `edit`, `write` | `file_change` | `args.path` |
+| `bash` (also `shell`, `killshell`) | `command` | `args.command` |
+| `edit`, `write` (also `multiedit`, `notebookedit`) | `file_change` | `args.path` |
 | `read` | `tool` | `read: <path>` |
 | `grep` | `tool` | `grep: <pattern>` |
 | `find` | `tool` | `find: <pattern>` |
 | `ls` | `tool` | `ls: <path>` |
+| `glob` | `tool` | `glob: <pattern>` |
+| `websearch` / `webfetch` | `web_search` | query / URL |
+| `task`, `agent` | `subagent` | `args.description` or `args.prompt` |
 | (default) | `tool` | tool name |
 
 For `file_change`, include `detail.changes = [{"path": <path>, "kind": "update"}]`.

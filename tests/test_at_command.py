@@ -146,8 +146,10 @@ def _make_ctx(
     chat_id: int = 12345,
     *,
     runtime: Any = None,
+    thread_id: int | None = None,
+    **extra: Any,
 ) -> CommandContext:
-    message = MessageRef(channel_id=chat_id, message_id=1)
+    message = MessageRef(channel_id=chat_id, message_id=1, thread_id=thread_id)
     return CommandContext(
         command="at",
         text=f"/at {args_text}",
@@ -160,6 +162,7 @@ def _make_ctx(
         plugin_config={},
         runtime=runtime if runtime is not None else _FakeRuntime(),
         executor=None,  # type: ignore[arg-type]
+        **extra,
     )
 
 
@@ -288,6 +291,61 @@ class TestAtCommand:
             finally:
                 tg.cancel_scope.cancel()
 
+    async def test_handle_uses_chat_agent_default_over_project(self):
+        """#950 — the chat's /agent default (or a topic default) beats the
+        project and global defaults, as it does for a plain prompt."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi"},
+            global_default="codex",
+        )
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, RunJobRecorder(), FakeTransport(), 12345)
+            try:
+                await AtCommand().handle(
+                    _make_ctx(
+                        "60s probe",
+                        runtime=runtime,
+                        thread_id=10,
+                        default_engine_override="opencode",
+                    )
+                )
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                assert pending[0].engine_override == "opencode"
+                assert pending[0].thread_id == 10
+                assert pending[0].context is not None
+                assert pending[0].context.project == "acme"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_uses_ambient_context_for_project_default(self):
+        """#950 — a topic/chat bound with /ctx resolves its project (and that
+        project's engine) like a plain prompt there, not the chat's mapping."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi", "beta": "claude"},
+            global_default="codex",
+        )
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, RunJobRecorder(), FakeTransport(), 12345)
+            try:
+                await AtCommand().handle(
+                    _make_ctx(
+                        "60s probe",
+                        runtime=runtime,
+                        ambient_context=RunContext(project="beta", branch="feat"),
+                    )
+                )
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                assert pending[0].engine_override == "claude"
+                assert pending[0].context is not None
+                assert pending[0].context.project == "beta"
+                assert pending[0].context.branch == "feat"
+            finally:
+                tg.cancel_scope.cancel()
+
 
 # ── Scheduler: schedule / cancel / drain ────────────────────────────────
 
@@ -342,6 +400,25 @@ class TestAtScheduler:
                 assert cancelled == 2
                 assert at_scheduler.active_count() == 1
                 assert at_scheduler.pending_for_chat(222)[0].prompt == "c"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_826_cancel_pending_for_chat_thread_filter(self):
+        """#826: a thread filter cancels only that topic's /at delays."""
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, _fake_run_job, FakeTransport(), 1)
+            try:
+                at_scheduler.schedule_delayed_run(333, 6, 60, "topic-6")
+                at_scheduler.schedule_delayed_run(333, 10, 60, "topic-10")
+                at_scheduler.schedule_delayed_run(333, None, 60, "general")
+                cancelled = at_scheduler.cancel_pending_for_chat(
+                    333, thread_filter=lambda t: t == 10
+                )
+                assert cancelled == 1
+                prompts = {p.prompt for p in at_scheduler.pending_for_chat(333)}
+                assert prompts == {"topic-6", "general"}
+                # Default (no filter) still drops the whole chat.
+                assert at_scheduler.cancel_pending_for_chat(333) == 2
             finally:
                 tg.cancel_scope.cancel()
 

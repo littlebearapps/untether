@@ -92,3 +92,4 @@ def test_router_is_resume_line_union() -> None:
 
     assert router.is_resume_line("`codex resume abc`")
     assert router.is_resume_line("claude --resume def")
+    assert router.is_resume_line("\u21a9\ufe0f `codex resume abc`")

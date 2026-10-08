@@ -3,9 +3,74 @@
 from __future__ import annotations
 
 # (pattern_substring, hint_text) — first match wins.
-# Order: auth → subscription/billing → overload/server → rate limits
-# → session → network → signals → execution.
+# Order: end-of-life/unsupported-client → CLI argv/config drift (#830) → the
+# generic "no longer supported" fallback → auth → subscription/billing
+# → overload/server → rate limits → model → context → content safety
+# → setting compatibility (#416) → invalid request → session → network
+# → signals → execution.
 _HINT_PATTERNS: list[tuple[str, str]] = [
+    # --- Engine end-of-life / unsupported client ---
+    # These MUST stay first. Both signatures are emitted by CLIs that exit
+    # rc=0, so without a hint the run surfaces as an empty answer rather than a
+    # failure. They also outrank the generic "invalid_request_error" pattern
+    # below, which AMP's 426 payload would otherwise match with a vaguer hint.
+    (
+        "ineligibletiererror",
+        "Gemini CLI is end-of-life for individual and free Google accounts"
+        " (18 June 2026). The `gemini` engine is deprecated in Untether"
+        " \N{EM DASH} switch engines via /config, or migrate to Antigravity CLI"
+        " (antigravity.google).",
+    ),
+    (
+        "gemini code assist for individuals",
+        "Gemini CLI is end-of-life for individual and free Google accounts"
+        " (18 June 2026). The `gemini` engine is deprecated in Untether"
+        " \N{EM DASH} switch engines via /config, or migrate to Antigravity CLI"
+        " (antigravity.google).",
+    ),
+    (
+        "this version of amp is no longer supported",
+        "AMP is refusing this client version. Run `amp update` to upgrade."
+        " The `amp` engine is deprecated in Untether and may stop working again"
+        " without notice.",
+    ),
+    # --- CLI argv / config drift (#830) ---
+    # Codex's config loader rejects a retired key with this wording (e.g.
+    # `approval_policy = "untrusted"` from 0.149.0). It must outrank the
+    # generic "no longer supported" end-of-life fallback below, which would
+    # otherwise blame the client version.
+    (
+        "is no longer supported; remove this setting",
+        "A setting in your Codex config (`~/.codex/config.toml`, a `--profile`"
+        " file, or `[engines.codex] extra_args`) is no longer supported by the"
+        " installed Codex CLI \N{EM DASH} remove the key the error names.",
+    ),
+    # clap argv rejections. Kept to clap's exact shapes (a quote before `for`,
+    # a dash after the quote) so agent/API prose doesn't match.
+    (
+        "' for '--",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
+    (
+        "a value is required for '--",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
+    (
+        "error: unexpected argument '-",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
+    (
+        "no longer supported",
+        "The engine CLI reports that this client version or account tier is no"
+        " longer supported by its provider. Update the CLI, or switch engines"
+        " via /config.",
+    ),
     # --- Authentication ---
     (
         "access token could not be refreshed",
@@ -173,10 +238,36 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "safety_block",
         "Request blocked by content safety filter. Try rephrasing your prompt.",
     ),
+    # --- Reasoning level / tool compatibility (#416) ---
+    # These MUST stay ahead of the generic "invalid_request_error" below: both
+    # 400 bodies carry that type, and the generic hint would send users to
+    # update a CLI that isn't outdated. The hints are engine-neutral on
+    # purpose: get_error_hint() only sees the message, `reasoning.effort` is an
+    # OpenAI Responses-API parameter (an OpenCode run on an OpenAI provider can
+    # hit it too, with no /config Reasoning page), and the level may come from
+    # the engine's own config file rather than an Untether override. Verbatim
+    # codex-cli 0.157.1 bodies: tests/fixtures/codex_turn_failed_minimal_reasoning.jsonl.
+    (
+        "cannot be used with reasoning.effort",
+        "The model's reasoning level can't be combined with a tool that is"
+        " switched on (usually web search). Raise the reasoning level: in"
+        " /config \N{RIGHTWARDS ARROW} Reasoning if this engine offers it there,"
+        " otherwise in the engine's own config file (for Codex,"
+        " model_reasoning_effort in ~/.codex/config.toml).",
+    ),
+    (
+        "reasoning.effort",
+        "The model doesn't accept this reasoning level. Choose another one: in"
+        " /config \N{RIGHTWARDS ARROW} Reasoning if this engine offers it there,"
+        " otherwise in the engine's own config file (for Codex,"
+        " model_reasoning_effort in ~/.codex/config.toml).",
+    ),
     # --- Invalid request ---
     (
         "invalid_request_error",
-        "Invalid API request. Try updating the engine CLI to the latest version.",
+        "The API rejected the request (invalid_request_error) \N{EM DASH} the"
+        " error below says why. Check the model and reasoning settings in"
+        " /config; if they look right, update the engine CLI.",
     ),
     # --- Session errors ---
     (

@@ -2,13 +2,48 @@
 
 from __future__ import annotations
 
+import html
+
 from ...commands import CommandBackend, CommandContext, CommandResult
+from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ...transport import RenderedMessage
+from ._permission_mode_text import (
+    APPLY_TIMING_TEXT,
+    BUTTON_MODES,
+    CLAUDE_MODE_TEXT,
+    NO_OVERRIDE_HINT,
+    NO_OVERRIDE_LABEL,
+    NO_OVERRIDE_TEXT,
+    cli_name_suffix,
+    mode_display,
+)
 
 logger = get_logger(__name__)
 
-_DOCS_BASE = "https://littlebearapps.com/tools/untether/how-to/"
+# #296: the help centre is the marketing-site docs sync
+# (littlebearapps.com ``scripts/docs-sync.config.ts``): every top-level page in
+# docs/{tutorials,how-to,reference,explanation,faq} is published flat at
+# ``/help/untether/<file-stem>/``, synced from ``master``.  Anchors are
+# GitHub-slugger heading ids; Zensical ``{#id}`` attr_list ids are NOT
+# honoured there, so never link one.  ``tests/test_config_help_links.py``
+# maps every rendered link to exactly one doc file + heading.
+_HELP_BASE = "https://littlebearapps.com/help/untether/"
+_BUG_REPORT_URL = (
+    "https://github.com/littlebearapps/untether/issues/new?template=bug_report.yml"
+)
+
+
+def _help_url(slug: str, anchor: str | None = None) -> str:
+    """Help-centre URL for a doc file stem (optionally with a heading anchor)."""
+    url = f"{_HELP_BASE}{slug}/"
+    return f"{url}#{anchor}" if anchor else url
+
+
+def _learn_more(slug: str, anchor: str | None = None, label: str = "Learn more") -> str:
+    """``📖 Learn more`` line linking a help-centre page."""
+    return f'📖 <a href="{_help_url(slug, anchor)}">{label}</a>'
 
 
 def _is_callback(ctx: CommandContext) -> bool:
@@ -38,6 +73,15 @@ async def _respond(
 def _check(label: str, *, active: bool) -> str:
     """Add checkmark prefix if active."""
     return f"✓ {label}" if active else label
+
+
+# #896: the per-chat ``budget_auto_cancel`` toggle (TOML key ``auto_cancel``).
+_STOP_AT_LIMIT = "Stop at limit"
+_STOP_AT_LIMIT_HELP = (
+    "Stops new runs once the daily budget is reached and ends a session after "
+    "the reply that passes the per-run budget. It can't interrupt a reply in "
+    "progress."
+)
 
 
 def _toggle_row(
@@ -108,12 +152,12 @@ async def _resolve_effective_engine(
 
 _HOME_HINTS: dict[str, dict[str, str]] = {
     "pm": {
-        "on": "approve actions",
-        "off": "run freely",
-        "auto": "auto-approve actions",
-        "default": "agent decides",
-        "full auto": "all tools approved",
-        "safe": "untrusted tools blocked",
+        # #747: Claude hints come from the shared permission-mode table
+        # (on/off/plan-auto/auto/manual/dontAsk/bypassPermissions).
+        **{text.ui_name: text.hint for text in CLAUDE_MODE_TEXT.values()},
+        NO_OVERRIDE_LABEL: NO_OVERRIDE_HINT,
+        "full auto": "Codex's own sandbox",
+        "safe": "read-only sandbox",
         "full access": "all tools approved",
         "edit files": "files ok, no shell",
         "read-only": "write tools blocked",
@@ -131,6 +175,7 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "off": "compact progress",
     },
     "tr": {"all": "respond to everything", "mentions": "@mention only"},
+    "fu": {"queue": "wait for the run", "steer": "fold into the run"},
     "md": {"default": "from CLI settings"},
     "rs": {"default": "from CLI settings"},
 }
@@ -202,8 +247,10 @@ async def _page_home(ctx: CommandContext) -> None:
 
     pm_label = "—"
     listen_label = "all"
+    followup_label = _followup_default()
     model_label = "default"
     reasoning_label = "default"
+    rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
     cu_label = "default"
@@ -216,14 +263,8 @@ async def _page_home(ctx: CommandContext) -> None:
         engine_override = await prefs.get_engine_override(chat_id, current_engine)
         pm = engine_override.permission_mode if engine_override else None
         if current_engine == "claude":
-            if pm == "plan":
-                pm_label = "on"
-            elif pm == "auto":
-                pm_label = "auto"
-            elif pm is not None:
-                pm_label = "off"
-            else:
-                pm_label = "default"
+            # #747: only acceptEdits is "off"; hand-stored modes show their name.
+            pm_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
         elif current_engine == "codex":
             pm_label = "safe" if pm == "safe" else "full auto"
         elif current_engine == "gemini":
@@ -237,13 +278,23 @@ async def _page_home(ctx: CommandContext) -> None:
         listen = await prefs.get_listen_mode(chat_id)
         listen_label = listen or "all"
 
+        followup_chat = await prefs.get_followup_mode(chat_id)
+        if followup_chat is not None:
+            followup_label = followup_chat
+
         # Model override for current engine
         if engine_override and engine_override.model:
             model_label = engine_override.model
 
-        # Reasoning override for current engine
+        # Reasoning override for current engine (#416: a retired level
+        # renders as the default it actually runs on)
         if engine_override and engine_override.reasoning:
-            reasoning_label = engine_override.reasoning
+            effective_rs, ignored_rs = _effective_reasoning(
+                current_engine, engine_override.reasoning
+            )
+            if effective_rs:
+                reasoning_label = effective_rs
+            rs_ignored = ignored_rs
 
         # Ask questions override for current engine
         if engine_override and engine_override.ask_questions is not None:
@@ -311,7 +362,9 @@ async def _page_home(ctx: CommandContext) -> None:
     if show_plan_mode:
         if current_engine == "claude":
             lines.append("<b>Agent controls</b> <i>(Claude Code)</i>")
-            lines.append(f"Plan mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}")
+            lines.append(
+                f"Permission mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
+            )
             if show_ask_questions:
                 lines.append(
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
@@ -365,6 +418,10 @@ async def _page_home(ctx: CommandContext) -> None:
         model_hint = f"  · {engine_hint}"
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
+    if current_engine == "claude":
+        lines.append(
+            f"Follow-up: <b>{followup_label}</b>{_home_hint('fu', followup_label)}"
+        )
     # #294: master trigger pause indicator on the home page when there's a
     # trigger manager with configured crons/webhooks. Sits below the chat
     # "Listen" line to keep the two senses of "trigger" visually distinct
@@ -380,28 +437,25 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         if triggers_has_any:
             state = "⏸ paused" if triggers_paused else "active"
-            triggers_indicator = f"Triggers (cron/webhook): <b>{state}</b>"
+            triggers_indicator = f"⏰ Triggers: <b>{state}</b>"
     if triggers_indicator is not None:
         lines.append(triggers_indicator)
     if show_reasoning:
         home_rs_label = get_reasoning_label(current_engine)
-        if reasoning_label == "default":
+        if rs_ignored is not None:
+            rs_hint = f"  · {rs_ignored} not supported"
+        elif reasoning_label == "default":
             engine_default = get_engine_default_reasoning(current_engine)
             rs_hint = f"  · {engine_default}" if engine_default else ""
         else:
             rs_hint = _home_hint("rs", reasoning_label)
         lines.append(f"{home_rs_label}: <b>{reasoning_label}</b>{rs_hint}")
 
-    _HELP_URL = (
-        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
-    )
-    _BUG_URL = (
-        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
-    )
+    # #296 D3: the help-centre index, and the same bug template as About.
     lines.append("")
     lines.append(
-        f'📖 <a href="{_HELP_URL}">Help guides</a>'
-        f' · 🐛 <a href="{_BUG_URL}">Report a bug</a>'
+        f'📖 <a href="{_HELP_BASE}">Help guides</a>'
+        f' · 🐛 <a href="{_BUG_REPORT_URL}">Report a bug</a>'
     )
 
     buttons: list[list[dict[str, str]]] = []
@@ -410,7 +464,7 @@ async def _page_home(ctx: CommandContext) -> None:
         # Claude Code layout
         buttons.append(
             [
-                {"text": "📋 Plan mode", "callback_data": "config:pm"},
+                {"text": "📋 Permission mode", "callback_data": "config:pm"},
                 {"text": "❓ Ask mode", "callback_data": "config:aq"},
             ]
         )
@@ -440,6 +494,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
+                {"text": "↪️ Follow-up", "callback_data": "config:fu"},
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
@@ -507,17 +562,22 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(row3)
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
-    # #294: master trigger pause toggle row — only when triggers are configured
-    # for this transport. Sits below the per-engine layout so it doesn't
-    # crowd the existing rows. Label reflects current state.
-    if triggers_has_any:
-        if triggers_paused:
-            tg_label = "▶️ Resume triggers"
-            tg_action = "config:tg:resume"
-        else:
-            tg_label = "⏸ Pause triggers"
-            tg_action = "config:tg:pause"
-        buttons.append([{"text": tg_label, "callback_data": tg_action}])
+    # #296: a ⏰ Triggers navigation button whenever triggers are enabled
+    # (even with none configured, D2 — the page explains how to add one),
+    # next to #294's one-tap pause/resume toggle when any are configured.
+    # No row when [triggers] is disabled (no manager).
+    if ctx.trigger_manager is not None:
+        tg_row = [{"text": "⏰ Triggers", "callback_data": "config:tg"}]
+        if triggers_has_any:
+            if triggers_paused:
+                tg_row.append(
+                    {"text": "▶️ Resume triggers", "callback_data": "config:tg:resume"}
+                )
+            else:
+                tg_row.append(
+                    {"text": "⏸ Pause triggers", "callback_data": "config:tg:pause"}
+                )
+        buttons.append(tg_row)
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -526,7 +586,14 @@ async def _page_home(ctx: CommandContext) -> None:
 # Plan mode
 # ---------------------------------------------------------------------------
 
-_PM_MODES: dict[str, str] = {"on": "plan", "auto": "auto", "off": "acceptEdits"}
+# #741 `pa` is Untether's plan-gate sugar (CLI plan + auto-approved
+# ExitPlanMode); `auto` is now Claude Code's own classifier-gated auto mode.
+_PM_MODES: dict[str, str] = {
+    "on": "plan",
+    "pa": CLAUDE_PLAN_AUTO_MODE,
+    "auto": "auto",
+    "off": "acceptEdits",
+}
 
 _CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
 
@@ -537,7 +604,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         PERMISSION_MODE_SUPPORTED_ENGINES,
-        EngineOverrides,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -570,19 +637,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     if engine == "codex" and action in _CODEX_PM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
         mode_value = _CODEX_PM_MODES[action]
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=mode_value if mode_value != "auto" else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
+        updated = with_override(
+            current, permission_mode=mode_value if mode_value != "auto" else None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
@@ -592,20 +648,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Claude plan mode actions ---
     if engine == "claude" and action in _PM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=_PM_MODES[action],
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=_PM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
         await _page_home(ctx)
@@ -614,20 +657,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Gemini approval mode actions ---
     if engine == "gemini" and action in _GEMINI_AM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=_GEMINI_AM_MODES[action],
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=_GEMINI_AM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode=action)
         await _page_home(ctx)
@@ -635,20 +665,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
 
     if engine == "gemini" and action == "ro":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode="ro")
         await _page_home(ctx)
@@ -657,20 +674,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Clear (all engines) ---
     if action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.permission_mode.cleared", chat_id=chat_id, engine=engine)
         await _page_home(ctx)
@@ -681,29 +685,27 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     pm = override.permission_mode if override else None
 
     if engine == "claude":
-        if pm == "plan":
-            current_label = "on"
-        elif pm == "auto":
-            current_label = "auto"
-        elif pm is not None:
-            current_label = "off"
-        else:
-            current_label = "default"
+        current_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
 
+        # #747: bullets come from the shared table, in button order.
+        bullets = [
+            f"• <b>{CLAUDE_MODE_TEXT[stored].ui_name}</b>{cli_name_suffix(stored)}"
+            f" — {CLAUDE_MODE_TEXT[stored].summary}"
+            for stored in BUTTON_MODES
+        ]
         lines = [
-            "<b>📋 Plan mode</b>",
+            "<b>📋 Permission mode</b>",
             "",
-            "Review and approve each action before it runs.",
+            "How much Claude checks with you before acting.",
             "",
-            "• <b>off</b> — run freely, no approval needed",
-            "• <b>on</b> — ask before every action (safest)",
-            "• <b>auto</b> — approve actions, ask before finalising plans",
+            *bullets,
             "",
-            "ℹ️ <i>Default: uses Claude Code's own permission mode</i>",
+            f"ℹ️ <i>Clear override → {NO_OVERRIDE_LABEL}: {NO_OVERRIDE_TEXT}</i>",
+            f"ℹ️ <i>Changes apply from your next message. {APPLY_TIMING_TEXT}</i>",
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}plan-mode/">Learn more</a>',
+            _learn_more("plan-mode"),
         ]
 
         buttons = [
@@ -719,9 +721,15 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ],
             [
                 {
+                    "text": _check("Plan-auto", active=current_label == "plan-auto"),
+                    "callback_data": "config:pm:pa",
+                },
+                {
                     "text": _check("Auto", active=current_label == "auto"),
                     "callback_data": "config:pm:auto",
                 },
+            ],
+            [
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
             ],
             [{"text": "← Back", "callback_data": "config:home"}],
@@ -733,15 +741,18 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         lines = [
             "<b>📋 Approval policy</b>",
             "",
-            "Control which tools Codex can use.",
-            "Codex runs non-interactively — approval is set before the run.",
+            "Codex runs unattended — it never stops to ask."
+            " This picks its sandbox before the run.",
             "",
-            "• <b>full auto</b> — all tools approved (default)",
-            "• <b>safe</b> — only trusted commands run, untrusted denied",
+            "• <b>full auto</b> — uses your Codex sandbox setting; for a trusted"
+            " project that usually means it can edit files there (default)",
+            "• <b>safe</b> — read-only: Codex can read files and run read-only"
+            " commands; edits, writes and network access are blocked — including"
+            " caches and /tmp, so tests, builds and installs will fail",
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+            _learn_more("interactive-approval", "codex-cli--approval-policy"),
         ]
 
         buttons = [
@@ -780,7 +791,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+            _learn_more("interactive-approval", "gemini-cli--approval-mode"),
         ]
 
         buttons = [
@@ -821,7 +832,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
     setting a budget cap.
     """
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import LOOP_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import LOOP_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -859,21 +870,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
             new_value = False
         else:
             new_value = None
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-            loop_enabled=new_value,
-        )
+        updated = with_override(current, loop_enabled=new_value)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.loop.set", chat_id=chat_id, value=new_value)
         await _page_home(ctx)
@@ -916,7 +913,8 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
         f"subscription quota. A 24h <code>/loop 1m</code> can fire up to "
         f"1440 times. Set a budget in 💰 Cost &amp; usage <i>before</i> "
         f"turning Loop mode on — the same daily cost cap applies to loop "
-        f"fires automatically."
+        f"fires automatically.\n\n"
+        f"{_learn_more('schedule-tasks', 'loop-mode')}"
     )
     buttons = [
         [
@@ -982,7 +980,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}verbose-progress/">Learn more</a>',
+        _learn_more("verbose-progress"),
     ]
 
     is_on = current == "verbose"
@@ -1008,7 +1006,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
 async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1028,18 +1026,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         current_engine, _ = await _resolve_effective_engine(ctx)
         current = await prefs.get_engine_override(chat_id, current_engine)
         if current and current.model:
-            updated = EngineOverrides(
-                model=None,
-                reasoning=current.reasoning,
-                permission_mode=current.permission_mode,
-                ask_questions=current.ask_questions,
-                diff_preview=current.diff_preview,
-                show_api_cost=current.show_api_cost,
-                show_subscription_usage=current.show_subscription_usage,
-                show_resume_line=current.show_resume_line,
-                budget_enabled=current.budget_enabled,
-                budget_auto_cancel=current.budget_auto_cancel,
-            )
+            updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
             logger.info("config.model.cleared", chat_id=chat_id)
         await _page_engine(ctx)
@@ -1075,13 +1062,30 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         f"Model: <b>{model_label}</b>",
         "",
         "Use <code>/model set &lt;name&gt;</code> to choose a model.",
+    ]
+
+    if any(eid in DEPRECATED_ENGINES for eid in available):
+        deprecated_shown = ", ".join(
+            eid for eid in available if eid in DEPRECATED_ENGINES
+        )
+        lines += [
+            "",
+            f"⚠️ <b>{deprecated_shown}</b> — deprecated, no longer supported,"
+            " may be removed in a future release. Prefer another engine.",
+        ]
+
+    lines += [
         "",
-        f'📖 <a href="{_DOCS_BASE}switch-engines/">Learn more</a>',
+        f'📖 <a href="{_help_url("switch-engines")}">Engines</a>'
+        f' · <a href="{_help_url("model-reasoning")}">Models</a>',
     ]
 
     engine_buttons = [
         {
-            "text": _check(eid, active=current == eid),
+            "text": _check(
+                f"{eid} ⚠️" if eid in DEPRECATED_ENGINES else eid,
+                active=current == eid,
+            ),
             "callback_data": f"config:ag:{eid}",
         }
         for eid in available
@@ -1152,7 +1156,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}group-chat/">Learn more</a>',
+        _learn_more("group-chat", "set-listen-mode-for-groups"),
     ]
 
     buttons = [
@@ -1176,6 +1180,100 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Follow-up mode (#775): queue vs steer for messages sent during a live run
+# ---------------------------------------------------------------------------
+
+
+def _followup_default() -> str:
+    """The ``[transports.telegram] followup_mode`` default (``queue``)."""
+    try:
+        from ...settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is not None:
+            return result[0].transports.telegram.followup_mode
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    return "queue"
+
+
+async def _page_followup(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>↪️ Follow-up mode</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    if action in {"q", "s"}:
+        mode = "steer" if action == "s" else "queue"
+        await prefs.set_followup_mode(chat_id, mode)
+        logger.info("config.followup.set", chat_id=chat_id, mode=mode)
+        await _page_home(ctx)
+        return
+    if action == "clr":
+        await prefs.clear_followup_mode(chat_id)
+        logger.info("config.followup.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
+
+    current = await prefs.get_followup_mode(chat_id)
+    default = _followup_default()
+    effective = current or default
+    source = "chat" if current is not None else "default"
+    current_engine, _label = await _resolve_effective_engine(ctx)
+
+    lines = [
+        "<b>↪️ Follow-up mode</b>",
+        "",
+        "What a message sent while Claude is working does.",
+        "",
+        "• <b>queue</b> — waits for the current turn to finish, then runs (default)",
+        "• <b>steer</b> — goes straight into the running turn; Claude picks it "
+        "up at its next step",
+        "",
+        "One-off: <code>/steer &lt;text&gt;</code> or "
+        "<code>/queue &lt;text&gt;</code>. Files, albums and forwards always "
+        "queue.",
+        "",
+        f"Current: <b>{effective}</b> ({source})",
+    ]
+    if current_engine != "claude":
+        lines += [
+            "",
+            f"⚠️ Steer is Claude Code only — <b>{current_engine}</b> runs "
+            "always queue follow-ups.",
+        ]
+    lines += ["", _learn_more("steer-follow-ups")]
+
+    buttons = [
+        [
+            {
+                "text": _check("Queue", active=effective == "queue"),
+                "callback_data": "config:fu:q",
+            },
+            {
+                "text": _check("Steer", active=effective == "steer"),
+                "callback_data": "config:fu:s",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:fu:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
@@ -1187,7 +1285,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
     The ``clr`` action is still handled here, then redirects to engine page.
     """
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     if action == "clr":
         config_path = ctx.config_path
@@ -1196,20 +1294,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             chat_id = ctx.message.channel_id
             current_engine, _ = await _resolve_effective_engine(ctx)
             current = await prefs.get_engine_override(chat_id, current_engine)
-            updated = EngineOverrides(
-                model=None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=current.permission_mode if current else None,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
             logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
         await _page_engine(ctx)
@@ -1223,8 +1308,9 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
 # Reasoning
 # ---------------------------------------------------------------------------
 
+# #416: no `min` — Codex `minimal` is retired. A stale `config:rs:min` from a
+# pre-upgrade message falls through to the page render (nothing persisted).
 _RS_ACTIONS: dict[str, str] = {
-    "min": "minimal",
     "low": "low",
     "med": "medium",
     "hi": "high",
@@ -1235,13 +1321,30 @@ _RS_ACTIONS: dict[str, str] = {
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
 
 
+def _effective_reasoning(
+    engine: str, stored: str | None
+) -> tuple[str | None, str | None]:
+    """#416: ``(effective, ignored)`` for a stored reasoning level.
+
+    A level the engine no longer allows runs on the engine default, so it is
+    shown as the default with the ignored value named alongside.
+    """
+    from ..engine_overrides import allowed_reasoning_levels, supports_reasoning
+
+    if not stored:
+        return None, None
+    if supports_reasoning(engine) and stored not in allowed_reasoning_levels(engine):
+        return None, stored
+    return stored, None
+
+
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
-        EngineOverrides,
         allowed_reasoning_levels,
         get_reasoning_label,
         supports_reasoning,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -1277,51 +1380,25 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
                 "config.reasoning.unsupported_level",
                 chat_id=chat_id,
                 engine=current_engine,
-                level=level,
+                reasoning_level=level,
                 allowed=sorted(allowed),
             )
             await _page_home(ctx)
             return
         current = await prefs.get_engine_override(chat_id, current_engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=level,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, reasoning=level)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
             "config.reasoning.set",
             chat_id=chat_id,
             engine=current_engine,
-            level=level,
+            reasoning_level=level,
         )
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, current_engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, reasoning=None)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
         await _page_home(ctx)
@@ -1330,9 +1407,13 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     from ..engine_overrides import get_engine_default_reasoning
 
     override = await prefs.get_engine_override(chat_id, current_engine)
-    reasoning = override.reasoning if override else None
+    reasoning, ignored = _effective_reasoning(
+        current_engine, override.reasoning if override else None
+    )
     if reasoning:
         current_label = reasoning
+    elif ignored:
+        current_label = f"default ({ignored} not supported \N{EM DASH} ignored)"
     else:
         engine_default = get_engine_default_reasoning(current_engine)
         current_label = f"default ({engine_default})" if engine_default else "default"
@@ -1340,8 +1421,6 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     levels = allowed_reasoning_levels(current_engine)
 
     level_descriptions: list[str] = []
-    if "minimal" in levels:
-        level_descriptions.append("• <b>minimal</b> — fastest responses")
     if "low" in levels or "medium" in levels or "high" in levels:
         present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
         level_descriptions.append(f"• {' · '.join(present)} — balanced options")
@@ -1368,12 +1447,11 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         f"Engine: <b>{current_engine}</b>",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}model-reasoning/">Learn more</a>',
+        _learn_more("model-reasoning", "set-reasoning-level"),
     ]
 
     # Build level buttons dynamically based on engine
     _LEVEL_BUTTON_MAP: dict[str, tuple[str, str]] = {
-        "minimal": ("Minimal", "min"),
         "low": ("Low", "low"),
         "medium": ("Medium", "med"),
         "high": ("High", "hi"),
@@ -1410,7 +1488,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1438,60 +1516,21 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
 
     if action == "on":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=True,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=True)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=False,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=False)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.cleared", chat_id=chat_id)
         await _page_home(ctx)
@@ -1517,7 +1556,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+        _learn_more("interactive-approval", "answering-questions"),
     ]
 
     buttons = [
@@ -1537,7 +1576,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1565,60 +1604,21 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
     if action == "on":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=True,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=True)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=False,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=False)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.cleared", chat_id=chat_id)
         await _page_home(ctx)
@@ -1644,7 +1644,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}interactive-approval/">Learn more</a>',
+        _learn_more("interactive-approval", "diff-previews"),
     ]
 
     buttons = [
@@ -1672,7 +1672,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
-        EngineOverrides,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -1699,7 +1699,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
                 "<b>💰 Cost & usage</b>\n\n"
                 f"Not available for <b>{current_engine}</b>.\n"
                 "API cost works with Claude Code and OpenCode.\n"
-                "Subscription usage works with Claude Code."
+                "Subscription usage works with Claude Code.\n"
+                "Send /usage for this chat's last-session token totals."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
@@ -1727,15 +1728,10 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             bc_val = {"on": True, "off": False, "clr": None}[act]
             logger.info("config.budget_auto_cancel.set", chat_id=chat_id, value=bc_val)
 
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
+        updated = with_override(
+            current,
             show_api_cost=ac_val,
             show_subscription_usage=su_val,
-            show_resume_line=current.show_resume_line if current else None,
             budget_enabled=bg_val,
             budget_auto_cancel=bc_val,
         )
@@ -1747,6 +1743,17 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     override = await prefs.get_engine_override(chat_id, current_engine)
     ac = override.show_api_cost if override else None
     su = override.show_subscription_usage if override else None
+    # Unset per-chat values fall back to ``[footer]``, as on the home page.
+    from ...settings import FooterSettings
+    from ...settings import load_settings_if_exists as _load_footer_cfg
+
+    try:
+        _footer_result = _load_footer_cfg()
+        footer_cfg = _footer_result[0].footer if _footer_result else FooterSettings()
+    except (OSError, ValueError, KeyError):
+        footer_cfg = FooterSettings()
+    ac_default = footer_cfg.show_api_cost
+    su_default = footer_cfg.show_subscription_usage
 
     lines = [
         "<b>💰 Cost & usage</b>",
@@ -1754,13 +1761,13 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     ]
 
     if has_api_cost:
-        ac_label = "on" if ac is True else ("off" if ac is False else "on")
+        ac_label = "on" if (ac if ac is not None else ac_default) else "off"
         lines.append(f"<b>API cost</b>: {ac_label}")
         lines.append("  Show cost, tokens, and time after each task.")
         lines.append("")
 
     if has_sub_usage:
-        su_label = "on" if su is True else "off"
+        su_label = "on" if (su if su is not None else su_default) else "off"
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
         lines.append("")
@@ -1797,16 +1804,18 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             if bc is True
             else ("off" if bc is False else ("on" if global_ac else "off"))
         )
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
     else:
         bg_label = "on" if bg is True else "off"
         bc_label = "on" if bc is True else "off"
         lines.append(f"  Enabled: {bg_label}")
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
+    # #896: say exactly what the toggle does — and what it can't.
+    lines.append(f"  {_STOP_AT_LIMIT_HELP}")
     lines.append("  Set limits in untether.toml [cost_budget] section.")
     lines.append("")
 
-    lines.append(f'📖 <a href="{_DOCS_BASE}cost-budgets/">Learn more</a>')
+    lines.append(_learn_more("cost-budgets"))
 
     # Determine budget defaults from global config
     budget_default_enabled = budget_cfg.enabled if budget_cfg is not None else False
@@ -1819,7 +1828,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             _toggle_row(
                 "Cost",
                 current=ac,
-                default=True,
+                default=ac_default,
                 on_data="config:cu:ac_on",
                 off_data="config:cu:ac_off",
                 clr_data="config:cu:ac_clr",
@@ -1832,7 +1841,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             _toggle_row(
                 "Sub",
                 current=su,
-                default=False,
+                default=su_default,
                 on_data="config:cu:su_on",
                 off_data="config:cu:su_off",
                 clr_data="config:cu:su_clr",
@@ -1853,7 +1862,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     )
     buttons.append(
         _toggle_row(
-            "Auto-cancel",
+            _STOP_AT_LIMIT,
             current=bc,
             default=budget_default_ac,
             on_data="config:cu:bc_on",
@@ -1875,7 +1884,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
 async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1893,20 +1902,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
     if action in ("on", "off", "clr"):
         current = await prefs.get_engine_override(chat_id, current_engine)
         new_val = {"on": True, "off": False, "clr": None}[action]
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=new_val,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, show_resume_line=new_val)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.resume_line.set", chat_id=chat_id, value=new_val)
         await _page_home(ctx)
@@ -1941,7 +1937,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         "Reply to continue in Telegram, or copy-paste into your",
         "terminal to pick up the session in CLI.",
         "",
-        f'📖 <a href="{_DOCS_BASE}conversation-modes/">Learn more</a>',
+        _learn_more("conversation-modes", "resume-lines-in-chat-mode"),
     ]
 
     buttons = [
@@ -1976,14 +1972,14 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
         f"Version: <b>{__version__}</b>",
     ]
 
-    versions_line = _build_versions_line(tuple(ctx.runtime.engine_ids))
+    versions_line = await _build_versions_line(tuple(ctx.runtime.engine_ids))
     if versions_line:
         lines.append(f"<code>{versions_line}</code>")
 
     lines.append("")
     lines.append(
         f'🔗 <a href="{_REPO_URL}">GitHub</a>'
-        f' · <a href="{_REPO_URL}/issues/new?template=bug_report.yml">Report a bug</a>'
+        f' · <a href="{_BUG_REPORT_URL}">Report a bug</a>'
         f' · <a href="{_REPO_URL}/issues/new?template=feature_request.yml">Feature request</a>'
     )
 
@@ -2030,8 +2026,9 @@ def _truncate_field(value: str | None, limit: int = 24) -> str:
 async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None:
     """Triggers control + per-chat visibility page.
 
-    Lives on its own ``/config`` page distinct from ``/config → 📡 Trigger``
-    (which is the listen-mode all/mentions chat-routing setting). Pause/resume
+    Lives on its own ``/config`` page distinct from ``/config → 📡 Listen``
+    (the all/mentions chat-routing setting, renamed from Trigger in #297).
+    Reached from the ``⏰ Triggers`` home button (#296). Pause/resume
     is the master kill-switch (#294). Below the controls, when triggers are
     configured for the current chat, the page lists each cron and webhook
     with its schedule/path, project, engine, and last-fired timestamp (#271
@@ -2047,7 +2044,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
     if mgr is None:
         await _respond(
             ctx,
-            "<b>⏰ Triggers</b>\n\nUnavailable (transport has no trigger support).",
+            "<b>⏰ Triggers</b>\n\nUnavailable: set <code>[triggers] enabled = true</code>"
+            " in <code>untether.toml</code> and restart to use crons and webhooks.\n\n"
+            + _learn_more("webhooks-and-cron"),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2079,7 +2078,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             "No crons or webhooks configured.",
             "",
             "Add <code>[[triggers.crons]]</code> or <code>[[triggers.webhooks]]</code> "
-            "entries to <code>untether.toml</code> — see the trigger docs.",
+            "entries to <code>untether.toml</code>.",
         ]
     else:
         if is_paused:
@@ -2087,8 +2086,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                 "Status: <b>⏸ paused</b>",
                 "",
                 "Crons and webhooks are temporarily suspended.",
-                f"<code>{cron_count}</code> cron · "
-                f"<code>{webhook_count}</code> webhook",
+                f"<code>{cron_count}</code> cron{'s' if cron_count != 1 else ''} · "
+                f"<code>{webhook_count}</code> "
+                f"webhook{'s' if webhook_count != 1 else ''}",
                 "",
                 "Pause is in-memory only — triggers auto-resume on restart.",
             ]
@@ -2096,8 +2096,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             lines += [
                 "Status: <b>active</b>",
                 "",
-                f"<code>{cron_count}</code> cron · "
-                f"<code>{webhook_count}</code> webhook",
+                f"<code>{cron_count}</code> cron{'s' if cron_count != 1 else ''} · "
+                f"<code>{webhook_count}</code> "
+                f"webhook{'s' if webhook_count != 1 else ''}",
             ]
 
         # #271 Tier 2: per-chat trigger list. Only render when we can scope
@@ -2119,10 +2120,22 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                         cron.schedule, cron.timezone or default_tz
                     )
                     last = _format_trigger_relative(get_last_fired(cron.id))
+                    # #743: free-form, so escaped (only shown when set).
+                    model_seg = (
+                        f"model=<i>{html.escape(_truncate_field(cron.model))}</i> · "
+                        if cron.model
+                        else ""
+                    )
+                    effort_seg = (
+                        f"effort=<i>{html.escape(cron.reasoning)}</i> · "
+                        if cron.reasoning
+                        else ""
+                    )
                     lines.append(
                         f"<code>{cron.id}</code> · {schedule_text} · "
                         f"proj=<i>{_truncate_field(cron.project)}</i> · "
                         f"eng=<i>{_truncate_field(cron.engine)}</i> · "
+                        f"{model_seg}{effort_seg}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_crons) - _TRIGGER_LIST_CAP
@@ -2147,6 +2160,8 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     lines.append(
                         f"…and {overflow} more (see <code>untether.toml</code>)"
                     )
+
+    lines += ["", _learn_more("webhooks-and-cron")]
 
     buttons: list[list[dict[str, str]]] = []
     if has_any:
@@ -2182,6 +2197,7 @@ _PAGES: dict[str, object] = {
     "vb": _page_verbose,
     "ag": _page_engine,
     "tr": _page_trigger,
+    "fu": _page_followup,
     "tg": _page_triggers,
     "md": _page_model,
     "rs": _page_reasoning,
@@ -2202,8 +2218,14 @@ class ConfigCommand:
     answer_early = True
 
     @staticmethod
-    def early_answer_toast(args_text: str) -> str | None:
-        """Return a confirmation toast for toggle actions, None for navigation."""
+    def early_answer_toast(
+        args_text: str, *, channel_id: int | None = None
+    ) -> str | None:
+        """Return a confirmation toast for toggle actions, None for navigation.
+
+        ``channel_id`` is accepted for the shared hook signature (#715);
+        this toast is derived from the callback data alone.
+        """
         parts = args_text.split(":")
         if len(parts) < 2:
             return None  # Home page navigation
@@ -2213,9 +2235,10 @@ class ConfigCommand:
             return None  # Sub-page navigation only
         _TOAST_LABELS: dict[str, dict[str, str]] = {
             "pm": {
-                "on": "Plan mode: on",
-                "off": "Plan mode: off",
-                "auto": "Plan mode: auto",
+                "on": "Permission mode: on (plan)",
+                "off": "Permission mode: off (acceptEdits)",
+                "pa": "Permission mode: plan-auto",
+                "auto": "Permission mode: auto",
                 "clr": "Permission mode: cleared",
                 "fa": "Approval policy: full auto",
                 "ya": "Approval mode: full access",
@@ -2234,13 +2257,17 @@ class ConfigCommand:
                 "men": "Listen: mentions",
                 "clr": "Listen: cleared",
             },
+            "fu": {
+                "q": "Follow-up: queue",
+                "s": "Follow-up: steer",
+                "clr": "Follow-up: cleared",
+            },
             "tg": {
                 "pause": "⏸ Triggers paused",
                 "resume": "▶️ Triggers resumed",
             },
             "md": {"clr": "Model: cleared"},
             "rs": {
-                "min": "Reasoning: minimal",
                 "low": "Reasoning: low",
                 "med": "Reasoning: medium",
                 "hi": "Reasoning: high",
@@ -2268,9 +2295,9 @@ class ConfigCommand:
                 "bg_on": "Budget: on",
                 "bg_off": "Budget: off",
                 "bg_clr": "Budget: cleared",
-                "bc_on": "Auto-cancel: on",
-                "bc_off": "Auto-cancel: off",
-                "bc_clr": "Auto-cancel: cleared",
+                "bc_on": f"{_STOP_AT_LIMIT}: on",
+                "bc_off": f"{_STOP_AT_LIMIT}: off",
+                "bc_clr": f"{_STOP_AT_LIMIT}: cleared",
             },
             "rl": {
                 "on": "Resume line: on",

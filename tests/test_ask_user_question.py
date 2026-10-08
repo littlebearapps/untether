@@ -11,6 +11,7 @@ from untether.events import EventFactory
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
+    _ANSWERED_ASK_FLOWS,
     _ASK_QUESTION_FLOWS,
     _HANDLED_REQUESTS,
     _PENDING_ASK_REQUESTS,
@@ -20,12 +21,14 @@ from untether.runners.claude import (
     ENGINE,
     AskQuestionState,
     ClaudeStreamState,
+    _record_answered_ask_flow,
     answer_ask_question,
     answer_ask_question_with_options,
     format_question_message,
     get_ask_question_flow,
     get_pending_ask_request,
     get_question_option_buttons,
+    recently_answered_ask_flow,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -82,6 +85,7 @@ def _clear_registries():
     _HANDLED_REQUESTS.clear()
     _PENDING_ASK_REQUESTS.clear()
     _ASK_QUESTION_FLOWS.clear()
+    _ANSWERED_ASK_FLOWS.clear()
 
 
 # ===========================================================================
@@ -489,6 +493,79 @@ def test_format_question_message_multi() -> None:
     assert "2 of 2" in format_question_message(flow)
 
 
+# ---------------------------------------------------------------------------
+# #713 — HTML escaping at the parse_mode="HTML" boundary
+# ---------------------------------------------------------------------------
+
+
+def test_format_question_message_html_escapes_agent_tags() -> None:
+    """An agent-authored tag must not reach Telegram's HTML parser raw.
+
+    Live repro (nsd 0.35.5rc4): a question containing a literal ``<svg>``
+    produced ``400 Bad Request: can't parse entities: Unsupported start tag
+    "svg"``, which dropped a keyboard-carrying edit and left the run
+    unanswerable from Telegram.
+    """
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Guard a blank line inside an inline `<svg>`?"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert "&lt;svg&gt;" in msg
+    assert "<svg>" not in msg
+
+
+def test_format_question_message_html_escapes_ampersand() -> None:
+    """A bare ``&`` is equally fatal to Telegram's HTML parser."""
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Ship A & B, or just <b>A</b>?"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert "&amp;" in msg
+    assert "&lt;b&gt;A&lt;/b&gt;" in msg
+    # Quotes are legal in HTML text content — escaping them would surface
+    # literal &quot; to the user, so they are deliberately left alone.
+    assert "&quot;" not in format_question_message(
+        AskQuestionState(
+            request_id="req-713b",
+            channel_id=CHAT_A,
+            questions=[{"question": 'Use "double" quotes?'}],
+        ),
+        escape_html=True,
+    )
+
+
+def test_format_question_message_default_stays_raw() -> None:
+    """The default must NOT escape — it feeds the markdown/entities path.
+
+    ``advance_ask_action_model`` stores this string as the progress action
+    title, which is rendered via ``render_markdown`` (markdown-it with
+    ``html: False`` already neutralises tags). Escaping here too would
+    double-escape and show the user a literal ``&lt;svg&gt;``.
+    """
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "Guard an inline `<svg>`?"}],
+    )
+    assert "<svg>" in format_question_message(flow)
+    assert "&lt;" not in format_question_message(flow)
+
+
+def test_format_question_message_html_keeps_multi_question_prefix() -> None:
+    """Escaping applies to agent text only, never the bot-authored prefix."""
+    flow = AskQuestionState(
+        request_id="req-713",
+        channel_id=CHAT_A,
+        questions=[{"question": "<one>"}, {"question": "<two>"}],
+    )
+    msg = format_question_message(flow, escape_html=True)
+    assert msg == "❓ Question 1 of 2: &lt;one&gt;"
+
+
 def test_get_question_option_buttons() -> None:
     flow = AskQuestionState(
         request_id="req-1",
@@ -816,8 +893,13 @@ async def test_send_next_ask_question_message_no_thread() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_command_ctx(args_text: str):
-    """Build a minimal CommandContext-like mock for AskQuestionCommand.handle tests."""
+def _make_command_ctx(args_text: str, *, channel_id: int = CHAT_A):
+    """Build a minimal CommandContext-like mock for AskQuestionCommand.handle tests.
+
+    #715: ``ctx.message.channel_id`` must be a real int — the handler now
+    scopes its flow lookup by it, and a bare ``MagicMock`` attribute would
+    silently match no flow.
+    """
     from unittest.mock import MagicMock
 
     ctx = MagicMock()
@@ -825,6 +907,7 @@ def _make_command_ctx(args_text: str):
     ctx.executor = AsyncMock()
     ctx.executor.edit = AsyncMock(return_value=None)
     ctx.message = MagicMock()
+    ctx.message.channel_id = channel_id
     return ctx
 
 
@@ -995,3 +1078,598 @@ async def test_550_multi_question_edits_twice(monkeypatch) -> None:
     assert ctx2.executor.edit.await_count == 1
     cleared_msg = ctx2.executor.edit.await_args[0][1]
     assert cleared_msg.extra["reply_markup"]["inline_keyboard"] == []
+
+
+# ---------------------------------------------------------------------------
+# #698 — a late option tap after the flow is torn down
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_698_late_tap_reports_already_answered(monkeypatch) -> None:
+    """#698: #550's keyboard strip is an async outbox edit issued *after* the
+    flow is torn down, so a tap landing in the gap (1s on nsd, wider in a busy
+    group chat) hit ``flow is None`` — WARNING plus a success toast for a tap
+    that did nothing. The answered flow is now remembered briefly, so the late
+    tap resolves to a truthful "Already answered".
+    """
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-698-a",
+        channel_id=CHAT_A,
+        questions=[{"question": "Q1", "options": [{"label": "A"}, {"label": "B"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    _ACTIVE_RUNNERS["sess-698a"] = (AsyncMock(), 0.0)
+    _REQUEST_TO_SESSION[flow.request_id] = "sess-698a"
+
+    ctx = _make_command_ctx("opt:0")
+    with capture_logs() as logs:
+        first = await cmd_mod.AskQuestionCommand().handle(ctx)
+        # The user taps a second option before the keyboard-clear edit lands.
+        late = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:1"))
+
+    assert first is not None and "Answers sent" in first.text
+    assert late is not None
+    assert late.text == "Already answered"
+
+    assert [r for r in logs if r.get("event") == "ask_question.flow_missing"] == []
+    already = [
+        r for r in logs if r.get("event") == "ask_question.flow_already_answered"
+    ]
+    assert len(already) == 1
+    assert already[0]["log_level"] == "info"
+    assert already[0]["action"] == "opt"
+    assert already[0]["request_id"] == "req-698-a"
+
+
+@pytest.mark.anyio
+async def test_698_late_tap_toast_is_truthful() -> None:
+    """The early-answer toast fires before ``handle`` runs, so it is the only
+    thing the user sees on a late tap. It must not claim "Selected" for a tap
+    that did nothing (same user-visible defect as #685)."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    backend = cmd_mod.AskQuestionCommand()
+    assert backend.early_answer_toast("opt:0") == "Selected"
+
+    _record_answered_ask_flow("req-698-b", CHAT_A)
+    assert backend.early_answer_toast("opt:0") == "Already answered"
+    assert backend.early_answer_toast("other") == "Already answered"
+
+
+@pytest.mark.anyio
+async def test_698_unknown_tap_still_warns() -> None:
+    """A tap with no flow and no recent answer is genuinely unexplained — keep
+    the WARNING so it stays visible in warn-level triage."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    with capture_logs() as logs:
+        result = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert result is not None
+    assert result.text == "No active question"
+    missing = [r for r in logs if r.get("event") == "ask_question.flow_missing"]
+    assert len(missing) == 1
+    assert missing[0]["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_698_answered_flow_recorded_with_channel() -> None:
+    """``answer_ask_question_with_options`` records the answered flow, scoped by
+    channel so a late tap in one chat cannot claim another chat's answer."""
+    flow = AskQuestionState(
+        request_id="req-698-c",
+        channel_id=CHAT_A,
+        questions=[{"question": "Q1", "options": [{"label": "A"}]}],
+        answers={"Q1": "A"},
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    mock_runner = AsyncMock()
+    mock_runner.write_control_response.return_value = True
+    _ACTIVE_RUNNERS["sess-698c"] = (mock_runner, 0.0)
+    _REQUEST_TO_SESSION[flow.request_id] = "sess-698c"
+
+    assert await answer_ask_question_with_options(flow.request_id) is True
+
+    assert recently_answered_ask_flow(CHAT_A) == "req-698-c"
+    assert recently_answered_ask_flow(CHAT_B) is None
+    assert recently_answered_ask_flow() == "req-698-c"
+
+
+def test_698_answered_memo_expires_and_is_bounded(monkeypatch) -> None:
+    """The memo is TTL-pruned (a tap hours later is not "recently answered")
+    and hard-capped so a long-lived process cannot accumulate entries."""
+    import untether.runners.claude as claude_mod
+
+    fake_now = 1000.0
+    monkeypatch.setattr(claude_mod.time, "monotonic", lambda: fake_now)
+
+    _record_answered_ask_flow("req-ttl", CHAT_A)
+    assert recently_answered_ask_flow(CHAT_A) == "req-ttl"
+
+    fake_now += claude_mod.ANSWERED_ASK_FLOW_TTL_S + 1.0
+    assert recently_answered_ask_flow(CHAT_A) is None
+
+    for i in range(claude_mod._ANSWERED_ASK_FLOWS_MAX + 10):
+        _record_answered_ask_flow(f"req-{i}", CHAT_A)
+    assert len(_ANSWERED_ASK_FLOWS) <= claude_mod._ANSWERED_ASK_FLOWS_MAX
+    # Oldest evicted first, newest retained.
+    assert "req-0" not in _ANSWERED_ASK_FLOWS
+    assert f"req-{claude_mod._ANSWERED_ASK_FLOWS_MAX + 9}" in _ANSWERED_ASK_FLOWS
+
+
+# ---------------------------------------------------------------------------
+# #709 — the heartbeat re-render must not clobber the in-place question edit
+# ---------------------------------------------------------------------------
+
+
+def _tracked_ask_action(request_id: str, *, title: str, buttons):
+    """Build a ProgressTracker holding one AskUserQuestion control action and
+    bind it the way ProgressEdits.on_event does."""
+    from untether.model import Action, ActionEvent
+    from untether.progress import ProgressTracker
+    from untether.runner_bridge import register_ask_action_model
+
+    tracker = ProgressTracker(engine="claude")
+    action = Action(
+        id="claude.control.1",
+        kind="warning",
+        title=title,
+        detail={
+            "request_id": request_id,
+            "request_type": "can_use_tool",
+            "ask_flow": True,
+            "inline_keyboard": {"buttons": buttons},
+        },
+    )
+    tracker.note_event(
+        ActionEvent(engine="claude", action=action, phase="started", ok=None)
+    )
+    register_ask_action_model(request_id, tracker, "claude.control.1")
+    return tracker
+
+
+def _rendered_keyboard(tracker):
+    """The buttons the progress renderer's newest-first scan would emit."""
+    for action_state in reversed(tracker.snapshot().actions):
+        if action_state.completed:
+            continue
+        kb = action_state.action.detail.get("inline_keyboard")
+        if kb and isinstance(kb, dict) and "buttons" in kb:
+            return [row[0]["text"] for row in kb["buttons"]]
+    return None
+
+
+@pytest.mark.anyio
+async def test_709_answering_q1_advances_the_tracked_action(monkeypatch) -> None:
+    """#709: answering Q1 edits the message to Q2 — the tracked action must
+    move with it, or the next 30s heartbeat re-renders Q1's title and Q1's
+    option labels over the top while Q2 is outstanding."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-a",
+        channel_id=CHAT_A,
+        questions=[
+            {
+                "question": "QA colour?",
+                "options": [{"label": "Red"}, {"label": "Blue"}],
+            },
+            {
+                "question": "QA size?",
+                "options": [{"label": "Small"}, {"label": "Large"}],
+            },
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Question 1 of 2: QA colour?",
+        buttons=[
+            [{"text": "Red", "callback_data": "aq:opt:0"}],
+            [{"text": "Blue", "callback_data": "aq:opt:1"}],
+            [{"text": "Other (type reply)", "callback_data": "aq:other"}],
+        ],
+    )
+    # Pre-condition: the model is showing Q1.
+    assert _rendered_keyboard(tracker) == ["Red", "Blue", "Other (type reply)"]
+
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    # Post-condition: the model is showing Q2 — so a heartbeat re-render is a
+    # no-op instead of the regression this issue reported.
+    action = tracker.snapshot().actions[0].action
+    assert action.title == "❓ Question 2 of 2: QA size?"
+    assert _rendered_keyboard(tracker) == ["Small", "Large", "Other (type reply)"]
+
+
+@pytest.mark.anyio
+async def test_709_final_answer_drops_the_keyboard_from_the_model(
+    monkeypatch,
+) -> None:
+    """The #550 keyboard strip becomes a model change, so a heartbeat landing
+    mid-teardown cannot repaint the answered question's buttons."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Only?",
+        buttons=[[{"text": "A", "callback_data": "aq:opt:0"}]],
+    )
+
+    async def _fake_answer(rid: str) -> bool:
+        _ASK_QUESTION_FLOWS.pop(rid, None)
+        return True
+
+    monkeypatch.setattr(
+        "untether.runners.claude.answer_ask_question_with_options", _fake_answer
+    )
+
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert _rendered_keyboard(tracker) is None
+    assert tracker.snapshot().actions[0].action.title == "✅ All questions answered"
+
+
+@pytest.mark.anyio
+async def test_709_untracked_flow_still_edits(monkeypatch) -> None:
+    """No registry entry (e.g. a non-Claude presenter path) must degrade to the
+    plain edit, never raise."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-709-c",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Q1", "options": [{"label": "A"}]},
+            {"question": "Q2", "options": [{"label": "B"}]},
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    ctx = _make_command_ctx("opt:0")
+    assert await cmd_mod.AskQuestionCommand().handle(ctx) is None
+    assert ctx.executor.edit.await_count == 1
+
+
+def test_709_claude_marks_ask_actions_with_ask_flow() -> None:
+    """The bridge binds on ``detail["ask_flow"]`` — set only when an
+    AskQuestionState was created, i.e. when the `aq` handler drives the
+    action. ``ask_question`` alone is absent when extraction yields "".
+    """
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-709-d",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [{"question": "Pick?", "options": [{"label": "A"}]}]
+                },
+            },
+        }
+    )
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+    detail = events[-1].action.detail
+    assert detail["ask_flow"] is True
+    assert detail["request_id"] == "req-709-d"
+
+
+# ---------------------------------------------------------------------------
+# #710 — concurrent taps on the final option must not IndexError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_710_concurrent_final_taps_do_not_raise(monkeypatch) -> None:
+    """#710: callback A increments the index then suspends on the answer
+    await; callback B lands inside that window and read
+    ``flow.questions[flow.current_index]`` unguarded → IndexError, surfacing
+    as an ERROR traceback (`callback.failed`, a watcher-tracked signature)
+    plus a failure toast for an action that in fact succeeded."""
+    import anyio
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-710-a",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}, {"label": "B"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    gate = anyio.Event()
+
+    async def _slow_answer(rid: str) -> bool:
+        # Hold the flow alive inside the await, exactly as the real control
+        # response does while it round-trips to the subprocess.
+        await gate.wait()
+        _ASK_QUESTION_FLOWS.pop(rid, None)
+        return True
+
+    monkeypatch.setattr(
+        "untether.runners.claude.answer_ask_question_with_options", _slow_answer
+    )
+
+    results: list[object] = []
+
+    async def _tap(args_text: str) -> None:
+        results.append(
+            await cmd_mod.AskQuestionCommand().handle(_make_command_ctx(args_text))
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_tap, "opt:0")
+        await anyio.lowlevel.checkpoint()  # let A reach the await
+        tg.start_soon(_tap, "opt:1")
+        await anyio.lowlevel.checkpoint()
+        gate.set()
+
+    texts = [getattr(r, "text", None) for r in results]
+    assert "Already answered" in texts
+    assert any(t and "Answers sent" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_710_out_of_range_index_reports_already_answered() -> None:
+    """The bounds check reuses #698's vocabulary, so both orderings of a
+    double-tap produce the same truthful outcome."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-710-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Only?", "options": [{"label": "A"}]}],
+        current_index=1,  # already past the end
+        answers={"Only?": "A"},
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+
+    with capture_logs() as logs:
+        result = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:0"))
+
+    assert result is not None
+    assert result.text == "Already answered"
+    already = [
+        r for r in logs if r.get("event") == "ask_question.flow_already_answered"
+    ]
+    assert len(already) == 1
+    assert already[0]["log_level"] == "info"
+    assert already[0]["request_id"] == "req-710-b"
+
+
+# ---------------------------------------------------------------------------
+# #713 — the two call sites must escape, and only at the HTML boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_713_in_place_edit_escapes_but_model_title_stays_raw() -> None:
+    """The in-place Q2 edit is sent with ``parse_mode="HTML"``, so its text
+    must be escaped — while the SAME string stored on the tracked action
+    (#709) must stay raw, because that one renders through
+    ``render_markdown``. Escaping both would show a literal ``&lt;svg&gt;``.
+    """
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-713-a",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Q1?", "options": [{"label": "A"}, {"label": "B"}]},
+            {
+                "question": "Guard a blank line inside an inline `<svg>`?",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            },
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow.request_id] = flow
+    tracker = _tracked_ask_action(
+        flow.request_id,
+        title="❓ Question 1 of 2: Q1?",
+        buttons=[[{"text": "A", "callback_data": "aq:opt:0"}]],
+    )
+
+    ctx = _make_command_ctx("opt:0")
+    await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    # The wire message: escaped, because parse_mode is HTML.
+    assert ctx.executor.edit.await_count == 1
+    sent = ctx.executor.edit.await_args[0][1]
+    assert sent.extra["parse_mode"] == "HTML"
+    assert "&lt;svg&gt;" in sent.text
+    assert "<svg>" not in sent.text
+
+    # The progress model: raw, because it renders through markdown.
+    assert "<svg>" in tracker.snapshot().actions[0].action.title
+
+
+@pytest.mark.anyio
+async def test_713_send_next_question_escapes() -> None:
+    """The "Other → typed reply" continuation path sends (not edits) the next
+    question under ``parse_mode="HTML"`` and needs the same escaping."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow = AskQuestionState(
+        request_id="req-713-b",
+        channel_id=CHAT_A,
+        questions=[{"question": "Ship <b>A</b> & B?", "options": [{"label": "Yes"}]}],
+    )
+    transport = AsyncMock()
+
+    await cmd_mod.send_next_ask_question_message(
+        transport,
+        chat_id=CHAT_A,
+        user_msg_id=1,
+        thread_id=None,
+        flow=flow,
+    )
+
+    assert transport.send.await_count == 1
+    message = transport.send.await_args.kwargs["message"]
+    assert message.extra["parse_mode"] == "HTML"
+    assert "&lt;b&gt;A&lt;/b&gt;" in message.text
+    assert "&amp;" in message.text
+
+
+# ── #715: option taps must be channel-scoped ──
+
+
+@pytest.mark.anyio
+async def test_715_option_tap_answers_its_own_chats_flow(monkeypatch) -> None:
+    """Two concurrent AskUserQuestion flows in different chats; a tap in the
+    SECOND chat must answer the second flow and leave the first untouched.
+
+    Before the fix the handler called ``get_ask_question_flow()`` with no
+    scope, and the resolver returns the FIRST flow in the registry when
+    ``channel_id`` is None — so chat B's tap was recorded against chat A's
+    question. Callback data is positional (``aq:opt:N``), so nothing failed:
+    the wrong question was silently answered with the option at that index.
+    """
+    from untether.runners import claude as claude_mod
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow_a = AskQuestionState(
+        request_id="req-715-a",
+        channel_id=CHAT_A,
+        questions=[
+            {
+                "question": "Deploy to prod?",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            }
+        ],
+    )
+    flow_b = AskQuestionState(
+        request_id="req-715-b",
+        channel_id=CHAT_B,
+        questions=[
+            {
+                "question": "Delete the branch?",
+                "options": [{"label": "Keep"}, {"label": "Delete"}],
+            }
+        ],
+    )
+    # A is inserted first, so it is what an unscoped lookup would return.
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+    _ASK_QUESTION_FLOWS[flow_b.request_id] = flow_b
+
+    answered: list[str] = []
+
+    async def fake_answer(request_id: str) -> bool:
+        answered.append(request_id)
+        _ASK_QUESTION_FLOWS.pop(request_id, None)
+        return True
+
+    # `handle` imports the symbol from the runner module at call time, so
+    # patch it there rather than on the command module.
+    monkeypatch.setattr(
+        claude_mod, "answer_ask_question_with_options", fake_answer, raising=True
+    )
+
+    # Tap option 1 in chat B — "Delete".
+    ctx = _make_command_ctx("opt:1", channel_id=CHAT_B)
+    await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    assert answered == ["req-715-b"], "the tap must answer the tapping chat's flow"
+    assert flow_b.answers == {"Delete the branch?": "Delete"}
+    # Chat A's flow is untouched: still live, no answer recorded.
+    assert flow_a.answers == {}
+    assert flow_a.current_index == 0
+    assert _ASK_QUESTION_FLOWS.get("req-715-a") is flow_a
+
+
+@pytest.mark.anyio
+async def test_715_tap_in_chat_with_no_flow_does_not_steal_another(monkeypatch) -> None:
+    """A tap from a chat with no outstanding question must report "no active
+    question" rather than answering whichever flow happens to be first."""
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    flow_a = AskQuestionState(
+        request_id="req-715-c",
+        channel_id=CHAT_A,
+        questions=[
+            {"question": "Proceed?", "options": [{"label": "Yes"}, {"label": "No"}]}
+        ],
+    )
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+
+    ctx = _make_command_ctx("opt:0", channel_id=CHAT_B)
+    result = await cmd_mod.AskQuestionCommand().handle(ctx)
+
+    assert result is not None
+    assert result.text == "No active question"
+    assert flow_a.answers == {}
+    assert _ASK_QUESTION_FLOWS.get("req-715-c") is flow_a
+
+
+def test_715_early_toast_is_channel_scoped() -> None:
+    """The pre-``handle`` toast is chosen from per-chat registry state, so it
+    must be scoped too — otherwise a chat with no question of its own reads
+    another chat's live flow and toasts "Selected" for a no-op tap."""
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+
+    flow_a = AskQuestionState(
+        request_id="req-715-d",
+        channel_id=CHAT_A,
+        questions=[{"question": "Go?", "options": [{"label": "Yes"}]}],
+    )
+    _ASK_QUESTION_FLOWS[flow_a.request_id] = flow_a
+    # Chat B answered a flow a moment ago and has nothing live.
+    _record_answered_ask_flow("req-715-e", CHAT_B)
+
+    assert (
+        AskQuestionCommand.early_answer_toast("opt:0", channel_id=CHAT_B)
+        == "Already answered"
+    )
+    # Chat A has a live flow, so it gets the normal selection toast.
+    assert (
+        AskQuestionCommand.early_answer_toast("opt:0", channel_id=CHAT_A) == "Selected"
+    )
+
+
+def test_715_dispatch_hook_falls_back_to_legacy_signature() -> None:
+    """``early_answer_toast`` is a duck-typed internal hook, not part of the
+    ``CommandBackend`` Protocol. A backend still carrying the old
+    ``(args_text)`` signature must degrade to that call rather than raising a
+    TypeError out of dispatch — which would kill the whole callback."""
+    from untether.telegram.commands.dispatch import _early_answer_toast
+
+    class LegacyBackend:
+        answer_early = True
+
+        @staticmethod
+        def early_answer_toast(args_text: str) -> str | None:
+            return f"legacy:{args_text}"
+
+    class ScopedBackend:
+        answer_early = True
+
+        @staticmethod
+        def early_answer_toast(args_text: str, *, channel_id: int | None = None):
+            return f"scoped:{args_text}:{channel_id}"
+
+    class NoHookBackend:
+        answer_early = True
+
+    assert _early_answer_toast(LegacyBackend(), "opt:0", CHAT_A) == "legacy:opt:0"
+    assert (
+        _early_answer_toast(ScopedBackend(), "opt:0", CHAT_A)
+        == f"scoped:opt:0:{CHAT_A}"
+    )
+    assert _early_answer_toast(NoHookBackend(), "opt:0", CHAT_A) is None

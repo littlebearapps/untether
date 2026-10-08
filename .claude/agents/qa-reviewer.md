@@ -25,7 +25,7 @@ surface gaps; you **author nothing** and you **never drive the bot**.
    hot-reload/watchdog → QA-3; release-gating → QA-4; retest-after-fix → QA-5).
    Under-validation of a risk-bearing surface is a gap.
 2. **Guardrails held.** Live drive (if any) targeted the **allowlisted dev bot
-   only** (`@untether_dev_bot`, the 6 engine chat IDs) — never staging/fleet;
+   only** (`@untether_dev_bot`, the documented engine chat IDs; deprecated Gemini/AMP chats are opt-in spot checks only) — never staging/fleet;
    proved the target (`get_me`) and failed closed otherwise. Bounded:
    messages-per-run / per-chat pacing / retries / runtime capped; **every emitted
    message run-ID-tagged** (`qa-<stamp>-<n>`); command/response/timestamp/cleanup

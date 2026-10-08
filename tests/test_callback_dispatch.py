@@ -638,3 +638,591 @@ async def test_callback_allowed_when_no_user_restriction() -> None:
         )
 
     assert backend._handle_called == 1
+
+
+# ---------------------------------------------------------------------------
+# #389: CommandContext carries the live files.deny_globs
+# ---------------------------------------------------------------------------
+
+
+class _CapturingBackend:
+    id = "test_cmd"
+    description = "stub"
+
+    def __init__(self) -> None:
+        self.contexts: list[CommandContext] = []
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        self.contexts.append(ctx)
+        return None
+
+
+def _with_deny_globs(cfg: TelegramBridgeConfig, globs: list[str]) -> None:
+    # In-place swap mirrors TelegramBridgeConfig.update_from (hot reload).
+    cfg.files = cfg.files.model_copy(update={"deny_globs": globs})
+
+
+@pytest.mark.anyio
+async def test_callback_context_carries_file_deny_globs(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    async def _dispatch() -> None:
+        await _dispatch_callback(
+            cfg,
+            _make_callback_query(),
+            "test_cmd",
+            "args",
+            None,
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            "cb-123",
+        )
+
+    _with_deny_globs(cfg, ["x/**"])
+    await _dispatch()
+    _with_deny_globs(cfg, ["y/**", "z"])
+    await _dispatch()
+
+    assert backend.contexts[0].file_deny_globs == ("x/**",)
+    assert backend.contexts[1].file_deny_globs == ("y/**", "z")
+
+
+@pytest.mark.anyio
+async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+
+    async def _dispatch() -> None:
+        await _dispatch_command(
+            cfg,
+            msg,
+            "/test_cmd",
+            "test_cmd",
+            "",
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            None,
+        )
+
+    _with_deny_globs(cfg, ["x/**"])
+    await _dispatch()
+    _with_deny_globs(cfg, ["w"])
+    await _dispatch()
+
+    assert [c.file_deny_globs for c in backend.contexts] == [("x/**",), ("w",)]
+
+
+@pytest.mark.anyio
+async def test_950_command_context_carries_engine_default_and_context(
+    monkeypatch,
+) -> None:
+    """#950: a command sees the topic/chat engine default and the ambient
+    (topic/chat-bound) context a plain prompt in that chat would use."""
+    from untether.context import RunContext
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+    ambient = RunContext(project="beta", branch="feat")
+    await _dispatch_command(
+        cfg,
+        msg,
+        "/test_cmd",
+        "test_cmd",
+        "",
+        {},
+        AsyncMock(),
+        None,
+        False,
+        "opencode",
+        None,
+        ambient_context=ambient,
+    )
+    await _dispatch_command(
+        cfg, msg, "/test_cmd", "test_cmd", "", {}, AsyncMock(), None, False, None, None
+    )
+
+    assert backend.contexts[0].default_engine_override == "opencode"
+    assert backend.contexts[0].ambient_context == ambient
+    assert backend.contexts[1].default_engine_override is None
+    assert backend.contexts[1].ambient_context is None
+
+
+# ---------------------------------------------------------------------------
+# #418 — CommandResult.attachment is delivered as a Telegram document
+# ---------------------------------------------------------------------------
+
+
+class _AttachmentBackend:
+    id = "test_cmd"
+    description = "stub"
+
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        return self.result
+
+
+class _FailingDocBot(FakeBot):
+    async def send_document(self, *args, **kwargs):  # type: ignore[override]
+        # records the call, then reports the upload as failed (None)
+        await super().send_document(*args, **kwargs)
+
+
+def _attachment_result(text: str = "📄 summary", **kwargs) -> CommandResult:
+    from untether.commands import CommandAttachment
+
+    return CommandResult(
+        text=text,
+        attachment=CommandAttachment(
+            filename="export.md", content=b"# full transcript", fallback_text="preview"
+        ),
+        **kwargs,
+    )
+
+
+async def _dispatch_attachment(
+    monkeypatch, cfg, result: CommandResult, *, thread_id: int | None = None
+) -> None:
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    backend = _AttachmentBackend(result)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+        thread_id=thread_id,
+    )
+    await _dispatch_command(
+        cfg, msg, "/test_cmd", "test_cmd", "", {}, AsyncMock(), None, False, None, None
+    )
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_sends_document_via_bot(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert len(cfg.bot.document_calls) == 1
+    call = cfg.bot.document_calls[0]
+    assert call["chat_id"] == 123
+    assert call["filename"] == "export.md"
+    assert call["content"] == b"# full transcript"
+    assert call["caption"] == "📄 summary"
+    assert call["reply_to_message_id"] == 7
+    assert call["message_thread_id"] is None
+    assert call["disable_notification"] is False
+    assert transport.send_calls == []
+    sent = [e for e in logs if e["event"] == "command.attachment_sent"]
+    assert len(sent) == 1 and sent[0]["size_bytes"] == len(b"# full transcript")
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_caption_truncated(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(monkeypatch, cfg, _attachment_result("x" * 2000))
+    caption = cfg.bot.document_calls[0]["caption"]
+    assert len(caption) == 1024
+    assert caption.endswith("…")
+
+
+def test_418_fit_caption_counts_utf16_units() -> None:
+    from untether.runner_bridge import _utf16_len
+    from untether.telegram.commands.dispatch import _fit_caption
+
+    text = "😀" * 1000  # 2 UTF-16 units each
+    cut = _fit_caption(text)
+    assert _utf16_len(cut) <= 1024
+    assert cut.endswith("…")
+    assert _fit_caption("short") == "short"
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_upload_failure_falls_back(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg.bot = _FailingDocBot()
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert len(transport.send_calls) == 1
+    assert transport.send_calls[0]["message"].text == "preview"
+    failed = [e for e in logs if e["event"] == "command.attachment_failed"]
+    assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_too_large_falls_back(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(dispatch_mod, "_DOCUMENT_MAX_BYTES", 10)
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert cfg.bot.document_calls == []
+    assert [c["message"].text for c in transport.send_calls] == ["preview"]
+    assert [e for e in logs if e["event"] == "command.attachment_too_large"]
+
+
+def test_418_document_cap_is_10_mb() -> None:
+    assert dispatch_mod._DOCUMENT_MAX_BYTES == 10 * 1024 * 1024
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_skip_reply_attachment(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(
+        monkeypatch, cfg, _attachment_result(skip_reply=True, notify=False)
+    )
+    call = cfg.bot.document_calls[0]
+    assert call["reply_to_message_id"] is None
+    assert call["disable_notification"] is True
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_without_attachment_sends_text(monkeypatch) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    await _dispatch_attachment(monkeypatch, cfg, CommandResult(text="plain"))
+    assert cfg.bot.document_calls == []
+    assert [c["message"].text for c in transport.send_calls] == ["plain"]
+
+
+@pytest.mark.anyio
+async def test_418_forum_thread_routed(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(monkeypatch, cfg, _attachment_result(), thread_id=10)
+    assert cfg.bot.document_calls[0]["message_thread_id"] == 10
+
+
+# ---------------------------------------------------------------------------
+# #685 — the claude_control early toast reads (and reserves) the request
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def control_registries():
+    from untether.runners import claude as claude_mod
+
+    def _wipe() -> None:
+        for reg in (
+            claude_mod._ACTIVE_RUNNERS,
+            claude_mod._SESSION_STDIN,
+            claude_mod._REQUEST_TO_SESSION,
+            claude_mod._REQUEST_TO_INPUT,
+            claude_mod._REQUEST_TO_TOOL_NAME,
+            claude_mod._HANDLED_REQUESTS,
+            claude_mod._INFLIGHT_CONTROL_RESPONSES,
+        ):
+            reg.clear()
+
+    _wipe()
+    _EPHEMERAL_MSGS.clear()
+    yield claude_mod
+    _wipe()
+    _EPHEMERAL_MSGS.clear()
+
+
+def _register_request(claude_mod, request_id: str) -> AsyncMock:
+    session_id = "sess-dispatch-685"
+    claude_mod._ACTIVE_RUNNERS[session_id] = (
+        claude_mod.ClaudeRunner(claude_cmd="claude"),
+        0.0,
+    )
+    stdin = AsyncMock()
+    claude_mod._SESSION_STDIN[session_id] = stdin
+    claude_mod._REQUEST_TO_SESSION[request_id] = session_id
+    claude_mod._REQUEST_TO_INPUT[request_id] = {}
+    claude_mod._REQUEST_TO_TOOL_NAME[request_id] = "Bash"
+    return stdin
+
+
+async def _dispatch_control(cfg, data: str, callback_query_id: str) -> None:
+    command_id, args_text = _parse_callback_data(data)
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(data),
+        command_id,
+        args_text,
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        callback_query_id,
+    )
+
+
+@pytest.mark.anyio
+async def test_685_claude_control_early_toast_uses_registry(
+    monkeypatch, control_registries
+) -> None:
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = control_registries
+    claude_mod.mark_request_handled("req-done", action="approve", channel_id=123)
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+
+    await _dispatch_control(cfg, "claude_control:approve:req-done", "cb-late")
+
+    assert [c["text"] for c in bot.callback_calls] == ["Already answered"]
+    assert len(transport.send_calls) == 1
+    sent = transport.send_calls[0]
+    assert sent["message"].text == "ℹ️ Already answered — approved"
+    assert sent["options"].notify is False
+
+
+@pytest.mark.anyio
+async def test_685_dispatch_reserves_claim_before_early_answer(
+    monkeypatch, control_registries
+) -> None:
+    """Two taps started together: the first toasts Approved, the second
+    Already answered — decided before either early answer is awaited."""
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = control_registries
+    stdin = _register_request(claude_mod, "req-both")
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+    gate = anyio.Event()
+    toasts: dict[str, str | None] = {}
+    orig_answer = bot.answer_callback_query
+
+    async def _gated_answer(query_id, text=None):
+        toasts.setdefault(query_id, text)
+        await gate.wait()
+        return await orig_answer(query_id, text=text)
+
+    bot.answer_callback_query = _gated_answer  # type: ignore[assignment]
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-1")
+        tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-2")
+        for _ in range(50):
+            await anyio.lowlevel.checkpoint()
+            if len(toasts) == 2:
+                break
+        gate.set()
+
+    assert toasts == {"cb-1": "Approved", "cb-2": "Already answered"}
+    assert stdin.send.await_count == 1
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+
+
+@pytest.mark.anyio
+async def test_685_claim_released_when_handle_raises(
+    monkeypatch, control_registries
+) -> None:
+    from untether.runners.claude import ControlRequestStatus
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = control_registries
+    _register_request(claude_mod, "req-boom")
+    cfg = make_cfg(FakeTransport())
+
+    class _Exploding(ClaudeControlCommand):
+        async def handle(self, ctx: CommandContext) -> CommandResult | None:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: _Exploding())
+
+    await _dispatch_control(cfg, "claude_control:approve:req-boom", "cb-boom")
+
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+    lookup = claude_mod.classify_control_request("req-boom")
+    assert lookup.status is ControlRequestStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_388_dispatch_foreign_chat_tap_gets_not_found(
+    monkeypatch, control_registries
+) -> None:
+    """#388: a claude_control callback from chat 123 for a request whose
+    buttons were posted in chat 111 reads as expired and writes nothing."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = control_registries
+    stdin = _register_request(claude_mod, "req-388")
+    claude_mod._REQUEST_TO_CHANNEL["req-388"] = 111
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+
+    with capture_logs() as logs:
+        await _dispatch_control(cfg, "claude_control:approve:req-388", "cb-388")
+
+    assert [c["text"] for c in bot.callback_calls] == ["This request has expired"]
+    assert stdin.send.await_count == 0
+    assert "req-388" in claude_mod._REQUEST_TO_SESSION
+    assert "req-388" not in claude_mod._INFLIGHT_CONTROL_RESPONSES
+    nf = [r for r in logs if r.get("event") == "claude_control.not_found"]
+    assert nf and nf[0]["reason"] == "channel_mismatch"
+    assert nf[0]["channel_id"] == 123
+    assert nf[0]["origin_channel_id"] == 111
+
+
+# ---------------------------------------------------------------------------
+# #388 phase 2 — opt-in "only the originator can approve"
+# ---------------------------------------------------------------------------
+
+
+def _originator_setup(monkeypatch, claude_mod, *, enabled: bool, originator):
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    stdin = _register_request(claude_mod, "req-orig")
+    if originator is not None:
+        claude_mod._REQUEST_TO_ORIGINATOR["req-orig"] = originator
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg.approval_originator_only = enabled
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+    return cfg, transport, stdin
+
+
+@pytest.mark.anyio
+async def test_388_originator_only_rejects_other_user(
+    monkeypatch, control_registries
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.approval_originator import NOT_ORIGINATOR_TEXT
+
+    claude_mod = control_registries
+    cfg, transport, stdin = _originator_setup(
+        monkeypatch, claude_mod, enabled=True, originator=2
+    )
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        await _dispatch_control(cfg, "claude_control:approve:req-orig", "cb-o1")
+
+    assert [c["text"] for c in bot.callback_calls] == [NOT_ORIGINATOR_TEXT]
+    assert stdin.send.await_count == 0
+    assert "req-orig" in claude_mod._REQUEST_TO_SESSION
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+    assert transport.send_calls == []
+    warn = [r for r in logs if r.get("event") == "callback.not_originator"]
+    assert len(warn) == 1
+    assert warn[0]["log_level"] == "warning"
+    assert warn[0]["sender_id"] == 1
+    assert warn[0]["originator_id"] == 2
+    assert warn[0]["request_id"] == "req-orig"
+    assert warn[0]["chat_id"] == 123
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("enabled", "originator"),
+    [(True, 1), (True, None), (False, 2)],
+    ids=["same-user", "no-originator", "setting-off"],
+)
+async def test_388_originator_only_allows(
+    monkeypatch, control_registries, enabled, originator
+) -> None:
+    """The originator, a run with no human originator (cron/webhook/at/loop)
+    and the default (off) all approve as before."""
+    claude_mod = control_registries
+    cfg, _transport, stdin = _originator_setup(
+        monkeypatch, claude_mod, enabled=enabled, originator=originator
+    )
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+
+    await _dispatch_control(cfg, "claude_control:approve:req-orig", "cb-o2")
+
+    assert [c["text"] for c in bot.callback_calls] == ["Approved"]
+    assert stdin.send.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_388_originator_only_rejects_ask_option_tap(
+    monkeypatch, control_registries
+) -> None:
+    """An AskUserQuestion option tap from another user is refused and the
+    flow is left untouched."""
+    from untether.telegram.approval_originator import NOT_ORIGINATOR_TEXT
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+
+    claude_mod = control_registries
+    _register_request(claude_mod, "req-ask")
+    claude_mod._REQUEST_TO_ORIGINATOR["req-ask"] = 2
+    flow = claude_mod.AskQuestionState(
+        request_id="req-ask",
+        channel_id=123,
+        questions=[{"question": "Pick?", "options": [{"label": "A"}]}],
+    )
+    claude_mod._ASK_QUESTION_FLOWS["req-ask"] = flow
+    cfg = make_cfg(FakeTransport())
+    cfg.approval_originator_only = True
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: AskQuestionCommand()
+    )
+    try:
+        await _dispatch_control(cfg, "aq:opt:0", "cb-aq")
+        assert [c["text"] for c in bot.callback_calls] == [NOT_ORIGINATOR_TEXT]
+        assert flow.current_index == 0
+        assert flow.answers == {}
+        assert claude_mod._ASK_QUESTION_FLOWS["req-ask"] is flow
+    finally:
+        claude_mod._ASK_QUESTION_FLOWS.pop("req-ask", None)

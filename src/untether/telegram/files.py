@@ -3,17 +3,24 @@ from __future__ import annotations
 import io
 import os
 import shlex
+import stat
 import tempfile
 import zipfile
 from collections.abc import Sequence
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from ..logging import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = [
+    "AccessReason",
+    "PathAccess",
     "ZipTooLargeError",
+    "check_path_access",
     "deduplicate_target",
     "default_upload_name",
     "default_upload_path",
@@ -100,14 +107,209 @@ def resolve_path_within_root(root: Path, rel_path: Path) -> Path | None:
     return target
 
 
+def _full_match_parts(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    """Segment-wise glob match with recursive ``**`` (Python 3.13 ``full_match``).
+
+    A ``**`` segment matches zero or more path segments, except a trailing
+    ``**``, which matches one or more (``.git/**`` matches ``.git/x`` but not
+    ``.git`` itself) — the same semantics as ``PurePath.full_match`` on 3.13+.
+    """
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        if not rest:
+            return len(parts) >= 1
+        return any(_full_match_parts(parts[i:], rest) for i in range(len(parts) + 1))
+    if not parts:
+        return False
+    return fnmatchcase(parts[0], head) and _full_match_parts(parts[1:], rest)
+
+
+def _glob_matches(posix: PurePosixPath, pattern: str) -> bool:
+    """Return True when *posix* matches deny glob *pattern* (#831).
+
+    ``PurePosixPath.match`` is right-anchored and treats ``**`` as a single
+    segment on Python 3.12-3.14, so ``**/*.pem`` never matched a root-level
+    ``key.pem`` and ``**/.ssh/**`` never matched ``.ssh/config`` or
+    ``a/b/.ssh/x/y``. This keeps the legacy right-anchored match (bare names
+    such as ``.env`` still match at any depth), adds a recursive ``**`` match
+    that emulates 3.13 ``full_match``, and for a trailing ``/**`` also accepts
+    any proper ancestor that matches the head (so ``secrets/**`` keeps
+    covering ``a/secrets/...`` at every depth, not just one level down).
+    Strictly more denying than the legacy match — never less.
+    """
+    if not posix.parts:
+        return False
+    if posix.match(pattern):
+        return True
+    if _full_match_parts(posix.parts, PurePosixPath(pattern).parts):
+        return True
+    if pattern.endswith("/**") and len(pattern) > 3:
+        head = pattern[:-3]
+        parts = posix.parts
+        for i in range(1, len(parts)):
+            if _glob_matches(PurePosixPath(*parts[:i]), head):
+                return True
+    return False
+
+
 def deny_reason(rel_path: Path, deny_globs: Sequence[str]) -> str | None:
-    if ".git" in rel_path.parts:
+    # Casefolded so ``.GIT`` on a case-insensitive filesystem (macOS APFS)
+    # is caught too (#390 D4).
+    if any(part.casefold() == ".git" for part in rel_path.parts):
         return ".git/**"
     posix = PurePosixPath(rel_path.as_posix())
     for pattern in deny_globs:
-        if posix.match(pattern):
+        if _glob_matches(posix, pattern):
             return pattern
     return None
+
+
+AccessReason = Literal["outside", "denied", "hidden", "unresolvable"]
+
+
+@dataclass(frozen=True, slots=True)
+class PathAccess:
+    """Result of :func:`check_path_access` (#389, #390)."""
+
+    root: Path
+    """The root, resolved (``root.resolve(strict=False)``)."""
+    target: Path | None
+    """Fully resolved absolute target; ``None`` unless allowed."""
+    rel: Path | None
+    """``target.relative_to(root)`` (never raises); ``None`` unless allowed."""
+    reason: AccessReason | None
+    """``None`` means allowed."""
+    rule: str | None
+    """The deny glob that matched when ``reason == "denied"``."""
+    via_symlink: bool
+    """True when the resolved relative path differs from the requested one."""
+    resolved: Path | None = None
+    """Resolved root-relative path whenever resolution stayed inside the root.
+
+    Unlike ``rel`` it is also set when the *resolved* path was denied, so
+    callers can say where a request led (``resolves to .git/hooks/x``)
+    without resolving twice. Relative, so safe to log.
+    """
+
+    @property
+    def ok(self) -> bool:
+        return self.reason is None
+
+
+def _is_hidden(rel: Path, hidden_allow: frozenset[str]) -> bool:
+    return any(part.startswith(".") and part not in hidden_allow for part in rel.parts)
+
+
+def _has_symlink_component(root_r: Path, target: Path) -> bool:
+    """``lstat``-walk *target* and its parents up to *root_r* for a symlink.
+
+    A resolved path never contains a symlink, except when resolution gave up
+    (a symlink loop on Python 3.13+, where ``resolve(strict=False)`` returns
+    the unresolved path instead of raising). Missing components are skipped;
+    ``lstat`` never follows links, so the walk cannot loop.
+    """
+    current = target
+    while current != root_r:
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return True
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return False
+
+
+def check_path_access(
+    root: Path,
+    candidate: Path,
+    deny_globs: Sequence[str],
+    *,
+    deny_hidden: bool = False,
+    hidden_allow: frozenset[str] = frozenset(),
+) -> PathAccess:
+    """Check *candidate* (relative to *root*, or absolute) for access.
+
+    Shared by ``/file put``/``/file get`` (#390) and ``/browse`` (#389). The
+    first failing check wins:
+
+    1. lexical containment (``os.path.normpath``) → ``outside``;
+    2. deny globs on the requested root-relative path → ``denied``;
+    3. hidden components (only with ``deny_hidden``) → ``hidden``;
+    4. resolve the raw path with OS semantics (``a/link/..`` follows
+       ``link``); a symlink loop → ``unresolvable`` on every Python;
+    5. resolved containment → ``outside``;
+    6. deny globs / hidden on the resolved root-relative path.
+
+    Existence is never checked, so callers must run this *before* any
+    ``exists()``/``is_file()`` to avoid an existence oracle.
+
+    TOCTOU: a process with write access inside the root could swap a parent
+    directory for a symlink between this check and the caller's read/write.
+    Such a process can already write anywhere in the root, so the residual
+    grants no new capability; accepted and documented (#390 D2).
+    """
+
+    def _deny(
+        reason: AccessReason,
+        root_r: Path,
+        *,
+        rule: str | None = None,
+        via_symlink: bool = False,
+        resolved: Path | None = None,
+    ) -> PathAccess:
+        return PathAccess(
+            root=root_r,
+            target=None,
+            rel=None,
+            reason=reason,
+            rule=rule,
+            via_symlink=via_symlink,
+            resolved=resolved,
+        )
+
+    try:
+        root_r = root.resolve(strict=False)
+    except (RuntimeError, OSError):
+        return _deny("unresolvable", root)
+    raw = root_r / candidate
+    lexical = Path(os.path.normpath(raw))
+    if not lexical.is_relative_to(root_r):
+        return _deny("outside", root_r)
+    lex_rel = lexical.relative_to(root_r)
+    rule = deny_reason(lex_rel, deny_globs)
+    if rule is not None:
+        return _deny("denied", root_r, rule=rule)
+    if deny_hidden and _is_hidden(lex_rel, hidden_allow):
+        return _deny("hidden", root_r)
+    try:
+        target = raw.resolve(strict=False)
+    except (RuntimeError, OSError):
+        return _deny("unresolvable", root_r)
+    if _has_symlink_component(root_r, target):
+        return _deny("unresolvable", root_r)
+    if not target.is_relative_to(root_r):
+        return _deny("outside", root_r, via_symlink=True)
+    rel = target.relative_to(root_r)
+    via_symlink = rel != lex_rel
+    rule = deny_reason(rel, deny_globs)
+    if rule is not None:
+        return _deny("denied", root_r, rule=rule, via_symlink=via_symlink, resolved=rel)
+    if deny_hidden and _is_hidden(rel, hidden_allow):
+        return _deny("hidden", root_r, via_symlink=via_symlink, resolved=rel)
+    return PathAccess(
+        root=root_r,
+        target=target,
+        rel=rel,
+        reason=None,
+        rule=None,
+        via_symlink=via_symlink,
+        resolved=rel,
+    )
 
 
 def format_bytes(value: int) -> str:
@@ -178,8 +380,17 @@ def zip_directory(
     deny_globs: Sequence[str],
     *,
     max_bytes: int | None = None,
+    arc_prefix: Path | None = None,
 ) -> bytes:
+    """Zip ``root / rel_path``, skipping symlinks and deny-globbed members.
+
+    Deny checks run on the real ``rel_path / member``. Member names use
+    ``arc_prefix`` when given (``/file get`` passes the *requested* path so a
+    download through an in-root symlink keeps its names, #390), else
+    ``rel_path``.
+    """
     target = root / rel_path
+    prefix = rel_path if arc_prefix is None else arc_prefix
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for dirpath, _, filenames in os.walk(target, followlinks=False):
@@ -190,10 +401,11 @@ def zip_directory(
                     continue
                 if not item.is_file():
                     continue
-                rel_item = rel_path / item.relative_to(target)
+                member = item.relative_to(target)
+                rel_item = rel_path / member
                 if deny_reason(rel_item, deny_globs) is not None:
                     continue
-                archive.write(item, arcname=rel_item.as_posix())
+                archive.write(item, arcname=(prefix / member).as_posix())
                 if max_bytes is not None and buffer.tell() > max_bytes:
                     logger.debug(
                         "file.zip_too_large",

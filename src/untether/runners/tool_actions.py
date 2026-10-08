@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..markdown import inline_code
 from ..model import ActionKind
 from ..utils.paths import relativize_command, relativize_path
 
@@ -42,31 +43,31 @@ def tool_kind_and_title(
     if name_lower == "read":
         path = tool_input_path(tool_input, path_keys=path_keys)
         if path:
-            return "tool", f"read: `{relativize_path(str(path))}`"
+            return "tool", f"read: {inline_code(relativize_path(str(path)))}"
         return "tool", "read"
 
     if name_lower == "glob":
         pattern = tool_input.get("pattern")
         if pattern:
-            return "tool", f"glob: `{pattern}`"
+            return "tool", f"glob: {inline_code(str(pattern))}"
         return "tool", "glob"
 
     if name_lower == "grep":
         pattern = tool_input.get("pattern")
         if pattern:
-            return "tool", f"grep: {pattern}"
+            return "tool", f"grep: {inline_code(str(pattern))}"
         return "tool", "grep"
 
     if name_lower == "find":
         pattern = tool_input.get("pattern")
         if pattern:
-            return "tool", f"find: {pattern}"
+            return "tool", f"find: {inline_code(str(pattern))}"
         return "tool", "find"
 
     if name_lower == "ls":
         path = tool_input_path(tool_input, path_keys=path_keys)
         if path:
-            return "tool", f"ls: `{relativize_path(str(path))}`"
+            return "tool", f"ls: {inline_code(relativize_path(str(path)))}"
         return "tool", "ls"
 
     if name_lower in {"websearch", "web_search"}:

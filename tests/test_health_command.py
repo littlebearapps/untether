@@ -133,3 +133,20 @@ def test_render_shows_ram_line_on_linux(tmp_path) -> None:
     assert "RAM:" in snapshot
     # The line should include a percentage figure
     assert "%" in snapshot
+
+
+def test_today_cost_reads_persisted_total_after_restart(tmp_path) -> None:
+    """#898: /health's today figure survives a restart."""
+    import untether.cost_tracker as mod
+
+    cfg = tmp_path / "untether.toml"
+    try:
+        mod._daily_cost, mod._daily_cost_path = ("", 0.0), None
+        mod.init_daily_cost(cfg)
+        mod.record_run_cost(1.23)
+        # Simulated restart: module state gone, nothing initialised yet.
+        mod._daily_cost, mod._daily_cost_path = ("", 0.0), None
+        snapshot = render_health_snapshot(_make_ctx(config_path=cfg))
+        assert "today's API cost: $1.23" in snapshot
+    finally:
+        mod._daily_cost, mod._daily_cost_path = ("", 0.0), None

@@ -1,3 +1,15 @@
+!!! warning "Deprecated"
+
+    The `gemini` engine is **deprecated and no longer supported** (as of
+    v0.36.0): it still loads, but gets no fixes, is excluded from testing, and
+    may be removed in a future release
+    ([#722](https://github.com/littlebearapps/untether/issues/722)). Google ended
+    Gemini CLI support for individual accounts (free, Google AI Pro and Ultra) on **18 June 2026**
+    ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/); `IneligibleTierError`); under Untether the subprocess hangs until the
+    watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
+    Antigravity CLI ships as a separate engine in v0.36.1
+    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
+
 Below is the implementation spec for the **Gemini CLI** runner shipped in Untether.
 
 ---
@@ -36,22 +48,22 @@ Untether appends a **single backticked** resume line at the end of the message:
 Notes:
 
 * The resume token is the **session id** (short alphanumeric string, e.g., `abc123def`), captured from the `init` event's `session_id` field.
-* `--resume latest` is also valid in the CLI but Untether always uses explicit session IDs.
+* Replies use the explicit session id; `/continue` passes `--resume latest`.
 
 ### Non-interactive runs
 
 The runner invokes:
 
 ```text
-gemini -p --output-format stream-json --skip-trust --model <model> --prompt=<prompt>
+gemini [--resume <session_id>|latest] --output-format stream-json [--model <model>] --approval-mode <mode> [--skip-trust] --prompt=<prompt>
 ```
 
 Flags:
 
-* `-p` — non-interactive (print mode)
+* `--prompt=<value>` — non-interactive (headless) mode; `--prompt` is the long form of `-p`, so no separate `-p` is passed
 * `--output-format stream-json` — JSONL output
 * `--model <model>` — optional, from config or `/config` override
-* `--prompt=<value>` — prompt bound directly to flag (prevents injection when prompt starts with `-`)
+* The prompt is bound directly to `--prompt=` (and space-prefixed if it starts with `-`), so it is never read as a flag
 * `--resume <session_id>` — when resuming a session
 * `--approval-mode <mode>` — defaults to `yolo` (full access) when no override is set; configurable via `/config` or `permission_mode` run option
 * `--skip-trust` — passed by **default** as of v0.35.3 ([#471](https://github.com/littlebearapps/untether/issues/471)) so headless runs work outside `~/.gemini/trustedFolders.json`. Gemini CLI rejects runs from any directory not in the trust list — even with `--approval-mode yolo` — and there is no interactive prompt path in headless usage, so projects outside the trust list previously failed silently before any agent output. Set `[gemini] skip_trust = false` in `untether.toml` to opt out (security-conscious operators who want Gemini's project-local extension/MCP trust gate enforced).
@@ -95,7 +107,7 @@ Exposes `BACKEND = EngineBackend(id="gemini", build_runner=build_runner, install
 #### Runner invocation
 
 ```text
-gemini -p --output-format stream-json [--resume <session_id>] [--model <model>] [--approval-mode <mode>] --prompt=<prompt>
+gemini [--resume <session_id>|latest] --output-format stream-json [--model <model>] --approval-mode <mode> [--skip-trust] --prompt=<prompt>
 ```
 
 #### Event translation

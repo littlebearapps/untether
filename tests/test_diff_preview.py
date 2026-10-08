@@ -58,7 +58,8 @@ class TestFormatDiffPreview:
                 "command": "rm -rf /tmp/test",
             },
         )
-        assert "$ rm -rf /tmp/test" in result
+        # #871 D2: a single-line command is a backtick-safe code span
+        assert result == "$ `rm -rf /tmp/test`"
 
     def test_bash_tool_empty_command(self):
         result = _format_diff_preview("Bash", {"command": ""})
@@ -122,3 +123,87 @@ class TestDiffPreviewGating:
 
         opts = EngineRunOptions(diff_preview=False)
         assert opts.diff_preview is False
+
+
+class TestDiffPreviewRendering:
+    """rc15 integration finding: the preview is rendered as Markdown, where a
+    bare ``+ x`` line became a ``- x`` list item, so an added line read as
+    removed on the approval message."""
+
+    def _render(self, preview: str) -> str:
+        from untether.telegram.render import render_markdown
+
+        text, _entities = render_markdown(f"⚠️ Permission Request [Edit]\n{preview}")
+        return text
+
+    def test_edit_added_lines_keep_plus_after_rendering(self) -> None:
+        preview = _format_diff_preview(
+            "Edit",
+            {"file_path": "/tmp/a.txt", "old_string": "hello", "new_string": "bye"},
+        )
+        rendered = self._render(preview)
+        assert "- hello\n+ bye" in rendered
+
+    def test_write_content_stays_literal(self) -> None:
+        preview = _format_diff_preview(
+            "Write", {"file_path": "/tmp/a.md", "content": "**bold** `x`\n```py"}
+        )
+        rendered = self._render(preview)
+        assert "+ **bold** `x`\n+ ```py" in rendered
+
+
+def test_elapsed_tail_stays_outside_the_fence() -> None:
+    """rc15 integration finding: after 60 s the #481 elapsed tail was appended
+    after the closing fence, so the code block swallowed the rest of the
+    progress message (footer, resume line)."""
+    from untether.markdown import format_action_line
+    from untether.model import Action
+    from untether.telegram.render import render_markdown
+
+    preview = _format_diff_preview(
+        "Write", {"file_path": "/tmp/c5.txt", "content": "hello\nworld"}
+    )
+    action = Action(
+        id="a1",
+        kind="warning",
+        title=f"Permission Request [Write]\n{preview}",
+        detail={},
+    )
+    line = format_action_line(
+        action, "started", None, command_width=None, elapsed_seconds=112
+    )
+    assert line.splitlines()[0].endswith("· 1m 52s")
+    assert line.endswith("```")
+    rendered, _ = render_markdown(f"{line}  \nfooter line")
+    assert rendered.endswith("footer line")
+    assert "```" not in rendered
+
+
+class TestBashPreview871:
+    """#871 D2 (amended by ⚑07-D2): the approval's ``$ cmd`` survives Markdown."""
+
+    def test_bash_preview_backtick_command(self):
+        from untether.telegram.render import render_markdown
+
+        result = _format_diff_preview("Bash", {"command": "echo `x`"})
+        text, entities = render_markdown(result)
+        assert text == "$ echo `x`"
+        assert [e["type"] for e in entities] == ["code"]
+        assert entities[0]["length"] == len("echo `x`")
+
+    def test_bash_preview_multiline_heredoc_fenced(self):
+        from untether.telegram.render import render_markdown
+
+        cmd = "cat > /tmp/pr.md <<'EOF'\nMoves `setup-python-env`\nEOF"
+        result = _format_diff_preview("Bash", {"command": cmd})
+        assert result.startswith("$\n```sh\n")
+        text, entities = render_markdown(result)
+        # the lines stay lines (not squashed into one) inside a pre block
+        assert "cat > /tmp/pr.md <<'EOF'\nMoves `setup-python-env`\nEOF" in text
+        assert any(e["type"] == "pre" for e in entities)
+
+    def test_bash_preview_multiline_with_fence_inside(self):
+        cmd = "cat <<'EOF'\n```python\nx\n```\nEOF"
+        result = _format_diff_preview("Bash", {"command": cmd})
+        assert result.startswith("$\n````sh\n")
+        assert result.endswith("\n````")

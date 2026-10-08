@@ -25,6 +25,17 @@ RESERVED_ENGINE_IDS = (
 )
 RESERVED_COMMAND_IDS = RESERVED_CLI_COMMANDS | RESERVED_CHAT_COMMANDS
 
+# Engines that still load and run but are no longer supported. Surfaced in
+# `/config` and the docs; no removal is scheduled, but they may be removed in a
+# future release (#722, #947). Deliberately a simple
+# id set rather than an `EngineBackend.status` field — the richer registry
+# metadata lands with the Antigravity engine, which needs it to render a
+# supported `antigravity` next to a deprecated `gemini`.
+#
+# NOT a blacklist: a third-party entry point supplying one of these ids is still
+# honoured. This only drives presentation.
+DEPRECATED_ENGINES = frozenset({"gemini", "amp"})
+
 
 def is_valid_id(value: str) -> bool:
     return bool(_ID_RE.fullmatch(value))

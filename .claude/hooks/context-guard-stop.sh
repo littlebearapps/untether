@@ -5,7 +5,7 @@
 #          when structural files (commands, skills, rules, config) were modified
 #          but context docs (CLAUDE.md, AGENTS.md, etc.) were not.
 # Tier: 1 (Nudge) — advisory, does not force; Claude can still stop
-# Installed by: /contextdocs:context-guard install
+# Installed by: /contextdocs:context-guard install — NOT registered in .claude/settings.json (inactive)
 #
 # Claude Code only — OpenCode, Codex CLI, Cursor, and other tools
 # do not support Claude Code hooks.
@@ -92,7 +92,7 @@ if [ "$HAS_CONTEXT" = false ]; then
   cat << EOF
 {
   "decision": "block",
-  "reason": "CONTEXT DRIFT DETECTED — structural files changed this session without context file updates:\\n$STRUCTURAL_LIST\\n\\nAffected context files likely include: AGENTS.md, CLAUDE.md, llms.txt\\n\\nACTION REQUIRED: Launch the context-updater agent (defined in .claude/agents/context-updater.md) to update these files before ending the session. The agent will apply surgical edits to only the affected sections. If context docs genuinely don't need changes, you can finish — this is advisory only."
+  "reason": "CONTEXT DRIFT DETECTED — structural files changed this session without context file updates:\\n$STRUCTURAL_LIST\\n\\nAffected context files likely include: AGENTS.md, CLAUDE.md, llms.txt\\n\\nACTION REQUIRED: Launch the context-updater agent (from the contextdocs plugin) or run /contextdocs:ai-context to update these files before ending the session. The agent will apply surgical edits to only the affected sections. If context docs genuinely don't need changes, you can finish — this is advisory only."
 }
 EOF
   exit 0

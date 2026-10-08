@@ -24,8 +24,8 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 | `pyproject.toml` | Package version (`version = "X.Y.Z"`) |
 | `CHANGELOG.md` | Release notes with issue links |
 | `uv.lock` | Locked dependency versions |
-| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing, reviewer approval gate) |
-| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, lockfile, audit, bandit, docs, testpypi, release-validation) |
+| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing; no reviewer gate — the release merge is the approval, see Phase 7) |
+| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, install-test, lockfile, pip-audit, bandit, docs, testpypi-publish, release-validation) |
 | `.github/workflows/prerelease-deps.yml` | Weekly pre-release dependency testing (informational) |
 | `scripts/validate_release.py` | Automated changelog/version validation (runs in CI on version-bump PRs) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
@@ -41,7 +41,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 fleet rollout  →  7. Tag & publish
 ```
 
-All seven (now-8) phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
+Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when a stable version is merged to `master` (by Nathan, or by Claude via `/pr-main X.Y.Z --merge` after his explicit approval).
 
 **Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
 Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
@@ -87,7 +87,11 @@ Analyse commits since the last tag and determine the version bump:
 | **Minor** (0.x.0) | New features, new commands, new engine support, config additions | `/browse` command, Pi runner, cost tracking |
 | **Major** (x.0.0) | Breaking changes to config format, runner protocol, or public API | Remove `untether.bridge`, change TOML schema |
 
-**Decision rule**: If ANY commit is breaking → major. If ANY commit adds features → minor. Otherwise → patch.
+**Decision rule (pre-1.0, `0.x`)**: if ANY entry is `### breaking` or adds features → **minor**. Otherwise → patch. A
+breaking line never ships as a patch — anyone pinned to `~=0.35` would get it. Example: the 0.35.5rc1–rc20 line carried
+six `### breaking` entries, so it ships as **v0.36.0** and its rcs continue as `0.36.0rcN`
+([#947](https://github.com/littlebearapps/untether/issues/947)). If the version changes mid-line, rename the
+milestone, the CHANGELOG heading and the rc numbering together.
 
 ## Phase 3: Changelog drafting
 
@@ -123,7 +127,7 @@ Analyse commits since the last tag and determine the version bump:
 - Every entry links to a GitHub issue: `[#N](...)`
 - Sub-bullets for implementation details (no issue link needed)
 - Sections appear only when they have entries (omit empty sections)
-- Section order: `fixes` → `changes` → `breaking` → `docs` → `tests`
+- Put `### breaking` first when present (with a **Migration:** line); the other sections' order isn't enforced
 - One changelog section per release — no retroactive edits to prior sections
 - Date is the date of the release tag, not the date of the commit
 
@@ -147,7 +151,7 @@ Run all checks before tagging:
 uv run pytest
 
 # Lint
-uv run ruff check src/
+uv run ruff check src/ tests/
 
 # Format check
 uv run ruff format --check src/ tests/
@@ -173,7 +177,7 @@ print(f'Version {v} matches changelog ✓')
 - [ ] All issues referenced in CHANGELOG.md with `[#N](...)`
 - [ ] `pyproject.toml` version matches changelog heading
 - [ ] Tests pass: `uv run pytest`
-- [ ] Lint clean: `uv run ruff check src/`
+- [ ] Lint clean: `uv run ruff check src/ tests/`
 - [ ] Format clean: `uv run ruff format --check src/ tests/`
 - [ ] Lockfile synced: `uv lock --check`
 - [ ] Release validation: `python3 scripts/validate_release.py`
@@ -198,14 +202,14 @@ journalctl --user -u untether-dev -f
 | Release type | Required tiers | Time |
 |---|---|---|
 | **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
-| **Major** | ALL tiers (1-7), ALL engines, full upgrade path testing | ~120 min |
+| **Minor** | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
+| **Major** | ALL tiers (1-7), all supported engines, full upgrade path testing | ~120 min |
 
 ### What to focus on per change type
 
 | Changed area | Must-run integration tests |
 |---|---|
-| Runner code (`runners/*.py`) | U1-U4, U6, U7 (all engines) |
+| Runner code (`runners/*.py`) | U1-U4, U6, U7 (all supported engines) |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
@@ -215,7 +219,7 @@ journalctl --user -u untether-dev -f
 
 ### Automated testing via Telegram MCP
 
-All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash. Claude Code sends test prompts to the 6 `ut-dev:` engine chats, reads back responses, verifies expected behaviour, checks logs, and creates GitHub issues for any bugs found.
+All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash. Claude Code sends test prompts to the 4 supported `ut-dev:` engine chats (the gemini/amp chats are opt-in spot checks only), reads back responses, verifies expected behaviour, checks logs, and creates GitHub issues for any bugs found.
 
 **MCP tools used:** `send_message`, `get_history`, `get_messages`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`
 
@@ -227,8 +231,8 @@ All integration test tiers are fully automated by Claude Code via Telegram MCP t
 | `ut-dev: codex` | 4929463515 |
 | `ut-dev: opencode` | 5200822877 |
 | `ut-dev: pi` | 5156256333 |
-| `ut-dev: gemini` | 5207762142 |
-| `ut-dev: amp` | 5230875989 |
+| `ut-dev: gemini` (deprecated) | 5207762142 |
+| `ut-dev: amp` (deprecated) | 5230875989 |
 
 **Workflow pattern:**
 
@@ -259,7 +263,7 @@ scripts/run-integration-tests.sh X.Y.ZrcN --manual \
   --notes "Tier 7 + Tier 1 all pass on @untether_dev_bot. No log warnings."
 ```
 
-The marker lands at `~/.untether-dev/integration-test-pass-X.Y.ZrcN.json` with timestamp, tester, tiers, and notes. **One marker per version.** If rc14 → rc15, write a new marker for rc15.
+The marker lands at `~/.untether-dev/integration-test-pass-X.Y.ZrcN.json` with timestamp, tester, tiers, and notes. **One marker per version.** If `0.36.0rc1` → `0.36.0rc2`, write a new marker for rc2.
 
 To invalidate a marker (e.g. discovered a regression post-test):
 
@@ -277,12 +281,12 @@ Before tagging a final release, publish a release candidate to TestPyPI and roll
 ### Enter the rc cycle
 
 ```bash
-# Bump to rc version (no changelog entry needed)
+# Bump to rc version on the batch's feature/fix branch (entries go under `## vX.Y.Z (unreleased)`; no per-rc heading)
 # Edit pyproject.toml: version = "X.Y.Zrc1"
 uv lock
 git add pyproject.toml uv.lock
-git commit -m "chore: staging X.Y.Zrc1"
-git push origin dev          # dev push, NOT master — CI publishes to TestPyPI
+git commit -m "chore(release): X.Y.Zrc1"
+git push -u origin <branch>  # then PR → dev (/pr-dev); the dev merge publishes to TestPyPI
 
 # Wait for CI to publish to TestPyPI (~3 min), then:
 #   1. Run integration tests via @untether_dev_bot (Phase 5)
@@ -307,7 +311,7 @@ scripts/fleet-rollout.sh X.Y.Zrc1 --only mac         # one host
 When the rc cycle is stable, bump to the final version (no rc suffix), follow the same flow:
 
 ```bash
-# Bump pyproject.toml to X.Y.Z, add CHANGELOG entry, then:
+# Bump pyproject.toml to X.Y.Z, date the `(unreleased)` CHANGELOG heading (/pr-main does both), then:
 scripts/run-integration-tests.sh X.Y.Z --manual --notes "Final cut; rc cycle stable"
 scripts/fleet-rollout.sh X.Y.Z                       # all 5 hosts parallel
 ```
@@ -329,26 +333,26 @@ systemctl --user restart untether
 ### Conventions
 
 - rc versions are **NOT** git-tagged (avoids triggering `release.yml`)
-- rc versions do **NOT** require changelog entries (`validate_release.py` skips them)
-- Commit message: `chore: staging X.Y.ZrcN`
-- Attestation marker is **per-version** — rc14 → rc15 each get their own
+- rc versions get no changelog heading of their own (`validate_release.py` skips them); their entries accumulate under the line's `## vX.Y.Z (unreleased)` heading, dated at the release merge
+- Commit message: rc batch PRs squash-merge as `rcN: <summary> — X.Y.ZrcN (#issues…)`; a bare bump is `chore(release): X.Y.ZrcN`
+- Attestation marker is **per-version** — `0.36.0rc1` → `0.36.0rc2` each get their own
 - Partial fleet failures are reported but NOT auto-rolled-back; operator decides
 
 ## Phase 7: Merge to master (single-gate release)
 
-The release flow uses a single approval gate: **the master PR review IS the release approval**. Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) to master, everything else is automatic.
+The release flow uses a single approval gate: **Nathan's explicit approval of the release**. Once a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) is squash-merged to master, everything else is automatic.
 
 ### Claude Code's role
 
-- Prepare the version bump on a feature branch (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`)
-- Open a PR from `dev` → `master` with a release summary
-- Wait for CI to go green
-- Hand off to Nathan with a one-line instruction: "merge PR #N when ready"
+- Prepare the version bump (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`) and open the `dev` → `master` PR (`/pr-main X.Y.Z`)
+- Wait for CI to go green, then ask Nathan whether to release
+- Only on his explicit go for that version: `/pr-main X.Y.Z --merge` → `gh pr merge <n> --squash --admin`. The guard checks head = `dev` + green CI and asks him to confirm ([#917](https://github.com/littlebearapps/untether/issues/917))
+- Verify auto-tag → `release.yml` → PyPI, then run `scripts/fleet-rollout.sh X.Y.Z` when he says so
 
 ### Nathan's role
 
-- Review the PR on GitHub
-- Squash-merge to master in the GitHub UI
+- Review the PR and approve the release (or squash-merge it himself in the GitHub UI)
+- Confirm the guard's permission prompt when Claude merges
 
 That's it. No tag creation, no PyPI environment approval. The git tag and PyPI publish happen automatically:
 
@@ -359,17 +363,18 @@ That's it. No tag creation, no PyPI environment approval. The git tag and PyPI p
    - Builds wheel + sdist via `uv build`, validates with `twine check` and `check-wheel-contents`
    - Publishes to PyPI via OIDC trusted publishing (no manual approval — the PR merge was the approval)
    - Creates a GitHub Release with auto-generated notes and uploads the dist artifacts
+   - `announce` job posts `.github/release-announcements/vX.Y.Z.md` (plus a links footer) to **Discussions → Announcements** and links it from the release; idempotent, re-run the job if it fails ([#1008](https://github.com/littlebearapps/untether/issues/1008)). The build job refuses to start without a passing announcement (`scripts/release_announcement.py check`)
 
 ### Why the single gate is safe
 
 The defenses that the legacy `pypi` environment reviewer was providing are already covered upstream:
 
-- Branch protection on master: only Nathan can merge via PR
+- Branch protection on master: changes only via PR. The release merge needs Nathan's explicit approval — he merges, or Claude via `/pr-main X.Y.Z --merge`, which the guard asks him to confirm (#917)
 - `validate_release.py` runs in CI on version-bump PRs (changelog format, issue links, date)
-- All CI checks must pass before the PR can merge
+- `release-guard.sh` requires green CI before a `master` merge (`--admin` bypasses the ruleset's own CI requirement)
 - `release.yml` re-validates tag-vs-version match
 - PyPI trusted publishing via OIDC (no static API token to leak)
-- The release-guard hooks block Claude Code from creating tags or pushing master directly
+- Claude Code must never create tags or push master — `release-guard.sh` (registered in `.claude/settings.json`, #915) denies both
 
 ### Manual override (rare)
 
@@ -381,7 +386,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-Both Claude Code and Nathan can do this. The release-guard hook blocks Claude Code from `git tag v*`, so this path is Nathan-only by design.
+This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; `release-guard.sh` denies `git tag` and tag pushes).
 
 ## Post-release verification
 
@@ -406,7 +411,7 @@ scripts/healthcheck.sh --dev --version X.Y.Z
 
 ## Rollback procedures
 
-### Failed CI (tag pushed, PyPI publish failed)
+### Failed CI (tag pushed, PyPI publish failed) — Nathan-only
 
 ```bash
 # Delete the tag locally and remotely
@@ -432,7 +437,7 @@ twine yank untether X.Y.Z
 
 **Never re-upload the same version to PyPI** — PyPI rejects duplicate version numbers even after yanking.
 
-### Revert commit on master
+### Revert commit on master — Nathan-only
 
 ```bash
 git revert <commit-sha>
@@ -449,7 +454,7 @@ git push origin master
 | `uv lock --check` fails | `pyproject.toml` changed without running `uv lock` | Run `uv lock` and commit `uv.lock` |
 | Changelog missing issue links | Issue not created before release | Create issue retroactively, amend changelog in next release |
 | PyPI publish fails with 403 | Trusted publisher not configured for this repo | Check PyPI project settings → Publishing → Trusted Publishers |
-| GitHub Release not created | Workflow `release.yml` missing `create_release` step | Check workflow file, ensure `gh release create` runs |
+| GitHub Release not created | The `softprops/action-gh-release` step in `release.yml` failed or was skipped | Check the `release.yml` run log for that step |
 
 ## Untether-specific considerations
 

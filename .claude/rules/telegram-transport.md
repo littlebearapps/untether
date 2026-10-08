@@ -1,5 +1,6 @@
 ---
-applies_to: "src/untether/telegram/**"
+paths:
+  - "src/untether/telegram/**"
 ---
 
 # Telegram Transport Rules
@@ -17,7 +18,7 @@ The outbox handles coalescing, priority scheduling, and rate limiting automatica
 ## Callback data
 
 - Max 64 bytes (Telegram enforced)
-- Format: `prefix:action:id` (e.g. `ctrl:approve:req_123`)
+- Format: `prefix:action:id` (e.g. `claude_control:approve:req_123`)
 - Must call `answerCallbackQuery` promptly to clear the button spinner
 
 ## Early callback answering
@@ -26,6 +27,9 @@ For time-sensitive callbacks (approval buttons), use early answering:
 - Set `answer_early = True` on the callback backend
 - Provide `early_answer_toast()` returning the toast text ("Approved", "Denied", etc.)
 - Dispatch calls `answerCallbackQuery` before processing the action
+- With `approval_originator_only` on (#388, default off, hot-reloads via `update_from`), `_dispatch_callback` refuses
+  a `claude_control:` / `aq:` tap from anyone but the run's originator **before** the early answer — the early toast
+  reserves a control claim, so never move the check after it. Logic: `telegram/approval_originator.py`
 
 ## Ephemeral messages
 
@@ -38,6 +42,11 @@ Messages that should auto-delete when a run finishes:
 - Per-chat pacing: private 1.0 msg/s, groups 20/60 msg/s
 - On 429: `RetryAfter` raised, op requeued unless superseded
 - Non-429 errors: logged and dropped
+- Error lines carry `kind` (#823): wrap the transport calls for an Untether surface in `with message_kind("…")`
+  (`transport.py`). The outbox op captures the kind at enqueue and re-applies it on the worker, so set it around the
+  `transport.*` call, not inside the outbox
+- `send_message(replace_message_id=…)` queues the replaced message's delete with `wait=False` (#928) — a slow delete
+  must never hold a final's delivery
 
 ## Message limits
 
@@ -53,7 +62,9 @@ Messages that should auto-delete when a run finishes:
 
 ## Outbox file delivery
 
-Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`.
+Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`, `outbox_stale_policy`.
+
+Freshness (#924): only entries changed since the dispatch's `outbox_since` are sent; older ones are quarantined to `.skipped/` once. Always thread `outbox_since` through every `handle_message` re-entry (a live session uses its spawn time, never a turn's), and read the outbox settings per delivery via `_load_outbox_settings(cfg)` — never `cfg.outbox_config` directly (frozen at startup, so edits wouldn't hot-reload).
 
 ## Progress persistence
 
@@ -65,7 +76,7 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 ## TelegramBridgeConfig hot-reload (#286)
 
-`TelegramBridgeConfig` is unfrozen (slots preserved) as of rc4. `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`.
+`TelegramBridgeConfig` is unfrozen (slots preserved). `update_from(settings)` applies a reloaded `TelegramTransportSettings` to the live config; `handle_reload()` in `loop.py` calls it and refreshes the two cached copies in `TelegramLoopState`. `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message. Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`. Every restart notice gets its "how to apply" text from `service_manager.restart_hint()` (#927) — never hardcode a systemd unit or launchd label.
 
 ## sd_notify (#287)
 
@@ -73,7 +84,38 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 ## /at command (#288)
 
-`telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
+`telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id, thread_filter=…)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
+
+`/at` freezes the engine and context a plain prompt in that chat/topic would use (#950): `CommandContext.default_engine_override`
+(topic/chat `/agent` default) and `ambient_context` (topic/chat `/ctx` binding), both filled by `dispatch_command`, then the
+project → global defaults. Never call `resolve_engine(engine_override=None, …)` for a run a command starts — that skips
+the topic/chat `/agent` default and can fire on a different engine than a plain message would.
+
+## Markdown rendering (`telegram/render.py`)
+
+`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797). Single newlines in line-structured text are kept as line breaks while wrapped prose reflows (#870), and an ordered list keeps its own start number (#886, sulguk ignores `<ol start>`, so it goes on the first `<li value>`).
+
+## Forward-coalesce command barrier (#807)
+
+A slash command sent while a prompt is pending in the `ForwardCoalescer` window
+(`telegram/loop.py`, `_apply_command_barrier`) is a barrier:
+
+- `/cancel`, `/new`, `/continue` → `ForwardCoalescer.drop(key, reason=<cmd>)`
+  (INFO `forward.prompt.dropped`) and a reply to the dropped prompt:
+  `🗑️ Dropped N message(s) sent just before /<cmd> — …`. Never drop silently (#794).
+- any other command → `ForwardCoalescer.flush(key, reason="command")` first.
+  **Best-effort ordering only:** the prompt is dispatched via `start_soon` and
+  awaits prefs/context, so a `/model` or `/planmode` right behind it can still
+  apply to it. Don't document or test it as a strict guarantee.
+- `/<engine>` / `/<project>` directives and `/steer <text>` are prompts — they
+  skip the barrier and meet the #794 merge/flush rules.
+
+## Reply and quote context (#736)
+
+The replied-to message (or the user's selected quote, which wins) is appended to the prompt by
+`append_reply_context()` (`telegram/reply_context.py`) **after** directive, engine and resume parsing, as escaped,
+bounded (`REPLY_CONTEXT_MAX_CHARS`) reference data inside `<telegram_reply_context>`. Resume-footer routing lines are
+removed first (`strip_reply_routing_lines`). Never let reply or quote text reach the routing parsers.
 
 ## Plan outline rendering
 
@@ -81,7 +123,12 @@ Plan outlines render as formatted Telegram text via `render_markdown()` + `split
 
 ## /new command
 
-`/new` cancels all running tasks for the chat via `_cancel_chat_tasks()` (in `commands/topics.py`) before clearing stored sessions. This prevents process leaks from orphaned Claude/engine subprocesses.
+`/new` cancels the running tasks (and pending `/loop` entries) of the message's thread in forum supergroups and private chats — chat-wide in non-forum groups — via `_cancel_chat_tasks(..., thread_filter=thread_filter_for(msg))` (in `commands/topics.py`; the predicate lives in `telegram/topics.py`, General = no thread = topic id 1) before clearing stored sessions ([#826](https://github.com/littlebearapps/untether/issues/826)). The `/cancel` no-reply fallback uses the same predicate for running tasks, queued jobs, `/at` delays and loops. Scope key = `RunningTask.thread_id` (the originating message's thread), never the echoed `ref.thread_id`. This prevents process leaks from orphaned Claude/engine subprocesses.
+
+An idle Claude live session (answered, no in-flight turn or background task; `running_task_is_idle_after_result`) is
+not a "running" task for wording or ambiguity: `/new` says `closed the idle session` (#895), and `/cancel` closes it
+(`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
+Never return early from `/cancel` after closing an idle session.
 
 ## After changes
 

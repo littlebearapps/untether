@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from untether.config import HOME_CONFIG_PATH, load_or_init_config
+from untether.config import load_or_init_config
 from untether.settings import _resolve_config_path, load_settings
 
 ENV_VAR = "UNTETHER_CONFIG_PATH"
@@ -32,12 +32,16 @@ class TestResolveConfigPath:
 
         assert result == env_config
 
-    def test_falls_back_to_home_config(self, monkeypatch) -> None:
+    def test_falls_back_to_home_config(self, tmp_path: Path, monkeypatch) -> None:
+        # #808: the binding is what's consulted at call time; pin it
+        # explicitly rather than comparing against the import-time value.
+        home_config = tmp_path / "home" / "untether.toml"
+        monkeypatch.setattr("untether.settings.HOME_CONFIG_PATH", home_config)
         monkeypatch.delenv(ENV_VAR, raising=False)
 
         result = _resolve_config_path(None)
 
-        assert result == HOME_CONFIG_PATH
+        assert result == home_config
 
     def test_env_var_tilde_expanded(self, monkeypatch) -> None:
         monkeypatch.setenv(ENV_VAR, "~/.untether-dev/untether.toml")
@@ -134,11 +138,15 @@ class TestOnboardingResolveHomeConfig:
 
         assert result == env_config
 
-    def test_falls_back_to_home_config(self, monkeypatch) -> None:
+    def test_falls_back_to_home_config(self, tmp_path: Path, monkeypatch) -> None:
         from untether.telegram.onboarding import _resolve_home_config
 
+        home_config = tmp_path / "home" / "untether.toml"
+        monkeypatch.setattr(
+            "untether.telegram.onboarding.HOME_CONFIG_PATH", home_config
+        )
         monkeypatch.delenv(ENV_VAR, raising=False)
 
         result = _resolve_home_config()
 
-        assert result == HOME_CONFIG_PATH
+        assert result == home_config

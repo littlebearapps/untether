@@ -5,9 +5,10 @@ from typing import TYPE_CHECKING
 
 from ...logging import get_logger
 from ...progress import ProgressTracker
-from ...runner_bridge import RunningTasks
+from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
 from ...scheduler import ThreadJob, ThreadScheduler
 from ...transport import MessageRef
+from ..topics import thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
 
@@ -64,9 +65,46 @@ async def handle_cancel(
             await reply(text="nothing is currently running for that message.")
             return
         # Fallback: single active run or single queued job in this chat
+        # #776: one entry per run — a live run is also registered under each
+        # follow-up turn's message.
+        from ...runner_bridge import unique_running_tasks
+
+        # #826: in a forum (or private-chat topic) only the sender's own
+        # thread is in scope — /cancel in topic B must never cancel topic A.
+        tf = thread_filter_for(msg)
         matches = [
-            (ref, t) for ref, t in running_tasks.items() if ref.channel_id == chat_id
+            (ref, t)
+            for ref, t in unique_running_tasks(running_tasks)
+            if ref.channel_id == chat_id and (tf is None or tf(t.thread_id))
         ]
+        # #902: live sessions idling after their answer are not runs the user
+        # can see. Close them, then carry on to the pending /at and /loop
+        # cancel below (the /at confirmation says "Cancel with /cancel"), and
+        # always reply. Any real work in scope keeps the behaviour below.
+        idle_closed = 0
+        if matches and all(running_task_is_idle_after_result(t) for _, t in matches):
+            claimed = [
+                (ref, t) for ref, t in matches if _claim_cancel(chat_id, ref.message_id)
+            ]
+            if not claimed:
+                logger.debug(
+                    "cancel.deduped",
+                    chat_id=chat_id,
+                    progress_message_id=matches[0][0].message_id,
+                    source="text-fallback",
+                )
+                return
+            for _ref, task in claimed:
+                task.cancel_requested.set()
+            idle_closed = len(claimed)
+            logger.info(
+                "cancel.idle_session_closed",
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                idle=idle_closed,
+                progress_message_ids=[ref.message_id for ref, _t in claimed],
+            )
+            matches = []
         if len(matches) == 1:
             ref, task = matches[0]
             if not _claim_cancel(chat_id, ref.message_id):
@@ -78,7 +116,10 @@ async def handle_cancel(
                 )
                 return
             logger.info(
-                "cancel.requested", chat_id=chat_id, progress_message_id=ref.message_id
+                "cancel.requested",
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                progress_message_id=ref.message_id,
             )
             task.cancel_requested.set()
             return
@@ -90,7 +131,7 @@ async def handle_cancel(
             return
         # Check queued jobs
         if scheduler is not None:
-            queued = scheduler.queued_for_chat(chat_id)
+            queued = scheduler.queued_for_chat(chat_id, thread_filter=tf)
             if len(queued) == 1:
                 job = await scheduler.cancel_queued(
                     chat_id, queued[0].progress_ref.message_id
@@ -109,32 +150,40 @@ async def handle_cancel(
         # Check pending /at delays for this chat (#288).
         from .. import at_scheduler
 
-        pending_at = at_scheduler.cancel_pending_for_chat(chat_id)
-        if pending_at:
-            await reply(
-                text=(
-                    f"\u274c cancelled {pending_at} pending /at run"
-                    f"{'s' if pending_at != 1 else ''}."
-                )
-            )
-            return
+        pending_at = at_scheduler.cancel_pending_for_chat(chat_id, thread_filter=tf)
         # Check pending /loop entries for this chat (#289).  Also writes the
         # do-not-resume sentinel so the upstream session-scoped cron that
         # may still live in the JSONL transcript can never be re-fired by
-        # us if the user later resumes the session manually.
+        # us if the user later resumes the session manually.  #902: always
+        # checked \u2014 a pending /at no longer hides the loops from /cancel.
         from ... import loop_scheduler
 
-        pending_loops = loop_scheduler.cancel_pending_for_chat(chat_id)
-        if pending_loops:
-            await reply(
-                text=(
-                    f"\u274c cancelled {pending_loops} active loop"
-                    f"{'s' if pending_loops != 1 else ''}."
-                )
+        pending_loops = loop_scheduler.cancel_pending_for_chat(
+            chat_id, thread_filter=tf
+        )
+        dropped: list[str] = []
+        if pending_at:
+            dropped.append(
+                f"{pending_at} pending /at run{'s' if pending_at != 1 else ''}"
             )
+        if pending_loops:
+            dropped.append(
+                f"{pending_loops} active loop{'s' if pending_loops != 1 else ''}"
+            )
+        if dropped:
+            # The idle-session close (#902) is incidental \u2014 not mentioned.
+            await reply(text=f"\u274c cancelled {' and '.join(dropped)}.")
             return
-        logger.debug("cancel.nothing_running", chat_id=chat_id)
-        await reply(text="nothing running in this chat.")
+        logger.debug(
+            "cancel.nothing_running",
+            chat_id=chat_id,
+            thread_id=msg.thread_id,
+            idle_closed=idle_closed,
+        )
+        text = f"nothing running in this {thread_scope_label(msg)}"
+        if idle_closed:
+            text += f" \u2014 {_idle_closed_label(idle_closed)}"
+        await reply(text=f"{text}.")
         return
 
     progress_ref = MessageRef(channel_id=chat_id, message_id=reply_id)
@@ -162,12 +211,34 @@ async def handle_cancel(
             source="text-reply",
         )
         return
+    if running_task_is_idle_after_result(running_task):
+        # #902: the answer is already delivered — say what /cancel did.
+        logger.info(
+            "cancel.idle_session_closed",
+            chat_id=chat_id,
+            thread_id=msg.thread_id,
+            idle=1,
+            progress_message_ids=[reply_id],
+        )
+        running_task.cancel_requested.set()
+        await reply(
+            text=(
+                "nothing is currently running for that message — "
+                f"{_idle_closed_label(1)}."
+            )
+        )
+        return
     logger.info(
         "cancel.requested",
         chat_id=chat_id,
         progress_message_id=reply_id,
     )
     running_task.cancel_requested.set()
+
+
+def _idle_closed_label(count: int) -> str:
+    """#902: same wording as ``/new``'s idle close (#895)."""
+    return "closed the idle sessions" if count > 1 else "closed the idle session"
 
 
 async def handle_callback_cancel(
@@ -232,15 +303,16 @@ async def handle_callback_cancel(
             text="cancelling...",
         )
         return
+    idle = running_task_is_idle_after_result(running_task)
     logger.info(
-        "cancel.requested",
+        "cancel.idle_session_closed" if idle else "cancel.requested",
         chat_id=query.chat_id,
         progress_message_id=query.message_id,
     )
     running_task.cancel_requested.set()
     await cfg.bot.answer_callback_query(
         callback_query_id=query.callback_query_id,
-        text="cancelling...",
+        text=f"{_idle_closed_label(1)}." if idle else "cancelling...",
     )
 
 

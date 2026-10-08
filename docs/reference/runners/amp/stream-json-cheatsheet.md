@@ -1,5 +1,14 @@
 # AMP `--stream-json` event cheatsheet
 
+!!! warning "Deprecated"
+
+    The `amp` engine is **deprecated and no longer supported** (as of v0.36.0):
+    it still loads, but gets no fixes, is excluded from testing, and may be
+    removed in a future release. The integration is
+    unmaintained, and AMP remotely refuses out-of-date clients with `426` and
+    exits 1. The AMP-only `/threads` command is deprecated with it
+    ([#458](https://github.com/littlebearapps/untether/issues/458)).
+
 `amp -x --stream-json` writes **one JSON object per line** (JSONL) using a
 Claude Code-compatible protocol with a `type` field discriminator.
 

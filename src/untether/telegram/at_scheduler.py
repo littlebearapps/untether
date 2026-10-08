@@ -265,17 +265,24 @@ def _as_channel_id(chat_id: int) -> ChannelId:
     return chat_id
 
 
-def cancel_pending_for_chat(chat_id: int) -> int:
-    """Cancel all pending /at delays for ``chat_id``.
+def cancel_pending_for_chat(
+    chat_id: int,
+    *,
+    thread_filter: Callable[[int | None], bool] | None = None,
+) -> int:
+    """Cancel pending /at delays for ``chat_id``.
 
     Returns the number of delays cancelled. Delays that have already
     fired (``fired=True``) run as part of the normal running_tasks set
-    and are unaffected.
+    and are unaffected.  #826: ``thread_filter`` (when given) limits the
+    cancel to delays whose ``thread_id`` it accepts; ``None`` = whole chat.
     """
     cancelled = 0
     for token in list(_PENDING):
         entry = _PENDING.get(token)
         if entry is None or entry.chat_id != chat_id or entry.fired:
+            continue
+        if thread_filter is not None and not thread_filter(entry.thread_id):
             continue
         entry.cancel_scope.cancel()
         _PENDING.pop(token, None)

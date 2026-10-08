@@ -31,6 +31,7 @@ Notes:
 
 - File transfer is **disabled by default**.
 - If `allowed_user_ids` is empty, private chats are allowed and group usage requires admin privileges.
+- Setting `deny_globs` **replaces** the built-in list. The defaults also cover `.env.*`, `*.key`, `id_rsa`, `id_ed25519`, `.netrc`, `.npmrc` and `.pypirc`; copy the full list from [Security → File transfer deny globs](security.md#file-transfer-deny-globs) and add to it rather than starting from the short example above.
 
 ## Upload a file (`/file put`)
 
@@ -59,7 +60,10 @@ If the target file already exists, Untether auto-appends a numeric suffix (`_1`,
 ```
 
 !!! untether "Untether"
-    📄 saved `docs/spec.pdf` (42 KB)
+    saved `docs/spec.pdf` in `happy-gadgets` (42 kb)
+
+!!! note "Path safety"
+    Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). A refused path gets a reply naming the rule, such as ``path denied by rule: `**/.ssh/**` ``, with `(resolves to …)` added when a symlink led there. Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
 
 <img src="../assets/screenshots/file-put.jpg" alt="Photos uploaded and auto-saved with confirmation" width="360" loading="lazy" />
 
@@ -73,8 +77,10 @@ Send:
 
 Directories are zipped automatically.
 
-!!! untether "Untether"
-    📎 `src/main.py` (1.2 KB)
+!!! note "Path safety"
+    The same double check applies to downloads: `/file get cfg.txt` is refused when `cfg.txt` is a symlink to `.env`, and a symlinked directory is zipped with every member checked against its real path. The file (or archive) keeps the name you asked for ([#390](https://github.com/littlebearapps/untether/issues/390)).
+
+Untether replies with the file as a Telegram document (no caption).
 
 <img src="../assets/screenshots/file-get.jpg" alt="/file get response showing fetched file as a document" width="360" loading="lazy" />
 
@@ -90,7 +96,7 @@ Agents can send files to you automatically — plan docs, generated images, scri
                               └──────────────────┘                └───────────┘
 ```
 
-Every agent session receives a preamble telling it about the outbox. The agent decides which files to share — you receive them as Telegram document messages with `📎 filename (size)` captions, arriving just after the final text response.
+Every new run receives a preamble telling it about the outbox (follow-ups and steers sent into a live Claude session don't repeat it). The agent decides which files to share — you receive them as Telegram document messages with `📎 filename (size)` captions, arriving just after the final text response.
 
 ### Configuration
 
@@ -114,7 +120,10 @@ Outbox delivery is enabled by default when file transfer is enabled:
     outbox_dir = ".untether-outbox"  # relative to project root
     outbox_max_files = 10            # max files per run (1–50)
     outbox_cleanup = true            # delete sent files after delivery
+    outbox_stale_policy = "archive"  # "send" = also send older leftovers (old behaviour)
     ```
+
+All `outbox_*` settings hot-reload with `watch_config = true` — they're read again for every delivery. Turning `files.enabled` on for the first time still needs a restart.
 
 ### How agents use it
 
@@ -129,20 +138,27 @@ cp output/diagram.svg .untether-outbox/
 When the run finishes successfully, Untether:
 
 1. Scans `.untether-outbox/` for files (flat scan, no subdirectories)
-2. Validates each file against deny globs, size limits, and path traversal rules
-3. Sends valid files as Telegram documents with `📎 filename (size)` captions
-4. Cleans up — deletes sent files and removes the empty directory
+2. Keeps only the files written or copied into it **during this run** (#924) — judged by the later of the file's modification and status-change times, so `mv` and `cp -p` still count. Anything older is moved once to `.untether-outbox/.skipped/` and listed in a single `📎 N older files were already in .untether-outbox/ …` notice instead of being sent
+3. Validates each file against deny globs, size limits, and path traversal rules
+4. Sends valid files as Telegram documents with `📎 filename (size)` captions
+5. Cleans up — deletes sent files and removes the empty directory
 
-Files are sent in alphabetical order, one at a time, immediately after the agent's text response.
+Files are sent in alphabetical order, one at a time, immediately after the agent's text response. In a live Claude session, "this run" starts when the session started, so a background task's file that a later wake turn reports is still delivered.
+
+!!! tip "Getting older files back"
+    `/file get .untether-outbox/.skipped` sends everything Untether moved aside as one zip. To have an agent re-send an older file, ask it to copy the file into `.untether-outbox/` again.
 
 ### Security
 
 Outbox delivery reuses the same security rules as `/file get`:
 
-- **Deny globs** — files matching `.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**` (and any custom deny globs) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
+- **Deny globs** — files matching `deny_globs` (by default `.git/**`, `.env` and `.env.*` files, `.envrc`, keys and certificates, `.ssh/**`, `.netrc`, `.npmrc`, `.pypirc`) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
 - **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
-- **Path traversal** — symlinks pointing outside the project root are rejected
-- **File count** — capped at `outbox_max_files` per run (default 10)
+- **Symlinks** — every symlink in the outbox is skipped (reported as `symlink`), wherever it points
+- **Outbox location** — `outbox_dir` must be a relative path without `..`; an outbox that resolves outside the project (for example a symlinked `.untether-outbox`) is never scanned or archived (#924)
+- **Empty files** — zero-byte files are skipped too
+- **Older files** — files left in the outbox by earlier sessions (or by agents running outside Untether) are never attached to an unrelated answer; they're moved to `.untether-outbox/.skipped/` with one notice (#924). Set `outbox_stale_policy = "send"` to restore the old send-everything behaviour
+- **File count** — capped at `outbox_max_files` per delivery (default 10); extra files are listed in a notice and moved to `.untether-outbox/.skipped/` rather than being sent with a later run
 - **Auto-cleanup** — sent files are deleted after delivery by default, preventing sensitive data accumulation
 - **Failed/auto-continued runs** — actual file delivery is still gated on a successful run, but skipped items (directories, deny-globbed files, oversized files) are surfaced even when the run fails or auto-continues, so you always learn what the agent intended to send. Opt out via `outbox_notify_skipped = false`.
 
@@ -156,11 +172,11 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
-| Gemini CLI | Needs config | Set approval mode to "Full access" via `/config` → Approval mode |
-| AMP | Yes | — |
+| Gemini CLI (deprecated) | Yes | Untether runs it with `--approval-mode yolo` unless the chat picks **Edit files**, which can still write files |
+| AMP (deprecated) | Yes | — |
 
-!!! tip "Gemini CLI permissions"
-    Gemini CLI defaults to read-only approval mode. To enable file creation (and outbox delivery), set the approval mode to "Full access" via `/config` → **Approval mode** in the Gemini chat.
+!!! tip "Gemini CLI permissions (deprecated engine)"
+    Untether runs Gemini CLI with `--approval-mode yolo` by default (the **Read-only** choice in `/config` → **Approval mode** lands on the same default), so it can create files for the outbox without any setup. See [Interactive approval → Gemini CLI](interactive-approval.md#gemini-cli-approval-mode).
 
 ### Limitations
 

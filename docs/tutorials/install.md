@@ -24,13 +24,15 @@ uv python install 3.14
 uv tool install -U untether
 ```
 
+Prefer `pipx`? `pipx install untether` works too (Python 3.12+).
+
 Verify it's installed:
 
 ```sh
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.35.4`).
+You should see the installed version number (e.g. `0.36.0`).
 
 ## 3. Install agent CLIs
 
@@ -53,13 +55,15 @@ npm install -g @anthropic-ai/claude-code
 Untether uses the official Claude Code CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Untether defaults to subscription billing unless you opt into API billing in config.
 
 !!! note "macOS credentials"
-    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've run `claude login` at least once before starting Untether.
+    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
 
 ### OpenCode
 
 ```sh
-npm install -g opencode-ai@latest
+npm install -g opencode-ai@1
 ```
+
+Untether drives the OpenCode **1.x** CLI (npm `opencode-ai`). OpenCode 2.x (npm `@opencode/cli`, whose binary is also called `opencode`) isn't supported yet: it runs prompts on a shared background service outside Untether's control, so Untether checks `opencode --version` before each run and refuses 2.x with a `🛑 OpenCode 2.x isn't supported yet` message and the commands to switch back ([#970](https://github.com/littlebearapps/untether/issues/970)).
 
 OpenCode supports logging in with Anthropic for your Claude subscription or with OpenAI for your ChatGPT subscription, and it can connect to 75+ providers via Models.dev (including local models).
 
@@ -71,18 +75,44 @@ npm install -g @mariozechner/pi-coding-agent
 
 Pi can authenticate via a provider login or use API billing. You can log in with Anthropic (Claude subscription), OpenAI (ChatGPT subscription), GitHub Copilot, Google Cloud Code Assist (Gemini CLI), or Antigravity (Gemini 3, Claude, GPT-OSS), or choose API billing instead.
 
-### Gemini CLI
+### Gemini CLI ⚠️ deprecated
+
+!!! warning "Deprecated — don't install for new setups"
+
+    Google ended Gemini CLI support for **individual accounts (free, Google AI Pro and Ultra) on
+    18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)), directing users to [Antigravity CLI](https://antigravity.google).
+    On those accounts the CLI fails to authenticate outright
+    (`IneligibleTierError`). Worse, under Untether the subprocess hangs rather
+    than exiting, so runs stall for ~10 minutes until the watchdog cancels them.
+    Enterprise / Google Cloud licences may still work, but Untether no longer
+    verifies this.
+
+    The `gemini` engine is still included but **deprecated and no longer
+    supported**: no bug fixes, no testing, and it may be removed in a future
+    release. Antigravity CLI support is planned as a separate `antigravity` engine
+    in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)).
 
 ```sh
 npm install -g @google/gemini-cli
 ```
 
-Gemini CLI uses Google AI Studio or Vertex AI for authentication. Run `gemini` and sign in with your Google account. Supports plan mode, sandboxing, and automatic model routing (Pro for planning, Flash for implementation).
+Gemini CLI needs a paid Gemini API key (Google AI Studio or Vertex AI) or an Enterprise / Google Cloud licence; individual Google accounts can no longer sign in (`IneligibleTierError`). Supports plan mode, sandboxing, and automatic model routing (Pro for planning, Flash for implementation).
 
 !!! tip "Headless trust"
     Untether runs Gemini with `--skip-trust` by default (v0.35.3+, [#471](https://github.com/littlebearapps/untether/issues/471)) so projects outside `~/.gemini/trustedFolders.json` work in headless mode. Set `[gemini] skip_trust = false` in `untether.toml` if you'd rather enforce Gemini's project-local trust gate.
 
-### AMP
+### AMP ⚠️ deprecated
+
+!!! warning "Deprecated — don't install for new setups"
+
+    Untether's AMP integration is still included but **deprecated and no longer
+    supported**: no bug fixes, no testing, and it may be removed in a future
+    release. AMP remotely refuses clients it considers out of date
+    (`426 This version of Amp is no longer supported`), so a refused run fails
+    within seconds. Untether does not track AMP's update cadence, so a working
+    setup can stop working without notice.
+
+    This is a decision about our integration, not about AMP itself.
 
 ```sh
 npm install -g @sourcegraph/amp
@@ -276,7 +306,7 @@ untether runs these engines on your computer. switch anytime with /agent.
   ───────────────────────────────────────────
   codex     ✓ installed
   claude    ✓ installed
-  opencode  ✗ not found    npm install -g opencode-ai@latest
+  opencode  ✗ not found    npm install -g opencode-ai@1
   pi        ✗ not found    npm install -g @mariozechner/pi-coding-agent
   gemini    ✗ not found    npm install -g @google/gemini-cli
   amp       ✗ not found    npm install -g @sourcegraph/amp
@@ -286,7 +316,7 @@ untether runs these engines on your computer. switch anytime with /agent.
    claude
 ```
 
-Pick whichever you prefer. You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode or Pi. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 
@@ -298,7 +328,7 @@ Untether supports three workflow modes that control how conversations continue:
 | **Workspace** | Teams, multiple projects | Forum topics, each bound to a project/branch. Independent sessions per topic. |
 | **Handoff** | Terminal-first workflow | Every message is a new run. Resume lines shown for copying to terminal. |
 
-The onboarding wizard configures this automatically based on your setup (private chat = assistant, forum group = workspace). You can change modes later by editing three settings in your config file — see [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
+These are the workflows you picked between in step 7; the wizard only changes your choice if you picked workspace and the group fails the topics check, and you then choose to switch to assistant. You can change modes later by editing three settings in your config file — see [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
 
 ## 11. Save your config
 
@@ -312,16 +342,24 @@ Press **y** or **Enter** to save. You'll see:
 
 ```
 ✓ setup complete. starting untether...
+
+  next steps:
+  • send a message to test: what is 2+2?
+  • change settings from telegram: /config
+  • enable voice notes: add voice_transcription = true to config
+  • set up projects: see littlebearapps.com/help/untether/projects/
+  • bot is locked to your account (user id 123456789)
 ```
 
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 untether is ready (v0.35.4)
+    🐕 **untether is ready** (v0.36.0)
 
     *default engine:* `codex`<br>
-    *installed engines:* codex<br>
-    mode: assistant
+    *installed engines:* `codex, claude` (not installed: opencode, pi, gemini, amp)<br>
+    *mode:* `assistant`<br>
+    *directories:* `none`
 
     Send a message to start, or /config for settings.
 
@@ -342,6 +380,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.allowed_user_ids '[123456789]'
         untether config set transports.telegram.session_mode "chat"
         untether config set transports.telegram.show_resume_line false
         untether config set transports.telegram.topics.enabled false
@@ -375,6 +414,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id -1001234567890
+        untether config set transports.telegram.allowed_user_ids '[123456789, 234567890]'
         untether config set transports.telegram.session_mode "chat"
         untether config set transports.telegram.show_resume_line false
         untether config set transports.telegram.topics.enabled true
@@ -408,6 +448,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         untether config set transport "telegram"
         untether config set transports.telegram.bot_token "..."
         untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.allowed_user_ids '[123456789]'
         untether config set transports.telegram.session_mode "stateless"
         untether config set transports.telegram.show_resume_line true
         untether config set transports.telegram.topics.enabled false
@@ -432,7 +473,9 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         scope = "auto"
         ```
 
-This config file controls all of Untether's behavior. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
+The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that.
+
+This config file controls all of Untether's behaviour. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 
 [Full config reference →](../reference/config.md)
 

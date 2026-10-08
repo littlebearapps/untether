@@ -134,9 +134,79 @@ class TestChatSessionKeyStateless:
             chat_type="supergroup",
             thread_id=77,
         )
-        # Even with a store, topic messages return None
+        # Even with a store, supergroup topic messages return None
         store = ChatSessionStore.__new__(ChatSessionStore)
         assert _chat_session_key(msg, store=store) is None
+
+
+# ---------------------------------------------------------------------------
+# _chat_session_key — private-chat topics (#734)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivateChatTopics:
+    """Private-chat topics get a thread-scoped chat-session key (#734).
+
+    Before the fix, any message carrying ``thread_id`` returned ``None``, so
+    private-chat topics wrote no resume token and every follow-up started a
+    fresh agent session. Supergroup forum topics are handled by
+    ``TopicStateStore`` and must keep returning ``None``.
+    """
+
+    @staticmethod
+    def _msg(**kwargs):
+        base = {
+            "transport": "telegram",
+            "chat_id": 123,
+            "message_id": 1,
+            "text": "hello",
+            "reply_to_message_id": None,
+            "reply_to_text": None,
+            "sender_id": 456,
+            "chat_type": "private",
+        }
+        base.update(kwargs)
+        return TelegramIncomingMessage(**base)
+
+    @staticmethod
+    def _store():
+        return ChatSessionStore.__new__(ChatSessionStore)
+
+    def test_private_topic_is_thread_scoped(self) -> None:
+        msg = self._msg(thread_id=77)
+        assert _chat_session_key(msg, store=self._store()) == (123, 77)
+
+    def test_private_topics_are_isolated_from_each_other(self) -> None:
+        one = _chat_session_key(self._msg(thread_id=77), store=self._store())
+        two = _chat_session_key(self._msg(thread_id=78), store=self._store())
+        assert one != two
+
+    def test_private_main_thread_keeps_its_existing_session(self) -> None:
+        """The regression guard: the main thread's key must not change."""
+        msg = self._msg(thread_id=None)
+        assert _chat_session_key(msg, store=self._store()) == (123, None)
+
+    def test_private_topic_differs_from_main_thread(self) -> None:
+        main = _chat_session_key(self._msg(thread_id=None), store=self._store())
+        topic = _chat_session_key(self._msg(thread_id=77), store=self._store())
+        assert main != topic
+
+    def test_supergroup_topic_still_defers_to_topic_store(self) -> None:
+        msg = self._msg(chat_id=-100, chat_type="supergroup", thread_id=77)
+        assert _chat_session_key(msg, store=self._store()) is None
+
+    def test_group_topic_still_defers_to_topic_store(self) -> None:
+        msg = self._msg(chat_id=-100, chat_type="group", thread_id=77)
+        assert _chat_session_key(msg, store=self._store()) is None
+
+    def test_private_topic_needs_no_sender_id(self) -> None:
+        """Private chats key on the thread, never on the sender."""
+        msg = self._msg(thread_id=77, sender_id=None)
+        assert _chat_session_key(msg, store=self._store()) == (123, 77)
+
+    def test_stateless_mode_still_wins(self) -> None:
+        msg = self._msg(thread_id=77)
+        assert _chat_session_key(msg, store=None) is None
 
 
 # ---------------------------------------------------------------------------

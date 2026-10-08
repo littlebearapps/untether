@@ -68,6 +68,131 @@ class SSRFError(Exception):
     """Raised when an outbound request is blocked by SSRF protection."""
 
 
+class SSRFBlockedError(SSRFError):
+    """#679: the host is (or resolves only to) a blocked private/reserved
+    address. Carries the parsed ``hostname`` and the blocked ``addresses`` so
+    callers can build actionable guidance without parsing the message.
+    ``str(exc)`` is unchanged from the plain :class:`SSRFError` it replaces."""
+
+    def __init__(
+        self, message: str, *, hostname: str, addresses: tuple[str, ...]
+    ) -> None:
+        super().__init__(message)
+        self.hostname = hostname
+        self.addresses = addresses
+
+
+class SSRFResolutionError(SSRFError):
+    """#679: DNS resolution for ``hostname`` failed or returned nothing."""
+
+    def __init__(self, message: str, *, hostname: str) -> None:
+        super().__init__(message)
+        self.hostname = hostname
+
+
+def redact_url_userinfo(url: str, *, drop_query: bool = False) -> str:
+    """#679: replace ``user[:pass]@`` in *url*'s netloc with ``***@``.
+
+    With ``drop_query`` (#841) the query string and fragment are dropped too,
+    whether or not the URL carries userinfo (signed URLs / ``?key=`` params).
+
+    Returns the input unchanged when there is nothing to redact or it can't be
+    parsed — this is a log-hygiene helper and must never raise.
+    """
+    try:
+        parsed = urlparse(url)
+        netloc = parsed.netloc
+    except ValueError:
+        return url
+    has_userinfo = "@" in netloc
+    has_query = drop_query and bool(parsed.query or parsed.fragment)
+    if not has_userinfo and not has_query:
+        return url
+    try:
+        if has_userinfo:
+            parsed = parsed._replace(netloc=f"***@{netloc.rsplit('@', 1)[1]}")
+        if has_query:
+            parsed = parsed._replace(query="", fragment="")
+        return parsed.geturl()
+    except ValueError:
+        return url
+
+
+def strip_url_userinfo(url: str) -> str:
+    """#679: drop ``user[:pass]@`` from *url*'s netloc entirely. The SSRF
+    verdict depends only on the scheme and host, so validating the stripped
+    copy is equivalent and keeps credentials out of every ``ssrf.*`` log."""
+    try:
+        parsed = urlparse(url)
+        netloc = parsed.netloc
+    except ValueError:
+        return url
+    if "@" not in netloc:
+        return url
+    try:
+        return parsed._replace(netloc=netloc.rsplit("@", 1)[1]).geturl()
+    except ValueError:
+        return url
+
+
+# #679: private ranges an operator may reasonably run a self-hosted service in
+# (RFC 1918, CGN — which covers Tailscale — and IPv6 ULA, plus mapped forms).
+# A suggestion for these is the bare address (least privilege). Link-local
+# (incl. 169.254.169.254 cloud metadata), unspecified, multicast, reserved,
+# broadcast and documentation ranges are deliberately absent: we never nudge
+# an operator towards allowlisting them.
+_SUGGESTABLE_PRIVATE: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+    ipaddress.IPv4Network("100.64.0.0/10"),
+    ipaddress.IPv6Network("fc00::/7"),
+    ipaddress.IPv6Network("::ffff:10.0.0.0/104"),
+    ipaddress.IPv6Network("::ffff:172.16.0.0/108"),
+    ipaddress.IPv6Network("::ffff:192.168.0.0/112"),
+)
+
+_MAX_SUGGESTIONS = 3
+
+
+def suggest_allowlist(addresses: Sequence[str]) -> tuple[str, ...]:
+    """#679: the narrowest safe allowlist entries that would unblock *addresses*.
+
+    - IPv4 loopback → ``"127.0.0.0/8"`` (matches the documented example); when
+      present it alone is enough, because a hostname passes if ANY resolved
+      address is allowed.
+    - ``::1`` → ``"::1"``; IPv4-mapped loopback → ``"::ffff:127.0.0.0/104"``.
+    - RFC 1918 / CGN (tailnet) / ULA and their mapped forms → the bare address.
+    - Anything else (link-local, cloud metadata, multicast, reserved, …) →
+      nothing.
+
+    De-duplicated, sorted, capped at 3.
+    """
+    parsed: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for raw in addresses:
+        try:
+            parsed.append(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    if any(isinstance(a, ipaddress.IPv4Address) and a.is_loopback for a in parsed):
+        return ("127.0.0.0/8",)
+    out: set[str] = set()
+    for addr in parsed:
+        if isinstance(addr, ipaddress.IPv6Address):
+            # Mapped first: on Python 3.13+ ``is_loopback`` is also true for
+            # ``::ffff:127.x`` and "::1" would not unblock it.
+            mapped = addr.ipv4_mapped
+            if mapped is not None and mapped.is_loopback:
+                out.add("::ffff:127.0.0.0/104")
+                continue
+            if addr.is_loopback:
+                out.add("::1")
+                continue
+        if any(addr in net for net in _SUGGESTABLE_PRIVATE):
+            out.add(str(addr))
+    return tuple(sorted(out))[:_MAX_SUGGESTIONS]
+
+
 def parse_networks(
     entries: Sequence[str],
 ) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -119,14 +244,16 @@ def validate_url(
         raise SSRFError(f"Invalid URL: {exc}") from exc
 
     if parsed.scheme not in ALLOWED_SCHEMES:
-        logger.warning("ssrf.scheme_blocked", url=url, scheme=parsed.scheme)
+        logger.warning(
+            "ssrf.scheme_blocked", url=redact_url_userinfo(url), scheme=parsed.scheme
+        )
         raise SSRFError(
             f"Scheme {parsed.scheme!r} not allowed; "
             f"permitted: {', '.join(sorted(ALLOWED_SCHEMES))}"
         )
 
     if not parsed.hostname:
-        logger.warning("ssrf.no_hostname", url=url)
+        logger.warning("ssrf.no_hostname", url=redact_url_userinfo(url))
         raise SSRFError("URL has no hostname")
 
     # If the host is an IP literal, check it immediately.
@@ -138,8 +265,10 @@ def validate_url(
     else:
         if _is_blocked_ip(addr, allowlist=allowlist):
             logger.warning("ssrf.ip_blocked", hostname=parsed.hostname)
-            raise SSRFError(
-                f"Blocked: {parsed.hostname} resolves to private/reserved range"
+            raise SSRFBlockedError(
+                f"Blocked: {parsed.hostname} resolves to private/reserved range",
+                hostname=parsed.hostname,
+                addresses=(parsed.hostname,),
             )
 
     return url
@@ -165,10 +294,12 @@ def resolve_and_validate(
     try:
         results = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise SSRFError(f"DNS resolution failed for {hostname!r}: {exc}") from exc
+        raise SSRFResolutionError(
+            f"DNS resolution failed for {hostname!r}: {exc}", hostname=hostname
+        ) from exc
 
     if not results:
-        raise SSRFError(f"No DNS results for {hostname!r}")
+        raise SSRFResolutionError(f"No DNS results for {hostname!r}", hostname=hostname)
 
     allowed: list[tuple[str, int]] = []
     blocked: list[str] = []
@@ -192,8 +323,10 @@ def resolve_and_validate(
 
     if not allowed:
         blocked_str = ", ".join(blocked)
-        raise SSRFError(
-            f"All resolved addresses for {hostname!r} are blocked: {blocked_str}"
+        raise SSRFBlockedError(
+            f"All resolved addresses for {hostname!r} are blocked: {blocked_str}",
+            hostname=hostname,
+            addresses=tuple(blocked),
         )
 
     return allowed
@@ -230,7 +363,7 @@ async def validate_url_with_dns(
             lambda: resolve_and_validate(hostname, port=port, allowlist=allowlist)
         )
 
-    logger.info("ssrf.validated", url=validated_url)
+    logger.info("ssrf.validated", url=redact_url_userinfo(validated_url))
     return validated_url
 
 

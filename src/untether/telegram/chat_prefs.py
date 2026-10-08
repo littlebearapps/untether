@@ -6,8 +6,14 @@ import msgspec
 
 from ..context import RunContext
 from ..logging import get_logger
+from ..runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ..transport import ChannelId
-from .engine_overrides import EngineOverrides, normalize_overrides
+from .engine_overrides import (
+    EngineOverrides,
+    migrate_legacy_overrides,
+    normalize_overrides,
+)
+from .followup_mode import FollowupMode, normalize_followup_mode
 from .state_store import JsonStateStore
 
 logger = get_logger(__name__)
@@ -24,11 +30,19 @@ class _ChatPrefs(msgspec.Struct, forbid_unknown_fields=False):
     context_project: str | None = None
     context_branch: str | None = None
     engine_overrides: dict[str, EngineOverrides] = msgspec.field(default_factory=dict)
+    # #775: "queue" | "steer" — kept out of EngineOverrides on purpose.
+    followup_mode: str | None = None
 
 
 class _ChatPrefsState(msgspec.Struct, forbid_unknown_fields=False):
     version: int
     chats: dict[str, _ChatPrefs] = msgspec.field(default_factory=dict)
+    # #741 one-shot marker: has the legacy Claude `auto` → `plan-auto` rewrite
+    # run against this file?  Deliberately a field rather than a STATE_VERSION
+    # bump — `JsonStateStore` *discards* state on a version mismatch, so
+    # bumping would wipe every chat's prefs to migrate one value.  Absent in
+    # pre-0.35.5rc8 files, which decode to False and get migrated.
+    permission_mode_migrated: bool = False
 
 
 def resolve_prefs_path(config_path: Path) -> Path:
@@ -82,6 +96,40 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             log_prefix="telegram.chat_prefs",
             logger=logger,
         )
+
+    def _reload_locked_if_needed(self) -> None:
+        super()._reload_locked_if_needed()
+        self._migrate_permission_modes_locked()
+
+    def _migrate_permission_modes_locked(self) -> None:
+        """One-shot rewrite of the legacy Claude ``auto`` spelling (#741).
+
+        Runs against each state file exactly once, guarded by the persisted
+        ``permission_mode_migrated`` flag.  It has to be one-shot rather than
+        applied on every read: after the rename, ``auto`` is a value a user can
+        legitimately *choose* from ``/planmode`` or ``/config`` to mean Claude
+        Code's own auto mode, so a read-time rewrite would make the new mode
+        permanently unreachable through the UI.
+        """
+        if self._state.permission_mode_migrated:
+            return
+        migrated_chats = 0
+        for chat in self._state.chats.values():
+            for engine_key, override in list(chat.engine_overrides.items()):
+                updated = migrate_legacy_overrides(engine_key, override)
+                if updated is not override:
+                    chat.engine_overrides[engine_key] = updated
+                    migrated_chats += 1
+        self._state.permission_mode_migrated = True
+        self._save_locked()
+        if migrated_chats:
+            logger.info(
+                "chat_prefs.permission_mode.migrated",
+                path=str(self._path),
+                overrides=migrated_chats,
+                legacy="auto",
+                renamed_to=CLAUDE_PLAN_AUTO_MODE,
+            )
 
     async def get_default_engine(self, chat_id: ChannelId) -> str | None:
         async with self._lock:
@@ -143,8 +191,38 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def clear_listen_mode(self, chat_id: ChannelId) -> None:
         await self.set_listen_mode(chat_id, None)
 
+    async def get_followup_mode(self, chat_id: ChannelId) -> FollowupMode | None:
+        async with self._lock:
+            self._reload_locked_if_needed()
+            chat = self._get_chat_locked(chat_id)
+            if chat is None:
+                return None
+            return normalize_followup_mode(chat.followup_mode)
+
+    async def set_followup_mode(self, chat_id: ChannelId, mode: str | None) -> None:
+        normalized = normalize_followup_mode(mode)
+        async with self._lock:
+            self._reload_locked_if_needed()
+            chat = self._get_chat_locked(chat_id)
+            if normalized is None:
+                if chat is None:
+                    return
+                chat.followup_mode = None
+                if self._chat_is_empty(chat):
+                    self._remove_chat_locked(chat_id)
+                self._save_locked()
+                logger.info("prefs.followup.cleared", chat_id=chat_id)
+                return
+            chat = self._ensure_chat_locked(chat_id)
+            chat.followup_mode = normalized
+            self._save_locked()
+            logger.info("prefs.followup.set", chat_id=chat_id, mode=normalized)
+
+    async def clear_followup_mode(self, chat_id: ChannelId) -> None:
+        await self.set_followup_mode(chat_id, None)
+
     # #297: legacy method aliases preserved so any external/uncovered call
-    # site keeps working. Remove after one release cycle (v0.36.x).
+    # site keeps working. Remove in v0.37.0 (#947).
     async def get_trigger_mode(self, chat_id: ChannelId) -> str | None:
         return await self.get_listen_mode(chat_id)
 
@@ -257,6 +335,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             and _normalize_listen_mode(chat.trigger_mode) is None
             and _normalize_text(chat.context_project) is None
             and _normalize_text(chat.context_branch) is None
+            and normalize_followup_mode(chat.followup_mode) is None
             and not self._has_engine_overrides(chat.engine_overrides)
         )
 

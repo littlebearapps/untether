@@ -21,6 +21,46 @@ TELEGRAM_BARE_TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{10,}\b")
 OPENAI_PROJECT_KEY_RE = re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")
 GITHUB_TOKEN_RE = re.compile(r"\b(ghp_|ghs_|gho_|github_pat_)[A-Za-z0-9_]{10,}\b")
+# #800: generic credential shapes, run after the vendor-specific patterns
+# above so their more precise markers win. A JWT is a base64url JSON object
+# (``eyJ`` = ``{"``); 10+ chars after the prefix never occurs in prose, and
+# the dotted segments are optional so a truncated token still matches.
+JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*){0,2}")
+# ``Authorization: <scheme> <credential>`` / ``Authorization:Bearer <x>``.
+AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*)"
+    r"(?:((?:bearer|basic|token|digest)\s*[:=]?\s*))?"
+    r"([^\s\"',;}\]]+)"
+)
+# A bare ``Bearer <credential>`` (no Authorization prefix).
+BEARER_RE = re.compile(r"(?i)\b(bearer(?:\s+|\s*[:=]\s*))([A-Za-z0-9._~+/=-]+)")
+# ``api_key=…`` / ``token: …`` / ``client_secret='…'`` / ``"password": "…"``.
+# The lookbehind allows an ``_``/``-`` joined prefix (``GROQ_API_KEY=``,
+# ``access_token=``) but not a word run into the name, and the name must be
+# followed directly by the separator — so ``total_tokens=52000`` and
+# ``token_count=3`` never match.
+KEY_VALUE_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(api[-_]?key|token|secret|password|passwd)"
+    r"([\"']?\s*([=:])\s*[\"']?)"
+    r"([^\s\"',;&}\])]+)"
+)
+# #841: credentials in a URL's userinfo (``scheme://user:pass@host``).
+# Anchored on ``://`` (no scheme backtracking) and greedy to the LAST ``@``
+# before ``/ ? #``, so an unescaped ``@`` inside a password can't leak its
+# tail. Quotes, ``<>`` and backslash are excluded so a JSON blob can't be
+# spanned. Bounded to 512 chars to stay linear (raise the bound if a longer
+# userinfo ever needs masking). The lookahead leaves an already-masked
+# ``***@`` (the #679 / voice ``_log_endpoint`` "credentials configured"
+# marker) untouched — but only when no further ``@`` follows it in the
+# authority, so ``://***@user:pw@host`` is still masked.
+URL_USERINFO_RE = re.compile(
+    r"://(?!\*\*\*@[^\s/?#\"'<>\\@]*(?:[\s/?#\"'<>\\]|\Z))"
+    r"[^\s/?#\"'<>\\]{1,512}@"
+)
+_REDACTED = "[REDACTED]"
+# Values that are clearly not credentials (``secret=None``, ``token=true``).
+_NON_SECRET_VALUES = frozenset({"none", "null", "true", "false", "***"})
 
 _LEVELS: dict[str, int] = {
     "debug": 10,
@@ -76,12 +116,66 @@ def _drop_below_level(
     return event_dict
 
 
+def _looks_like_credential(value: str) -> bool:
+    """Heuristic for prose-adjacent matches (``Bearer x``, ``token: x``).
+
+    A real credential has a digit or punctuation, or is long; a short
+    all-letter word (``bearer token expired``, ``token: expired``) is prose.
+    """
+    if value.startswith("[REDACTED"):
+        return False
+    return not (value.isalpha() and len(value) < 16)
+
+
+def _redact_authorization(match: re.Match[str]) -> str:
+    prefix, scheme, value = match.group(1), match.group(2), match.group(3)
+    if value.startswith("[REDACTED"):
+        return match.group(0)
+    # With an explicit scheme the value is a credential by construction;
+    # without one (``Authorization: failed``) fall back to the heuristic.
+    if scheme is None and not _looks_like_credential(value):
+        return match.group(0)
+    return f"{prefix}{scheme or ''}{_REDACTED}"
+
+
+def _redact_bearer(match: re.Match[str]) -> str:
+    if not _looks_like_credential(match.group(2)):
+        return match.group(0)
+    return f"{match.group(1)}{_REDACTED}"
+
+
+def _redact_key_value(match: re.Match[str]) -> str:
+    name, sep, sep_char, value = match.groups()
+    lowered = value.lower()
+    if (
+        value.startswith("[REDACTED")
+        or lowered in _NON_SECRET_VALUES
+        or value.isdigit()  # ``max_token=4096`` is a count, not a secret
+    ):
+        return match.group(0)
+    # ``name=value`` is an assignment; ``name: value`` may be prose.
+    if sep_char == ":" and not _looks_like_credential(value):
+        return match.group(0)
+    return f"{name}{sep}{_REDACTED}"
+
+
 def _redact_text(value: str) -> str:
-    redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", value)
+    redacted = value
+    # #841: URL userinfo first, so a token used as the username becomes one
+    # marker. Cheap prefilter: most log strings carry no URL.
+    if "://" in redacted:
+        redacted = URL_USERINFO_RE.sub("://[REDACTED]@", redacted)
+    redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", redacted)
     redacted = TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
     redacted = OPENAI_PROJECT_KEY_RE.sub("[REDACTED_KEY]", redacted)
     redacted = OPENAI_KEY_RE.sub("[REDACTED_KEY]", redacted)
-    return GITHUB_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
+    redacted = GITHUB_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
+    # #800: generic shapes — MCP header tokens and JWTs in process cmdlines,
+    # ``key=value`` credentials in URLs / stderr excerpts.
+    redacted = JWT_RE.sub("[REDACTED_JWT]", redacted)
+    redacted = AUTHORIZATION_RE.sub(_redact_authorization, redacted)
+    redacted = BEARER_RE.sub(_redact_bearer, redacted)
+    return KEY_VALUE_RE.sub(_redact_key_value, redacted)
 
 
 def _redact_value(value: Any, memo: dict[int, Any]) -> Any:

@@ -9,6 +9,7 @@ from ..context import RunContext
 from ..logging import get_logger
 from ..model import ResumeToken
 from .engine_overrides import EngineOverrides, normalize_overrides
+from .followup_mode import FollowupMode, normalize_followup_mode
 from .state_store import JsonStateStore
 
 logger = get_logger(__name__)
@@ -43,6 +44,8 @@ class _ThreadState(msgspec.Struct, forbid_unknown_fields=False):
     default_engine: str | None = None
     trigger_mode: str | None = None
     engine_overrides: dict[str, EngineOverrides] = msgspec.field(default_factory=dict)
+    # #775: per-topic follow-up mode override ("queue" | "steer").
+    followup_mode: str | None = None
 
 
 class _TopicState(msgspec.Struct, forbid_unknown_fields=False):
@@ -243,6 +246,29 @@ class TopicStateStore(JsonStateStore[_TopicState]):
 
     async def clear_listen_mode(self, chat_id: int, thread_id: int) -> None:
         await self.set_listen_mode(chat_id, thread_id, None)
+
+    async def get_followup_mode(
+        self, chat_id: int, thread_id: int
+    ) -> FollowupMode | None:
+        async with self._lock:
+            self._reload_locked_if_needed()
+            thread = self._get_thread_locked(chat_id, thread_id)
+            if thread is None:
+                return None
+            return normalize_followup_mode(thread.followup_mode)
+
+    async def set_followup_mode(
+        self, chat_id: int, thread_id: int, mode: str | None
+    ) -> None:
+        normalized = normalize_followup_mode(mode)
+        async with self._lock:
+            self._reload_locked_if_needed()
+            thread = self._ensure_thread_locked(chat_id, thread_id)
+            thread.followup_mode = normalized
+            self._save_locked()
+
+    async def clear_followup_mode(self, chat_id: int, thread_id: int) -> None:
+        await self.set_followup_mode(chat_id, thread_id, None)
 
     # #297: legacy aliases preserved for one release cycle.
     async def set_trigger_mode(

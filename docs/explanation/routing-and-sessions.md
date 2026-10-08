@@ -16,7 +16,7 @@ Untether supports four ways to continue a thread:
    - Topic state is stored in `telegram_topics_state.json`.
    - Reset with `/new`.
 3. **Chat sessions** (optional)
-   - Set `session_mode = "chat"` to store one resume token per chat (per sender in groups).
+   - Set `session_mode = "chat"` to store one resume token per chat (per sender in groups; per topic in a private chat with topics).
    - Stored sessions are per engine; resuming a different engine does not overwrite others.
    - State is stored in `telegram_chat_sessions_state.json`.
    - Reset with `/new`.
@@ -24,7 +24,7 @@ Untether supports four ways to continue a thread:
    - Resume the most recent session in the project directory, regardless of where it was started.
    - Useful for picking up a CLI session (iTerm, tmux, mosh) from Telegram while away from the terminal.
    - Uses each engine's native "continue" flag (`--continue`, `resume --last`, `--resume latest`).
-   - Works with Claude, Codex, OpenCode, Pi, and Gemini. Not supported for AMP. See the [cross-environment resume guide](../how-to/cross-environment-resume.md).
+   - Works with Claude, Codex, OpenCode and Pi (and the deprecated Gemini CLI). Not supported for AMP. See the [cross-environment resume guide](../how-to/cross-environment-resume.md).
 
 Reply-to-continue works even if topics or chat sessions are enabled.
 
@@ -32,7 +32,7 @@ Reply-to-continue works even if topics or chat sessions are enabled.
 
 Before routing, Untether checks the chat's **listen mode** (renamed from "trigger mode" in v0.35.3 — [#297](https://github.com/littlebearapps/untether/issues/297)). In `mentions` mode, messages that don't @mention the bot, reply to the bot, or start with a known slash command are silently dropped — they never reach the router. In the default `all` mode, every message passes through.
 
-Listen mode is configured per chat via `/listen` (or the deprecated `/trigger` alias) or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-trigger-mode-for-groups) for details.
+Listen mode is configured per chat via `/listen` (or the deprecated `/trigger` alias) or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-listen-mode-for-groups) for details.
 
 ## Routing (how Untether picks a runner)
 
@@ -40,14 +40,17 @@ For each message, Untether:
 
 - parses directive prefixes (`/<engine-id>`, `/<project-alias>`, `@branch`) from the first non-empty line
 - attempts to extract a resume token by polling available runners
-- if a resume token is found, routes to the matching runner; otherwise uses the configured default engine
+- if a resume token is found, routes to the matching runner; otherwise uses the most specific default engine (topic → chat → project → global)
+- after routing, appends the replied-to message (or a selected quote) to the prompt as bounded, escaped reference data, so reply text can never change the engine, project or session ([#736](https://github.com/littlebearapps/untether/issues/736))
 
-## Serialization (why you don’t get overlapping runs)
+## Serialisation (why you don’t get overlapping runs)
 
-Untether allows parallel runs across **different threads**, but enforces serialization within a thread:
+Untether allows parallel runs across **different threads**, but enforces serialisation within a thread:
 
-- Telegram side: jobs are queued FIFO per thread.
-- Runner side: runners enforce per-resume-token locks (so the same session can’t be resumed concurrently).
+- Telegram side: jobs are queued FIFO per thread. Prompts sent within about a second of each other are merged into one job first, and `/cancel`, `/new` and `/continue` drop anything still waiting in that window.
+- Runner side: runners enforce per-resume-token locks (so the same session can’t be resumed concurrently). A `/continue` run locks the real session id it resumes, not a shared placeholder ([#817](https://github.com/littlebearapps/untether/issues/817)).
+
+Claude Code's **live sessions** (v0.36.0) keep this guarantee without a new process per turn: a queued follow-up for a session whose process is still open is written into that process once its current turn ends, rather than waiting for it to exit and resuming. A [steered](../how-to/steer-follow-ups.md) message is the one exception to "one turn at a time": it is written into the running turn on purpose. See [Architecture → Live sessions](architecture.md#live-sessions-claude-code).
 
 The precise invariants are specified in the [Specification](../reference/specification.md).
 

@@ -28,20 +28,20 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Python deps (shipped in wheel) — auto-merge patch and minor only.
+      # Python deps (pip/uv; shipped in wheel) — auto-merge patch and minor only.
       # Major version bumps may have breaking API changes and need manual review.
-      - name: Auto-merge Python patch and minor updates
+      - name: Auto-merge Python deps (pip/uv) patch and minor updates
         if: >-
-          steps.metadata.outputs.package-ecosystem == 'pip'
+          (steps.metadata.outputs.package-ecosystem == 'pip' || steps.metadata.outputs.package-ecosystem == 'uv')
           && steps.metadata.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Flag Python major updates for manual review
+      - name: Flag Python deps (pip/uv) major updates for manual review
         if: >-
-          steps.metadata.outputs.package-ecosystem == 'pip'
+          (steps.metadata.outputs.package-ecosystem == 'pip' || steps.metadata.outputs.package-ecosystem == 'uv')
           && steps.metadata.outputs.update-type == 'version-update:semver-major'
         run: gh pr comment "$PR_URL" --body "This is a **major Python dependency update** — requires manual review before merging. CI-only deps (GitHub Actions) are auto-merged regardless of version bump."
         env:

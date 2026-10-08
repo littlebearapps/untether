@@ -74,6 +74,17 @@ def _trigger_indicator(ctx: CommandContext) -> str | None:
     return line
 
 
+def _background_indicator(ctx: CommandContext) -> str | None:
+    """``⏳ background: 2 tasks running`` while this chat's live Claude runs
+    hold background work (#777)."""
+    from ...background_status import chat_live_background_count
+
+    count = chat_live_background_count(ctx.message.channel_id)
+    if count <= 0:
+        return None
+    return f"⏳ background: {count} task{'s' if count != 1 else ''} running"
+
+
 class PingCommand:
     """Command backend for bot health check and uptime."""
 
@@ -86,6 +97,9 @@ class PingCommand:
         indicator = _trigger_indicator(ctx)
         if indicator is not None:
             lines.append(indicator)
+        background = _background_indicator(ctx)
+        if background is not None:
+            lines.append(background)
         return CommandResult(text="\n".join(lines), notify=True)
 
 

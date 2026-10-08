@@ -245,6 +245,101 @@ class TestCronConfig:
         assert c.permission_mode == "anything"
 
 
+class TestCronModelReasoning:
+    """#743: per-cron model / reasoning overrides."""
+
+    def test_743_model_default_none(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.model is None
+
+    def test_743_reasoning_default_none(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.reasoning is None
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("sonnet", "sonnet"),
+            ("claude-sonnet-5", "claude-sonnet-5"),
+            ("openai/gpt-5", "openai/gpt-5"),
+            ("  haiku  ", "haiku"),
+        ],
+    )
+    def test_743_model_accepted_free_form(self, raw: str, expected: str):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi", model=raw)
+        assert c.model == expected
+
+    @pytest.mark.parametrize(
+        "bad", ["", "   ", "-p", "--model", "son net", "a\tb", "x\x07"]
+    )
+    def test_743_model_rejects_leading_dash_and_whitespace(self, bad: str):
+        with pytest.raises(ValidationError):
+            CronConfig(id="x", schedule="* * * * *", prompt="Hi", model=bad)
+
+    @pytest.mark.parametrize(
+        ("engine", "level"),
+        [("claude", lvl) for lvl in ("low", "medium", "high", "xhigh", "max")]
+        + [("codex", lvl) for lvl in ("low", "medium", "high", "xhigh")],
+    )
+    def test_743_reasoning_valid_for_explicit_engine(self, engine: str, level: str):
+        c = CronConfig(
+            id="x", schedule="* * * * *", prompt="Hi", engine=engine, reasoning=level
+        )
+        assert c.reasoning == level
+
+    def test_743_reasoning_normalised_to_lower_case(self):
+        c = CronConfig(
+            id="x", schedule="* * * * *", prompt="Hi", engine="claude", reasoning="HIGH"
+        )
+        assert c.reasoning == "high"
+
+    @pytest.mark.parametrize(
+        ("engine", "level"),
+        [("codex", "max"), ("claude", "minimal"), ("claude", "ultracode")],
+    )
+    def test_743_reasoning_rejected_for_explicit_engine(self, engine: str, level: str):
+        with pytest.raises(ValidationError, match="allowed values"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine=engine,
+                reasoning=level,
+            )
+
+    def test_743_reasoning_rejected_for_engine_without_reasoning(self):
+        with pytest.raises(ValidationError, match="not supported for engine"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine="opencode",
+                reasoning="high",
+            )
+
+    def test_743_reasoning_engine_unset_uses_global_table(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi", reasoning="high")
+        assert c.reasoning == "high"
+        for bad in ("minimal", "bogus"):
+            with pytest.raises(ValidationError, match="any engine"):
+                CronConfig(id="x", schedule="* * * * *", prompt="Hi", reasoning=bad)
+
+    def test_743_existing_cron_without_fields_parses_unchanged(self):
+        raw = {
+            "id": "nightly",
+            "schedule": "0 6 * * *",
+            "project": "p",
+            "engine": "claude",
+            "chat_id": -100,
+            "prompt": "go",
+            "timezone": "Australia/Melbourne",
+            "run_once": False,
+            "permission_mode": "auto",
+        }
+        c = CronConfig(**raw)
+        assert c.model_dump(exclude_none=True) == raw
+
+
 class TestTriggersSettings:
     def test_disabled_by_default(self):
         s = TriggersSettings()
@@ -555,3 +650,128 @@ class TestCronConfigFetch:
         )
         assert c.prompt == "Review PRs"
         assert c.fetch is None
+
+
+# ── #894: project-only triggers fall back to the transport default chat ──
+
+
+def _fallback_settings(**cron_overrides) -> TriggersSettings:
+    cron = {"id": "nightly", "schedule": "0 2 * * *", "prompt": "hi"}
+    cron.update(cron_overrides)
+    return parse_trigger_config({"enabled": True, "crons": [cron]})
+
+
+_PROJECT_CHATS = {"myapp": -100555, "same": 123}
+
+
+def _project_chat_id(project: str) -> int | None:
+    return _PROJECT_CHATS.get(project.lower())
+
+
+_WEBHOOK_WITH_PROJECT = {
+    "enabled": True,
+    "webhooks": [
+        {
+            "id": "gh",
+            "path": "/hooks/gh",
+            "auth": "none",
+            "prompt_template": "x",
+            "project": "myapp",
+        }
+    ],
+}
+
+
+class TestChatFallback:
+    def test_project_cron_without_chat_id_is_flagged(self):
+        from untether.triggers.settings import find_trigger_chat_fallbacks
+
+        found = find_trigger_chat_fallbacks(
+            _fallback_settings(project="myapp"),
+            default_chat_id=123,
+            project_chat_id=_project_chat_id,
+        )
+        assert [
+            (f.kind, f.trigger_id, f.project, f.project_chat_id) for f in found
+        ] == [("cron", "nightly", "myapp", -100555)]
+
+    def test_project_alias_is_case_insensitive(self):
+        from untether.triggers.settings import find_trigger_chat_fallbacks
+
+        found = find_trigger_chat_fallbacks(
+            _fallback_settings(project="MyApp"),
+            default_chat_id=123,
+            project_chat_id=_project_chat_id,
+        )
+        assert len(found) == 1
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"project": "myapp", "chat_id": -100555},  # explicit chat_id
+            {"project": "myapp", "chat_id": 123},  # explicit, even if default
+            {"project": "same"},  # project chat IS the default chat
+            {"project": "unbound"},  # project has no bound chat
+            {},  # no project at all
+        ],
+    )
+    def test_not_flagged(self, overrides):
+        from untether.triggers.settings import find_trigger_chat_fallbacks
+
+        assert (
+            find_trigger_chat_fallbacks(
+                _fallback_settings(**overrides),
+                default_chat_id=123,
+                project_chat_id=_project_chat_id,
+            )
+            == []
+        )
+
+    def test_webhook_flagged_too(self):
+        from untether.triggers.settings import find_trigger_chat_fallbacks
+
+        found = find_trigger_chat_fallbacks(
+            parse_trigger_config(_WEBHOOK_WITH_PROJECT),
+            default_chat_id=123,
+            project_chat_id=_project_chat_id,
+        )
+        assert [(f.kind, f.trigger_id) for f in found] == [("webhook", "gh")]
+
+    def test_warn_logs_once_per_trigger(self):
+        from structlog.testing import capture_logs
+
+        from untether.triggers.settings import warn_trigger_chat_fallbacks
+
+        warned: set = set()
+        settings = _fallback_settings(project="myapp")
+        with capture_logs() as logs:
+            for _ in range(3):  # startup + two reloads
+                warn_trigger_chat_fallbacks(
+                    settings,
+                    default_chat_id=123,
+                    project_chat_id=_project_chat_id,
+                    warned=warned,
+                )
+        hits = [e for e in logs if e["event"] == "trigger.cron.chat_fallback"]
+        assert len(hits) == 1
+        assert hits[0]["log_level"] == "warning"
+        assert hits[0]["cron_id"] == "nightly"
+        assert hits[0]["project"] == "myapp"
+        assert hits[0]["project_chat_id"] == -100555
+        assert hits[0]["default_chat_id"] == 123
+
+    def test_warn_webhook_event_name(self):
+        from structlog.testing import capture_logs
+
+        from untether.triggers.settings import warn_trigger_chat_fallbacks
+
+        with capture_logs() as logs:
+            warn_trigger_chat_fallbacks(
+                parse_trigger_config(_WEBHOOK_WITH_PROJECT),
+                default_chat_id=123,
+                project_chat_id=_project_chat_id,
+                warned=set(),
+            )
+        hits = [e for e in logs if e["event"] == "trigger.webhook.chat_fallback"]
+        assert len(hits) == 1
+        assert hits[0]["webhook_id"] == "gh"

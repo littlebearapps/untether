@@ -19,7 +19,7 @@ Fields:
 - `session_id`
 - `tools`: array of tool names
 - `mcp_servers`: array of `{name, status}`
-- `cwd`, `model`, `permissionMode`, `apiKeySource` (optional)
+- `cwd`, `model`, `permissionMode`, `apiKeySource`, `output_style` (optional)
 
 Example:
 ```json
@@ -53,6 +53,16 @@ Example (user tool result, array content):
 {"type":"user","session_id":"session_01","message":{"id":"msg_4","type":"message","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Task completed"}]}]}}
 ```
 
+Example (assistant frame stopped by Anthropic's safeguards, #814 — `message.id`,
+`stop_reason` and `stop_details` are decoded since 0.35.5rc14):
+```json
+{"type":"assistant","session_id":"session_01","parent_tool_use_id":null,"message":{"id":"msg_5","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"…"}}}
+```
+`stop_details.category` ∈ `cyber` | `bio` | `frontier_llm` | `reasoning_extraction` |
+`general_harms` | `null`. The CLI forwards the API message verbatim; one API response can
+span several frames, so Untether dedupes on `message.id`. A frame truncated by an interrupt
+carries `aborted: true` and no `stop_reason`.
+
 Optional parent field (for nested tool usage):
 ```json
 {"type":"assistant","parent_tool_use_id":"toolu_parent","session_id":"session_01", ...}
@@ -67,7 +77,8 @@ Fields (success path):
 - `total_cost_usd`, `is_error`, `duration_ms`, `duration_api_ms`, `num_turns`
 - `result`: final answer string
 - `usage`: usage object
-- `modelUsage`: optional per-model usage
+- `modelUsage`: optional per-model usage, keyed by model id; each entry carries `contextWindow`
+  (decoded since 0.35.5rc15 for the `% ctx` denominator, [#819](https://github.com/littlebearapps/untether/issues/819))
 
 Example (success):
 ```json
@@ -75,46 +86,133 @@ Example (success):
 ```
 
 Fields (error path):
-- Same as success, but `is_error`: `true`, `subtype`: `"error"`
+- Same as success, but `is_error`: `true` and an error `subtype` (e.g.
+  `error_during_execution`, which can carry an `errors` array). Untether keys success on
+  `is_error`; `subtype` is informational
 - `result` may be empty or contain an error description
+- API-error fields (decoded since 0.35.5rc20, CLI 2.1.289; all optional, typed `Any`, so a
+  type change upstream never drops the line):
+  - `api_error_status`: HTTP status of the API error that ended the turn (public SDK field)
+  - `api_error_code`: the server's `error.details.error_code`, e.g. `credits_required` (`@internal`)
+  - `api_error`: the CLI's typed kind, e.g. `model_requires_usage_credits` or
+    `long_context_credits_required` (`@internal`; the CLI says the text "stays the fallback")
+
+  The #701 action-required cap latch reads `api_error`, then `api_error_code`, then the
+  `result` text: "… Switch to another model[, or manage usage credits at <url>,] to
+  continue." in headless mode, or the older "Run /usage-credits …" wording
+  ([#922](https://github.com/littlebearapps/untether/issues/922)). The long-context kind never
+  latches: its remedy is different.
 
 Example (error):
 ```json
 {"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":""}
 ```
 
-Optional fields (may appear in upstream Claude Code CLI output but are **not** captured
-by Untether's `StreamResultMessage` schema):
-- `error`: error description string
+Turn-ending fields (decoded since 0.35.5rc14, all optional):
+- `terminal_reason`: why the turn ended. `aborted_streaming` / `aborted_tools` mean it was
+  interrupted; the subtype is then usually `success`, sometimes `error_during_execution`
+  with an `[ede_diagnostic]` error, so classify a cancel on `terminal_reason`, never on
+  `subtype` / `is_error` ([#806](https://github.com/littlebearapps/untether/issues/806);
+  `CLAUDE_ABORTED_TERMINAL_REASONS` in `schemas/claude.py`).
+- `origin`: what started the turn, e.g. `{"kind":"task-notification","producer":"session-task"}`
+  for a turn the CLI started itself (a background-task finish or an `asyncRewake` hook, #812).
+  Typed `Any`: readers check it is an object first. The CLI also writes an empty **no-query**
+  result (`num_turns: 0`, `duration_api_ms: 0`, `result: ""`, `origin.kind: "task-notification"`)
+  for each notification it answered together with others, and for the agent hand-back notice — no
+  model call, no cost ([SDK docs](https://code.claude.com/docs/en/agent-sdk/typescript),
+  `SDKResultMessage.origin`). Untether absorbs these ([#928](https://github.com/littlebearapps/untether/issues/928)).
+- `local_command`: set when a local command (e.g. `/compact`) finished without entering the agent
+  loop; such a 0-turn result is never a no-query result (#928). Typed `Any`.
+- `stop_reason`: passed through, typed `Any`.
+
+Optional fields that may appear in upstream Claude Code CLI output but are **not** captured
+by Untether's `StreamResultMessage` schema:
+- `error` / `errors`: error description(s)
 - `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
-- `structured_output`: arbitrary structured output (captured by schema but unused)
+
+`structured_output` (arbitrary structured output) is captured by the schema but unused.
 
 ### `rate_limit_event`
 
-Informational event emitted when Claude Code hits or approaches a rate limit (CLI v2.1.45+).
-Purely informational — the run continues, it does not terminate the session.
+A **quota-status snapshot**, not a throttle notice ([#790](https://github.com/littlebearapps/untether/issues/790)).
+The CLI emits one whenever an API response moves the rounded utilization or a reset
+time of the account's subscription windows — so a healthy session sees a steady trickle
+of `status: "allowed"` events. The event never terminates the session.
 
-Fields:
-- `type`: `"rate_limit_event"`
-- `rate_limit_info` (optional): object with rate limit details
-
-`rate_limit_info` fields (all optional):
-- `requests_limit`, `requests_remaining`, `requests_reset` (ISO 8601)
-- `tokens_limit`, `tokens_remaining`, `tokens_reset` (ISO 8601)
-- `retry_after_ms`
-
-Example (full):
+Real payload (captured on CLI 2.1.283, one-turn Haiku probe):
 ```json
-{"type":"rate_limit_event","rate_limit_info":{"requests_limit":1000,"requests_remaining":0,"requests_reset":"2026-01-01T00:01:00Z","tokens_limit":50000,"tokens_remaining":0,"tokens_reset":"2026-01-01T00:01:00Z","retry_after_ms":60000}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790578200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1790578200},"seven_day":{"utilization":0.15,"resetsAt":1791036000}}},"uuid":"…","session_id":"…"}
 ```
 
-Example (bare):
+`rate_limit_info` fields (upstream zod, CLI 2.1.283):
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | `"allowed"` \| `"allowed_warning"` \| `"rejected"` | always present |
+| `resetsAt` | int (epoch s) | reset time of the window named by `rateLimitType` |
+| `rateLimitType` | `five_hour` \| `seven_day` \| `seven_day_opus` \| `seven_day_sonnet` \| `seven_day_overage_included` \| `overage` | optional |
+| `utilization` | number (0–1) | optional; the warning window's utilization |
+| `unifiedWindows` | `{five_hour?, seven_day?, seven_day_overage_included?}: {utilization, resetsAt}` | absent for API-key / Bedrock / Vertex sessions |
+| `overageStatus` | same 3 values as `status` | paid extra-usage state |
+| `overageResetsAt` | int | optional |
+| `overageDisabledReason` | enum (13 values, e.g. `out_of_credits`, `org_level_disabled`) | optional |
+| `isUsingOverage` | bool | `rejected` + `isUsingOverage` is **not** a throttle — extra usage covers it |
+| `errorCode` | `"credits_required"` | optional |
+| `limitScope`, `surpassedThreshold`, `overageInUse`, … | | ignored by Untether |
+
+The enum lists are mirrored as `CLAUDE_RATE_LIMIT_STATUSES` / `CLAUDE_RATE_LIMIT_TYPES` /
+`CLAUDE_OVERAGE_STATUSES` in `schemas/claude.py` and pinned by the zero-token drift test
+`tests/test_claude_cli_schema_drift.py`, which reads them out of the installed CLI.
+
+**Legacy shape.** Earlier docs described `requests_limit` / `requests_remaining` /
+`requests_reset` / `tokens_limit` / `tokens_remaining` / `tokens_reset` / `retry_after_ms`.
+No real CLI has been observed sending these; the schema keeps them optional so such an
+emitter still gets a precise countdown ([#518](https://github.com/littlebearapps/untether/issues/518)).
+
+**Untether handling** (`_translate_rate_limit_event` in `runners/claude.py`):
+
+| Snapshot | Untether |
+|---|---|
+| `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. |
+| `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
+| `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
+| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage / `seven_day_overage_included` → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title naming the cap kind (`⛔ Fable limit reached — …`, `⛔ Usage credits used up — …`, `⛔ Monthly spend limit reached — …`, `⛔ Team budget reached — …`; [#922](https://github.com/littlebearapps/untether/issues/922)) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
+| `rejected` with `isUsingOverage`, or `resetsAt` already past | Not a throttle (INFO log `retry_after_source=covered_by_overage` / `stale`). |
+| unknown `status` | WARN `claude.rate_limit_event.unknown_status` once per value; no latch. |
+| no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |
+| truly bare (`{"type":"rate_limit_event"}`) | Nothing — INFO `retry_after_source=bare`. The [#657](https://github.com/littlebearapps/untether/issues/657) "bare = 60 s throttle" guess is retired: bare was an artefact of the old schema decoding every real snapshot to all-`None`. |
+
+### `system` / `api_retry` (#792)
+
+Emitted when an API request fails with a retryable error and the CLI will retry after a
+delay — the wire twin of the REPL's retry banner (`SDKAPIRetryMessage`, CLI 2.1.283).
+This, not `rate_limit_event`, is the real "backing off, retrying in N s" signal.
+
 ```json
-{"type":"rate_limit_event"}
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":8000,"error_status":529,"error":"overloaded","uuid":"…","session_id":"…"}
 ```
 
-**Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
-`translate_claude_event` (no Untether events emitted).
+| Field | Type | Notes |
+|---|---|---|
+| `attempt` / `max_retries` | int | retry counters |
+| `retry_delay_ms` | int | back-off before the next attempt |
+| `error_status` | int \| null | HTTP status; `null` for connection errors (timeouts) with no response |
+| `error` | string | category: `rate_limit`, `overloaded`, `server_error`, `authentication_failed`, `billing_error`, `invalid_request`, `unknown`, … |
+| `no_response` | `{waited_ms, retry_wait_ms}` (optional) | only when no response headers arrived within `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS`; `max_retries` is then this cause's own cap (normally 1) |
+
+A sibling `system/control_request_progress` with `status: "api_retry"` carries the same
+counters for client-originated control requests (side questions only) — not handled.
+
+**Untether handling** (`_translate_api_retry` in `runners/claude.py`): decoded into the
+flat `StreamSystemMessage` (all fields optional, `error` typed `Any`). Renders one note per
+retry sequence, updated in place as attempts climb — `🔁 API error 529 (overloaded) —
+retrying in 8s (attempt 2/10)`, `🔁 API unreachable — retrying in 5s (attempt 1/10)`
+(no status), or `🔁 No response from API after 45s — retrying in 2s (attempt 1/1)`
+(`no_response`). Latches `ClaudeStreamState.api_retry_wait_until` = now + delay (+ the
+retry's `retry_wait_ms` header window); the bridge's `awaiting_api_retry()` probe treats that
+window as an expected wait (`reason=api_retry_waiting`), like a rate-limit window. Logs
+`claude.api_retry` at INFO (WARN, and a `warning`-level note, on the final attempt). Retry
+time accrues in `api_retry_total_s`, kept separate from rate-limit time.
 
 ### `tool_progress`
 
@@ -142,6 +240,228 @@ tail on long-running actions from its own clock (#481), so the upstream heartbea
 redundant for progress rendering — the schema entry exists so the line decodes instead of
 being dropped with a `jsonl.msgspec.invalid` warning ([#637](https://github.com/littlebearapps/untether/issues/637)).
 
+### `stream_event`
+
+Partial-message deltas (`{"type":"stream_event","uuid","session_id","event":{…},"parent_tool_use_id"}`)
+appear only with `--include-partial-messages`, which Untether doesn't pass. The schema
+decodes them (`StreamEventMessage`), and `translate_claude_event` ignores them
+(DEBUG `claude.event.unrecognised`).
+
+### Background-task lifecycle (`system` subtypes, CLI ≥ 2.1.28x) — #776
+
+Verified on 2.1.283 (see `docs/findings/2026-09-27-claude-live-session-probes.md`).
+
+```json
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"…"}]}
+{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_…","description":"…","is_backgrounded":true,"task_type":"local_bash"}
+{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_…","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"…"}
+{"type":"system","subtype":"task_started","task_id":"f1","owned_by_subagent":true,"is_backgrounded":false,"task_type":"local_bash"}
+{"type":"system","subtype":"task_progress","task_id":"a1","usage":{"total_tokens":52470,"tool_uses":2,"duration_ms":4314},"last_tool_name":"Bash"}
+{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"completed","end_time":1790500249636}}
+{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_…","status":"completed","output_file":"…","summary":"…"}
+```
+
+- `background_tasks_changed` is a full snapshot of live background tasks (`[]` when none) and arrives just *before* `task_started` / `task_updated`.
+- `owned_by_subagent: true` with `is_backgrounded: false` is a subagent's own foreground tool — not background work.
+- `task_updated.patch.status`: `completed` | `killed`; `task_notification.status`: `completed` | `stopped`.
+- `Monitor` is `task_type: local_bash`; each streamed line starts a new turn with **no** per-line task event; the stream end emits `task_updated` + `task_notification`.
+- `ScheduleWakeup` / `RemoteTrigger` emit **no** task events.
+- Resuming a finished background agent (e.g. `SendMessage` to it) **reuses its `task_id`**: a fresh snapshot lists it again and a new `task_started` follows. Untether revives the ended task instead of leaving it terminal ([#801](https://github.com/littlebearapps/untether/issues/801)).
+- Closing stdin stops live background tasks (`killed` / `stopped`) and the CLI exits rc=0 a few seconds later.
+- On `--resume` after such a stop, the CLI first emits `task_notification{status:"stopped", output_file:""}`, then `system/init`, then a **0-turn result**, then the real turn.
+
+### `command_lifecycle` (#776)
+
+One line per input command (user line or scheduled wake-up):
+
+```json
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"queued"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"started"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"completed"}
+```
+
+`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued).
+
+### Multi-result streams (#776)
+
+In control-channel mode the process does not exit after `result`: background-task completions, Monitor lines, ScheduleWakeup firings and user lines written while idle each produce another `system/init` → … → `result`. `total_cost_usd` is cumulative per session (including across `--resume`); `num_turns` is per result.
+
+### `system` / `status` — permission-mode edges (#383)
+
+Emitted on **every** change of the CLI's permission mode — an approved `ExitPlanMode` (mode becomes `prePlanMode ?? "default"`, so a session started in plan lands in `default`; emitted *before* the tool_result) and a successful `set_permission_mode`. A no-op change emits nothing. (The same subtype also carries `status:"compacting"` during compaction.)
+
+```json
+{"type":"system","subtype":"status","status":null,"permissionMode":"default","uuid":"…","session_id":"…"}
+```
+
+`system/init.permissionMode` reports the mode each turn starts in (live follow-up turns included on 2.1.285). Untether tracks the effective mode from both (`claude.permission_mode.changed`); neither produces an Untether event.
+
+Untether's plan re-arm (host → CLI, handled inline by the CLI's stdin reader, not queued behind a turn) and its answers:
+
+```json
+{"type":"control_request","request_id":"ut_plan_rearm_<sid>_1","request":{"subtype":"set_permission_mode","mode":"plan"}}
+{"type":"control_response","response":{"subtype":"success","request_id":"ut_plan_rearm_<sid>_1","response":{"mode":"plan"}}}
+{"type":"control_response","response":{"subtype":"error","request_id":"…","error":"…","error_code":"invalid_mode"}}
+```
+
+A real change is followed by the `system/status` frame above; `plan` while already `plan` is acked with no status frame. Refusal codes (2.1.285): `invalid_mode`, `bypass_*` (target `bypassPermissions`) and `auto_mode_*` (target `auto`) — `plan` is never refused.
+
+### `control_request` / `control_response` (permission prompts)
+
+In control-channel mode (`--permission-prompt-tool stdio`) the CLI asks the host before
+running a tool the earlier permission stages didn't decide:
+
+```json
+{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"…","old_string":"…","new_string":"…"},"permission_suggestions":[…]}}
+```
+
+Other request subtypes Untether decodes: `initialize`, `set_permission_mode`,
+`hook_callback`, `mcp_message`, `rewind_files`, `interrupt` (`ControlRequest` in
+`schemas/claude.py`). Untether answers on stdin:
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{"behavior":"allow","updatedInput":{…}}}}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{"behavior":"deny","message":"User denied"}}}
+```
+
+`updatedInput` echoes the request's `input` (AskUserQuestion adds `answers`). Which requests
+become Telegram buttons depends on the permission mode
+([#749](https://github.com/littlebearapps/untether/issues/749)); see the
+[runner spec](runner.md), "Permission modes". The CLI ignores a second answer to the same
+request, so Untether tracks answered requests itself
+([#685](https://github.com/littlebearapps/untether/issues/685)). `control_response` lines
+from the CLI are decoded too; only the acks of Untether's own `set_permission_mode`
+(`ut_plan_rearm_…`, above) are acted on.
+
+### `control_cancel_request` (CLI → host) — #684
+
+The CLI withdraws a pending `can_use_tool` it no longer needs (interrupt, turn abort). No
+`session_id`, and no reply is expected — a `control_response` that still arrives for that id is
+ignored (CLI 2.1.285, findings 2026-09-30 probe Z4). It is followed by a synthetic rejection
+`tool_result`. Closing stdin with a request pending sends **no** cancel frame (probe Z5).
+
+```json
+{"type":"control_cancel_request","request_id":"<id>"}
+```
+
+Untether retires the request (registries, keyboard, `cancelled` record) and writes nothing; see
+`untether-events.md` §4.1.
+
+### Hook lifecycle (`system` subtypes, `--include-hook-events`) — #812
+
+Emitted only when Untether passes `--include-hook-events` (control-channel mode, CLI lists the
+flag, `[watchdog] hold_for_async_hooks` on). `SessionStart` / `Setup` hook frames are emitted
+even without the flag. Source: `docs/findings/2026-09-29-claude-rc14-cli-surface.md` §A2/§A3.
+
+```json
+{"type":"system","subtype":"hook_started","hook_id":"<uuid>","hook_name":"Stop","hook_event":"Stop","uuid":"…","session_id":"…"}
+{"type":"system","subtype":"hook_progress","hook_id":"<uuid>","hook_name":"Stop","hook_event":"Stop","stdout":"…","stderr":"…","output":"…","uuid":"…","session_id":"…"}
+{"type":"system","subtype":"hook_response","hook_id":"<uuid>","hook_name":"Stop","hook_event":"Stop","outcome":"error","exit_code":2,"stdout":"","stderr":"<findings>","output":"…","uuid":"…","session_id":"…"}
+```
+
+- `hook_id` pairs `hook_started` with `hook_response`. `hook_name` can carry a matcher suffix
+  (`SessionStart:startup`).
+- `outcome`: `success` | `error` | `cancelled`; `exit_code` is omitted when undefined. Exit 2
+  (`outcome: "error"`) is a blocking error, which for an `asyncRewake` hook is the wake signal.
+- **No field marks a hook as async.** A background hook shows up only as a `hook_started` whose
+  `hook_response` arrives after the turn's `result`.
+- A plain `async` hook's `hook_response` is **withheld while the session is idle** and
+  delivered at the next turn or at stdin close, even though its process exited long ago
+  (probed on 2.1.285). `asyncRewake` and synchronous hooks report as soon as they exit.
+- An `asyncRewake` hook that exits 2 while idle starts a new turn with **no**
+  `command_lifecycle` frames: `hook_response{exit_code:2}` → `system/init` →
+  `system/informational` ("Original prompt: `<task-notification>` … Stop hook feedback") → …
+  → `result` with `origin: {"kind":"task-notification"}`.
+- After stdin closes the CLI kills plain `async` hooks (`outcome: "cancelled"`), waits up to
+  30 s for pending `asyncRewake` hooks, and **drops** any rewake they produce.
+
+**Untether handling**: decoded into the flat `StreamSystemMessage` (`hook_id`, `hook_name`,
+`hook_event`, `outcome`, `exit_code`, all typed `Any`; `stdout` / `stderr` / `output` are
+deliberately not declared, so hook output is never held in memory). No Untether events; the
+frames feed the live-session hook hold (see the [runner spec](runner.md), "Async hooks") and
+don't overwrite `JsonlStreamState.last_event_type`.
+
+### Safeguard stops and model fallback (#814)
+
+```json
+{"type":"system","subtype":"informational","content":"Opus 5.5's safeguards stopped the response above · continuing once with that noted","level":"notice","uuid":"…","session_id":"…"}
+{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-opus-5-5","fallback_model":"claude-opus-4-8","api_refusal_category":"cyber","api_refusal_explanation":"…","content":"…","session_id":"…","uuid":"…"}
+{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-opus-5-5","api_refusal_category":"bio","api_refusal_explanation":"…","content":"…","session_id":"…","uuid":"…"}
+{"type":"system","subtype":"model_fallback","trigger":"overloaded","original_model":"claude-opus-5-5","fallback_model":"claude-sonnet-5-5","content":"…","session_id":"…","uuid":"…"}
+```
+
+- `informational` (`SDKInformationalMessage`): `content`, `level` (`info` | `notice` |
+  `suggestion` | `warning`), optional `tool_use_id` / `prevent_continuation`. It is a general
+  banner (hook blocks, notices, …); the safeguard notice is one of these at level `notice`.
+  Its position relative to the turn's `result` is unverified, so Untether parses it on either
+  side (and between turns in a live session).
+- `model_refusal_fallback` / `model_refusal_no_fallback` / `model_fallback` are undocumented
+  in the SDK reference; shapes come from the CLI binary (2.1.284/2.1.285). `scope: "local"` on
+  a refusal fallback means a subagent or side question fell back and the session model is
+  unchanged. Other optional keys seen: `request_id`, `refused_user_message_uuid`,
+  `saw_cyber_refusal`, `retracted_message_uuids`.
+- The drift test (`tests/test_claude_cli_schema_drift.py`) probes the installed binary for
+  these subtypes and the safeguard notice text at zero token cost.
+
+**Untether handling**: all fields decode into `StreamSystemMessage` typed `Any` (about 40
+system subtypes share the struct, so a type clash must never drop the line). Dispatch is
+`_SYSTEM_SUBTYPE_HANDLERS` in `runners/claude.py`; the mapping is in
+[untether-events.md](untether-events.md) §4.1 and the runner spec's "Safeguard stops".
+Source: `docs/findings/2026-09-29-claude-rc14-cli-surface.md` §B.
+
+### Context usage and compaction (#819)
+
+The context-window numbers ride on frames already listed above (CLI 2.1.285; zero-token
+probes in `tests/test_claude_cli_schema_drift.py`, research in
+`docs/findings/2026-09-30-claude-sdk-control-permissions-context.md` Q4/Q5):
+
+```json
+{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1234,"cache_creation_input_tokens":100,"cache_read_input_tokens":185000,"output_tokens":5},"content":[…]},"parent_tool_use_id":null,"session_id":"…"}
+{"type":"result","subtype":"success",…,"modelUsage":{"claude-haiku-4-5":{"inputTokens":…,"contextWindow":200000,"maxOutputTokens":64000,…}}}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":6336,"post_tokens":277,"cumulative_dropped_tokens":6059,"duration_ms":47},"logical_parent_uuid":"…","session_id":"…"}
+```
+
+- `modelUsage` is keyed by the model id the CLI used; `contextWindow` is the only place the
+  window appears. Decoded as `StreamResultMessage.modelUsage` (`Any`).
+- Assistant `message.usage` decodes as `StreamAssistantMessageBody.usage` (`Any`).
+- All these keys decode as `Any` on `StreamSystemMessage` / `StreamUserMessage`.
+
+Compaction frames as captured on CLI 2.1.285 (Haiku, 2026-10-01; redacted transcripts in
+`tests/fixtures/claude_{compaction,autocompact,compact_empty}_2.1.285.jsonl`):
+
+```json
+{"type":"system","subtype":"status","status":"compacting","session_id":"…"}
+{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"…"}
+{"type":"system","subtype":"init",…}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":51305,"post_tokens":2228,"cumulative_dropped_tokens":49077,"duration_ms":21942,"preserved_segment":{…},"preserved_messages":{…}},"logical_parent_uuid":"…","session_id":"…"}
+{"type":"user","isReplay":false,"isSynthetic":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. …"}}
+{"type":"user","isReplay":true,"message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_api_ms":0,"result":"",…}
+```
+
+- That is a manual `/compact`. The `init` line and the last two lines appear only for
+  `/compact`.
+- **Auto** compaction fires inside a turn, between a `tool_result` and the next API
+  request. It sends no fresh `init`, and the boundary frame has no `session_id`
+  (`{"trigger":"auto","pre_tokens":79267,"post_tokens":15092,…}`). The summary `user`
+  frame has list content, and the turn carries on.
+- `status: "compacting"` is re-sent every 30 s while compacting (drift probe). A 22 s
+  compaction sent none.
+- A failure ends with `status:null`, `compact_result:"failed"` and an optional
+  `compact_error`, with no boundary. A PreCompact-hook skip ends with a plain
+  `status:null`. `status:null` + `permissionMode` is #383's mode-change edge, not
+  compaction.
+- `post_tokens` excludes the system prompt and tools. After this manual compaction the
+  next response's input side was 21 320 against `post_tokens` 2 228.
+- `isCompactSummary` was not on the wire; the summary frame carries `isSynthetic: true`.
+- `/compact` on a session with no history: `init` → a `<synthetic>` assistant
+  `Error: No messages to compact` → a 0-turn, 0-ms result with `result: ""` and
+  `modelUsage: {}`, and no compaction frames.
+
+**Untether handling**: `% ctx` (C2), the `🗜️` rows, the liveness latch and the manual-only
+0-turn exemption. See [untether-events.md](untether-events.md) §6.1 and the runner spec's
+"Context usage" and "Compaction" sections.
+
 ## Message object (`message` field)
 
 Fields:
@@ -157,10 +477,21 @@ Fields:
 {"type":"text","text":"Hello"}
 ```
 
+### Thinking
+```json
+{"type":"thinking","thinking":"…","signature":"…"}
+```
+Untether emits each non-empty thinking block as a completed `note` action
+(`claude.thinking.<n>`).
+
 ### Tool use
 ```json
 {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}
 ```
+
+`server_tool_use` (Anthropic server-side tools such as `web_search`) has the same shape and
+is translated like `tool_use`; `advisor_tool_result` has the `tool_result` shape and is
+translated like it ([#489](https://github.com/littlebearapps/untether/issues/489)).
 
 #### `ScheduleWakeup` (session-scoped scheduling)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from .backends import EngineBackend, EngineConfig, SetupIssue
 from .backends_helpers import install_issue
 from .commands import (
+    CommandAttachment,
     CommandBackend,
     CommandContext,
     CommandExecutor,
@@ -58,6 +59,7 @@ __all__ = [
     "ActionEvent",
     "ActionState",
     "BaseRunner",
+    "CommandAttachment",
     "CommandBackend",
     "CommandContext",
     "CommandExecutor",

@@ -1,3 +1,12 @@
+!!! warning "Deprecated"
+
+    The `amp` engine is **deprecated and no longer supported** (as of v0.36.0):
+    it still loads, but gets no fixes, is excluded from testing, and may be
+    removed in a future release. The integration is
+    unmaintained, and AMP remotely refuses out-of-date clients with `426` and
+    exits 1. The AMP-only `/threads` command is deprecated with it
+    ([#458](https://github.com/littlebearapps/untether/issues/458)).
+
 Below is the implementation spec for the **AMP CLI (Sourcegraph)** runner shipped in Untether.
 
 ---
@@ -14,7 +23,7 @@ Provide the **`amp`** engine backend so Untether can:
 
 ### Non-goals (v1)
 
-* Thread management commands — `amp threads list/search/share` etc. are not exposed via Telegram.
+* Full thread management — only the deprecated AMP-only `/threads` command (list, search, view, resume, archive) is exposed via Telegram; `share` and the rest are not.
 
 ---
 
@@ -43,14 +52,14 @@ Notes:
 The runner invokes:
 
 ```text
-amp [--dangerously-allow-all] --mode <mode> --model <model> -x --stream-json <prompt>
+amp [--dangerously-allow-all] [--mode <mode>] --stream-json [--stream-json-input] -x <prompt>
 ```
 
 Flags:
 
 * `--dangerously-allow-all` — auto-approve all of AMP's tool calls. **Default flipped to `false` in v0.35.3** ([#206](https://github.com/littlebearapps/untether/issues/206)); set `[amp] dangerously_allow_all = true` to enable.
-* `--mode <mode>` — optional (`deep|free|rush|smart`)
-* `--model <model>` — optional, from config or `/config` override
+* `--mode <mode>` — optional (`deep|free|rush|smart`), from `[amp] mode`; a `/config` model override is passed as `--mode`
+* No `--model` is passed: `[amp] model` only labels the `🏷` footer when no mode is set
 * `-x` — execute mode (non-interactive)
 * `--stream-json` — JSONL output
 * `--stream-json-input` — optional; enables stdin streaming (preliminary support, configurable)
@@ -60,7 +69,7 @@ Prompts starting with `-` are space-prefixed via `sanitize_prompt()` (base runne
 For resumed sessions:
 
 ```text
-amp threads continue <thread-id> [--dangerously-allow-all] -x --stream-json <prompt>
+amp threads continue <thread-id> [--dangerously-allow-all] [--mode <mode>] --stream-json [--stream-json-input] -x <prompt>
 ```
 
 ---
@@ -84,7 +93,7 @@ amp threads continue <thread-id> [--dangerously-allow-all] -x --stream-json <pro
     default_engine = "amp"
 
     [amp]
-    model = "claude-sonnet-4-6"       # optional; passed as --model
+    model = "claude-sonnet-4-6"       # optional; footer label only (not passed to amp)
     mode = "smart"                     # optional; deep|free|rush|smart
     dangerously_allow_all = false      # default: false (changed in v0.35.3 #206)
     stream_json_input = false          # default: false; passes --stream-json-input
@@ -94,7 +103,7 @@ Notes:
 
 * `mode` controls model selection, system prompt, and tool availability within AMP.
 * `dangerously_allow_all` defaults to `false` as of v0.35.3 ([#206](https://github.com/littlebearapps/untether/issues/206)) — opt in only if you specifically want AMP runs without its built-in permission system. Untether's own permission layer remains the primary control.
-* `stream_json_input` enables `--stream-json-input` for stdin streaming. This is preliminary plumbing — the interactive control flow (approve/deny via Telegram) is not yet wired.
+* `stream_json_input` enables `--stream-json-input` for stdin streaming. Nothing reads it back: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only.
 
 ---
 
@@ -107,7 +116,7 @@ Exposes `BACKEND = EngineBackend(id="amp", build_runner=build_runner, install_cm
 #### Runner invocation
 
 ```text
-amp [threads continue <thread-id>] [--dangerously-allow-all] [--mode <mode>] [--model <model>] -x --stream-json [--stream-json-input] <prompt>
+amp [threads continue <thread-id>] [--dangerously-allow-all] [--mode <mode>] --stream-json [--stream-json-input] -x <prompt>
 ```
 
 #### Event translation
@@ -146,8 +155,8 @@ Run `amp login` to authenticate with Sourcegraph.
 
 * AMP uses `amp threads continue <thread-id>` for resume, not `--resume`.
 * Thread IDs use the format `T-<uuid>` (e.g., `T-2775dc92-90ed-4f85-8b73-8f9766029e83`).
-* `--stream-json-input` is passed when `stream_json_input = true` in config. The interactive control flow (approve/deny buttons in Telegram) is not yet wired — this is preliminary plumbing.
-* AMP's `--model` flag may have no effect when using hosted models (model is controlled server-side by `--mode`).
+* `--stream-json-input` is passed when `stream_json_input = true` in config. No approve/deny flow is wired for AMP; interactive features are Claude Code-only.
+* Untether does not pass `--model`; model selection is controlled server-side by `--mode`.
 
 ## See also
 

@@ -71,6 +71,7 @@ class TestUpdateFrom:
             voice_transcription_api_key="sk-new",
             voice_show_transcription=False,
             voice_transcription_language="EN",
+            voice_transcription_prompt=" Trello, Untether ",
             show_resume_line=False,
             forward_coalesce_s=3.5,
             media_group_debounce_s=2.5,
@@ -85,6 +86,8 @@ class TestUpdateFrom:
         assert cfg.voice_transcription_base_url == "https://x/v1"
         # #638: hot-reloadable, normalised to lowercase at parse time
         assert cfg.voice_transcription_language == "en"
+        # #691: hot-reloadable, stripped at parse time
+        assert cfg.voice_transcription_prompt == "Trello, Untether"
         # #378: SecretStr — compare via .get_secret_value() since equality
         # against a bare str returns False.
         assert cfg.voice_transcription_api_key is not None
@@ -93,6 +96,19 @@ class TestUpdateFrom:
         assert cfg.show_resume_line is False
         assert cfg.forward_coalesce_s == 3.5
         assert cfg.media_group_debounce_s == 2.5
+
+    def test_388_approval_originator_only_hot_reloads(self, cfg: TelegramBridgeConfig):
+        """#388: opt-in, off by default, and not restart-required."""
+        assert _settings().approval_originator_only is False
+        assert cfg.approval_originator_only is False
+        cfg.update_from(_settings(approval_originator_only=True))
+        assert cfg.approval_originator_only is True
+        cfg.update_from(_settings())
+        assert cfg.approval_originator_only is False
+        assert (
+            "approval_originator_only"
+            not in TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+        )
 
     def test_update_from_swaps_files_object(self, cfg: TelegramBridgeConfig):
         original = cfg.files
@@ -240,7 +256,14 @@ class TestNotifyRestartRequired:
     locks in the broader broadcast behaviour so the fix doesn't regress."""
 
     @pytest.mark.anyio
-    async def test_sends_to_allowed_user_ids(self):
+    async def test_sends_to_allowed_user_ids(self, monkeypatch):
+        from untether import service_manager
+
+        monkeypatch.setattr(
+            service_manager,
+            "restart_command",
+            lambda: "systemctl --user restart untether-dev",
+        )
         transport = FakeTransport()
         cfg = make_cfg(transport)
         cfg.allowed_user_ids = (555, 777)
@@ -250,7 +273,24 @@ class TestNotifyRestartRequired:
         for call in transport.send_calls:
             assert "`session_mode`" in call["message"].text
             assert "restart required" in call["message"].text
-            assert "systemctl" in call["message"].text
+            assert "To apply: run `systemctl --user restart untether-dev`" in (
+                call["message"].text
+            )
+
+    @pytest.mark.anyio
+    async def test_restart_notice_generic_when_undetected(self, monkeypatch):
+        """#927: no detectable unit → generic wording, never the default
+        unit name (wrong on multi-instance hosts and on macOS)."""
+        from untether import service_manager
+
+        monkeypatch.setattr(service_manager, "restart_command", lambda: None)
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode"])
+        text = transport.send_calls[0]["message"].text
+        assert "restart Untether's service" in text
+        assert "systemctl" not in text
 
     @pytest.mark.anyio
     async def test_falls_back_to_transport_chat_id_when_no_targets(self):

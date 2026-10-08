@@ -1,7 +1,13 @@
+---
+paths:
+  - "docs/kaizen/**"
+  - ".claude/commands/kaizen*.md"
+---
+
 # Kaizen — capture rule (thin slice)
 
-The always-on slice for Untether's continuous-improvement loop. Loads whenever
-`/kaizen` or `/kaizen-review` runs (and when a Stop-hook nudges `/kaizen`). The
+The capture slice for Untether's continuous-improvement loop. `/kaizen` and
+`/kaizen-review` load it explicitly (a Stop-hook nudge exists in `.claude/hooks/kaizen-stop-nudge.sh` but isn't registered). The
 full rubric lives in `docs/kaizen/README.md`; this rule is the boundary + shape.
 
 ## When `/kaizen` fires (session end)
@@ -24,8 +30,8 @@ Capture **0–3** *process* learnings — how the work went, not what the code d
 
 | Command | May write | May NEVER write |
 |---|---|---|
-| `/kaizen` | exactly ONE `gh issue comment` on the collector (idempotent) | code · `.claude/rules/*` · `hooks.json` · `CLAUDE.md` |
-| `/kaizen-review` | strike a bullet (edit collector comment) · draft into `incoming/kaizen-runs/` · open a GH issue | apply any edit to `.claude/rules/*` · `hooks.json` · `CLAUDE.md` · code |
+| `/kaizen` | exactly ONE `gh issue comment` on the collector (idempotent) | code · `.claude/rules/*` · `.claude/settings.json` · `CLAUDE.md` |
+| `/kaizen-review` | strike a bullet (edit collector comment) · draft into `incoming/kaizen-runs/` · open a GH issue | apply any edit to `.claude/rules/*` · `.claude/settings.json` · `CLAUDE.md` · code |
 
 Promotion is **propose-only**: `/kaizen-review` drafts a pytest/doc/rule-draft +
 files an issue; a human (or `/implement`) applies it later. Nothing authoritative

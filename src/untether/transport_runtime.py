@@ -288,6 +288,11 @@ class TransportRuntime:
     def project_chat_ids(self) -> tuple[int, ...]:
         return self._projects.project_chat_ids()
 
+    def project_chat_id(self, project: str) -> int | None:
+        """Bound ``chat_id`` of *project* (alias, case-insensitive), if any."""
+        config = self._projects.projects.get(project.strip().lower())
+        return config.chat_id if config is not None else None
+
     def resolve_runner(
         self,
         *,

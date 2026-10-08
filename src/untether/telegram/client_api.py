@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
+import time
+from collections import deque
+from collections.abc import Callable
 from typing import Any, Protocol, TypeVar
 
 import httpx
 import msgspec
 
 from ..logging import get_logger
+from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
 
 logger = get_logger(__name__)
@@ -17,6 +21,107 @@ _BOT_TOKEN_RE = re.compile(r"/bot[^/]+/")
 def _safe_url(url: object) -> str:
     """Sanitise a Telegram Bot API URL for logging (strip bot token)."""
     return _BOT_TOKEN_RE.sub("/bot***/", str(url))
+
+
+# #746: known-benign editMessage*/deleteMessage rejections. Telegram's
+# error_code is "subject to change" (Bot API docs) and all of these are HTTP
+# 400, so match the description — case-insensitively, as a substring
+# (aiogram-2 style). Strings from tdlib/telegram-bot-api Client.cpp @ e3e9dd8;
+# see docs/findings/2026-09-30-telegram-benign-400s-and-stt-prompt.md (Track D).
+# A reworded string falls back to ERROR ``telegram.http_error`` (loud, safe).
+_BENIGN_REJECTIONS: tuple[tuple[str, str], ...] = (
+    ("message is not modified", "not_modified"),
+    ("message to edit not found", "target_gone"),
+    ("message to delete not found", "target_gone"),
+    ("message can't be edited", "not_editable"),
+    ("message can't be deleted", "not_deletable"),  # also "... for everyone"
+)
+# MESSAGE_ID_INVALID is deliberately absent: it is the signature of a wrong id
+# (an Untether bug), not a vanished message. It stays ERROR.
+
+# #746: a flood of benign rejections is still worth a WARNING (a wrong-id or
+# routing bug, or a stuck render loop, would otherwise leave only INFO lines).
+# Message calls (send/edit/delete/answer) get a short timeout: one dead
+# pooled connection (e.g. a stalled IPv6 flow to api.telegram.org) otherwise
+# blocks the chat's outbox for the full bulk timeout (rc15 integration
+# finding: 120 s freezes, lost and duplicated finals). Uploads, downloads and
+# getUpdates keep their own, longer timeouts.
+_MESSAGE_TIMEOUT_S = 30.0
+_CONNECT_TIMEOUT_S = 10.0
+# Never sent: safe to repeat for any method.
+_UNSENT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+# May have reached Telegram: repeat only where a duplicate is harmless.
+_IDEMPOTENT_METHODS = frozenset(
+    {
+        "editMessageText",
+        "editMessageReplyMarkup",
+        "deleteMessage",
+        "answerCallbackQuery",
+    }
+)
+_IDEMPOTENT_RETRY_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+)
+
+_BENIGN_BURST_THRESHOLD = 5  # rejections of one (method, reason_class) ...
+_BENIGN_BURST_WINDOW_S = 60.0  # ... within this many seconds
+
+
+def classify_benign_rejection(
+    method: str, description: object, message_id: object
+) -> str | None:
+    """#746: the benign reason class for a rejected edit/delete, else ``None``.
+
+    ``message_id`` is the id Untether *sent* (the request payload). A missing,
+    non-int or non-positive id is an Untether bug, never a benign race
+    (Telegram's "not found" also fires for ``message_id <= 0``), so it never
+    classifies. ``bool`` is excluded explicitly.
+    """
+    if not isinstance(description, str) or not description:
+        return None
+    if not (method.startswith("editMessage") or method == "deleteMessage"):
+        return None
+    if isinstance(message_id, bool) or not isinstance(message_id, int):
+        return None
+    if message_id <= 0:
+        return None
+    text = description.lower()
+    for needle, reason_class in _BENIGN_REJECTIONS:
+        if needle in text:
+            return reason_class
+    return None
+
+
+def _payload_target(request_payload: Any) -> tuple[Any, Any]:
+    """#823: the ``(chat_id, message_id)`` a request targeted, for error logs.
+
+    Works for both JSON and multipart (``data=``) payloads; anything that
+    isn't a dict (or a method with no chat, e.g. ``getUpdates``) yields
+    ``(None, None)``.
+    """
+    if not isinstance(request_payload, dict):
+        return None, None
+    return request_payload.get("chat_id"), request_payload.get("message_id")
+
+
+def _error_description(resp: httpx.Response) -> str | None:
+    """The Bot API ``description`` of an error response, if it parses."""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(payload, dict):
+        description = payload.get("description")
+        if isinstance(description, str):
+            return description
+    return None
 
 
 T = TypeVar("T")
@@ -68,6 +173,7 @@ class BotClient(Protocol):
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
+        wait: bool = True,
     ) -> Message | None: ...
 
     async def send_document(
@@ -143,12 +249,19 @@ class HttpBotClient:
         *,
         timeout_s: float = 30,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not token:
             raise ValueError("Telegram token is empty")
         self._base = f"https://api.telegram.org/bot{token}"
         self._file_base = f"https://api.telegram.org/file/bot{token}"
-        self._http_client = http_client or httpx.AsyncClient(timeout=timeout_s)
+        self._bulk_timeout_s = timeout_s
+        self._http_client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                min(timeout_s, _MESSAGE_TIMEOUT_S),
+                connect=min(timeout_s, _CONNECT_TIMEOUT_S),
+            )
+        )
         self._owns_http_client = http_client is None
         # #598: last failure reason per (method, chat_id, message_id). The
         # queued call chain returns bare ``None`` on failure, so upper
@@ -157,6 +270,11 @@ class HttpBotClient:
         # a separate, uncorrelated ``telegram.api_error`` line. Bounded
         # insertion-ordered dict; entries are popped on read.
         self._last_api_errors: dict[tuple[str, Any, Any], str] = {}
+        # #746: sliding window of benign rejections per (method, reason_class)
+        # and the time of the last burst WARNING per key.
+        self._clock = clock
+        self._benign_hits: dict[tuple[str, str], deque[tuple[float, Any, Any]]] = {}
+        self._benign_burst_warned_at: dict[tuple[str, str], float] = {}
 
     async def close(self) -> None:
         if self._owns_http_client:
@@ -169,10 +287,7 @@ class HttpBotClient:
         description: str,
     ) -> None:
         """#598: remember why a request failed, keyed for later correlation."""
-        chat_id = message_id = None
-        if isinstance(request_payload, dict):
-            chat_id = request_payload.get("chat_id")
-            message_id = request_payload.get("message_id")
+        chat_id, message_id = _payload_target(request_payload)
         self._last_api_errors[(method, chat_id, message_id)] = description
         while len(self._last_api_errors) > 64:
             self._last_api_errors.pop(next(iter(self._last_api_errors)))
@@ -182,6 +297,39 @@ class HttpBotClient:
     ) -> str | None:
         """#598: fetch-and-clear the recorded failure reason for a request."""
         return self._last_api_errors.pop((method, chat_id, message_id), None)
+
+    def _note_benign_rejection(
+        self, method: str, reason_class: str, chat_id: Any, message_id: Any
+    ) -> None:
+        """#746: one WARNING when 5 benign rejections of one kind land in 60 s.
+
+        Keyed on ``(method, reason_class)`` — not the message — so it catches
+        one message hammered (a stuck loop), many wrong ids (a routing bug)
+        and many chats at once. Latched: at most one WARNING per key per
+        window. Memory is bounded (a few keys, each trimmed to the window).
+        """
+        key = (method, reason_class)
+        now = self._clock()
+        hits = self._benign_hits.setdefault(key, deque())
+        hits.append((now, chat_id, message_id))
+        while hits and now - hits[0][0] > _BENIGN_BURST_WINDOW_S:
+            hits.popleft()
+        if len(hits) < _BENIGN_BURST_THRESHOLD:
+            return
+        last = self._benign_burst_warned_at.get(key)
+        if last is not None and now - last < _BENIGN_BURST_WINDOW_S:
+            return
+        self._benign_burst_warned_at[key] = now
+        logger.warning(
+            "telegram.benign_rejection.burst",
+            method=method,
+            reason_class=reason_class,
+            count=len(hits),
+            window_s=_BENIGN_BURST_WINDOW_S,
+            distinct_messages=len({(c, m) for _, c, m in hits}),
+            message_ids=sorted({m for _, _, m in hits})[:5],
+            chat_ids=sorted({c for _, c, _ in hits if c is not None})[:5],
+        )
 
     def _parse_telegram_envelope(
         self,
@@ -212,11 +360,15 @@ class HttpBotClient:
                     retry_after=retry_after,
                 )
                 raise TelegramRetryAfter(retry_after)
+            chat_id, message_id = _payload_target(request_payload)
             logger.error(
                 "telegram.api_error",
                 method=method,
                 url=_safe_url(resp.request.url),
                 payload=payload,
+                chat_id=chat_id,
+                message_id=message_id,
+                kind=current_message_kind(),
             )
             self._record_api_error(
                 method,
@@ -227,6 +379,33 @@ class HttpBotClient:
 
         logger.debug("telegram.response", method=method, payload=payload)
         return payload.get("result")
+
+    async def _post_once(
+        self,
+        method: str,
+        *,
+        json: dict[str, Any] | None,
+        data: dict[str, Any] | None,
+        files: dict[str, Any] | None,
+        **timeout_kwargs: Any,
+    ) -> httpx.Response:
+        if json is not None:
+            return await self._http_client.post(
+                f"{self._base}/{method}", json=json, **timeout_kwargs
+            )
+        return await self._http_client.post(
+            f"{self._base}/{method}", data=data, files=files, **timeout_kwargs
+        )
+
+    @staticmethod
+    def _should_retry(method: str, exc: httpx.HTTPError) -> bool:
+        if method == "getUpdates":
+            return False  # the poll loop retries on its own
+        if isinstance(exc, _UNSENT_ERRORS):
+            return True
+        return method in _IDEMPOTENT_METHODS and isinstance(
+            exc, _IDEMPOTENT_RETRY_ERRORS
+        )
 
     async def _request(
         self,
@@ -243,22 +422,37 @@ class HttpBotClient:
         if request_timeout is not None:
             timeout_kwargs["timeout"] = request_timeout
         try:
-            if json is not None:
-                resp = await self._http_client.post(
-                    f"{self._base}/{method}", json=json, **timeout_kwargs
+            try:
+                resp = await self._post_once(
+                    method, json=json, data=data, files=files, **timeout_kwargs
                 )
-            else:
-                resp = await self._http_client.post(
-                    f"{self._base}/{method}", data=data, files=files, **timeout_kwargs
+            except httpx.HTTPError as first:
+                if not self._should_retry(method, first):
+                    raise
+                # httpx drops the failed connection, so this goes out on a
+                # fresh one.
+                retry_chat_id, _ = _payload_target(request_payload)
+                logger.warning(
+                    "telegram.network_retry",
+                    method=method,
+                    error_type=first.__class__.__name__,
+                    chat_id=retry_chat_id,
+                )
+                resp = await self._post_once(
+                    method, json=json, data=data, files=files, **timeout_kwargs
                 )
         except httpx.HTTPError as exc:
             exc_url = getattr(exc.request, "url", None)
+            chat_id, message_id = _payload_target(request_payload)
             logger.error(
                 "telegram.network_error",
                 method=method,
                 url=_safe_url(exc_url) if exc_url is not None else None,
                 error=str(exc),
                 error_type=exc.__class__.__name__,
+                chat_id=chat_id,
+                message_id=message_id,
+                kind=current_message_kind(),
             )
             self._record_api_error(
                 method, request_payload, f"network error: {exc.__class__.__name__}"
@@ -291,16 +485,48 @@ class HttpBotClient:
                 )
                 raise TelegramRetryAfter(retry_after) from exc
             body = resp.text
-            logger.error(
-                "telegram.http_error",
-                method=method,
-                status=resp.status_code,
-                url=_safe_url(resp.request.url),
-                error=str(exc),
-                body=body,
+            chat_id, message_id = _payload_target(request_payload)
+            description = _error_description(resp)
+            benign = (
+                classify_benign_rejection(method, description, message_id)
+                if resp.status_code == 400
+                else None
             )
+            if benign is not None:
+                # #746: an expected race (message gone / not modified / can't
+                # be edited) — INFO, so restart orphan cleanup and no-op edits
+                # no longer raise ERROR lines. No URL: keeps the token out.
+                logger.info(
+                    "telegram.benign_rejection",
+                    method=method,
+                    status=resp.status_code,
+                    reason_class=benign,
+                    description=description,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    kind=current_message_kind(),
+                )
+                self._note_benign_rejection(method, benign, chat_id, message_id)
+            else:
+                logger.error(
+                    "telegram.http_error",
+                    method=method,
+                    status=resp.status_code,
+                    url=_safe_url(resp.request.url),
+                    error=str(exc),
+                    body=body,
+                    # #823: which chat/message a failed request targeted
+                    # (message_ids are per chat, so both are needed).
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    kind=current_message_kind(),
+                )
+            # #746 D4: record the readable Telegram description when there is
+            # one (matches the envelope path), else the raw body.
             self._record_api_error(
-                method, request_payload, f"http {resp.status_code}: {body[:200]}"
+                method,
+                request_payload,
+                description or f"http {resp.status_code}: {body[:200]}",
             )
             return None
 
@@ -363,7 +589,9 @@ class HttpBotClient:
         data: dict[str, Any],
         files: dict[str, Any],
     ) -> Any | None:
-        return await self._request(method, data=data, files=files)
+        return await self._request(
+            method, data=data, files=files, request_timeout=self._bulk_timeout_s
+        )
 
     async def get_updates(
         self,
@@ -409,7 +637,7 @@ class HttpBotClient:
             return None
         url = f"{self._file_base}/{file_path}"
         try:
-            resp = await self._http_client.get(url)
+            resp = await self._http_client.get(url, timeout=self._bulk_timeout_s)
         except httpx.HTTPError as exc:
             request_url = getattr(exc.request, "url", None)
             logger.error(
@@ -467,6 +695,7 @@ class HttpBotClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
+        wait: bool = True,
     ) -> Message | None:
         params: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if disable_notification is not None:

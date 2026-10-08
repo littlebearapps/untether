@@ -138,8 +138,6 @@ def test_codex_exec_flags_after_exec() -> None:
     assert args == [
         "-c",
         "notify=[]",
-        "--ask-for-approval",
-        "never",
         "exec",
         "--json",
         "--skip-git-repo-check",
@@ -772,43 +770,133 @@ def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
 # ===========================================================================
 
 
-def test_recent_event_is_control_request_true_when_last_label_matches() -> None:
-    """#526 rc20: the watchdog uses ``recent_events[-1] == 'control_request'``
-    as its approval-pending signal so a session waiting on an
-    ExitPlanMode/CanUseTool/AskUserQuestion approval doesn't flood the
-    operator dashboard with ``subprocess.liveness_stall`` WARNs.
+def test_approval_pending_true_when_control_request_is_newest() -> None:
+    """#526 rc20: the watchdog needs an approval-pending signal so a session
+    waiting on an ExitPlanMode/CanUseTool/AskUserQuestion approval doesn't
+    flood the operator dashboard with ``subprocess.liveness_stall`` WARNs.
     """
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
     stream.recent_events.append((1.0, "assistant"))
     stream.recent_events.append((2.0, "control_request"))
 
-    assert _recent_event_is_control_request(stream) is True
+    assert _approval_pending(stream) is True
 
 
-def test_recent_event_is_control_request_false_when_resolved() -> None:
+def test_approval_pending_false_when_resolved() -> None:
     """Once the approval resolves and Claude emits a ``control_response``
     (followed by assistant work), the predicate must report False — the
     session is no longer awaiting user input and a subsequent stall
     SHOULD escalate to the normal WARN path."""
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
     stream.recent_events.append((1.0, "control_request"))
     stream.recent_events.append((2.0, "control_response"))
     stream.recent_events.append((3.0, "assistant"))
 
-    assert _recent_event_is_control_request(stream) is False
+    assert _approval_pending(stream) is False
 
 
-def test_recent_event_is_control_request_false_when_buffer_empty() -> None:
+def test_approval_pending_false_when_buffer_empty() -> None:
     """A fresh subprocess with no JSONL events yet is not approval-pending
     — return False rather than raising IndexError."""
-    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    assert _approval_pending(JsonlStreamState(expected_session=None)) is False
+
+
+def test_approval_pending_survives_same_tick_rate_limit_event() -> None:
+    """#697: the discriminator must not be positional. A ``rate_limit_event``
+    arriving in the same tick as the ``control_request`` took the last ring
+    slot on nsd and demoted a 10-minute approval wait back to a
+    ``subprocess.liveness_stall`` WARN with ``approval_pending=False``.
+
+    Verbatim ring buffer from the nsd occurrence (session b081a873).
+    """
+    from untether.runner import JsonlStreamState, _approval_pending
 
     stream = JsonlStreamState(expected_session=None)
-    assert _recent_event_is_control_request(stream) is False
+    for label in (
+        "assistant",
+        "assistant",
+        "assistant",
+        "control_request",
+        "rate_limit_event",
+    ):
+        stream.recent_events.append((47024.0, label))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_transparent_to_tool_noise() -> None:
+    """Events that neither request nor resolve an approval (tool frames,
+    system notices) are transparent to the backward scan — only a genuine
+    resolving event stops it."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "control_request"))
+    stream.recent_events.append((2.0, "tool:Bash"))
+    stream.recent_events.append((3.0, "system"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_prefers_engine_state_registry() -> None:
+    """#697: the authoritative signal is the engine's own unanswered
+    control-request registry (``awaiting_user_approval``), reached by the
+    same ``engine_state`` duck-typing the bridge-side predicate uses. It
+    must win over a ring buffer whose ``control_request`` has already
+    scrolled out of the 10-entry window."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _EngineState:
+        def awaiting_user_approval(self) -> bool:
+            return True
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _EngineState()
+    stream.recent_events.append((1.0, "user"))
+    stream.recent_events.append((2.0, "assistant"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_falls_back_when_probe_raises() -> None:
+    """A raising probe must never take the watchdog down or silently swallow
+    the ring-buffer signal — fall back to the scan."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _Exploding:
+        def awaiting_user_approval(self) -> bool:
+            raise RuntimeError("boom")
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _Exploding()
+    stream.recent_events.append((1.0, "control_request"))
+
+    assert _approval_pending(stream) is True
+
+
+def test_approval_pending_false_when_engine_reports_no_pending() -> None:
+    """A non-Claude engine (no probe) and a Claude session with an empty
+    registry and a resolved ring buffer both report False, so a genuine
+    post-approval hang still escalates to WARN."""
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    class _EngineState:
+        def awaiting_user_approval(self) -> bool:
+            return False
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = _EngineState()
+    stream.recent_events.append((1.0, "control_request"))
+    stream.recent_events.append((2.0, "user"))
+    stream.recent_events.append((3.0, "assistant"))
+
+    assert _approval_pending(stream) is False
 
 
 def test_approval_pending_refire_constant_is_30_min() -> None:
@@ -890,6 +978,63 @@ async def test_watchdog_demotes_to_approval_pending_when_control_request_recent(
 
 
 @pytest.mark.anyio
+async def test_watchdog_demotes_when_rate_limit_event_follows_control_request(
+    tmp_path,
+) -> None:
+    """#697 end-to-end: a ``rate_limit_event`` landing after the
+    ``control_request`` (nsd's steady state — plan-mode approval + subscription
+    throttling) must NOT flip the approval wait back to a
+    ``subprocess.liveness_stall`` WARN. The WARN branch latches
+    ``liveness_warned``, burning the run's one-shot stall canary, and falls
+    through to the auto-kill check.
+    """
+    from structlog.testing import capture_logs
+
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3be"
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "print(json.dumps({'type': 'control_request', 'request_id': 'req_1'}), flush=True)\n"
+        "print(json.dumps({'type': 'rate_limit_event'}), flush=True)\n"
+        "time.sleep(1.0)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    runner._LIVENESS_TIMEOUT_SECONDS = 0.2
+    runner._WATCHDOG_POLL_SECONDS = 0.05
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    with capture_logs() as logs:
+        with anyio.fail_after(5):
+            _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+    assert stream.recent_events[-1][1] == "rate_limit_event"
+
+    liveness_warns = [r for r in logs if r.get("event") == "subprocess.liveness_stall"]
+    assert liveness_warns == [], (
+        f"A same-tick rate_limit_event must not demote the approval wait back "
+        f"to a WARN, got: {liveness_warns}"
+    )
+    approval_infos = [
+        r for r in logs if r.get("event") == "subprocess.approval_pending"
+    ]
+    assert len(approval_infos) == 1
+    assert approval_infos[0].get("approval_pending") is True
+    # The one-shot stall canary must remain unburnt for a genuine later hang.
+    assert stream.liveness_stalls == 0
+
+
+@pytest.mark.anyio
 async def test_watchdog_warn_still_fires_when_no_control_request(tmp_path) -> None:
     """The rc20 follow-up must NOT silence the WARN for genuinely-hung
     sessions. When the most recent event is a plain ``assistant`` (or
@@ -940,42 +1085,75 @@ async def test_watchdog_warn_still_fires_when_no_control_request(tmp_path) -> No
 
 
 # ===========================================================================
-# Phase 2e: _ResumeLineProxy.current_stream forwarding (#98)
+# #510 — base runner publishes pid + stream together to the per-run handle
 # ===========================================================================
 
 
-def test_resume_line_proxy_current_stream_forwarding() -> None:
-    """_ResumeLineProxy.current_stream returns inner runner's stream."""
-    from untether.runner import JsonlStreamState
-    from untether.telegram.commands.executor import _ResumeLineProxy
+@pytest.mark.anyio
+async def test_base_runner_publishes_paired_pid_and_stream(tmp_path) -> None:
+    """#510: the base runner publishes THIS spawn's pid and stream to the
+    bridge's per-run handle together, before the payload is sent — never a
+    new pid paired with a previous spawn's stream."""
+    from untether.runner import (
+        JsonlStreamState,
+        RunStreamHandle,
+        bind_run_stream_handle,
+        current_run_stream_handle,
+    )
 
-    runner = CodexRunner(codex_cmd="codex", extra_args=[])
-    stream = JsonlStreamState(expected_session=None)
-    runner.current_stream = stream
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_0', 'type': 'agent_message', 'text': 'ok'}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
 
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is stream
+    seen_at_send: list[tuple[object, object]] = []
+
+    class _Probe(CodexRunner):
+        async def _send_payload(self, proc, payload, *, logger, resume) -> None:
+            handle = current_run_stream_handle()
+            assert handle is not None
+            seen_at_send.append((handle.pid, handle.stream))
+            await CodexRunner._send_payload(
+                self, proc, payload, logger=logger, resume=resume
+            )
+
+    runner = _Probe(codex_cmd=str(codex_path), extra_args=[])
+    stale = JsonlStreamState(expected_session=None)
+    runner.current_stream = stale
+    runner.last_pid = 999
+
+    handle = RunStreamHandle()
+    with bind_run_stream_handle(handle):
+        events = [evt async for evt in runner.run("hi", None)]
+
+    started = next(e for e in events if isinstance(e, StartedEvent))
+    assert handle.ready.is_set()
+    assert handle.pid == started.meta["pid"]
+    assert handle.stream is runner.current_stream
+    assert handle.stream is not stale
+    # Already paired when the payload went out.
+    assert seen_at_send == [(handle.pid, handle.stream)]
+    # Unbound after the context exits: publishing is then a no-op.
+    assert current_run_stream_handle() is None
 
 
-def test_resume_line_proxy_current_stream_none() -> None:
-    """_ResumeLineProxy.current_stream returns None when runner has no stream."""
-    from untether.telegram.commands.executor import _ResumeLineProxy
+def test_publish_run_stream_without_handle_is_noop() -> None:
+    from untether.runner import (
+        JsonlStreamState,
+        current_run_stream_handle,
+        publish_run_stream,
+    )
 
-    runner = CodexRunner(codex_cmd="codex", extra_args=[])
-    runner.current_stream = None
-
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is None
-
-
-def test_resume_line_proxy_current_stream_no_attr() -> None:
-    """_ResumeLineProxy.current_stream returns None for runners without the attr."""
-    from untether.runners.mock import MockRunner
-    from untether.telegram.commands.executor import _ResumeLineProxy
-
-    runner = MockRunner(engine="mock")
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is None
+    assert current_run_stream_handle() is None
+    publish_run_stream(JsonlStreamState(expected_session=None), 123)
+    assert current_run_stream_handle() is None
 
 
 # ===========================================================================
@@ -1181,3 +1359,254 @@ async def test_589_manage_subprocess_balances_the_counter() -> None:
         "counter leaked on the error path — a leak permanently inflates "
         "live_runs and would block all future spawns (#589)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #812: hook lifecycle frames in the engine-agnostic line handler
+# ---------------------------------------------------------------------------
+
+
+def _claude_line_handler(sid: str = "sess-812"):
+    import json as _json
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+    state = runner.new_state("hi", None)
+    state.live_mode = True
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = state
+    stream.followup_turns = True
+    log = runner.get_logger()
+
+    def feed(obj: dict) -> list:
+        obj.setdefault("session_id", sid)
+        return runner._handle_jsonl_line(
+            raw_line=_json.dumps(obj).encode(),
+            stream=stream,
+            state=state,
+            resume=None,
+            logger=log,
+            pid=1,
+        )
+
+    return feed, stream, state
+
+
+def _hook(subtype: str, hook_id: str, event: str = "Stop", **extra) -> dict:
+    return {
+        "type": "system",
+        "subtype": subtype,
+        "hook_id": hook_id,
+        "hook_name": event,
+        "hook_event": event,
+        **extra,
+    }
+
+
+def test_812_hook_frames_keep_last_event_type() -> None:
+    """#470 / auto-continue guard: an async hook's response landing after the
+    turn's ``result`` must not flip ``last_event_type`` to ``system`` — but a
+    running hook is still liveness (D-5)."""
+    feed, stream, state = _claude_line_handler()
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(_hook("hook_started", "h1"))
+    feed(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "num_turns": 1,
+            "result": "ok",
+        }
+    )
+    assert stream.last_event_type == "result"
+    count, seen_at = stream.event_count, stream.last_stdout_at
+    out = feed(_hook("hook_progress", "h1", stdout="x"))
+    out += feed(_hook("hook_response", "h1", outcome="success", exit_code=0))
+    assert out == []
+    assert stream.last_event_type == "result"
+    assert stream.last_event_tool is None
+    assert stream.saw_result is True
+    assert stream.event_count == count + 2
+    assert stream.last_stdout_at >= seen_at
+    labels = [label for _, label in stream.recent_events]
+    assert labels[-2:] == ["hook:hook_progress", "hook:hook_response"]
+    assert state.pending_hooks == {}
+
+
+def test_812_non_hook_system_frames_still_update_last_event_type() -> None:
+    feed, stream, _ = _claude_line_handler()
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    assert stream.last_event_type == "system"
+    assert stream.recent_events[-1][1] == "system"
+
+
+def test_812_hook_flood_keeps_approval_registry_probe() -> None:
+    """#697: a PreToolUse/PostToolUse flood pushes ``control_request`` out of
+    the 10-entry ring; the engine's own request registry stays authoritative."""
+    from untether.runner import _approval_pending
+    from untether.runners import claude as claude_mod
+
+    sid = "sess-812-flood"
+    feed, stream, _ = _claude_line_handler(sid)
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(
+        {
+            "type": "control_request",
+            "request_id": "req_812",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+            },
+        }
+    )
+    claude_mod._REQUEST_TO_SESSION["req_812"] = sid
+    try:
+        for i in range(40):
+            feed(_hook("hook_started", f"pre{i}", "PreToolUse"))
+            feed(_hook("hook_response", f"pre{i}", "PreToolUse", outcome="success"))
+        labels = [label for _, label in stream.recent_events]
+        assert "control_request" not in labels  # scrolled out of the ring
+        assert all(label.startswith("hook:") for label in labels)
+        assert _approval_pending(stream) is True
+    finally:
+        for registry in (
+            claude_mod._REQUEST_TO_SESSION,
+            claude_mod._REQUEST_TO_INPUT,
+            claude_mod._REQUEST_TO_TOOL_NAME,
+        ):
+            registry.pop("req_812", None)
+    # Without the registry entry the ring alone can no longer tell.
+    assert _approval_pending(stream) is False
+
+
+# ---------------------------------------------------------------------------
+# #684: control_cancel_request is control-channel traffic
+# ---------------------------------------------------------------------------
+
+
+def test_684_cancel_frame_is_control_traffic() -> None:
+    feed, stream, _state = _claude_line_handler("sess-684")
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        }
+    )
+    assert stream.last_event_type == "assistant"
+    feed({"type": "control_cancel_request", "request_id": "r-x"})
+    assert stream.last_event_type == "assistant"
+    assert stream.recent_events[-1][1] == "control_cancel_request"
+
+
+def test_684_ring_cancel_resolves_approval() -> None:
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "assistant"))
+    stream.recent_events.append((2.0, "control_request"))
+    stream.recent_events.append((3.0, "control_cancel_request"))
+    assert _approval_pending(stream) is False
+
+
+# ── #819: compaction / status frames are liveness-only ─────────────────────
+
+
+def _tool_use_frame(tool_id: str = "toolu_1") -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "model": "m",
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "Read", "input": {}}
+            ],
+        },
+    }
+
+
+def _tool_result_frame(tool_id: str = "toolu_1") -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": "x"}
+            ],
+        },
+    }
+
+
+def test_819_status_frames_do_not_overwrite_last_event_type() -> None:
+    """An auto-compaction starts right after a tool_result: the CLI dying
+    mid-compaction must still look like ``user`` to auto-continue."""
+    feed, stream, _ = _claude_line_handler("sess-819")
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(_tool_use_frame())
+    feed(_tool_result_frame())
+    assert stream.last_event_type == "user"
+    for _ in range(3):
+        feed({"type": "system", "subtype": "status", "status": "compacting"})
+    assert stream.last_event_type == "user"
+    feed({"type": "system", "subtype": "status", "status": None})
+    assert stream.last_event_type == "user"
+
+
+def test_819_compact_boundary_does_not_overwrite_last_event_type() -> None:
+    feed, stream, _ = _claude_line_handler("sess-819b")
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(_tool_result_frame())
+    feed(
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compact_metadata": {"trigger": "auto", "pre_tokens": 10},
+        }
+    )
+    assert stream.last_event_type == "user"
+    assert stream.recent_events[-1][1] == "compact_boundary"
+
+
+def test_819_status_frames_count_as_liveness() -> None:
+    feed, stream, _ = _claude_line_handler("sess-819c")
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    count, seen_at = stream.event_count, stream.last_stdout_at
+    feed({"type": "system", "subtype": "status", "status": "compacting"})
+    feed(
+        {
+            "type": "system",
+            "subtype": "status",
+            "status": None,
+            "permissionMode": "plan",
+        }
+    )
+    assert stream.event_count == count + 2
+    assert stream.last_stdout_at >= seen_at
+    labels = [label for _, label in stream.recent_events]
+    assert labels[-2:] == ["status:compacting", "status:null"]
+
+
+def test_819_task_notification_system_frames_still_set_last_event_type() -> None:
+    """Negative: only the listed subtypes are exempt."""
+    feed, stream, _ = _claude_line_handler("sess-819d")
+    feed(_tool_result_frame())
+    feed(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "t1",
+            "status": "completed",
+        }
+    )
+    assert stream.last_event_type == "system"

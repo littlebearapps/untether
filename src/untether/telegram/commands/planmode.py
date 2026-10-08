@@ -1,22 +1,38 @@
-"""Command backend for toggling Claude Code plan mode via /planmode."""
+"""Command backend for setting Claude Code's permission mode via /planmode."""
 
 from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, claude_cli_permission_mode
+from ._permission_mode_text import (
+    APPLY_TIMING_TEXT,
+    NO_OVERRIDE_LABEL,
+    NO_OVERRIDE_TEXT,
+    cli_name_suffix,
+    mode_display,
+)
 
 logger = get_logger(__name__)
 
 PLANMODE_USAGE = (
-    "usage: `/planmode`, `/planmode on`, `/planmode auto`, `/planmode off`,"
-    " `/planmode show`, or `/planmode clear`"
+    "usage: `/planmode`, `/planmode on`, `/planmode plan-auto`,"
+    " `/planmode auto`, `/planmode off`, `/planmode show`, or"
+    " `/planmode clear`"
 )
 
+# #741 `plan-auto` is Untether's own sugar (CLI plan mode + auto-approved
+# ExitPlanMode).  `auto` is now the CLI's native classifier-gated mode, which
+# this command shadowed until 0.35.5rc8.
 PERMISSION_MODES = {
     "on": "plan",
+    "plan-auto": CLAUDE_PLAN_AUTO_MODE,
     "auto": "auto",
     "off": "acceptEdits",
 }
+
+# Modes that mean "planning is active" for the bare `/planmode` toggle.
+_PLANNING_MODES = ("plan", CLAUDE_PLAN_AUTO_MODE)
 
 # Engines that support the /planmode command (Claude-style permission modes).
 # Codex and Gemini have approval policies but use different semantics —
@@ -24,21 +40,26 @@ PERMISSION_MODES = {
 _PLANMODE_ENGINES = frozenset({"claude"})
 
 
+def _summary(mode: str) -> str:
+    _, mode_text = mode_display(mode)
+    return mode_text.summary if mode_text is not None else mode
+
+
 class PlanModeCommand:
     """Command backend for toggling Claude Code permission mode."""
 
     id = "planmode"
-    description = "Toggle Claude Code plan mode on/auto/off"
+    description = "Set Claude Code permission mode: on/plan-auto/auto/off"
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-        from ..engine_overrides import EngineOverrides
+        from ..engine_overrides import with_override
         from ._resolve_engine import resolve_effective_engine
 
         config_path = ctx.config_path
         if config_path is None:
             return CommandResult(
-                text="plan mode overrides unavailable (no config path).",
+                text="permission mode overrides unavailable (no config path).",
                 notify=True,
             )
 
@@ -64,43 +85,32 @@ class PlanModeCommand:
         if args == "show":
             current = await chat_prefs.get_engine_override(chat_id, engine)
             mode = current.permission_mode if current else None
-            if mode == "plan":
-                label = "<b>on</b> (plan mode)"
-            elif mode == "auto":
-                label = "<b>auto</b> (plan mode, auto-approve ExitPlanMode)"
-            elif mode is not None:
-                label = f"<b>off</b> ({mode})"
+            if mode is None:
+                text = (
+                    f"permission mode: <b>{NO_OVERRIDE_LABEL}</b>: no override"
+                    f" for this chat; it {NO_OVERRIDE_TEXT}."
+                )
             else:
-                label = "default (uses engine config)"
-            return CommandResult(
-                text=f"plan mode: {label}", notify=True, parse_mode="HTML"
-            )
+                # #747: only acceptEdits is "off"; a hand-stored mode that
+                # /planmode can't set shows its own name.
+                ui_name, mode_text = mode_display(mode)
+                text = f"permission mode: <b>{ui_name}</b>{cli_name_suffix(mode)}"
+                if mode_text is not None:
+                    text += f": {mode_text.summary}."
+            return CommandResult(text=text, notify=True, parse_mode="HTML")
 
         if args == "":
             # Toggle: if currently plan/auto mode, turn off; otherwise turn on
             current = await chat_prefs.get_engine_override(chat_id, engine)
             current_mode = current.permission_mode if current else None
-            args = "off" if current_mode in ("plan", "auto") else "on"
+            args = "off" if current_mode in _PLANNING_MODES else "on"
 
         if args in PERMISSION_MODES:
             mode = PERMISSION_MODES[args]
             current = await chat_prefs.get_engine_override(chat_id, engine)
-            updated = EngineOverrides(
-                model=current.model if current else None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=mode,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, permission_mode=mode)
             await chat_prefs.set_engine_override(chat_id, engine, updated)
-            cli_mode = "plan" if mode in ("plan", "auto") else mode
+            cli_mode = claude_cli_permission_mode(mode)
             logger.info(
                 "planmode.set",
                 chat_id=chat_id,
@@ -110,8 +120,11 @@ class PlanModeCommand:
             )
             return CommandResult(
                 text=(
-                    f"plan mode <b>{args}</b> for this chat.\n"
-                    f"new sessions will use <code>--permission-mode {cli_mode}</code>."
+                    f"permission mode <b>{args}</b> for this chat:"
+                    f" {_summary(mode)}.\n"
+                    "applies from your next message"
+                    f" (<code>--permission-mode {cli_mode}</code>)."
+                    f" {APPLY_TIMING_TEXT}"
                 ),
                 notify=True,
                 parse_mode="HTML",
@@ -119,24 +132,14 @@ class PlanModeCommand:
 
         if args == "clear":
             current = await chat_prefs.get_engine_override(chat_id, engine)
-            updated = EngineOverrides(
-                model=current.model if current else None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=None,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, permission_mode=None)
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             logger.info("planmode.cleared", chat_id=chat_id, command="planmode")
             return CommandResult(
-                text="plan mode <b>override cleared</b> (using engine config default).",
+                text=(
+                    "permission mode <b>override cleared</b>: no override for"
+                    f" this chat; it {NO_OVERRIDE_TEXT}."
+                ),
                 notify=True,
                 parse_mode="HTML",
             )

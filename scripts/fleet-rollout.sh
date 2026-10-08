@@ -32,6 +32,9 @@
 
 set -euo pipefail
 
+# #745: post-restart stability check shipped to each host on stdin.
+FLEET_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PACKAGE="untether"
 STATE_FILE="${HOME}/.untether-dev/fleet-rollout-state.json"
 ATTESTATION_DIR="${HOME}/.untether-dev"
@@ -259,7 +262,11 @@ if (( IS_PRERELEASE == 1 )); then
     # TestPyPI but its dependencies live on PyPI, we have to tell uv to
     # look across both. Without this, the install fails with
     # "No solution found when resolving dependencies".
-    UV_INDEX_ARGS='--default-index https://test.pypi.org/simple/ --index https://pypi.org/simple/ --prerelease=allow --index-strategy unsafe-best-match'
+    # --prerelease=if-necessary-or-explicit, NOT allow: `allow` lets every
+    # dependency resolve to a pre-release. On 2026-09-28 it put httpx
+    # 1.0.dev6 (no AsyncClient) on sl and crash-looped the rc11 roll (#745).
+    # The explicit untether==X.YrcN pin still admits the rc itself.
+    UV_INDEX_ARGS='--default-index https://test.pypi.org/simple/ --index https://pypi.org/simple/ --prerelease=if-necessary-or-explicit --index-strategy unsafe-best-match'
 else
     PIP_ARGS='--index-url https://pypi.org/simple/'
     UV_INDEX_ARGS='--default-index https://pypi.org/simple/'
@@ -307,22 +314,22 @@ build_install_cmd() {
 # No detection needed because lba-1 is the host running this script.
 INSTALL_CMD[lba-1]="cd ${HOME}/untether && scripts/staging.sh install ${VERSION}"
 RESTART_CMD[lba-1]='systemctl --user restart untether'
-POSTCHECK_CMD[lba-1]='systemctl --user is-active untether'
+POSTCHECK_CMD[lba-1]='bash "$FLEET_SCRIPT_DIR/fleet-postcheck.sh" systemd'
 MANAGER[lba-1]='pipx (via staging.sh)'
 
 # Restart + postcheck per host. These are NOT manager-dependent — only the
 # install path varies.
 RESTART_CMD[nsd]="ssh nsd 'systemctl --user restart untether'"
-POSTCHECK_CMD[nsd]="ssh nsd 'systemctl --user is-active untether'"
+POSTCHECK_CMD[nsd]="ssh nsd 'bash -s -- systemd' < \"\$FLEET_SCRIPT_DIR/fleet-postcheck.sh\""
 
 RESTART_CMD[channelo]="ssh channelo 'systemctl --user restart untether'"
-POSTCHECK_CMD[channelo]="ssh channelo 'systemctl --user is-active untether'"
+POSTCHECK_CMD[channelo]="ssh channelo 'bash -s -- systemd' < \"\$FLEET_SCRIPT_DIR/fleet-postcheck.sh\""
 
 RESTART_CMD[sl]="ssh sl 'systemctl --user restart untether'"
-POSTCHECK_CMD[sl]="ssh sl 'systemctl --user is-active untether'"
+POSTCHECK_CMD[sl]="ssh sl 'bash -s -- systemd' < \"\$FLEET_SCRIPT_DIR/fleet-postcheck.sh\""
 
 RESTART_CMD[mac]='ssh mac "launchctl kickstart -k gui/\$(id -u)/com.littlebearapps.untether"'
-POSTCHECK_CMD[mac]='ssh mac "launchctl print gui/\$(id -u)/com.littlebearapps.untether | grep -E \"^\\s*(state|last exit code)\""'
+POSTCHECK_CMD[mac]="ssh mac 'bash -s -- launchd' < \"\$FLEET_SCRIPT_DIR/fleet-postcheck.sh\""
 
 # ────────────────────────────────────────────────────────────────────────────
 # Host selection

@@ -1,3 +1,9 @@
+---
+paths:
+  - "docs/faq/**"
+  - "CHANGELOG.md"
+---
+
 # Help-Centre FAQ Rules (`docs/faq/faq.md`)
 
 `docs/faq/faq.md` is the user-facing FAQ for Untether. It backs the
@@ -10,7 +16,7 @@ JSON-LD on every deploy — unlocking AI-citation surface (ChatGPT,
 Perplexity, Google AI Overviews) and SERP rich-snippet eligibility for
 the Untether help articles.
 
-Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (closed).
 
 ## Hard rules
 
@@ -20,10 +26,10 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
   Removing it silently breaks the docs-sync mapping (`build-error` per
   the issue's "Coordinated mapping" note) and regresses the FAQPage
   schema on the next deploy.
-- The repo enforces this via `.claude/hooks/help-faq-protect.sh`
-  (PreToolUse Bash hook). It blocks `rm`, `git rm`, `mv`-away, and
-  shell-redirect (`>`) truncation. Append (`>>`) and Edit/Write are
-  intentionally NOT blocked — the FAQ is meant to evolve.
+- `.claude/hooks/help-faq-protect.sh` (a PreToolUse Bash hook registered in
+  `.claude/settings.json`) blocks `rm`, `git rm`, `mv`-away and
+  shell-redirect (`>`) truncation. Append (`>>`) and Edit/Write are fine —
+  the FAQ is meant to evolve.
 - To genuinely retire the FAQ, raise an issue first to coordinate the
   matching mapping removal in `littlebearapps/littlebearapps.com`.
 
@@ -32,10 +38,11 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 - Treat the FAQ like a contract with users. Whenever a new feature
   lands in `CHANGELOG.md`, ask: does the existing FAQ still answer
   questions correctly?
-- Specifically watch for:
+- Specifically watch for (Q numbers as of 0.36.0rc1 — they drift as questions are added, so match on the quoted heading):
   - **Engine support changes** — Q3 ("Which AI coding agents…")
-    enumerates the 6 supported engines. If a new engine lands or one is
-    deprecated, update.
+    enumerates the 4 supported engines plus the 2 deprecated ones (Gemini
+    CLI, Amp). If a new engine lands (e.g. Antigravity, #558, in v0.36.1) or one is
+    deprecated or removed, update.
   - **Subscription / API key model changes** — Q4 ("Do I need an API
     key?") describes which engines use OAuth vs API key. Any auth-flow
     changes need an FAQ refresh.
@@ -46,13 +53,13 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
     documents Plan mode buttons and `/planmode` semantics. Any change
     to ExitPlanMode, ask-mode, or per-engine approval policies needs
     an FAQ pass.
-  - **Cost / budget changes** — Q8 ("How do I keep agents from
+  - **Cost / budget changes** — Q11 ("How do I keep agents from
     spending too much…") shows `[cost_budget]` config. New keys, new
-    budget types, or new auto-cancel behaviour need an FAQ refresh.
-  - **Voice transcription changes** — Q9 ("Can I send voice notes…")
+    budget types, or Stop at limit (`auto_cancel`) changes need an FAQ refresh.
+  - **Voice transcription changes** — Q15 ("Can I send voice notes…")
     references `voice_transcription_*` config keys. Renames or new
     keys need an FAQ pass.
-  - **Install / update / uninstall path changes** — Q2/Q10/Q11 cover
+  - **Install / update / uninstall path changes** — Q2/Q18/Q19 cover
     `uv tool` and `pipx` flows. Any change to the wizard, default
     config path, or systemd integration needs an FAQ refresh.
 
@@ -66,7 +73,7 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 - Phrase as: ends with `?`, OR starts with How / What / Why / When /
   Where / Can / Do / Does / Is / Are / Should / Will.
 - Aim for ≥7 H2 Q/A pairs (the issue's acceptance criterion). Currently
-  ships with 12. Don't drop below 7 without coordinating with the
+  ships with 20. Don't drop below 7 without coordinating with the
   marketing site.
 
 ### Answer style

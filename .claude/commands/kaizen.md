@@ -22,7 +22,7 @@ Load `.claude/rules/kaizen.md` (the thin capture rule) and, for the full rubric,
 cross-cutting rules. Key points:
 
 - **Authority: read-only except ONE `gh issue comment`.** Never edit code,
-  `.claude/rules/*`, `hooks.json`, or `CLAUDE.md`. Promotion to any of those is
+  `.claude/rules/*`, `.claude/settings.json`, or `CLAUDE.md`. Promotion to any of those is
   `/kaizen-review`'s job, and even then only as a *proposal*.
 - **Self-invokes** at session end (a Stop-hook nudge is proposed to Nathan for
   wiring, but is not required — this command runs itself). Under Untether/cron

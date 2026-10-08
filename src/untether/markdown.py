@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -33,8 +34,10 @@ def assemble_markdown_parts(parts: MarkdownParts) -> str:
     )
 
 
-def format_changed_file_path(path: str, *, base_dir: Path | None = None) -> str:
-    return f"`{relativize_path(path, base_dir=base_dir)}`"
+def format_changed_file_path(
+    path: str, *, base_dir: Path | None = None, width: int | None = None
+) -> str:
+    return inline_code(_shorten_path(relativize_path(path, base_dir=base_dir), width))
 
 
 def format_elapsed(elapsed_s: float) -> str:
@@ -49,13 +52,25 @@ def format_elapsed(elapsed_s: float) -> str:
 
 
 def format_header(
-    elapsed_s: float, item: int | None, *, label: str, engine: str
+    elapsed_s: float,
+    item: int | None,
+    *,
+    label: str,
+    engine: str,
+    context_pct: int | None = None,
 ) -> str:
+    """``label · engine · elapsed[ · step N][ · N% ctx]``.
+
+    #819: ``context_pct`` (Claude's context-window use) is appended last, with
+    no emoji, and omitted when unknown.
+    """
     elapsed = format_elapsed(elapsed_s)
     parts = [label, engine]
     parts.append(elapsed)
     if item is not None:
         parts.append(f"step {item}")
+    if context_pct is not None:
+        parts.append(f"{context_pct}% ctx")
     return HEADER_SEP.join(parts)
 
 
@@ -67,6 +82,68 @@ def shorten(text: str, width: int | None) -> str:
     if len(text) <= width:
         return text
     return textwrap.shorten(text, width=width, placeholder="…")
+
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def backtick_fence(text: str, *, minimum: int = 1) -> str:
+    """A backtick fence longer than any backtick run in *text* (#855, #871)."""
+    longest = max((len(m) for m in _BACKTICK_RUN_RE.findall(text)), default=0)
+    return "`" * max(minimum, longest + 1)
+
+
+def inline_code(text: str, width: int | None = None) -> str:
+    """A CommonMark code span that backticks inside *text* can't close (#871).
+
+    Code spans can't hold line breaks (and backslash escapes don't work in
+    them), so lines are joined with spaces, the text is shortened BEFORE
+    fencing (a cut can never land inside the fence), and the fence outruns
+    every inner backtick run. A lead/trail backtick gets one padding space,
+    which CommonMark strips again. Backtick-free text renders as before:
+    ``inline_code("git status") == "`git status`"``.
+    """
+    text = shorten(" ".join(text.splitlines()).strip(), width)
+    if not text:
+        return ""
+    fence = backtick_fence(text)
+    pad = " " if text[0] == "`" or text[-1] == "`" else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def _shorten_path(path: str, width: int | None) -> str:
+    """Keep a path's tail (the file name) when it must be cut."""
+    if width is None or len(path) <= width:
+        return path
+    if width <= 1:
+        return "…"
+    return "…" + path[-(width - 1) :]
+
+
+_EMOJI_PRESENTATION = "\ufe0f"
+
+
+def starts_with_pictograph(text: str) -> bool:
+    """True when *text*'s first non-space character is a symbol/pictograph.
+
+    That is: Unicode category ``So`` (warning sign, hooked arrow, check marks
+    and, deliberately, box drawing such as tree lines), the pictograph blocks
+    U+1F000-1FAFF and U+2600-27BF, or any character followed by U+FE0F (emoji
+    presentation). The information source sign U+2139 is category ``Ll``, so
+    only its trailing FE0F marks it; without FE0F it is not a pictograph.
+    #868 uses this to drop the done glyph on emoji-led notes; #870 to spot
+    status lines that must keep their own line.
+    """
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    first = stripped[0]
+    code = ord(first)
+    if 0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
+        return True
+    if unicodedata.category(first) == "So":
+        return True
+    return stripped[1:2] == _EMOJI_PRESENTATION
 
 
 def action_status(action: Action, *, completed: bool, ok: bool | None = None) -> str:
@@ -95,6 +172,12 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
 
     changes = detail.get("changes")
     if isinstance(changes, list) and changes:
+        # #871: shorten each path before fencing, so no later cut lands
+        # inside a code span.
+        shown = min(len(changes), MAX_FILE_CHANGES_INLINE)
+        path_width = (
+            None if command_width is None else max(16, command_width // shown - 12)
+        )
         rendered: list[str] = []
         for raw in changes:
             path: str | None
@@ -108,14 +191,15 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
             if not isinstance(path, str) or not path:
                 continue
             verb = kind if isinstance(kind, str) and kind else "update"
-            rendered.append(f"{verb} {format_changed_file_path(path)}")
+            rendered.append(
+                f"{verb} {format_changed_file_path(path, width=path_width)}"
+            )
 
         if rendered:
             if len(rendered) > MAX_FILE_CHANGES_INLINE:
                 remaining = len(rendered) - MAX_FILE_CHANGES_INLINE
                 rendered = rendered[:MAX_FILE_CHANGES_INLINE] + [f"…({remaining} more)"]
-            inline = shorten(", ".join(rendered), command_width)
-            return f"files: {inline}"
+            return f"files: {', '.join(rendered)}"
 
     fallback = title
     relativized = relativize_path(fallback)
@@ -127,22 +211,40 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
         and not (fallback.startswith("`") and fallback.endswith("`"))
         and (was_relativized or os.sep in fallback or "/" in fallback)
     ):
-        fallback = f"`{fallback}`"
+        return f"files: {inline_code(_shorten_path(fallback, command_width))}"
+    if fallback.startswith("`") and fallback.endswith("`"):
+        return f"files: {fallback}"  # already a span: never cut inside it
     return f"files: {shorten(fallback, command_width)}"
+
+
+_WEB_SEARCH_PREFIX: dict[str, str] = {
+    "search": "searched: ",
+    "open_page": "opened: ",
+    "find_in_page": "find in page: ",
+    "other": "",
+}
 
 
 def format_action_title(action: Action, *, command_width: int | None) -> str:
     title = str(action.title or "")
     kind = action.kind
     if kind == "command":
-        title = shorten(title, command_width)
-        return f"`{title}`"
+        # #871: a fence longer than any backtick in the command, so an inner
+        # backtick can't end the span early and swallow the next lines.
+        return inline_code(title, command_width)
     if kind == "tool":
         title = shorten(title, command_width)
         return f"tool: {title}"
     if kind == "web_search":
         title = shorten(title, command_width)
-        return f"searched: {title}"
+        # #419: Codex tags each web_search with its action type; Claude's
+        # WebSearch has none and keeps the ``searched:`` prefix byte-for-byte.
+        detail = action.detail if isinstance(action.detail, dict) else {}
+        action_type = detail.get("action_type")
+        prefix = _WEB_SEARCH_PREFIX.get(
+            action_type if isinstance(action_type, str) else "search", "searched: "
+        )
+        return f"{prefix}{title}"
     if kind == "subagent":
         title = shorten(title, command_width)
         return f"subagent: {title}"
@@ -194,6 +296,7 @@ def format_action_line(
 
     #481: ``elapsed_seconds`` triggers the long-running tail. When the
     action is non-completed AND age > 60 s, append ``· <elapsed> · <key arg>``
+    (just ``· <elapsed>`` when the title already shows the key arg, #986)
     so a glancing user can answer "is it alive? what is it doing? for how
     long?" without waiting for the next JSONL event. The tail fires
     regardless of formatter verbosity — verbose mode keeps its existing
@@ -202,35 +305,87 @@ def format_action_line(
     """
     if phase != "completed":
         status = STATUS["update"] if phase == "updated" else STATUS["running"]
-        line = f"{status} {format_action_title(action, command_width=command_width)}"
+        title = format_action_title(action, command_width=command_width)
+        line = f"{status} {title}"
         if elapsed_seconds is not None and elapsed_seconds > 60:
             elapsed_str = format_duration(elapsed_seconds)
-            detail = format_verbose_detail(action)
+            detail = format_verbose_detail(action, width=_TAIL_DETAIL_WIDTH)
             if detail:
                 # Strip the ``→ `` prefix so the tail reads as
                 # ``▸ Bash · 3m 47s · npm run build`` rather than
                 # ``▸ Bash · 3m 47s · → npm run build``.
                 detail_clean = detail.lstrip("→ ").strip()
-                line += f" · {elapsed_str} · {shorten(detail_clean, 80)}"
+                if _title_shows_detail(action, title, detail_clean):
+                    detail = None
+            if detail:
+                tail = f" · {elapsed_str} · {_fit_detail(action, detail_clean, _TAIL_DETAIL_WIDTH)}"
             else:
-                line += f" · {elapsed_str}"
+                tail = f" · {elapsed_str}"
+            # On the first line: a multi-line title (an approval's fenced
+            # diff preview) would otherwise get the tail after its closing
+            # fence, which then never closes (rc15 integration finding).
+            first, sep, rest = line.partition("\n")
+            line = f"{first}{tail}{sep}{rest}"
         return line
     status = action_status(action, completed=True, ok=ok)
     suffix = action_suffix(action)
-    return (
-        f"{status} {format_action_title(action, command_width=command_width)}{suffix}"
-    )
+    title = format_action_title(action, command_width=command_width)
+    # #868: a successful note/warning that leads with its own emoji (⚠️ rate
+    # limit, ⏳, 🛡️, 🗜️, ↪️) uses that emoji as its status — a ✓ in front
+    # would make a warning read as a finished step. ✗ and ▸ are unchanged.
+    if (
+        action.kind in {"note", "warning"}
+        and status == STATUS["done"]
+        and starts_with_pictograph(title)
+    ):
+        return f"{title}{suffix}"
+    return f"{status} {title}{suffix}"
 
 
 _VERBOSE_DETAIL_WIDTH = 120
+_TAIL_DETAIL_WIDTH = 80
+# Verbose details that carry a code span, built to fit the caller's width so
+# nobody shortens (and cuts) them afterwards (#871).
+_FENCED_DETAIL_NAMES = frozenset({"Edit", "edit", "Grep", "grep", "Glob", "glob"})
 
 
-def format_verbose_detail(action: Action) -> str | None:
+def _plain(text: str) -> str:
+    return " ".join(text.replace("`", "").split())
+
+
+def _title_shows_detail(action: Action, title: str, detail: str) -> bool:
+    """Whether the long-running tail's detail only repeats the title (#986).
+
+    A file change's title already names its file(s), so the tail adds only
+    the elapsed time (``▸ files: update x.txt · 9m 54s``, not ``… · x.txt``).
+    Otherwise the detail is dropped when the title already contains it, e.g.
+    a command, ``read:`` path or ``grep:`` pattern shown in full.
+    """
+    if action.kind == "file_change":
+        return True
+    plain_detail = _plain(detail).rstrip("…").strip('"')
+    return bool(plain_detail) and plain_detail in _plain(title)
+
+
+def _fit_detail(action: Action, detail: str, width: int) -> str:
+    """Fit a verbose detail into *width* without ever cutting a code span."""
+    if action.kind == "command":
+        return inline_code(detail, width)
+    name = (action.detail or {}).get("name")
+    if name in _FENCED_DETAIL_NAMES:
+        return detail  # format_verbose_detail(width=...) already sized it
+    return shorten(detail, width)
+
+
+def format_verbose_detail(action: Action, *, width: int | None = None) -> str | None:
     """Extract a compact detail line from action.detail for verbose mode.
 
     Returns a single line like ``"→ src/settings.py (4821 chars)"`` or None
-    if no meaningful detail is available.
+    if no meaningful detail is available. Commands are returned raw (callers
+    fence them); Edit/Grep/Glob details carry a code span sized to *width*
+    (default 120), so callers must not shorten them again (#871).
     """
+    span_width = width if width is not None else _VERBOSE_DETAIL_WIDTH
     detail = action.detail or {}
     name = detail.get("name", "")
     inp = detail.get("input") or detail.get("arguments") or detail.get("args") or {}
@@ -257,12 +412,12 @@ def format_verbose_detail(action: Action) -> str | None:
     if name in ("Edit", "edit"):
         path = inp.get("file_path", "")
         if path:
-            old = shorten(str(inp.get("old_string", "")), 40)
-            return (
-                f"→ {relativize_path(path)} `{old}`→…"
-                if old
-                else f"→ {relativize_path(path)}"
-            )
+            old = inline_code(str(inp.get("old_string", "")), 40)
+            if not old:
+                return f"→ {relativize_path(path)}"
+            # "→ " + path + " " + span + "→…" must fit span_width.
+            budget = max(8, span_width - len(old) - 5)
+            return f"→ {_shorten_path(relativize_path(path), budget)} {old}→…"
         return None
 
     # Write: show file path
@@ -276,7 +431,7 @@ def format_verbose_detail(action: Action) -> str | None:
     if name in ("Grep", "grep", "Glob", "glob"):
         pattern = inp.get("pattern", "")
         if pattern:
-            return f"→ `{shorten(pattern, 60)}`"
+            return f"→ {inline_code(str(pattern), min(60, max(8, span_width - 8)))}"
         return None
 
     # Task/subagent: show description
@@ -365,7 +520,7 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return [str(engine)]
         case ActionEvent() as action_event:
             action = action_event.action
-            if action.kind == "turn":
+            if action.kind in ("turn", "telemetry"):
                 return []
             return [
                 format_action_line(
@@ -379,10 +534,20 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return []
 
 
+# #688: the minor version is OPTIONAL and bounded to 1-2 digits. The Claude 5
+# family ships major-only IDs (``claude-opus-5``), which the old mandatory
+# ``(\d+)[.-](\d+)`` could not match at all — every Claude 5 model fell through
+# to the lossy family fallback below and rendered as a bare ``opus``, silently
+# dropping both the version and the ``[1m]`` context marker. The ``(?!\d)``
+# guard is what keeps a trailing date from being read as a minor version:
+# ``claude-opus-5-20260725`` → ``opus 5``, not ``opus 5.20260725``, while
+# ``claude-opus-4-6-20260101`` still yields ``opus 4.6``.
 _CLAUDE_MODEL_RE = re.compile(
-    r"(opus|sonnet|haiku)[- ](\d+)[.-](\d+)[^\[]*(?:\[([^\]]+)\])?",
+    r"(opus|sonnet|haiku|fable)[- ](\d+)(?:[.-](\d{1,2})(?!\d))?[^\[]*(?:\[([^\]]+)\])?",
     re.IGNORECASE,
 )
+
+_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
 
 _CONTEXT_SUFFIX_MAP: dict[str, str] = {"1m": "1M"}
 
@@ -393,16 +558,21 @@ def _short_model_name(model: str) -> str:
     ``'claude-opus-4-6'`` → ``'opus 4.6'``
     ``'claude-opus-4-6[1m]'`` → ``'opus 4.6 (1M)'``
     ``'claude-sonnet-4-5-20250929'`` → ``'sonnet 4.5'``
+    ``'claude-opus-5[1m]'`` → ``'opus 5 (1M)'`` (major-only Claude 5 IDs)
+    ``'claude-fable-5'`` → ``'fable 5'``
     """
     m = _CLAUDE_MODEL_RE.search(model)
     if m:
-        base = f"{m.group(1).lower()} {m.group(2)}.{m.group(3)}"
+        base = f"{m.group(1).lower()} {m.group(2)}"
+        minor = m.group(3)
+        if minor:
+            base = f"{base}.{minor}"
         suffix = m.group(4)
         if suffix:
             label = _CONTEXT_SUFFIX_MAP.get(suffix.lower(), suffix.upper())
             return f"{base} ({label})"
         return base
-    for family in ("opus", "sonnet", "haiku"):
+    for family in _CLAUDE_FAMILIES:
         if family in model.lower():
             return family
     if model.lower().startswith("auto-"):
@@ -442,10 +612,14 @@ class MarkdownFormatter:
         max_actions: int = 5,
         command_width: int | None = MAX_PROGRESS_CMD_LEN,
         verbosity: Literal["compact", "verbose"] = "compact",
+        show_context_usage: bool = True,
     ) -> None:
         self.max_actions = max(0, int(max_actions))
         self.command_width = command_width
         self.verbosity = verbosity
+        # #819: ``[progress] show_context_usage`` — read at every render, set
+        # per run by ``refresh_from`` (hot reload).
+        self.show_context_usage = show_context_usage
 
     def refresh_from(self, progress: Any) -> None:
         """Update mutable formatting knobs from a ``ProgressSettings`` snapshot (#269).
@@ -463,6 +637,12 @@ class MarkdownFormatter:
         verbosity = getattr(progress, "verbosity", None)
         if verbosity in ("compact", "verbose"):
             self.verbosity = verbosity
+        show_context_usage = getattr(progress, "show_context_usage", None)
+        if isinstance(show_context_usage, bool):
+            self.show_context_usage = show_context_usage
+
+    def _context_pct(self, state: ProgressState) -> int | None:
+        return state.context_pct if self.show_context_usage else None
 
     def render_progress_parts(
         self,
@@ -478,8 +658,12 @@ class MarkdownFormatter:
             step,
             label=label,
             engine=state.engine,
+            context_pct=self._context_pct(state),
         )
         body = self._assemble_body(self._format_actions(state, now=now))
+        if state.background:
+            # #777: live background tasks, below the action lines.
+            body = f"{body}\n\n{state.background}" if body else state.background
         return MarkdownParts(
             header=header, body=body, footer=self._format_footer(state)
         )
@@ -498,6 +682,7 @@ class MarkdownFormatter:
             step,
             label=status,
             engine=state.engine,
+            context_pct=self._context_pct(state),
         )
         answer = (answer or "").strip()
         body = answer if answer else None
@@ -545,9 +730,11 @@ class MarkdownFormatter:
             )
             lines.append(line)
             if self.verbosity == "verbose":
-                detail_line = format_verbose_detail(action_state.action)
+                action = action_state.action
+                detail_line = format_verbose_detail(action, width=_VERBOSE_DETAIL_WIDTH)
                 if detail_line:
-                    lines.append(f"  {shorten(detail_line, _VERBOSE_DETAIL_WIDTH)}")
+                    fitted = _fit_detail(action, detail_line, _VERBOSE_DETAIL_WIDTH - 2)
+                    lines.append(f"  {fitted}")
         return lines
 
     @staticmethod

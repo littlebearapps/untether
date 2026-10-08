@@ -16,6 +16,7 @@ Provide the **`pi`** engine backend so Untether can:
 
 * Interactive TUI flows (session picker, prompts, etc.)
 * RPC mode (requires a long-running process and JSON commands)
+* Approvals, plan mode, AskUserQuestion, live sessions and steer: these are Claude Code-only. Pi runs non-interactively.
 
 ---
 
@@ -24,7 +25,7 @@ Provide the **`pi`** engine backend so Untether can:
 ### Engine selection
 
 * Default: `untether` (auto-router uses `default_engine` from config)
-* Override: `untether pi`
+* Override: `untether pi`, or `/pi <prompt>` in Telegram
 
 ### Resume UX (canonical line)
 
@@ -77,14 +78,17 @@ Recommended schema:
     [pi]
     model = "..."               # optional; passed as --model
     provider = "..."            # optional; passed as --provider
-    extra_args = []             # optional list of strings, appended verbatim
+    extra_args = []             # optional list of strings, placed before Untether's own flags
     ```
 
 Notes:
 
-* `extra_args` lets you pass new Pi flags without changing Untether.
+* `extra_args` lets you pass new Pi flags without changing Untether. Unlike Claude
+  and Codex, Pi has no `extra_args` deny-list.
+* A `/config` or `/model` override replaces `pi.model` for that chat.
 * Session files are stored under Pi's default session dir:
-  `~/.pi/agent/sessions/--<cwd>--` (with path separators replaced by `-`).
+  `~/.pi/agent/sessions/--<cwd>--` (with path separators replaced by `-`), or
+  under `$PI_CODING_AGENT_DIR/sessions/` when that variable is set.
 * The Pi runner explicitly creates the session dir with `0o700` (rwx------) and chmods any pre-existing dir to the same mode ([#207](https://github.com/littlebearapps/untether/issues/207)) so other users on a shared host can't read Pi session JSONL.
 
 ---
@@ -100,10 +104,10 @@ Expose a module-level `BACKEND = EngineBackend(...)`.
 The runner should launch Pi in headless JSON mode:
 
 ```text
-pi --print --mode json --session <session.jsonl> <prompt>
+pi [extra_args] --print --mode json [--provider <provider>] [--model <model>] --session <session.jsonl> <prompt>
 ```
 
-When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat.
+When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat; `/continue` passes `--continue` instead of `--session`. The subprocess gets an allowlisted environment (plus `NO_COLOR=1` and `CI=1`), not Untether's full environment.
 
 #### Event translation
 
@@ -116,7 +120,9 @@ The runner should translate:
 
 For the final answer, use the most recent assistant message text (from
 `message_end` events). For errors, if the assistant stopReason is `error` or
-`aborted`, emit `completed(ok=false, error=...)`.
+`aborted`, emit `completed(ok=false, error=...)`. `auto_compaction_*` and
+`auto_retry_*` become note actions; see [Untether events](untether-events.md)
+for the full mapping.
 
 **Footer model display.** When no model override is set for the chat, Pi extracts the model name from the `message_end` JSONL event and emits a supplementary `StartedEvent` with populated `meta`. The base runner's `handle_started_event` passes this duplicate through whenever `event.meta` is truthy, and `ProgressTracker.note_event` merges meta idempotently, so the completion footer shows the actual default model instead of a blank. ([#225](https://github.com/littlebearapps/untether/issues/225))
 
@@ -142,11 +148,6 @@ set up credentials before using Untether.
 * `--resume` is interactive; Untether uses `--session <path>` instead.
 * Prompts that start with `-` are interpreted as flags by the CLI. Untether
   prefixes a space to make them safe.
-
----
-
-If you want, I can also add a sample `untether.toml` snippet to the README or
-include a small quickstart section for Pi in the onboarding panel.
 
 ## See also
 

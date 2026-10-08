@@ -5,7 +5,7 @@
 ```mermaid
 flowchart TB
     subgraph CLI["CLI Layer"]
-        cli[cli.py]
+        cli[cli/]
         cli_desc["Entry point, config loading, lock file"]
     end
 
@@ -25,13 +25,13 @@ flowchart TB
     end
 
     subgraph Bridge["Bridge Layer"]
-        tg_bridge[telegram/bridge.py<br/>run_main_loop]
+        tg_bridge[telegram/loop.py<br/>run_main_loop]
         runner_bridge[runner_bridge.py<br/>handle_message]
     end
 
     subgraph Runner["Runner Layer"]
         runner_proto[Runner Protocol<br/>runner.py]
-        runners[runners/<br/>claude, codex, opencode, pi, gemini, amp]
+        runners[runners/<br/>claude, codex, opencode, pi,<br/>gemini + amp (deprecated)]
         schemas[schemas/<br/>JSONL decoders]
     end
 
@@ -169,7 +169,7 @@ classDiagram
 sequenceDiagram
     participant User
     participant Telegram
-    participant Bridge as telegram/bridge.py
+    participant Bridge as telegram/loop.py
     participant Scheduler as ThreadScheduler
     participant RunnerBridge as runner_bridge.py
     participant Runner
@@ -221,12 +221,12 @@ flowchart TD
     B --> C[Build Command]
 
     C --> D{Engine?}
-    D -->|Claude| D1["claude --print --output-format stream-json<br/>[--resume id] prompt"]
+    D -->|Claude| D1["claude --output-format stream-json<br/>--input-format stream-json --verbose<br/>[--resume id] --permission-mode …<br/>(prompt as JSON on stdin;<br/>-p when no permission mode is set)"]
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
-    D -->|OpenCode| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;"]
-    D -->|Gemini| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
-    D -->|Amp| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
+    D -->|OpenCode 1.x| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;<br/>(2.x refused before spawn)"]
+    D -->|Gemini, deprecated| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
+    D -->|Amp, deprecated| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
     D1 --> E[Spawn Subprocess<br/>anyio.open_process]
     D2 --> E
@@ -244,6 +244,40 @@ flowchart TD
 
     F -->|EOF| J[Return]
 ```
+
+## Live sessions (Claude Code)
+
+The flow above ends at the first `result`. Since v0.36.0 a Claude Code run in a permission mode (the control-channel mode, without `-p`) is a **live session**: Untether keeps reading after the answer, so the process stays open while Claude Code has background work in flight ([#776](https://github.com/littlebearapps/untether/issues/776)).
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Bridge as runner_bridge.py
+    participant Runner as ClaudeRunner
+    participant CLI as claude (live)
+
+    User->>Bridge: prompt
+    Bridge->>Runner: run(prompt)
+    Runner->>CLI: spawn + prompt on stdin
+    CLI-->>Runner: result (turn 1)
+    Runner-->>Bridge: final answer
+    Note over CLI: background task, Monitor or<br/>ScheduleWakeup still running
+    CLI-->>Runner: task_notification → new turn
+    Runner-->>Bridge: TurnEvent (🔔 / 📡 / ⏰)
+    Bridge->>User: wake-turn message
+    User->>Bridge: follow-up
+    Bridge->>Runner: live_followup writes to stdin<br/>(after the current turn ends)
+    CLI-->>Runner: result (follow-up turn)
+    Note over Runner,CLI: idle ~60 s with no background work,<br/>or background hold / 4 h cap reached
+    Runner->>CLI: close stdin (graceful exit)
+```
+
+- **Turns.** Each later turn arrives as a `TurnEvent` segment and is delivered as its own Telegram message. Background work is tracked from Claude Code's own `system/task_*` events; the background status message ([`background_status.py`](module-map.md#rendering-and-progress)) is built from the same task map.
+- **Follow-ups.** `ThreadScheduler` still serialises jobs per thread, but a queued follow-up for a live session is written into the running process (`live_followup.py`) instead of waiting for it to exit and `--resume`-ing. A [steered](../how-to/steer-follow-ups.md) message is written straight away and read at the next tool boundary.
+- **Closing.** The session closes by closing stdin: about a minute after the last turn when nothing is running, after `[watchdog] post_result_bg_max_hold` (30 min) with no background activity, or at `live_session_max_s` (4 h). `/cancel`, `/new`, settings changes (including a `/ctx` change, so the next message resumes in the new directory, [#996](https://github.com/littlebearapps/untether/issues/996)) and restarts close it too, with a notice. A clean close is not quarantined, so the next message resumes the same session. A process killed from outside Untether while idle gets its own `⚠️ … ended unexpectedly` notice ([#1001](https://github.com/littlebearapps/untether/issues/1001)).
+- **Per-run state.** Runner instances are shared across chats, so each run publishes its own stream and PID through a per-run handle rather than shared runner attributes ([#510](https://github.com/littlebearapps/untether/issues/510)).
+
+`[watchdog] live_sessions = false` restores the stop-at-first-answer behaviour. Other engines are not affected. See the [Claude runner reference](../reference/runners/claude/runner.md#live-sessions-776) for the protocol details.
 
 ---
 
@@ -267,7 +301,7 @@ sequenceDiagram
     Note over User,CLI: Resume Conversation
     User->>Bridge: Reply: "now add tests"
     Bridge->>Bridge: extract_resume(reply_text)<br/>→ ResumeToken(claude, abc123)
-    Bridge->>Bridge: parse_ctx_line()<br/>→ project, branch
+    Bridge->>Bridge: parse_context_line()<br/>→ project, branch
     Bridge->>Runner: run("now add tests", token)
     Runner->>CLI: claude --resume abc123 "now add tests"
     CLI-->>Runner: Continues session
@@ -281,7 +315,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    cli[cli.py] --> config[config.py]
+    cli[cli/] --> config[config.py]
     cli --> engines[engines.py]
     cli --> transports[transports.py]
     cli --> commands[commands.py]
@@ -351,16 +385,19 @@ flowchart LR
     subgraph Config["~/.untether/"]
         toml[untether.toml]
         lock[untether.lock]
+        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history"]
     end
 
     subgraph toml_contents["untether.toml"]
         direction TB
-        global["transport<br/>default_engine<br/>default_project"]
-        telegram_cfg["[transports.telegram]<br/>bot_token = ...<br/>chat_id = ..."]
+        global["transport<br/>default_engine<br/>default_project<br/>watch_config"]
+        telegram_cfg["[transports.telegram]<br/>bot_token = ...<br/>chat_id = ...<br/>allowed_user_ids = [...]"]
         plugins_cfg["[plugins]<br/>enabled = [...]"]
         plugins_extra["[plugins.mycommand]<br/>setting = ..."]
-        claude_cfg["[claude]<br/>model = ..."]
-        codex_cfg["[codex]<br/>model = ..."]
+        claude_cfg["[engines.claude]<br/>model = ...<br/>permission_mode = ..."]
+        codex_cfg["[engines.codex]<br/>model = ..."]
+        runtime_cfg["[progress] [watchdog] [footer]<br/>[cost_budget] [loop] [security]"]
+        triggers_cfg["[triggers]<br/>[[triggers.crons]]<br/>[[triggers.webhooks]]"]
         projects_cfg["[projects.alias]<br/>path = ...<br/>worktrees_dir = ...<br/>default_engine = ..."]
     end
 
@@ -416,10 +453,10 @@ flowchart TD
 
 | Layer | Components | Responsibility |
 |-------|------------|----------------|
-| **CLI** | `cli.py` | Entry point, config, lock |
+| **CLI** | `cli/` | Entry point, config, lock |
 | **Plugins** | `plugins.py`, `engines.py`, `transports.py`, `commands.py`, `api.py` | Entrypoint discovery, plugin loading, public API boundary |
 | **Orchestration** | `router.py`, `scheduler.py`, `config.py` | Engine selection, job queuing, project config |
-| **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
+| **Bridge** | `telegram/loop.py`, `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
 | **Runner** | `runner.py`, `runners/*.py`, `schemas/*.py` | Agent CLI subprocess, JSONL parsing, event translation |
 | **Transport** | `transport.py`, `presenter.py`, `telegram/client.py` | Telegram API, message rendering |
 | **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/manager.py`, `triggers/dispatcher.py`, `triggers/actions.py`, `triggers/fetch.py`, `triggers/ssrf.py`, `triggers/auth.py`, `triggers/rate_limit.py`, `triggers/describe.py`, `triggers/history.py`, `triggers/templating.py` | Webhook server (multipart, rate limit, `503 triggers paused`), cron scheduler (timezone, data-fetch, `run_once`), `TriggerManager` for hot-reload + master pause/resume toggle, fire-history persistence for `/stats` triggered/manual breakdown, non-agent actions (`file_write`/`http_forward`/`notify_only`), SSRF protection, HMAC/bearer auth, human-friendly cron description |

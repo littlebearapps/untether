@@ -25,9 +25,11 @@ Untether spawns Claude Code CLI as a subprocess and consumes its JSONL output. T
 | `src/untether/runners/claude.py` | `ClaudeRunner` — subprocess management, PTY, control channel, event translation |
 | `src/untether/schemas/claude.py` | msgspec structs for Claude JSONL events |
 | `src/untether/runners/tool_actions.py` | `tool_kind_and_title()` — tool name to ActionKind mapping |
+| `src/untether/loop_scheduler.py` | Loop mode: Untether-run `/loop` schedules, wake-up timers, cancel and cron-suppression records (#925, #926) |
 | `docs/reference/runners/claude/runner.md` | Full runner specification |
 | `docs/reference/runners/claude/stream-json-cheatsheet.md` | JSONL event shapes with examples |
 | `docs/reference/runners/claude/untether-events.md` | Claude JSONL to Untether event mapping |
+| `.claude/skills/claude-stream-json/control-channel-internals.md` | Control-channel mechanism detail: registries, claims, live-session stdin writers, async-hook hold, scheduling hooks, plan re-arm, parent-initiated requests |
 
 ## CLI invocation
 
@@ -51,13 +53,19 @@ claude --output-format stream-json --input-format stream-json --verbose \
 
 - **No `-p` flag** — prompt sent via stdin as JSON user message
 - `--permission-prompt-tool stdio`: enables bidirectional control channel
-- `--permission-mode plan|tool`: determines what needs approval
+- `--permission-mode <mode>`: the configured mode verbatim (`plan`, `auto`, `default`, `acceptEdits`, …); only Untether's `plan-auto` is translated (to `plan`, #741)
+- `--include-hook-events` when the cached `claude --help` probe lists it (#812)
+- The stdin `initialize` request carries `hooks`: exact-name `PreToolUse` matchers for `CronCreate` / `CronDelete`
+  (callback ids `ut_loop_cron_create` / `ut_loop_cron_delete`, #925) unless `[loop] own_schedule = false`
+- A session that may still hold a native CLI cron job is resumed with `CLAUDE_CODE_DISABLE_CRON=1` (#926)
 
 ### Common flags
 
-- `--resume <session_id>`: resume a previous session
+- `--resume <session_id>` / `--continue` (`/continue`): resume a previous session
 - `--model <name>`: model override (sonnet, opus, haiku)
-- `--allowedTools "<rules>"`: auto-approve specific tools
+- `--effort <level>`: reasoning override
+- `--allowedTools "<rules>"`: pre-approve tools at stage 5 — not sent in prompting modes unless set explicitly (#749)
+- `[engines.claude] extra_args` go after the I/O prelude; approval/sandbox-bypass flags are refused (#209)
 
 ## JSONL event types
 
@@ -100,11 +108,47 @@ Content blocks in `message.content[]`:
 
 - `is_error`: authoritative error indicator
 - `result`: final answer string
-- Untether emits exactly one `CompletedEvent` here
-- Lines after `result` are dropped
+- Untether emits exactly one `CompletedEvent` here (the run's first result)
+- In control-channel mode with live sessions (#776, default on) the process keeps
+  running after `result`; each later turn is a `TurnEvent(started) → ActionEvent* →
+  TurnEvent(completed)` segment. With `[watchdog] live_sessions = false` (or legacy
+  `-p` mode) lines after `result` are dropped
 
 Fields NOT in Untether's `StreamResultMessage` schema (silently ignored by msgspec):
 - `error`, `permission_denials`, `modelUsage`
+
+### `rate_limit_event` (#790)
+
+A **quota-status snapshot**, not a throttle notice: `rate_limit_info.status` is
+`allowed` / `allowed_warning` / `rejected`, plus `resetsAt`, `rateLimitType`,
+`unifiedWindows` and overage fields. `allowed` → stashed, nothing rendered;
+`allowed_warning` → one `⚠️ 5h limit N% used — resets HH:MM` note per window, no
+latch; only `rejected` not covered by overage latches an expected wait until
+`resetsAt` (`⏳ Rate limited until …`). Bare events latch nothing — the #657
+"bare = 60 s throttle" guess is retired. `tests/test_claude_cli_schema_drift.py`
+re-reads the enums from the installed CLI.
+
+### `system` / `api_retry` (#792)
+
+Emitted before Claude Code backs off a retryable API error (`attempt`,
+`max_retries`, `retry_delay_ms`, `error_status`, `error`). Rendered as one
+updating `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` note and
+latched as an expected wait (bridge threshold reason `api_retry_waiting`), kept
+apart from rate-limit time.
+
+### `system` / `status` + `compact_boundary` (#819)
+
+`status: "compacting"` (re-sent every 30 s) → `status: null` + `compact_result`
+→ (manual `/compact` only: a fresh `init`) → `compact_boundary` with
+`compact_metadata{trigger, pre_tokens, post_tokens}` → a synthetic summary
+`user` frame. One `🗜️` row per compaction; liveness-only in `runner.py`;
+bounded expected wait (`compacting`, `awaiting_compaction()`). A manual
+`/compact`'s 0-turn empty result is exempt from #596/#631 only when
+`usage["compaction"].manual_success`. `status: null` + `permissionMode` is
+#383's mode edge in the same handler. Main-thread `message.usage` over
+`result.modelUsage.<model>.contextWindow` is the header's `% ctx`.
+
+Full shapes and decision tables: `docs/reference/runners/claude/stream-json-cheatsheet.md`.
 
 ## Tool name to ActionKind mapping
 
@@ -131,31 +175,28 @@ When using `--permission-prompt-tool stdio`, Claude Code sends control requests 
 ### Control request (stdout)
 
 ```json
-{"type":"assistant","session_id":"...","message":{"content":[
-  {"type":"tool_use","id":"toolu_ctrl_1","name":"PermissionPromptTool",
-   "input":{"type":"control_request","request_id":"req_1",
-            "tool_name":"Bash","tool_input":{"command":"rm -rf /"}}}
-]}}
+{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool",
+ "tool_name":"Bash","input":{"command":"rm -rf /"},"permission_suggestions":[...]}}
 ```
+
+Other `request.subtype`s (`initialize`, `hook_callback`, `mcp_message`, `rewind_files`, `interrupt`) are
+housekeeping. Decoded by `StreamControlRequest` / `Control*Request` in `schemas/claude.py`. The CLI can withdraw a
+pending request with `control_cancel_request` (#684).
 
 ### Control response (stdin)
 
 ```json
-{"type":"control_response","request_id":"req_1","approved":true}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>",
+ "response":{"behavior":"allow","updatedInput":{...}}}}
 ```
 
-Or with denial:
+Or with denial (the message is what Claude reads — also how a typed AskUserQuestion answer is delivered):
 ```json
-{"type":"control_response","request_id":"req_1","approved":false,
- "denial_message":"Not allowed — explain your plan first."}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>",
+ "response":{"behavior":"deny","message":"Not allowed — explain your plan first."}}}
 ```
 
-### ControlInitializeRequest
-
-Sent at session start; auto-approved immediately (no user prompt):
-```json
-{"type":"control_response","request_id":"req_init","approved":true}
-```
+Exact shapes: `docs/reference/runners/claude/stream-json-cheatsheet.md`.
 
 ## PTY for stdin
 
@@ -168,8 +209,10 @@ ClaudeRunner uses `pty.openpty()` instead of `subprocess.PIPE` for stdin:
 ## Session registries (concurrent sessions)
 
 ```python
-_SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin pipe
+_SESSION_STDIN: dict[str, Any]                        # session_id -> stdin writer (PTY/pipe)
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
+_PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip — cleared at every live turn open (#383)
+_DISCUSS_APPROVED / _DISCUSS_CARRY: set[str]           # post-outline approval; carried ONE boundary (#383)
 ```
 
 - Registered in `_iter_jsonl_events` when session_id is first seen
@@ -178,25 +221,45 @@ _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_i
 
 ## Auto-approve logic
 
-Non-interactive tools are auto-approved without user prompt:
+Decided per control request in `ClaudeRunner` (mechanism: `control-channel-internals.md`):
 
-```python
-AUTO_APPROVE_TOOLS = {"Grep", "Glob", "Read", "LS", "Bash", "BashOutput",
-                      "TodoWrite", "TodoRead", "WebSearch", "WebFetch", ...}
-```
-
-- `ControlInitializeRequest`: always auto-approved
-- Tool requests where `tool_name in AUTO_APPROVE_TOOLS`: auto-approved silently
-- `ExitPlanMode`: always shown to user as inline buttons
+- Housekeeping request types (`_AUTO_APPROVE_TYPES`: initialize, hook_callback, mcp_message, rewind_files,
+  interrupt) are auto-approved without looking at the payload — except `hook_callback`s whose `callback_id` is in
+  `_LOOP_HOOK_IDS` (Untether's own scheduling hooks, #925), answered by `_loop_hook_decision_safe()`
+- `can_use_tool` in an autonomous mode (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`): auto-approved
+  unless the tool is in `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` or diff preview routes it
+- `can_use_tool` in a prompting mode (`default`/`manual`/`acceptEdits`, `state.prompting_mode`): every tool goes to
+  Telegram (#749)
+- Unattended cron/webhook runs never wait for a tap: would-wait requests are denied (`_unattended_deny`, #835)
+- `ExitPlanMode`: never auto-approved by the generic path (only `plan-auto`'s rubber stamp or a prior approval)
 
 ## ExitPlanMode handling
 
 When Claude requests `ExitPlanMode`:
-1. Inline keyboard shown: **Approve** / **Deny** / **Pause & Outline Plan**
+1. Inline keyboard shown: **Approve Plan** / **Deny** / **Pause & Outline Plan** (#383: plus a caption saying what approving does; "Plan mode resumes when this reply ends, or after the background agents it starts have finished." only when true)
 2. "Pause & Outline Plan" sends a deny with a detailed message asking Claude to write a step-by-step plan
 3. After outline is written, post-outline buttons appear: **Approve Plan** / **Deny** / **Let's discuss**
 4. "Let's discuss" sends a deny asking Claude to discuss the plan (action: `chat`)
 5. Text-based outline gate: retries without written outline text are auto-denied
+
+### After approval: the plan re-arm (#383)
+
+- Approval moves the CLI to `prePlanMode ?? "default"` and emits
+  `system/status{status:null,permissionMode:"default"}` before the tool_result.
+- In a live session of a `plan` / `plan-auto` chat the runner sends
+  `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}`
+  at every turn close, **before yielding the turn-closing event** (never after —
+  see `.claude/rules/control-channel.md`), and again before a follow-up / idle
+  steer if still needed. Ack `{"mode":"plan"}` + `system/status plan`; no status
+  frame when already plan. `plan-auto`: follow-ups/idle steers only.
+- Kill switch `[watchdog] rearm_plan_mode`. Residual: a wake turn the CLI starts
+  ~20 ms after the result (notification already queued) has an unplanned first
+  model call (probe P-6). Running background agents inherit the mode (P-3), so
+  the re-arm is deferred while agents launched in the plan-exit turn
+  (`origin_turn == plan_exit_turn`) run — until they end, go quiet for
+  `post_result_bg_max_hold` (`latest_background_progress`) or hit
+  `live_session_max_s`; turns meanwhile carry `detail.plan_deferred`
+  (`⚠️ Not re-planned …` header line).
 
 ### Outline gate (#570 retired the progressive cooldown)
 
@@ -215,15 +278,19 @@ Telegram buttons show a spinner until `answerCallbackQuery`. The Claude control 
 ## `write_control_response` helper
 
 ```python
-async def write_control_response(
-    session_id: str,
+async def write_control_response(          # ClaudeRunner method
+    self,
     request_id: str,
     approved: bool,
+    *,
     deny_message: str | None = None,
-) -> None:
+    rejects_plan: bool = True,
+) -> bool:
 ```
 
-Looks up stdin in `_SESSION_STDIN[session_id]`, writes JSON response, handles cleanup.
+Resolves the session via `_REQUEST_TO_SESSION` → `_SESSION_STDIN`, writes the response through `_locked_send`, and
+cleans up. Telegram taps go through `respond_to_control_request()` after `claim_control_request()` (#685), never
+straight to the writer.
 
 ## Config keys (`[claude]` section in untether.toml)
 

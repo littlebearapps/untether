@@ -1,0 +1,19 @@
+# Codex 0.157.1 resume usage capture (#419 step-0 U2, 2026-10-01, gpt-5.6-luna).
+# run 1 = fresh exec, run 2 = exec resume <id>, run 3 = exec resume --last (the /continue path).
+# turn.completed.usage is the THREAD's running total; thread.started is re-emitted on both resumes.
+# Scrubbed: thread id replaced, config-warning error items dropped.
+# run 1
+{"type":"thread.started","thread_id":"0199f000-0419-7000-8000-00000000c0de"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Hi!"}}
+{"type":"turn.completed","usage":{"input_tokens":10656,"cached_input_tokens":5888,"cache_write_input_tokens":0,"output_tokens":6,"reasoning_output_tokens":0}}
+# run 2
+{"type":"thread.started","thread_id":"0199f000-0419-7000-8000-00000000c0de"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Hi again!"}}
+{"type":"turn.completed","usage":{"input_tokens":21328,"cached_input_tokens":11776,"cache_write_input_tokens":0,"output_tokens":13,"reasoning_output_tokens":0}}
+# run 3
+{"type":"thread.started","thread_id":"0199f000-0419-7000-8000-00000000c0de"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Hi once more!"}}
+{"type":"turn.completed","usage":{"input_tokens":32017,"cached_input_tokens":21760,"cache_write_input_tokens":0,"output_tokens":21,"reasoning_output_tokens":0}}

@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
+
 from tests.factories import (
     action_completed,
     action_started,
@@ -13,10 +15,14 @@ from untether.markdown import (
     MarkdownFormatter,
     action_status,
     assemble_markdown_parts,
+    format_action_line,
     format_elapsed,
     format_file_change_title,
+    format_verbose_detail,
+    inline_code,
     render_event_cli,
     shorten,
+    starts_with_pictograph,
 )
 from untether.model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent
 from untether.progress import ProgressTracker
@@ -407,3 +413,379 @@ def test_progress_renderer_ignores_missing_action_id() -> None:
         formatter.render_progress_parts(tracker.snapshot(), elapsed_s=0.0)
     )
     assert header.startswith("working · codex · 0s")
+
+
+def _ws_title(detail: dict) -> str:
+    from untether.markdown import format_action_title
+
+    action = Action(id="w", kind="web_search", title="t", detail=detail)
+    return format_action_title(action, command_width=None)
+
+
+def test_format_action_title_web_search_prefixes() -> None:
+    """#419 D3: verb prefix per Codex web-search action type."""
+    assert _ws_title({"action_type": "search"}) == "searched: t"
+    assert _ws_title({"action_type": "open_page"}) == "opened: t"
+    assert _ws_title({"action_type": "find_in_page"}) == "find in page: t"
+    assert _ws_title({"action_type": "other"}) == "t"
+
+
+def test_format_action_title_web_search_claude_unchanged() -> None:
+    """Regression: Claude's WebSearch has no action_type → ``searched:``."""
+    assert _ws_title({}) == "searched: t"
+    assert _ws_title({"query": "t"}) == "searched: t"
+
+
+# --- #868: emoji-led notes use their own emoji as the status -----------------
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "⚠️ 7-day limit 79% used — resets Sat 09:00 AEST",
+        "⏳ Rate limited — retrying in 30s",
+        "🛡️ Safeguards stopped a response",
+        "ℹ️ x",
+        "↪️ Switched model a → b",
+        "🗜️ Context compacted",
+    ],
+)
+def test_868_completed_emoji_note_has_no_done_glyph(title: str) -> None:
+    for kind in ("note", "warning"):
+        line = format_action_line(
+            Action(id="n", kind=kind, title=title),  # type: ignore[arg-type]
+            "completed",
+            True,
+            command_width=300,
+        )
+        assert line == title
+
+
+def test_868_completed_plain_note_keeps_done_glyph() -> None:
+    title = "reasoning override is not supported for this engine"
+    line = format_action_line(
+        Action(id="n", kind="note", title=title), "completed", True, command_width=300
+    )
+    assert line == f"✓ {title}"
+
+
+def test_868_failed_emoji_note_keeps_fail_glyph() -> None:
+    line = format_action_line(
+        Action(id="n", kind="note", title="🗜️ Compaction failed"),
+        "completed",
+        False,
+        command_width=300,
+    )
+    assert line == "✗ 🗜️ Compaction failed"
+
+
+def test_868_running_emoji_note_keeps_running_glyph() -> None:
+    line = format_action_line(
+        Action(id="n", kind="note", title="🗜️ Compacting context…"),
+        "started",
+        None,
+        command_width=300,
+    )
+    assert line == "▸ 🗜️ Compacting context…"
+
+
+def test_868_completed_command_starting_with_emoji_keeps_glyph() -> None:
+    line = format_action_line(
+        Action(id="c", kind="command", title="⚠ echo hi"),
+        "completed",
+        True,
+        command_width=300,
+    )
+    assert line.startswith("✓ ")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "⚠️ warn",
+        "⚠ warn",
+        "⏳ wait",
+        "🔁 retry",
+        "🛡️ guard",
+        "🛡 guard",
+        "ℹ️ info",
+        "↪️ fallback",
+        "↪ fallback",
+        "🗜️ compact",
+        "✅ ok",
+        "🔔 bell",
+        "  ⚠️ leading spaces",
+        # ✓ U+2713 is category So: a note title starting with ✓ drops the
+        # extra glyph rather than doubling it (documented, desirable).
+        "✓ already ticked",
+        # box drawing is So too — plan 06 relies on this for tree lines
+        "├── src",
+    ],
+)
+def test_868_starts_with_pictograph_true(text: str) -> None:
+    assert starts_with_pictograph(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a", "#1", "`code`", "", "   ", "- item", "1. one", "ℹ bare info (no FE0F)"],
+)
+def test_868_starts_with_pictograph_false(text: str) -> None:
+    assert starts_with_pictograph(text) is False
+
+
+# --- #871: backticks in agent text never break the action list ---------------
+
+
+def _code_texts(text: str, entities: list[dict]) -> list[str]:
+    raw = text.encode("utf-16-le")
+    return [
+        raw[e["offset"] * 2 : (e["offset"] + e["length"]) * 2].decode("utf-16-le")
+        for e in entities
+        if e["type"] == "code"
+    ]
+
+
+def _render_lines(lines: list[str]) -> tuple[str, list[dict]]:
+    return render_markdown(HARD_BREAK.join(lines))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("git status", "`git status`"),
+        ("echo `date`", "`` echo `date` ``"),
+        ("a ``` b", "````a ``` b````"),
+        ("`", "`` ` ``"),
+        ("x`", "`` x` ``"),
+        ("", ""),
+        ("a\nb", "`a b`"),
+        ("a\r\nb", "`a b`"),
+    ],
+)
+def test_871_inline_code_fence_outruns_inner_runs(text: str, expected: str) -> None:
+    assert inline_code(text) == expected
+
+
+def test_871_inline_code_shortens_before_fencing() -> None:
+    text = ("word `tick` " * 40).strip()
+    out = inline_code(text, 80)
+    fence = out[: len(out) - len(out.lstrip("`"))]
+    assert len(fence) == 2  # outruns the single backticks inside
+    assert out.endswith(fence)
+    inner = out[len(fence) : -len(fence)].strip()
+    assert len(inner) <= 80
+
+
+def test_871_command_titles_with_backticks_render_one_per_line() -> None:
+    commands = ['grep "today `pg_migration_head`|X" .', "git status", "git log -1"]
+    lines = [
+        format_action_line(
+            Action(id=str(i), kind="command", title=c),
+            "completed",
+            True,
+            command_width=300,
+        )
+        for i, c in enumerate(commands)
+    ]
+    text, entities = _render_lines(lines)
+    assert text.splitlines() == [f"✓ {c}" for c in commands]
+    assert _code_texts(text, entities) == commands
+
+
+def test_871_heredoc_pr_body_progress_line() -> None:
+    heredoc = (
+        "cat > /tmp/pr-body.md <<'EOF'\n"
+        "`setup-python-env` moves to `actions/setup-python@v6` (Node 24)\nEOF"
+    )
+    running = "timeout 590 gh pr checks --watch"
+    lines = [
+        format_action_line(
+            Action(id="1", kind="command", title=heredoc),
+            "completed",
+            True,
+            command_width=300,
+        ),
+        format_action_line(
+            Action(id="2", kind="command", title="sed -i 's/a/b/' x.md"),
+            "completed",
+            True,
+            command_width=300,
+        ),
+        format_action_line(
+            Action(
+                id="3",
+                kind="command",
+                title=running,
+                detail={"name": "Bash", "input": {"command": running}},
+            ),
+            "started",
+            None,
+            command_width=300,
+            elapsed_seconds=210,
+        ),
+    ]
+    text, entities = _render_lines(lines)
+    out_lines = text.splitlines()
+    assert len(out_lines) == 3
+    assert out_lines[2].startswith("▸ timeout 590")
+    # #986: the title already shows the whole command, so no repeat.
+    assert out_lines[2].endswith(" · 3m 30s")
+    codes = _code_texts(text, entities)
+    assert all("·" not in c and "▸" not in c and "✓" not in c for c in codes)
+    assert "`" not in text.replace("`setup-python-env`", "").replace(
+        "`actions/setup-python@v6`", ""
+    )
+
+
+def test_871_long_running_tail_fences_command_detail() -> None:
+    cmd = "echo `date` && sleep 300"
+    line = format_action_line(
+        Action(
+            id="1",
+            kind="command",
+            title=cmd,
+            detail={"name": "Bash", "input": {"command": cmd}},
+        ),
+        "started",
+        None,
+        # A title cut narrower than the command keeps the tail detail (#986).
+        command_width=12,
+        elapsed_seconds=210,
+    )
+    assert line.endswith(" · 3m 30s · ``echo `date` && sleep 300``")
+    text, entities = render_markdown(line)
+    assert text == f"▸ echo `date`… · 3m 30s · {cmd}"
+    assert _code_texts(text, entities) == ["echo `date`…", cmd]
+
+
+def test_871_long_running_tail_edit_detail_keeps_span_closed() -> None:
+    edit = Action(
+        id="1",
+        kind="file_change",
+        title="src/some/deeply/nested/package/directory/module_name.py",
+        detail={
+            "name": "Edit",
+            "input": {
+                "file_path": "src/some/deeply/nested/package/directory/module_name.py",
+                "old_string": "def foo(bar):\n    return `x` + bar  # long tail text",
+            },
+        },
+    )
+    lines = [
+        format_action_line(
+            edit, "started", None, command_width=300, elapsed_seconds=120
+        ),
+        format_action_line(
+            Action(id="2", kind="command", title="git status"),
+            "started",
+            None,
+            command_width=300,
+        ),
+        format_action_line(
+            Action(id="3", kind="command", title="git diff"),
+            "started",
+            None,
+            command_width=300,
+        ),
+    ]
+    text, entities = _render_lines(lines)
+    assert len(text.splitlines()) == 3
+    assert all("▸" not in c for c in _code_texts(text, entities))
+
+
+def test_871_verbose_grep_pattern_with_backtick() -> None:
+    action = Action(
+        id="1",
+        kind="tool",
+        title="grep",
+        detail={"name": "Grep", "input": {"pattern": "`foo`"}},
+    )
+    assert format_verbose_detail(action) == "→ `` `foo` ``"
+
+
+def test_871_verbose_command_line_fenced() -> None:
+    from untether.progress import ActionState, ProgressState
+
+    def _state(i: int, title: str) -> ActionState:
+        return ActionState(
+            action=Action(
+                id=str(i),
+                kind="command",
+                title=title,
+                detail={"name": "Bash", "input": {"command": title}},
+            ),
+            phase="completed",
+            ok=True,
+            display_phase="completed",
+            completed=True,
+            first_seen=i,
+            last_update=i,
+        )
+
+    state = ProgressState(
+        engine="claude",
+        action_count=2,
+        actions=(_state(0, "echo `date`"), _state(1, "git status")),
+        resume=None,
+        resume_line=None,
+        context_line=None,
+    )
+    formatter = MarkdownFormatter(max_actions=5, verbosity="verbose")
+    parts = formatter.render_progress_parts(state, elapsed_s=1.0)
+    text, entities = render_markdown(assemble_markdown_parts(parts))
+    body = text.splitlines()[1:]
+    assert "✓ echo `date`" in body
+    assert "echo `date`" in body
+    assert "✓ git status" in body
+    assert _code_texts(text, entities).count("echo `date`") == 2
+
+
+def test_871_verbose_line_with_double_backticks_stays_inline() -> None:
+    text, entities = render_markdown("  " + inline_code("a `` b"))
+    assert [e["type"] for e in entities] == ["code"]
+
+
+def test_871_file_change_paths_shortened_before_fencing() -> None:
+    long = "src/" + "very_long_directory_name/" * 20 + "file.py"
+    action = Action(
+        id="f",
+        kind="file_change",
+        title="3 files",
+        detail={"changes": [{"path": long, "kind": "update"}] * 3},
+    )
+    title = format_file_change_title(action, command_width=120)
+    text, entities = render_markdown(title)
+    assert len(_code_texts(text, entities)) == 3
+    assert all(c.endswith("file.py") for c in _code_texts(text, entities))
+
+
+def test_871_codex_command_with_backtick_renders_one_line() -> None:
+    import json as _json
+
+    from untether.events import EventFactory
+    from untether.runners.codex import translate_codex_event
+    from untether.schemas import codex as codex_schema
+
+    evt = {
+        "type": "item.completed",
+        "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": 'echo "a `b` c"',
+            "aggregated_output": "",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    out = translate_codex_event(
+        codex_schema.decode_event(_json.dumps(evt)),
+        title="Codex",
+        factory=EventFactory("codex"),
+    )
+    lines = [
+        format_action_line(e.action, "completed", e.ok, command_width=300) for e in out
+    ] + ["✓ `ls`"]
+    text, entities = _render_lines(lines)
+    assert len(text.splitlines()) == 2
+    assert 'echo "a `b` c"' in _code_texts(text, entities)

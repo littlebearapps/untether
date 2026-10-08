@@ -25,7 +25,7 @@ project commands take precedence when invoked from inside `/home/nathan/untether
 | `.claude/commands/debug/step-classify.md` | Step 1 | 15 Untether issue classes + diagnostic hints |
 | `.claude/commands/debug/step-evidence.md` | Step 2 | Data-source catalogue (journalctl, structlog, fleet SSH, MCP, state files) |
 | `.claude/commands/debug/step-research.md` | Step 3 | Docs, closed issues, upstream engine repos, library docs |
-| `.claude/commands/debug/systemic-patterns.md` | Step 4 | 15-20 known Untether patterns + memory-aware exceptions |
+| `.claude/commands/debug/systemic-patterns.md` | Step 4 | ~20 known Untether patterns + memory-aware exceptions |
 | `.claude/commands/debug/step-fix.md` | Step 7 | Implementation checklist (tests, lint, format, changelog, branch model) |
 | `.claude/commands/debug/step-verify.md` | Step 8 | Post-fix verification (dev restart, integration tests, attestation, fleet rollout) |
 | `.claude/commands/debug/output-template.md` | output | Debug-report-comment and triage-report templates |
@@ -109,9 +109,9 @@ for unit in untether untether-dev untether-demo untether-dev-hf untether-dev-ws;
 done
 ```
 
-**Remote — four hosts (nsd, channelo, sl, mac):**
+**Remote — four hosts (nsd, channelo, sl, mac; `mac` is launchd, no journalctl — see `debug/step-evidence.md` §2b):**
 ```bash
-for host in nsd channelo mac; do
+for host in nsd channelo sl; do
   ssh "$host" "journalctl --user -u untether --since '${HOURS}h ago' --output=cat \
     | grep -E 'level=(error|warning)|\"level\":\\s*\"(error|warning)\"'" \
     > "/tmp/debug-sweep-${host}-$$.log" 2>/dev/null || true
@@ -211,7 +211,7 @@ Read `.claude/commands/debug/systemic-patterns.md`. Walk the pattern list
 top to bottom. For each match:
 - If the pattern has a canonical issue, **comment on that issue** with the
   new evidence rather than creating a new one.
-- If the pattern is flagged "by-design" (e.g. cron + plan-mode stalls), say
+- If the pattern is flagged "by-design" (e.g. an unattended cron run denied an approval), say
   so clearly in the Debug Report and stop — no fix needed.
 - If the pattern is "regression of previously-fixed" — flag as a regression
   with explicit reference to the prior fix commit.
@@ -233,7 +233,7 @@ Untether-specific hypothesis classes commonly missed (read in full):
 - callback_data > 64 bytes (Telegram silent drop)
 - Restart-required config key edited mid-run, silently warned
 - Signal-death loop with auto-continue (rc=143/137 should suppress retry)
-- Plan-mode cooldown bypass via rapid-fire ExitPlanMode
+- Outline-gate bypass via rapid-fire ExitPlanMode (the gate is text-based since #570 retired the cooldown)
 - MCP catalog staleness (#365 — detect, optionally refresh)
 - Hot-reload race during an active run (TelegramBridgeConfig field copy)
 - Outbox deny-glob false-positive (legitimate file matched a deny pattern)
@@ -287,7 +287,8 @@ Read `.claude/commands/debug/step-verify.md`. Summary:
    the change scope (patch/minor/major).
 4. Write attestation marker: `scripts/run-integration-tests.sh ${VERSION} --manual ...`.
 5. If this is part of an rc release, run `scripts/fleet-rollout.sh ${VERSION}`
-   only after Nathan merges the PR.
+   only after the rc is merged to `dev`, TestPyPI has it and the attestation
+   marker exists.
 6. Re-run Step 4 grep on the fresh dev logs to ensure no other systemic
    pattern regressed.
 
@@ -315,12 +316,12 @@ posting (default: print only, do not post).
 - **Never push to master.** Never merge PRs to master. Never tag. Hooks block
   these — do not attempt workarounds.
 - **Never restart staging to test changes.** Use `untether-dev.service`.
-- **Fleet awareness.** Probe all four hosts (lba-1 local + nsd + channelo + mac
-  via SSH) in sweep mode by default. In targeted mode, probe only the hosts
+- **Fleet awareness.** Probe all five hosts (lba-1 local + nsd + channelo + sl +
+  mac via SSH) in sweep mode by default. In targeted mode, probe only the hosts
   relevant to the issue. If you can't SSH to a host, log it as a partial scope
   and continue — never silently drop a host.
 - **Stay in the dev branch model.** Feature branch → PR to `dev`. Never feature
-  → master directly. Squash-merge to `dev` is allowed; merging to master is
-  Nathan's only.
+  → master directly. Squash-merge to `dev` is allowed; merging to master
+  happens only in `/pr-main X.Y.Z --merge`, after Nathan approves the release.
 
 End of /debug command file. See companion files for step detail.

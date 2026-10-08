@@ -9,7 +9,8 @@ import signal
 import subprocess
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 from weakref import WeakValueDictionary
@@ -88,14 +89,52 @@ class SessionLockMixin:
             raise RuntimeError(
                 f"resume token is for engine {resume_token.engine!r}, not {self.engine!r}"
             )
+        # ``aclosing``: closing this wrapper must close the inner generator in
+        # the same task. A bare ``async for`` leaves it suspended at its yield
+        # (inside run_impl's task group) for the event loop to finalise in
+        # another task, which raises "Attempted to exit cancel scope in a
+        # different task" (rc15 integration finding; #614 closed only the
+        # outermost generator).
         if resume_token is None:
-            async for evt in run_fn(prompt, resume_token):
-                yield evt
+            async with contextlib.aclosing(run_fn(prompt, resume_token)) as events:
+                async for evt in events:
+                    yield evt
             return
         lock = self.lock_for(resume_token)
-        async with lock:
-            async for evt in run_fn(prompt, resume_token):
+        async with lock, contextlib.aclosing(run_fn(prompt, resume_token)) as events:
+            async for evt in events:
                 yield evt
+
+
+# #838: ``CompletedEvent.usage`` key set by the pre-spawn guard on a block
+# (value ``"concurrency"`` / ``"ram"``). The bridge reads it so a blocked
+# resume never auto-clears the chat's saved session.
+PRESPAWN_BLOCKED_KEY = "prespawn_blocked"
+
+
+def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
+    """The guard-block reason marked on ``usage`` (#838), or None."""
+    if not isinstance(usage, dict):
+        return None
+    reason = usage.get(PRESPAWN_BLOCKED_KEY)
+    return reason if isinstance(reason, str) else None
+
+
+def _idle_claude_live_session_count() -> int:
+    """Idle Claude live sessions (#776) currently holding a process (#838).
+
+    Engine-agnostic: the guard runs for every engine, and a Codex block can
+    be caused by idle Claude sessions. Imported lazily (claude.py imports
+    this module); any failure counts as zero — diagnostics must never block.
+    """
+    try:
+        from .runners.claude import idle_live_session_count
+    except ImportError:  # pragma: no cover — claude runner always ships
+        return 0
+    try:
+        return idle_live_session_count()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _rc_label(rc: int) -> str:
@@ -146,12 +185,68 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
 )
 _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 
+# #716: the terminal frame of a run. Latched onto ``saw_result`` so
+# "did this run reach its result?" is answerable independently of the
+# running ``last_event_type`` — see ``JsonlStreamState.saw_result``.
+_RESULT_EVENT_TYPE = "result"
+
 # #502: control-channel traffic is stdin/stdout permission-flow (Claude
 # control_request → Untether stdin control_response, and parent-initiated
 # requests like mcp_status). Skip when computing last_event_type so the
 # session.summary reflects the last *stream* event, not the last frame
 # the parser saw. recent_events still records them for diagnostics.
-_CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
+# #684: ``control_cancel_request`` (the CLI withdrawing a request) is control
+# traffic too — it must never become ``last_event_type``.
+_CONTROL_CHANNEL_EVENT_TYPES = frozenset(
+    {"control_request", "control_response", "control_cancel_request"}
+)
+
+# #812: Claude's ``--include-hook-events`` lifecycle frames
+# (``{"type":"system","subtype":"hook_started|hook_progress|hook_response"}``)
+# can land after the turn's ``result`` (an async hook finishing while the
+# session idles). Like control traffic they must not overwrite
+# ``last_event_type`` — a trailing ``system`` would break the #470
+# post-result check and the auto-continue predicate — but unlike it they are
+# genuine liveness (a hook doing work), so they still count towards
+# ``last_stdout_at`` / ``event_count``. Ring label: ``hook:<subtype>``.
+_HOOK_FRAME_SUBTYPE_PREFIX = "hook_"
+
+
+def _hook_frame_subtype(raw: dict[str, Any], etype: str) -> str | None:
+    if etype != "system":
+        return None
+    subtype = raw.get("subtype")
+    if isinstance(subtype, str) and subtype.startswith(_HOOK_FRAME_SUBTYPE_PREFIX):
+        return subtype
+    return None
+
+
+# #819: Claude's compaction frames get the same treatment as #812's hook
+# frames. An auto-compaction starts right after a ``tool_result`` (last type
+# ``user``); if the CLI dies mid-compaction the auto-continue predicate must
+# still see ``user``, and the #470 post-result check must not see a trailing
+# ``system``. ``system/status`` also carries #383's permission-mode edges,
+# which arrive while a live session idles — same reasoning.
+_LIVENESS_ONLY_SYSTEM_SUBTYPES = frozenset({"status", "compact_boundary"})
+
+
+def _liveness_only_label(raw: dict[str, Any], etype: str) -> str | None:
+    """Ring label for a frame that counts as liveness (``last_stdout_at``,
+    ``event_count``) but must never become ``last_event_type`` — None for
+    every other frame."""
+    hook_subtype = _hook_frame_subtype(raw, etype)
+    if hook_subtype is not None:
+        return f"hook:{hook_subtype}"
+    if etype != "system":
+        return None
+    subtype = raw.get("subtype")
+    if subtype not in _LIVENESS_ONLY_SYSTEM_SUBTYPES:
+        return None
+    if subtype == "status":
+        status = raw.get("status")
+        return f"status:{status}" if isinstance(status, str) else "status:null"
+    return str(subtype)
+
 
 # #526 rc20 follow-up: shared with runner_bridge.py for paced
 # ``subprocess.approval_pending`` INFO emission. The user-side stall
@@ -161,24 +256,59 @@ _CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"}
 _APPROVAL_PENDING_REFIRE_S = 1800.0
 
 
-def _recent_event_is_control_request(stream: JsonlStreamState) -> bool:
-    """True if the most recent JSONL event in the ring buffer is a
-    Claude ``control_request`` frame — i.e. the session is awaiting an
-    approval response on the control channel.
+# #697: ring-buffer labels that mean an outstanding approval has been
+# resolved — the tool ran (its ``tool_result`` arrives as a ``user`` frame),
+# the turn ended, or Claude answered on the control channel. Every other
+# label (``rate_limit_event``, ``assistant``, ``tool:*``, ``system``) is
+# transparent to the backward scan below.
+# #684: a ``control_cancel_request`` resolves the wait as well — the CLI
+# withdrew the request, so nothing is pending any more.
+_APPROVAL_RESOLVING_EVENT_LABELS = frozenset(
+    {"control_response", "control_cancel_request", "user", "result"}
+)
 
-    Used by ``_watchdog_loop`` to demote ``subprocess.liveness_stall``
+
+def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
+    """True while the subprocess is awaiting a user approval on the control
+    channel, rather than genuinely hung.
+
+    Used by ``_subprocess_watchdog`` to demote ``subprocess.liveness_stall``
     WARN → ``subprocess.approval_pending`` INFO, mirroring the bridge-side
-    behaviour added in rc19. The bridge-side predicate inspects the
-    inline-keyboard payload of the most recent action; the watchdog has
-    no access to bridge state, so it consults the JSONL event stream
-    directly. Both signals agree in the common case where Claude emitted
-    a ``control_request`` and we're waiting for the user to click a
-    button (or otherwise resolve the approval).
+    ``ProgressEdits._has_pending_approval``.
+
+    Two signals, in order of authority:
+
+    1. The engine's own unanswered-control-request registry, reached by the
+       same ``engine_state`` duck-typing the bridge uses (Claude's
+       ``awaiting_user_approval`` → ``pending_control_requests_for_session``).
+       It is self-cleaning and does not go stale during a long approval wait.
+       Engines with no control channel simply have no probe.
+    2. A backward scan of the JSONL ring buffer, kept as a True-only
+       fallback for the same reason the bridge keeps its presentation-state
+       check.
+
+    #697: the scan replaces a check on ``recent_events[-1]``, which was
+    positional — on nsd a ``rate_limit_event`` arriving in the same tick as
+    the ``control_request`` took the last slot and flipped a 10-minute
+    approval wait back to a WARN (``approval_pending=False``). That branch
+    latches ``liveness_warned``, burning the run's one-shot stall canary,
+    and falls through to the auto-kill check.
     """
-    if not stream.recent_events:
-        return False
-    _, label = stream.recent_events[-1]
-    return label == "control_request"
+    es = getattr(stream, "engine_state", None)
+    probe = getattr(es, "awaiting_user_approval", None)
+    if callable(probe):
+        try:
+            if probe():
+                return True
+        except Exception as exc:  # noqa: BLE001 - watchdog must not die
+            if logger is not None:
+                logger.debug("subprocess.approval_probe_failed", error=str(exc))
+    for _, label in reversed(stream.recent_events):
+        if label == "control_request":
+            return True
+        if label in _APPROVAL_RESOLVING_EVENT_LABELS:
+            return False
+    return False
 
 
 def _classify_jsonl_event(raw: Any) -> str:
@@ -290,25 +420,38 @@ class BaseRunner(SessionLockMixin):
     async def run_locked(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
-        if resume is not None:
-            async for evt in self.run_with_resume_lock(prompt, resume, self.run_impl):
-                yield evt
+        # A /continue token carries no session id (``value == ""``), so locking
+        # it up front would key every /continue of this engine on one shared
+        # ``"<engine>:"`` lock. Treat it like a new run instead: lock the real
+        # session id once the StartedEvent names it (#817).
+        if resume is not None and not resume.is_continue:
+            async with contextlib.aclosing(
+                self.run_with_resume_lock(prompt, resume, self.run_impl)
+            ) as events:
+                async for evt in events:
+                    yield evt
             return
+        if resume is not None and resume.engine != self.engine:
+            raise RuntimeError(
+                f"resume token is for engine {resume.engine!r}, not {self.engine!r}"
+            )
 
         lock: anyio.Semaphore | None = None
         acquired = False
         try:
-            async for evt in self.run_impl(prompt, None):
-                if lock is None and isinstance(evt, StartedEvent):
-                    lock = self.lock_for(evt.resume)
-                    await lock.acquire()
-                    acquired = True
-                    _lock_logger.debug(
-                        "session_lock.acquired",
-                        session_id=evt.resume.value,
-                        engine=str(self.engine),
-                    )
-                yield evt
+            # ``aclosing``: see ``run_with_resume_lock``.
+            async with contextlib.aclosing(self.run_impl(prompt, resume)) as events:
+                async for evt in events:
+                    if lock is None and isinstance(evt, StartedEvent):
+                        lock = self.lock_for(evt.resume)
+                        await lock.acquire()
+                        acquired = True
+                        _lock_logger.debug(
+                            "session_lock.acquired",
+                            session_id=evt.resume.value,
+                            engine=str(self.engine),
+                        )
+                    yield evt
         finally:
             if acquired and lock is not None:
                 lock.release()
@@ -338,6 +481,36 @@ class JsonlStreamState:
     last_stdout_at: float = 0.0
     last_event_type: str | None = None
     last_event_tool: str | None = None
+    # #716: monotonic latch — True once a ``result`` frame has been parsed.
+    #
+    # ``last_event_type`` is a *running* value overwritten by every non-
+    # control-channel frame, so it answers "what was the last frame we saw?"
+    # and NOT "did this run reach its result?". Those come apart in practice:
+    # 106 healthy (``ok=True``, uncancelled) Claude runs on nsd logged
+    # ``session.summary last_event_type=user``, which is the exact value
+    # ``_should_auto_continue`` treats as its salvage trigger.
+    #
+    # Note the mechanism is NOT a frame arriving after the terminal
+    # ``result`` — that is measurably impossible on this path, because the
+    # ``result`` frame's CompletedEvent sets ``did_emit_completed`` and both
+    # ``_iter_jsonl_events`` overrides break out of the read loop
+    # immediately (verified against the real ClaudeRunner with the
+    # ``trailing_user_after_result`` fake-CLI scenario: the trailing frame
+    # does not even reach ``recent_events``). A ``user`` value on a completed
+    # run therefore means the result frame never landed on THIS stream
+    # object. Whatever the upstream reason, the discriminator the salvage
+    # predicate needs is "was a result parsed", which is what this latch
+    # records — set-only, so it states a fact about the run rather than
+    # about frame ordering.
+    saw_result: bool = False
+    # #776: set by runners that keep their process live after the first
+    # result (Claude control-channel mode). The base line handler then keeps
+    # translating after CompletedEvent instead of dropping lines, and later
+    # turns surface as TurnEvent segments.
+    followup_turns: bool = False
+    # #776 / #505: set when the post-exit drain had to close stdout because a
+    # grandchild still held the inherited fd.
+    stdout_held_after_exit: bool = False
     event_count: int = 0
     recent_events: deque[tuple[float, str]] = field(
         default_factory=lambda: deque(maxlen=10)
@@ -392,8 +565,75 @@ class JsonlStreamState:
     stall_suppression_counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class RunStreamHandle:
+    """Per-run binding of a spawn's ``JsonlStreamState`` and PID (#510).
+
+    Runner instances are shared across chats, so anything stored on the
+    runner (``current_stream`` / ``last_pid``) describes *the most recent
+    spawn in any chat*. The bridge instead creates one handle per
+    ``run_runner_with_cancel`` call and exposes it through ``_RUN_STREAM``;
+    the runner's ``run_impl`` — which executes in the task iterating the run
+    generator, so it inherits the bridge's context — publishes its own
+    stream and PID into it via :func:`publish_run_stream`.
+    """
+
+    stream: JsonlStreamState | None = None
+    pid: int | None = None
+    ready: anyio.Event = field(default_factory=anyio.Event)
+
+
+_RUN_STREAM: ContextVar[RunStreamHandle | None] = ContextVar(
+    "untether.run_stream", default=None
+)
+
+
+def current_run_stream_handle() -> RunStreamHandle | None:
+    return _RUN_STREAM.get()
+
+
+def set_run_stream_handle(handle: RunStreamHandle | None) -> Token:
+    """Bind ``handle`` as the current run's stream handle for this context.
+
+    Must be called BEFORE the task that iterates the runner is started:
+    anyio child tasks copy the context at spawn time.
+    """
+    return _RUN_STREAM.set(handle)
+
+
+def reset_run_stream_handle(token: Token) -> None:
+    _RUN_STREAM.reset(token)
+
+
+@contextlib.contextmanager
+def bind_run_stream_handle(handle: RunStreamHandle) -> Iterator[RunStreamHandle]:
+    """Context-manager form of :func:`set_run_stream_handle`."""
+    token = set_run_stream_handle(handle)
+    try:
+        yield handle
+    finally:
+        reset_run_stream_handle(token)
+
+
+def publish_run_stream(stream: JsonlStreamState, pid: int | None) -> None:
+    """Publish this run's stream + PID (together) to the bridge's handle.
+
+    No-op when no handle is bound (e.g. a runner driven directly by a test
+    or a CLI path that doesn't go through the bridge). Re-publishing (a
+    second spawn inside one run) overwrites — it is still this run's process.
+    """
+    handle = _RUN_STREAM.get()
+    if handle is None:
+        return
+    handle.stream = stream
+    handle.pid = pid
+    handle.ready.set()
+
+
 class JsonlSubprocessRunner(BaseRunner):
-    # Exposed for diagnostics — set during run_impl, cleared on exit
+    # Diagnostics only: the most recent spawn on this (shared) runner
+    # instance, in ANY chat. Never cleared, and never read by the bridge —
+    # per-run binding goes through ``publish_run_stream`` (#510).
     current_stream: JsonlStreamState | None = None
     last_pid: int | None = None
 
@@ -872,7 +1112,7 @@ class JsonlSubprocessRunner(BaseRunner):
         logger: Any,
         pid: int,
     ) -> list[UntetherEvent]:
-        if stream.did_emit_completed:
+        if stream.did_emit_completed and not stream.followup_turns:
             if not stream.ignored_after_completed:
                 log_pipeline(
                     logger,
@@ -934,10 +1174,20 @@ class JsonlSubprocessRunner(BaseRunner):
             # #502: skip control-channel events when updating last_event_type
             # so session.summary reflects the last stream event, not stdin/stdout
             # permission-flow traffic. recent_events still records them.
-            if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
+            # #812: hook lifecycle frames are skipped the same way, and so
+            # are #819's compaction / status frames.
+            liveness_label = _liveness_only_label(raw_dict, etype)
+            if etype not in _CONTROL_CHANNEL_EVENT_TYPES and liveness_label is None:
                 stream.last_event_type = etype
                 stream.last_event_tool = etool
-            label = f"tool:{etool}" if etool else etype
+            # #716: latch the terminal frame separately from the running
+            # ``last_event_type``. Set-only — never cleared.
+            if etype == _RESULT_EVENT_TYPE:
+                stream.saw_result = True
+            if liveness_label is not None:
+                label = liveness_label
+            else:
+                label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
             # intervening "other" events (attachments, system hooks) and is
@@ -975,6 +1225,10 @@ class JsonlSubprocessRunner(BaseRunner):
                     jsonl_seq=seq,
                 )
                 output.append(evt)
+                # #776: a live runner keeps translating after completion —
+                # later turns arrive as TurnEvent segments in later batches.
+                if stream.followup_turns:
+                    continue
                 break
             output.append(evt)
         return output
@@ -1010,6 +1264,8 @@ class JsonlSubprocessRunner(BaseRunner):
                 break
 
     _WATCHDOG_GRACE_SECONDS: float = 5.0
+    # #776: post-exit stdout drain for runners that read past the result.
+    _POST_EXIT_DRAIN_SECONDS: float = 2.0
 
     _WATCHDOG_POLL_SECONDS: float = 0.5
 
@@ -1067,22 +1323,39 @@ class JsonlSubprocessRunner(BaseRunner):
         from .utils.subprocess import live_engine_subprocess_count
 
         live_runs = live_engine_subprocess_count()
+        # #838: idle Claude live sessions (#776) stay inside manage_subprocess
+        # and so count toward ``live_runs`` — on purpose (they still hold
+        # their MCP children's RAM). Name them on the logs and the message so
+        # a block while "nothing is running" explains itself, on any engine.
+        idle_live = _idle_claude_live_session_count()
+        ctx: dict[str, Any] = {"idle_live_sessions": idle_live} if idle_live else {}
         if max_runs > 0 and live_runs >= max_runs:
             logger.error(
                 "subprocess.prespawn.concurrency_blocked",
                 engine=self.engine,
                 live_runs=live_runs,
                 max_runs=max_runs,
+                **ctx,
             )
+            idle_clause = ""
+            if idle_live:
+                idle_clause = (
+                    f" (including {idle_live} idle Claude session(s) kept open "
+                    f"for background work — they close on their own)"
+                )
             return CompletedEvent(
                 engine=self.engine,
                 ok=False,
                 answer="",
                 resume=resume,
                 error=(
-                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs}). "
-                    f"Wait for one to finish, or /cancel an active run."
+                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs})"
+                    f"{idle_clause}. Wait for one to finish, or /cancel an "
+                    f"active run."
                 ),
+                # #838: marks a guard block so the bridge never treats it as
+                # a broken resume (it would clear the chat's saved session).
+                usage={PRESPAWN_BLOCKED_KEY: "concurrency"},
             )
 
         avail_kb = mem_available_kb()
@@ -1105,6 +1378,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 live_runs=live_runs,
                 per_run_reserve_mb=per_run_reserve,
                 warn_mb=warn_mb,
+                **ctx,
             )
             if live_runs > 0 and effective_block_mb > block_mb:
                 msg = (
@@ -1125,6 +1399,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 answer="",
                 resume=resume,
                 error=msg,
+                usage={PRESPAWN_BLOCKED_KEY: "ram"},
             )
 
         if warn_mb > 0 and avail_mb < warn_mb:
@@ -1134,6 +1409,8 @@ class JsonlSubprocessRunner(BaseRunner):
                 avail_mb=avail_mb,
                 warn_mb=warn_mb,
                 block_mb=block_mb,
+                live_runs=live_runs,
+                **ctx,
             )
         return None
 
@@ -1197,16 +1474,15 @@ class JsonlSubprocessRunner(BaseRunner):
             ):
                 idle = time.monotonic() - stream.last_stdout_at
                 if idle >= self._LIVENESS_TIMEOUT_SECONDS:
-                    # #526 rc20 follow-up: when the most recent JSONL
-                    # event is a ``control_request``, the subprocess
-                    # is awaiting a user approval — emit a paced
+                    # #526 rc20 follow-up: when the subprocess is awaiting a
+                    # user approval on the control channel, emit a paced
                     # ``subprocess.approval_pending`` INFO instead of
                     # the ``subprocess.liveness_stall`` WARN. Skip the
                     # auto-kill branch entirely (approval-waiting is
                     # by definition not a hang). Without latching
                     # ``liveness_warned`` so a later genuine hang
                     # (post-approval) can still fire the WARN.
-                    if _recent_event_is_control_request(stream):
+                    if _approval_pending(stream, logger):
                         now = time.monotonic()
                         if (
                             last_approval_pending_emit_at == 0.0
@@ -1268,7 +1544,26 @@ class JsonlSubprocessRunner(BaseRunner):
                         prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
-        if stream.did_emit_completed or reader_done.is_set():
+        if reader_done.is_set():
+            return
+        if stream.did_emit_completed and stream.followup_turns:
+            # #776 / #505: a live runner keeps reading after the result, so
+            # the old "stop at the first result" protection no longer
+            # applies. Once the process is gone, give the reader a short
+            # drain for the final lines, then close our read end so a
+            # grandchild holding the inherited stdout fd can't block it.
+            with anyio.move_on_after(self._POST_EXIT_DRAIN_SECONDS):
+                await reader_done.wait()
+            if reader_done.is_set():
+                return
+            stream.stdout_held_after_exit = True
+            logger.warning("subprocess.stdout_held_after_exit", pid=pid)
+            stdout = getattr(proc, "stdout", None)
+            if stdout is not None:
+                with contextlib.suppress(Exception):
+                    await stdout.aclose()
+            return
+        if stream.did_emit_completed:
             return
         # Process is dead but reader hasn't finished — wait grace period.
         with anyio.move_on_after(self._WATCHDOG_GRACE_SECONDS):
@@ -1292,6 +1587,16 @@ class JsonlSubprocessRunner(BaseRunner):
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
+        # #350 / #589 pre-spawn guard — refuse or warn when the host is
+        # near-OOM or the concurrency ceiling is reached. First statement
+        # (#838) so a blocked spawn costs nothing: no run state, no args,
+        # no ``runner.start`` log. A BLOCK yields a CompletedEvent(ok=False)
+        # and returns early without forking.
+        block_result = self._check_prespawn_ram_guard(resume)
+        if block_result is not None:
+            yield block_result
+            return
+
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
 
@@ -1314,15 +1619,6 @@ class JsonlSubprocessRunner(BaseRunner):
             engine=self.engine,
             prompt_preview=prompt[:100] + "…" if len(prompt) > 100 else prompt,
         )
-
-        # #350 pre-spawn RAM guard — refuse or warn when the host is
-        # near-OOM. Runs BEFORE manage_subprocess so a blocked spawn costs
-        # nothing. A WARN emits a visible note; a BLOCK yields a
-        # CompletedEvent(ok=False) and returns early without forking.
-        block_result = self._check_prespawn_ram_guard(resume)
-        if block_result is not None:
-            yield block_result
-            return
 
         cwd = get_run_base_dir()
 
@@ -1352,7 +1648,6 @@ class JsonlSubprocessRunner(BaseRunner):
                 )
                 raise RuntimeError(self.pipes_error_message())
 
-            self.last_pid = proc.pid
             logger.info(
                 "subprocess.spawn",
                 cmd=cmd[0] if cmd else None,
@@ -1360,10 +1655,16 @@ class JsonlSubprocessRunner(BaseRunner):
                 pid=proc.pid,
             )
 
+            # #510: create the stream before sending the payload and publish
+            # pid + stream together, so nobody ever sees this spawn's pid
+            # paired with a previous spawn's stream.
+            stream = JsonlStreamState(expected_session=resume)
+            self.last_pid = proc.pid
+            self.current_stream = stream
+            publish_run_stream(stream, proc.pid)
+
             await self._send_payload(proc, payload, logger=logger, resume=resume)
 
-            stream = JsonlStreamState(expected_session=resume)
-            self.current_stream = stream
             reader_done = anyio.Event()
 
             async with anyio.create_task_group() as tg:

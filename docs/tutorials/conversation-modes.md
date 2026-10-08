@@ -61,8 +61,10 @@ To continue the same session, **reply** to a message with a resume line:
 !!! untether "Untether"
     done · codex · 8s
 
-    !!! user "You"
-        now add tests
+!!! user "You (replying to it)"
+    now add tests
+
+The agent also sees the message you replied to (or the part you quoted), so you can refer to it directly. See [Chat sessions → Replying to a message or a quote](../how-to/chat-sessions.md#replying-to-a-message-or-a-quote).
 
 ## Changing your settings
 
@@ -82,6 +84,8 @@ You can manually change these settings in your config file:
     session_mode = "chat"      # "chat" or "stateless"
     show_resume_line = false   # true or false
     ```
+
+`session_mode` only takes effect after a restart (send `/restart` from Telegram); `show_resume_line` applies straight away when `watch_config = true`.
 
 Or re-run onboarding to pick a different workflow:
 
@@ -115,7 +119,7 @@ Even in chat mode, replying to a message with a resume line takes precedence and
 
 ## Cross-environment resume
 
-Started a session in your terminal and left the house? Use `/continue` to pick it up from Telegram — no reply needed. Works with Claude, Codex, OpenCode, Pi, and Gemini.
+Started a session in your terminal and left the house? Use `/continue` to pick it up from Telegram — no reply needed. Works with Claude, Codex, OpenCode and Pi (and the deprecated Gemini CLI).
 
 See the [cross-environment resume guide](../how-to/cross-environment-resume.md) for details.
 

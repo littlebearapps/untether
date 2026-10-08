@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.14"
           enable-cache: true
@@ -54,6 +54,11 @@ jobs:
 
           print(f"OK: tag {tag!r} matches version {project_version!r}")
           PY
+
+      - name: Check the release announcement (#1008)
+        # The user-facing Discussions post must exist before anything ships;
+        # /pr-main writes it and validate_release.py gates the release PR.
+        run: python3 scripts/release_announcement.py check
 
       - name: Run tests
         run: uv run pytest
@@ -91,7 +96,7 @@ jobs:
           path: dist/
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
           skip-existing: true
@@ -102,12 +107,39 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create GitHub release + upload artifacts
+    outputs:
+      tag: ${{ steps.release-meta.outputs.tag }}
+      prerelease: ${{ steps.release-meta.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The release's tag (on a manual run from a branch, ref_name is the branch, so the tag
+      # comes from pyproject.toml), and whether it's a pre-release. Same PEP 440 rule as
+      # auto-tag-on-master.yml: stable is exactly vN.N.N; any rc/a/b/dev/post suffix is a
+      # pre-release, so a hand-pushed rc tag never becomes "Latest" (#1014).
+      - name: Resolve tag and pre-release flag
+        id: release-meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          else
+            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          fi
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prerelease=false
+          else
+            prerelease=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Release $tag (prerelease=$prerelease)"
+
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.14"
           enable-cache: true
@@ -119,10 +151,88 @@ jobs:
           path: dist/
 
       - name: Create GitHub release and upload artifacts
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.release-meta.outputs.prerelease }}
           files: |
             dist/*
 
+  announce:
+    name: Post release announcement to Discussions
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # link the discussion from the GitHub release body
+      discussions: write  # create the Announcements discussion
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Post announcement (idempotent)
+        # Reuses an existing discussion with the same title, so a re-run never
+        # double-posts. A failure turns this run red — re-run this job.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release_announcement.py post
+
+  rebuild-website:
+    name: Rebuild untether.cc
+    # untether.cc reads the latest PyPI version and date at build time (the hero's "Latest
+    # release" line), so a production rebuild right after publishing shows the new release
+    # within minutes instead of at its next daily rebuild. CF_DEPLOY_HOOK_PRODUCTION is the
+    # Workers Builds Deploy Hook for the untether-cc Worker's `main` branch. It waits for
+    # `announce`, because the site also shows the announcement's TL;DR and links its Discussion
+    # (read from this release's body). If `announce` fails, it still rebuilds once the GitHub
+    # release exists, and the site links the release instead. Never fails the release.
+    needs: [github-release, announce]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    continue-on-error: true
+    steps:
+      - name: Trigger the untether.cc production deploy hook
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.CF_DEPLOY_HOOK_PRODUCTION }}
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "::warning::CF_DEPLOY_HOOK_PRODUCTION isn't set, so untether.cc wasn't rebuilt."
+            exit 0
+          fi
+          curl --fail --silent --show-error --request POST "$DEPLOY_HOOK_URL" \
+            --output /dev/null --write-out "Deploy hook: HTTP %{http_code}\n"
+
+  notify-littlebearapps:
+    name: Rebuild littlebearapps.com
+    # littlebearapps.com reads release data at build time (version badge, changelog, roadmap,
+    # softwareVersion) and syncs the help centre from master. A repository_dispatch to its
+    # deploy-auto.yml refreshes the github-proxy cache and rebuilds production.
+    # Done here, not in notify-website.yml: releases created with GITHUB_TOKEN don't fire
+    # `release: published`, so that workflow never ran after v0.34.2 (#1014). Pre-releases
+    # are skipped, so the site never shows an rc as the current version. Never fails the
+    # release, but a failed dispatch shows the job red instead of hiding it.
+    needs: [github-release]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && needs.github-release.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    continue-on-error: true
+    steps:
+      - name: Dispatch release-published to littlebearapps.com
+        env:
+          TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          TAG_NAME: ${{ needs.github-release.outputs.tag }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::WEBSITE_DISPATCH_TOKEN isn't set, so littlebearapps.com wasn't notified."
+            exit 1
+          fi
+          payload=$(jq -n --arg tag "$TAG_NAME" '{event_type:"release-published",client_payload:{repo:"untether",tag:$tag}}')
+          code=$(curl --silent --show-error --output "$RUNNER_TEMP/resp.json" --write-out '%{http_code}' \
+            -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $TOKEN" \
+            https://api.github.com/repos/littlebearapps/littlebearapps.com/dispatches -d "$payload")
+          if [ "$code" != "204" ]; then
+            echo "::error::littlebearapps.com dispatch returned HTTP $code (expected 204)"
+            cat "$RUNNER_TEMP/resp.json"
+            exit 1
+          fi
+          echo "littlebearapps.com notified for $TAG_NAME (HTTP 204)"

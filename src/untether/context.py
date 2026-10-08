@@ -16,3 +16,50 @@ class RunContext:
     # applies it on top of the resolved EngineRunOptions so the cron
     # override wins over the chat's /planmode default.
     permission_mode: str | None = None
+    # #743: per-cron model / reasoning overrides, applied the same way.
+    model: str | None = None
+    reasoning: str | None = None
+
+
+# #751 / #835: trigger sources with nobody present to answer a Telegram
+# prompt. `at:` is excluded on purpose: a human scheduled it from the chat and
+# is around to tap (#751 Decision 7). `loop:` re-fires follow a human's /loop.
+UNATTENDED_TRIGGER_PREFIXES: tuple[str, ...] = ("cron:", "webhook:")
+
+
+def unattended_trigger(context: RunContext | None) -> str | None:
+    """The trigger source when *context* is an unattended run, else None.
+
+    The single predicate for both the #751 dispatch warning and the #835
+    fail-closed enforcement, so the two can't drift. Only dispatchers set
+    ``trigger_source``; a Telegram message, reply or directive can't.
+    """
+    if context is None:
+        return None
+    source = context.trigger_source
+    if source and source.startswith(UNATTENDED_TRIGGER_PREFIXES):
+        return source
+    return None
+
+
+def attended_context(context: RunContext | None) -> RunContext | None:
+    """*context* with the trigger-only fields cleared (#835).
+
+    For a human message that reuses a trigger run's context — a reply to a
+    running cron/webhook turn's progress or wake-turn message. The human
+    keeps the run's project/branch but not its provenance or its per-trigger
+    ``permission_mode``/``model``/``reasoning``: their turn resolves the
+    chat's own options, so it never inherits "unattended" (approvals
+    auto-denied) and never lands in the cron's live process, whose spawn
+    options no longer match (``options_changed`` → attended resume).
+    """
+    if context is None:
+        return None
+    if (
+        context.trigger_source is None
+        and context.permission_mode is None
+        and context.model is None
+        and context.reasoning is None
+    ):
+        return context
+    return RunContext(project=context.project, branch=context.branch)

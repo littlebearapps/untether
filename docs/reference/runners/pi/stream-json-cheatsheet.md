@@ -75,8 +75,20 @@ required `type` field. These are `AgentSessionEvent` objects from
 ### `auto_compaction_end`
 
 ```json
-{"type":"auto_compaction_end","result":{"newNumTokens":42000},"aborted":false}
+{"type":"auto_compaction_end","result":{"tokensBefore":42000},"aborted":false}
 ```
+
+### `auto_retry_start` / `auto_retry_end`
+
+```json
+{"type":"auto_retry_start","attempt":2,"maxAttempts":5,"delayMs":1500,"errorMessage":"503"}
+```
+
+```json
+{"type":"auto_retry_end","success":true,"attempt":2}
+```
+
+On failure `auto_retry_end` carries `"success":false` and `finalError`.
 
 ## Notes
 

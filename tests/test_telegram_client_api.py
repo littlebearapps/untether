@@ -5,6 +5,7 @@ from untether.telegram.api_models import User
 from untether.telegram.client_api import (
     HttpBotClient,
     TelegramRetryAfter,
+    classify_benign_rejection,
     retry_after_from_payload,
 )
 
@@ -69,7 +70,21 @@ def test_parse_envelope_ok() -> None:
 @pytest.mark.anyio
 async def test_client_methods_build_params_and_decode() -> None:
     payloads = {
-        "getUpdates": [{"update_id": 1}],
+        "getUpdates": [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 9,
+                    "chat": {"id": 1, "type": "private"},
+                    "text": "new",
+                    "quote": {"text": "selected"},
+                    "reply_to_message": {
+                        "message_id": 8,
+                        "caption": "caption",
+                    },
+                },
+            }
+        ],
         "getFile": {"file_path": "path"},
         "sendMessage": {"message_id": 1, "chat": {"id": 1, "type": "private"}},
         "sendDocument": {"message_id": 2, "chat": {"id": 1, "type": "private"}},
@@ -107,6 +122,11 @@ async def test_client_methods_build_params_and_decode() -> None:
 
     updates = await client.get_updates(offset=10, allowed_updates=["message"])
     assert updates and updates[0].update_id == 1
+    assert updates[0].message is not None
+    assert updates[0].message.quote is not None
+    assert updates[0].message.quote.text == "selected"
+    assert updates[0].message.reply_to_message is not None
+    assert updates[0].message.reply_to_message.caption == "caption"
 
     assert await client.get_file("file") is not None
 
@@ -312,3 +332,620 @@ def test_598_error_store_is_bounded() -> None:
     # Oldest entries evicted, newest retained
     assert client.pop_last_api_error("editMessageText", 1, 0) is None
     assert client.pop_last_api_error("editMessageText", 1, 79) == "err 79"
+
+
+# ---------------------------------------------------------------------------
+# #746 — benign edit/delete 400s log at INFO, not ERROR
+# ---------------------------------------------------------------------------
+
+# Exact descriptions built by tdlib/telegram-bot-api (Client.cpp @ e3e9dd8).
+_NOT_MODIFIED = (
+    "Bad Request: message is not modified: specified new message content and "
+    "reply markup are exactly the same as a current content and reply markup "
+    "of the message"
+)
+_EDIT_GONE = "Bad Request: message to edit not found"
+_NOT_EDITABLE = "Bad Request: message can't be edited"
+_DELETE_GONE = "Bad Request: message to delete not found"
+_NOT_DELETABLE = "Bad Request: message can't be deleted"
+_NOT_DELETABLE_ALL = "Bad Request: message can't be deleted for everyone"
+
+
+@pytest.mark.parametrize(
+    ("method", "description", "expected"),
+    [
+        ("editMessageText", _NOT_MODIFIED, "not_modified"),
+        ("editMessageText", _EDIT_GONE, "target_gone"),
+        ("editMessageText", _NOT_EDITABLE, "not_editable"),
+        ("editMessageReplyMarkup", _EDIT_GONE, "target_gone"),
+        ("deleteMessage", _DELETE_GONE, "target_gone"),
+        ("deleteMessage", _NOT_DELETABLE, "not_deletable"),
+        ("deleteMessage", _NOT_DELETABLE_ALL, "not_deletable"),
+        ("editMessageText", "Bad Request: Message To Edit Not Found", "target_gone"),
+    ],
+)
+def test_746_classify_benign_rejection_table(
+    method: str, description: str, expected: str
+) -> None:
+    assert classify_benign_rejection(method, description, 916) == expected
+
+
+@pytest.mark.parametrize(
+    ("method", "description"),
+    [
+        ("sendMessage", _EDIT_GONE),
+        (
+            "editMessageText",
+            'Bad Request: can\'t parse entities: Unsupported start tag "br" '
+            "at byte offset 5",
+        ),
+        ("editMessageText", "Bad Request: message not found"),
+        ("deleteMessage", "Forbidden: bot was blocked by the user"),
+        ("editMessageText", "Bad Request: MESSAGE_ID_INVALID"),
+        ("editMessageText", None),
+        ("editMessageText", ""),
+        ("editMessageText", 400),
+    ],
+)
+def test_746_classify_negative_cases(method: str, description: object) -> None:
+    assert classify_benign_rejection(method, description, 916) is None
+
+
+@pytest.mark.parametrize("message_id", [0, -1, None, "916", True, 1.5])
+def test_746_classify_requires_positive_message_id(message_id: object) -> None:
+    assert classify_benign_rejection("editMessageText", _EDIT_GONE, message_id) is None
+    assert classify_benign_rejection("editMessageText", _EDIT_GONE, 1) == "target_gone"
+
+
+def _api_400(
+    description: str | None = None,
+    *,
+    status: int = 400,
+    text: str | None = None,
+    clock=None,
+) -> tuple[HttpBotClient, httpx.AsyncClient]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if text is not None:
+            return httpx.Response(status, text=text, request=request)
+        return httpx.Response(
+            status,
+            json={"ok": False, "error_code": status, "description": description},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    kwargs = {} if clock is None else {"clock": clock}
+    return HttpBotClient("123:abcDEF_ghij", http_client=http, **kwargs), http
+
+
+def _events(logs: list[dict], name: str) -> list[dict]:
+    return [r for r in logs if r.get("event") == name]
+
+
+@pytest.mark.anyio
+async def test_746_http_400_non_positive_message_id_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(_EDIT_GONE)
+    try:
+        with capture_logs() as logs:
+            result = await api.edit_message_text(chat_id=123, message_id=0, text="x")
+    finally:
+        await http.aclose()
+    assert result is None
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "error"
+    assert errors[0]["message_id"] == 0
+    assert not _events(logs, "telegram.benign_rejection")
+    assert api._benign_hits == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("description", "reason_class"),
+    [
+        (_NOT_MODIFIED, "not_modified"),
+        (_EDIT_GONE, "target_gone"),
+        (_NOT_EDITABLE, "not_editable"),
+    ],
+)
+async def test_746_http_400_benign_edit_logs_info_not_error(
+    description: str, reason_class: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(description)
+    try:
+        with capture_logs() as logs:
+            result = await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    assert result is None
+    assert not [r for r in logs if r.get("log_level") == "error"]
+    recs = _events(logs, "telegram.benign_rejection")
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["log_level"] == "info"
+    assert rec["method"] == "editMessageText"
+    assert rec["status"] == 400
+    assert rec["message_id"] == 916
+    assert rec["chat_id"] == 123
+    assert rec["reason_class"] == reason_class
+    assert rec["description"] == description
+    assert "url" not in rec
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("description", "reason_class"),
+    [
+        (_DELETE_GONE, "target_gone"),
+        (_NOT_DELETABLE, "not_deletable"),
+        (_NOT_DELETABLE_ALL, "not_deletable"),
+    ],
+)
+async def test_746_http_400_benign_delete_logs_info_not_error(
+    description: str, reason_class: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(description)
+    try:
+        with capture_logs() as logs:
+            result = await api.delete_message(chat_id=123, message_id=917)
+    finally:
+        await http.aclose()
+    assert result is False
+    assert not [r for r in logs if r.get("log_level") == "error"]
+    recs = _events(logs, "telegram.benign_rejection")
+    assert len(recs) == 1
+    assert recs[0]["log_level"] == "info"
+    assert recs[0]["method"] == "deleteMessage"
+    assert recs[0]["reason_class"] == reason_class
+    assert recs[0]["message_id"] == 917
+
+
+@pytest.mark.anyio
+async def test_746_http_400_reason_recorded_as_description() -> None:
+    api, http = _api_400(_EDIT_GONE)
+    try:
+        await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    assert api.pop_last_api_error("editMessageText", 123, 916) == _EDIT_GONE
+    assert api.pop_last_api_error("editMessageText", 123, 916) is None
+
+
+@pytest.mark.anyio
+async def test_746_http_400_non_benign_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    desc = 'Bad Request: can\'t parse entities: Unsupported start tag "br"'
+    api, http = _api_400(desc)
+    try:
+        with capture_logs() as logs:
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1
+    assert errors[0]["log_level"] == "error"
+    assert errors[0]["status"] == 400
+    assert errors[0]["message_id"] == 916
+    # #823: the chat is logged too (message_ids are per chat)
+    assert errors[0]["chat_id"] == 123
+    assert not _events(logs, "telegram.benign_rejection")
+    # D4: the readable description is recorded for the #598 reason
+    assert api.pop_last_api_error("editMessageText", 123, 916) == desc
+
+
+@pytest.mark.anyio
+async def test_746_benign_string_on_other_method_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(_EDIT_GONE)
+    try:
+        with capture_logs() as logs:
+            await api.send_message(chat_id=123, text="x")
+    finally:
+        await http.aclose()
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1 and errors[0]["log_level"] == "error"
+    assert not _events(logs, "telegram.benign_rejection")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "description", "text", "reason"),
+    [
+        (
+            403,
+            "Forbidden: bot was blocked by the user",
+            None,
+            "Forbidden: bot was blocked by the user",
+        ),
+        (500, None, "oops", "http 500: oops"),
+    ],
+)
+async def test_746_non_400_status_stays_error(
+    status: int, description: str | None, text: str | None, reason: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(description, status=status, text=text)
+    try:
+        with capture_logs() as logs:
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1 and errors[0]["log_level"] == "error"
+    assert errors[0]["status"] == status
+    assert errors[0]["chat_id"] == 123
+    assert not _events(logs, "telegram.benign_rejection")
+    assert api.pop_last_api_error("editMessageText", 123, 916) == reason
+
+
+@pytest.mark.anyio
+async def test_746_http_400_unparseable_body_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400(text="nope")
+    try:
+        with capture_logs() as logs:
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1 and errors[0]["log_level"] == "error"
+    assert api.pop_last_api_error("editMessageText", 123, 916) == "http 400: nope"
+
+
+def test_746_envelope_path_unchanged() -> None:
+    """The HTTP-200 ``ok:false`` envelope path is out of scope (§4.3)."""
+    from structlog.testing import capture_logs
+
+    client = HttpBotClient("token", http_client=httpx.AsyncClient())
+    with capture_logs() as logs:
+        result = client._parse_telegram_envelope(
+            method="editMessageText",
+            resp=_response(),
+            payload={"ok": False, "error_code": 400, "description": _EDIT_GONE},
+            request_payload={"chat_id": 123, "message_id": 916, "text": "x"},
+        )
+    assert result is None
+    errors = _events(logs, "telegram.api_error")
+    assert len(errors) == 1 and errors[0]["log_level"] == "error"
+    assert not _events(logs, "telegram.benign_rejection")
+    assert client.pop_last_api_error("editMessageText", 123, 916) == _EDIT_GONE
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.mark.anyio
+async def test_746_benign_burst_warns_once_per_window() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _api_400(_EDIT_GONE, clock=clock)
+    try:
+        with capture_logs() as logs:
+            for t in range(4):
+                clock.now = float(t)
+                await api.edit_message_text(chat_id=123, message_id=916, text="x")
+            assert not _events(logs, "telegram.benign_rejection.burst")
+            clock.now = 4.0
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+            bursts = _events(logs, "telegram.benign_rejection.burst")
+            assert len(bursts) == 1
+            b = bursts[0]
+            assert b["log_level"] == "warning"
+            assert b["method"] == "editMessageText"
+            assert b["reason_class"] == "target_gone"
+            assert b["count"] == 5
+            assert b["distinct_messages"] == 1
+            assert b["message_ids"] == [916]
+            assert b["chat_ids"] == [123]
+            for t in range(5, 10):
+                clock.now = float(t)
+                await api.edit_message_text(chat_id=123, message_id=916, text="x")
+            assert len(_events(logs, "telegram.benign_rejection.burst")) == 1
+            for i in range(5):
+                clock.now = 70.0 + i
+                await api.edit_message_text(chat_id=123, message_id=916, text="x")
+            assert len(_events(logs, "telegram.benign_rejection.burst")) == 2
+    finally:
+        await http.aclose()
+    assert len(_events(logs, "telegram.benign_rejection")) == 15
+    assert not [r for r in logs if r.get("log_level") == "error"]
+
+
+@pytest.mark.anyio
+async def test_746_benign_burst_window_expires() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _api_400(_EDIT_GONE, clock=clock)
+    try:
+        with capture_logs() as logs:
+            for _ in range(4):
+                await api.edit_message_text(chat_id=123, message_id=916, text="x")
+            clock.now = 61.0
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await http.aclose()
+    assert not _events(logs, "telegram.benign_rejection.burst")
+
+
+@pytest.mark.anyio
+async def test_746_benign_burst_keys_are_independent() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        desc = (
+            _NOT_DELETABLE
+            if request.url.path.endswith("deleteMessage")
+            else (_EDIT_GONE)
+        )
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": desc},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http, clock=clock)
+    try:
+        with capture_logs() as logs:
+            for i in range(4):
+                clock.now = float(i)
+                await api.edit_message_text(chat_id=123, message_id=916, text="x")
+                await api.delete_message(chat_id=123, message_id=917)
+            assert not _events(logs, "telegram.benign_rejection.burst")
+        # A fresh window: 5 target_gone edits to 5 different ids (wrong-id shape)
+        api2 = HttpBotClient("123:abcDEF_ghij", http_client=http, clock=clock)
+        with capture_logs() as logs:
+            for i in range(5):
+                await api2.edit_message_text(chat_id=123, message_id=1000 + i, text="x")
+    finally:
+        await http.aclose()
+    bursts = _events(logs, "telegram.benign_rejection.burst")
+    assert len(bursts) == 1
+    assert bursts[0]["distinct_messages"] == 5
+    assert bursts[0]["message_ids"] == [1000, 1001, 1002, 1003, 1004]
+
+
+# --- rc15 integration finding: dead connections and per-call timeouts --------
+
+
+def _flaky_client(error: Exception, *, fail_times: int = 1):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        if len(calls) <= fail_times:
+            raise error
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return HttpBotClient("token", http_client=http), calls
+
+
+@pytest.mark.anyio
+async def test_edit_retries_once_after_read_timeout() -> None:
+    client, calls = _flaky_client(httpx.ReadTimeout("dead flow"))
+    result = await client._request(
+        "editMessageText", json={"chat_id": 1, "message_id": 2, "text": "x"}
+    )
+    assert result is True
+    assert calls == ["editMessageText", "editMessageText"]
+
+
+@pytest.mark.anyio
+async def test_send_is_not_repeated_after_read_timeout() -> None:
+    # It may have reached Telegram: a repeat could duplicate the message.
+    client, calls = _flaky_client(httpx.ReadTimeout("dead flow"))
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is None
+    assert calls == ["sendMessage"]
+
+
+@pytest.mark.anyio
+async def test_send_retries_when_the_request_never_left() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"))
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is True
+    assert calls == ["sendMessage", "sendMessage"]
+
+
+@pytest.mark.anyio
+async def test_retry_happens_only_once() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"), fail_times=5)
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is None
+    assert len(calls) == 2
+
+
+@pytest.mark.anyio
+async def test_get_updates_is_never_retried_here() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"))
+    assert await client._request("getUpdates", json={"timeout": 1}) is None
+    assert calls == ["getUpdates"]
+
+
+def test_owned_client_uses_short_message_timeouts() -> None:
+    client = HttpBotClient("token", timeout_s=120)
+    timeout = client._http_client.timeout
+    assert timeout.read == 30.0
+    assert timeout.connect == 10.0
+    assert client._bulk_timeout_s == 120
+
+
+# --- #823: chat_id on every unattributable error line ---
+
+
+@pytest.mark.anyio
+async def test_823_send_document_http_error_has_chat_id() -> None:
+    from structlog.testing import capture_logs
+
+    api, http = _api_400("Bad Request: file is too big")
+    try:
+        with capture_logs() as logs:
+            result = await api.send_document(chat_id=456, filename="x.md", content=b"x")
+    finally:
+        await http.aclose()
+    assert result is None
+    errors = _events(logs, "telegram.http_error")
+    assert len(errors) == 1
+    # multipart (data=) payloads carry the chat too
+    assert errors[0]["chat_id"] == 456
+    assert errors[0]["message_id"] is None
+
+
+@pytest.mark.anyio
+async def test_823_network_error_has_chat_id() -> None:
+    from structlog.testing import capture_logs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http)
+    try:
+        with capture_logs() as logs:
+            result = await api.edit_message_text(chat_id=123, message_id=9, text="x")
+    finally:
+        await http.aclose()
+    assert result is None
+    errors = _events(logs, "telegram.network_error")
+    assert len(errors) == 1
+    assert errors[0]["chat_id"] == 123
+    assert errors[0]["message_id"] == 9
+    for retry in _events(logs, "telegram.network_retry"):
+        assert retry["chat_id"] == 123
+    assert "abcDEF" not in str(logs)
+
+
+@pytest.mark.anyio
+async def test_823_envelope_api_error_has_chat_id() -> None:
+    from structlog.testing import capture_logs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"ok": False, "error_code": 400, "description": "x"},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http)
+    try:
+        with capture_logs() as logs:
+            result = await api.edit_message_text(chat_id=123, message_id=9, text="x")
+    finally:
+        await http.aclose()
+    assert result is None
+    errors = _events(logs, "telegram.api_error")
+    assert len(errors) == 1
+    assert errors[0]["chat_id"] == 123
+    assert errors[0]["message_id"] == 9
+    assert api.pop_last_api_error("editMessageText", 123, 9) == "x"
+
+
+@pytest.mark.parametrize("payload", [None, "x", [1, 2], 5])
+def test_823_payload_target_non_dict(payload: object) -> None:
+    from untether.telegram.client_api import _payload_target
+
+    assert _payload_target(payload) == (None, None)
+
+
+def test_823_payload_target_dict() -> None:
+    from untether.telegram.client_api import _payload_target
+
+    assert _payload_target({"chat_id": 1, "message_id": 2}) == (1, 2)
+    assert _payload_target({"offset": 3}) == (None, None)
+
+
+# --- #823: the message kind (progress / final / …) on the error lines ---
+
+
+@pytest.mark.anyio
+async def test_823_kind_rides_the_outbox_onto_benign_rejection() -> None:
+    """The caller sets the kind (``message_kind``), but the request runs on
+    the outbox worker task, so the op must carry it across."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.client import TelegramClient
+    from untether.transport import message_kind
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": _EDIT_GONE},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = TelegramClient(
+        "123:abcDEF_ghij", http_client=http, private_chat_rps=0, group_chat_rps=0
+    )
+    try:
+        with capture_logs() as logs:
+            with message_kind("progress"):
+                await client.edit_message_text(chat_id=123, message_id=9, text="x")
+            await client.edit_message_text(chat_id=123, message_id=10, text="x")
+    finally:
+        await client.close()
+        await http.aclose()
+    recs = _events(logs, "telegram.benign_rejection")
+    assert [(r["message_id"], r["kind"]) for r in recs] == [
+        (9, "progress"),
+        (10, None),
+    ]
+
+
+@pytest.mark.anyio
+async def test_823_kind_on_http_api_and_network_errors() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.transport import current_message_kind, message_kind
+
+    responses = iter(
+        [
+            httpx.Response(400, json={"ok": False, "description": "Bad Request: x"}),
+            httpx.Response(200, json={"ok": False, "error_code": 400}),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            resp = next(responses)
+        except StopIteration:
+            raise httpx.ConnectError("boom", request=request) from None
+        resp.request = request
+        return resp
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http)
+    try:
+        with capture_logs() as logs, message_kind("final"):
+            for _ in range(3):
+                await api.send_message(chat_id=123, text="x")
+            with message_kind("bg_status"):
+                assert current_message_kind() == "bg_status"
+            assert current_message_kind() == "final"
+    finally:
+        await http.aclose()
+    assert current_message_kind() is None
+    for name in ("telegram.http_error", "telegram.api_error", "telegram.network_error"):
+        recs = _events(logs, name)
+        assert recs and recs[0]["kind"] == "final", name

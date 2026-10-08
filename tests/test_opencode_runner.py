@@ -78,6 +78,35 @@ def test_translate_success_fixture() -> None:
     assert completed.answer == "```\nhello\n```"
 
 
+def test_opencode_two_runs_through_real_translation() -> None:
+    """#417: the real nested OpenCode usage shape accumulates as ``per_run``
+    in the session ledger (two runs of the success fixture)."""
+    from untether import runner_bridge as rb
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = "ses_417_two_runs"
+    for i in range(2):
+        state = OpenCodeStreamState()
+        events: list = []
+        for event in _load_fixture("opencode_stream_success.jsonl"):
+            events.extend(
+                translate_opencode_event(event, title="opencode", state=state)
+            )
+        completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
+        usage = completed.usage
+        assert usage is not None
+        out = rb._apply_token_delta("opencode", sid, usage, resumed=i > 0)
+        assert out is not None
+        assert out["usage"] == usage["usage"]
+        assert "session_total_usage" in out
+    tokens = get_session_cost_ledger().session_tokens("opencode", sid)
+    assert tokens is not None
+    assert tokens.totals["input_tokens"] == 44886
+    assert tokens.totals["cache_read_tokens"] == 42830
+    assert tokens.totals["output_tokens"] == 236
+    assert tokens.runs == 2
+
+
 def test_translate_missing_reason_success() -> None:
     state = OpenCodeStreamState()
     events: list = []
@@ -114,7 +143,7 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "text",
                 "sessionID": "ses_test123",
-                "part": {"type": "text", "text": "Hello "},
+                "part": {"id": "prt_1", "type": "text", "text": "Hello"},
             }
         ),
         title="opencode",
@@ -125,14 +154,15 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "text",
                 "sessionID": "ses_test123",
-                "part": {"type": "text", "text": "World"},
+                "part": {"id": "prt_2", "type": "text", "text": "World"},
             }
         ),
         title="opencode",
         state=state,
     )
 
-    assert state.last_text == "Hello World"
+    # #955: distinct text parts are separated, never glued together.
+    assert state.last_text == "Hello\n\nWorld"
 
     events = translate_opencode_event(
         _decode_event(
@@ -153,12 +183,84 @@ def test_translate_accumulates_text() -> None:
     assert len(events) == 1
     completed = events[0]
     assert isinstance(completed, CompletedEvent)
-    assert completed.answer == "Hello World"
+    assert completed.answer == "Hello\n\nWorld"
     assert completed.ok is True
     assert completed.usage is not None
     assert completed.usage["total_cost_usd"] == 0.005
     assert completed.usage["usage"]["input_tokens"] == 100
     assert completed.usage["usage"]["output_tokens"] == 10
+
+
+def _text_event(text: str, part_id: str | None) -> opencode_schema.OpenCodeEvent:
+    part: dict = {"type": "text", "text": text}
+    if part_id is not None:
+        part["id"] = part_id
+    return _decode_event({"type": "text", "sessionID": "ses_t955", "part": part})
+
+
+def test_translate_text_parts_across_tool_call_keep_separator() -> None:
+    """#955: text, a tool call, then more text must not run together."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(
+        _text_event("I'll read CLAUDE.md.", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _decode_event(
+            {
+                "type": "tool_use",
+                "sessionID": "ses_t955",
+                "part": {
+                    "id": "prt_tool",
+                    "callID": "call_1",
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "CLAUDE.md"},
+                        "output": "...",
+                    },
+                },
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+    translate_opencode_event(
+        _text_event("Files listed below.", "prt_b"), title="opencode", state=state
+    )
+    events = translate_opencode_event(
+        _decode_event(
+            {"type": "step_finish", "sessionID": "ses_t955", "part": {"reason": "stop"}}
+        ),
+        title="opencode",
+        state=state,
+    )
+    completed = events[-1]
+    assert isinstance(completed, CompletedEvent)
+    assert "CLAUDE.md.Files" not in completed.answer
+    assert completed.answer == "I'll read CLAUDE.md.\n\nFiles listed below."
+
+
+def test_translate_repeated_text_part_id_replaces_not_duplicates() -> None:
+    """#955: a re-emitted part (same part.id) updates in place, no duplicate."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(
+        _text_event("Draft", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _text_event("Draft, revised", "prt_a"), title="opencode", state=state
+    )
+    translate_opencode_event(
+        _text_event("Tail", "prt_b"), title="opencode", state=state
+    )
+    assert state.last_text == "Draft, revised\n\nTail"
+
+
+def test_translate_text_parts_without_id_are_separated() -> None:
+    """#955: parts with no id are still treated as distinct parts."""
+    state = OpenCodeStreamState(session_id="ses_t955", emitted_started=True)
+    translate_opencode_event(_text_event("One.", None), title="opencode", state=state)
+    translate_opencode_event(_text_event("Two.", None), title="opencode", state=state)
+    assert state.last_text == "One.\n\nTwo."
 
 
 def test_translate_accumulates_cost_across_steps() -> None:
@@ -801,3 +903,163 @@ def test_build_runner_no_opencode_config(
     runner = build_runner({}, tmp_path / "untether.toml")
     assert runner.model is None
     assert runner.session_title == "opencode"
+
+
+# ---------------------------------------------------------------------------
+# #970: OpenCode v2 (@opencode/cli) version guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("1.14.33\n", (1, 14, 33)),
+        ("2.0.23", (2, 0, 23)),
+        ("opencode 2.0.23\nextra", (2, 0, 23)),
+        ("opencode v2.0.24\n", (2, 0, 24)),  # real @opencode/cli 2.0.24 output
+        ("v1.18.4", (1, 18, 4)),
+        ("", None),
+        ("not a version", None),
+    ],
+)
+def test_parse_opencode_version(output: str, expected) -> None:
+    from untether.runners.opencode import parse_opencode_version
+
+    assert parse_opencode_version(output) == expected
+
+
+def _fake_opencode_bin(tmp_path: Path) -> Path:
+    """A fake ``opencode`` that records each spawn and emits a v1 run."""
+    marker = tmp_path / "spawned"
+    script = tmp_path / "opencode"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo spawn >> "{marker}"\n'
+        "echo '"
+        '{"type":"step_start","sessionID":"ses_v1ok","part":{}}'
+        "'\n"
+        "echo '"
+        '{"type":"text","sessionID":"ses_v1ok","part":{"id":"p1","text":"ok"}}'
+        "'\n"
+        "echo '"
+        '{"type":"step_finish","sessionID":"ses_v1ok","part":{"reason":"stop"}}'
+        "'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.anyio
+async def test_run_refuses_opencode_v2_without_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a 2.x CLI fails fast with a clear message and never spawns `run`."""
+    from untether.runner import prespawn_blocked_reason
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: "2.0.23")
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+    resume = ResumeToken(engine=ENGINE, value="ses_keepme")
+
+    events = [evt async for evt in runner.run("hello", resume)]
+
+    assert len(events) == 1
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.ok is False
+    assert completed.error is not None
+    assert "OpenCode 2.0.23" in completed.error
+    assert "opencode-ai@1" in completed.error
+    assert completed.resume == resume
+    # Guard block: the chat's saved session must not be auto-cleared (#838).
+    assert prespawn_blocked_reason(completed.usage) == "unsupported_version"
+    assert not (tmp_path / "spawned").exists()
+
+
+@pytest.mark.anyio
+async def test_run_allows_opencode_v1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a 1.x CLI runs as before."""
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: "1.14.33")
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+
+    events = [evt async for evt in runner.run("hello", None)]
+
+    assert isinstance(events[0], StartedEvent)
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is True
+    assert events[-1].answer == "ok"
+    assert (tmp_path / "spawned").exists()
+
+
+@pytest.mark.anyio
+async def test_run_unknown_opencode_version_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a failed/unparsable probe never blocks a run (logged instead)."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", lambda path: None)
+    runner = OpenCodeRunner(opencode_cmd=str(script))
+
+    with capture_logs() as logs:
+        events = [evt async for evt in runner.run("hello", None)]
+
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is True
+    assert any(e["event"] == "opencode.version.unknown" for e in logs)
+
+
+def test_opencode_version_probe_cached_per_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: one --version probe per (binary, mtime); an upgrade re-probes."""
+    import os
+
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    calls: list[str] = []
+
+    def probe(path: str) -> str:
+        calls.append(path)
+        return "1.14.33"
+
+    monkeypatch.setattr(opencode_mod, "_probe_opencode_version", probe)
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert len(calls) == 1
+
+    st = script.stat()
+    os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert opencode_mod.opencode_cli_version(str(script)) == "1.14.33"
+    assert len(calls) == 2
+
+
+def test_opencode_version_unresolvable_command_is_unknown() -> None:
+    from untether.runners import opencode as opencode_mod
+
+    assert opencode_mod.opencode_cli_version("definitely-not-opencode-xyz") is None
+
+
+def test_opencode_version_probe_failure_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#970: a failed probe re-probes next time instead of sticking."""
+    from untether.runners import opencode as opencode_mod
+
+    script = _fake_opencode_bin(tmp_path)
+    results = iter([None, "2.0.23"])
+    monkeypatch.setattr(
+        opencode_mod, "_probe_opencode_version", lambda path: next(results)
+    )
+    assert opencode_mod.opencode_cli_version(str(script)) is None
+    assert opencode_mod.opencode_cli_version(str(script)) == "2.0.23"

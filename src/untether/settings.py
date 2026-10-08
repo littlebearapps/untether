@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import functools
 import os
 import re
+import tomllib
+from collections import OrderedDict
 from collections.abc import Iterable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -18,7 +23,7 @@ from pydantic import (
 )
 from pydantic.types import StrictInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings.sources import TomlConfigSettingsSource
+from pydantic_settings.sources import InitSettingsSource, TomlConfigSettingsSource
 
 from .config import (
     HOME_CONFIG_PATH,
@@ -62,9 +67,10 @@ class TelegramFilesSettings(BaseModel):
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
     # Secret/credential patterns never delivered from the outbox. Broadened
     # for #628 recursive directory (zip) delivery, which makes shipping a
-    # nested secret far easier than the old flat scan — matched right-to-left
-    # by ``deny_reason`` (PurePosixPath.match), so bare names like ``.env``
-    # also match nested members.
+    # nested secret far easier than the old flat scan. Matched by
+    # ``deny_reason`` (``telegram/files.py:_glob_matches``): bare names like
+    # ``.env`` still match right-anchored at any depth, and ``**`` is
+    # recursive, so ``**/*.pem`` also denies a root-level ``key.pem`` (#831).
     deny_globs: list[NonEmptyStr] = Field(
         default_factory=lambda: [
             ".git/**",
@@ -104,6 +110,12 @@ class TelegramFilesSettings(BaseModel):
     # attachment per directory. Directories with no deliverable members (all
     # denied/empty) or an oversize zip fall back to the #600 archive.
     outbox_deliver_directories: Literal["off", "zip"] = "off"
+    # #924: deliver only entries written or copied into the outbox during the
+    # run (``max(mtime, ctime)`` ≥ the run's start, 5 s grace). "archive"
+    # (default) moves older leftovers once to ``<outbox>/.skipped/`` with one
+    # notice; "send" is the legacy deliver-everything behaviour (kill switch).
+    # Hot-reloads (read per delivery); not in RESTART_REQUIRED_FIELDS.
+    outbox_stale_policy: Literal["archive", "send"] = "archive"
 
     @field_validator("uploads_dir")
     @classmethod
@@ -117,6 +129,10 @@ class TelegramFilesSettings(BaseModel):
     def _validate_outbox_dir(cls, value: str) -> str:
         if Path(value).is_absolute():
             raise ValueError("files.outbox_dir must be a relative path")
+        # #924 review: `..` would let the outbox (and its stale archiving)
+        # reach outside the project.
+        if ".." in Path(value).parts:
+            raise ValueError("files.outbox_dir must not contain '..'")
         return value
 
 
@@ -152,6 +168,11 @@ class TelegramTransportSettings(BaseModel):
     # to True is logged at INFO on every boot so the deviation is
     # visible in journalctl.
     allow_any_user: bool = False
+    # #388: opt-in for multi-user chats — a Claude approval button or an
+    # AskUserQuestion answer is accepted only from the user whose message
+    # started the run. Runs with no human originator (cron, webhook, /at,
+    # loop fires) stay answerable by any allowed user. Hot-reloads.
+    approval_originator_only: bool = False
     message_overflow: Literal["trim", "split"] = "split"
     voice_transcription: bool = False
     voice_max_bytes: StrictInt = 10 * 1024 * 1024
@@ -166,6 +187,18 @@ class TelegramTransportSettings(BaseModel):
     # stops Whisper-family models mis-guessing the language on short
     # utterances ('Continue' → '계속').
     voice_transcription_language: NonEmptyStr | None = None
+    # #691: optional vocabulary-bias prompt forwarded to the STT API — steers
+    # the decoder toward domain proper nouns ('trollo' → Trello). Effect is
+    # model-dependent; keep it to genuinely high-frequency nouns — an
+    # overstuffed prompt can induce hallucinated terms on short clips.
+    #
+    # #703: unset now resolves to DEFAULT_VOICE_TRANSCRIPTION_PROMPT (the
+    # product-generic engine/tool vocabulary) rather than omitting the
+    # parameter — #691 shipped inert on every fleet host because no TOML set
+    # it. Explicit `""` disables, matching how `[preamble] text = ""` works;
+    # that's why this is `str | None` and not `NonEmptyStr | None` — the
+    # empty string has to survive validation to mean anything.
+    voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
     # voice_transcription_base_url — lets operators opt in to private endpoints
@@ -173,6 +206,10 @@ class TelegramTransportSettings(BaseModel):
     voice_transcription_url_allowlist: list[str] = Field(default_factory=list)
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
+    # #775: what a message sent during a live Claude run does by default —
+    # "queue" (wait for the turn to end) or "steer" (fold it into the running
+    # turn). Per-chat / per-topic overrides via /config, /steer and /queue.
+    followup_mode: Literal["queue", "steer"] = "queue"
     forward_coalesce_s: float = Field(default=1.0, ge=0)
     media_group_debounce_s: float = Field(default=1.0, ge=0)
     topics: TelegramTopicsSettings = Field(default_factory=TelegramTopicsSettings)
@@ -225,6 +262,32 @@ class TelegramTransportSettings(BaseModel):
             ) from exc
         return SecretStr(key)
 
+    @field_validator("voice_transcription_prompt", mode="after")
+    @classmethod
+    def _validate_voice_prompt(cls, v: str | None) -> str | None:
+        """#691: strip; reject rather than silently truncate past 1000 chars —
+        provider prompt windows are token-capped (~224 for Whisper) and
+        invisible truncation would change the configured bias without telling
+        the operator.
+
+        #703: an explicitly-configured empty string is PRESERVED as ``""``
+        (the opt-out sentinel) instead of collapsing to ``None``. ``None`` now
+        means "unset → use the shipped default", so the two must stay
+        distinguishable. Resolution happens in
+        :func:`untether.telegram.voice.resolve_transcription_prompt`.
+        """
+        if v is None:
+            return None
+        prompt = v.strip()
+        if not prompt:
+            return ""
+        if len(prompt) > 1000:
+            raise ValueError(
+                "voice_transcription_prompt must be ≤1000 characters "
+                f"(got {len(prompt)}); keep it to high-frequency domain nouns"
+            )
+        return prompt
+
     @field_validator("voice_transcription_language", mode="after")
     @classmethod
     def _validate_voice_language(cls, v: str | None) -> str | None:
@@ -253,7 +316,13 @@ class TelegramTransportSettings(BaseModel):
         resolve to a private IP are caught later (async, with DNS) at the
         chokepoint in ``transcribe_voice``."""
         # Lazy import to avoid any import-time cycle through the triggers pkg.
-        from .triggers.ssrf import SSRFError, parse_networks, validate_url
+        from .triggers.ssrf import (
+            SSRFBlockedError,
+            SSRFError,
+            parse_networks,
+            suggest_allowlist,
+            validate_url,
+        )
 
         try:
             networks = parse_networks(self.voice_transcription_url_allowlist)
@@ -267,9 +336,26 @@ class TelegramTransportSettings(BaseModel):
             try:
                 validate_url(self.voice_transcription_base_url, allowlist=networks)
             except SSRFError as exc:
+                # #679: name the key that opts the address in (or say it
+                # can't be opted in safely). Stays DNS-free — this runs on
+                # every config load and reload.
+                guidance = ""
+                if isinstance(exc, SSRFBlockedError):
+                    suggested = suggest_allowlist(exc.addresses)
+                    if suggested:
+                        entries = ", ".join(f'"{e}"' for e in suggested)
+                        guidance = (
+                            f"; to allow it, add {entries} to [transports.telegram] "
+                            "voice_transcription_url_allowlist"
+                        )
+                    else:
+                        guidance = (
+                            "; this address range can't be allowlisted safely — "
+                            "use a different host"
+                        )
                 raise ValueError(
                     "[transports.telegram] voice_transcription_base_url is not "
-                    f"permitted: {exc}"
+                    f"permitted: {exc}{guidance}"
                 ) from exc
         return self
 
@@ -327,13 +413,24 @@ class CostBudgetSettings(BaseModel):
     max_cost_per_day: float | None = Field(default=None, ge=0)
     warn_at_pct: int = Field(default=70, ge=0, le=100)
     auto_cancel: bool = False
+    # #702: a per-run spend signal that does NOT require the rest of this
+    # block. Everything above is gated on `enabled`, so the one configuration
+    # where a spend alarm matters most — no budget at all — is the one where
+    # it was disabled by construction. Unset falls back to
+    # DEFAULT_RUN_OUTLIER_USD; 0 disables the signal entirely.
+    warn_run_above_usd: float | None = Field(default=None, ge=0)
+    # Opt-out for the one-line chat notice. The log event fires regardless —
+    # the notice is the half that reaches an operator who isn't reading
+    # journalctl, which is exactly the `show_api_cost = false` fleet default.
+    notify_run_outlier: bool = True
 
 
 class LoopSettings(BaseModel):
-    """Untether-side observation of Claude Code's session-scoped scheduling
-    tools (CronCreate, ScheduleWakeup) so /loop and dynamic-mode wakeups
-    keep firing after the subprocess exits.  Off by default — opt-in
-    per-chat via /config → 🔁 Loop mode (#289).
+    """Untether-side ownership of Claude Code's scheduling tools
+    (CronCreate, ScheduleWakeup): in Loop-mode chats Untether runs /loop
+    schedules itself, with the caps below, and fires long wake-ups after
+    the subprocess exits (#289, #925).  Loop mode is off by default —
+    opt-in per-chat via /config → 🔁 Loop mode.
 
     Cost limits are NOT in [loop]; they live in [cost_budget] and apply
     to loop fires automatically.  The caps below are runaway-safety
@@ -349,6 +446,13 @@ class LoopSettings(BaseModel):
     max_total_duration_hours: int = Field(default=4, ge=1, le=168)
     min_interval_seconds: int = Field(default=60, ge=60)
     expiry_days: int = Field(default=7, ge=1, le=30)
+    # #925: Untether owns Claude's schedules. An SDK PreToolUse hook on every
+    # control-channel spawn declines CronCreate — Loop mode on: registered
+    # here with the caps above; off: declined with Loop-mode / /at guidance —
+    # and self-paced wake-up chains stop after ``max_iterations``. ``false``
+    # = rc19 behaviour in both modes (kill switch; hot-reloads). Remove the
+    # key before rolling back to rc19, which rejects unknown [loop] keys.
+    own_schedule: bool = True
 
 
 class FooterSettings(BaseModel):
@@ -433,6 +537,11 @@ class WatchdogSettings(BaseModel):
     tool_timeout: float = Field(default=600.0, ge=60, le=7200)
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
+    # #684: detect-only WARNING ``control_request.unanswerable`` for a control
+    # request pending past ``tool_timeout`` with nothing on screen that can
+    # answer it (no approval/option button, no text-reply route) or no stdin
+    # writer. Never denies, never releases a live-session hold. Kill switch.
+    detect_unanswerable_control_requests: bool = True
 
     # Engine-agnostic "stuck after tool_result" detector (issue #322).
     # Default threshold of 300s matches undici's non-configurable 5-min
@@ -548,18 +657,58 @@ class WatchdogSettings(BaseModel):
     # RSS/TCP) is released promptly. 0 disables the shortcut. Range 0-600s.
     post_result_limbo_grace: float = Field(default=60.0, ge=0, le=600)
 
-    # #647/#646: liveness-aware extension of the post-result ceiling. Upstream
-    # runs Agent/Task subagents in the background by default (Claude Code
-    # ≥2.1.198) and their completion is never signalled on stream-json, so a
-    # fixed `post_result_idle_timeout` SIGTERMs live subagent work mid-flight —
-    # which quarantines the session (#632) and diverts the user's next message
-    # to a fresh contextless session. When the ceiling expires while background
-    # handles are still live and the process tree is not demonstrably idle
-    # (/proc CPU evidence), the SIGTERM is deferred and re-checked each poll.
-    # Bounded: background handles age out at 900 s from registration, and the
-    # total post-result hold never exceeds this cap. 0 disables the extension
-    # (pre-rc10 fixed-cap behaviour). Range 0-2h.
+    # The background hold, in seconds. It has two meanings:
+    # - Live sessions (#776, the default; #829): how long a live Claude
+    #   session stays open with background work still running and **no
+    #   background activity** — no turn, no agent `task_progress` frame, no
+    #   subagent tool starting or ending, no output from a background Bash —
+    #   before Untether closes it with a notice (`max_hold`). With
+    #   `bg_hold_rearm_on_progress = false` it counts from the last turn only
+    #   (the rc14 behaviour). `live_session_max_s` still caps the process.
+    #   A declared wait (#872, `bg_hold_declared_waits`) is never cut short.
+    # - `live_sessions = false` (legacy, #647/#646): the liveness-aware
+    #   extension of the post-result ceiling — when `post_result_idle_timeout`
+    #   expires while background handles are live and the process tree is not
+    #   demonstrably idle (/proc CPU evidence), the SIGTERM is deferred, and
+    #   the total post-result hold never exceeds this cap. 0 disables it.
+    # Read per spawn. Range 0-2h.
     post_result_bg_max_hold: float = Field(default=1800.0, ge=0, le=7200)
+    # #829: re-arm the live-session background hold on background activity
+    # (see `post_result_bg_max_hold`). False = the hold counts from the last
+    # turn only (rc14). Read per spawn, so a change applies to the next run.
+    bg_hold_rearm_on_progress: bool = True
+    # #872: a live session's background hold never closes before a declared
+    # wait ends — a background Bash's `timeout` (with `run_in_background`;
+    # the CLI enforces it, up to 2 h) or a pending ScheduleWakeup (up to 1 h)
+    # — plus a short grace, still capped by `live_session_max_s`. False = the
+    # rc16 quiet-time rule only. Read per spawn.
+    bg_hold_declared_waits: bool = True
+
+    # #776: live-session model for Claude (control-channel mode). The process
+    # stays live after its reply: background-task / scheduled-wakeup /
+    # Monitor turns are delivered to Telegram and follow-ups are written into
+    # the live process instead of resuming. Kill switch: false restores the
+    # pre-rc11 "stop reading at the first result" behaviour.
+    live_sessions: bool = True
+    # #776: absolute lifetime cap for one live Claude process, from spawn
+    # (backstop against e.g. an endless Monitor). Range 10 min - 24 h.
+    live_session_max_s: float = Field(default=14400.0, ge=600, le=86400)
+    # #383: in a plan / plan-auto chat, put a live Claude session back into
+    # plan mode (the CLI's own ``set_permission_mode``) when an approved plan
+    # took it out, so later follow-ups (and, in plan chats, background
+    # wake-ups) are planned again. Read per spawn. Kill switch: false = never
+    # sent (pre-rc15 behaviour; each plan approval then lasts the process).
+    rearm_plan_mode: bool = True
+    # #812: keep a live Claude session's stdin open while a hook the CLI
+    # runs in the background (``async`` / ``asyncRewake``) is still pending,
+    # so an ``asyncRewake`` hook's findings arrive as their own wake turn
+    # instead of being dropped when stdin closes. Passes
+    # ``--include-hook-events`` (when the installed CLI lists it) to see the
+    # hooks. Kill switch: false = no flag, no hold (pre-rc14 behaviour).
+    hold_for_async_hooks: bool = True
+    # #812: bound on the hold per hook, from its ``hook_started``. Default =
+    # the CLI's enforced 600 s asyncRewake timeout + its 30 s exit wait.
+    async_hook_max_hold: float = Field(default=630.0, ge=0, le=3600)
 
     # #481: grace window for fresh Bash/BashOutput tool calls. When the most
     # recent action is Bash/BashOutput/KillShell and its age is less than
@@ -601,6 +750,17 @@ class ProgressSettings(BaseModel):
     # stall_check_interval) and only runs the threshold check at the slower
     # cadence. Range 5s-120s.
     heartbeat_interval: float = Field(default=30.0, ge=5, le=120)
+    # #777: live background-task status (Claude). The pre-result block in the
+    # progress message plus the post-result status message, and its row cap
+    # ("+N more" beyond it).
+    show_background_tasks: bool = True
+    background_tasks_max_rows: int = Field(default=5, ge=1, le=20)
+    # #785 part 2: fold short wake-turn acks (no tools, no approval, short
+    # answer) into that status message instead of a new pushed message.
+    consolidate_wake_turns: bool = True
+    # #819: Claude's context-window use as ``N% ctx`` at the end of the
+    # progress / final / turn header line. Display-only kill switch.
+    show_context_usage: bool = True
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -657,6 +817,9 @@ class SecuritySettings(BaseModel):
 
 
 class UntetherSettings(BaseSettings):
+    # #506: the parse cache in ``load_settings_if_exists`` keys on the file's
+    # bytes + ``_env_fingerprint()``. If an ``env_file`` / ``secrets_dir`` is
+    # ever added here, that key must grow to cover it.
     model_config = SettingsConfigDict(
         extra="allow",
         env_prefix="UNTETHER__",
@@ -864,6 +1027,7 @@ class UntetherSettings(BaseSettings):
 
 
 def load_settings(path: str | Path | None = None) -> tuple[UntetherSettings, Path]:
+    """Strict loader (startup, config watcher, onboarding). Never cached (#506 D3)."""
     cfg_path = _resolve_config_path(path)
     _ensure_config_file(cfg_path)
     migrate_config_file(cfg_path)
@@ -873,15 +1037,168 @@ def load_settings(path: str | Path | None = None) -> tuple[UntetherSettings, Pat
 def load_settings_if_exists(
     path: str | Path | None = None,
 ) -> tuple[UntetherSettings, Path] | None:
+    """Load settings if the config file exists, else ``None``.
+
+    #506: the result is cached per path, keyed on the file's exact bytes plus
+    the ``UNTETHER__*`` environment, so an unchanged file is parsed once
+    instead of on every read, while an edit still applies on the very next
+    read (#269 per-run hot-reload, including mid-live-session turns).
+
+    A cache hit returns a **shared, read-only** ``UntetherSettings`` instance:
+    do not mutate it — ``model_copy()`` it if you need a private copy.
+    Set ``UNTETHER_SETTINGS_CACHE=0`` to disable the cache.
+    """
     cfg_path = _resolve_config_path(path)
     if cfg_path.exists():
         if not cfg_path.is_file():
             raise ConfigError(
                 f"Config path {cfg_path} exists but is not a file."
             ) from None
+        if _settings_cache_enabled():
+            return _load_settings_cached(cfg_path), cfg_path
         migrate_config_file(cfg_path)
         return _load_settings_from_path(cfg_path), cfg_path
+    _SETTINGS_CACHE.pop(str(cfg_path), None)
     return None
+
+
+# ---------------------------------------------------------------------------
+# #506: content-keyed settings parse cache
+# ---------------------------------------------------------------------------
+#
+# One Claude message used to parse untether.toml at least 15 times (plus ~one
+# per tool call), each parse blocking the event loop for ~10-47 ms. The key is
+# the exact file bytes, not ``(mtime_ns, size)`` (``config_watch`` too, #839):
+# on kernels < 6.13 timestamps are coarse, so two same-size writes inside one
+# tick share a stat signature and a stat-keyed cache would serve stale config.
+
+_SETTINGS_CACHE_MAX = 4
+_SETTINGS_CACHE_ENV = "UNTETHER_SETTINGS_CACHE"
+_SETTINGS_CACHE_OFF = frozenset({"0", "false", "off", "no"})
+_ENV_PREFIX = "UNTETHER__"
+
+
+@dataclass(slots=True, frozen=True)
+class _CachedSettings:
+    raw: bytes
+    env: tuple[tuple[str, str], ...]
+    settings: UntetherSettings
+
+
+_SETTINGS_CACHE: OrderedDict[str, _CachedSettings] = OrderedDict()
+
+# The TOML data for the in-memory source, set only around one instantiation.
+_TOML_DATA: ContextVar[dict[str, Any] | None] = ContextVar(
+    "untether_settings_toml_data", default=None
+)
+
+
+class _InMemoryTomlSettings(UntetherSettings):
+    """``UntetherSettings`` fed from already-parsed TOML (``_TOML_DATA``)
+    instead of re-reading the file, so the cached object is derived from
+    exactly the bytes stored as its key. Same source precedence as
+    ``UntetherSettings`` (init > env > dotenv > toml > secrets)."""
+
+    # Keep validation errors titled like the uncached path's.
+    model_config = SettingsConfigDict(
+        **UntetherSettings.model_config, title="UntetherSettings"
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            InitSettingsSource(settings_cls, init_kwargs=_TOML_DATA.get() or {}),
+            file_secret_settings,
+        )
+
+
+def _settings_cache_enabled() -> bool:
+    value = os.environ.get(_SETTINGS_CACHE_ENV, "1").strip().lower()
+    return value not in _SETTINGS_CACHE_OFF
+
+
+def _env_fingerprint() -> tuple[tuple[str, str], ...]:
+    """The ``UNTETHER__*`` env vars pydantic-settings reads (case-insensitively)."""
+    return tuple(
+        sorted(
+            (key.upper(), value)
+            for key, value in os.environ.items()
+            if key.upper().startswith(_ENV_PREFIX)
+        )
+    )
+
+
+def _parse_settings_bytes(raw: bytes, cfg_path: Path) -> UntetherSettings:
+    """Parse and validate ``raw`` (the config file's bytes) in memory."""
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        logger.error("config.read.decode_error", path=str(cfg_path), error=str(exc))
+        raise ConfigError(f"Failed to read config file {cfg_path}: {exc}") from None
+    except tomllib.TOMLDecodeError as exc:
+        logger.error("config.read.toml_error", path=str(cfg_path), error=str(exc))
+        raise ConfigError(f"Malformed TOML in {cfg_path}: {exc}") from None
+    token = _TOML_DATA.set(data)
+    try:
+        return _InMemoryTomlSettings()
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid config in {cfg_path}: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - safety net
+        raise ConfigError(f"Failed to load config {cfg_path}: {exc}") from exc
+    finally:
+        _TOML_DATA.reset(token)
+
+
+def _load_settings_cached(cfg_path: Path) -> UntetherSettings:
+    key = str(cfg_path)
+    env_now = _env_fingerprint()
+    entry = _SETTINGS_CACHE.get(key)
+    try:
+        raw_now = cfg_path.read_bytes()
+    except OSError:
+        # Let the uncached path produce today's errors/logs unchanged.
+        migrate_config_file(cfg_path)
+        return _load_settings_from_path(cfg_path)
+    if entry is not None and entry.raw == raw_now and entry.env == env_now:
+        _SETTINGS_CACHE.move_to_end(key)
+        return entry.settings
+
+    # Miss: migrate (may rewrite the file), then parse the post-migration
+    # bytes captured here — never a re-read — so no write racing the parse can
+    # leave settings cached under the wrong key. Errors are not cached (D7).
+    migrate_config_file(cfg_path)
+    raw = cfg_path.read_bytes()
+    settings = _parse_settings_bytes(raw, cfg_path)
+    if entry is None:
+        reason = "first_load"
+    elif entry.raw != raw:
+        reason = "content_changed"
+    else:
+        reason = "env_changed"
+    _SETTINGS_CACHE[key] = _CachedSettings(raw=raw, env=env_now, settings=settings)
+    _SETTINGS_CACHE.move_to_end(key)
+    while len(_SETTINGS_CACHE) > _SETTINGS_CACHE_MAX:
+        _SETTINGS_CACHE.popitem(last=False)
+    # INFO again (#498 demoted it while it fired on every read): it now fires
+    # once per real parse, and is the live verification signal for #506.
+    logger.info("config.loaded", path=key, reason=reason)
+    return settings
+
+
+def clear_settings_cache() -> None:
+    """Drop every cached settings entry and bound class (tests, #808)."""
+    _SETTINGS_CACHE.clear()
+    _bound_settings_class.cache_clear()
 
 
 def validate_settings_data(
@@ -920,20 +1237,30 @@ def _ensure_config_file(cfg_path: Path) -> None:
         raise ConfigError(f"Missing config file {cfg_path}.") from None
 
 
-def _load_settings_from_path(cfg_path: Path) -> UntetherSettings:
+@functools.lru_cache(maxsize=8)
+def _bound_settings_class(cfg_path: Path) -> type[UntetherSettings]:
+    """``UntetherSettings`` bound to ``cfg_path`` as its ``toml_file``.
+
+    #506: built once per path instead of per call (~5 ms each). Safe to reuse
+    because the class binds only the path; file and env are read at
+    instantiation."""
     cfg = dict(UntetherSettings.model_config)
     cfg["toml_file"] = cfg_path
-    Bound = type(
+    return type(
         "UntetherSettingsBound",
         (UntetherSettings,),
         {"model_config": SettingsConfigDict(**cfg)},
     )
+
+
+def _load_settings_from_path(cfg_path: Path) -> UntetherSettings:
+    Bound = _bound_settings_class(cfg_path)
     try:
         settings = Bound()
-        # #498 — fires per-helper load (footer/watchdog/progress/auto_continue/
-        # preamble/budget) by design (#269 hot-reload); too noisy at INFO.
-        # See v0.35.4 issue for caching settings within handle_message.
-        logger.debug("config.loaded", path=str(cfg_path))
+        # #506: the cached ``load_settings_if_exists`` path logs INFO
+        # ``config.loaded`` once per real parse; this uncached path
+        # (``load_settings()``, kill switch) stays at DEBUG (#498).
+        logger.debug("config.loaded", path=str(cfg_path), reason="uncached")
         return settings
     except ValidationError as exc:
         raise ConfigError(f"Invalid config in {cfg_path}: {exc}") from exc

@@ -1,6 +1,8 @@
 # Untether — Copilot Instructions
 
-Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). It runs on the user's machine and bridges agents to Telegram, so users can send tasks by voice or text, approve changes, and read results from their phone — while agents work in the background.
+Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi; Gemini CLI and Amp deprecated). It runs on the user's machine and bridges agents to Telegram, so users can send tasks by voice or text, approve changes, and read results from their phone — while agents work in the background.
+
+Website: https://untether.cc · Help centre (user docs, synced flat from `docs/` on `master`): `https://littlebearapps.com/help/untether/<file-stem>/`
 
 ## Stack
 
@@ -19,7 +21,7 @@ Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode
 
 ## Architecture
 
-Runners (`src/untether/runners/`) manage engine subprocesses, emit events via the 3-event contract (StartedEvent → ActionEvent(s) → CompletedEvent). RunnerBridge connects runners to the TelegramPresenter which handles message rendering and inline keyboards.
+Runners (`src/untether/runners/`) manage engine subprocesses, emit events via the 3-event contract (StartedEvent → ActionEvent(s) → CompletedEvent; Claude live sessions may follow it with `TurnEvent` segments, never a second CompletedEvent). RunnerBridge connects runners to the TelegramPresenter which handles message rendering and inline keyboards.
 
 All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
@@ -32,11 +34,11 @@ All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
 ## Commit conventions
 
-- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
+- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Feature branches: `feature/*`, `fix/*`, `docs/*`
 - Every bug fix references a GitHub issue
 - Update CHANGELOG.md for user-facing changes
 
 ## Commands
 
-Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/verbose`, `/restart`.
+Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/steer` / `/queue` (Claude follow-ups), `/verbose`, `/restart`.

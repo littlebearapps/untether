@@ -1,0 +1,38 @@
+title: "[Idea] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea! Ideas that get traction (👍 reactions and comments) become tracked issues.
+        Found a bug instead? Please [open a bug report](https://github.com/littlebearapps/untether/issues/new/choose).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation or workflow, from your point of view. What's awkward or missing today?
+      placeholder: "When I'm away from my desk and…"
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: How you'd like Untether to help. Rough is fine.
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine(s)?
+      multiple: true
+      options:
+        - Claude Code
+        - Codex CLI
+        - OpenCode
+        - Pi
+        - All / not engine-specific
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you've tried instead?
+      description: Workarounds, other tools, or config you've experimented with.

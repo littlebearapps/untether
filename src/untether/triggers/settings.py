@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from collections.abc import Callable
+from typing import Annotated, Any, Literal, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -15,6 +16,10 @@ from pydantic import (
     model_validator,
 )
 from pydantic.types import StrictInt
+
+from ..logging import get_logger
+
+logger = get_logger(__name__)
 
 _SAFE_PATH_RE = re.compile(r"^/[a-zA-Z0-9/_.-]+$")
 
@@ -140,6 +145,25 @@ class CronConfig(BaseModel):
     fetch: CronFetchConfig | None = None
     run_once: bool = False
     permission_mode: NonEmptyStr | None = None
+    # #743: this cron's own model / effort (reasoning) for its run only; unset
+    # inherits the chat's /model and reasoning, then engine config.
+    model: NonEmptyStr | None = None
+    reasoning: NonEmptyStr | None = None
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, v: str | None) -> str | None:
+        # Free-form like /model set (the engine rejects unknown names), but
+        # never something that could read as another argv flag or carry
+        # whitespace / control characters into argv and logs.
+        if v is None:
+            return v
+        if v.startswith("-") or any(ch.isspace() or not ch.isprintable() for ch in v):
+            raise ValueError(
+                f"invalid model {v!r}: must not start with '-' or contain "
+                "whitespace or control characters"
+            )
+        return v
 
     @field_validator("timezone")
     @classmethod
@@ -178,6 +202,40 @@ class CronConfig(BaseModel):
                 f"unknown permission_mode {self.permission_mode!r} for engine "
                 f"{self.engine!r}; allowed values: {sorted(allowed)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_reasoning(self) -> CronConfig:
+        """#743: strict when ``engine`` is explicit, else the global table.
+
+        With no ``engine`` the cron resolves later (project default, #862);
+        a level that engine doesn't allow gets the executor's run-time note.
+        """
+        if self.reasoning is None:
+            return self
+        # Import lazily to avoid a circular import at module load.
+        from ..telegram.engine_overrides import (
+            REASONING_LEVELS,
+            allowed_reasoning_levels,
+            supports_reasoning,
+        )
+
+        level = self.reasoning.lower()
+        if self.engine is not None:
+            if not supports_reasoning(self.engine):
+                raise ValueError(
+                    f"reasoning is not supported for engine {self.engine!r}"
+                )
+            allowed = allowed_reasoning_levels(self.engine)
+        else:
+            allowed = REASONING_LEVELS
+        if level not in allowed:
+            where = f"engine {self.engine!r}" if self.engine else "any engine"
+            raise ValueError(
+                f"unknown reasoning {self.reasoning!r} for {where}; "
+                f"allowed values: {list(allowed)}"
+            )
+        self.reasoning = level
         return self
 
 
@@ -226,3 +284,81 @@ class TriggersSettings(BaseModel):
 def parse_trigger_config(raw: dict[str, Any]) -> TriggersSettings:
     """Parse and validate a raw trigger config dict into settings."""
     return TriggersSettings.model_validate(raw)
+
+
+class TriggerChatFallback(NamedTuple):
+    """A trigger whose ``project`` is bound to a chat it will NOT post to."""
+
+    kind: Literal["cron", "webhook"]
+    trigger_id: str
+    project: str
+    project_chat_id: int
+
+
+def find_trigger_chat_fallbacks(
+    settings: TriggersSettings,
+    *,
+    default_chat_id: int | None,
+    project_chat_id: Callable[[str], int | None],
+) -> list[TriggerChatFallback]:
+    """Return triggers with a ``project`` but no ``chat_id`` (#894).
+
+    Such a trigger posts to the transport's default ``chat_id``, not the
+    project's bound chat, which surprises anyone who expects ``project =``
+    to route the run. Routing is deliberately unchanged (existing crons may
+    rely on it); this only finds the cases worth a warning: the project has
+    a bound chat and it differs from the default chat.
+    """
+    found: list[TriggerChatFallback] = []
+    triggers: list[tuple[Literal["cron", "webhook"], CronConfig | WebhookConfig]] = [
+        *(("cron", c) for c in settings.crons),
+        *(("webhook", w) for w in settings.webhooks),
+    ]
+    for kind, trigger in triggers:
+        if trigger.project is None or trigger.chat_id is not None:
+            continue
+        bound = project_chat_id(trigger.project)
+        if bound is None or bound == default_chat_id:
+            continue
+        found.append(TriggerChatFallback(kind, trigger.id, trigger.project, bound))
+    return found
+
+
+def warn_trigger_chat_fallbacks(
+    settings: TriggersSettings,
+    *,
+    default_chat_id: int | None,
+    project_chat_id: Callable[[str], int | None],
+    warned: set[TriggerChatFallback],
+) -> list[TriggerChatFallback]:
+    """Log ``trigger.cron.chat_fallback`` / ``trigger.webhook.chat_fallback``
+    once per finding (#894).
+
+    *warned* carries the findings already logged by this process, so a
+    config hot-reload doesn't repeat the warning; a changed finding (new
+    trigger, different project or project chat) is logged again. Returns
+    the newly logged findings.
+    """
+    new: list[TriggerChatFallback] = []
+    for item in find_trigger_chat_fallbacks(
+        settings, default_chat_id=default_chat_id, project_chat_id=project_chat_id
+    ):
+        if item in warned:
+            continue
+        warned.add(item)
+        new.append(item)
+        id_field = "cron_id" if item.kind == "cron" else "webhook_id"
+        logger.warning(
+            f"trigger.{item.kind}.chat_fallback",
+            **{id_field: item.trigger_id},
+            project=item.project,
+            project_chat_id=item.project_chat_id,
+            default_chat_id=default_chat_id,
+            hint=(
+                f"This {item.kind} has project = {item.project!r} but no "
+                "chat_id, so it posts to the transport default chat_id, not "
+                "the project's chat. Add chat_id to send it to the project's "
+                "chat."
+            ),
+        )
+    return new

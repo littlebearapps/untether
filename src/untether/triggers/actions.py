@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import tempfile
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..logging import get_logger
+from ..telegram.files import deny_reason as _files_deny_reason
 from .settings import WebhookConfig
 from .ssrf import SSRFError, clamp_timeout, validate_url_with_dns
 from .templating import render_template_fields
@@ -40,12 +41,14 @@ _FORWARD_MAX_RETRIES: int = 3
 
 
 def _deny_reason(path: Path) -> str | None:
-    """Check whether *path* matches a deny glob."""
-    posix = PurePosixPath(path.as_posix())
-    for pattern in _DENY_GLOBS:
-        if posix.match(pattern):
-            return pattern
-    return None
+    """Check whether *path* matches a deny glob.
+
+    Uses the shared ``telegram.files.deny_reason`` (#831): any ``.git``
+    component (case-insensitive) is denied, and ``**`` is recursive, so
+    ``/proj/.git/objects/ab/cd`` and ``~/.ssh/a/b`` are caught at any depth.
+    ``PurePosixPath.match`` alone treated ``**`` as a single segment.
+    """
+    return _files_deny_reason(path, _DENY_GLOBS)
 
 
 def _resolve_file_path(raw_path: str) -> Path | None:

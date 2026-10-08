@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...logging import get_logger
 from ..chat_prefs import ChatPrefsStore
-from ..engine_overrides import EngineOverrides, resolve_override_value
+from ..engine_overrides import resolve_override_value, with_override
 from ..files import split_command_args
 from ..topic_state import TopicStateStore
 from ..topics import _topic_key
@@ -136,32 +136,7 @@ async def _handle_model_command(
                 chat_prefs=chat_prefs,
                 chat_id=msg.chat_id,
                 engine=engine,
-                update=lambda current: EngineOverrides(
-                    model=model,
-                    reasoning=current.reasoning if current is not None else None,
-                    permission_mode=current.permission_mode
-                    if current is not None
-                    else None,
-                    ask_questions=current.ask_questions
-                    if current is not None
-                    else None,
-                    diff_preview=current.diff_preview if current is not None else None,
-                    show_api_cost=current.show_api_cost
-                    if current is not None
-                    else None,
-                    show_subscription_usage=current.show_subscription_usage
-                    if current is not None
-                    else None,
-                    show_resume_line=current.show_resume_line
-                    if current is not None
-                    else None,
-                    budget_enabled=current.budget_enabled
-                    if current is not None
-                    else None,
-                    budget_auto_cancel=current.budget_auto_cancel
-                    if current is not None
-                    else None,
-                ),
+                update=lambda current: with_override(current, model=model),
                 topic_unavailable="topic model overrides are unavailable.",
                 chat_unavailable="chat model overrides are unavailable (no config path).",
             )
@@ -240,32 +215,7 @@ async def _handle_model_command(
                 chat_prefs=chat_prefs,
                 chat_id=msg.chat_id,
                 engine=engine,
-                update=lambda current: EngineOverrides(
-                    model=None,
-                    reasoning=current.reasoning if current is not None else None,
-                    permission_mode=current.permission_mode
-                    if current is not None
-                    else None,
-                    ask_questions=current.ask_questions
-                    if current is not None
-                    else None,
-                    diff_preview=current.diff_preview if current is not None else None,
-                    show_api_cost=current.show_api_cost
-                    if current is not None
-                    else None,
-                    show_subscription_usage=current.show_subscription_usage
-                    if current is not None
-                    else None,
-                    show_resume_line=current.show_resume_line
-                    if current is not None
-                    else None,
-                    budget_enabled=current.budget_enabled
-                    if current is not None
-                    else None,
-                    budget_auto_cancel=current.budget_auto_cancel
-                    if current is not None
-                    else None,
-                ),
+                update=lambda current: with_override(current, model=None),
                 topic_unavailable="topic model overrides are unavailable.",
                 chat_unavailable="chat model overrides are unavailable (no config path).",
             )

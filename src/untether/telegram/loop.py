@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -14,18 +14,20 @@ from ..commands import list_command_ids
 from ..config import ConfigError
 from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
-from ..context import RunContext
+from ..context import RunContext, attended_context, unattended_trigger
 from ..directives import DirectiveError
-from ..ids import RESERVED_CHAT_COMMANDS
+from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..progress import ProgressTracker
-from ..runners.run_options import EngineRunOptions
+from ..runners.run_options import EngineRunOptions, claude_tap_waits_for
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions
 from ..transport_runtime import ResolvedMessage
+from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
+from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
 from .chat_prefs import ChatPrefsStore, resolve_prefs_path
 from .chat_sessions import ChatSessionStore, resolve_sessions_path
 from .client import poll_incoming
@@ -58,8 +60,10 @@ from .commands.parse import is_cancel_command, parse_dot_typo
 from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
-from .engine_overrides import merge_overrides
+from .engine_overrides import drop_unsupported_reasoning, merge_overrides
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .reply_context import append_reply_context, strip_reply_routing_lines
+from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
 from .topics import (
     _maybe_rename_topic,
@@ -68,13 +72,19 @@ from .topics import (
     _topics_chat_allowed,
     _topics_chat_project,
     _validate_topics_setup,
+    thread_filter_for,
 )
 from .types import (
     TelegramCallbackQuery,
     TelegramIncomingMessage,
     TelegramIncomingUpdate,
 )
-from .voice import transcribe_voice
+from .voice import (
+    check_voice_endpoint,
+    resolve_transcription_prompt,
+    transcribe_voice,
+    voice_endpoint_keys_changed,
+)
 
 logger = get_logger(__name__)
 
@@ -102,10 +112,30 @@ def _format_answered_echo(text: str) -> str:
 def _chat_session_key(
     msg: TelegramIncomingMessage, *, store: ChatSessionStore | None
 ) -> tuple[int, int | None] | None:
-    if store is None or msg.thread_id is not None:
+    """Resolve the ``(chat_id, owner)`` key chat-mode sessions persist under.
+
+    The second slot is a per-chat-type scope, not a single identity:
+
+    * private chat, main thread — ``None`` (one session for the whole chat)
+    * private chat, topic — the ``thread_id``, so each topic resumes
+      independently (#734).  Telegram's private-chat topics carry a
+      ``message_thread_id`` but are not forum topics, so ``TopicStateStore``
+      never claims them; returning ``None`` here dropped their resume token
+      entirely and every follow-up started a fresh agent session.
+    * group / supergroup, topic — ``None``, because ``TopicStateStore`` owns
+      forum topics (and wins on read, see ``ResumeResolver``)
+    * group / supergroup, no topic — the ``sender_id``
+
+    The slots can't collide: a chat is either private or a group, so a given
+    ``chat_id`` only ever uses one of the thread-scoped and sender-scoped
+    forms.
+    """
+    if store is None:
         return None
     if msg.chat_type == "private":
-        return (msg.chat_id, None)
+        return (msg.chat_id, msg.thread_id)
+    if msg.thread_id is not None:
+        return None
     if msg.sender_id is None:
         return None
     return (msg.chat_id, msg.sender_id)
@@ -129,53 +159,146 @@ async def _resolve_engine_run_options(
     merged = merge_overrides(topic_override, chat_override)
     if merged is None:
         return None
-    return EngineRunOptions(
-        model=merged.model,
-        reasoning=merged.reasoning,
-        permission_mode=merged.permission_mode,
-        ask_questions=merged.ask_questions,
-        diff_preview=merged.diff_preview,
-        show_api_cost=merged.show_api_cost,
-        show_subscription_usage=merged.show_subscription_usage,
-        show_resume_line=merged.show_resume_line,
-        budget_enabled=merged.budget_enabled,
-        budget_auto_cancel=merged.budget_auto_cancel,
-        loop_enabled=merged.loop_enabled,
+    # #416: sanitise a retired reasoning level HERE, the single producer of
+    # per-chat options, so run_job, the live follow-up / steer comparisons and
+    # the command resolver all see identical options (a stale level must never
+    # fake an `options_changed`). The executor adds the user-facing note.
+    return drop_unsupported_reasoning(
+        engine,
+        EngineRunOptions(
+            model=merged.model,
+            reasoning=merged.reasoning,
+            permission_mode=merged.permission_mode,
+            ask_questions=merged.ask_questions,
+            diff_preview=merged.diff_preview,
+            show_api_cost=merged.show_api_cost,
+            show_subscription_usage=merged.show_subscription_usage,
+            show_resume_line=merged.show_resume_line,
+            budget_enabled=merged.budget_enabled,
+            budget_auto_cancel=merged.budget_auto_cancel,
+            loop_enabled=merged.loop_enabled,
+        ),
     )
 
 
-def _apply_trigger_permission_override(
+# Trigger-level fields that win over the resolved chat/topic options for a
+# trigger's own run (#330 permission_mode). Each is copied from RunContext.
+_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode", "model", "reasoning")
+
+
+def _apply_trigger_overrides(
     run_options: EngineRunOptions | None,
     context: RunContext | None,
     *,
     engine: EngineId | None = None,
+    log: bool = True,
 ) -> EngineRunOptions | None:
-    """#330: apply a trigger-level `permission_mode` on top of resolved run_options.
+    """Apply a trigger's own overrides on top of resolved run_options (#330/#743).
 
-    Dispatchers populate ``RunContext.permission_mode`` from
-    ``CronConfig.permission_mode``; this helper overrides the resolved
-    per-chat/topic ``EngineRunOptions.permission_mode`` when a trigger
-    override is present. Logs once when the override actually changes the
-    effective value so staging debug is greppable.
+    Dispatchers populate ``RunContext`` from the trigger config
+    (``CronConfig.permission_mode``, …); each set field replaces the resolved
+    per-chat/topic value for that run only. This is the single applier for
+    every trigger-level option, used by ``run_job`` and by the live
+    follow-up / steer comparisons so all three see identical options.
+
+    ``log``: emit ``trigger.cron.<field>_override`` when an override changes
+    the effective value. Only ``run_job`` logs; the comparison sites pass
+    ``log=False`` so a follow-up or steer never prints a spurious override.
     """
-    if context is None or context.permission_mode is None:
+    if context is None:
         return run_options
-    previous_mode = run_options.permission_mode if run_options is not None else None
-    if run_options is None:
-        new_options = EngineRunOptions(permission_mode=context.permission_mode)
-    else:
-        from dataclasses import replace
+    fields = {
+        name: value
+        for name in _TRIGGER_OVERRIDE_FIELDS
+        if (value := getattr(context, name, None)) is not None
+    }
+    # #835: derived, not configured — the shared predicate marks cron and
+    # webhook runs so the runner denies anything that would wait for a tap.
+    # Never logged as an "override".
+    derived: dict[str, object] = {}
+    if (source := unattended_trigger(context)) is not None:
+        derived["unattended_trigger"] = source
+    if not fields and not derived:
+        return run_options
+    from dataclasses import replace
 
-        new_options = replace(run_options, permission_mode=context.permission_mode)
-    if previous_mode != context.permission_mode:
-        logger.info(
-            "trigger.cron.permission_mode_override",
-            trigger_source=context.trigger_source,
-            chat_permission_mode=previous_mode,
-            trigger_permission_mode=context.permission_mode,
-            engine=engine,
-        )
+    base = run_options if run_options is not None else EngineRunOptions()
+    if "reasoning" in fields:
+        # #743: the cron's own level replaces the chat's, so a stale chat
+        # level dropped by the resolver (#416) must not be reported as
+        # ignored for this run.
+        derived["ignored_reasoning"] = None
+    new_options = replace(base, **fields, **derived)
+    if engine is not None and "reasoning" in fields:
+        # #416 parity with the resolver and the executor, so comparisons see
+        # the same options the run is spawned with.
+        new_options = drop_unsupported_reasoning(engine, new_options)
+    if log:
+        for name, value in fields.items():
+            previous = getattr(run_options, name) if run_options is not None else None
+            if previous != value:
+                logger.info(
+                    f"trigger.cron.{name}_override",
+                    trigger_source=context.trigger_source,
+                    engine=engine,
+                    **{f"chat_{name}": previous, f"trigger_{name}": value},
+                )
     return new_options
+
+
+# #751: (trigger_source, mode) pairs already warned about, per process.
+_UNATTENDED_RISK_WARNED: set[tuple[str, str]] = set()
+_UNATTENDED_RISK_WARNED_MAX = 256
+
+
+def _note_unattended_approval_risk(
+    context: RunContext | None,
+    engine: EngineId | None,
+    run_options: EngineRunOptions | None,
+    engine_default_mode: Callable[[], str | None],
+) -> None:
+    """#751: warn once per (trigger, mode) when a cron or webhook run goes to
+    Claude in a mode that asks for a Telegram tap nobody is there to give.
+
+    Sees the real resolved mode — the cron's own, else the chat/topic
+    preference, else engine config — which the config-time audit can't.
+    Log only: since #835 those requests are denied at once (``outcome``).
+    """
+    if context is None or engine != "claude":
+        return
+    source = unattended_trigger(context)
+    if source is None:
+        return
+    mode = run_options.permission_mode if run_options is not None else None
+    if context.permission_mode is not None:
+        origin = "cron"
+    elif mode is not None:
+        origin = "chat_pref"
+    else:
+        origin = "engine_config"
+        try:
+            mode = engine_default_mode()
+        except Exception:  # noqa: BLE001 — a warning must never break a run
+            return
+    waits_for = claude_tap_waits_for(mode)
+    if mode is None or waits_for is None:
+        return
+    key = (source, mode)
+    if key in _UNATTENDED_RISK_WARNED:
+        return
+    if len(_UNATTENDED_RISK_WARNED) >= _UNATTENDED_RISK_WARNED_MAX:
+        _UNATTENDED_RISK_WARNED.clear()
+    _UNATTENDED_RISK_WARNED.add(key)
+    logger.warning(
+        "trigger.unattended_approval_risk",
+        phase="dispatch",
+        trigger=source,
+        mode=mode,
+        source=origin,
+        waits_for=waits_for,
+        # #835: nothing waits any more — such requests are denied at once.
+        outcome="denied",
+    )
 
 
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
@@ -214,11 +337,14 @@ async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -
     are logged and skipped so one bad chat can't mask the warning from
     the rest.
     """
+    from ..service_manager import restart_hint
+
     keys_text = ", ".join(f"`{k}`" for k in keys)
+    # #927: name the running unit/label (generic wording when undetected).
     text = (
         "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
         f"Setting {keys_text} changed — restart required to take effect.\n"
-        "Run: `systemctl --user restart untether`"
+        f"To apply: {restart_hint()}."
     )
     targets: set[int] = set()
     targets.update(cfg.runtime.project_chat_ids())
@@ -399,10 +525,20 @@ def _dispatch_builtin_command(
         else:
             # Stateless mode: just cancel running tasks and reply
             async def _stateless_new() -> None:
-                from .commands.topics import _cancel_chat_tasks
+                from .commands.topics import (
+                    _cancel_chat_tasks_counted,
+                    _cancelled_label,
+                )
 
-                cancelled = _cancel_chat_tasks(msg.chat_id, ctx.running_tasks)
-                label = "cancelled run" if cancelled else "no stored sessions to clear"
+                # #826: a forum topic's /new only cancels that topic's runs.
+                cancelled = _cancel_chat_tasks_counted(
+                    msg.chat_id,
+                    ctx.running_tasks,
+                    thread_filter=thread_filter_for(msg),
+                    thread_id=msg.thread_id,
+                )
+                # #895: an idle post-result live session is "closed", not a run.
+                label = _cancelled_label(cancelled) or "no stored sessions to clear"
                 await reply(text=f"{label} for this chat.")
 
             handler = _stateless_new
@@ -471,6 +607,24 @@ def _dispatch_builtin_command(
         task_group.start_soon(handler)
         return True
 
+    if command_id in FOLLOWUP_COMMAND_IDS and not args_text.strip():
+        # #775: bare /steer or /queue sets the default (the `<text>` form is
+        # split off in route_message and runs as a prompt).
+        from .commands.followup import handle_followup_default_command
+
+        handler = partial(
+            handle_followup_default_command,
+            cfg,
+            msg,
+            command_id,
+            ambient_context,
+            topic_store,
+            chat_prefs,
+            scope_chat_ids=scope_chat_ids,
+        )
+        task_group.start_soon(handler)
+        return True
+
     if command_id in {"listen", "trigger"}:
         # #297: /trigger is a deprecated alias for /listen. The handler
         # prepends a deprecation notice when invoked_as="trigger".
@@ -513,7 +667,16 @@ async def _drain_backlog(cfg: TelegramBridgeConfig, offset: int | None) -> int |
 
 
 async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
-    """Edit orphan progress messages from a prior instance to show interrupted."""
+    """Edit orphan progress messages from a prior instance to show interrupted.
+
+    #746: failures are expected — the orphan may have been deleted, or the id
+    may not be editable. The HTTP layer already logs each one once at the
+    right level (INFO ``telegram.benign_rejection`` for a vanished message,
+    ERROR for anything genuine), so a per-orphan failure is DEBUG here with
+    the popped reason. ``startup.orphan_cleanup.edited`` is logged only when
+    the edit actually succeeded, and one INFO ``startup.orphan_cleanup.done``
+    summarises the pass.
+    """
     config_path = cfg.runtime.config_path
     if config_path is None:
         return
@@ -528,29 +691,51 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if not entries:
         return
     logger.info("startup.orphan_cleanup", count=len(entries))
+    edited = failed = skipped = 0
+    pop = getattr(cfg.bot, "pop_edit_error", None)
     for entry in entries.values():
         chat_id = entry.get("chat_id")
         message_id = entry.get("message_id")
         if chat_id is None or message_id is None:
+            skipped += 1
             continue
         try:
-            await cfg.bot.edit_message_text(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
+            cid, mid = int(chat_id), int(message_id)
+            result = await cfg.bot.edit_message_text(
+                chat_id=cid,
+                message_id=mid,
                 text="\u26a0\ufe0f interrupted by restart",
             )
-            logger.debug(
-                "startup.orphan_cleanup.edited",
-                chat_id=chat_id,
-                message_id=message_id,
-            )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — corrupt entry (int()) or an unexpected raise
+            failed += 1
             logger.debug(
                 "startup.orphan_cleanup.edit_failed",
                 chat_id=chat_id,
                 message_id=message_id,
                 exc_info=True,
             )
+            continue
+        if result is None:
+            failed += 1
+            # The #598 reason is keyed on the ints that were sent.
+            reason = pop(cid, mid) if callable(pop) else None
+            logger.debug(
+                "startup.orphan_cleanup.edit_failed",
+                chat_id=cid,
+                message_id=mid,
+                reason=reason,
+            )
+            continue
+        # A Message, or SUPERSEDED (the winning op set the final state).
+        edited += 1
+        logger.debug("startup.orphan_cleanup.edited", chat_id=cid, message_id=mid)
+    logger.info(
+        "startup.orphan_cleanup.done",
+        count=len(entries),
+        edited=edited,
+        failed=failed,
+        skipped=skipped,
+    )
     clear_all_progress(progress_path)
 
 
@@ -616,6 +801,11 @@ async def poll_updates(
     await _cleanup_orphan_progress(cfg)
     await _send_startup(cfg)
 
+    # #927: one INFO `service.detected` line (rollout evidence). Never raises.
+    from ..service_manager import log_service_detection
+
+    log_service_detection()
+
     # Signal systemd that Untether is ready to receive traffic. No-op on
     # non-systemd runs (NOTIFY_SOCKET absent). See #287.
     if sdnotify.notify("READY=1"):
@@ -656,6 +846,10 @@ class _PendingPrompt:
     is_voice_transcribed: bool
     forwards: list[tuple[int, str]]
     cancel_scope: anyio.CancelScope | None = None
+    # #794: ids of earlier prompt messages whose text was merged into this one.
+    merged_message_ids: list[int] = field(default_factory=list)
+    # #775: "steer"/"queue" from `/steer <text>` / `/queue <text>`.
+    followup_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -744,11 +938,33 @@ class TelegramLoopState:
     seen_update_order: deque[int]
     seen_message_keys: set[MessageKey]
     seen_messages_order: deque[MessageKey]
+    # #894: last-seen ``[triggers] enabled`` (startup, then each reload) so a
+    # reload flipping it on is flagged restart-required exactly once. A
+    # failed startup init resets it to False (nothing is running).
+    triggers_enabled: bool = False
+    # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
+    # don't repeat the warning.
+    trigger_chat_fallbacks_warned: set[TriggerChatFallback] = field(default_factory=set)
+
+
+def _triggers_enable_needs_restart(
+    *, previous: bool, current: bool, running: bool
+) -> bool:
+    """#894: whether a reload's ``[triggers] enabled`` value needs a restart.
+
+    The cron scheduler and webhook server only start at startup, so turning
+    ``enabled`` on is a no-op until restart when nothing is running. Only
+    the off→on edge is flagged (not every later reload). Turning it off is
+    hot (``TriggerManager.update`` clears every cron and route), and so is
+    turning it back on while the scheduler from startup is still running.
+    """
+    return current and not previous and not running
 
 
 if TYPE_CHECKING:
     from ..runner_bridge import RunningTasks
     from ..triggers.manager import TriggerManager
+    from ..triggers.settings import TriggerChatFallback
 
 
 _FORWARD_FIELDS = (
@@ -770,13 +986,115 @@ def _forward_key(msg: TelegramIncomingMessage) -> ForwardKey:
 def _is_forwarded(raw: dict[str, object] | None) -> bool:
     if not isinstance(raw, dict):
         return False
-    return any(raw.get(field) is not None for field in _FORWARD_FIELDS)
+    return any(raw.get(name) is not None for name in _FORWARD_FIELDS)
 
 
 def _forward_fields_present(raw: dict[str, object] | None) -> list[str]:
     if not isinstance(raw, dict):
         return []
-    return [field for field in _FORWARD_FIELDS if raw.get(field) is not None]
+    return [name for name in _FORWARD_FIELDS if raw.get(name) is not None]
+
+
+def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | None:
+    """Why ``existing`` can't be folded into ``new`` (None when it can, #794).
+
+    Prompts are merged only when they would have run the same way on their
+    own: same reply target (a reply carries its own resume token), same
+    topic / session / context, same voice-transcript status. A later prompt
+    led by a directive (``/engine``, ``/project``, ``@branch``) is kept apart
+    too — merged behind the earlier text its directive would no longer lead
+    the prompt and would be silently ignored.
+    """
+    if existing.reply_id != new.reply_id:
+        return "reply_target"
+    if (
+        existing.topic_key != new.topic_key
+        or existing.chat_session_key != new.chat_session_key
+        or existing.chat_project != new.chat_project
+        or existing.ambient_context != new.ambient_context
+    ):
+        return "context"
+    if existing.is_voice_transcribed != new.is_voice_transcribed:
+        return "voice"
+    if existing.followup_override != new.followup_override:
+        # #775: a `/steer <text>` and a plain (or `/queue`) prompt must not
+        # share a run — the override would apply to both texts.
+        return "followup_mode"
+    if new.text.lstrip().startswith(("/", "@")):
+        return "directive"
+    return None
+
+
+# #807: session-control commands drop a pending coalesced prompt (with a
+# notice) instead of flushing it — flushing would only start the prompt for
+# the command to kill it, or run it in the session the user is leaving.
+_SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
+
+
+def _reply_targets_running_progress(
+    running_tasks: Mapping[MessageRef, object],
+    chat_id: int,
+    reply_id: int | None,
+) -> bool:
+    """#904: True when the reply is to a still-running task's progress
+    message. Its tool list and elapsed time are not useful reply context —
+    the prompt is routed to that task (or steered into it) anyway."""
+    if reply_id is None:
+        return False
+    from ..runner_bridge import running_task_shows_progress
+
+    ref = MessageRef(channel_id=chat_id, message_id=reply_id)
+    task = running_tasks.get(ref)
+    return task is not None and running_task_shows_progress(task, ref)
+
+
+def _is_prompt_directive(command_id: str, reserved_commands: set[str]) -> bool:
+    """True for ``/<engine>`` and ``/<project>`` — prompt directives, not
+    commands. They run as prompts and meet the #794 merge rules instead of
+    the #807 command barrier."""
+    return command_id in reserved_commands and command_id not in RESERVED_COMMAND_IDS
+
+
+def _apply_command_barrier(
+    coalescer: ForwardCoalescer,
+    key: ForwardKey,
+    *,
+    command_id: str | None,
+    is_cancel: bool,
+    reserved_commands: set[str],
+) -> tuple[_PendingPrompt, str] | None:
+    """Make a command a barrier for the coalesce window (#807).
+
+    ``/cancel``, ``/new`` and ``/continue`` drop the pending prompt and
+    return it with the command name, so the caller can tell the user. Any
+    other command flushes it first — best-effort ordering: the prompt is
+    dispatched before the command is handled, but its run starts via
+    ``start_soon`` and awaits prefs/context, so a ``/model`` or ``/planmode``
+    right behind it can still apply to it. Prompt directives (``/<engine>``, ``/<project>``) and ``/steer <text>`` (already
+    split to ``command_id=None``) are prompts and are left alone.
+    """
+    command = "cancel" if is_cancel else command_id
+    if command is None:
+        return None
+    if command in _SESSION_CONTROL_COMMANDS:
+        dropped = coalescer.drop(key, reason=command)
+        return (dropped, command) if dropped is not None else None
+    if not _is_prompt_directive(command, reserved_commands):
+        coalescer.flush(key, reason="command")
+    return None
+
+
+def _dropped_prompt_notice(pending: _PendingPrompt, *, command: str) -> str:
+    count = len(pending.merged_message_ids) + 1 + len(pending.forwards)
+    if count == 1:
+        return (
+            f"🗑️ Dropped 1 message sent just before /{command} — "
+            "send it again if you still need it."
+        )
+    return (
+        f"🗑️ Dropped {count} messages sent just before /{command} — "
+        "send them again if you still need them."
+    )
 
 
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
@@ -805,20 +1123,43 @@ class ForwardCoalescer:
         self._dispatch = dispatch
         self._pending = pending
 
-    def cancel(self, key: ForwardKey) -> None:
+    def flush(self, key: ForwardKey, *, reason: str) -> bool:
+        """Dispatch the prompt pending for ``key`` now (#807).
+
+        Returns whether anything was pending. Used as a best-effort barrier
+        ahead of a command: the prompt is dispatched before the command is
+        handled, but dispatch runs via ``start_soon`` and awaits prefs /
+        context, so a setting command right behind it may still apply to it.
+        """
+        pending = self._pending.get(key)
+        if pending is None:
+            return False
+        self._flush(key, pending, reason=reason)
+        return True
+
+    def drop(self, key: ForwardKey, *, reason: str) -> _PendingPrompt | None:
+        """Discard the prompt pending for ``key`` without dispatching it (#807).
+
+        Returns the dropped prompt so the caller can tell the user — a
+        pending prompt must never vanish silently (#794).
+        """
         pending = self._pending.pop(key, None)
         if pending is None:
-            return
+            return None
         if pending.cancel_scope is not None:
             pending.cancel_scope.cancel()
-        logger.debug(
-            "forward.prompt.cancelled",
+        logger.info(
+            "forward.prompt.dropped",
             chat_id=pending.msg.chat_id,
             thread_id=pending.msg.thread_id,
             sender_id=pending.msg.sender_id,
             message_id=pending.msg.message_id,
+            merged_message_ids=pending.merged_message_ids,
+            merged_count=len(pending.merged_message_ids) + 1,
             forward_count=len(pending.forwards),
+            reason=reason,
         )
+        return pending
 
     def schedule(self, pending: _PendingPrompt) -> None:
         if pending.msg.sender_id is None:
@@ -846,19 +1187,14 @@ class ForwardCoalescer:
         key = _forward_key(pending.msg)
         existing = self._pending.get(key)
         if existing is not None:
-            if existing.cancel_scope is not None:
-                existing.cancel_scope.cancel()
-            if existing.forwards:
-                pending.forwards = list(existing.forwards)
-            logger.debug(
-                "forward.prompt.replace",
-                chat_id=pending.msg.chat_id,
-                thread_id=pending.msg.thread_id,
-                sender_id=pending.msg.sender_id,
-                old_message_id=existing.msg.message_id,
-                new_message_id=pending.msg.message_id,
-                forward_count=len(pending.forwards),
-            )
+            # #794: a newer prompt inside the window used to *replace* the
+            # pending one, silently dropping its text. Merge it instead, or,
+            # when the two can't share a run, send the earlier one now.
+            reason = _merge_block_reason(existing, pending)
+            if reason is None:
+                self._merge(existing, pending)
+            else:
+                self._flush(key, existing, reason=reason)
         self._pending[key] = pending
         logger.debug(
             "forward.prompt.schedule",
@@ -869,6 +1205,49 @@ class ForwardCoalescer:
             debounce_s=self._debounce_s,
         )
         self._reschedule(key, pending)
+
+    def _merge(self, existing: _PendingPrompt, pending: _PendingPrompt) -> None:
+        """Fold ``existing`` into ``pending``: its text goes first, its
+        forwards are kept. The run anchors on the newer message."""
+        if existing.cancel_scope is not None:
+            existing.cancel_scope.cancel()
+        parts = [text for text in (existing.text, pending.text) if text.strip()]
+        pending.text = "\n\n".join(parts)
+        pending.forwards = [*existing.forwards, *pending.forwards]
+        pending.merged_message_ids = [
+            *existing.merged_message_ids,
+            existing.msg.message_id,
+            *pending.merged_message_ids,
+        ]
+        logger.info(
+            "forward.prompt.merged",
+            chat_id=pending.msg.chat_id,
+            thread_id=pending.msg.thread_id,
+            sender_id=pending.msg.sender_id,
+            message_id=pending.msg.message_id,
+            merged_message_ids=pending.merged_message_ids,
+            merged_count=len(pending.merged_message_ids) + 1,
+            forward_count=len(pending.forwards),
+            text_len=len(pending.text),
+        )
+
+    def _flush(self, key: ForwardKey, pending: _PendingPrompt, *, reason: str) -> None:
+        """Dispatch a pending prompt now, without waiting out its window."""
+        if self._pending.get(key) is pending:
+            self._pending.pop(key, None)
+        if pending.cancel_scope is not None:
+            pending.cancel_scope.cancel()
+        logger.info(
+            "forward.prompt.flushed",
+            chat_id=pending.msg.chat_id,
+            thread_id=pending.msg.thread_id,
+            sender_id=pending.msg.sender_id,
+            message_id=pending.msg.message_id,
+            merged_count=len(pending.merged_message_ids) + 1,
+            forward_count=len(pending.forwards),
+            reason=reason,
+        )
+        self._task_group.start_soon(self._dispatch, pending)
 
     def attach_forward(self, msg: TelegramIncomingMessage) -> None:
         if msg.sender_id is None:
@@ -947,6 +1326,7 @@ class ForwardCoalescer:
             sender_id=pending.msg.sender_id,
             message_id=pending.msg.message_id,
             forward_count=len(pending.forwards),
+            merged_count=len(pending.merged_message_ids) + 1,
             debounce_s=self._debounce_s,
         )
         await self._dispatch(pending)
@@ -1000,6 +1380,8 @@ class ResumeResolver:
         topic_key: tuple[int, int] | None,
         engine_for_session: EngineId,
         prompt_text: str,
+        reply_quote_text: str | None = None,
+        reply_reference_text: str | None = None,
     ) -> ResumeDecision:
         if resume_token is not None:
             return ResumeDecision(
@@ -1010,6 +1392,14 @@ class ResumeResolver:
                 MessageRef(channel_id=chat_id, message_id=reply_id)
             )
             if running_task is not None:
+                prompt_text = append_reply_context(
+                    prompt_text,
+                    selected_quote=reply_quote_text,
+                    reply_text=strip_reply_routing_lines(
+                        reply_reference_text,
+                        is_resume_line=self._cfg.runtime.is_resume_line,
+                    ),
+                )
                 self._task_group.start_soon(
                     send_with_resume,
                     self._cfg,
@@ -1022,6 +1412,21 @@ class ResumeResolver:
                     prompt_text,
                 )
                 return ResumeDecision(resume_token=None, handled_by_running_task=True)
+        resume_token = await self.stored_token(
+            chat_session_key=chat_session_key,
+            topic_key=topic_key,
+            engine_for_session=engine_for_session,
+        )
+        return ResumeDecision(resume_token=resume_token, handled_by_running_task=False)
+
+    async def stored_token(
+        self,
+        *,
+        chat_session_key: tuple[int, int | None] | None,
+        topic_key: tuple[int, int] | None,
+        engine_for_session: EngineId,
+    ) -> ResumeToken | None:
+        """The topic's (else the chat's) stored session for this engine."""
         if self._topic_store is not None and topic_key is not None:
             stored = await self._topic_store.get_session_resume(
                 topic_key[0],
@@ -1029,20 +1434,14 @@ class ResumeResolver:
                 engine_for_session,
             )
             if stored is not None:
-                resume_token = stored
-        if (
-            resume_token is None
-            and self._chat_session_store is not None
-            and chat_session_key is not None
-        ):
-            stored = await self._chat_session_store.get_session_resume(
+                return stored
+        if self._chat_session_store is not None and chat_session_key is not None:
+            return await self._chat_session_store.get_session_resume(
                 chat_session_key[0],
                 chat_session_key[1],
                 engine_for_session,
             )
-            if stored is not None:
-                resume_token = stored
-        return ResumeDecision(resume_token=resume_token, handled_by_running_task=False)
+        return None
 
 
 class MediaGroupBuffer:
@@ -1198,13 +1597,24 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     user why, or that /cancel was available. Returns ``None`` for non-Claude
     engines, unknown sessions, and normal mid-run queues (where the active
     progress message above already explains itself).
+
+    #781: with live sessions (#776) a follow-up to a session that is live
+    and accepting input is written into that same process as soon as its
+    current turn ends — background tasks keep running and are NOT waited
+    for, so the note says that instead. The background-wait wording is kept
+    for ``[watchdog] live_sessions = false`` and for live sessions that are
+    already closing, where the follow-up really does resume after the
+    process exits. The live note omits "/cancel to drop it": once the
+    scheduler hands the job to the injector it is no longer in the
+    cancellable queue.
     """
     if resume_token.engine != "claude":
         return None
     try:
-        from ..runners.claude import session_linger_info
+        from ..runners.claude import is_session_accepting, session_linger_info
 
         info = session_linger_info(resume_token.value)
+        live = info is not None and is_session_accepting(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1214,6 +1624,13 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     post_result, bg_count = info
     if not post_result:
         return None
+    if live:
+        if bg_count > 0:
+            return (
+                "⏳ Queued — sent as soon as Claude's current turn ends "
+                "(background tasks keep running)."
+            )
+        return "⏳ Queued — sent as soon as Claude's current turn ends."
     if bg_count > 0:
         plural = "s" if bg_count != 1 else ""
         return (
@@ -1301,20 +1718,31 @@ async def send_with_resume(
             notify=False,
         )
         return
+    # #835: a human reply to a running cron/webhook turn (its progress or a
+    # wake-turn message) is the human's turn, not the trigger's — drop the
+    # trigger-only fields so it resolves attended with the chat's options.
+    context = attended_context(running_task.context)
+    if context is not running_task.context:
+        logger.info(
+            "trigger.reply_context_attended",
+            chat_id=chat_id,
+            user_msg_id=user_msg_id,
+            trigger_source=running_task.context.trigger_source,
+        )
     progress_ref = await _send_queued_progress(
         cfg,
         chat_id=chat_id,
         user_msg_id=user_msg_id,
         thread_id=thread_id,
         resume_token=resume,
-        context=running_task.context,
+        context=context,
     )
     await enqueue(
         chat_id,
         user_msg_id,
         text,
         resume,
-        running_task.context,
+        context,
         thread_id,
         session_key,
         progress_ref,
@@ -1325,21 +1753,35 @@ async def _notify_drain_start(
     transport: object,
     running_tasks: Mapping[MessageRef, object],
 ) -> None:
-    """Send a draining notice to each unique chat with active runs."""
-    from ..transport import RenderedMessage
+    """Send a draining notice to each unique chat/topic with active runs.
+
+    #665: routed via ``SendOptions(thread_id=…)`` and de-duplicated by
+    ``(channel_id, thread_id)`` — a bare channel send lands in a forum
+    supergroup's General topic, invisible to the topic that owns the run.
+    """
+    from ..transport import RenderedMessage, SendOptions
 
     msg = RenderedMessage(
         text="\U0001f504 Restarting \N{EM DASH} waiting for your run to finish\N{HORIZONTAL ELLIPSIS}",
         extra={},
     )
-    notified: set[int | str] = set()
+    notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
-        if ref.channel_id not in notified:
-            notified.add(ref.channel_id)
+        target = (ref.channel_id, ref.thread_id)
+        if target not in notified:
+            notified.add(target)
             try:
-                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+                await transport.send(  # type: ignore[attr-defined]
+                    channel_id=ref.channel_id,
+                    message=msg,
+                    options=SendOptions(thread_id=ref.thread_id),
+                )
             except Exception:  # noqa: BLE001
-                logger.debug("shutdown.drain_notify_failed", channel_id=ref.channel_id)
+                logger.debug(
+                    "shutdown.drain_notify_failed",
+                    channel_id=ref.channel_id,
+                    thread_id=ref.thread_id,
+                )
 
 
 async def _notify_drain_timeout(
@@ -1347,8 +1789,9 @@ async def _notify_drain_timeout(
     running_tasks: Mapping[MessageRef, object],
     remaining: int,
 ) -> None:
-    """Send a timeout notice to each unique chat still running after drain."""
-    from ..transport import RenderedMessage
+    """Send a timeout notice to each unique chat/topic still running after
+    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``."""
+    from ..transport import RenderedMessage, SendOptions
 
     hint = (
         "Untether was restarted. Your session is saved"
@@ -1363,15 +1806,22 @@ async def _notify_drain_timeout(
         ),
         extra={},
     )
-    notified: set[int | str] = set()
+    notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
-        if ref.channel_id not in notified:
-            notified.add(ref.channel_id)
+        target = (ref.channel_id, ref.thread_id)
+        if target not in notified:
+            notified.add(target)
             try:
-                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+                await transport.send(  # type: ignore[attr-defined]
+                    channel_id=ref.channel_id,
+                    message=msg,
+                    options=SendOptions(thread_id=ref.thread_id),
+                )
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "shutdown.timeout_notify_failed", channel_id=ref.channel_id
+                    "shutdown.timeout_notify_failed",
+                    channel_id=ref.channel_id,
+                    thread_id=ref.thread_id,
                 )
 
 
@@ -1413,6 +1863,7 @@ async def run_main_loop(
         seen_update_order=deque(),
         seen_message_keys=set(),
         seen_messages_order=deque(),
+        triggers_enabled=bool(cfg.trigger_config and cfg.trigger_config.get("enabled")),
     )
 
     def refresh_topics_scope() -> None:
@@ -1439,6 +1890,7 @@ async def run_main_loop(
         is_shutting_down,
         request_shutdown,
         reset_shutdown,
+        scan_self_restart_evidence,
         select_drain_timeout,
     )
 
@@ -1458,11 +1910,13 @@ async def run_main_loop(
                 "chat_prefs.enabled",
                 state_path=str(resolve_prefs_path(config_path)),
             )
+            from ..cost_tracker import init_daily_cost
             from ..session_stats import init_stats
             from ..triggers.history import init_history
 
             init_stats(config_path)
             init_history(config_path)
+            init_daily_cost(config_path)  # #898
         if cfg.session_mode == "chat":
             if config_path is None:
                 raise ConfigError(
@@ -1594,6 +2048,22 @@ async def run_main_loop(
                                 transport="telegram",
                                 keys=hot_keys,
                             )
+                            # #679: re-check the voice endpoint when a key
+                            # that affects its SSRF verdict changed (log-only,
+                            # background; the helper never raises and is a
+                            # silent no-op when voice was just disabled).
+                            if voice_endpoint_keys_changed(hot_keys):
+                                tg.start_soon(
+                                    partial(
+                                        check_voice_endpoint,
+                                        enabled=cfg.voice_transcription,
+                                        base_url=cfg.voice_transcription_base_url,
+                                        allowlist_entries=tuple(
+                                            cfg.voice_transcription_url_allowlist
+                                        ),
+                                        phase="reload",
+                                    )
+                                )
                         state.transport_snapshot = new_snapshot
                 if (
                     state.transport_id is not None
@@ -1606,6 +2076,42 @@ async def run_main_loop(
                         restart_required=True,
                     )
                     state.transport_id = reload.settings.transport
+
+                # #894: read [triggers] once — for the restart check below
+                # (which must land before the reload notice) and for the
+                # trigger hot-reload at the end of this handler.
+                raw_triggers: object = None
+                triggers_read_error: Exception | None = None
+                try:
+                    from ..config import read_config
+
+                    raw_triggers = read_config(reload.config_path).get("triggers")
+                except (ConfigError, ValueError, TypeError, OSError) as exc:
+                    triggers_read_error = exc
+                triggers_enabled_now = isinstance(raw_triggers, dict) and bool(
+                    raw_triggers.get("enabled")
+                )
+                if triggers_read_error is None:
+                    # #894: hot-reload can't start the scheduler/server, so
+                    # flag a false→true flip as restart-required (log + the
+                    # Telegram reload notice) instead of silently doing
+                    # nothing.
+                    if _triggers_enable_needs_restart(
+                        previous=state.triggers_enabled,
+                        current=triggers_enabled_now,
+                        running=trigger_manager is not None,
+                    ):
+                        logger.warning(
+                            "config.reload.restart_required",
+                            key="triggers.enabled",
+                            hint=(
+                                "The cron scheduler and webhook server only "
+                                "start at startup; restart Untether to run "
+                                "the configured triggers."
+                            ),
+                        )
+                        _reload_restart_keys.append("triggers.enabled")
+                    state.triggers_enabled = triggers_enabled_now
 
                 # #547 axis 2 / #548: broadcast the affirmative
                 # "Hot-reloaded — No restart needed." (or, if any
@@ -1628,22 +2134,33 @@ async def run_main_loop(
                         )
 
                 # --- Hot-reload trigger configuration ---
-                if trigger_manager is not None:
+                if triggers_read_error is not None:
+                    if trigger_manager is not None:
+                        logger.warning(
+                            "config.reload.triggers_failed",
+                            error=str(triggers_read_error),
+                        )
+                elif trigger_manager is not None or triggers_enabled_now:
                     try:
-                        from ..config import read_config
                         from ..triggers.settings import (
                             TriggersSettings,
                             parse_trigger_config,
+                            warn_trigger_chat_fallbacks,
                         )
 
-                        raw_toml = read_config(reload.config_path)
-                        raw_triggers = raw_toml.get("triggers")
-                        if isinstance(raw_triggers, dict) and raw_triggers.get(
-                            "enabled"
-                        ):
+                        if isinstance(raw_triggers, dict) and triggers_enabled_now:
                             new_settings = parse_trigger_config(raw_triggers)
-                            trigger_manager.update(new_settings)
-                        else:
+                            if trigger_manager is not None:
+                                trigger_manager.update(new_settings)
+                            # #894: warn (once) about project-only triggers
+                            # that will post to the default chat.
+                            warn_trigger_chat_fallbacks(
+                                new_settings,
+                                default_chat_id=cfg.chat_id,
+                                project_chat_id=cfg.runtime.project_chat_id,
+                                warned=state.trigger_chat_fallbacks_warned,
+                            )
+                        elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
                     except (ValueError, TypeError, OSError) as exc:
@@ -1664,6 +2181,22 @@ async def run_main_loop(
 
                 tg.start_soon(run_config_watch)
 
+            # #679: warn at startup when the configured voice endpoint would be
+            # refused by the SSRF guard (e.g. `localhost` or a tailnet host
+            # without an allowlist entry) instead of only on the first voice
+            # note. Deliberately OUTSIDE the watch_config block so it runs with
+            # watch_config = false too; background so DNS never delays startup.
+            if cfg.voice_transcription and cfg.voice_transcription_base_url:
+                tg.start_soon(
+                    partial(
+                        check_voice_endpoint,
+                        enabled=cfg.voice_transcription,
+                        base_url=cfg.voice_transcription_base_url,
+                        allowlist_entries=tuple(cfg.voice_transcription_url_allowlist),
+                        phase="startup",
+                    )
+                )
+
             # Graceful drain-then-exit task
             async def _drain_and_exit() -> None:
                 """Wait for shutdown signal, drain active runs, then exit."""
@@ -1677,7 +2210,21 @@ async def run_main_loop(
                 if sdnotify.notify("STOPPING=1"):
                     logger.debug("sdnotify.stopping")
 
-                active = len(state.running_tasks)
+                from ..runner_bridge import (
+                    close_idle_live_sessions,
+                    unique_running_tasks,
+                )
+
+                # #776: live Claude sessions that are only holding between
+                # turns are closed gracefully now (the CLI stops their
+                # background tasks and exits in seconds) instead of holding
+                # the drain for up to their 30 min background hold.
+                closed_live = await close_idle_live_sessions(
+                    state.running_tasks, "drain"
+                )
+                if closed_live:
+                    logger.info("shutdown.live_sessions_closed", count=closed_live)
+                active = len(unique_running_tasks(state.running_tasks))
                 pending_at = at_scheduler.active_count()
                 # #289: include loop fires in the shutdown summary so ops
                 # can see how many were pending at drain time.  Pending
@@ -1694,30 +2241,65 @@ async def run_main_loop(
                 )
 
                 if active > 0:
-                    # #559: when the sole active run is (almost certainly) the
-                    # session that triggered the restart — the self-restart
-                    # deadlock from #547 — the full 120s drain is dead time the
-                    # lone run can never satisfy. Use a short drain instead so we
-                    # reach the clean-exit + outbox-flush path promptly.
+                    # #559/#690: the 10s fast drain needs demonstrated
+                    # causality — the sole run initiated this shutdown — not
+                    # mere cardinality. Evidence: the /restart origin chat
+                    # matches the sole run's chat, or the run's process tree
+                    # contains the blocking systemctl/launchctl invocation it
+                    # is deadlocked on (#547). An external restart (fleet
+                    # rollout, reboot — origin None, no matching descendant)
+                    # gets the full grace so a healthy in-flight run isn't
+                    # destroyed (#690).
                     origin_chat_id = get_shutdown_origin_chat_id()
-                    self_restart = active == 1
-                    drain_timeout = select_drain_timeout(active)
-                    if self_restart:
-                        sole_chat = next(
-                            (ref.channel_id for ref in state.running_tasks), None
+                    sole_ref = None
+                    sole_task = None
+                    if active == 1:
+                        sole_ref, sole_task = next(
+                            iter(unique_running_tasks(state.running_tasks)),
+                            (None, None),
                         )
+                    sole_chat = sole_ref.channel_id if sole_ref is not None else None
+                    origin_matches = (
+                        active == 1
+                        and origin_chat_id is not None
+                        and origin_chat_id == sole_chat
+                    )
+                    evidence = "origin_match" if origin_matches else None
+                    if active == 1 and evidence is None:
+                        sole_pid = getattr(
+                            getattr(sole_task, "edits", None), "pid", None
+                        )
+                        evidence = scan_self_restart_evidence(sole_pid)
+                    self_restart = evidence is not None
+                    drain_timeout = select_drain_timeout(
+                        active, self_restart=self_restart
+                    )
+                    if active == 1:
                         logger.info(
-                            "shutdown.drain.self_restart",
+                            "shutdown.drain.self_restart"
+                            if self_restart
+                            else "shutdown.drain.external_sole_run",
                             drain_timeout_s=drain_timeout,
                             sole_chat_id=sole_chat,
                             origin_chat_id=origin_chat_id,
-                            origin_matches=origin_chat_id is not None
-                            and origin_chat_id == sole_chat,
+                            origin_matches=origin_matches,
+                            evidence=evidence,
                         )
 
-                    await _notify_drain_start(
-                        cfg.exec_cfg.transport, state.running_tasks
-                    )
+                    # Bounded so a hanging transport send can't eat the 30s
+                    # margin between DRAIN_TIMEOUT_S and TimeoutStopSec=150.
+                    with anyio.move_on_after(10.0):
+                        from ..runner_bridge import running_task_is_live_idle
+
+                        # Idle live sessions get their own "closing" notice.
+                        await _notify_drain_start(
+                            cfg.exec_cfg.transport,
+                            {
+                                ref: task
+                                for ref, task in state.running_tasks.items()
+                                if not running_task_is_live_idle(task)
+                            },
+                        )
 
                     # Wait for all runs to complete (up to drain timeout).
                     # Pending /at delays that have not yet fired are cancelled
@@ -1726,25 +2308,33 @@ async def run_main_loop(
                     with anyio.move_on_after(drain_timeout):
                         while state.running_tasks:
                             await sleep(1.0)
+                            # A run mid-turn at drain start goes idle when its
+                            # turn ends — close it then too (review finding).
+                            await close_idle_live_sessions(state.running_tasks, "drain")
                             _drain_tick += 1
                             if _drain_tick % 10 == 0:
                                 logger.info(
                                     "shutdown.drain.progress",
-                                    remaining=len(state.running_tasks),
+                                    remaining=len(
+                                        unique_running_tasks(state.running_tasks)
+                                    ),
                                 )
 
-                    remaining = len(state.running_tasks)
+                    remaining = len(unique_running_tasks(state.running_tasks))
                     if remaining > 0:
                         logger.warning(
                             "shutdown.drain_timeout",
                             remaining=remaining,
                             timeout_s=drain_timeout,
+                            self_restart=self_restart,
+                            evidence=evidence,
                         )
-                        await _notify_drain_timeout(
-                            cfg.exec_cfg.transport,
-                            state.running_tasks,
-                            remaining,
-                        )
+                        with anyio.move_on_after(10.0):
+                            await _notify_drain_timeout(
+                                cfg.exec_cfg.transport,
+                                state.running_tasks,
+                                remaining,
+                            )
 
                 logger.info("shutdown.exiting")
                 tg.cancel_scope.cancel()
@@ -1845,13 +2435,25 @@ async def run_main_loop(
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                 )
-                # #330: cron-level permission_mode override wins over the
-                # resolved chat/topic preference. Dispatchers populate
-                # RunContext.permission_mode from CronConfig.permission_mode;
-                # here we apply it to the per-run EngineRunOptions so the
-                # runner's _effective_permission_mode() picks it up.
-                run_options = _apply_trigger_permission_override(
+                # #330 / #743: trigger-level overrides win over the resolved
+                # chat/topic preference. Dispatchers populate RunContext from
+                # the trigger config; here they are applied to the per-run
+                # EngineRunOptions so the runner picks them up.
+                run_options = _apply_trigger_overrides(
                     run_options, context, engine=engine_for_overrides
+                )
+                _note_unattended_approval_risk(
+                    context,
+                    engine_for_overrides,
+                    run_options,
+                    lambda: getattr(
+                        cfg.runtime.resolve_runner(
+                            resume_token=resume_token,
+                            engine_override=engine_for_overrides,
+                        ).runner,
+                        "permission_mode",
+                        None,
+                    ),
                 )
                 await run_engine(
                     exec_cfg=cfg.exec_cfg,
@@ -1867,12 +2469,58 @@ async def run_main_loop(
                         on_thread_known, topic_key, chat_session_key
                     ),
                     on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
-                    engine_override=engine_override,
+                    # Run the engine the options and the approval audit were
+                    # resolved for: a raw ``None`` made resolve_runner fall
+                    # back to the global default, so a cron on a Claude
+                    # project with no ``engine`` ran on Codex in full auto
+                    # (rc15 integration finding).
+                    engine_override=(
+                        engine_for_overrides if resume_token is None else None
+                    ),
                     thread_id=thread_id,
                     show_resume_line=show_resume_line,
                     progress_ref=progress_ref,
                     run_options=run_options,
                 )
+
+            async def trigger_budget_refused(
+                chat_id: int,
+                context: RunContext,
+                engine_override: EngineId | None,
+            ) -> bool:
+                """#896: refuse a cron/webhook before it is announced (or its
+                fetch runs) once the daily budget is spent — same options as
+                ``run_job`` resolves for a trigger, so per-chat budget
+                overrides apply. The dispatcher sees the refusal, so a
+                ``run_once`` cron isn't consumed by a run that never started."""
+                from ..budget_gate import daily_gate
+                from .budget_notice import skip_unattended_run
+
+                engine = engine_override or cfg.runtime.resolve_engine(
+                    engine_override=None, context=context
+                )
+                run_options = await _resolve_engine_run_options(
+                    chat_id,
+                    None,
+                    engine,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                )
+                run_options = _apply_trigger_overrides(
+                    run_options, context, engine=engine
+                )
+                blocked = daily_gate(run_options)
+                if blocked is None:
+                    return False
+                await skip_unattended_run(
+                    cfg.exec_cfg.transport,
+                    chat_id=chat_id,
+                    context=context,
+                    daily=blocked[0],
+                    limit=blocked[1],
+                    stage="dispatch",
+                )
+                return True
 
             async def run_thread_job(job: ThreadJob) -> None:
                 await run_job(
@@ -1889,7 +2537,50 @@ async def run_main_loop(
                     job.progress_ref,
                 )
 
-            scheduler = ThreadScheduler(task_group=tg, run_job=run_thread_job)
+            from ..live_followup import inject_live_followup
+
+            async def _job_run_options(job: ThreadJob) -> object:
+                # Same resolution as run_job (#776): a live process only
+                # takes a follow-up while the chat's options still match.
+                job_chat_id = cast(int, job.chat_id)
+                job_topic_key = (
+                    (job_chat_id, job.thread_id)
+                    if state.topic_store is not None
+                    and job.thread_id is not None
+                    and _topics_chat_allowed(
+                        cfg, job_chat_id, scope_chat_ids=state.topics_chat_ids
+                    )
+                    else None
+                )
+                options = await _resolve_engine_run_options(
+                    job_chat_id,
+                    job_topic_key[1] if job_topic_key is not None else None,
+                    job.resume_token.engine,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                )
+                return _apply_trigger_overrides(
+                    options, job.context, engine=job.resume_token.engine, log=False
+                )
+
+            async def _job_run_cwd(job: ThreadJob) -> Path | None:
+                # #996: the directory run_job would spawn in — a live process
+                # only takes a follow-up while the chat's context (/ctx,
+                # topic binding) still resolves to its spawn cwd. Off the
+                # event loop: a branch context looks up its worktree.
+                return await anyio.to_thread.run_sync(
+                    cfg.runtime.resolve_run_cwd, job.context
+                )
+
+            scheduler = ThreadScheduler(
+                task_group=tg,
+                run_job=run_thread_job,
+                inject_job=partial(
+                    inject_live_followup,
+                    options_for=_job_run_options,
+                    cwd_for=_job_run_cwd,
+                ),
+            )
 
             # --- /at one-shot delayed runs (#288) ---
             from . import at_scheduler
@@ -1914,8 +2605,13 @@ async def run_main_loop(
             def _is_chat_busy(chat_id_in: int) -> bool:
                 """Drop a loop fire if the chat already has a run in flight
                 — mirrors upstream's "no catch-up" semantic."""
-                for ref in state.running_tasks:
-                    if getattr(ref, "channel_id", None) == chat_id_in:
+                from ..runner_bridge import running_task_is_live_idle
+
+                for ref, task in state.running_tasks.items():
+                    # #776: a live session idling between turns isn't busy.
+                    if getattr(
+                        ref, "channel_id", None
+                    ) == chat_id_in and not running_task_is_live_idle(task):
                         return True
                 return False
 
@@ -1935,10 +2631,21 @@ async def run_main_loop(
                 from ..triggers.dispatcher import TriggerDispatcher
                 from ..triggers.manager import TriggerManager
                 from ..triggers.server import run_webhook_server
-                from ..triggers.settings import parse_trigger_config
+                from ..triggers.settings import (
+                    parse_trigger_config,
+                    warn_trigger_chat_fallbacks,
+                )
 
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    # #894: a project-only trigger posts to the default chat,
+                    # not the project's — warn once so it isn't a surprise.
+                    warn_trigger_chat_fallbacks(
+                        trigger_settings,
+                        default_chat_id=cfg.chat_id,
+                        project_chat_id=cfg.runtime.project_chat_id,
+                        warned=state.trigger_chat_fallbacks_warned,
+                    )
                     # #317: pass config_path so the manager can load/save
                     # the run_once fired-state alongside untether.toml.
                     trigger_manager = TriggerManager(
@@ -1953,6 +2660,7 @@ async def run_main_loop(
                         transport=cfg.exec_cfg.transport,
                         default_chat_id=cfg.chat_id,
                         task_group=tg,
+                        budget_check=trigger_budget_refused,
                     )
                     # Always start the cron scheduler — it idles when the
                     # cron list is empty and picks up new crons on reload.
@@ -1985,6 +2693,10 @@ async def run_main_loop(
                         error=str(exc),
                         error_type=exc.__class__.__name__,
                     )
+                    # #894: nothing is running, so treat triggers as off —
+                    # a reload that fixes the TOML is then flagged
+                    # restart-required like an off→on flip.
+                    state.triggers_enabled = False
 
             def resolve_topic_key(
                 msg: TelegramIncomingMessage,
@@ -2104,10 +2816,23 @@ async def run_main_loop(
                 chat_session_key: tuple[int, int | None] | None,
                 reply_ref: MessageRef | None,
                 reply_id: int | None,
+                steerable: bool = False,
+                followup_override: str | None = None,
             ) -> None:
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
                 context = resolved.context
+                reply_quote_text = msg.reply_quote_text
+                reply_reference_text = (
+                    msg.reply_reference_text
+                    if msg.reply_reference_text is not None
+                    else msg.reply_to_text
+                )
+                if _reply_targets_running_progress(
+                    state.running_tasks, chat_id, reply_id
+                ):
+                    # #904: no progress render as reply context.
+                    reply_quote_text = reply_reference_text = None
                 engine_resolution = await resolve_engine_defaults(
                     explicit_engine=resolved.engine_override,
                     context=context,
@@ -2115,6 +2840,24 @@ async def run_main_loop(
                     topic_key=topic_key,
                 )
                 engine_override = engine_resolution.engine
+                if steerable and await _try_steer(
+                    msg=msg,
+                    prompt_text=append_reply_context(
+                        prompt_text,
+                        selected_quote=reply_quote_text,
+                        reply_text=strip_reply_routing_lines(
+                            reply_reference_text,
+                            is_resume_line=cfg.runtime.is_resume_line,
+                        ),
+                    ),
+                    resolved=resolved,
+                    engine=engine_override,
+                    topic_key=topic_key,
+                    chat_session_key=chat_session_key,
+                    reply_id=reply_id,
+                    followup_override=followup_override,
+                ):
+                    return
                 resume_decision = await resume_resolver.resolve(
                     resume_token=resolved.resume_token,
                     reply_id=reply_id,
@@ -2125,10 +2868,20 @@ async def run_main_loop(
                     topic_key=topic_key,
                     engine_for_session=engine_resolution.engine,
                     prompt_text=prompt_text,
+                    reply_quote_text=reply_quote_text,
+                    reply_reference_text=reply_reference_text,
                 )
                 if resume_decision.handled_by_running_task:
                     return
                 resume_token = resume_decision.resume_token
+                prompt_text = append_reply_context(
+                    prompt_text,
+                    selected_quote=reply_quote_text,
+                    reply_text=strip_reply_routing_lines(
+                        reply_reference_text,
+                        is_resume_line=cfg.runtime.is_resume_line,
+                    ),
+                )
                 if resume_token is None:
                     await run_job(
                         chat_id,
@@ -2160,6 +2913,75 @@ async def run_main_loop(
                     msg.thread_id,
                     chat_session_key,
                     progress_ref,
+                )
+
+            async def _try_steer(
+                *,
+                msg: TelegramIncomingMessage,
+                prompt_text: str,
+                resolved: ResolvedMessage,
+                engine: EngineId,
+                topic_key: tuple[int, int] | None,
+                chat_session_key: tuple[int, int | None] | None,
+                reply_id: int | None,
+                followup_override: str | None,
+            ) -> bool:
+                """#775: steer a plain-text/voice prompt into the chat's live
+                Claude session when the follow-up mode says so. The target is
+                the session this prompt would otherwise queue behind."""
+
+                async def steer_target() -> ResumeToken | None:
+                    token = resolved.resume_token
+                    if token is None and reply_id is not None:
+                        running = state.running_tasks.get(
+                            MessageRef(channel_id=msg.chat_id, message_id=reply_id)
+                        )
+                        token = running.resume if running is not None else None
+                    if token is None:
+                        token = await resume_resolver.stored_token(
+                            chat_session_key=chat_session_key,
+                            topic_key=topic_key,
+                            engine_for_session=engine,
+                        )
+                    return token
+
+                topic_thread_id = topic_key[1] if topic_key is not None else None
+
+                async def run_options_for(target: ResumeToken) -> object:
+                    options = await _resolve_engine_run_options(
+                        msg.chat_id,
+                        topic_thread_id,
+                        target.engine,
+                        chat_prefs=state.chat_prefs,
+                        topic_store=state.topic_store,
+                    )
+                    return _apply_trigger_overrides(
+                        options, resolved.context, engine=target.engine, log=False
+                    )
+
+                async def run_cwd_for() -> Path | None:
+                    # #996: an idle live session spawned in another
+                    # project/branch takes the queue path (close + resume).
+                    return await anyio.to_thread.run_sync(
+                        cfg.runtime.resolve_run_cwd, resolved.context
+                    )
+
+                return await maybe_steer(
+                    cfg,
+                    chat_id=msg.chat_id,
+                    user_msg_id=msg.message_id,
+                    thread_id=msg.thread_id,
+                    topic_thread_id=topic_thread_id,
+                    prompt_text=prompt_text,
+                    engine=engine,
+                    resume_token=None,
+                    resolve_token=steer_target,
+                    override=followup_override,
+                    running_tasks=state.running_tasks,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                    run_options=run_options_for,
+                    run_cwd=run_cwd_for,
                 )
 
             async def run_prompt_from_upload(
@@ -2244,6 +3066,10 @@ async def run_main_loop(
                     chat_session_key=pending.chat_session_key,
                     reply_ref=pending.reply_ref,
                     reply_id=pending.reply_id,
+                    # #775: plain text / voice transcripts may steer;
+                    # anything carrying forwards always queues.
+                    steerable=not pending.forwards,
+                    followup_override=pending.followup_override,
                 )
 
             forward_coalescer = ForwardCoalescer(
@@ -2365,16 +3191,46 @@ async def run_main_loop(
                 chat_project = ctx.chat_project
                 ambient_context = ctx.ambient_context
 
+                command_id = classification.command_id
+                args_text = classification.args_text
+                # #775: `/steer <text>` / `/queue <text>` — the text runs as a
+                # prompt with a one-message follow-up mode override.
+                followup_override: str | None = None
+                followup_split = split_followup_command(command_id, args_text)
+                if followup_split is not None:
+                    followup_override, text = followup_split
+                    command_id = None
+                    args_text = ""
+
+                # #807: a command is a barrier for the coalesce window. Session
+                # control drops the pending prompt (visibly); any other command
+                # dispatches it first (best-effort: the prompt is dispatched
+                # before the command is handled, not guaranteed to run first).
+                barrier_drop = _apply_command_barrier(
+                    forward_coalescer,
+                    forward_key,
+                    command_id=command_id,
+                    is_cancel=classification.is_cancel,
+                    reserved_commands=state.reserved_commands,
+                )
+                if barrier_drop is not None:
+                    dropped, barrier_command = barrier_drop
+                    tg.start_soon(
+                        partial(
+                            make_reply(cfg, dropped.msg),
+                            text=_dropped_prompt_notice(
+                                dropped, command=barrier_command
+                            ),
+                        )
+                    )
+
                 if classification.is_cancel:
                     tg.start_soon(
                         handle_cancel, cfg, msg, state.running_tasks, scheduler
                     )
                     return
 
-                command_id = classification.command_id
-                args_text = classification.args_text
                 if command_id == "continue":
-                    forward_coalescer.cancel(forward_key)
                     prompt_text = args_text.strip() if args_text else ""
                     resolved = cfg.runtime.resolve_message(
                         text=prompt_text,
@@ -2464,6 +3320,11 @@ async def run_main_loop(
                             cfg.voice_transcription_url_allowlist
                         ),
                         language=cfg.voice_transcription_language,
+                        # #703: unset → the shipped vocabulary default;
+                        # explicit "" → omit the parameter.
+                        prompt=resolve_transcription_prompt(
+                            cfg.voice_transcription_prompt
+                        ),
                     )
                     if text is None:
                         return
@@ -2529,7 +3390,9 @@ async def run_main_loop(
                             topic_store=state.topic_store,
                         )
                         tg.start_soon(
-                            dispatch_command,
+                            # #950: /at freezes the engine + context a plain
+                            # prompt here would use (topic/chat defaults).
+                            partial(dispatch_command, ambient_context=ambient_context),
                             cfg,
                             msg,
                             text,
@@ -2558,9 +3421,36 @@ async def run_main_loop(
                     )
                     from .commands.ask_question import send_next_ask_question_message
 
+                    async def _ask_answer_refused(ask_request_id: str) -> bool:
+                        # #388: with approval_originator_only on, only the
+                        # user who started the run may answer its question.
+                        if not cfg.approval_originator_only:
+                            return False
+                        from .approval_originator import (
+                            NOT_ORIGINATOR_TEXT,
+                            request_originator_mismatch,
+                        )
+
+                        originator = request_originator_mismatch(
+                            ask_request_id, msg.sender_id
+                        )
+                        if originator is None:
+                            return False
+                        logger.warning(
+                            "ask_user_question.not_originator",
+                            chat_id=msg.chat_id,
+                            request_id=ask_request_id,
+                            sender_id=msg.sender_id,
+                            originator_id=originator,
+                        )
+                        await reply(text=NOT_ORIGINATOR_TEXT)
+                        return True
+
                     # Check for active option flow in "Other" text mode first
                     flow = get_ask_question_flow(channel_id=msg.chat_id)
                     if flow is not None and flow.awaiting_text:
+                        if await _ask_answer_refused(flow.request_id):
+                            return
                         flow.awaiting_text = False
                         current_q = flow.questions[flow.current_index]
                         question_key = current_q.get(
@@ -2594,6 +3484,8 @@ async def run_main_loop(
                     pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
                     if pending_ask is not None:
                         ask_req_id, _ask_question = pending_ask
+                        if await _ask_answer_refused(ask_req_id):
+                            return
                         logger.info(
                             "ask_user_question.answering",
                             request_id=ask_req_id,
@@ -2648,6 +3540,7 @@ async def run_main_loop(
                     reply_id=reply_id,
                     is_voice_transcribed=is_voice_transcribed,
                     forwards=[],
+                    followup_override=followup_override,
                 )
                 if reply_id is not None and state.running_tasks.get(
                     MessageRef(channel_id=chat_id, message_id=reply_id)
@@ -2732,6 +3625,12 @@ async def run_main_loop(
                     if len(state.seen_messages_order) > _SEEN_MESSAGES_LIMIT:
                         oldest = state.seen_messages_order.popleft()
                         state.seen_message_keys.discard(oldest)
+                if isinstance(update, TelegramIncomingMessage):
+                    # #388: remember who sent it, so a run it starts knows
+                    # its originator (approval_originator_only).
+                    note_message_sender(
+                        update.chat_id, update.message_id, update.sender_id
+                    )
                 if isinstance(update, TelegramCallbackQuery):
                     if update.data == CANCEL_CALLBACK_DATA:
                         tg.start_soon(
@@ -2741,6 +3640,9 @@ async def run_main_loop(
                             state.running_tasks,
                             scheduler,
                         )
+                    elif is_run_anyway_callback(update.data):
+                        # #896: one-shot "Run anyway" past the daily budget.
+                        tg.start_soon(handle_budget_run_callback, cfg, update)
                     elif update.data:
                         # Route callback to command backend if registered
                         cb_command_id, cb_args_text = parse_callback_data(update.data)
@@ -2801,7 +3703,9 @@ async def run_main_loop(
             # dispatch → resolve → run_engine) register in
             # running_tasks, then wait for them to complete before
             # triggering shutdown so _drain_and_exit() can exit.
-            for _ in range(10):
+            # #775: 50, not 10 — the dispatch chain now also resolves the
+            # follow-up mode (chat/topic prefs reads) before queueing.
+            for _ in range(50):
                 await anyio.lowlevel.checkpoint()
             while state.running_tasks:
                 await sleep(0.1)

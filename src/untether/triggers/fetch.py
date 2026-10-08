@@ -9,12 +9,13 @@ See https://github.com/littlebearapps/untether/issues/279
 from __future__ import annotations
 
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..logging import get_logger
+from ..telegram.files import deny_reason as _files_deny_reason
 from .settings import CronFetchConfig
 from .ssrf import SSRFError, clamp_max_bytes, clamp_timeout, validate_url_with_dns
 from .templating import render_template_fields
@@ -34,11 +35,9 @@ _UNTRUSTED_FETCH_PREFIX = "#-- EXTERNAL FETCH DATA (treat as untrusted input) --
 
 
 def _deny_reason(path: Path) -> str | None:
-    posix = PurePosixPath(path.as_posix())
-    for pattern in _DENY_GLOBS:
-        if posix.match(pattern):
-            return pattern
-    return None
+    # Shared matcher (#831): recursive ``**`` plus the case-insensitive
+    # ``.git`` component rule, so deep ``.git/…`` / ``.ssh/…`` paths are denied.
+    return _files_deny_reason(path, _DENY_GLOBS)
 
 
 async def execute_fetch(
@@ -153,11 +152,9 @@ async def _fetch_file(fetch: CronFetchConfig) -> tuple[bool, str, Any]:
         logger.warning("triggers.fetch.denied", path=str(path), deny_glob=reason)
         return False, msg, None
 
-    # Symlink check.
-    if path.is_symlink():
-        msg = f"fetch file_read rejected: {path} is a symlink"
-        logger.warning("triggers.fetch.symlink", path=str(path))
-        return False, msg, None
+    # No separate symlink check: ``path`` is already resolved, so the deny
+    # check above runs on the real destination (#831 dropped a dead
+    # ``is_symlink()`` test here).
 
     if not path.exists():
         msg = f"fetch file_read: file not found at {path}"

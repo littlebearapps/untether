@@ -14,6 +14,7 @@ from untether.telegram.commands.threads import (
     ThreadsCommand,
     _format_thread_detail,
     _format_thread_list,
+    _is_amp_stderr_failure,
     _register_thread,
     _resolve_thread,
 )
@@ -250,3 +251,114 @@ def test_callback_data_within_64_bytes() -> None:
         for btn in row:
             data = btn.get("callback_data", "")
             assert len(data.encode("utf-8")) <= 64, f"callback_data too long: {data}"
+
+
+# --- defensive zero-exit fatal-stderr guard ---
+
+
+def test_is_amp_stderr_failure_detects_426() -> None:
+    stderr = (
+        'Error: 426 {"type":"error","error":{"message":"This version of Amp is no'
+        ' longer supported. Run `amp update` to continue."}}'
+    )
+    assert _is_amp_stderr_failure(stderr) is True
+
+
+def test_is_amp_stderr_failure_detects_unexpected_error() -> None:
+    assert _is_amp_stderr_failure("Error: Unexpected error inside Amp CLI.") is True
+
+
+def test_is_amp_stderr_failure_ignores_empty_stderr() -> None:
+    assert _is_amp_stderr_failure("") is False
+    assert _is_amp_stderr_failure("   \n ") is False
+
+
+def test_is_amp_stderr_failure_ignores_benign_stderr() -> None:
+    """A plain warning must not be promoted to a failure."""
+    assert _is_amp_stderr_failure("Warning: limited color support detected") is False
+
+
+@pytest.mark.anyio
+async def test_run_amp_command_promotes_rc0_fatal_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero exit carrying a fatal stderr message must be promoted, otherwise
+    `threads list` parses empty stdout and renders "No AMP threads found".
+
+    Defensive: `amp threads list` is local and exits non-zero on real failures,
+    so this shape has not been observed in the wild. Cheap insurance."""
+    import untether.telegram.commands.threads as threads_mod
+
+    @dataclass
+    class FakeProc:
+        returncode: int
+        stdout: bytes
+        stderr: bytes
+
+    async def _fake_run_process(*_a: Any, **_kw: Any) -> FakeProc:
+        return FakeProc(
+            returncode=0,
+            stdout=b"",
+            stderr=b"Error: 426 This version of Amp is no longer supported.",
+        )
+
+    monkeypatch.setattr(threads_mod.anyio, "run_process", _fake_run_process)
+
+    rc, stdout, stderr = await threads_mod._run_amp_command("threads", "list")
+    assert rc == 1
+    assert stdout == ""
+    assert "no longer supported" in stderr
+
+
+@pytest.mark.anyio
+async def test_run_amp_command_leaves_clean_rc0_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine success (e.g. archive, which prints nothing) stays rc=0 — this
+    is the negative control that keeps the guard from breaking working calls."""
+    import untether.telegram.commands.threads as threads_mod
+
+    @dataclass
+    class FakeProc:
+        returncode: int
+        stdout: bytes
+        stderr: bytes
+
+    async def _fake_run_process(*_a: Any, **_kw: Any) -> FakeProc:
+        return FakeProc(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(threads_mod.anyio, "run_process", _fake_run_process)
+
+    rc, _stdout, _stderr = await threads_mod._run_amp_command(
+        "threads", "archive", "T-1"
+    )
+    assert rc == 0
+
+
+@pytest.mark.anyio
+async def test_threads_list_surfaces_amp_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the refusal reaches the user instead of "no threads found"."""
+    import untether.telegram.commands.threads as threads_mod
+
+    @dataclass
+    class FakeProc:
+        returncode: int
+        stdout: bytes
+        stderr: bytes
+
+    async def _fake_run_process(*_a: Any, **_kw: Any) -> FakeProc:
+        return FakeProc(
+            returncode=0,
+            stdout=b"",
+            stderr=b"Error: 426 This version of Amp is no longer supported.",
+        )
+
+    monkeypatch.setattr(threads_mod.anyio, "run_process", _fake_run_process)
+
+    cmd = ThreadsCommand()
+    result = await cmd.handle(_make_ctx())
+    assert result is not None
+    assert "no longer supported" in result.text.lower()
+    assert "no amp threads" not in result.text.lower()

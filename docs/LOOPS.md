@@ -23,6 +23,7 @@ Each loop records four fields (AT's shape) plus a build **Status**:
 
 > **Status legend:** `available` = built and usable now · `planned Pn` = specified
 > in `docs/plans/agentic-loops-and-commands/` for phase *n*, not yet built.
+> (`docs/plans/` is gitignored — the plan pack lives in the lba-1 checkout only.)
 
 ---
 
@@ -34,7 +35,7 @@ Delivery loops (net-new capability)
   L2   /implement     approved phase → feature branch, TDD, stop before PR         [available]
   L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [available]
   L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [available]
-  L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [available]
+  L4b  /pr-main       release-prep → open dev→master PR → STOP; --merge on Nathan's go → PyPI [available]
 
 Production loops (defects)
   L5   /debug         8-step investigate (sweep / targeted) — fleet-aware          [available]
@@ -57,15 +58,15 @@ Automated (non-agentic — already live)
   A2   /monitor cron (auto:monitor-audit) — per-host + untether-fleet meta-target
   A3   fleet-rollout.sh / fleet-rollback.sh / fleet-status.sh — operator, attestation-gated
   A4   run-integration-tests.sh — writes the per-VERSION attestation marker
-  A5   CI (format/ruff/ty/pytest 3.12-3.14/build/lockfile/pip-audit/bandit/codeql/docs)
-  A6   release pipeline (auto-tag-on-master.yml → release.yml, OIDC → PyPI) — OPERATOR gate
+  A5   CI (format/ruff/ty/pytest 3.12-3.14/build/lockfile/install-test/pip-audit/bandit/codeql/docs)
+  A6   release pipeline (auto-tag-on-master.yml → release.yml, OIDC → PyPI → GitHub Release → Discussions announcement) — OPERATOR gate
 
 Intentionally NOT built
   /paid-run       — no billable CLI calls of Untether's own
   /dq-spot-check  — no warehouse / no DQ patterns
-  /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [watchdog]), not a command
+  /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [cost_budget]), not a command
   /issue-triage   — covered by A1 + A2
-  /context-health — covered by the context hooks + the context-quality rule
+  /context-health — covered by the context-quality rule (the context-drift hook scripts in .claude/hooks/ are not registered)
 ```
 
 The delivery model is **three boundaries, not five stages** —
@@ -115,15 +116,15 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 
 - **Trigger:** a feature/fix/chore branch at "code + tests done".
 - **Driver:** `/pr-dev` (docs reconciliation folded in as a completion criterion).
-- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/`## Tests` reconciled inline. Merge → TestPyPI (automatic CI).
-- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the one merge Claude may do). Never master/tag/release/deploy.
+- **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/test-catalog reconciled inline. Merge → TestPyPI (automatic CI).
+- **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the only merge `/pr-dev` may do). Never master/tag/release/deploy.
 
 ### L4b · `/pr-main` — release-prep → open `dev`→`master` PR, STOP  ·  Status: **available**
 
 - **Trigger:** `dev` is green + ahead of `master` and a stable `X.Y.Z` is decided.
 - **Driver:** `/pr-main`.
-- **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the opened `dev`→`master` PR (release body), then **STOP**.
-- **Authority:** everything Claude *may* do up to the operator boundary. Never merges to master, tags, `gh release create`, or runs `fleet-rollout.sh`. The master merge is Nathan's single release gate.
+- **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the plain-English release announcement (`.github/release-announcements/vX.Y.Z.md`, [#1008](https://github.com/littlebearapps/untether/issues/1008)) + the opened `dev`→`master` PR (release body), then **STOP**.
+- **Authority:** prepares and opens the release PR, then stops. `--merge` merges it only after Nathan explicitly approves that version; the guard checks head = `dev` + green CI and asks him to confirm (#917). Never tags or runs `gh release create` (the pipeline does); runs `fleet-rollout.sh` only once PyPI has the version and Nathan says so.
 
 ### L7 · `/kaizen` — capture a process learning  ·  Status: **available**
 
@@ -137,7 +138,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Trigger:** weekly (human-gated); monthly `--monthly` health sample.
 - **Driver:** `/kaizen-review` (propose-only).
 - **Output:** approval packets → on Accept, a propose-only artefact (pytest/doc/rule draft + GH issue) and the source bullet struck.
-- **Authority:** propose only. Never auto-edits `.claude/rules/`, `hooks.json`, `CLAUDE.md`, or code.
+- **Authority:** propose only. Never auto-edits `.claude/rules/`, `.claude/settings.json`, `CLAUDE.md`, or code.
 
 ### L9 · `/handover` — interruption stop-state  ·  Status: **available**
 
@@ -156,8 +157,8 @@ Not full loops — helpers the loops lean on.
 
 - **Trigger:** documentation drifted with **no code change** to deliver alongside it.
 - **Driver:** `.claude/commands/docs.md`. The default path is `/pr-dev` (docs are folded in as a completion criterion); `/docs` is the escape hatch.
-- **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `CLAUDE.md ## Tests` / `docs/reference/*`.
-- **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. FAQ is gate-protected.
+- **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `docs/reference/test-catalog.md` / `docs/reference/*`.
+- **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. Never delete or move the FAQ (edit it freely).
 
 ### `/research` + `docs/findings/` — current-truth convention  ·  Status: **available**
 
@@ -181,12 +182,12 @@ Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the 
 
 | ID | What | Where |
 |---|---|---|
-| A1 | `untether-issue-watcher` daemon — files `auto:error-report` from error-log patterns, host-tagged | 5 hosts (lba-1, nsd, channelo, sl, mac); `contrib/untether-issue-watcher.*` |
+| A1 | `untether-issue-watcher` daemon — files `auto:error-report` from error-log patterns, host-tagged | 5 hosts (lba-1, nsd, channelo, sl, mac); `contrib/untether-issue-watcher.service` / `contrib/com.littlebearapps.untether-issue-watcher.plist` |
 | A2 | `/monitor` cron — files `auto:monitor-audit` (bugs + enhancements) | per-host configs + `untether-fleet` meta-target |
 | A3 | `fleet-rollout.sh` / `fleet-rollback.sh` / `fleet-status.sh` — parallel upgrade/rollback/status, attestation-gated | `scripts/` (operator-run) |
 | A4 | `run-integration-tests.sh` — writes the per-VERSION attestation marker | `scripts/` |
-| A5 | CI — format / ruff / ty / pytest 3.12–3.14 / build / lockfile / pip-audit / bandit / codeql / docs | `.github/workflows/` |
-| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI) | OPERATOR gate: the `dev`→`master` PR merge |
+| A5 | CI — format / ruff / ty / pytest 3.12–3.14 / build / lockfile / install-test / pip-audit / bandit / codeql / docs | `.github/workflows/` |
+| A6 | Release pipeline — `auto-tag-on-master.yml` → `release.yml` (OIDC → PyPI → GitHub Release → `announce` job posts to Discussions → Announcements) | OPERATOR gate: the `dev`→`master` PR merge (Nathan, or `/pr-main X.Y.Z --merge` after his explicit go; the guard asks) |
 
 ---
 

@@ -65,10 +65,10 @@ class Runner(Protocol):
 ### UntetherEvent (discriminated union)
 
 ```python
-type UntetherEvent = StartedEvent | ActionEvent | CompletedEvent
+type UntetherEvent = StartedEvent | ActionEvent | CompletedEvent | TurnEvent
 ```
 
-Every run emits: `StartedEvent` (once) -> `ActionEvent`s (zero+) -> `CompletedEvent` (once, always last).
+Every run emits: `StartedEvent` (once) -> `ActionEvent`s (zero+) -> `CompletedEvent` (once). A Claude live session (#776) may follow it with `TurnEvent(started) -> ActionEvent* -> TurnEvent(completed)` segments, delivered by `FollowupTurnRouter` as separate Telegram messages.
 
 ### RunnerBridge (`runner_bridge.py`)
 
@@ -102,6 +102,12 @@ Live-updates the Telegram progress message:
 - Detects approval button transitions for push notifications
 - Manages `_approval_notified` flag and `_approval_notify_ref`
 - `delete_ephemeral()` cleans up notification messages on run completion
+- Stall monitor reads the run's **own** `JsonlStreamState`/PID from the per-run `RunStreamHandle` (ContextVar bound in `run_runner_with_cancel`), never the shared `runner.current_stream`/`last_pid` (#510)
+- Expected waits (rate-limit `rejected` latch #790, `api_retry` back-off #792, approvals) demote stall warnings; live-idle holds between turns raise no stall WARN and are reported as `peak_live_idle_seconds` in `session.summary`, not `peak_idle_seconds` (#787)
+- Child processes earn the 15-min subagent threshold unconditionally only on Claude; on other engines only while the process tree uses CPU (Codex's npm shim and OpenCode's MCP servers are permanent children); a stopped engine (state `T`) is reported as "Engine process is stopped" (#953)
+- The heartbeat repaints the header's elapsed time once nothing has repainted for a heartbeat interval (30 s), so silent generation still ticks (#954); `stop_repaints()` must precede any final / cancelled edit so a debounced repaint can't land over it (#948)
+- Approval reminder (#919/#920): first at 10 min, then every 30 min; each repeat replaces the previous reminder (`_approval_reminder_ref`) and it is deleted once the request is answered or the run ends
+- `edits.orphan_approvals` (`orphan_approvals.py`, #929): a background agent's `can_use_tool` that arrives while the live session is idle gets its own pushed Approve / Deny message (same 10 / 30 min re-post, retired once answered). It never auto-denies; writes go through the transport only
 
 ### TelegramPresenter (`telegram/bridge.py`)
 
@@ -156,6 +162,8 @@ UntetherSettings (pydantic-settings, TOML source)
   │           └── TelegramFilesSettings
   ├── PluginsSettings
   ├── ProjectSettings (per project)
+  ├── CostBudgetSettings, LoopSettings, FooterSettings, PreambleSettings,
+  │   ProgressSettings, WatchdogSettings, AutoContinueSettings, SecuritySettings
   └── engine_config(engine_id) -> dict  # [claude], [codex], etc.
 ```
 
@@ -165,18 +173,21 @@ UntetherSettings (pydantic-settings, TOML source)
 
 ### ChatPrefsStore
 
-Per-chat persistent preferences (engine, model, reasoning, permission_mode):
+Per-chat persistent preferences: `default_engine`, listen mode, context project/branch,
+`followup_mode` (#775) and a per-engine `engine_overrides: dict[str, EngineOverrides]`:
 
 ```python
-class EngineOverrides:
-    engine: str | None
-    model: str | None
-    reasoning: str | None
-    permission_mode: str | None
+class EngineOverrides(msgspec.Struct):  # telegram/engine_overrides.py
+    model: str | None = None
+    reasoning: str | None = None
+    permission_mode: str | None = None
+    ask_questions: bool | None = None
+    diff_preview: bool | None = None
+    # ... footer / budget / loop toggles
 ```
 
-- Stored in `telegram_chat_prefs_state.json`
-- Set via `/agent`, `/model`, `/reasoning`, `/planmode` commands
+- Stored in `telegram_chat_prefs_state.json` (topic-level overrides in the topic state)
+- Set via `/agent`, `/model`, `/reasoning`, `/planmode`, `/config` commands
 - Applied at run time to override global config
 
 ## Engine backend registration
@@ -189,6 +200,8 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+gemini = "untether.runners.gemini:BACKEND"  # deprecated, unsupported
+amp = "untether.runners.amp:BACKEND"        # deprecated, unsupported
 ```
 
 ### EngineBackend
@@ -213,10 +226,10 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | `dispatch.py` | Callback dispatch, early answering, ephemeral registration |
 | `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring |
 | `planmode.py` | `/planmode` toggle |
-| `usage.py` | `/usage` — Claude Code API usage |
+| `usage.py` | `/usage` — Claude subscription quota; token totals for other engines (#417) |
 | `model.py` | `/model` override |
 | `reasoning.py` | `/reasoning` override |
-| `trigger.py` | `/trigger` — mentions-only mode |
+| `listen.py` | `/listen` (formerly `/trigger`, still accepted) — all-messages vs mentions-only |
 | `agent.py` | `/agent` — engine selection |
 
 ### CommandResult
@@ -225,7 +238,11 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 @dataclass
 class CommandResult:
     text: str
+    notify: bool = True
+    reply_to: MessageRef | None = None
     parse_mode: str | None = None  # "HTML" for bold formatting
+    skip_reply: bool = False
+    attachment: CommandAttachment | None = None  # #418: sent as a document
 ```
 
 Commands return `CommandResult`; dispatch sends it as a Telegram message.
@@ -233,9 +250,12 @@ Commands return `CommandResult`; dispatch sends it as a Telegram message.
 ### Callback dispatch
 
 Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
-- `ctrl:approve:<request_id>` — approve control request
-- `ctrl:deny:<request_id>` — deny control request
-- `ctrl:discuss:<request_id>` — pause & outline plan
+- `claude_control:approve:<request_id>` — approve control request
+- `claude_control:deny:<request_id>` — deny control request
+- `claude_control:discuss:<request_id>` — pause & outline plan
+- `claude_control:chat:<request_id>` — let's discuss (holds the request open)
+- synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>` / `aq:other`
+- opt-in `[transports.telegram] approval_originator_only` (#388): `claude_control:` / `aq:` taps (and typed AskUserQuestion answers) are accepted only from the user whose message started the run; cron / webhook / `/at` / loop runs have no originator, so any allowed user may answer
 
 ## Running tasks
 
@@ -249,6 +269,8 @@ class RunningTask:
     cancel_requested: anyio.Event
     done: anyio.Event
     context: RunContext | None
+    edits: ProgressEdits | None      # #690: drain self-restart evidence scan
+    thread_id: ThreadId | None       # #826: scopes /new and /cancel to a topic
 ```
 
 - Keyed by progress message ref
@@ -285,6 +307,18 @@ Triggers let external events or schedules start agent runs automatically. Opt-in
 ### Dispatch
 
 Both crons and webhooks feed into `TriggerDispatcher.dispatch_cron()`/`dispatch_webhook()` → sends a notification message to Telegram (`⏰`/`⚡`) → calls `run_job()` with the prompt, threading under the notification.
+
+- Cron/webhook runs are **unattended** (`RunContext.trigger_source`): a Claude approval, plan approval or question is
+  denied at once (`permission.unattended_deny`, #835) — they need an explicit autonomous `permission_mode`
+  (`plan-auto`, `auto`, `dontAsk`). A reply to the run continues attended. `/at` runs still ask.
+- Per-cron `permission_mode` / `model` / `reasoning` overrides apply to that run only (`_apply_trigger_overrides`).
+
+### Loop mode (`loop_scheduler.py`)
+
+Untether runs `/loop` schedules itself and, on control-channel Claude spawns, owns Claude's `CronCreate` /
+`CronDelete` through `PreToolUse` hook callbacks (#925): Loop on → registered as an Untether loop under the `[loop]`
+caps; Loop off → denied with Loop mode / `/at` guidance. `[loop] own_schedule = false` is the kill switch. Detail:
+`.claude/skills/claude-stream-json/control-channel-internals.md` → "Scheduling hooks".
 
 ### Key files
 

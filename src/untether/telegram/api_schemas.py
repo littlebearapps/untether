@@ -19,6 +19,7 @@ __all__ = [
     "MessageReply",
     "PhotoSize",
     "Sticker",
+    "TextQuote",
     "Update",
     "User",
     "Video",
@@ -82,7 +83,12 @@ class Sticker(msgspec.Struct, forbid_unknown_fields=False):
 class MessageReply(msgspec.Struct, forbid_unknown_fields=False):
     message_id: int
     text: str | None = None
+    caption: str | None = None
     from_: User | None = msgspec.field(default=None, name="from")
+
+
+class TextQuote(msgspec.Struct, forbid_unknown_fields=False):
+    text: str
 
 
 class Message(msgspec.Struct, forbid_unknown_fields=False):
@@ -93,6 +99,7 @@ class Message(msgspec.Struct, forbid_unknown_fields=False):
     text: str | None = None
     caption: str | None = None
     reply_to_message: MessageReply | None = None
+    quote: TextQuote | None = None
     forward_from: User | None = None
     forward_from_chat: Chat | None = None
     forward_from_message_id: int | None = None

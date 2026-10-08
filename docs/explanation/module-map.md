@@ -6,7 +6,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `cli.py` | Typer CLI entry point; loads settings, selects engine/transport, runs the transport backend. |
+| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, `onboarding_cmd.py`, `plugins.py`); loads settings, selects engine/transport, runs the transport backend. |
 | `telegram/backend.py` | Telegram transport backend: validates config, runs onboarding, builds and runs the Telegram bridge. |
 
 ## Orchestration and routing
@@ -15,12 +15,21 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `runner_bridge.py` | Transport-agnostic orchestration: per-message handler, progress updates, final render, cancellation, resume coordination. |
 | `router.py` | Auto-router: resolves resume tokens by polling runners; selects a runner for a message. |
-| `scheduler.py` | Per-thread FIFO job queueing with serialization. |
+| `scheduler.py` | Per-thread FIFO job queueing with serialisation. |
+| `directives.py`, `context.py`, `worktrees.py` | Directive parsing (`/<engine>`, `/<project>`, `@branch`, `dir:` lines), run context types, and branch worktree creation. |
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
-| `cost_tracker.py` | Per-run and daily cost tracking with budget alerts and auto-cancel. |
+| `cost_tracker.py` | Per-run and daily cost tracking with budget alerts (checked when a result arrives; the daily gate before a run lives in `budget_gate.py`). |
+| `budget_gate.py` | `[cost_budget] auto_cancel` ("Stop at limit"): refuses new runs once today's total reaches `max_cost_per_day`, until local midnight ([#896](https://github.com/littlebearapps/untether/issues/896)). |
+| `session_stats.py` | Per-engine run counts, actions and durations behind `/stats`. |
+| `error_hints.py` | Maps engine error text to the actionable hints shown in Telegram. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
+| `live_followup.py` | Writes a queued follow-up into a still-running Claude session (live sessions) instead of resuming a new process. |
+| `session_costs.py` | Per-session cost and token ledger, so a resumed session's running totals are recorded per run. |
+| `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
+| `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
-| `telegram/loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `loop_scheduler.py` | Loop mode: runs Claude's `/loop` schedules (declined `CronCreate` calls) and long `ScheduleWakeup`s with the `[loop]` caps, plus the cancel and cron-suppression records; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `orphan_approvals.py` | Pushed standalone Approve / Deny message for a background agent's approval request that arrives while a Claude session is idle; re-sent after 10 min, then every 30 min, and removed once answered. |
 
 ## Domain model and events
 
@@ -36,6 +45,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `progress.py` | Progress tracking: reduces untether events into progress snapshots. |
 | `markdown.py` | Markdown formatting for progress/final messages; includes helpers like elapsed formatting. |
+| `background_status.py` | Live background-task block and status message for Claude live sessions. |
 | `presenter.py` | Presenter protocol: converts `ProgressState` into transport-specific messages. |
 | `transport.py` | Transport protocol: send/edit/delete abstractions and message reference types. |
 
@@ -43,13 +53,25 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `telegram/bridge.py` | Telegram bridge loop: polls updates, filters messages, dispatches handlers, coordinates cancellation. |
-| `telegram/client.py` | Telegram API wrapper with retry/outbox semantics. |
+| `telegram/loop.py` | Main update loop: polls updates, filters and classifies messages, dispatches built-in commands and runs, applies config hot-reload. |
+| `telegram/bridge.py` | `TelegramPresenter`, `TelegramBridgeConfig` and `TelegramTransport`, plus the cancel/send helpers (`run_main_loop` here delegates to `loop.py`). |
+| `telegram/parsing.py` | Parses Bot API updates into incoming messages and callbacks. |
+| `telegram/client.py`, `telegram/client_api.py`, `telegram/outbox.py` | Telegram API wrapper, the pooled `httpx` Bot API client, and the paced outbox with retry semantics. |
+| `telegram/chat_sessions.py`, `telegram/topic_state.py`, `telegram/chat_prefs.py` | Persisted chat sessions, forum-topic bindings and sessions, and per-chat preferences. |
 | `telegram/render.py` | Telegram markdown rendering and trimming. |
 | `telegram/onboarding.py` | Interactive setup and setup validation UX. |
 | `telegram/commands/*` | In-chat command handlers (`/agent`, `/file`, `/topic`, `/ctx`, `/new`, …). |
 | `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
 | `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
+| `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
+| `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
+| `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
+| `telegram/reply_context.py` | Appends the replied-to message and any selected quote to the prompt as bounded, clearly marked context ([#736](https://github.com/littlebearapps/untether/issues/736)). |
+| `telegram/budget_notice.py` | Telegram side of the daily budget gate: the "Daily budget reached" notice and its one-shot **Run anyway** button ([#896](https://github.com/littlebearapps/untether/issues/896)). |
+| `telegram/approval_originator.py` | Opt-in `approval_originator_only`: only the person who started a run can answer its approval buttons and questions ([#388](https://github.com/littlebearapps/untether/issues/388)). |
+| `telegram/engine_defaults.py`, `telegram/engine_overrides.py` | Per-message engine resolution (topic → chat → project → global defaults) and the per-chat engine overrides (`/model`, `/reasoning`, `/planmode`, Loop mode), incl. the one-shot `auto` → `plan-auto` migration. |
+| `telegram/topics.py`, `telegram/listen_mode.py` | Forum-topic scope helpers (which topic `/new` and `/cancel` act on) and the per-chat listen mode (`all` / `mentions`). |
+| `telegram/offset_persistence.py`, `telegram/state_store.py` | Persisted Telegram `update_id` offset (`last_update_id.json`) and the versioned JSON state store behind the chat/topic state files. |
 
 ## Plugins
 
@@ -66,7 +88,10 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). |
+| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp). |
+| `runners/run_options.py` | Per-run options (model, reasoning, permission mode) and the Claude permission-mode tables. |
+| `runners/extra_args_guard.py` | Rejects approval- and sandbox-bypass flags in `extra_args`. |
+| `runners/tool_actions.py` | Shared tool-call → action kind and title mapping used by the runners' event translation. |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
 
 ## Triggers
@@ -78,21 +103,34 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `triggers/dispatcher.py` | Routes webhook/cron fires to `run_job()` or non-agent action handlers. |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop. |
 | `triggers/history.py` | Persistent JSON history of cron/webhook fire times for `/stats` triggered/manual breakdown. |
-| `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → 📡 Triggers`. |
+| `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → ⏰ Triggers`. |
+| `triggers/actions.py`, `triggers/fetch.py` | Non-agent webhook actions (`file_write`, `http_forward`, `notify_only`) and cron `fetch` steps. |
+| `triggers/auth.py`, `triggers/ssrf.py` | Webhook authentication and the SSRF guard for outbound trigger requests. |
+| `triggers/rate_limit.py`, `triggers/templating.py` | Token-bucket rate limiting for webhooks and prompt templating from webhook payloads. |
+| `triggers/run_once_state.py` | Persists fired and pending `run_once` crons (`run_once_fired.json`, `run_once_pending.json`) so one-shots never re-fire and a failed announce is retried. |
 
 ## Configuration and persistence
 
 | Module | Responsibility |
 |--------|----------------|
 | `settings.py` | Loads `untether.toml` (TOML + env), validates with pydantic-settings. |
-| `config_store.py` | Raw TOML read/write (merge/update without clobbering extra sections). |
+| `config.py` | Raw TOML read/write (merge/update without clobbering extra sections) and project config types. |
+| `config_watch.py` | Watches `untether.toml` and triggers hot-reload (when `watch_config = true`). |
+| `config_reload_notification.py` | Formats the Telegram notice after a reload ("No restart needed" / "Restart required"). |
+| `service_manager.py`, `sdnotify.py` | Detects the systemd unit or launchd label running Untether so restart notices name the right service ([#927](https://github.com/littlebearapps/untether/issues/927)); systemd readiness / stopping notifications (`READY=1`, `STOPPING=1`). |
+| `lockfile.py` | Single-instance lock (`untether.lock`) so two processes can't poll the same bot. |
+| `runtime_loader.py` | Builds the runtime (engines, router, projects) from settings at startup and on reload. |
 | `config_migrations.py` | One-time edits to on-disk config (e.g. legacy Telegram key migration). |
 
 ## Utilities
 
 | Module | Responsibility |
 |--------|----------------|
-| `utils/paths.py` | Path/command relativization helpers. |
+| `utils/env_policy.py` | Engine subprocess environment allowlist (`[security] env_extra_allow` / `env_extra_prefix_allow`). |
+| `utils/env_audit.py` | Checks a running engine's real environment against that allowlist. |
+| `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the quota footer. |
+| `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation; atomic JSON writes for state files. |
+| `utils/paths.py` | Path/command relativisation helpers. |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |
 | `utils/proc_diag.py` | Process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children). |

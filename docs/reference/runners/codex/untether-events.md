@@ -4,6 +4,21 @@ This document describes how Codex exec --json events are translated to Untether'
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/codex.py` and the translation logic is in `src/untether/runners/codex.py`. When in doubt, refer to the code.
 
+## Invocation
+
+Untether runs Codex non-interactively; it never stops to ask for approval, and approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only. The argv (prompt on stdin) is:
+
+```text
+codex [extra_args] [--profile <p>] [--model <m>] [-c model_reasoning_effort=<level>] \
+  exec --json --skip-git-repo-check --color=never [--sandbox read-only] \
+  [resume <thread_id> | resume --last] -
+```
+
+* **`extra_args`** default to `["-c", "notify=[]"]` and sit at the root, before `exec`. A deny-list rejects managed flags (`--json`, `--skip-git-repo-check`, `--color`, `--output-schema`, `--output-last-message`, `--ask-for-approval`/`-a`, exec-only `--ignore-rules`/`--ignore-user-config`), bypass flags (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, `-c` values mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), workspace flags (`--cd`/`-C`, `--worktree`) and a bare `--`, in every spelling. A blocked flag stops the Codex engine loading, and the error names the flag ([#209](https://github.com/littlebearapps/untether/issues/209), see [Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). Root `--sandbox read-only|workspace-write` stays allowed.
+* **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto.
+* **Reasoning** (`/config` → Reasoning): `low`, `medium`, `high` or `xhigh`, passed as `-c model_reasoning_effort=<level>`. `minimal` is not offered ([#416](https://github.com/littlebearapps/untether/issues/416)).
+* **Exit code 2** with a clap argv error on stderr (`error: unexpected argument …` and similar) also logs `codex.argv.rejected` with the argv, to flag upstream flag drift.
+
 ## The 3-event Untether schema
 
 The Untether event model uses 3 event types. The `action` event includes a `phase` field to represent started/updated/completed lifecycles.
@@ -22,7 +37,7 @@ Emitted once **as soon as you know the resume token** (Codex: `thread.started.th
 }
 ```
 
-Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from run options (CLI `--model` flag) and `meta.permissionMode` when approval policy is set to "safe" (non-default).
+Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from the `/config` model override (falling back to `codex-mini-latest` for display), `meta.effort` when a reasoning level is set, and `meta.permissionMode` only when the approval policy is `safe` (non-default). See [Invocation](#invocation) for what each setting does to argv.
 
 ### 2) `action`
 
@@ -57,9 +72,12 @@ Emitted once at end-of-run with the **final answer** (from `agent_message`) and 
   "ok": true,
   "answer": "Done. I updated the docs...",
   "error": null,
-  "usage": { "input_tokens": 24763, "cached_input_tokens": 24448, "output_tokens": 122 }  // optional
+  "usage": { "input_tokens": 24763, "cached_input_tokens": 24448, "cache_write_input_tokens": 0,
+             "output_tokens": 122, "reasoning_output_tokens": 64 }  // optional; THREAD running total
 }
 ```
+
+The runner forwards `turn.completed.usage` unchanged: all five fields, as the thread's running total. The bridge then rewrites the five flat fields to **this run's delta** using the per-thread ledger in `session_costs.json`, and adds `thread_total_usage` (the running total) and `token_delta_source` ([#419](https://github.com/littlebearapps/untether/issues/419); details in the [cheatsheet](exec-json-cheatsheet.md)). `/usage` in a Codex chat shows the token totals of the chat's last Codex session, with cached input and reasoning output shown as subsets ([#417](https://github.com/littlebearapps/untether/issues/417)). Codex has no subscription-quota data.
 
 Why this fits Untether cleanly:
 
@@ -182,10 +200,12 @@ However, Codex may also emit transient reconnect notices as `type="error"` with
 messages like `"Reconnecting... 1/5"` while it retries a dropped stream. Treat
 those as non-fatal progress updates (do **not** end the run).
 
-→ Untether:
+→ Untether (does **not** end the run on its own):
 
-* if you haven’t emitted `completed` yet: emit **`completed`** with `ok=false` and `error=message`
-* if you *already* emitted `completed`, treat it as an extra warning (or ignore; it’s “post-mortem noise”)
+* `Reconnecting... N/M` → **`action`** with id `codex.reconnect`, `kind="note"`, `level="info"`, `detail={ attempt, max }`; `phase="started"` for attempt 1, `"updated"` after, so the row updates in place
+* any other message → a warning **`action`** (`kind="warning"`, `phase="completed"`, `ok=false`, `level="warning"`, `message=message`)
+
+The run ends via `turn.completed` / `turn.failed`, or when the process exits: a non-zero exit code emits a warning plus `completed` with `ok=false` (`codex exec failed (rc=…)` with a stderr excerpt); a clean exit with no `turn.*` emits `completed` with `ok=true` and the captured answer, or `ok=false` if no `thread_id` was ever seen.
 
 ---
 
@@ -209,38 +229,33 @@ Now, map each `item.type`:
 
 Below is a “complete coverage” mapping for all item types listed in the cheatsheet. 
 
-### 1) `agent_message` (only `item.completed`)
+### 1) `agent_message`
 
 Codex:
 
 ```json
-{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"..."}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"...","phase":"final_answer"}}
 ```
+
+`item.phase` is optional (`commentary`, `final_answer`, or absent).
 
 → Untether:
 
-* **do not emit an `action`** (recommended)
-* instead: **store** `final_answer = item.text`
-* final answer will be surfaced by the eventual `completed` event
-
-Reason: you want `completed` to be “final answer delivery”, and you probably don’t want the answer duplicated in progress rendering. 
-
-(If you *do* want to render it as it arrives, you can emit an `action` too, but then your renderer must avoid showing it twice.)
+* `phase="commentary"` → **`action`** with `kind="note"`, `title=item.text`, `detail={ phase: "commentary" }` on started/updated/completed (`ok=true` on completion)
+* any other `agent_message`: **no `action`**; on `item.completed` the text is stored for the turn
+* the final answer is the turn's last `final_answer` message, else its last message with no phase; it is delivered by the eventual `completed` event (a new `turn.started` resets it)
 
 ---
 
-### 2) `reasoning` (only `item.completed`, if enabled)
+### 2) `reasoning` (usually only `item.completed`, if enabled)
 
 Codex gives a text breadcrumb. 
 
 → Untether `action`:
 
 * `kind="note"`
-* `title="reasoning"` (or “thought”)
-* `phase="completed"`
-* `message=item.text` (or put it under `detail.text`)
-
-This is usually safe to show as a short “what it’s doing” line (or ignore if you don’t want to surface it).
+* `title=item.text`
+* `phase` maps 1:1 to started/updated/completed; `ok=true` on completion
 
 ---
 
@@ -252,11 +267,9 @@ Codex fields include `command`, `status`, `aggregated_output` (often noisy), and
 → Untether `action`:
 
 * `kind="command"`
-* `title=item.command` (or a shortened version like `pytest`)
-* `detail={ command, exit_code, status }` (optionally include output tail)
-* `phase="started"` on `item.started`
-* `phase="completed"` on `item.completed`
-* `ok = (item.status == "completed")` (and `exit_code == 0` when present)
+* `title=item.command` with the run directory prefix stripped from paths
+* `phase` maps 1:1 to started/updated/completed
+* on completion: `detail={ exit_code, status }` and `ok = (item.status == "completed")` (and `exit_code == 0` when it is an int); `aggregated_output` is never copied
 
 Note: “failed” command becomes `ok=false` but it’s still just an `action` completion — the overall run might still succeed later, depending on agent behavior.
 
@@ -269,12 +282,10 @@ Codex contains `changes[]` and `status`.
 → Untether `action`:
 
 * `kind="file_change"`
-* `title="file changes"`
-* `detail={ changes }`
-* `phase="completed"`
+* `title` = the changed paths joined with `, ` (or `N files` when none carry a path)
+* `detail={ changes: [{ path, kind }], status, error: null }`
+* `phase="completed"` (started/updated lines are ignored)
 * `ok = (item.status == "completed")`
-
-This is a great progress line for your UI (“updated docs/…, added …”).
 
 ---
 
@@ -292,24 +303,38 @@ completion. Result can be large; may include base64 in content blocks.
 
   * e.g. `detail.result_summary = { content_blocks: N, has_structured: bool }`
   * include `detail.error_message` if failed
-* `phase="started"` or `"completed"`
-* `ok = (item.status == "completed")`
+* `phase` maps 1:1 to started/updated/completed
+* `ok = (item.status == "completed" and item.error is None)`
 
-Recommendation: **do not dump** full `result.content` into `detail` if it can contain large blobs; keep a summary and optionally stash full raw elsewhere for debugging.
+Full `result.content` is never copied into `detail` (it can hold large base64 blobs); only the summary is kept.
 
 ---
 
-### 6) `web_search` (only `item.completed`)
+### 6) `web_search` (`item.started` and `item.completed`)
 
-Codex includes `query`. 
+Codex includes `query` (empty on `item.started`), an untyped `action`
+(`{"type": "search"|"open_page"|"find_in_page"|"other", …}`) and, on
+completion, opaque `results`. The schema keeps `action`/`results` as `Any` so an
+unknown future action type never drops the line (#419).
 
-→ Untether `action`:
+→ Untether `action` (same raw id on both phases, so the started row completes in place):
 
 * `kind="web_search"`
-* `title="web search"`
-* `detail={ query }`
-* `phase="completed"`
-* `ok=true` (this is just “it did a search”; success/failure is typically not expressed here)
+* `phase="started"` / `"completed"`, `ok=true` on completion
+* `title` from `runners/codex.py:_web_search_title()`:
+
+  | `action.type` | title | `detail.action_type` | rendered prefix |
+  |---|---|---|---|
+  | `search` | `action.query` → `query` → first 3 `queries` joined with ` · ` (+ ` (+N more)`) | `search` | `searched: ` |
+  | `search` with no query at all | `web search` | `other` | none |
+  | `open_page` | `action.url` → `query` → `page` | `open_page` | `opened: ` |
+  | `find_in_page` | `"<pattern>" in <url>`, `"<pattern>"`, or `url` → `query` → `page` | `find_in_page` | `find in page: ` |
+  | `other` / absent / unknown, `query` non-empty | `query` | `search` | `searched: ` |
+  | `other` / absent / unknown, no `query` | `web search` | `other` | none |
+
+* `detail={ query, action_type, url?, result_count? }` — raw `results` are never
+  copied (only their count).
+* Claude's `WebSearch` sets no `action_type` and keeps the `searched: ` prefix.
 
 ---
 
@@ -319,11 +344,11 @@ Codex includes checklist items with `completed` booleans.
 
 → Untether `action`:
 
-* `kind="note"` (or `"todo"`)
-* `title="plan"`
-* `detail={ items, done: count_done, total: count_total }`
+* `kind="note"`
+* `title="todo <done>/<total>: <first unfinished item>"` (`…: done` when all are complete; `todo` when the list is empty)
+* `detail={ done, total }`
 * `phase` maps 1:1 to started/updated/completed
-* `ok=true` when phase completed (optional)
+* `ok=true` when phase completed
 
 This is the one case where `item.updated` is common; your unified `action` event is exactly the right shape for it.
 
@@ -341,12 +366,18 @@ Cheatsheet: this is a **non-fatal warning** (different from top-level fatal `err
 
 → Untether `action`:
 
-* `kind="warning"` (or `"note"`)
-* `title="warning"`
-* `message=item.message`
+* `kind="warning"`
+* `title="⚠️ " + item.message`, `detail={ message }`, `message=item.message`
 * `level="warning"`
-* `phase="completed"`
-* `ok=true` (because it’s informational) **or** omit `ok`
+* `phase="completed"` (started/updated lines are ignored)
+* `ok=true`: the progress row shows the ⚠️ as its status, not ✗; it does not end the run ([#987](https://github.com/littlebearapps/untether/issues/987))
+* a repeat of a message already shown in the run is dropped: Codex 0.160 emits each config warning (e.g. an ignored `[project]` table in `~/.codex/config.toml`) twice, under two item ids
+
+---
+
+### 9) `collab_tool_call` and unknown item types
+
+`collab_tool_call` (sub-agent coordination) decodes but emits **no action**. An `item.*` line whose `item.type` Untether doesn't know decodes as `unknown_item` (instead of being dropped as invalid JSONL) and also emits nothing.
 
 ---
 
@@ -407,16 +438,12 @@ for line in codex_jsonl_stream:
         did_emit_completed = True
         continue
 
-    if t == "error":  # fatal stream error
-        if not did_emit_completed:
-            emit({"type":"completed","engine":"codex","resume":resume,
-                  "ok":False,"answer":final_answer or "",
-                  "error":line.get("message")})
-            did_emit_completed = True
+    if t == "error":  # stream error: progress/warning only, never ends the run
+        emit(reconnect_note_or_warning(line.get("message")))
         continue
 
-# Optional: if stream ends without turn.completed/failed,
-# emit completed with ok=False and error="unexpected EOF"
+# If the stream ends without turn.completed/failed: rc != 0 -> completed ok=False;
+# rc == 0 -> completed ok=True with final_answer (ok=False if no thread_id was seen)
 ```
 
 This design preserves the Untether ordering/serialization principles: `started` happens as soon as resume token is known, actions stream in order, and exactly one `completed` closes the run. 

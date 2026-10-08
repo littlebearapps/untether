@@ -51,9 +51,9 @@ Topics bind Telegram **forum threads** to a project/branch context. Each topic k
 - `projects`: topics only in project chats (`projects.<alias>.chat_id`)
 - `all`: topics available in both the main chat and project chats
 
-## Create and bind a topic
+## Create a bound topic
 
-Run this inside a forum topic thread:
+Send this anywhere in the forum group:
 
 ```
 /topic <project> @branch
@@ -64,12 +64,12 @@ Examples:
 - In the main chat: `/topic backend @feat/api`
 - In a project chat: `/topic @feat/api` (project is implied)
 
-Untether will bind the topic and rename it to match the context.
+Untether creates a **new** topic named after the context, binds it, and posts the binding as the topic's first message. A branch is required. If a topic for that project and branch already exists, Untether renames it back to the context name and says so instead of creating a second one.
 
 !!! untether "Untether"
-    topic bound: **backend** @feat/api
+    created topic `backend @feat/api`.
 
-    Topic renamed to `backend @feat/api`
+To bind the topic you're already in, use `/ctx set <project> @branch` inside it (below).
 
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/forum-topic-context.jpg" alt="Forum topic bound to project and branch with renamed title and context footer" width="360" loading="lazy" /> -->
@@ -84,7 +84,12 @@ Note: Outside topics (private chats or main group chats), `/ctx` binds the chat 
 
 ## Reset a topic session
 
-Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread.
+Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread. Only this topic's run (and its `/loop` schedules) is cancelled — other topics keep running. `/new` or `/cancel` in General likewise only touches General's work ([#826](https://github.com/littlebearapps/untether/issues/826)).
+
+`/cancel` without a reply follows the same rule: in a topic it stops that topic's run, or replies "nothing running in this topic." when only other topics are busy. When nothing is running it also drops the topic's pending `/at` runs and loops and says what it dropped (`❌ cancelled 1 pending /at run and 1 active loop.`); a Claude session that is only idling after its answer is closed rather than counted as a run (`nothing running in this topic — closed the idle session.`). It always replies ([#902](https://github.com/littlebearapps/untether/issues/902)). `/new` cancels runs and loops but leaves pending `/at` runs alone.
+
+!!! note "Scheduled runs"
+    Cron and webhook runs have no topic: they run in General, so only `/new` or `/cancel` in General cancels them. An `/at` run belongs to the topic it was scheduled from. Claude Code `/loop` schedules belong to the topic whose run created them, and each loop iteration is posted back in that topic.
 
 ## Set a default engine per topic
 
@@ -93,6 +98,12 @@ Use `/agent set` inside the topic:
 ```
 /agent set claude
 ```
+
+## Set the follow-up mode per topic
+
+For Claude Code, send `/steer` (no text) inside a topic to have messages sent there while Claude is working steered into the run, or `/queue` to go back to waiting for the turn to end. It applies to that topic only. See [Steer follow-ups](steer-follow-ups.md).
+
+Notices about a run — such as `🔄 Restarting — waiting for your run to finish…` during a restart — are posted in the topic that owns the run ([#665](https://github.com/littlebearapps/untether/issues/665)).
 
 ## State files
 
@@ -106,8 +117,10 @@ Topic bindings and sessions live in:
   - Your `scope` does not include this chat. Update `topics.scope`.
 - **"chat is not a supergroup" / "topics enabled but chat does not have topics"**
   - Convert the group to a supergroup and enable topics.
-- **"bot lacks manage topics permission"**
-  - Promote the bot to admin and grant Manage Topics.
+- **"topics enabled but bot is not an admin"** (startup error)
+  - Promote the bot to admin and grant Manage Topics. An admin without Manage Topics starts, but logs `topics.manage_topics.missing` and can't create topics.
+- **"topics enabled but no project chats are configured"** (startup error)
+  - With `scope = "projects"`, set `projects.<alias>.chat_id` for your forum chats, or use `scope = "main"`.
 
 ## Related
 

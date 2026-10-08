@@ -35,14 +35,14 @@ From `docs/reference/integration-testing.md` and
 | Change scope | Required tiers | Time |
 |---|---|---|
 | **Patch** (bug fix) | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** (new feature) | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + Tier 3 (transport if changed) + Tier 4 (overrides if changed) + Tier 6 + upgrade path | ~75 min |
-| **Major** (breaking) | ALL tiers (1–7), ALL engines, full upgrade path | ~120 min |
+| **Minor** (new feature) | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport if changed) + Tier 4 (overrides if changed) + Tier 6 + upgrade path | ~75 min |
+| **Major** (breaking) | ALL tiers (1–7), all supported engines, full upgrade path | ~120 min |
 
 Integration tests are automated via Telegram MCP tools (`send_message`,
 `get_history`, `list_inline_buttons`, `press_inline_button`,
 `reply_to_message`, `send_voice`, `send_file`) + Bash (`journalctl`,
 `kill -TERM`, FD/zombie checks). Chat IDs in
-`testing-conventions.md` §Integration testing via Telegram MCP.
+`docs/reference/integration-testing.md` §Test chats.
 
 Use `@untether_dev_bot`. **NEVER** test on `@hetz_lba1_bot` (staging) until
 dev tests pass.
@@ -59,8 +59,8 @@ scripts/run-integration-tests.sh ${VERSION} --manual \
 ```
 
 This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with
-timestamp, tester, tier list, and notes. The marker is per-version; rc14 →
-rc15 each get their own.
+timestamp, tester, tier list, and notes. The marker is per-version; `0.36.0rc1`
+→ `0.36.0rc2` each get their own.
 
 **Markers are durable.** Delete manually if you discover a regression
 post-test:
@@ -82,7 +82,7 @@ scripts/fleet-rollout.sh ${VERSION} --dry-run    # preview
 scripts/fleet-rollout.sh ${VERSION} --only mac   # one host
 ```
 
-The four hosts: lba-1 staging, nsd VPS, channelo VPS, Nathan's Mac.
+The five hosts: lba-1 staging, nsd VPS, channelo VPS, sl VPS, Nathan's Mac.
 
 **Partial failure handling:** if one host fails, the script reports it but
 does NOT roll back successful hosts. Operator decides: rerun the failed
@@ -114,14 +114,14 @@ red flags. Investigate before declaring the fix verified.
 uv run pytest
 
 # Lint + format
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 
 # CHANGELOG validation (if version bumped)
 python3 scripts/validate_release.py
 
-# Confirm no settings.json or hooks.json drift
-git status .claude/hooks.json .claude/settings.json 2>/dev/null
+# Confirm no hook-registration or guard-script drift
+git status .claude/settings.json .claude/hooks/ 2>/dev/null
 ```
 
 ## 7. Note `needs-verification` on the issue

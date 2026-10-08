@@ -1,120 +1,79 @@
 ---
-applies_to: "src/untether/runners/claude.py,src/untether/telegram/commands/claude_control.py"
+paths:
+  - "src/untether/runners/claude.py"
+  - "src/untether/runners/run_options.py"
+  - "src/untether/telegram/commands/claude_control.py"
+  - "src/untether/telegram/commands/ask_question.py"
+  - "src/untether/live_followup.py"
+  - "src/untether/loop_scheduler.py"
 ---
 
-# Control Channel Rules
+# Control Channel Rules (Claude runner)
 
-## PTY lifecycle
+Invariants only. Mechanism detail (registry table, claim flow, async-hook hold, scheduling hooks, plan re-arm,
+live-session close sequence): `.claude/skills/claude-stream-json/control-channel-internals.md` and `docs/reference/runners/claude/runner.md`.
+Read those before changing any of these areas.
 
-ClaudeRunner uses `pty.openpty()` for stdin (not `subprocess.PIPE`):
-1. `master_fd, slave_fd = pty.openpty()`
-2. `tty.setraw(master_fd)` for raw byte passthrough
-3. Slave FD passed to subprocess as stdin
-4. Master FD wrapped in `anyio.AsyncFile` for async writes
-5. **Always close master FD in `finally`** — FD leaks break subsequent runs
-
-## Session registries
-
-```python
-_SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin
-_REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
-_OUTLINE_PENDING: set[str]                             # sessions awaiting outline text
-_DISCUSS_APPROVED: set[str]                            # sessions with post-outline approval
-_PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel_id, question)
-```
-
-- Register on first `system.init` event (when session_id is known)
-- Clean up all registries in the `finally` block of `run_impl` (including outline and approval state)
-- All control responses go through `write_control_response(session_id, request_id, approved, deny_message)`
+## PTY + registries
+- Stdin is a PTY (`pty.openpty()`, `tty.setraw(master)`); **always close the master FD in `finally`** — leaks break later runs.
+- Register session registries on the first `system.init`; clean **all** of them (incl. outline/approval state) in `run_impl`'s `finally`.
+- Every stdin write goes through `_locked_send` (per-pipe `anyio.Lock`) — several tasks write concurrently.
+- Control responses go through `write_control_response(...)`. Taps go through `respond_to_control_request()` (#685):
+  **never write a response without a claim** (`claim_control_request()` before the dispatcher's first `await`).
+- A CLI `control_cancel_request` (#684) retires the request everywhere and records `cancelled`; write nothing back.
+  A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`.
+- Every request registration binds through `_bind_request_channel()`, which records `_REQUEST_TO_CHANNEL` **and** the
+  run's originator (`_REQUEST_TO_ORIGINATOR`, from `get_run_sender_id()`, #388); clean both with the other registries.
+  No originator entry (cron, webhook, `/at`, loop fires) means any allowed user may answer — never invent one.
+  `[transports.telegram] approval_originator_only` checks it in `_dispatch_callback` **before** the early answer
+  reserves a claim, and on typed AskUserQuestion replies.
 
 ## Auto-approve
+- Auto-approve the non-interactive request types in `_AUTO_APPROVE_TYPES`.
+- `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` — **`ExitPlanMode` is never auto-approved**.
+- Prompting modes (`default`/`manual`/`acceptEdits`) route every tool to Telegram (#749); `is_claude_prompting_mode()`
+  in `runners/run_options.py` is the single classification point.
 
-Non-interactive requests are auto-approved without showing buttons:
-- Request types in `_AUTO_APPROVE_TYPES` tuple: `ControlInitializeRequest`, `ControlHookCallbackRequest`, `ControlMcpMessageRequest`, `ControlRewindFilesRequest`, `ControlInterruptRequest`
-- Tool requests: auto-approved UNLESS `tool_name in _TOOLS_REQUIRING_APPROVAL`
-- `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}`
-- `ExitPlanMode`: NEVER auto-approved — always show Telegram buttons
-- `AskUserQuestion`: NEVER auto-approved — shown in Telegram for user to reply with text
+## Permission modes (#741)
+- Only `plan-auto` is translated (→ CLI `plan` + ExitPlanMode rubber stamp). Every genuine CLI mode passes through verbatim.
+- `auto` is the CLI's classifier mode: it must **never** arm `auto_approve_exit_plan_mode`.
+- Never re-introduce an inline `"plan" if mode == "auto"` remap. Add new modes to `CLAUDE_CLI_PERMISSION_MODES`
+  (drift test in `tests/test_claude_permission_modes.py`).
+- Plan re-arm (#383): only when configured mode maps to CLI `plan`, session is live, plan was observed, it has left plan,
+  nothing in flight. Never for prompting modes or `auto`/`dontAsk`/`bypassPermissions`. Approval flags are turn-scoped
+  (`_open_followup_turn` clears `_PLAN_EXIT_APPROVED`; `_DISCUSS_APPROVED` survives one boundary via `_DISCUSS_CARRY`).
+  A mid-turn steer fold is never a boundary. Defer while plan-exit-turn agents run — key on `origin_turn`, never start time.
+- The idle-boundary re-arm is written **before** the turn-closing event is yielded (`_drain_plan_rearm_pre_yield`);
+  never move it to the post-yield drains.
 
-## AskUserQuestion flow
+## Live sessions (#776)
+- Never write a follow-up mid-turn outside steer mode — use `inject_when_idle`. `LiveSession.lock` serialises injection
+  against `close_live_session`.
+- `_SESSION_STDIN` means "a process owns this session"; ask `is_session_accepting()` before writing a follow-up.
+- Async hooks (#812): `has_pending_async_hooks()` is a sibling predicate — never part of `has_live_background_work()`.
+  Hook release is all-or-nothing; **never bind a process to a hook**; never rely on `sh -c` to identify hook processes.
+- Timing knobs are slots-dataclass fields: set them on the instance in tests.
 
-When Claude calls `AskUserQuestion`:
-1. Control request intercepted → registered in `_PENDING_ASK_REQUESTS[request_id]`
-2. Question extracted from `input.question` or `input.questions[0].question`
-3. Progress message shows `❓ <question text>` with Approve/Deny buttons
-4. User replies with text → `telegram/loop.py` intercepts via `get_pending_ask_request()`
-5. `answer_ask_question()` sends deny response with user's text as `denial_message`
-6. Claude reads the denial message as the answer and continues
+## Outline gate / post-outline approval
+- After "Pause & Outline", the gate is text-based (`_OUTLINE_MIN_CHARS`): short → auto-deny, written → hold open with buttons.
+- Synthetic buttons use the `da:` callback prefix (64-byte limit), handled in `claude_control.py` before approve/deny.
+- "Let's discuss" holds the request open; the 5-min sweep is event-driven, not a timer.
 
-## Diff preview
+## Scheduling hooks (#925)
+- Every control-channel spawn registers `PreToolUse` hook callbacks `ut_loop_cron_create` / `ut_loop_cron_delete` in
+  `initialize` (none with `[loop] own_schedule = false`). Only ids in `_LOOP_HOOK_IDS` may read a hook payload; every
+  other `hook_callback` stays payload-blind auto-approve.
+- Always answer them: CronCreate fails **closed** (deny), CronDelete fails open (passthrough). Read Loop mode when the
+  callback arrives, never at spawn. CronDelete only stops loops the calling session owns.
+- CLI 2.1.289 validates CronDelete ids before hooks, so the `tool_use` observer is what stops a `ut_loop_` id — never
+  remove it in favour of the hook branch.
 
-`_format_diff_preview(tool_name, tool_input)` generates compact diffs for approval messages:
-- Only for tools going through `ControlRequest` (not auto-approved)
-- Edit: `- old` / `+ new` lines (max 4 each, 60 char truncation)
-- Write: `+ content` (max 8 lines)
-- Bash: `$ command` (max 200 chars)
-
-## Outline gate (Pause & Outline)
-
-After a "Pause & Outline Plan" click, `mark_outline_pending(session_id)` arms a
-purely TEXT-based gate on subsequent `ExitPlanMode` requests:
-- Outline not yet written (`max_text_len_since_cooldown < _OUTLINE_MIN_CHARS`,
-  200 chars) → auto-deny with the write-the-outline-first instruction
-- Outline written → hold the request open + synthetic Approve/Deny buttons
-- Outline and approval state cleaned up on session end
-
-**#570 (retired workaround):** a time-based progressive cooldown
-(30/60/90/120s escalation, `_DISCUSS_COOLDOWN`) used to also gate this path —
-it worked around Claude Code v2.1.72–2.1.74 re-issuing `ExitPlanMode`
-immediately after a denial (#126 lineage). Verified fixed on CLI 2.1.215
-(2026-07-20: denied ExitPlanMode → clean text turn, no re-issue) and removed.
-If the upstream loop ever regresses, the repro is: deny an ExitPlanMode
-control_request via the Telegram buttons and watch for an immediate re-issue.
-
-## Post-outline approval
-
-After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (✅/❌/📋 emoji prefixes) appear in Telegram:
-- User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, outline-pending cleared
-- User clicks "Deny" → outline-pending cleared, no auto-approve flag set
-- User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; 5-minute safety timeout (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) cleans up stale held requests
-- Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
-- Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)
-- Handled in `claude_control.py` before the normal approve/deny flow
-- Outlines rendered as formatted text via `render_markdown()` + `split_markdown_body()` — approval buttons on last message
-- Outline/notification cleanup via module-level `_OUTLINE_REGISTRY` on approve/deny
-
-## Control request/response format
-
-Request (from Claude on stdout):
-```json
-{"type":"control_request","request_id":"req_1","tool_name":"Bash","tool_input":{...}}
-```
-
-Response (to Claude on stdin):
-```json
-{"type":"control_response","request_id":"req_1","approved":true}
-```
-
-Denial with message:
-```json
-{"type":"control_response","request_id":"req_1","approved":false,"denial_message":"..."}
-```
-
-## Parent-initiated control_requests (Untether → Claude)
-
-Untether can also *initiate* control_requests on stdin, following the wire format documented in Anthropic's [`claude-agent-sdk-python`](https://github.com/anthropics/claude-agent-sdk-python). Subtypes accepted by Claude Code include: `mcp_status`, `mcp_reconnect` (`serverName`), `mcp_toggle` (`serverName` + `enabled`), `set_permission_mode`, `interrupt`, `set_model`, `stop_task` (`task_id`).
-
-Untether uses this direction in [#365](https://github.com/littlebearapps/untether/issues/365):
-```json
-{"type":"control_request","request_id":"ut_catalog_refresh_<sid>_<seq>","request":{"subtype":"mcp_status"}}
-```
-
-Drained via `ClaudeRunner._drain_catalog_refresh` alongside `_drain_auto_approve` / `_drain_auto_deny`. **Fire-and-forget** — Untether does not register a pending response entry or parse the eventual `control_response` today. Request IDs use the `ut_<feature>_<session_id>_<seq>` namespace so they can't collide with Claude Code's own `req_*` IDs. If you add another parent-initiated subtype, reuse this namespace convention and extend this section.
+## Parent-initiated control requests
+- Request ids use the `ut_<feature>_<session_id>_<seq>` namespace (never collide with the CLI's `req_*`). Extend the
+  internals doc when adding a subtype.
 
 ## After changes
-
 ```bash
 uv run pytest tests/test_claude_control.py tests/test_ask_user_question.py tests/test_diff_preview.py -x
 ```
-
-If this change will be released, also run integration tests C1-C6 (Claude interactive), T8 (stale buttons), S9 (concurrent clicks) via `@untether_dev_bot`. See `docs/reference/integration-testing.md`.
+Before release: integration tests C1–C6, T8, S9 via `@untether_dev_bot` (`docs/reference/integration-testing.md`).

@@ -782,3 +782,153 @@ class TestStderrSanitisation:
 
         text = "Use option /x to enable verbose mode"
         assert _sanitise_stderr(text) == text
+
+
+class _GatedContinueRunner(ResumeTokenMixin, BaseRunner):
+    """Resolves a /continue token to ``continue_resolves_to`` and blocks on a gate."""
+
+    engine = "dummy"
+    resume_re = re.compile(r"(?im)^`?dummy resume (?P<token>[^`\s]+)`?$")
+
+    def __init__(self) -> None:
+        self.gate = None
+        self.started: list[str] = []
+        self.continue_resolves_to: list[str] = []
+
+    async def run_impl(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[StartedEvent | CompletedEvent]:
+        if resume is not None and resume.is_continue:
+            token = ResumeToken(
+                engine=self.engine, value=self.continue_resolves_to.pop(0)
+            )
+        else:
+            token = resume or ResumeToken(engine=self.engine, value="fresh")
+        yield StartedEvent(engine=self.engine, resume=token, title="dummy")
+        self.started.append(prompt)
+        await self.gate.wait()
+        yield CompletedEvent(engine=self.engine, ok=True, answer=prompt, resume=token)
+
+
+async def _drain(runner: BaseRunner, prompt: str, resume: ResumeToken | None) -> None:
+    async for _ in runner.run(prompt, resume):
+        pass
+
+
+@pytest.mark.anyio
+async def test_817_concurrent_continue_runs_do_not_share_a_lock() -> None:
+    import anyio
+
+    runner = _GatedContinueRunner()
+    runner.gate = anyio.Event()
+    runner.continue_resolves_to = ["sess-a", "sess-b"]
+    cont = ResumeToken(engine=runner.engine, value="", is_continue=True)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_drain, runner, "first", cont)
+        tg.start_soon(_drain, runner, "second", cont)
+        with anyio.fail_after(2):
+            while len(runner.started) < 2:
+                await anyio.sleep(0.01)
+        # Both /continue runs are inside run_impl at once: no shared "dummy:" lock.
+        assert sorted(runner.started) == ["first", "second"]
+        assert runner.lock_for(ResumeToken(engine="dummy", value="")).value == 1
+        runner.gate.set()
+
+
+@pytest.mark.anyio
+async def test_817_continue_run_locks_its_real_session_id() -> None:
+    import anyio
+
+    runner = _GatedContinueRunner()
+    runner.gate = anyio.Event()
+    runner.continue_resolves_to = ["sess-a"]
+    cont = ResumeToken(engine=runner.engine, value="", is_continue=True)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_drain, runner, "continue", cont)
+        with anyio.fail_after(2):
+            while runner.started != ["continue"]:
+                await anyio.sleep(0.01)
+        # The real session id is locked, so a normal resume of it must wait.
+        assert runner.lock_for(ResumeToken(engine="dummy", value="sess-a")).value == 0
+        tg.start_soon(
+            _drain, runner, "resume", ResumeToken(engine="dummy", value="sess-a")
+        )
+        await anyio.sleep(0.1)
+        assert runner.started == ["continue"]
+        runner.gate.set()
+    assert runner.started == ["continue", "resume"]
+
+
+@pytest.mark.anyio
+async def test_817_continue_token_for_other_engine_is_rejected() -> None:
+    runner = _GatedContinueRunner()
+    bad = ResumeToken(engine="other", value="", is_continue=True)
+    with pytest.raises(RuntimeError):
+        await _drain(runner, "x", bad)
+
+
+class _TaskGroupRunner(ResumeTokenMixin, BaseRunner):
+    """``run_impl`` yields from inside an anyio task group, like Claude's."""
+
+    engine = "dummy"
+    resume_re = re.compile(r"(?im)^`?dummy resume (?P<token>[^`\s]+)`?$")
+
+    def __init__(self) -> None:
+        self.closed_in_task: object | None = None
+
+    async def run_impl(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[StartedEvent | CompletedEvent]:
+        import anyio
+
+        token = resume or ResumeToken(engine=self.engine, value="tg")
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(anyio.sleep_forever)
+                yield StartedEvent(engine=self.engine, resume=token, title="dummy")
+                yield CompletedEvent(
+                    engine=self.engine, ok=True, answer=prompt, resume=token
+                )
+                tg.cancel_scope.cancel()
+        finally:
+            self.closed_in_task = anyio.get_current_task().id
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("resume_value", [None, "sess-1"])
+async def test_closing_run_closes_run_impl_in_the_same_task(
+    resume_value: str | None,
+) -> None:
+    """rc15 integration finding: the consumer is cancelled while blocked in its
+    own body (a stalled Telegram send), then closes ``runner.run()`` as
+    runner_bridge's #614 ``finally`` does. The inner ``run_impl`` must be closed
+    in that task too, not left for the event loop to finalise elsewhere, which
+    raised "Attempted to exit cancel scope in a different task"."""
+    import anyio
+
+    from untether.runner_bridge import _close_runner_events
+
+    runner = _TaskGroupRunner()
+    resume = (
+        ResumeToken(engine=runner.engine, value=resume_value) if resume_value else None
+    )
+    consumer_task: list[object] = []
+    blocked = anyio.Event()
+
+    async def consume() -> None:
+        consumer_task.append(anyio.get_current_task().id)
+        events = runner.run("go", resume)
+        try:
+            async for _evt in events:
+                blocked.set()
+                await anyio.sleep_forever()  # stuck outside the generator
+        finally:
+            await _close_runner_events(events)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(consume)
+            await blocked.wait()
+            tg.cancel_scope.cancel()
+
+    assert runner.closed_in_task == consumer_task[0]

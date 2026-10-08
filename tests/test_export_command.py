@@ -11,6 +11,7 @@ from untether.telegram.commands.export import (
     ExportCommand,
     _format_export_json,
     _format_export_markdown,
+    latest_session_for_chat,
     record_session_event,
     record_session_usage,
 )
@@ -167,6 +168,54 @@ class TestFormatExportMarkdown:
         assert "Completed" in md
         assert "Done!" in md
 
+    @staticmethod
+    def _command_md(command: str) -> str:
+        return _format_export_markdown(
+            "s",
+            [
+                {
+                    "type": "action",
+                    "phase": "completed",
+                    "ok": True,
+                    "action": {"id": "1", "kind": "command", "title": command},
+                }
+            ],
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        ("title", "line"),
+        [
+            ("⚠️ `project` is ignored.", "- ✓ ⚠️ `project` is ignored."),
+            ("Permission resolved", "- ✓ ⚠️ Permission resolved"),
+        ],
+    )
+    def test_warning_gets_one_warning_sign(self, title: str, line: str):
+        """#987: a Codex warning title already leads with ⚠️."""
+        md = _format_export_markdown(
+            "s",
+            [
+                {
+                    "type": "action",
+                    "phase": "completed",
+                    "ok": True,
+                    "action": {"id": "1", "kind": "warning", "title": title},
+                }
+            ],
+            None,
+        )
+        assert line in md
+
+    def test_command_with_backticks_is_a_safe_code_span(self):
+        """#871/#418: an inner backtick can't close the code span."""
+        assert "- ✓ `` echo `date` ``" in self._command_md("echo `date`")
+        assert "- ✓ `git status`" in self._command_md("git status")
+
+    def test_multiline_command_is_a_fenced_block(self):
+        """#871/#418: a heredoc is kept verbatim in a fence it can't close."""
+        md = self._command_md("cat <<EOF\nhi `x`\n```\nEOF")
+        assert "  ````\n  cat <<EOF\n  hi `x`\n  ```\n  EOF\n  ````" in md
+
     def test_with_usage(self):
         md = _format_export_markdown(
             "s1",
@@ -253,3 +302,253 @@ class TestFormatExportJson:
         assert parsed["session_id"] == "s1"
         assert len(parsed["events"]) == 1
         assert parsed["usage"]["cost"] == 0.1
+
+
+# --- #417: nested token header, latest = last activity, engine filter -------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def time(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    from untether.telegram.commands import export as export_mod
+
+    c = _Clock()
+    monkeypatch.setattr(export_mod, "time", c)
+    _reset()
+    yield c
+    _reset()
+
+
+def test_header_nested_tokens_without_cost() -> None:
+    """OpenCode's nested usage with no cost still gets a token line."""
+    md = _format_export_markdown(
+        "s1",
+        [{"type": "completed", "ok": True, "answer": "ok", "error": None}],
+        {"usage": {"input_tokens": 5000, "output_tokens": 1200}},
+    )
+    assert "5000 in / 1200 out tokens" in md
+
+
+def test_latest_session_uses_last_activity(clock: _Clock) -> None:
+    record_session_event("A", {"type": "started", "engine": "codex"}, channel_id=CHAT_A)
+    record_session_event("B", {"type": "started", "engine": "codex"}, channel_id=CHAT_A)
+    record_session_event("A", {"type": "action", "phase": "started"}, channel_id=CHAT_A)
+    latest = latest_session_for_chat(CHAT_A)
+    assert latest is not None and latest.session_id == "A"
+    record_session_usage("B", {"input_tokens": 1}, channel_id=CHAT_A)
+    latest = latest_session_for_chat(CHAT_A)
+    assert latest is not None and latest.session_id == "B"
+    assert latest.usage == {"input_tokens": 1}
+
+
+def test_latest_session_filters_by_engine(clock: _Clock) -> None:
+    record_session_event(
+        "cx", {"type": "started", "engine": "codex"}, channel_id=CHAT_A
+    )
+    record_session_event(
+        "cl", {"type": "started", "engine": "claude"}, channel_id=CHAT_A
+    )
+    codex = latest_session_for_chat(CHAT_A, engine="codex")
+    assert codex is not None
+    assert (codex.session_id, codex.engine) == ("cx", "codex")
+    anything = latest_session_for_chat(CHAT_A)
+    assert anything is not None and anything.session_id == "cl"
+    assert latest_session_for_chat(CHAT_A, engine="opencode") is None
+    assert latest_session_for_chat(CHAT_B) is None
+
+
+@pytest.mark.anyio
+async def test_export_command_selects_latest_after_refactor(clock: _Clock) -> None:
+    record_session_event(
+        "old", {"type": "started", "engine": "codex", "title": "t"}, channel_id=CHAT_A
+    )
+    record_session_event(
+        "new", {"type": "started", "engine": "codex", "title": "t"}, channel_id=CHAT_A
+    )
+    # Resume the older session: it becomes the most recently active.
+    record_session_event(
+        "old",
+        {"type": "completed", "ok": True, "answer": "resumed", "error": None},
+        channel_id=CHAT_A,
+    )
+
+    @dataclass
+    class FakeMessage:
+        channel_id: int = CHAT_A
+        message_id: int = 1
+
+    @dataclass
+    class FakeCtx:
+        args_text: str = "json"
+        message: FakeMessage = None  # type: ignore[assignment]
+
+        def __post_init__(self):
+            if self.message is None:
+                self.message = FakeMessage()
+
+    result = await ExportCommand().handle(FakeCtx())  # type: ignore[arg-type]
+    assert result is not None
+    assert result.attachment is not None
+    content = result.attachment.content.decode()
+    assert '"session_id": "old"' in content
+    assert "resumed" in content
+
+
+def test_trim_evicts_least_recently_active(clock: _Clock) -> None:
+    for i in range(20):
+        record_session_event(f"s{i}", {"type": "started"}, channel_id=CHAT_A)
+    # s0 was created first but is now the most recently active.
+    record_session_event("s0", {"type": "action"}, channel_id=CHAT_A)
+    record_session_event("s20", {"type": "started"}, channel_id=CHAT_A)
+    assert len(_SESSION_HISTORY) == 20
+    assert (CHAT_A, "s0") in _SESSION_HISTORY
+    assert (CHAT_A, "s1") not in _SESSION_HISTORY
+
+
+def test_export_usage_header_names_its_scope() -> None:
+    """rc15 integration finding: the header showed the last run's cost under a
+    transcript of every run; it now says which figure it is."""
+    opencode = [{"type": "started", "engine": "opencode", "title": "t"}]
+    md = _format_export_markdown("s", opencode, {"total_cost_usd": 0.03})
+    assert "**Usage:** $0.0300 · last run" in md
+    codex = [{"type": "started", "engine": "codex", "title": "t"}]
+    md = _format_export_markdown("s", codex, {"input_tokens": 9, "output_tokens": 2})
+    assert "9 in / 2 out tokens · thread total" in md
+
+
+# --- #418: /export attaches the full transcript as a document ---------------
+
+
+@dataclass
+class _Msg418:
+    channel_id: int = CHAT_A
+    message_id: int = 1
+
+
+@dataclass
+class _Ctx418:
+    args_text: str = ""
+    message: _Msg418 | None = None
+
+    def __post_init__(self):
+        if self.message is None:
+            self.message = _Msg418()
+
+
+def _record_long_session(session_id: str = "sess_long") -> str:
+    _reset()
+    record_session_event(
+        session_id,
+        {"type": "started", "engine": "claude", "title": "opus"},
+        channel_id=CHAT_A,
+    )
+    for i in range(40):
+        record_session_event(
+            session_id,
+            {
+                "type": "action",
+                "phase": "completed",
+                "ok": True,
+                "action": {"kind": "command", "title": f"echo step {i}"},
+            },
+            channel_id=CHAT_A,
+        )
+    answer = "".join(f"line {i:04d} lorem ipsum dolor sit amet\n" for i in range(150))
+    assert len(answer) > 5000
+    record_session_event(
+        session_id,
+        {"type": "completed", "ok": True, "answer": answer, "error": None},
+        channel_id=CHAT_A,
+    )
+    return answer
+
+
+@pytest.mark.anyio
+async def test_418_export_md_is_attachment() -> None:
+    answer = _record_long_session()
+    result = await ExportCommand().handle(_Ctx418())  # type: ignore[arg-type]
+    assert result is not None and result.attachment is not None
+    att = result.attachment
+    assert att.filename.startswith("untether-export-claude-sess_long-")
+    assert att.filename.endswith(".md")
+    content = att.content.decode("utf-8")
+    assert answer.strip() in content  # the whole answer, untruncated
+    assert "(truncated)" not in content
+    assert "echo step 39" in content
+    assert len(result.text) <= 1024
+    assert "claude" in result.text
+    assert "sess_long" in result.text
+    assert "Markdown" in result.text
+    assert "42 events" in result.text
+
+
+@pytest.mark.anyio
+async def test_418_export_json_is_attachment() -> None:
+    import json
+
+    _record_long_session()
+    result = await ExportCommand().handle(_Ctx418(args_text="json"))  # type: ignore[arg-type]
+    assert result is not None and result.attachment is not None
+    assert result.attachment.filename.endswith(".json")
+    data = json.loads(result.attachment.content)
+    assert data["session_id"] == "sess_long"
+    assert len(data["events"]) == 42
+    assert "JSON" in result.text
+
+
+@pytest.mark.anyio
+async def test_418_fallback_text_is_inline_preview() -> None:
+    _record_long_session()
+    result = await ExportCommand().handle(_Ctx418())  # type: ignore[arg-type]
+    assert result is not None and result.attachment is not None
+    fallback = result.attachment.fallback_text
+    assert fallback is not None
+    assert fallback.startswith("📄 Session export (42 events, md)")
+    assert "couldn't attach" in fallback
+    assert len(fallback) <= 3200
+
+
+@pytest.mark.anyio
+async def test_418_filename_sanitised() -> None:
+    import re
+
+    _reset()
+    record_session_event(
+        "a/b:c d", {"type": "started", "engine": "codex"}, channel_id=CHAT_A
+    )
+    result = await ExportCommand().handle(_Ctx418())  # type: ignore[arg-type]
+    assert result is not None and result.attachment is not None
+    assert re.match(
+        r"^untether-export-[a-z]+-[A-Za-z0-9_-]+-\d{8}-\d{4}\.md$",
+        result.attachment.filename,
+    )
+    assert "a_b_c_d" in result.attachment.filename
+
+
+def test_418_filename_unknown_engine() -> None:
+    from untether.telegram.commands.export import _export_filename
+
+    name = _export_filename(None, "x" * 80, "json")
+    assert name.startswith("untether-export-session-" + "x" * 36 + "-")
+    assert name.endswith(".json")
+
+
+@pytest.mark.anyio
+async def test_418_no_session_replies_have_no_attachment() -> None:
+    _reset()
+    result = await ExportCommand().handle(_Ctx418())  # type: ignore[arg-type]
+    assert result is not None and result.attachment is None
+    # a session with no recorded events
+    _SESSION_HISTORY[(CHAT_A, "empty")] = (1.0, [], None)
+    result = await ExportCommand().handle(_Ctx418())  # type: ignore[arg-type]
+    assert result is not None
+    assert result.text == "Session has no recorded events."
+    assert result.attachment is None

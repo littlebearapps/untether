@@ -7,14 +7,20 @@ import socket
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from untether.triggers.ssrf import (
     BLOCKED_NETWORKS,
+    SSRFBlockedError,
     SSRFError,
+    SSRFResolutionError,
     _is_blocked_ip,
     clamp_max_bytes,
     clamp_timeout,
+    parse_networks,
+    redact_url_userinfo,
     resolve_and_validate,
+    suggest_allowlist,
     validate_url,
     validate_url_with_dns,
 )
@@ -427,3 +433,175 @@ class TestBlockedNetworks:
         assert not any(
             ipaddress.ip_address("8.8.8.8") in net for net in BLOCKED_NETWORKS
         )
+
+
+# ---------------------------------------------------------------------------
+# #679: structured errors, allowlist suggestions, userinfo redaction
+# ---------------------------------------------------------------------------
+
+
+def _gai(*ips: str) -> list[tuple]:
+    """Build fake ``getaddrinfo`` results for *ips*."""
+    out: list[tuple] = []
+    for ip in ips:
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sockaddr = (ip, 443, 0, 0) if family == socket.AF_INET6 else (ip, 443)
+        out.append((family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr))
+    return out
+
+
+class TestStructuredErrors:
+    def test_679_ip_literal_raises_blocked_error_with_fields(self) -> None:
+        with pytest.raises(SSRFBlockedError) as info:
+            validate_url("http://127.0.0.1:8000/v1")
+        exc = info.value
+        assert isinstance(exc, SSRFError)
+        assert exc.hostname == "127.0.0.1"
+        assert exc.addresses == ("127.0.0.1",)
+        assert str(exc) == "Blocked: 127.0.0.1 resolves to private/reserved range"
+
+    def test_679_dns_all_blocked_raises_blocked_error_with_all_addresses(
+        self,
+    ) -> None:
+        with (
+            patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")),
+            pytest.raises(SSRFBlockedError) as info,
+        ):
+            resolve_and_validate("localhost", port=8000)
+        assert info.value.hostname == "localhost"
+        assert info.value.addresses == ("127.0.0.1", "::1")
+        assert str(info.value).startswith("All resolved addresses for 'localhost'")
+
+    def test_679_dns_partial_block_still_passes(self) -> None:
+        with patch(
+            "socket.getaddrinfo", return_value=_gai("127.0.0.1", "93.184.216.34")
+        ):
+            result = resolve_and_validate("mixed.example.com", port=443)
+        assert result == [("93.184.216.34", 443)]
+
+    def test_679_dns_failure_raises_resolution_error(self) -> None:
+        with (
+            patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
+            pytest.raises(SSRFResolutionError) as info,
+        ):
+            resolve_and_validate("nx.invalid")
+        assert info.value.hostname == "nx.invalid"
+        assert isinstance(info.value, SSRFError)
+        with (
+            patch("socket.getaddrinfo", return_value=[]),
+            pytest.raises(SSRFResolutionError),
+        ):
+            resolve_and_validate("empty.invalid")
+
+    def test_679_scheme_error_is_plain_ssrf_error(self) -> None:
+        with pytest.raises(SSRFError) as info:
+            validate_url("ftp://example.com/x")
+        assert type(info.value) is SSRFError
+
+    @pytest.mark.anyio
+    async def test_679_ssrf_logs_redact_userinfo(self) -> None:
+        with (
+            capture_logs() as logs,
+            patch("socket.getaddrinfo", return_value=_gai("93.184.216.34")),
+        ):
+            await validate_url_with_dns("http://user:s3cret@example.com/v1")
+            with pytest.raises(SSRFError):
+                validate_url("ftp://user:s3cret@x/")
+        assert logs
+        for entry in logs:
+            for value in entry.values():
+                assert "s3cret" not in str(value)
+        validated = [e for e in logs if e["event"] == "ssrf.validated"]
+        assert validated[0]["url"] == "http://***@example.com/v1"
+
+    def test_679_redact_url_userinfo(self) -> None:
+        assert redact_url_userinfo("https://api.groq.com/v1") == (
+            "https://api.groq.com/v1"
+        )
+        assert redact_url_userinfo("http://user@host:8000/v1") == (
+            "http://***@host:8000/v1"
+        )
+        assert redact_url_userinfo("http://user:pass@host/v1") == ("http://***@host/v1")
+        # Unparseable input is returned unchanged, never raises.
+        assert redact_url_userinfo("http://[::1") == "http://[::1"
+
+    def test_841_redact_url_userinfo_drop_query(self) -> None:
+        assert redact_url_userinfo(
+            "https://u:p@h/v1?key=abc#frag", drop_query=True
+        ) == ("https://***@h/v1")
+        assert redact_url_userinfo("https://h/v1?key=abc", drop_query=True) == (
+            "https://h/v1"
+        )
+        assert redact_url_userinfo("https://h/v1", drop_query=True) == ("https://h/v1")
+        # the default keeps the query (ssrf.* output unchanged)
+        assert redact_url_userinfo("https://u:p@h/v1?x=1") == ("https://***@h/v1?x=1")
+        # unparseable input is returned unchanged and never raises
+        assert redact_url_userinfo("http://[::1", drop_query=True) == "http://[::1"
+
+
+class TestSuggestAllowlist:
+    def test_679_suggest_loopback_v4(self) -> None:
+        assert suggest_allowlist(["127.0.0.1"]) == ("127.0.0.0/8",)
+
+    def test_679_suggest_loopback_dual_stack(self) -> None:
+        assert suggest_allowlist(["127.0.0.1", "::1"]) == ("127.0.0.0/8",)
+
+    def test_679_suggest_loopback_v6_only(self) -> None:
+        assert suggest_allowlist(["::1"]) == ("::1",)
+
+    def test_679_suggest_mapped_loopback(self) -> None:
+        assert suggest_allowlist(["::ffff:127.0.0.1"]) == ("::ffff:127.0.0.0/104",)
+
+    def test_679_suggest_private_exact_ip(self) -> None:
+        assert suggest_allowlist(["10.1.2.3"]) == ("10.1.2.3",)
+        assert suggest_allowlist(["100.101.102.103"]) == ("100.101.102.103",)
+        assert suggest_allowlist(["fd7a:115c:a1e0::1"]) == ("fd7a:115c:a1e0::1",)
+
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "169.254.169.254",
+            "fe80::1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "192.0.2.1",
+            "255.255.255.255",
+        ],
+    )
+    def test_679_suggest_never_metadata_or_link_local(self, addr: str) -> None:
+        assert suggest_allowlist([addr]) == ()
+
+    def test_679_suggest_mixed_drops_unsafe(self) -> None:
+        assert suggest_allowlist(["10.0.0.5", "169.254.169.254"]) == ("10.0.0.5",)
+
+    def test_679_suggest_capped_and_deduped(self) -> None:
+        result = suggest_allowlist(
+            ["10.0.0.5", "10.0.0.5", "10.0.0.9", "192.168.1.2", "172.16.0.3"]
+        )
+        assert len(result) <= 3
+        assert len(set(result)) == len(result)
+        assert list(result) == sorted(result)
+
+    def test_679_suggest_ignores_garbage(self) -> None:
+        assert suggest_allowlist(["localhost", ""]) == ()
+
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "10.1.2.3",
+            "172.16.4.5",
+            "192.168.1.20",
+            "100.101.102.103",
+            "fd7a:115c:a1e0::1",
+            "::ffff:10.0.0.5",
+        ],
+    )
+    def test_679_every_suggestion_unblocks_its_address(self, addr: str) -> None:
+        ip = ipaddress.ip_address(addr)
+        assert _is_blocked_ip(ip)
+        suggested = suggest_allowlist([addr])
+        assert suggested
+        assert not _is_blocked_ip(ip, allowlist=parse_networks(suggested))

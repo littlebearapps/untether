@@ -70,6 +70,135 @@ def test_decode_rate_limit_event_bare() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #790 — the real rate_limit_event is a quota-status snapshot (CLI 2.1.283)
+# ---------------------------------------------------------------------------
+
+# Captured 2026-09-28 on lba-1 from a one-turn Haiku probe (uuid/session_id
+# redacted). Every key below was silently dropped by the pre-#790 schema.
+REAL_ALLOWED_RATE_LIMIT_EVENT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1790578200,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "out_of_credits",
+        "isUsingOverage": False,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.09, "resetsAt": 1790578200},
+            "seven_day": {"utilization": 0.15, "resetsAt": 1791036000},
+        },
+    },
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "session_id": "11111111-1111-1111-1111-111111111111",
+}
+
+
+def test_decode_real_allowed_rate_limit_event() -> None:
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps(REAL_ALLOWED_RATE_LIMIT_EVENT).encode()
+    )
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.uuid == "00000000-0000-0000-0000-000000000000"
+    assert decoded.session_id == "11111111-1111-1111-1111-111111111111"
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "allowed"
+    assert info.resets_at == 1790578200
+    assert info.rate_limit_type == "five_hour"
+    assert info.overage_status == "rejected"
+    assert info.overage_disabled_reason == "out_of_credits"
+    assert info.is_using_overage is False
+    assert info.unified_windows is not None
+    assert info.unified_windows.five_hour is not None
+    assert info.unified_windows.five_hour.utilization == 0.09
+    assert info.unified_windows.five_hour.resets_at == 1790578200
+    assert info.unified_windows.seven_day is not None
+    assert info.unified_windows.seven_day.utilization == 0.15
+    assert info.unified_windows.seven_day_overage_included is None
+    # Legacy fields stay available and simply absent.
+    assert info.retry_after_ms is None
+    assert info.requests_reset is None
+
+
+def test_decode_allowed_warning_rate_limit_event() -> None:
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "allowed_warning",
+            "resetsAt": 1790578200,
+            "rateLimitType": "seven_day_opus",
+            "utilization": 0.82,
+            "surpassedThreshold": 0.8,
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "allowed_warning"
+    assert info.rate_limit_type == "seven_day_opus"
+    assert info.utilization == 0.82
+
+
+def test_decode_rejected_rate_limit_event_with_error_code() -> None:
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "rejected",
+            "rateLimitType": "overage",
+            "overageStatus": "rejected",
+            "isUsingOverage": True,
+            "errorCode": "credits_required",
+            "unifiedWindows": {
+                "seven_day_overage_included": {
+                    "utilization": 1.0,
+                    "resetsAt": 1791036000,
+                }
+            },
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "rejected"
+    assert info.error_code == "credits_required"
+    assert info.is_using_overage is True
+    assert info.resets_at is None
+    assert info.unified_windows is not None
+    window = info.unified_windows.seven_day_overage_included
+    assert window is not None
+    assert window.utilization == 1.0
+
+
+def test_decode_rate_limit_event_unknown_status_and_extra_keys() -> None:
+    """Upstream enum growth must degrade to "unknown value", never a dropped
+    line — status is a plain str, and unknown keys are ignored."""
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "throttled_v2",
+            "rateLimitType": "one_hour",
+            "limitScope": "group_pool",
+            "brandNewKey": {"nested": [1, 2, 3]},
+            "unifiedWindows": {"one_hour": {"utilization": 0.5, "resetsAt": 1}},
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.rate_limit_info is not None
+    assert decoded.rate_limit_info.status == "throttled_v2"
+    assert decoded.rate_limit_info.rate_limit_type == "one_hour"
+
+
+# ---------------------------------------------------------------------------
 # #489 — server_tool_use + advisor_tool_result content blocks
 # ---------------------------------------------------------------------------
 
@@ -361,3 +490,222 @@ def test_tool_progress_translates_to_no_events() -> None:
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# #792 — system/api_retry (CLI 2.1.283 zod: SDKAPIRetryMessage)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_api_retry_with_http_status() -> None:
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 2,
+        "max_retries": 10,
+        "retry_delay_ms": 8000,
+        "error_status": 529,
+        "error": "overloaded",
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.subtype == "api_retry"
+    assert decoded.attempt == 2
+    assert decoded.max_retries == 10
+    assert decoded.retry_delay_ms == 8000
+    assert decoded.error_status == 529
+    assert decoded.error == "overloaded"
+    assert decoded.no_response is None
+
+
+def test_decode_api_retry_no_response_and_null_status() -> None:
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 1,
+        "max_retries": 1,
+        "retry_delay_ms": 2000,
+        "error_status": None,
+        "error": "unknown",
+        "no_response": {"waited_ms": 45000, "retry_wait_ms": 90000},
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.error_status is None
+    assert decoded.no_response is not None
+    assert decoded.no_response.waited_ms == 45000
+    assert decoded.no_response.retry_wait_ms == 90000
+
+
+def test_decode_api_retry_tolerates_drift() -> None:
+    """Unknown keys, an object-shaped ``error`` and extra ``no_response``
+    keys must never drop the line."""
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 3,
+        "max_retries": 10,
+        "retry_delay_ms": 16000,
+        "error_status": 500,
+        "error": {"message": "boom", "formatted": "API Error: 500"},
+        "no_response": {"waited_ms": 1, "retry_wait_ms": 2, "new_key": True},
+        "brand_new_field": [1, 2],
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.attempt == 3
+    assert isinstance(decoded.error, dict)
+
+
+# ---------------------------------------------------------------------------
+# #806 — result terminal_reason / origin / stop_reason
+# ---------------------------------------------------------------------------
+
+
+def _result_line(**extra: object) -> bytes:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1200,
+            "duration_api_ms": 900,
+            "num_turns": 2,
+            "session_id": "sess-806",
+            "result": "partial",
+            **extra,
+        }
+    ).encode()
+
+
+def test_decode_result_terminal_reason_and_origin() -> None:
+    decoded = claude_schema.decode_stream_json_line(
+        _result_line(
+            terminal_reason="aborted_tools",
+            origin={"kind": "task-notification"},
+            stop_reason=None,
+        )
+    )
+    assert isinstance(decoded, claude_schema.StreamResultMessage)
+    assert decoded.terminal_reason == "aborted_tools"
+    assert decoded.origin == {"kind": "task-notification"}
+    assert decoded.stop_reason is None
+    # All optional: an older CLI's result still decodes.
+    bare = claude_schema.decode_stream_json_line(_result_line())
+    assert isinstance(bare, claude_schema.StreamResultMessage)
+    assert (bare.terminal_reason, bare.origin, bare.stop_reason) == (None, None, None)
+    # ``origin`` is Any-typed: a non-object value must not drop the line.
+    odd = claude_schema.decode_stream_json_line(_result_line(origin="user"))
+    assert isinstance(odd, claude_schema.StreamResultMessage)
+    assert odd.origin == "user"
+
+
+@pytest.mark.parametrize(
+    ("terminal_reason", "subtype", "expected"),
+    [
+        ("aborted_streaming", "success", "aborted_streaming"),
+        ("aborted_tools", "error_during_execution", "aborted_tools"),
+        ("completed", "success", None),
+        (None, "success", None),
+    ],
+)
+def test_translate_result_marks_aborted_terminal_reason_in_usage(
+    terminal_reason: str | None, subtype: str, expected: str | None
+) -> None:
+    """#806: only an interrupted turn carries ``usage["terminal_reason"]`` —
+    classified on terminal_reason, never on the subtype."""
+    from untether.model import CompletedEvent
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+
+    extra: dict[str, object] = {"subtype": subtype, "is_error": subtype != "success"}
+    if terminal_reason is not None:
+        extra["terminal_reason"] = terminal_reason
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        claude_schema.decode_stream_json_line(_result_line(**extra)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert (completed.usage or {}).get("terminal_reason") == expected
+
+
+# ---------------------------------------------------------------------------
+# #814 — safeguard stops
+# ---------------------------------------------------------------------------
+
+
+def test_decode_assistant_stop_reason_refusal_and_details() -> None:
+    payload = {
+        "type": "assistant",
+        "parent_tool_use_id": None,
+        "session_id": "sess-814",
+        "uuid": "u-1",
+        "message": {
+            "id": "msg_1",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "partial"}],
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "flagged",
+            },
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamAssistantMessage)
+    assert decoded.message.id == "msg_1"
+    assert decoded.message.stop_reason == "refusal"
+    assert decoded.message.stop_details == {
+        "type": "refusal",
+        "category": "cyber",
+        "explanation": "flagged",
+    }
+    # Absent on ordinary frames (and older CLIs).
+    del payload["message"]["stop_reason"], payload["message"]["stop_details"]
+    plain = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(plain, claude_schema.StreamAssistantMessage)
+    assert (plain.message.stop_reason, plain.message.stop_details) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"content": "Opus 5.5's safeguards stopped…", "level": "notice"},
+        {"content": {"blocks": []}, "level": 3, "prevent_continuation": "yes"},
+        {"content": None, "level": None},
+        {
+            "subtype": "model_refusal_fallback",
+            "original_model": {"id": "x"},
+            "fallback_model": ["y"],
+            "api_refusal_category": 7,
+            "api_refusal_explanation": None,
+            "trigger": "refusal",
+            "direction": "retry",
+            "scope": "local",
+            "content": "switched",
+        },
+    ],
+)
+def test_decode_system_informational_any_typed_fields(fields: dict) -> None:
+    """Any-typed: an unexpected type decodes instead of dropping the line."""
+    payload = {
+        "type": "system",
+        "subtype": "informational",
+        "session_id": "sess-814",
+        "uuid": "u-2",
+        **fields,
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    for key, value in fields.items():
+        assert getattr(decoded, key) == value

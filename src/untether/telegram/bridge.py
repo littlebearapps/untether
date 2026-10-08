@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import anyio
 from pydantic import SecretStr
 
 from ..context import RunContext
@@ -18,9 +19,16 @@ from ..settings import (
     TelegramTopicsSettings,
     TelegramTransportSettings,
 )
-from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
+from ..transport import (
+    MessageRef,
+    RenderedMessage,
+    SendOptions,
+    Transport,
+    current_message_kind,
+)
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
+from .client_api import classify_benign_rejection
 from .outbox import SUPERSEDED
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
@@ -85,8 +93,16 @@ class TelegramPresenter:
             reply_markup = CLEAR_MARKUP
         else:
             # Check if any active action has inline keyboard buttons (e.g. permission approval)
+            #
+            # #683: scan NEWEST-first. Telegram renders one keyboard per
+            # message, and the newest pending request is the one the user must
+            # answer. Oldest-first let an uncompleted keyboard action — most
+            # notably the synthetic ``claude.discuss_approve.N`` emitted by the
+            # Pause & Outline hold-open path, which nothing ever completes —
+            # pin the keyboard for the rest of the run and silently swallow
+            # every later AskUserQuestion / approval keyboard.
             reply_markup = CANCEL_MARKUP
-            for action_state in state.actions:
+            for action_state in reversed(state.actions):
                 if not action_state.completed:
                     kb = action_state.action.detail.get("inline_keyboard")
                     if kb and isinstance(kb, dict) and "buttons" in kb:
@@ -99,6 +115,9 @@ class TelegramPresenter:
                             "render_progress.inline_keyboard_found",
                             action_id=action_state.action.id,
                             buttons=len(kb["buttons"]),
+                            # #822: which request / tool the keyboard is for.
+                            request_id=action_state.action.detail.get("request_id"),
+                            tool_name=action_state.action.detail.get("tool_name"),
                         )
                         break
         return RenderedMessage(
@@ -169,6 +188,8 @@ class TelegramBridgeConfig:
     exec_cfg: ExecBridgeConfig
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
+    # #775: global default follow-up mode (hot-reloads).
+    followup_mode: Literal["queue", "steer"] = "queue"
     voice_transcription: bool = False
     voice_max_bytes: int = 10 * 1024 * 1024
     voice_transcription_model: str = "gpt-4o-mini-transcribe"
@@ -177,6 +198,8 @@ class TelegramBridgeConfig:
     voice_transcription_api_key: SecretStr | None = None
     # #638: optional ISO-639-1 hint forwarded to the transcription API.
     voice_transcription_language: str | None = None
+    # #691: optional vocabulary-bias prompt forwarded to the STT API.
+    voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
     # #381: CIDR/IP allowlist strings for the voice base_url SSRF check.
     voice_transcription_url_allowlist: tuple[str, ...] = ()
@@ -187,6 +210,8 @@ class TelegramBridgeConfig:
     # Mirrors `TelegramTransportSettings.allow_any_user` so the loop can
     # log on every boot (telegram/loop.py:security.allow_any_user).
     allow_any_user: bool = False
+    # #388: only the run's originator may answer its approvals (opt-in).
+    approval_originator_only: bool = False
     files: TelegramFilesSettings = field(default_factory=TelegramFilesSettings)
     chat_ids: tuple[int, ...] | None = None
     topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
@@ -205,12 +230,14 @@ class TelegramBridgeConfig:
         store initialisation.
         """
         self.show_resume_line = bool(settings.show_resume_line)
+        self.followup_mode = settings.followup_mode
         self.voice_transcription = bool(settings.voice_transcription)
         self.voice_max_bytes = int(settings.voice_max_bytes)
         self.voice_transcription_model = settings.voice_transcription_model
         self.voice_transcription_base_url = settings.voice_transcription_base_url
         self.voice_transcription_api_key = settings.voice_transcription_api_key
         self.voice_transcription_language = settings.voice_transcription_language
+        self.voice_transcription_prompt = settings.voice_transcription_prompt
         self.voice_show_transcription = bool(settings.voice_show_transcription)
         self.voice_transcription_url_allowlist = tuple(
             settings.voice_transcription_url_allowlist
@@ -219,6 +246,7 @@ class TelegramBridgeConfig:
         self.media_group_debounce_s = float(settings.media_group_debounce_s)
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
         self.allow_any_user = bool(settings.allow_any_user)
+        self.approval_originator_only = bool(settings.approval_originator_only)
         self.files = settings.files
 
 
@@ -233,6 +261,39 @@ class TelegramTransport:
             return []
         return [item for item in followups if isinstance(item, RenderedMessage)]
 
+    @staticmethod
+    def _followup_params(
+        followup: RenderedMessage,
+        *,
+        chat_id: int,
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        notify: bool,
+    ) -> dict[str, Any]:
+        return {
+            "chat_id": chat_id,
+            "text": followup.text,
+            "entities": followup.extra.get("entities"),
+            "parse_mode": followup.extra.get("parse_mode"),
+            "reply_markup": followup.extra.get("reply_markup"),
+            "reply_to_message_id": reply_to_message_id,
+            "message_thread_id": message_thread_id,
+            "disable_notification": not notify,
+        }
+
+    @staticmethod
+    def _edit_followup_route(message: RenderedMessage) -> dict[str, Any]:
+        """Where an edited message's follow-up chunks are sent."""
+        return {
+            "reply_to_message_id": cast(
+                int | None, message.extra.get("followup_reply_to_message_id")
+            ),
+            "message_thread_id": cast(
+                int | None, message.extra.get("followup_thread_id")
+            ),
+            "notify": bool(message.extra.get("followup_notify", True)),
+        }
+
     async def _send_followups(
         self,
         *,
@@ -242,18 +303,21 @@ class TelegramTransport:
         message_thread_id: int | None,
         notify: bool,
     ) -> None:
-        for followup in followups:
+        route = {
+            "chat_id": chat_id,
+            "reply_to_message_id": reply_to_message_id,
+            "message_thread_id": message_thread_id,
+            "notify": notify,
+        }
+        for index, followup in enumerate(followups):
             try:
-                await self._bot.send_message(
-                    chat_id=chat_id,
-                    text=followup.text,
-                    entities=followup.extra.get("entities"),
-                    parse_mode=followup.extra.get("parse_mode"),
-                    reply_markup=followup.extra.get("reply_markup"),
-                    reply_to_message_id=reply_to_message_id,
-                    message_thread_id=message_thread_id,
-                    disable_notification=not notify,
-                )
+                await self._bot.send_message(**self._followup_params(followup, **route))
+            except anyio.get_cancelled_exc_class():
+                # #928: a bounded caller (the early final delivery) cut the
+                # send short. This chunk is already queued; queue the rest
+                # too, or the final would silently end part-way.
+                await self._queue_followups(followups=followups[index + 1 :], **route)
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "transport.followup.failed",
@@ -261,6 +325,46 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    async def _queue_followups(
+        self,
+        *,
+        chat_id: int,
+        followups: list[RenderedMessage],
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        notify: bool,
+    ) -> None:
+        """#928: hand ``followups`` to the outbox in order without awaiting
+        delivery. Runs while the caller is being cancelled, so it is shielded
+        — queueing is immediate, it never waits on the network."""
+        if not followups:
+            return
+        logger.warning(
+            "transport.followups.queued_on_cancel",
+            chat_id=chat_id,
+            count=len(followups),
+        )
+        with anyio.CancelScope(shield=True):
+            for followup in followups:
+                try:
+                    await self._bot.send_message(
+                        **self._followup_params(
+                            followup,
+                            chat_id=chat_id,
+                            reply_to_message_id=reply_to_message_id,
+                            message_thread_id=message_thread_id,
+                            notify=notify,
+                        ),
+                        wait=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "transport.followup.failed",
+                        chat_id=chat_id,
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
 
     async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
         """#559: drain queued outbox sends (best-effort, bounded) before close."""
@@ -309,20 +413,33 @@ class TelegramTransport:
             )
             notify = bool(message.extra.get("followup_notify", True))
         followups = self._extract_followups(message)
-        sent = await self._bot.send_message(
-            chat_id=chat_id,
-            text=message.text,
-            entities=message.extra.get("entities"),
-            parse_mode=message.extra.get("parse_mode"),
-            reply_markup=message.extra.get("reply_markup"),
-            reply_to_message_id=reply_to_message_id,
-            message_thread_id=message_thread_id,
-            replace_message_id=replace_message_id,
-            disable_notification=not notify,
-        )
+        try:
+            sent = await self._bot.send_message(
+                chat_id=chat_id,
+                text=message.text,
+                entities=message.extra.get("entities"),
+                parse_mode=message.extra.get("parse_mode"),
+                reply_markup=message.extra.get("reply_markup"),
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                replace_message_id=replace_message_id,
+                disable_notification=not notify,
+            )
+        except anyio.get_cancelled_exc_class():
+            # #928: the first chunk is queued and still goes out — so must
+            # the rest of a multi-chunk message.
+            await self._queue_followups(
+                chat_id=chat_id,
+                followups=followups,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                notify=notify,
+            )
+            raise
         if sent is None:
             logger.warning(
                 "transport.send.failed",
+                kind=current_message_kind(),
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
                 text_len=len(message.text) if message.text else 0,
@@ -358,15 +475,25 @@ class TelegramTransport:
         parse_mode = message.extra.get("parse_mode")
         reply_markup = message.extra.get("reply_markup")
         followups = self._extract_followups(message)
-        edited = await self._bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=message.text,
-            entities=entities,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-            wait=wait,
-        )
+        try:
+            edited = await self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message.text,
+                entities=entities,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                wait=wait,
+            )
+        except anyio.get_cancelled_exc_class():
+            # #928: the edit is queued and still lands — so must the rest of
+            # a multi-chunk message (see ``send``).
+            await self._queue_followups(
+                chat_id=chat_id,
+                followups=followups,
+                **self._edit_followup_route(message),
+            )
+            raise
         if edited is SUPERSEDED:
             # #598: a newer same-key edit (or a delete/replace) coalesced this
             # one out of the outbox before dispatch — the message ends in the
@@ -391,10 +518,14 @@ class TelegramTransport:
                 pop = getattr(self._bot, "pop_edit_error", None)
                 if callable(pop):
                     reason = pop(chat_id, message_id)
-                if reason is not None and "message is not modified" in reason:
+                if (
+                    classify_benign_rejection("editMessageText", reason, message_id)
+                    == "not_modified"
+                ):
                     # #598/#364 family: Telegram rejects edits whose text AND
                     # markup match the current message — the edit's intent is
                     # already satisfied, so this is a no-op, not a failure.
+                    # #746: the one shared classifier (case-insensitive).
                     logger.info(
                         "transport.edit.noop",
                         chat_id=chat_id,
@@ -404,6 +535,7 @@ class TelegramTransport:
                     return ref
                 logger.warning(
                     "transport.edit.failed",
+                    kind=current_message_kind(),
                     chat_id=chat_id,
                     message_id=message_id,
                     has_reply_markup=reply_markup is not None,
@@ -415,19 +547,10 @@ class TelegramTransport:
             )
             return ref
         if followups:
-            reply_to_message_id = cast(
-                int | None, message.extra.get("followup_reply_to_message_id")
-            )
-            message_thread_id = cast(
-                int | None, message.extra.get("followup_thread_id")
-            )
-            notify = bool(message.extra.get("followup_notify", True))
             await self._send_followups(
                 chat_id=chat_id,
                 followups=followups,
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-                notify=notify,
+                **self._edit_followup_route(message),
             )
         message_id = edited.message_id
         thread_id = (
@@ -451,6 +574,7 @@ class TelegramTransport:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "transport.delete.failed",
+                kind=current_message_kind(),
                 chat_id=ref.channel_id,
                 message_id=ref.message_id,
                 error=str(exc),

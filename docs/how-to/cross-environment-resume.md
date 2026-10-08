@@ -42,10 +42,10 @@ Each engine CLI stores sessions per directory. Untether projects map to director
 |--------|:---------:|---------------|-------|
 | Claude Code | ✅ | `--continue` | Tested, works reliably |
 | Codex CLI | ✅ | `resume --last` | Tested, works reliably |
-| Gemini CLI | ✅ | `--resume latest` | Tested, works reliably |
+| Gemini CLI | ⚠️ | `--resume latest` | Deprecated; individual Google accounts can no longer sign in |
 | OpenCode | ✅ | `--continue` | Tested via dev bot; requires latest OpenCode version |
 | Pi | ✅ | `--continue` | Requires `provider` config for OAuth subscriptions (see below) |
-| Amp | — | N/A | Requires explicit thread ID; no "most recent" mode |
+| Amp | — | N/A | Deprecated; requires explicit thread ID, no "most recent" mode |
 
 ### Pi provider configuration
 
@@ -89,6 +89,9 @@ sequenceDiagram
 This works because resume tokens are stored per-directory, not per-transport. Both Telegram and terminal sessions use the same underlying engine session store.
 
 ## Tips
+
+- After a `/continue`, Untether tracks the real session it resumed, so your next message (or a reply to the result) carries on in that session as usual. Before v0.36.0 a Claude `/continue` could leave the session half-registered, so the next resume waited 30 seconds and then started fresh ([#816](https://github.com/littlebearapps/untether/issues/816), [#817](https://github.com/littlebearapps/untether/issues/817)).
+- Codex reports token usage as a running total for the thread. When you `/continue` a thread that Untether hasn't seen before, the footer can't tell how much of that was this run, so it is labelled `· thread total` ([#419](https://github.com/littlebearapps/untether/issues/419)).
 
 - Use `/new` first if you want to clear any stored Untether session before continuing a CLI session.
 - If the most recent session in the directory was an Untether session (not a CLI one), `/continue` will resume that instead. To target a specific older session, use [reply-to-continue](../explanation/routing-and-sessions.md) instead.

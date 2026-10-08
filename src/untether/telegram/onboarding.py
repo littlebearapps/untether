@@ -948,7 +948,7 @@ async def step_save_config(ui: UI, svc: Services, state: OnboardingState) -> Non
     ui.print("  • send a message to test: what is 2+2?")
     ui.print("  • change settings from telegram: /config")
     ui.print("  • enable voice notes: add voice_transcription = true to config")
-    ui.print("  • set up projects: see docs at littlebearapps.com/tools/untether/")
+    ui.print("  • set up projects: see littlebearapps.com/help/untether/projects/")
     if state.chat and state.chat.user_id is not None:
         ui.print(f"  • bot is locked to your account (user id {state.chat.user_id})")
 

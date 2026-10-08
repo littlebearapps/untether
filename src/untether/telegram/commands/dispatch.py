@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING
 
 import anyio
 
-from ...commands import CommandContext, get_command
+from ...commands import CommandContext, CommandResult, get_command
 from ...config import ConfigError
+from ...context import RunContext
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
-from ...runner_bridge import RunningTasks, register_ephemeral_message
+from ...runner_bridge import RunningTasks, _utf16_len, register_ephemeral_message
 from ...runners.run_options import EngineRunOptions
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
@@ -23,6 +24,79 @@ if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
+
+# #418: Telegram caps a document caption at 1024 characters (UTF-16 units).
+_CAPTION_MAX = 1024
+# #418: our own bound on a command attachment (Telegram allows 50 MB). The
+# outbox is one serial worker, so a multi-MB upload stalls every chat's
+# progress edits for its whole duration; bigger files fall back to text.
+_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _fit_caption(text: str, limit: int = _CAPTION_MAX) -> str:
+    """Cut *text* to at most *limit* UTF-16 units, ending with ``…`` if cut."""
+    if _utf16_len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    while cut and _utf16_len(cut) > limit - 1:
+        cut = cut[:-1]
+    return cut + "…"
+
+
+async def _send_command_attachment(
+    cfg: TelegramBridgeConfig,
+    executor: _TelegramCommandExecutor,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    command_id: str,
+    result: CommandResult,
+    reply_to: MessageRef | None,
+) -> None:
+    """#418: deliver ``result.attachment`` as a document via the outbox-queued
+    ``cfg.bot.send_document``, falling back to a text reply when the file is
+    too large or the upload fails."""
+    attachment = result.attachment
+    assert attachment is not None
+    size = len(attachment.content)
+    fallback = attachment.fallback_text or result.text
+    if size > _DOCUMENT_MAX_BYTES:
+        logger.warning(
+            "command.attachment_too_large",
+            command=command_id,
+            chat_id=chat_id,
+            filename=attachment.filename,
+            size_bytes=size,
+            max_bytes=_DOCUMENT_MAX_BYTES,
+        )
+        await executor.send(fallback, reply_to=reply_to, notify=result.notify)
+        return
+    sent = await cfg.bot.send_document(
+        chat_id=chat_id,
+        filename=attachment.filename,
+        content=attachment.content,
+        reply_to_message_id=reply_to.message_id if reply_to is not None else None,
+        message_thread_id=thread_id,
+        disable_notification=not result.notify,
+        caption=_fit_caption(result.text) if result.text else None,
+    )
+    if sent is None:
+        logger.warning(
+            "command.attachment_failed",
+            command=command_id,
+            chat_id=chat_id,
+            filename=attachment.filename,
+            size_bytes=size,
+        )
+        await executor.send(fallback, reply_to=reply_to, notify=result.notify)
+        return
+    logger.info(
+        "command.attachment_sent",
+        command=command_id,
+        chat_id=chat_id,
+        filename=attachment.filename,
+        size_bytes=size,
+    )
 
 
 def _parse_callback_data(data: str) -> tuple[str, str]:
@@ -38,6 +112,59 @@ def _parse_callback_data(data: str) -> tuple[str, str]:
     return command_id, args_text
 
 
+def _early_answer_toast(
+    backend: object,
+    args_text: str,
+    chat_id: int,
+    claim_owner: str | None = None,
+) -> str | None:
+    """Call a backend's ``early_answer_toast`` hook, passing the chat it fired in.
+
+    #715: the toast is chosen from registry state (is there a live flow? was
+    one just answered?), and that state is per-chat — so a hook that cannot
+    see which chat tapped can only answer globally, and in a fleet running
+    concurrent chats it answers about someone else's run.
+
+    #685: ``claim_owner`` (the callback query id) lets a hook reserve the
+    request synchronously, before the first ``await`` of the dispatch, so two
+    concurrent taps can't both toast success. A hook that reserves must also
+    expose ``release_early_claim(owner)``; the dispatch ``finally`` calls it.
+
+    ``early_answer_toast`` is an internal duck-typed hook, not part of the
+    ``CommandBackend`` Protocol, so a backend may still carry an older
+    ``(args_text, *, channel_id)`` or ``(args_text)`` signature. Fall back to
+    them rather than letting a ``TypeError`` escape: this runs before
+    ``backend.handle`` inside the dispatch ``try``, and an exception here would
+    take out the whole callback — a strictly worse outcome than a slightly
+    less specific toast.
+    """
+    hook = getattr(backend, "early_answer_toast", None)
+    if hook is None:
+        return None
+    if claim_owner is not None:
+        try:
+            return hook(args_text, channel_id=chat_id, claim_owner=claim_owner)
+        except TypeError:
+            pass
+    try:
+        return hook(args_text, channel_id=chat_id)
+    except TypeError:
+        return hook(args_text)
+
+
+def _release_early_claim(backend: object, owner: str | None) -> None:
+    """Release any claim ``owner``'s early toast reserved (#685). Never raises."""
+    if backend is None or owner is None:
+        return
+    release = getattr(backend, "release_early_claim", None)
+    if release is None:
+        return
+    try:
+        release(owner)
+    except Exception:  # noqa: BLE001
+        logger.debug("callback.release_claim_failed", exc_info=True)
+
+
 async def _dispatch_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -51,6 +178,8 @@ async def _dispatch_command(
     default_engine_override: EngineId | None,
     engine_overrides_resolver: Callable[[EngineId], Awaitable[EngineRunOptions | None]]
     | None,
+    *,
+    ambient_context: RunContext | None = None,
 ) -> None:
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
@@ -127,6 +256,9 @@ async def _dispatch_command(
         executor=executor,
         trigger_manager=cfg.trigger_manager,
         default_chat_id=cfg.chat_id,
+        file_deny_globs=tuple(cfg.files.deny_globs),
+        default_engine_override=default_engine_override,  # #950
+        ambient_context=ambient_context,
     )
     try:
         result = await backend.handle(ctx)
@@ -153,6 +285,17 @@ async def _dispatch_command(
             reply_to = result.reply_to
         else:
             reply_to = message_ref
+        if result.attachment is not None:
+            await _send_command_attachment(
+                cfg,
+                executor,
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                command_id=command_id,
+                result=result,
+                reply_to=reply_to,
+            )
+            return
         msg: RenderedMessage | str = result.text
         if result.parse_mode is not None:
             msg = RenderedMessage(
@@ -194,6 +337,32 @@ async def _dispatch_callback(
             )
         return
 
+    # #388: opt-in "only the originator can approve". Checked before the
+    # early answer, which reserves a claim and toasts "Approved".
+    if cfg.approval_originator_only:
+        from ..approval_originator import (
+            NOT_ORIGINATOR_TEXT,
+            callback_originator_mismatch,
+        )
+
+        mismatch = callback_originator_mismatch(
+            command_id, args_text, msg.chat_id, msg.sender_id
+        )
+        if mismatch is not None:
+            logger.warning(
+                "callback.not_originator",
+                chat_id=msg.chat_id,
+                command=command_id,
+                request_id=mismatch[0],
+                sender_id=msg.sender_id,
+                originator_id=mismatch[1],
+            )
+            if callback_query_id is not None:
+                await cfg.bot.answer_callback_query(
+                    callback_query_id, text=NOT_ORIGINATOR_TEXT
+                )
+            return
+
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
     user_msg_id = msg.message_id
@@ -221,6 +390,7 @@ async def _dispatch_callback(
     dispatch_start = time.monotonic()
     logger.info("callback.dispatch", command=command_id, chat_id=chat_id)
     _answered = False
+    backend: object | None = None
 
     # #247: instrument the early-answer path so we can observe actual latency
     # to Telegram's answerCallbackQuery in the field. `BotResponseTimeoutError`
@@ -284,7 +454,9 @@ async def _dispatch_callback(
         # entry); the `early=True` flag lets us split the metric by branch
         # when grepping.
         if getattr(backend, "answer_early", False) and callback_query_id is not None:
-            toast = backend.early_answer_toast(args_text)  # type: ignore[attr-defined]
+            toast = _early_answer_toast(
+                backend, args_text, chat_id, claim_owner=callback_query_id
+            )
             # Always answer early when the backend opts in, even if the toast
             # is None — clearing the spinner before backend.handle() is the
             # whole point. A None toast just means no toast text will appear.
@@ -306,6 +478,8 @@ async def _dispatch_callback(
             executor=executor,
             trigger_manager=cfg.trigger_manager,
             default_chat_id=cfg.chat_id,
+            file_deny_globs=tuple(cfg.files.deny_globs),
+            callback_query_id=callback_query_id,
         )
         try:
             result = await backend.handle(ctx)
@@ -319,6 +493,14 @@ async def _dispatch_callback(
             await _answer_callback(user_safe_error(exc, fallback="callback failed"))
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
+        if result is not None and result.attachment is not None:
+            # #418: attachments are delivered for text commands only.
+            logger.debug(
+                "command.attachment_ignored",
+                command=command_id,
+                chat_id=chat_id,
+                filename=result.attachment.filename,
+            )
         if result is not None:
             cb_msg: RenderedMessage | str = result.text
             if result.parse_mode is not None:
@@ -350,4 +532,7 @@ async def _dispatch_callback(
             if sent_ref is not None and callback_query_id is not None:
                 register_ephemeral_message(chat_id, user_msg_id, sent_ref)
     finally:
+        # #685: a claim the early toast reserved must never outlive this
+        # callback — even when handle raised or was cancelled.
+        _release_early_claim(backend, callback_query_id)
         await _answer_callback()

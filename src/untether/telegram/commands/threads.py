@@ -46,6 +46,33 @@ def _resolve_thread(tid: int) -> str | None:
     return _THREAD_REGISTRY.get(tid)
 
 
+# Defensive guard. Callers below branch only on a non-zero return code, so any
+# AMP subcommand that reported a fatal error on stderr while exiting 0 would
+# parse empty stdout and render "No AMP threads found" instead of the real
+# reason. These markers promote such an exit to a failure so the user sees AMP's
+# own message (and the matching error hint).
+#
+# Measured 2026-07-30: `amp threads list` exits 0 on success and 1 on failure,
+# and — being a local command — does NOT hit the server-side version gate that
+# makes `amp -x` return `426 This version of Amp is no longer supported`. So this
+# guard is belt-and-braces against a shape AMP has not actually been observed to
+# produce, not a fix for a reproduced bug. Kept because it is cheap and keyed on
+# stderr content, so a genuine no-output success (`threads archive`) is unaffected.
+_AMP_FATAL_STDERR_MARKERS = (
+    "no longer supported",
+    "unexpected error inside amp",
+    "error:",
+)
+
+
+def _is_amp_stderr_failure(stderr: str) -> bool:
+    """True when stderr carries a fatal AMP error despite a zero exit code."""
+    if not stderr.strip():
+        return False
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _AMP_FATAL_STDERR_MARKERS)
+
+
 async def _run_amp_command(*args: str) -> tuple[int, str, str]:
     """Run an amp CLI command and return (returncode, stdout, stderr)."""
     amp_path = shutil.which("amp")
@@ -55,11 +82,12 @@ async def _run_amp_command(*args: str) -> tuple[int, str, str]:
         [amp_path, *args],
         check=False,
     )
-    return (
-        result.returncode,
-        result.stdout.decode("utf-8", errors="replace"),
-        result.stderr.decode("utf-8", errors="replace"),
-    )
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    returncode = result.returncode
+    if returncode == 0 and _is_amp_stderr_failure(stderr):
+        returncode = 1
+    return returncode, stdout, stderr
 
 
 def _parse_thread_table(stdout: str) -> list[dict]:

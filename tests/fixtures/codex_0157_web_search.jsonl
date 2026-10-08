@@ -1,0 +1,11 @@
+# Codex 0.157.1 web_search wire capture (#419 step-0 U1, 2026-10-01, gpt-5.6-luna).
+# Scrubbed: thread id replaced, config-warning error items dropped, results trimmed to one entry.
+# Note the DUPLICATE item id on the wire (item_N then the raw id): msgspec keeps the last one.
+{"type":"thread.started","thread_id":"0199f000-0419-7000-8000-00000000c0de"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_2","type":"web_search","id":"exec-8c5b2cf1-1a6d-4c0f-a221-922c684c3c82","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_2","type":"web_search","id":"exec-8c5b2cf1-1a6d-4c0f-a221-922c684c3c82","query":"codex-cli latest version npm GitHub","action":{"type":"search","query":"codex-cli latest version npm GitHub"},"results":[{"type":"text_result","domain":"www.npmjs.com","ref_id":"turn0search0","snippet":"Run the following on Mac or Linux to install Codex CLI: ... The standalone in...","title":"@openai/codex - npm","url":"https://www.npmjs.com/package/%40openai/codex?activeTab=versions"}]}}
+{"type":"item.started","item":{"id":"item_3","type":"web_search","id":"exec-a632e1b9-dc6e-42db-9384-0d6349805f01","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_3","type":"web_search","id":"exec-a632e1b9-dc6e-42db-9384-0d6349805f01","query":"","action":{"type":"other"},"results":[{"type":"text_result","ref_id":"turn1view0","snippet":"Total lines: 1","title":"Internal Error"}]}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"The latest Codex CLI version is **v0.158.0**. [Source](https://www.npmjs.com/package/@openai/codex)"}}
+{"type":"turn.completed","usage":{"input_tokens":40489,"cached_input_tokens":27904,"cache_write_input_tokens":0,"output_tokens":178,"reasoning_output_tokens":52}}

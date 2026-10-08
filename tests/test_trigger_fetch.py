@@ -245,6 +245,42 @@ class TestFetchFileRead:
         assert "deny glob" in err
 
     @pytest.mark.anyio
+    async def test_file_read_deep_git_denied(self, tmp_path: Path) -> None:
+        # #831: ``.git/**`` used to deny only direct children of ``.git``.
+        target = tmp_path / ".git" / "refs" / "heads" / "main"
+        target.parent.mkdir(parents=True)
+        target.write_text("deadbeef")
+        fetch = _make_fetch(type="file_read", url=None, file_path=str(target))
+        ok, err, data = await execute_fetch(fetch)
+        assert ok is False
+        assert "deny glob" in err
+        assert data is None
+
+    @pytest.mark.anyio
+    async def test_file_read_deep_ssh_denied(self, tmp_path: Path) -> None:
+        target = tmp_path / ".ssh" / "keys" / "id_work"
+        target.parent.mkdir(parents=True)
+        target.write_text("PRIVATE")
+        fetch = _make_fetch(type="file_read", url=None, file_path=str(target))
+        ok, err, _ = await execute_fetch(fetch)
+        assert ok is False
+        assert "**/.ssh/**" in err
+
+    @pytest.mark.anyio
+    async def test_file_read_symlink_to_denied_file(self, tmp_path: Path) -> None:
+        # The deny check runs on the resolved path, so a link can't bypass it.
+        (tmp_path / ".env").write_text("SECRET=value")
+        link = tmp_path / "notes.txt"
+        try:
+            link.symlink_to(tmp_path / ".env")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported")
+        fetch = _make_fetch(type="file_read", url=None, file_path=str(link))
+        ok, err, _ = await execute_fetch(fetch)
+        assert ok is False
+        assert "deny glob" in err
+
+    @pytest.mark.anyio
     async def test_file_read_lines_mode(self, tmp_path: Path) -> None:
         target = tmp_path / "list.txt"
         target.write_text("item1\nitem2\nitem3\n")

@@ -35,11 +35,14 @@ services rarely surface novel bugs.
 
 ## 2b. Fleet — four remote hosts (nsd, channelo, sl, mac)
 
-The fleet runs one `untether.service` per host (the PyPI wheel). SSH from
-lba-1 via the tailnet:
+The fleet runs one `untether` service per host (the PyPI wheel). SSH from
+lba-1 via the tailnet. The Linux VPSs use systemd; `mac` runs under launchd
+(`com.littlebearapps.untether`) and has no journalctl — its output goes to
+macOS Unified Logging (see `contrib/com.littlebearapps.untether-issue-watcher.plist`
+for how the issue watcher reads it).
 
 ```bash
-for host in nsd channelo mac; do
+for host in nsd channelo sl; do
   echo "=== $host ==="
   ssh "$host" "journalctl --user -u untether --since '${HOURS}h ago' --output=cat \
     | grep -E 'level=(error|warning)|\"level\":\\s*\"(error|warning)\"'" 2>/dev/null \
@@ -100,6 +103,10 @@ For any matching line, pull these fields when present (JSON or `key=value`):
 
 `peak_idle` excessive + `last_event_type=user` is the auto-continue trigger
 signature. `last_event_type=result` with `proc_returncode!=0` is a hard error.
+Since 0.35.5rc12 (#787) a live session's between-turn hold is reported as
+`peak_live_idle_seconds`, not `peak_idle_seconds` — a long live-idle hold is
+by-design, not a stall. Summaries written before rc12 may carry another chat's
+stream values (#510); don't correlate them across concurrent chats.
 
 ## 2e. State files
 
@@ -122,7 +129,7 @@ ls ~/.untether-dev/integration-test-pass-*.json
 ## 2f. Telegram chat history (dev engine chats)
 
 For chat-side issues, pull last N messages from the relevant dev engine chat
-via the Telegram MCP. Chat IDs from `.claude/rules/testing-conventions.md`:
+via the Telegram MCP. Chat IDs (canonical list: `docs/reference/integration-testing.md` → "Test chats"):
 
 | Engine | Chat ID |
 |---|---|
@@ -130,8 +137,8 @@ via the Telegram MCP. Chat IDs from `.claude/rules/testing-conventions.md`:
 | Codex CLI | `4929463515` |
 | OpenCode | `5200822877` |
 | Pi | `5156256333` |
-| Gemini CLI | `5207762142` |
-| AMP CLI | `5230875989` |
+| Gemini CLI (deprecated) | `5207762142` |
+| AMP CLI (deprecated) | `5230875989` |
 
 ```
 mcp__telegram__get_history(chat_id=<id>, limit=50)
@@ -154,12 +161,11 @@ journalctl --user -u untether-issue-watcher --since "${HOURS}h ago" --output=cat
 ## 2h. Per-host PyPI version
 
 ```bash
-pipx list --short | grep untether                       # local lba-1 staging
-for host in nsd channelo mac; do
-  echo -n "$host: "
-  ssh "$host" "pipx list --short 2>/dev/null | grep untether" 2>/dev/null || echo "(unreachable)"
-done
+scripts/fleet-status.sh        # read-only version + service state for all 5 hosts
 ```
+
+(sl installs via `uv tool`, not pipx, so a `pipx list` loop misses it —
+`fleet-status.sh` uses `untether --version` on every host.)
 
 Version mismatch across hosts during/after a rollout is a fleet-rollout class
 issue.
@@ -217,16 +223,17 @@ uv run pytest
 
 ## 2m. Process diagnostics (live or recent)
 
-For stall investigations, check `/proc` snapshots captured by `utils/proc_diag.py`:
+For stall investigations, check the `/proc` snapshot fields (from `utils/proc_diag.py`) that the
+stall watchdog logs on `progress_edits.stall_detected`:
 
 ```bash
-# In journalctl, look for proc_diag JSON blobs
 journalctl --user -u untether-dev --since "${HOURS}h ago" --output=cat \
-  | grep -A 1 'proc_diag' | head -40
+  | grep -E 'progress_edits\.stall_detected|subprocess\.liveness_stall' | head -40
 ```
 
-Key fields: `cpu_active`, `rss_mb`, `tcp_open`, `fds`, `children`,
-`tool_name`. `cpu_active=None` means the diag couldn't read /proc — usually
+Key fields: `process_alive`, `process_state`, `cpu_active`, `tree_active`, `rss_kb`,
+`tcp_established`/`tcp_total`, `fd_count`, `last_event_type`, `recent_events`, `last_action`.
+`cpu_active=None` means the diag couldn't read /proc (or it's the first sample) — usually
 permissions or zombie state.
 
 ## What NOT to gather

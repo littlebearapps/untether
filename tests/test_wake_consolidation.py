@@ -1,0 +1,314 @@
+"""#785 part 2: short wake-turn acks fold into the #777 status message.
+
+End to end with a REAL ``handle_message`` + ``ClaudeRunner`` against
+``tests/fake_clis/fake_claude_live.py`` (``multi_agent_acks`` models the nsd
+blogs session: two background agents, each finish answered twice by the CLI).
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+from structlog.testing import capture_logs
+
+from tests.test_live_session_harness import _drive, _progress, _watchdog
+from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+pytestmark = pytest.mark.anyio
+
+_ENV = (
+    "FAKE_CLAUDE_SCENARIO",
+    "FAKE_CLAUDE_WAKE_S",
+    "FAKE_CLAUDE_ACK_TOOL",
+    "FAKE_CLAUDE_NO_QUERY_INIT",  # #928
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    set_quarantine_store(QuarantineStore(tmp_path / "q.json"))
+    _watchdog(monkeypatch)
+    yield
+    set_quarantine_store(None)
+    for key in _ENV:
+        os.environ.pop(key, None)
+
+
+def _status_ref(transport):
+    return next(
+        c["ref"]
+        for c in transport.send_calls
+        if c["message"].text.startswith("⏳ background")
+    )
+
+
+def _status_text(transport) -> str:
+    ref = _status_ref(transport)
+    edits = [c["message"].text for c in transport.edit_calls if c["ref"] == ref]
+    return edits[-1]
+
+
+def _sent(transport, needle: str) -> list[dict]:
+    return [c for c in transport.send_calls if needle in c["message"].text]
+
+
+async def test_ack_turns_fold_and_only_the_report_pushes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("multi_agent_acks", wake_s=0.6)
+
+    # The first finish's two turns (ack while sweep two runs, then the
+    # task's own restatement) never become messages of their own…
+    assert _sent(transport, "Sweep one is back") == []
+    assert _sent(transport, "a1 finished (again)") == []
+    # …they are on sweep one's row of the status message, in full.
+    final = _status_text(transport)
+    lines = final.splitlines()
+    assert lines[0] == "✅ all 2 background tasks done"
+    a1 = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 ·")))
+    assert lines[a1 + 1] == "   ↳ Sweep one is back; waiting on sweep two."
+    assert lines[a1 + 2] == "   ↳ a1 finished (again)."
+
+    # The compiled report (long) breaks out as a normal pushed message.
+    report = _sent(transport, "REPORT: all findings compiled.")
+    assert len(report) == 1
+    assert report[0]["options"].notify is True
+    assert "Background task finished — bg a2" in report[0]["message"].text
+    # Its restatement folds onto sweep two's row — no second push.
+    assert _sent(transport, "a2 finished (again)") == []
+    assert "   ↳ a2 finished (again)." in lines
+
+    # One user message → the answer, the status message and the report.
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert len(pushed) == 1
+
+
+async def test_tool_using_ack_breaks_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    os.environ["FAKE_CLAUDE_ACK_TOOL"] = "1"
+    transport = await _drive("multi_agent_acks", wake_s=0.6)
+    ack = _sent(transport, "Sweep one is back")
+    assert len(ack) == 1
+    assert ack[0]["options"].notify is True
+    # The restatement is still just an ack: it folds.
+    assert _sent(transport, "a1 finished (again)") == []
+    assert "   ↳ a1 finished (again)." in _status_text(transport).splitlines()
+
+
+async def test_consolidation_off_keeps_rc12_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=False)
+    transport = await _drive("multi_agent_acks", wake_s=0.6)
+    for needle in (
+        "Sweep one is back",
+        "a1 finished (again)",
+        "REPORT: all findings compiled.",
+        "a2 finished (again)",
+    ):
+        assert len(_sent(transport, needle)) == 1, needle
+    # The status message still tracks the tasks, with no ack lines.
+    final = _status_text(transport)
+    assert final.startswith("✅ all 2 background tasks done")
+    assert "↳" not in final
+
+
+async def test_no_status_message_means_nothing_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consolidation needs the #777 status message to fold into."""
+    _progress(monkeypatch, show_background_tasks=False, consolidate_wake_turns=True)
+    transport = await _drive("multi_agent_acks", wake_s=0.6)
+    assert len(_sent(transport, "Sweep one is back")) == 1
+    assert len(_sent(transport, "a1 finished (again)")) == 1
+    assert not any(
+        c["message"].text.startswith("⏳ background") for c in transport.send_calls
+    )
+
+
+@pytest.mark.parametrize("task_end", ["mid", "after"])
+async def test_single_agent_pair_pushes_once(
+    monkeypatch: pytest.MonkeyPatch, task_end: str
+) -> None:
+    """One background agent, answered twice by the CLI (#785). ``mid``: the
+    first turn is retro-attributed and is the last task — it pushes; its
+    restatement folds onto the row. ``after``: the first turn raced the
+    task's end, so it can't be known as the last one and folds as an ack; the
+    restatement then carries the batch's one push, and the earlier ack is
+    filed under the task's row."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    os.environ["FAKE_CLAUDE_TASK_END"] = task_end
+    transport = await _drive("agent_wake_unknown_first", wake_s=0.6)
+    os.environ.pop("FAKE_CLAUDE_TASK_END", None)
+    pushed = [
+        c
+        for c in transport.send_calls
+        if c["options"].notify and "Background task finished" in c["message"].text
+    ]
+    assert len(pushed) == 1
+    assert "bg a1" in pushed[0]["message"].text
+    lines = _status_text(transport).splitlines()
+    assert lines[0] == "✅ background task done"
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 ·")))
+    folded = "The sweep has finished" if task_end == "mid" else "The sweep is back"
+    assert lines[row + 1] == f"   ↳ {folded}"
+    assert not any(ln.startswith("💬") for ln in lines)
+
+
+async def test_quiet_batch_report_pushes_even_if_already_announced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dev-bot regression (#785): every earlier wake turn folded, and the
+    shell task's end was paired with the last folded ``unknown`` ack, so its
+    report turn arrived ``already_announced`` (no push) — a long report
+    breaking out of a batch that had never pushed must push."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("quiet_batch_report", wake_s=0.6)
+    for ack in ("a1 is back.", "a2 is back.", "Still waiting on the shell job."):
+        assert _sent(transport, ack) == [], ack
+    report = _sent(transport, "REPORT: all three jobs finished cleanly.")
+    assert len(report) == 1
+    assert report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+    assert _status_text(transport).startswith("✅ all 3 background tasks done")
+
+
+async def test_batch_of_folded_acks_still_pushes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#785: the only wake turn folded and the last task ended without a turn
+    after it — when the status message finalises, one short pushed notice
+    replies to the launching prompt."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("acks_only_batch", wake_s=0.6)
+    assert _sent(transport, "b1 done; waiting on b2.") == []
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert len(pushed) == 1
+    assert pushed[0]["message"].text == "✅ all 2 background tasks done"
+    assert pushed[0]["options"].reply_to.message_id == 10
+
+
+async def test_orphaned_subagent_task_is_listed_while_it_holds_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#801 + #777: the agent ends but its own backgrounded sleep carries on
+    (owner unknown here) — the status message lists it instead of claiming
+    nothing runs; the ack about it folds; its report pushes once."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("agent_orphans_bg_task", wake_s=1.5)
+    ref = _status_ref(transport)
+    texts = [c["message"].text for c in transport.edit_calls if c["ref"] == ref]
+    held = [t for t in texts if "🐚 Wait 75 seconds" in t]
+    assert held, texts
+    assert held[0].startswith("⏳ background (1) · 1 done")
+    assert _sent(transport, "The re-check is still running") == []
+    final = texts[-1]
+    assert final.startswith("✅ all 2 background tasks done")
+    report = _sent(transport, "RECHECK: recheck")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+
+
+async def test_813_five_agent_interleaved_readonly_acks_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#813 (nsd's first live batch, 5 tasks / 9 wake turns): every ack
+    collects its task's result with one ``Read`` — they all fold, the report
+    is the batch's only push, and every ``↳`` line sits under the task it
+    describes (a3's restatement arrives while the latest unattributed ack is
+    a4's, which "latest note" used to misfile under a3)."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    with capture_logs() as logs:
+        transport = await _drive("five_agent_interleaved", wake_s=0.6)
+
+    acks = {
+        "a1": ["a1 is back; four still running.", "a1 findings filed."],
+        "a2": ["a2 is back."],
+        "a3": ["a3 is back.", "a3 findings filed."],
+        "a4": ["a4 is back.", "a4 findings filed."],
+        "a5": ["a5 finished (again)."],
+    }
+    for task_acks in acks.values():
+        for ack in task_acks:
+            assert _sent(transport, ack) == [], ack
+
+    report = _sent(transport, "REPORT: all five agents finished")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+
+    lines = _status_text(transport).splitlines()
+    assert lines[0] == "✅ all 5 background tasks done"
+    for task_id, task_acks in acks.items():
+        row = lines.index(
+            next(ln for ln in lines if ln.startswith(f"✅ bg {task_id} ·"))
+        )
+        assert lines[row + 1 : row + 1 + len(task_acks)] == [
+            f"   ↳ {ack}" for ack in task_acks
+        ], (task_id, lines)
+    assert not any(ln.startswith("💬") for ln in lines)
+
+    decisions = [e for e in logs if e["event"] == "live_turn.fold_decision"]
+    assert len(decisions) == 9
+    assert not [e for e in decisions if e["decision"] == "tools"]
+
+
+async def test_noop_turns_after_the_report_fold_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#785 dev bot (session 4b3a2ab8): after the report pushed, an unnamed
+    ``unknown`` no-op turn and a late ScheduleWakeup no-op are folded into the
+    (finalised) status message — never a second push, never a lone
+    "🔔 Claude continued"."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("report_then_noop", wake_s=0.6)
+    report = _sent(transport, "REPORT: the job finished cleanly.")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    for noop in ("nothing new.", "Wake-up: still nothing new."):
+        assert _sent(transport, noop) == [], noop
+    assert not _sent(transport, "Claude continued")
+    lines = _status_text(transport).splitlines()
+    assert lines[0] == "✅ background task done"
+    assert "💬 I already posted its output above; nothing new." in lines
+    assert "💬 Wake-up: still nothing new." in lines
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+
+
+@pytest.mark.parametrize("consolidate", [True, False], ids=["fold_on", "fold_off"])
+@pytest.mark.parametrize("with_init", [False, True], ids=["case_r", "case_i"])
+async def test_928_no_query_tail_never_reaches_telegram(
+    monkeypatch: pytest.MonkeyPatch, consolidate: bool, with_init: bool
+) -> None:
+    """#928: the CLI's empty no-query result after a wake turn is neither a
+    run nor a message — with consolidation on (no empty ``💬`` row) or off
+    (no empty ``🔔 Claude continued``) — and a2's later finish still pushes
+    (the tail no longer arms the #785 pairing window)."""
+    _progress(
+        monkeypatch, show_background_tasks=True, consolidate_wake_turns=consolidate
+    )
+    if with_init:
+        os.environ["FAKE_CLAUDE_NO_QUERY_INIT"] = "1"
+    with capture_logs() as logs:
+        transport = await _drive("agent_wake_no_query_tail", wake_s=0.6)
+    assert not _sent(transport, "Claude continued")
+    assert not [c for c in transport.send_calls if not c["message"].text.strip()]
+    lines = _status_text(transport).splitlines()
+    assert not any(ln.strip() in ("💬", "↳") for ln in lines)
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert all(e.get("num_turns") != 0 for e in completed)
+    assert len(completed) == 3  # the run, a1's wake turn, a2's wake turn
+    names = [e["event"] for e in logs]
+    assert "claude.turn.task_end_paired" not in names
+    assert names.count("claude.turn.no_query") == 1
+    pushed = [
+        c
+        for c in transport.send_calls
+        if c["options"].notify and "Background task finished" in c["message"].text
+    ]
+    assert any("a2 done" in c["message"].text for c in pushed)

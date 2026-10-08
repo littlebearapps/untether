@@ -1,6 +1,6 @@
 # Workflow modes
 
-Untether supports three workflow modes inherited from [takopi](https://github.com/banteg/takopi). Each mode configures three settings that control session continuation and resume line display.
+Untether supports three workflow modes. Each mode configures three settings that control session continuation and resume line display.
 
 ## Mode comparison
 
@@ -41,7 +41,7 @@ Same auto-resume as assistant, but scoped per Telegram forum topic. Each topic b
 Requires a Telegram supergroup with forum topics enabled and the bot added as admin with "manage topics" permission.
 
 - **Session mode:** `chat` (auto-resume within each topic)
-- **Topics:** enabled — each topic gets its own resume tokens, default engine, trigger mode, and model/reasoning overrides
+- **Topics:** enabled — each topic gets its own resume tokens, default engine, listen mode, follow-up mode, and model/reasoning overrides
 - **Resume lines:** hidden
 - **State file:** `telegram_topics_state.json`
 
@@ -66,12 +66,10 @@ The `scope` setting controls which chats allow topics:
 | `projects` | Project chats only |
 | `all` | Main chat and all project chats |
 
-### Workspace-only commands
+### Topic commands
 
-- `/ctx show` — display current topic's bound context
-- `/ctx set <project> @<branch>` — bind topic to a project/branch
-- `/ctx clear` — unbind topic context
-- `/topic <project> @<branch>` — create a new forum topic for a project/branch
+- `/topic <project> @<branch>` — create a new forum topic for a project/branch (workspace only)
+- `/ctx`, `/ctx set <project> @<branch>`, `/ctx clear` — inside a topic these show, bind and unbind the **topic's** context; in any other chat (all modes) they act on the chat's context instead
 
 ## Handoff
 
@@ -103,11 +101,10 @@ Since there is no auto-resume, you have three ways to continue a session:
 
 ## Changing modes
 
-Edit `session_mode`, `show_resume_line`, and `topics.enabled` in your `untether.toml` and restart:
+Edit `session_mode`, `show_resume_line`, and `topics.enabled` in your `untether.toml` and restart (`session_mode` and `topics.enabled` are restart-only): send `/restart` from Telegram, or on a systemd install:
 
 ```bash
-systemctl --user restart untether      # staging
-systemctl --user restart untether-dev  # dev
+systemctl --user restart untether
 ```
 
 There is no migration step — the new mode takes effect on restart.
@@ -116,18 +113,19 @@ There is no migration step — the new mode takes effect on restart.
 
 These work identically in all three modes:
 
-- All 6 engine runners (Claude, Codex, OpenCode, Pi, Gemini, AMP)
-- All commands except `/ctx` and `/topic` (workspace-only)
-- Permission control (approve/deny/discuss, plan mode)
-- AskUserQuestion with option buttons
+- All engine runners (Claude, Codex, OpenCode, Pi; plus the deprecated, unsupported Gemini and AMP)
+- All commands except `/topic` (workspace-only); `/ctx` binds the chat instead of a topic outside workspace mode
+- Permission control (approve/deny/discuss, plan mode) — Claude Code only
+- AskUserQuestion with option buttons — Claude Code only
+- Live sessions and steer/queue follow-ups — Claude Code only
 - `/continue` cross-environment resume
 - `/config` inline settings menu
-- `/browse` file browser
+- `/browse` file browser (in assistant mode it needs `default_project` or a project-bound chat)
 - `/export` session transcript
-- `/usage` cost stats
+- `/usage` subscription usage (Claude Code) or session token totals (other engines)
 - File upload and outbox delivery
 - Voice transcription
 - Cost tracking and budget alerts
 - Stall detection and watchdog
-- Trigger mode (all vs mentions)
+- Listen mode (all vs mentions, `/listen`)
 - Model and reasoning overrides

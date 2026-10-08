@@ -10,28 +10,36 @@ Send `/config` in any chat:
 /config
 ```
 
-The home page shows current values for all settings, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
+The home page shows current values grouped under **Agent controls**, **Display** and **Routing**, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
 
 ```
 🐕 Untether settings
 
 Agent controls (Claude Code)
-Plan mode: on  · approve actions
+Permission mode: on  · approve the plan first
 Ask mode: on  · interactive questions
 Diff preview: off  · buttons only
 
-Verbose: off
+Display
 Cost & usage: cost on, sub off
+Verbose: off  · compact progress
 Resume line: on
-Engine: claude (global)
-Model: default
-Listen: all
 
-[📋 Plan mode]     [❓ Ask mode]
+Routing
+Engine: claude (default)
+Model: default  · from CLI settings
+Listen: all  · respond to everything
+Follow-up: queue  · wait for the run
+⏰ Triggers: active                    ← only when triggers are configured
+Effort: default  · high
+
+[📋 Permission mode]  [❓ Ask mode]
 [📝 Diff preview]  [🔍 Verbose]
 [💰 Cost & usage]  [↩️ Resume line]
-[📡 Listen]        [⚙️ Engine & model]
-[🧠 Reasoning]     [ℹ️ About]
+[📡 Listen]        [🔁 Loop mode]
+[🧠 Reasoning]     [⚙️ Engine & model]
+[↪️ Follow-up]     [ℹ️ About]
+[⏰ Triggers]      [⏸ Pause triggers]   ← only when [triggers] is enabled
 
 📖 Help guides · 🐛 Report a bug
 ```
@@ -39,7 +47,7 @@ Listen: all
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Plan mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe). **Gemini CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -50,6 +58,7 @@ Tap any button to open that setting's page. Each sub-page shows:
 - Buttons to change the value
 - A **Clear override** button to revert to the global/engine default
 - A **← Back** button to return to the home page
+- A **📖 Learn more** link to the matching page of the help centre (`littlebearapps.com/help/untether/…`)
 
 ## Toggle behaviour
 
@@ -57,17 +66,17 @@ Most settings use a **two-button selection** pattern: `[On] [Off] [Clear]` with 
 
 When you tap a setting button:
 
-1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude Code approval buttons.
+1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Permission mode: off (acceptEdits)", "Verbose: on"). This uses the same toast mechanism as Claude Code approval buttons.
 2. **Auto-return** — the menu automatically navigates back to the home page, showing the updated value across all settings. No need to tap "Back" manually.
 
 ### Multi-state settings
 
 Some settings have more than two states and use a different layout:
 
-- **Plan mode** — three options (off / on / auto) shown as separate buttons in a 2+1 split: `[Off] [On]` on the first row, `[Auto] [Clear override]` on the second
-- **Approval mode** (Gemini) — three options (read-only / edit files / full access)
+- **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
+- **Approval mode** (Gemini, deprecated) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
-- **Reasoning** (Codex) — minimal / low / medium / high / xhigh
+- **Reasoning** (Codex) — low / medium / high / xhigh
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
 
@@ -75,10 +84,11 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Plan mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
-- **Approval policy** — Codex CLI only. Toggle between "full auto" (default, all tools approved) and "safe" (untrusted tools blocked via `--ask-for-approval untrusted`). This is a pre-run policy — not interactive mid-run approval.
-- **Approval mode** — Gemini CLI only. Toggle between "read-only" (default, write tools blocked), "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy.
+- **Permission mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
+- **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
+- **Approval mode** — Gemini CLI only (deprecated). Toggle between "read-only", "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy. Despite its label, "read-only" (also what an unset chat shows) runs Gemini with `--approval-mode yolo`, i.e. full access — see [Interactive approval](interactive-approval.md#gemini-cli-approval-mode).
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
+- **Follow-up** — Claude Code only ([#775](https://github.com/littlebearapps/untether/issues/775)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
 - **Reasoning** — Claude Code and Codex only. Hidden for OpenCode, Pi, Gemini, and Amp.
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
@@ -88,49 +98,50 @@ When you switch engines via the Engine & model page, the home page automatically
 
 | Setting | Options | Persisted |
 |---------|---------|-----------|
-| Plan mode | off, on, auto | Yes (chat prefs) |
-| Approval policy | full auto, safe | Yes (chat prefs) |
+| Permission mode | off, on, plan-auto, auto | Yes (chat prefs) |
+| Approval policy | full auto, safe (read-only sandbox) | Yes (chat prefs) |
 | Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |
-| Verbose | off, on | Yes (chat prefs) |
+| Verbose | off, on | No (in memory, cleared on restart) |
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: minimal, low, medium, high, xhigh | Yes (chat prefs) |
-| Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh | Yes (chat prefs) |
+| Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
-| Budget enabled | off, on | Yes (chat prefs) |
-| Budget auto-cancel | off, on | Yes (chat prefs) |
+| Follow-up | queue, steer | Yes (chat prefs) |
+| Budget | off, on | Yes (chat prefs) |
+| Stop at limit | off, on | Yes (chat prefs) |
 
-Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Gemini CLI.
+Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
 ### Triggers page {#triggers-page}
 
-When `[triggers]` is enabled and at least one cron or webhook is configured, the home page gains a one-button toggle row at the bottom and a dedicated `📡 Triggers` button that opens the Triggers page (`config:tg`) ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2 + [#294](https://github.com/littlebearapps/untether/issues/294)).
+When `[triggers]` is enabled, the home page gains a bottom row with a `⏰ Triggers` button that opens the Triggers page (`config:tg`), even when nothing is configured yet (the page then explains how to add one). When at least one cron or webhook is configured, the same row also carries the one-tap **⏸ Pause triggers** / **▶️ Resume triggers** toggle ([#296](https://github.com/littlebearapps/untether/issues/296)) ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2 + [#294](https://github.com/littlebearapps/untether/issues/294)).
 
 The Triggers page shows:
 
 * **State and counts** — `running` / `paused`, plus per-chat cron and webhook totals.
-* **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), `/health` reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
-* **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, and last-fired relative time.
+* **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), the webhook server's HTTP `/health` endpoint reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
+* **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, the cron's own `model=` / `effort=` when it sets one ([#743](https://github.com/littlebearapps/untether/issues/743)), and last-fired relative time.
 * **Per-chat webhook list** — each line shows the webhook `id`, path, auth scheme, project, engine, and last-fired.
 
-Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured.
+Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured. `📡` is Listen only; Triggers always use `⏰`, matching `/ping` and the run footer.
 
 See [Schedule tasks](schedule-tasks.md#pausing-all-triggers) for the pause flow end-to-end.
 
 ### Loop mode page {#loop-mode}
 
-When the active engine is Claude Code, the home page gains a `🔁 Loop mode` button that opens the Loop sub-page ([#289](https://github.com/littlebearapps/untether/issues/289)). Loop mode is **off by default** — turning it on enables Untether's observation of Claude's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`) so iterations keep firing after the subprocess exits.
+When the active engine is Claude Code, the home page gains a `🔁 Loop mode` button that opens the Loop sub-page ([#289](https://github.com/littlebearapps/untether/issues/289)). Loop mode is **off by default** — turning it on lets Claude schedule repeated runs: Untether declines Claude Code's own `CronCreate` and runs the schedule itself, with the `[loop]` caps, firing each iteration with `claude --resume` whether or not the session is still open ([#925](https://github.com/littlebearapps/untether/issues/925)). With it off, Claude can't schedule recurring or timed tasks and points you here, or to `/at` for a one-off. Self-paced wake-ups (`ScheduleWakeup`) work in both modes, up to `max_iterations` in a row.
 
 The page shows:
 
-* **State** — `Loop mode: on` / `off` for the current chat (per-chat override over the global `[loop] enabled` default).
-* **Cost + quota warning** — explicit reminder before turning ON: every loop fire counts against `[cost_budget]`, and the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are the safety net.
+* **State** — `Currently: On (global)` / `Off (global)` (no per-chat override, so the `[loop] enabled` default applies) or `On (per-chat)` / `Off (per-chat)`.
+* **Cost + quota warning** — explicit reminder before turning ON: every loop fire counts against `[cost_budget]`, so set a budget first.
 * **💰 Set a budget** — deep-link to the `Cost & Usage` page (`config:cu`) for one-tap budget setup.
-* **Toggle row** — `[On] [Off] [Clear]` with ✓ on the active option.
+* **Buttons** — `[On] [Off]` with ✓ on the active per-chat choice, then `[Clear override] [💰 Set a budget]` and `[← Back]`.
 
-`/cancel` and `/new` both drop pending loop iterations for the current session and write a do-not-resume sentinel so a subsequent `loop_scheduler` resume can't replay them. `/continue` is unaffected (it doesn't trigger loop replay).
+`/cancel` and `/new` both drop pending loop iterations for the current chat (or forum topic); the next message resumes the session without the cancelled loop, and new loops in that session run normally ([#926](https://github.com/littlebearapps/untether/issues/926)). `/continue` is unaffected (it doesn't trigger loop replay).
 
 Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`); the button is hidden for other engines. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full architecture and cost guidance.
 
@@ -140,12 +151,16 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
 - **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code only)
-- **Budget enabled** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
-- **Budget auto-cancel** — enable or disable automatic run cancellation when a budget is exceeded
+- **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
+- **Stop at limit** — per-chat override of `[cost_budget] auto_cancel`. Stops new runs once the daily budget is reached and ends a session after the reply that passes the per-run budget. It can't interrupt a reply in progress (see [Cost budgets](cost-budgets.md#stop-at-limit))
 
 Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 
 For historical cost data across sessions, use the [`/stats`](../reference/commands-and-directives.md) command.
+
+### About page
+
+`ℹ️ About` shows the Untether version and a `py X.Y.Z · <engine> X.Y.Z · …` line with the version of each available engine CLI (in alphabetical order) that answers `--version` (Pi included), plus GitHub, bug-report and feature-request links. The engine CLIs are checked side by side in the background, so the page opens in a few seconds without holding up the bot, and the versions are reused for 5 minutes ([#951](https://github.com/littlebearapps/untether/issues/951)).
 
 ## Callbacks vs commands
 
