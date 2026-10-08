@@ -242,6 +242,8 @@ GitHub Actions CI runs on push to master/dev and on PRs:
 | auto-tag-on-master | On master push: detects stable version bump in `pyproject.toml`, creates and pushes `vX.Y.Z` tag (skips pre-releases) |
 | release-validation | PR-only: validates changelog format, issue links, date when version changes; for a stable version also requires the user-facing Discussions announcement (#1008) |
 | release → announce | After PyPI + the GitHub Release: posts `.github/release-announcements/vX.Y.Z.md` to Discussions → Announcements (idempotent) and links it from the release; `release.yml`'s build refuses to start without a passing announcement (#1008) |
+| release → rebuild-website / notify-littlebearapps | After the GitHub Release: triggers the untether.cc production rebuild and sends a `repository_dispatch` to littlebearapps.com (expects HTTP 204; `continue-on-error`) so the help centre and changelog refresh within minutes. The GitHub Release's pre-release flag is computed from the tag (#1012, #1014) |
+| notify-website | Manual catch-up only (`workflow_dispatch`): re-sends the littlebearapps.com dispatch for a given tag (#1014) |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB), every dependency group incl. docs (#875) |
 | bandit | Python SAST (security static analysis) |
 | codeql | CodeQL code scanning (Python + Actions), blocks PRs on new alerts |

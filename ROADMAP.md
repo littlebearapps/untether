@@ -4,7 +4,7 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Latest release — v0.36.0
 
-The stable release after 0.35.4 (its release candidates were numbered 0.35.5rc1–rc20, then 0.36.0rc1–rc3). It carries breaking changes, so read [Upgrading to v0.36.0](docs/how-to/update.md#upgrading-to-v0360) before upgrading; the [CHANGELOG](CHANGELOG.md) has the full list.
+The stable release after 0.35.4 (its release candidates were numbered 0.35.5rc1–rc20, then 0.36.0rc1–rc5). It carries breaking changes, so read [Upgrading to v0.36.0](docs/how-to/update.md#upgrading-to-v0360) before upgrading; the [CHANGELOG](CHANGELOG.md) has the full list.
 
 - **Live Claude sessions** — a Claude session stays open after its reply while background tasks, subagents, `Monitor` or `ScheduleWakeup` keep working; their results arrive as their own messages with a live background-task status, and follow-ups can be queued or steered into the running session ([#776](https://github.com/littlebearapps/untether/issues/776), [#777](https://github.com/littlebearapps/untether/issues/777), [#775](https://github.com/littlebearapps/untether/issues/775))
 - **Context-window visibility** — Claude's context use in the status line (`62% ctx`) and 🗜️ compaction rows ([#819](https://github.com/littlebearapps/untether/issues/819))
