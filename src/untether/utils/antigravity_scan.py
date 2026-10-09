@@ -21,8 +21,14 @@ Two sets, both relative to the project root:
 
 Fail-closed rules (security review of 2b4d66c):
 
-- symlinked directories are followed (loops cut by real path), so a plugin
-  dir linked from elsewhere is still hashed;
+- symlinked directories are followed only while they stay inside the
+  project root (each real path once — cycle protection); a link out of the
+  root, or a manifest naming a script outside it, is recorded but never
+  followed and marks the scan ``outside_root`` ("not checked");
+- only regular files are ever opened (``stat`` first, then ``O_NONBLOCK`` +
+  ``fstat`` on the fd), so a FIFO, ``/dev/zero`` or a device can't wedge it;
+- each set has one budget — entries (files and directories), total bytes
+  hashed and wall clock; running over it sets ``truncated``;
 - a file larger than the hash cap, or one that can't be read, still counts:
   its fingerprint carries the inode change time (``st_ctime_ns``), which a
   writer can't set back the way it can ``mtime``;
@@ -43,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -56,7 +63,12 @@ logger = get_logger(__name__)
 MAX_ANCESTOR_LEVELS = 10
 MAX_FILES = 2000
 TIME_BUDGET_S = 2.0
-HASH_CAP_BYTES = 8 * 1024 * 1024
+# Per-file hash cap (the rest is covered by the inode change time) and the
+# per-set totals: a hostile repo can't make the scan read or walk unbounded.
+HASH_CAP_BYTES = 4 * 1024 * 1024
+MAX_HASH_BYTES = 32 * 1024 * 1024
+_CHUNK_BYTES = 256 * 1024
+_MAX_TOKENS = 200
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
 _GATE_PLUGIN = "plugins/untether-gate/"
@@ -98,6 +110,9 @@ class ScanResult:
     # digest as if it were complete.
     truncated: bool = False
     cross_truncated: bool = False
+    # A link under .agents/ (or a script a manifest names) resolves outside
+    # the project root: its target can change unseen, so "not checked".
+    outside_root: bool = False
 
     @property
     def agy_digest(self) -> str:
@@ -156,30 +171,78 @@ def _is_user_manifest(rel: str) -> bool:
 
 
 class _Budget:
+    """One budget per set: entries (files + dirs), bytes hashed, wall clock.
+
+    Running over any of them marks the scan ``exceeded`` (→ "not checked":
+    a ⚠️ row on attended runs, unattended runs refused)."""
+
     def __init__(self) -> None:
         self.deadline = time.monotonic() + TIME_BUDGET_S
-        self.files = 0
+        self.entries = 0
+        self.bytes = 0
         self.exceeded = False
+        self.outside = False  # a symlink or script points outside the root
 
-    def take(self) -> bool:
-        self.files += 1
-        if self.files > MAX_FILES or time.monotonic() > self.deadline:
+    def _check(self) -> bool:
+        if (
+            self.entries > MAX_FILES
+            or self.bytes > MAX_HASH_BYTES
+            or time.monotonic() > self.deadline
+        ):
             self.exceeded = True
         return not self.exceeded
 
+    def take(self) -> bool:
+        self.entries += 1
+        return self._check()
 
-def _walk_files(base: Path, budget: _Budget) -> Iterator[Path]:
-    """Every file under *base*, following symlinked dirs once each."""
-    seen: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=True):
+    def spend(self, nbytes: int) -> bool:
+        self.bytes += nbytes
+        return self._check()
+
+
+def _contained(path: str | Path, base: str) -> bool:
+    real = os.path.realpath(path)
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _walk_files(
+    base: Path,
+    budget: _Budget,
+    *,
+    follow_within: str | None,
+    seen: set[str] | None = None,
+) -> Iterator[Path]:
+    """Every entry under *base* that isn't a directory, bounded by *budget*.
+
+    Symlinked directories are followed only when their real path stays
+    inside *follow_within* (and only once each — cycle protection); any
+    other symlinked directory is yielded as an entry, never descended.
+    """
+    seen = set() if seen is None else seen
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
         real = os.path.realpath(dirpath)
-        if real in seen:
+        if real in seen or not budget.take():
             dirnames[:] = []
+            if budget.exceeded:
+                return
             continue
         seen.add(real)
-        if budget.exceeded:
-            return
-        dirnames.sort()
+        keep: list[str] = []
+        for name in sorted(dirnames):
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                if follow_within is not None and _contained(full, follow_within):
+                    # os.walk won't descend a link with followlinks=False;
+                    # walk it explicitly (bounded by the same budget).
+                    yield from _walk_files(
+                        Path(full), budget, follow_within=follow_within, seen=seen
+                    )
+                else:
+                    yield Path(full)
+            else:
+                keep.append(name)
+        dirnames[:] = keep
         for name in sorted(filenames):
             yield Path(dirpath) / name
 
@@ -188,37 +251,75 @@ def _stamp(st: os.stat_result) -> str:
     return f"ctime:{st.st_ctime_ns}"
 
 
-def _fingerprint(path: Path, *, read: bool) -> Fingerprint | None:
-    """None for an empty file. Never raises: an unreadable or vanished path
-    still yields an entry, so it can't drop out of the digest."""
+def _hash_regular(path: Path, st: os.stat_result, budget: _Budget) -> Fingerprint:
+    """Hash a regular file without ever blocking on it: ``O_NONBLOCK`` and a
+    post-open ``fstat`` reject a file swapped for a FIFO or device."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
     try:
-        st = path.stat()
+        fd = os.open(path, flags)
     except OSError:
+        return (st.st_size, f"unreadable:{_stamp(st)}")
+    digest = hashlib.sha256()
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino:
+            return (-1, f"special:{stat.S_IFMT(fst.st_mode)}:{_stamp(fst)}")
+        remaining = min(fst.st_size, HASH_CAP_BYTES)
+        while remaining > 0:
+            chunk = os.read(fd, min(_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+            if not budget.spend(len(chunk)):
+                return (fst.st_size, f"unfinished:{_stamp(fst)}")
+    except OSError:
+        return (st.st_size, f"unreadable:{_stamp(st)}")
+    finally:
+        os.close(fd)
+    if fst.st_size > HASH_CAP_BYTES:
+        # Content past the cap isn't hashed: the change time catches edits.
+        return (fst.st_size, f"{digest.hexdigest()}:partial:{_stamp(fst)}")
+    return (fst.st_size, digest.hexdigest())
+
+
+def _fingerprint(
+    path: Path,
+    *,
+    read: bool,
+    budget: _Budget,
+    contain: str | None = None,
+) -> Fingerprint | None:
+    """None for an empty regular file. Never raises, never opens anything but
+    a regular file, and never follows a link out of *contain*: such entries
+    still count (by stat / link target), so they can't drop out of the
+    digest."""
+    try:
+        lst = os.lstat(path)
+    except OSError:
+        return (-1, "unstatable")
+    if stat.S_ISLNK(lst.st_mode):
         try:
             target = os.readlink(path)
         except OSError:
-            return (-1, "unstatable")
-        return (-1, f"dangling:{target}")
+            target = "?"
+        if contain is not None and not _contained(path, contain):
+            budget.outside = True
+            return (-1, f"outside:{target}")
+        try:
+            st = os.stat(path)
+        except OSError:
+            return (-1, f"dangling:{target}")
+    else:
+        st = lst
+    if not stat.S_ISREG(st.st_mode):
+        # FIFO, device, socket, directory link: never opened.
+        return (-1, f"special:{stat.S_IFMT(st.st_mode)}:{_stamp(st)}")
     if st.st_size == 0:
         return None
     if not read:
         return (st.st_size, f"{st.st_mtime_ns}:{_stamp(st)}")
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as handle:
-            remaining = HASH_CAP_BYTES
-            while remaining > 0:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                digest.update(chunk)
-                remaining -= len(chunk)
-    except OSError:
-        return (st.st_size, f"unreadable:{_stamp(st)}")
-    if st.st_size > HASH_CAP_BYTES:
-        # Content past the cap isn't hashed: the change time catches edits.
-        return (st.st_size, f"{digest.hexdigest()}:partial:{_stamp(st)}")
-    return (st.st_size, digest.hexdigest())
+    return _hash_regular(path, st, budget)
 
 
 def _strings(value: Any) -> Iterator[str]:
@@ -232,49 +333,64 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(item)
 
 
-def _referenced_scripts(manifest: Path, root: Path) -> list[Path]:
-    """In-project files that a hooks / MCP manifest's commands name.
+def _read_small_regular(path: Path, limit: int) -> str | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _referenced_scripts(manifest: Path, root_real: str) -> list[Path]:
+    """In-project regular files that a hooks / MCP manifest's commands name.
 
     Hook commands run with the manifest's directory as cwd; also try the
-    project root. Only existing files inside the root are returned.
+    project root. Paths resolving outside the project root (``/dev/zero``,
+    ``~``, ``../..``) are never touched.
     """
-    try:
-        if manifest.stat().st_size > _REF_PARSE_CAP_BYTES:
-            return []
-        data = json.loads(manifest.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
+    text = _read_small_regular(manifest, _REF_PARSE_CAP_BYTES)
+    if text is None:
         return []
-    root_real = root.resolve()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
     found: list[Path] = []
-    for text in _strings(data):
-        for token in _TOKEN_SPLIT.split(text):
+    for value in _strings(data):
+        for token in _TOKEN_SPLIT.split(value)[:_MAX_TOKENS]:
             if not token or ("/" not in token and "." not in token):
                 continue
-            for base in (manifest.parent, root):
-                candidate = (
-                    (base / token).resolve()
-                    if not os.path.isabs(token)
-                    else Path(token).resolve()
-                )
+            for base in (str(manifest.parent), root_real):
+                candidate = os.path.normpath(os.path.join(base, token))
+                if not _contained(candidate, root_real):
+                    continue
                 try:
-                    if candidate.is_file() and candidate.is_relative_to(root_real):
-                        found.append(candidate)
+                    if stat.S_ISREG(os.stat(candidate).st_mode):
+                        found.append(Path(os.path.realpath(candidate)))
                         break
                 except OSError:
                     continue
     return found
 
 
-def _rel(path: Path, root: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return path.resolve().relative_to(root.resolve()).as_posix()
-
-
 def _scan_agents_dirs(
     root: Path, cwd: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
+    root_real = os.path.realpath(root)
     current = cwd.resolve()
     dirs: list[Path] = []
     for _ in range(MAX_ANCESTOR_LEVELS + 1):
@@ -285,25 +401,32 @@ def _scan_agents_dirs(
     manifests: list[Path] = []
     for directory in dirs:
         agents = directory / _AGENTS_DIR
-        if not agents.is_dir():
+        if not agents.is_dir() or not _contained(agents, root_real):
+            if agents.is_symlink():
+                budget.outside = True
+                out[agents.relative_to(root).as_posix()] = (-1, "outside")
             continue
-        for path in _walk_files(agents, budget):
+        for path in _walk_files(agents, budget, follow_within=root_real):
             if not budget.take():
                 return
-            fp = _fingerprint(path, read=True)
+            fp = _fingerprint(path, read=True, budget=budget, contain=root_real)
+            if budget.exceeded:
+                return
             if fp is None:
                 continue
             out[path.relative_to(root).as_posix()] = fp
-            if path.name in _COMMAND_MANIFESTS:
+            if path.name in _COMMAND_MANIFESTS and fp[0] >= 0:
                 manifests.append(path)
     for manifest in manifests:
-        for script in _referenced_scripts(manifest, root):
-            rel = _rel(script, root)
+        for script in _referenced_scripts(manifest, root_real):
+            rel = Path(script).relative_to(root_real).as_posix()
             if rel in out:
                 continue
             if not budget.take():
                 return
-            fp = _fingerprint(script, read=True)
+            fp = _fingerprint(script, read=True, budget=budget, contain=root_real)
+            if budget.exceeded:
+                return
             if fp is not None:
                 out[rel] = fp
 
@@ -311,16 +434,17 @@ def _scan_agents_dirs(
 def _scan_user_dir(
     user_dir: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
-    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33)."""
+    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33).
+    Symlinked dirs are recorded, not followed."""
     if not user_dir.is_dir():
         return
-    for path in _walk_files(user_dir, budget):
+    for path in _walk_files(user_dir, budget, follow_within=None):
         rel = path.relative_to(user_dir).as_posix()
-        if not _is_user_manifest(rel):
+        if not _is_user_manifest(rel) and not path.is_symlink():
             continue
         if not budget.take():
             return
-        fp = _fingerprint(path, read=False)
+        fp = _fingerprint(path, read=False, budget=budget)
         if fp is not None:
             out[f"{USER_DISPLAY_PREFIX}{rel}"] = fp
 
@@ -328,23 +452,31 @@ def _scan_user_dir(
 def _scan_cross_engine(
     root: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
+    """Stat only; symlinked dirs are recorded, not followed."""
     candidates: list[Path] = [root / rel for rel in _CROSS_ENGINE_FILES]
     for tree in _CROSS_ENGINE_TREES:
         base = root / tree
-        if base.is_dir():
-            candidates.extend(_walk_files(base, budget))
+        if base.is_dir() and not base.is_symlink():
+            candidates.extend(_walk_files(base, budget, follow_within=None))
+        elif base.is_symlink():
+            candidates.append(base)
+        if budget.exceeded:
+            return
     for path in candidates:
-        if not (path.is_file() or path.is_symlink()):
+        if not os.path.lexists(path):
             continue
         if not budget.take():
             return
-        fp = _fingerprint(path, read=False)
+        fp = _fingerprint(path, read=False, budget=budget)
         if fp is not None:
             out[path.relative_to(root).as_posix()] = fp
 
 
 def scan_workspace_config(cwd: Path) -> ScanResult:
-    """Fingerprint both sets for a run in *cwd* (blocking; ≤ 2 s)."""
+    """Fingerprint both sets for a run in *cwd*.
+
+    Blocking and bounded (entries, bytes hashed, wall clock); callers run it
+    off the event loop (``anyio.to_thread``)."""
     root = find_project_root(cwd)
     agy: dict[str, Fingerprint] = {}
     cross: dict[str, Fingerprint] = {}
@@ -354,12 +486,14 @@ def scan_workspace_config(cwd: Path) -> ScanResult:
         _scan_user_dir(user_config_dir(), agy, agy_budget)
     cross_budget = _Budget()
     _scan_cross_engine(root, cross, cross_budget)
-    if agy_budget.exceeded or cross_budget.exceeded:
+    if agy_budget.exceeded or cross_budget.exceeded or agy_budget.outside:
         logger.warning(
             "antigravity.workspace_config.scan_truncated",
             root=str(root),
             agy_files=len(agy),
             cross_files=len(cross),
+            over_budget=agy_budget.exceeded or cross_budget.exceeded,
+            outside_root=agy_budget.outside,
         )
     return ScanResult(
         root=root,
@@ -367,4 +501,5 @@ def scan_workspace_config(cwd: Path) -> ScanResult:
         cross=cross,
         truncated=agy_budget.exceeded,
         cross_truncated=cross_budget.exceeded,
+        outside_root=agy_budget.outside,
     )

@@ -542,14 +542,21 @@ def test_user_level_manifests_stat_only(
     _write(tmp_path / ".agents" / "hooks.json", '{"x": 1}')
     opened: list[str] = []
     real_open = builtins.open
+    real_os_open = os.open
 
     def spy_open(file: Any, *a: Any, **k: Any) -> Any:
         opened.append(str(file))
         return real_open(file, *a, **k)
 
+    def spy_os_open(file: Any, *a: Any, **k: Any) -> Any:
+        opened.append(str(file))
+        return real_os_open(file, *a, **k)
+
     monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
     result = scan.scan_workspace_config(tmp_path)
     monkeypatch.setattr(builtins, "open", real_open)
+    monkeypatch.setattr(os, "open", real_os_open)
     assert "~/.gemini/config/hooks.json" in result.agy
     assert "~/.gemini/config/plugins/foo/hooks.json" in result.agy
     assert not any("untether-gate" in p for p in result.agy)
@@ -1097,19 +1104,81 @@ def test_change_past_hash_cap_detected(
     assert scan.scan_workspace_config(tmp_path).agy_digest != first
 
 
-def test_symlinked_plugin_dir_is_scanned(tmp_path: Path, gemini_home: Path) -> None:
+def test_symlinked_plugin_dir_inside_root_is_scanned(
+    tmp_path: Path, gemini_home: Path
+) -> None:
     proj = tmp_path / "proj"
-    outside = tmp_path / "outside-plugin"
-    manifest = _write(outside / "hooks.json", '{"a": 1}')
+    vendored = proj / "vendor" / "plugin"
+    manifest = _write(vendored / "hooks.json", '{"a": 1}')
     (proj / ".agents" / "plugins").mkdir(parents=True)
-    (proj / ".agents" / "plugins" / "evil").symlink_to(
-        outside, target_is_directory=True
-    )
-    (outside / "loop").symlink_to(outside, target_is_directory=True)  # no hang
-    first = scan.scan_workspace_config(proj)
-    assert ".agents/plugins/evil/hooks.json" in first.agy
+    (proj / ".agents" / "plugins" / "p").symlink_to(vendored, target_is_directory=True)
+    (vendored / "loop").symlink_to(proj / ".agents", target_is_directory=True)
+    first = scan.scan_workspace_config(proj)  # the cycle terminates
+    assert ".agents/plugins/p/hooks.json" in first.agy
+    assert not first.truncated and not first.outside_root
     manifest.write_text('{"a": 2}')
     assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
+
+
+@pytest.mark.parametrize("target", ["outside", "/", "home"])
+def test_symlink_out_of_root_never_followed(
+    target: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    proj = tmp_path / "proj"
+    (proj / ".agents" / "plugins").mkdir(parents=True)
+    dest = {
+        "outside": tmp_path / "outside-plugin",
+        "/": Path("/"),
+        "home": Path.home(),
+    }[target]
+    if target == "outside":
+        _write(dest / "hooks.json", '{"a": 1}')
+    (proj / ".agents" / "plugins" / "evil").symlink_to(dest, target_is_directory=True)
+    result = scan.scan_workspace_config(proj)
+    assert result.outside_root is True  # → "not checked" in the runner
+    assert list(result.agy) == [".agents/plugins/evil"]
+
+
+def test_fifo_and_device_never_opened(tmp_path: Path, gemini_home: Path) -> None:
+    os.mkfifo(tmp_path / "pipe.sh")
+    (tmp_path / ".agents").mkdir()
+    os.mkfifo(tmp_path / ".agents" / "hooks.json")
+    _write(
+        tmp_path / ".agents" / "mcp_config.json",
+        json.dumps({"s": {"command": "cat /dev/zero ./pipe.sh ../../etc/passwd"}}),
+    )
+    result = scan.scan_workspace_config(tmp_path)  # would hang if opened
+    assert result.agy[".agents/hooks.json"][1].startswith("special:")
+    assert "pipe.sh" not in result.agy  # not a regular file
+    assert not any("dev/zero" in p or "passwd" in p for p in result.agy)
+
+
+def test_scan_byte_budget_marks_unchecked(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "MAX_HASH_BYTES", 100)
+    for i in range(3):
+        _write(tmp_path / ".agents" / f"blob{i}.bin", "z" * 80)
+    assert scan.scan_workspace_config(tmp_path).truncated is True
+
+
+def test_scan_time_budget_marks_unchecked(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "TIME_BUDGET_S", -1.0)
+    _write(tmp_path / ".agents" / "hooks.json", '{"a": 1}')
+    assert scan.scan_workspace_config(tmp_path).truncated is True
+
+
+def test_scan_entry_budget_counts_directories(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "MAX_FILES", 5)
+    deep = tmp_path / ".agents"
+    for i in range(10):  # empty dirs only, no files
+        deep = deep / f"d{i}"
+    deep.mkdir(parents=True)
+    assert scan.scan_workspace_config(tmp_path).truncated is True
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
@@ -1221,3 +1290,42 @@ async def test_config_non_default_tool_permission_refuses_workspace(
     assert "proceed-in-sandbox" in (done.error or "")
     agy_config["value"] = _config(toolPermission="strict")
     assert _completed(await _run(runner)).ok is True
+
+
+@pytest.mark.anyio
+async def test_out_of_root_link_is_unchecked_in_runner(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    elsewhere = tmp_path / "elsewhere"
+    _write(elsewhere / "hooks.json", '{"a": 1}')
+    (project / ".agents" / "plugins").mkdir(parents=True)
+    (project / ".agents" / "plugins" / "x").symlink_to(
+        elsewhere, target_is_directory=True
+    )
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    for _ in range(2):
+        rows = _warning_rows(await _run(runner))
+        assert any("links outside the project" in r.action.title for r in rows)
+    events = await _run(runner, EngineRunOptions(unattended_trigger="cron:x"))
+    assert events[-1].usage == {PRESPAWN_BLOCKED_KEY: "config_unchecked"}
+
+
+@pytest.mark.anyio
+async def test_scans_run_off_the_event_loop(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    real = scan.scan_workspace_config
+    threads: list[bool] = []
+
+    def spy(cwd: Path) -> scan.ScanResult:
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real(cwd)
+
+    monkeypatch.setattr(scan, "scan_workspace_config", spy)
+    events = await _run(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    assert _completed(events).ok is True
+    assert threads == [False, False]  # pre-spawn and post-run, both off-loop

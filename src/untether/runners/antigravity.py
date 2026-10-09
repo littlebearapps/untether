@@ -49,7 +49,14 @@ from ..backends import EngineBackend, EngineConfig
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
-from ..model import Action, ActionKind, EngineId, ResumeToken, UntetherEvent
+from ..model import (
+    Action,
+    ActionKind,
+    CompletedEvent,
+    EngineId,
+    ResumeToken,
+    UntetherEvent,
+)
 from ..runner import (
     PRESPAWN_BLOCKED_KEY,
     JsonlSubprocessRunner,
@@ -467,6 +474,7 @@ class _RunPrecheck:
     # The planted-config scan failed or was truncated: show a ⚠️ row (never
     # record a digest as seen); unattended runs were already refused.
     scan_problem: str | None = None
+    effective_mode: str = "workspace"  # set by new_state (for logs)
     config: antigravity_quota.AgyConfig | None = None
     config_key: tuple[str, str] | None = None  # (project root, settings digest)
     config_rows: list[tuple[str, str]] = field(default_factory=list)
@@ -699,6 +707,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             JsonlSubprocessRunner.run_impl(self, prompt, resume)
         ) as events:
             async for evt in events:
+                if (
+                    isinstance(evt, CompletedEvent)
+                    and precheck is not None
+                    and precheck.scan is not None
+                ):
+                    # Off the event loop: the re-scan is bounded but blocking.
+                    rows = await anyio.to_thread.run_sync(
+                        self._config_change_rows, precheck
+                    )
+                    for row in rows:
+                        yield row
                 yield evt
 
     def _no_project_refusal(self, resume: ResumeToken | None) -> UntetherEvent | None:
@@ -829,6 +848,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         scan = pre.scan
         if scan is not None and scan.truncated:
             pre.scan_problem = "too many files to check in time"
+        elif scan is not None and scan.outside_root:
+            pre.scan_problem = "links outside the project"
         if pre.scan_problem is not None:
             # Security review: an unfinished scan is "not checked", never a
             # stable digest — attended runs warn every time, unattended
@@ -1061,6 +1082,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         label = _mode_label(mode)
         if precheck is not None:
             label += precheck.label_suffix
+            precheck.effective_mode = mode
         return AntigravityStreamState(
             factory=EventFactory(ENGINE),
             expected_resume=expected or None,
@@ -1259,16 +1281,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         title: str,
         detail: dict[str, Any] | None = None,
     ) -> UntetherEvent:
-        # #868/#987: an ok=True warning that leads with ⚠️ renders the ⚠️ as
-        # its status (never ✓ / ✗).
-        return state.factory.action_completed(
-            action_id=action_id,
-            kind="warning",
-            title=title,
-            ok=True,
-            detail=detail or {},
-            level="warning",
-        )
+        return _warning_event(state.factory, action_id, title, detail)
 
     def _startup_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
         """⚠️ rows learnt before spawn, shown right after Started."""
@@ -1557,7 +1570,6 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 message="interrupted" if interrupted else error,
             )
         )
-        out.extend(self._config_change_rows(state))
         answer = self._answer(state, res.response)
         if denied_labels:
             answer = _append_paragraph(
@@ -1659,13 +1671,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         return out, labels
 
-    def _config_change_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
+    def _config_change_rows(self, pre: _RunPrecheck) -> list[UntetherEvent]:
         """Planted config changed during the run (either set) → one ⚠️ row
         per set (REVIEW B2, REVIEW-2 M4). Never refuses anything here; a
         re-check that fails or is truncated says so (fail visible)."""
-        pre = state.precheck
-        if pre is None or pre.scan is None or pre.cwd is None:
+        if pre.scan is None or pre.cwd is None:
             return []
+        factory = EventFactory(ENGINE)
         problem: str | None = None
         try:
             after = antigravity_scan.scan_workspace_config(pre.cwd)
@@ -1678,11 +1690,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             problem = "the check failed"
         if after is not None and (after.truncated or after.cross_truncated):
             problem = "too many files to check in time"
+        elif after is not None and after.outside_root:
+            problem = "links outside the project"
         out: list[UntetherEvent] = []
         if problem is not None:
             out.append(
-                self._warning_row(
-                    state,
+                _warning_event(
+                    factory,
                     "antigravity.config.recheck",
                     "⚠️ Untether couldn't re-check this project's agy and "
                     f"other engines' config after the run ({problem}). Review "
@@ -1703,11 +1717,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "antigravity.workspace_config_changed",
                 paths=paths[:20],
                 set=set_name,
-                permission_mode=state.effective_mode,
+                permission_mode=pre.effective_mode,
             )
             out.append(
-                self._warning_row(
-                    state,
+                _warning_event(
+                    factory,
                     f"antigravity.config.changed.{set_name}",
                     f"⚠️ Antigravity changed {_paths_text(paths)} — agy (or "
                     "another engine) will load it on the next run. Review it "
@@ -1853,6 +1867,24 @@ def _step_of(action_id: str) -> int:
         return int(action_id.removeprefix("step-"))
     except ValueError:
         return -1
+
+
+def _warning_event(
+    factory: EventFactory,
+    action_id: str,
+    title: str,
+    detail: dict[str, Any] | None = None,
+) -> UntetherEvent:
+    # #868/#987: an ok=True warning that leads with ⚠️ renders the ⚠️ as its
+    # status (never ✓ / ✗).
+    return factory.action_completed(
+        action_id=action_id,
+        kind="warning",
+        title=title,
+        ok=True,
+        detail=detail or {},
+        level="warning",
+    )
 
 
 def _in_family(tool_name: Any, family: frozenset[str]) -> bool:
