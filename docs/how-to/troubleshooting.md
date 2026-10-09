@@ -210,6 +210,14 @@ Ask me and Plan first aren't available yet. Pick Workspace or Full access in `/c
 
 agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session. Send your message again to start fresh.
 
+### "That model id isn't valid for Antigravity"
+
+**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash).`
+
+Untether checks the model id before it starts agy and refuses one that agy could misread. Set a valid id with `/model set <id>` (run `agy models` on the host for the list) or go back to the default with `/model clear`. For a cron, fix its `model`. The same check on `[antigravity] model` in `untether.toml` is a config error at startup.
+
+If the message is `🛑 That Antigravity conversation id isn't valid, so nothing was started.`, the resume line you replied to (or the saved session) doesn't hold a real conversation id: send `/new` and try again.
+
 ### "Effort … isn't available"
 
 Antigravity models accept different effort levels. Open `/config` → **Effort**: it shows only the levels the chat's model takes. See [Antigravity effort](model-reasoning.md#antigravity-effort).

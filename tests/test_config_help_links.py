@@ -394,6 +394,26 @@ def test_no_satellite_triggers_in_docs() -> None:
             assert "📡 Trigger" not in line, f"{path}:{n}: {line}"
 
 
+def test_help_urls_in_src_resolve() -> None:
+    """Every full help-centre URL written in ``src/`` (outside ``/config``'s
+    ``_learn_more`` calls) lands on one doc file and heading — e.g. the
+    Antigravity sign-in card and one-time notice (#558)."""
+    from untether.runners import antigravity as agy
+
+    assert _resolve(agy.SIGN_IN_HELP_URL) is not None
+    assert agy.SIGN_IN_HELP_URL in agy.AUTH_TEXT
+    assert agy.SIGN_IN_HELP_URL in agy.OAUTH_NOTICE_TEXT
+    found: set[str] = set()
+    for path in (_REPO_ROOT / "src" / "untether").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        found.update(
+            re.findall(r"https://littlebearapps\.com/help/untether/[\w/#.-]*", text)
+        )
+    assert agy.SIGN_IN_HELP_URL in found
+    for url in found - {_HELP_BASE}:
+        assert _resolve(url) is not None, url
+
+
 def test_readme_and_faq_help_links_resolve() -> None:
     """The dead ``untether.littlebearapps.com`` subdomain is gone (#296 D4)."""
     for rel in ("README.md", "docs/faq/faq.md"):

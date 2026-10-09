@@ -100,6 +100,11 @@ INTERRUPTED_TEXT = (
     "Antigravity was interrupted — the conversation can be resumed by "
     "replying to its resume line."
 )
+# The published help page with agy's install, sign-in routes and terms note
+# (GitHub-slugger anchor; pinned by ``tests/test_config_help_links.py``).
+SIGN_IN_HELP_URL = (
+    "https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli"
+)
 # Phase 03 (D27): distinct, non-retryable error cards for the stderr kill
 # classes. None of them matches ``_RESUME_FAILURE_RE``, so the chat keeps its
 # saved session.
@@ -108,7 +113,7 @@ AUTH_TEXT = (
     "sign-in, which a bot can't complete. Run `agy` once in a terminal on the "
     "host and finish the Google sign-in, then retry. On a keyring desktop, also "
     "check that `DBUS_SESSION_BUS_ADDRESS` reaches Untether. For servers, the "
-    "Gemini API key route avoids sign-in (see the Antigravity runner docs)."
+    f"Gemini API key route avoids sign-in: {SIGN_IN_HELP_URL}"
 )
 ACCOUNT_BLOCKED_TEXT = (
     "Google is asking this account to verify itself or appeal a Terms of "
@@ -616,7 +621,7 @@ OAUTH_NOTICE_TEXT = (
     "Antigravity terms say third-party tools such as Untether mustn't use "
     "that sign-in, and Google may suspend the account. A Gemini API key or "
     "Enterprise sign-in avoids this: "
-    "https://littlebearapps.com/help/untether/switch-engines/ "
+    f"{SIGN_IN_HELP_URL} "
     "(Shown once in this chat.)"
 )
 

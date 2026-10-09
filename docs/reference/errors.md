@@ -173,6 +173,8 @@ Antigravity CLI (`agy`) errors are Untether's own messages, written when the run
 | `Antigravity's AI credits balance is too low to continue` | Out of AI credits | Top up, or wait for the quota reset |
 | `That Antigravity conversation no longer exists` | agy doesn't know the resume id | Send the message again; a new conversation starts |
 | `Antigravity was interrupted` | The run was cancelled or the process was signalled | Reply to the resume line to continue |
+| `🛑 That model id isn't valid for Antigravity, so nothing was started.` | The chat's, cron's or config's model id has a space, a leading dash or another character Antigravity model ids don't use | `/model set <id>` with a valid id (`agy models` lists them), or `/model clear` |
+| `🛑 That Antigravity conversation id isn't valid, so nothing was started.` | The resume line or saved session holds something that isn't a conversation id | `/new`, then send the message again |
 | `Antigravity needs a project` | The chat has no project directory | `/ctx set <project>`, or add a `[projects.*]` entry |
 | `🛑 Antigravity CLI <version> is older than 1.3.1` | agy is too old | `agy update` on the host |
 | `Ask me needs Untether's approval gate` / `Plan first needs …` | That mode isn't available yet | Pick Workspace or Full access in `/config` |

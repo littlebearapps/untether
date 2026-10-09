@@ -50,6 +50,7 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 |---|---|
 | RAM / concurrency guard | Same pre-spawn guard as every engine |
 | `no_project` | No project directory, or it is `/`, the home directory or the bot's own directory |
+| `invalid_argument` | The model id or the conversation id being resumed isn't a valid value (it could be read by agy as a flag). The bad id is not kept as the resume token |
 | `gate_missing` | The mode is Ask me or Plan first |
 | `unsupported_version` | agy is older than 1.3.1 |
 | `config_changed` | Unattended run, and the project's agy config differs from what an attended run last showed |

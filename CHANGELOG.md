@@ -16,6 +16,7 @@
 
 ### fixes
 
+- **security(antigravity):** a model id or a resumed conversation id can no longer change how Antigravity runs. Untether checks both before starting agy and always passes them joined to their flag; an invalid model id (spaces, a leading dash, unusual characters) or conversation id is refused with a clear message and nothing starts, and an invalid `[antigravity] model` is a config error at startup [#558](https://github.com/littlebearapps/untether/issues/558)
 - **fix(antigravity):** while agy holds its answer for a background command (up to 30 minutes), the progress message shows `⏳ Antigravity is waiting for 1 background task …` instead of a stall warning, the run isn't auto-cancelled, and the background commands are stopped when the run ends or is cancelled [#975](https://github.com/littlebearapps/untether/issues/975)
 - **fix(antigravity):** the agy version is checked before each run (1.3.1 minimum, with a clear message for an older one) and logged as `agy_version` on `antigravity.session.started` [#976](https://github.com/littlebearapps/untether/issues/976)
 - **fix(config):** `/config` → About probes each engine's real CLI command, so Antigravity's version (`agy`) shows there [#993](https://github.com/littlebearapps/untether/issues/993)

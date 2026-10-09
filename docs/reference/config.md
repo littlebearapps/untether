@@ -652,7 +652,7 @@ Antigravity CLI (`agy` 1.3.1 or newer). Read the [terms note](runners/antigravit
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `model` | string | (unset) | Optional model, passed as `--model`. Prefer a base id; an id that names its effort (ending `-low`, `-medium`, `-high`) fixes the effort level. `agy models` lists them. |
+| `model` | string | (unset) | Optional model, passed as `--model=<id>`. Allowed characters: ASCII letters, digits and `. _ - : / @ +`; it must start with a letter or digit, have no spaces and be at most 128 characters. Anything else is a config error at load. Prefer a base id; an id that names its effort (ending `-low`, `-medium`, `-high`) fixes the effort level. `agy models` lists them. |
 | `cmd` | string | `agy` on `PATH`, then `~/.local/bin/agy` | Path to the agy binary (`~` is expanded). The "installed engines" check at startup looks for `agy` on `PATH` only. |
 | `permission_mode` | string | `workspace` | `workspace` or `full` (passes `--dangerously-skip-permissions`; logged once at startup). `ask` and `plan` are accepted but refused at run time until a later 0.36.1 release. Any other value is a config error. A chat's `/config` → **Permission mode** overrides it; cron and webhook runs never inherit `full` from here. See [Permission mode](../how-to/interactive-approval.md#antigravity-cli-permission-mode). |
 

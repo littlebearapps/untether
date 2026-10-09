@@ -79,7 +79,7 @@ On a host where agy uses a Google account sign-in, the first successful Antigrav
 
 > ⚠️ This host signs Antigravity in with a Google account. Google's Antigravity terms say third-party tools such as
 > Untether mustn't use that sign-in, and Google may suspend the account. A Gemini API key or Enterprise sign-in avoids
-> this: https://littlebearapps.com/help/untether/switch-engines/ (Shown once in this chat.)
+> this: https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli (Shown once in this chat.)
 
 Untether decides this from agy's own `-p /config` report (`modelProvider: "gemini"` means the API-key route) and
 from `AGY_ADC_AUTH=true`. If that check fails, the host is treated as a Google sign-in host, so an API-key host can
@@ -91,7 +91,7 @@ One `agy` process per message:
 
 ```text
 agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
-    [--conversation <id> | --continue] [--model <model>] [--effort <level>] [--dangerously-skip-permissions]
+    [--conversation=<id> | --continue] [--model=<model>] [--effort=<level>] [--dangerously-skip-permissions]
 ```
 
 - **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
@@ -100,6 +100,19 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 --d
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
   success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
 - `--dangerously-skip-permissions` is passed only in Full access (see [Permission modes](#permission-modes)).
+- **Values are always joined to their flag** (`--model=<model>`, `--conversation=<id>`, `--effort=<level>`), and
+  each is checked first. agy reads a separate value that starts with a dash as another flag, so Untether never
+  passes one as its own argument. A model id may use ASCII letters, digits and `. _ - : / @ +`, must start with a
+  letter or digit and be at most 128 characters; a conversation id may use letters, digits, `_` and `-`; effort is
+  one of agy's level names. A model or conversation id that fails the check is refused before agy starts
+  (`antigravity.argv.invalid_value` in the logs, without the raw value):
+
+    > 🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and
+    > . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash). Set one with /model set,
+    > or go back to the default with /model clear.
+
+    > 🛑 That Antigravity conversation id isn't valid, so nothing was started. Send /new to start a fresh
+    > conversation.
 
 ### Resume
 
@@ -109,7 +122,8 @@ Final messages end with the resume line:
 `agy --conversation <conversation_id>`
 ```
 
-Replying to it (or chat mode) resumes with `--conversation <id>`. `/continue` uses `agy --continue`, which picks
+That line is what you copy into a terminal. Replying to it (or chat mode) resumes the conversation; Untether
+itself passes the id to agy in the joined form `--conversation=<id>`. `/continue` uses `agy --continue`, which picks
 the most recent conversation for the project directory. agy also considers a parent or child directory's
 conversations there, so run `/continue` from the directory you used in the terminal.
 
@@ -217,7 +231,7 @@ kept.
 
 | agy stderr line (matched case-insensitively on the first 4 KiB) | Untether's reply |
 |---|---|
-| starts with `authentication required`, `error: authentication required` or `waiting for authentication` | `Antigravity CLI isn't signed in on this host — agy wanted a browser sign-in, which a bot can't complete. …` plus a hint naming the API-key and Enterprise routes |
+| starts with `authentication required`, `error: authentication required` or `waiting for authentication` | `Antigravity CLI isn't signed in on this host — agy wanted a browser sign-in, which a bot can't complete. …`, ending with a link to the sign-in guide, plus a hint naming the API-key and Enterprise routes |
 | contains `verify your account`, or `terms of service` with `block`, `appeal`, `violat` or `suspend` | `Google is asking this account to verify itself or appeal a Terms of Service block. Sign in with agy in a terminal on the host to see Google's link. Untether won't retry.` |
 | contains `individual quota reached` | `This Antigravity quota is used up. /usage shows when each group resets; Untether won't retry.` |
 | contains `ai credits balance is too low` | `Antigravity's AI credits balance is too low to continue. Top up or wait for the quota reset (/usage).` |
@@ -265,7 +279,7 @@ stderr lines are logged at DEBUG only.
 ## Effort
 
 `/config` → **Effort** offers `low`, `medium` and `high`, passed as `--effort`. Which of them a model accepts
-varies, so when the Effort page opens Untether asks agy with a zero-token `agy -p /effort [--model <model>]`
+varies, so when the Effort page opens Untether asks agy with a zero-token `agy -p /effort [--model=<model>]`
 (10 second limit, remembered per agy binary and model) and shows only the levels that model takes. A model with a
 fixed effort shows no level buttons. If agy can't be asked, the page shows all three with a note.
 
@@ -307,7 +321,7 @@ aren't tracked.
 
 ```toml
 [antigravity]
-model = "gemini-3.8-flash"     # optional; passed as --model
+model = "gemini-3.8-flash"     # optional; passed as --model=<id>
 cmd = "~/.local/bin/agy"       # optional; default: agy on PATH, then ~/.local/bin/agy
 permission_mode = "workspace"  # workspace (default) | full; ask and plan are refused for now
 ```
@@ -320,7 +334,8 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.auth.required` / `.killed`, `antigravity.account.blocked`, `antigravity.quota.exhausted`,
 `antigravity.credits.low`, `antigravity.conversation.missing`, `antigravity.permission_mode.mismatch`,
 `antigravity.workspace_config_present` / `_changed` / `.unattended_refused`, `antigravity.config_check.fetched` /
-`.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`.
+`.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`,
+`antigravity.argv.invalid_value`.
 
 ## See also
 

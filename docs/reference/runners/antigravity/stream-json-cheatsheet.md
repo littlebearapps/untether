@@ -153,7 +153,7 @@ uses three of them, none of which calls a model:
 {"event":"command_result","command":{"name":"effort","data":{"adjustable":true,"current":"high","available":["low","medium","high"]}}}
 ```
 
-- `/effort [--model <model>]` — the effort levels a model accepts (`{"adjustable": false}` for a fixed-effort model)
+- `/effort [--model=<model>]` (Untether always joins the value to the flag) — the effort levels a model accepts (`{"adjustable": false}` for a fixed-effort model)
 - `/usage` — quota `groups`, each with `buckets` (`window` such as `5h` or `weekly`, `remaining_fraction`,
   `reset_time`)
 - `/config` — agy's effective settings (`toolPermission`, `permissions.allow`, `allowNonWorkspaceAccess`,
