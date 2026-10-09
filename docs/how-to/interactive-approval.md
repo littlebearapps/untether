@@ -159,6 +159,24 @@ This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. 
 !!! note "Before v0.36.0"
     Safe used to pass `--ask-for-approval untrusted`. `codex exec` never applied that flag, so Safe ran exactly like Full auto, and codex-cli 0.149.0+ rejects it outright, so every Safe run failed at startup ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
+### Antigravity CLI — Permission mode
+
+Toggle via `/config` → **Permission mode**:
+
+| Mode | CLI flag | Behaviour |
+|------|----------|-----------|
+| **Workspace** (default) | (none) | Antigravity edits files in the project (and temp folders); agy blocks its own shell, web and MCP calls. Not a sandbox — see below |
+| **Ask me** | — | Coming in a later 0.36.1 release: asks you in Telegram before shell, web and MCP calls. Needs Untether's approval gate, so it's shown but can't be picked yet |
+| **Plan first** | — | Coming in a later 0.36.1 release: writes a plan and waits for your approval before changing anything |
+| **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
+
+This is a pre-run policy: headless agy can't stop to ask. When it blocks a tool, the progress message shows a ⚠️ **Blocked** row and the final reply says how to allow it. To allow specific commands without Full access, add exact rules such as `command(git status)` to `permissions.allow` in agy's own settings file.
+
+You can also set a default with `permission_mode = "full"` (or `"workspace"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
+
+!!! warning "Workspace is not a sandbox"
+    Workspace only limits agy's own tool calls. agy hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers run their own commands in every mode, and a run can write those files for the next run to execute. Untether shows a ⚠️ row when a project carries agy config it doesn't manage or when a run changes it (or another engine's files such as `.claude/`, `.envrc` or `.github/workflows/`), and holds scheduled runs after such a change until someone sends a message in the chat.
+
 ### Gemini CLI — Approval mode
 
 !!! warning "Deprecated"

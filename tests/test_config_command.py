@@ -1035,6 +1035,214 @@ class TestGeminiApprovalModeToasts:
 
 
 # ---------------------------------------------------------------------------
+# Antigravity permission mode (#558 phase 02, D21)
+# ---------------------------------------------------------------------------
+
+
+class TestAntigravityPermissionPage:
+    @staticmethod
+    def _ctx(tmp_path, action: str | None = None, *, toml_mode: str | None = None):
+        args = "pm" if action is None else f"pm:{action}"
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}",
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity", "claude"),
+        )
+        ctx.runtime.resolve_runner.return_value.runner.default_permission_mode = (
+            toml_mode
+        )
+        return ctx
+
+    @staticmethod
+    async def _override(tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        return await prefs.get_engine_override(123, "antigravity")
+
+    @pytest.mark.anyio
+    async def test_antigravity_permission_page_text_and_buttons(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        text = msg.text
+        assert "<b>📋 Permission mode</b>" in text
+        assert "Not a sandbox" in text
+        assert "read-only" not in text.lower()
+        assert "--dangerously-skip-permissions" in text
+        assert "Cron and webhook runs only get this when the cron itself sets it" in (
+            text
+        )
+        assert "<code>command(git status)</code>" in text
+        assert "Current: <b>workspace</b> (default)" in text
+        assert "interactive-approval/#antigravity-cli--permission-mode" in text
+        labels = _buttons_labels(msg)
+        assert labels == [
+            "✓ Workspace",
+            "Full access",
+            "Ask me · soon",
+            "Plan first · soon",
+            "Clear override",
+            "← Back",
+        ]
+        assert _buttons_data(msg) == [
+            "config:pm:agw",
+            "config:pm:agf",
+            "config:pm:aga",
+            "config:pm:agp",
+            "config:pm:clr",
+            "config:home",
+        ]
+
+    @pytest.mark.anyio
+    async def test_antigravity_pm_actions_store_values(self, tmp_path):
+        cmd = ConfigCommand()
+        await cmd.handle(self._ctx(tmp_path, "agf"))
+        assert (await self._override(tmp_path)).permission_mode == "full"
+        await cmd.handle(self._ctx(tmp_path, "agw"))
+        assert (await self._override(tmp_path)).permission_mode == "workspace"
+        await cmd.handle(self._ctx(tmp_path, "clr"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        for soon in ("aga", "agp"):
+            ctx = self._ctx(tmp_path, soon)
+            await cmd.handle(ctx)
+            override = await self._override(tmp_path)
+            assert override is None or override.permission_mode is None
+            ctx.executor.edit.assert_not_called()
+            ctx.executor.send.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_antigravity_pm_setter_keeps_loop_override(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123,
+            "antigravity",
+            EngineOverrides(model="gemini-3.1-pro", loop_enabled=True),
+        )
+        await ConfigCommand().handle(self._ctx(tmp_path, "agf"))
+        override = await self._override(tmp_path)
+        assert override.permission_mode == "full"
+        assert override.model == "gemini-3.1-pro"
+        assert override.loop_enabled is True
+
+    @pytest.mark.anyio
+    async def test_antigravity_home_and_page_show_toml_full(self, tmp_path):
+        ctx = self._ctx(tmp_path, toml_mode="full")
+        await ConfigCommand().handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "Current: <b>full access</b> (from untether.toml)" in page.text
+        assert "✓ Full access" in _buttons_labels(page)
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        home.runtime.resolve_runner.return_value.runner.default_permission_mode = "full"
+        await ConfigCommand().handle(home)
+        text = _last_send_msg(home).text
+        assert "<b>Agent controls</b> <i>(Antigravity CLI)</i>" in text
+        assert (
+            "Permission mode: <b>full access</b> (from untether.toml)"
+            "  · all tools approved" in text
+        )
+        assert "config:pm" in _buttons_data(_last_send_msg(home))
+        # A chat override wins over the TOML value on both pages.
+        await ConfigCommand().handle(self._ctx(tmp_path, "agw", toml_mode="full"))
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        await ConfigCommand().handle(home)
+        assert (
+            "Permission mode: <b>workspace</b>  · edits files, no shell — not a sandbox"
+            in _last_send_msg(home).text
+        )
+
+    @pytest.mark.anyio
+    async def test_antigravity_home_hint_default(self, tmp_path):
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        await ConfigCommand().handle(home)
+        assert (
+            "Permission mode: <b>workspace</b> (default)"
+            "  · edits files, no shell — not a sandbox" in _last_send_msg(home).text
+        )
+
+    def test_antigravity_toast_labels_present(self):
+        toast = ConfigCommand.early_answer_toast
+        assert toast("pm:agw") == "Permission mode: workspace"
+        assert toast("pm:agf") == "Permission mode: full access"
+        for soon in ("pm:aga", "pm:agp"):
+            assert toast(soon) == (
+                "Needs Untether's Telegram approval gate — coming in a later "
+                "0.36.1 release"
+            )
+
+    @pytest.mark.anyio
+    async def test_gemini_permission_page_unchanged(self, tmp_path):
+        """Guards the #766 regression that dropped the Gemini buttons."""
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=tmp_path / "prefs.json",
+            default_engine="gemini",
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert msg.text.startswith("<b>📋 Approval mode</b>")
+        assert "Control which tools Gemini can use" in msg.text
+        assert _buttons_data(msg) == [
+            "config:pm:ro",
+            "config:pm:ae",
+            "config:pm:ya",
+            "config:pm:clr",
+            "config:home",
+        ]
+
+    @pytest.mark.anyio
+    async def test_unsupported_engine_lists_antigravity(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=tmp_path / "prefs.json",
+            default_engine="pi",
+            engine_ids=("pi",),
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "Only available for Claude Code, Codex, Antigravity CLI and Gemini CLI."
+            in _last_edit_msg(ctx).text
+        )
+
+    def test_mode_text_covers_every_valid_mode(self):
+        from untether.runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
+        from untether.telegram.commands._antigravity_mode_text import (
+            ANTIGRAVITY_MODE_TEXT,
+            ANTIGRAVITY_PM_ACTIONS,
+            antigravity_mode_label,
+        )
+
+        valid = VALID_PERMISSION_MODES_BY_ENGINE["antigravity"]
+        assert set(ANTIGRAVITY_MODE_TEXT) == valid
+        assert set(ANTIGRAVITY_PM_ACTIONS.values()) == valid
+        assert antigravity_mode_label(None) == "workspace"
+        assert antigravity_mode_label("accept-edits") == "workspace"
+        assert antigravity_mode_label("full") == "full access"
+        for mode in ANTIGRAVITY_MODE_TEXT.values():
+            assert "read-only" not in mode.hint
+
+
+# ---------------------------------------------------------------------------
 # Verbose sub-page
 # ---------------------------------------------------------------------------
 

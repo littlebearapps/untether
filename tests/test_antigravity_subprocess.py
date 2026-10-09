@@ -145,7 +145,50 @@ async def test_run_tools_denied_end_to_end(
     view = [e for t, e in completed.items() if "notes.txt" in t]
     cmd = [e for t, e in completed.items() if "probe-shell" in t]
     assert view and view[0].ok is True
-    assert cmd and cmd[0].ok is False  # closed, not left running
+    # Closed, not left running — as a ⚠️ warning row (phase 02).
+    assert cmd and cmd[0].ok is True
+    assert cmd[0].action.title.startswith("⚠️ Blocked: shell command (RunCommand)")
+
+
+@pytest.mark.anyio
+async def test_run_default_mode_shell_denial_end_to_end(
+    project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 02 exit gate: no override → no bypass flag; the shell denial
+    becomes a ⚠️ row and the final explains how to allow it."""
+    _scenario(monkeypatch, "tools_denied")
+    with structlog.testing.capture_logs() as logs:
+        events = await _run("run echo probe-shell")
+    done = _assert_contract(events)
+    argv = json.loads(record.read_text())["argv"]
+    assert "--dangerously-skip-permissions" not in argv
+    assert done.ok is True
+    assert "blocked from using a shell command" in done.answer
+    assert events[0].meta["permissionMode"] == "workspace"
+    rows = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.title.startswith("⚠️ Blocked")
+    ]
+    assert len(rows) == 1
+    (log,) = [e for e in logs if e["event"] == "antigravity.denied_actions"]
+    assert log["actions"] == ["command"] and log["permission_mode"] == "workspace"
+
+
+@pytest.mark.anyio
+async def test_run_full_mode_passes_bypass_flag(
+    project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    _scenario(monkeypatch, "hook_deny_bypass")
+    with apply_run_options(EngineRunOptions(permission_mode="full")):
+        events = await _run("run the hooks probe")
+    done = _assert_contract(events)
+    assert done.ok is True
+    argv = json.loads(record.read_text())["argv"]
+    assert argv[-1] == "--dangerously-skip-permissions"
+    assert events[0].meta["permissionMode"] == "full access"
 
 
 @pytest.mark.anyio

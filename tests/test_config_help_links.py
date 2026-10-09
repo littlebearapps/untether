@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SYNCED_DIRS = ("tutorials", "how-to", "reference", "explanation", "faq")
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_ENGINES = ("claude", "codex", "opencode", "gemini")
+_ENGINES = ("claude", "codex", "opencode", "antigravity", "gemini")
 _CHAT = 123
 
 _REPO_URL = "https://github.com/littlebearapps/untether"
@@ -260,6 +260,9 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
     )
     table[("pm", "gemini")] = frozenset(
         {_u("interactive-approval", "gemini-cli--approval-mode")}
+    )
+    table[("pm", "antigravity")] = frozenset(
+        {_u("interactive-approval", "antigravity-cli--permission-mode")}
     )
     table[("aq", "claude")] = frozenset(
         {_u("interactive-approval", "answering-questions")}

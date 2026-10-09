@@ -311,7 +311,9 @@ def _no_opencode_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
 
 @pytest.fixture(autouse=True)
-def _no_agy_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _no_agy_version_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[None]:
     """#558/#976: ``AntigravityRunner.run_impl`` asks ``agy --version`` (once
     per binary) before every run. Unit tests must never spawn the host's real
     agy (lba-1 has one), so the probe reports "unknown" (→ the run is allowed)
@@ -320,5 +322,18 @@ def _no_agy_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr(antigravity_runner, "_probe_agy_version", lambda path: None)
     antigravity_runner._VERSION_CACHE.clear()
+    # Phase 02: the cached `-p /config` check reports "failed" (the run fails
+    # open) unless a test opts in, and the planted-config scan never looks at
+    # the host's real ~/.gemini/config.
+    from untether.utils import antigravity_quota, antigravity_scan
+
+    async def _no_config_probe(runner: object) -> object:
+        raise antigravity_quota.AgySlashError("stubbed_in_tests")
+
+    monkeypatch.setattr(antigravity_quota, "_probe_agy_config", _no_config_probe)
+    antigravity_quota.clear_config_cache()
+    empty_config_dir = tmp_path_factory.mktemp("agy-user-config")
+    monkeypatch.setattr(antigravity_scan, "user_config_dir", lambda: empty_config_dir)
     yield
     antigravity_runner._VERSION_CACHE.clear()
+    antigravity_quota.clear_config_cache()

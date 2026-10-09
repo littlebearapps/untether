@@ -68,6 +68,8 @@ class PlanModeCommand:
             hint = ""
             if current_engine in {"codex", "gemini"}:
                 hint = " Use /config → Approval policy instead."
+            elif current_engine == "antigravity":
+                hint = " Use /config → Permission mode instead."
             return CommandResult(
                 text=(
                     f"Plan mode is only available for Claude Code."

@@ -15,14 +15,21 @@ stream-json user line (never in argv), the stream comes back as
 - ``result`` — ``status`` ``SUCCESS`` / ``ERROR``; ``usage``, ``num_turns``
   and ``duration_seconds`` are **session-cumulative** across resumes
 
-Safety: this runner never passes ``--dangerously-skip-permissions`` (the
-explicit permission modes land with phase 02), refuses to run without a
-project directory, and refuses agy older than 1.3.1.
+Safety (phase 02, D21): ``--dangerously-skip-permissions`` is passed only
+when a human explicitly chose **Full access** (``/config``, ``[antigravity]
+permission_mode = "full"`` or a cron's own ``permission_mode``); unknown
+values fail closed to Workspace, unattended runs never inherit Full access
+(08 §10), and "Ask me" / "Plan first" are refused until Untether's approval
+gate ships. The runner also refuses to run without a project directory or on
+agy older than 1.3.1, cross-checks agy's own settings (``-p /config``) and the
+reported ``init.permission_mode``, and warns about agy hooks, plugins and MCP
+servers it doesn't manage (REVIEW-2 B2).
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -53,8 +60,15 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import antigravity as agy_schema
-from ..utils.paths import get_run_base_dir
-from .run_options import get_run_options
+from ..utils import antigravity_quota, antigravity_scan
+from ..utils.antigravity_state import (
+    NOTICES_FILENAME,
+    SEEN_CONFIG_FILENAME,
+    NoticeStore,
+    SeenConfigStore,
+)
+from ..utils.paths import get_run_base_dir, get_run_channel_id
+from .run_options import ANTIGRAVITY_PERMISSION_MODES, get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
@@ -84,9 +98,11 @@ NO_PROJECT_TEXT = (
     "[projects.*] entry. It won't run in the bot's own directory, because it "
     "can edit files there."
 )
-_DENIED_TEXT = "denied by Antigravity's headless permission policy"
 NO_PROJECT_BLOCK = "no_project"
 UNSUPPORTED_VERSION_BLOCK = "unsupported_version"
+GATE_MISSING_BLOCK = "gate_missing"
+CONFIG_CHANGED_BLOCK = "config_changed"
+ALWAYS_PROCEED_BLOCK = "agy_always_proceed"
 
 # PR #766's mapping onto the shared tool vocabulary (real parameter names).
 _TOOL_NAME_MAP: dict[str, str] = {
@@ -135,9 +151,37 @@ _DENIABLE_TOOLS = frozenset(
         "grep_search",
     }
 )
-# ``result.denied_actions[].action`` → the tool names it covers.
-_DENIED_ACTION_TOOLS: dict[str, frozenset[str]] = {
+_FILE_TOOLS = frozenset(
+    {
+        "view_file",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "sed_file",
+        "list_dir",
+        "find_by_name",
+        "grep_search",
+    }
+)
+# ``result.denied_actions[].action`` → the tool names it covers (a trailing
+# ``*`` is a prefix) and how Telegram names it.
+_DENIED_FAMILY: dict[str, frozenset[str]] = {
     "command": frozenset({"run_command"}),
+    "unsandboxed": frozenset({"run_command"}),
+    "read_url": frozenset({"read_url_content"}),
+    "execute_url": frozenset({"browser_*"}),
+    "mcp": frozenset({"call_mcp_tool"}),
+    "read_file": _FILE_TOOLS,
+    "write_file": _FILE_TOOLS,
+}
+_DENIED_LABEL: dict[str, str] = {
+    "command": "shell command",
+    "unsandboxed": "shell command",
+    "mcp": "MCP tool",
+    "read_url": "web fetch",
+    "execute_url": "browser action",
+    "read_file": "file outside the project",
+    "write_file": "file outside the project",
 }
 
 # 08 §6 (#975): tools that can hold agy's single result while they run.
@@ -246,6 +290,162 @@ def unsupported_version_message(version: str) -> str:
         f"🛑 Antigravity CLI {version} is older than {minimum}, which this "
         "Untether version needs. Run `agy update` on the host, then retry."
     )
+
+
+# ── permission modes (phase 02, D21; 08 §10) ────────────────────────────────
+
+BYPASS_FLAG = "--dangerously-skip-permissions"
+_GATE_MODES = frozenset({"ask", "plan"})
+_GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
+
+ALWAYS_PROCEED_TEXT = (
+    "agy's own settings turn off its permission checks (toolPermission: "
+    "always-proceed), so Untether won't run Workspace mode — change that "
+    "setting or pick Full access in /config."
+)
+
+_UNKNOWN_MODE_WARNED: set[str] = set()
+_UNATTENDED_DOWNGRADE_WARNED: set[tuple[str, str]] = set()
+_WARNED_MAX = 256
+_FULL_FROM_TOML_WARNED = False
+_BYPASS_UNREPORTED_WARNED = False
+
+
+def _reset_permission_warnings() -> None:
+    """Tests: forget every warn-once marker."""
+    global _FULL_FROM_TOML_WARNED, _BYPASS_UNREPORTED_WARNED
+    _UNKNOWN_MODE_WARNED.clear()
+    _UNATTENDED_DOWNGRADE_WARNED.clear()
+    _FULL_FROM_TOML_WARNED = False
+    _BYPASS_UNREPORTED_WARNED = False
+
+
+def gate_missing_message(mode: str) -> str:
+    name = _GATE_MODE_NAMES.get(mode, mode)
+    return (
+        f"{name} needs Untether's approval gate, which arrives in a later "
+        "0.36.1 release — switch to Workspace or Full access in /config."
+    )
+
+
+def _warn_unknown_mode(value: str) -> None:
+    """Once per distinct value per process: an unknown mode runs as
+    Workspace (fails closed — unlike Codex, which fails open)."""
+    if value in _UNKNOWN_MODE_WARNED:
+        return
+    if len(_UNKNOWN_MODE_WARNED) >= _WARNED_MAX:
+        _UNKNOWN_MODE_WARNED.clear()
+    _UNKNOWN_MODE_WARNED.add(value)
+    logger.warning(
+        "antigravity.permission_mode.unknown",
+        value=value,
+        note="unknown Antigravity permission_mode runs as Workspace; valid: "
+        + ", ".join(sorted(ANTIGRAVITY_PERMISSION_MODES)),
+    )
+
+
+def _warn_full_access_from_toml(config_path: Path) -> None:
+    """REVIEW-2 m6: a host-wide bypass default must show in the journal."""
+    global _FULL_FROM_TOML_WARNED
+    if _FULL_FROM_TOML_WARNED:
+        return
+    _FULL_FROM_TOML_WARNED = True
+    logger.warning(
+        "antigravity.full_access_from_toml",
+        config_path=str(config_path),
+        note=(
+            "[antigravity] permission_mode = 'full' passes "
+            "--dangerously-skip-permissions to every attended agy run that "
+            "has no chat override"
+        ),
+    )
+
+
+def _warn_bypass_unreported() -> None:
+    """D22.7: we passed the bypass flag but agy reported request-review."""
+    global _BYPASS_UNREPORTED_WARNED
+    if _BYPASS_UNREPORTED_WARNED:
+        return
+    _BYPASS_UNREPORTED_WARNED = True
+    logger.warning(
+        "antigravity.permission_mode.bypass_unreported",
+        note="--dangerously-skip-permissions passed but agy reported "
+        "request-review; continuing",
+    )
+
+
+def _mode_label(mode: str) -> str:
+    from ..telegram.commands._antigravity_mode_text import antigravity_mode_label
+
+    return antigravity_mode_label(mode)
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) <= 1:
+        return "".join(labels)
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def denial_paragraph(labels: list[str], *, mode: str, trigger: str | None) -> str:
+    """Why the run stopped and how to allow it — trigger-aware (audit §6)."""
+    what = f"⚠️ Antigravity was blocked from using a {_join_labels(labels)}"
+    rule = "add an allow rule such as `command(git status)` to agy's settings file"
+    if mode == "full":
+        return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
+    head = f"{what} — headless runs can't ask for approval, so it stopped there."
+    if trigger is not None and trigger.startswith("webhook:"):
+        return f"{head} Webhook runs never get Full access; {rule}, or run it from the chat."
+    if trigger is not None:
+        return (
+            f'{head} To allow it, set `permission_mode = "full"` on this cron, '
+            f"or {rule}."
+        )
+    return f"{head} To allow it: /config → Permission mode → Full access, or {rule}."
+
+
+def _paths_text(paths: list[str], limit: int = 5) -> str:
+    shown = ", ".join(paths[:limit])
+    more = len(paths) - limit
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def config_changed_message(paths: list[str]) -> str:
+    return (
+        "agy's workspace config changed since someone last ran Antigravity in "
+        f"this chat's project ({_paths_text(paths)}). Send any message in the "
+        "chat to review it; the schedule runs again after that."
+    )
+
+
+OAUTH_NOTICE_TEXT = (
+    "⚠️ This host signs Antigravity in with a Google account. Google's "
+    "Antigravity terms say third-party tools such as Untether mustn't use "
+    "that sign-in, and Google may suspend the account. A Gemini API key or "
+    "Enterprise sign-in avoids this: "
+    "https://littlebearapps.com/help/untether/switch-engines/ "
+    "(Shown once in this chat.)"
+)
+
+
+@dataclass(slots=True)
+class _RunPrecheck:
+    """What ``run_impl`` learnt before spawn, handed to ``new_state``."""
+
+    cwd: Path | None = None
+    scan: antigravity_scan.ScanResult | None = None
+    first_sight: bool = False  # show the "hooks … Untether doesn't manage" row
+    config: antigravity_quota.AgyConfig | None = None
+    config_key: tuple[str, str] | None = None  # (project root, settings digest)
+    config_rows: list[tuple[str, str]] = field(default_factory=list)
+    label_suffix: str = ""
+    auth_route: str = "oauth"
+
+
+# Set by ``run_impl`` right before it delegates to the base ``run_impl``,
+# consumed (and cleared) by ``new_state`` in the same task.
+_PRECHECK: contextvars.ContextVar[_RunPrecheck | None] = contextvars.ContextVar(
+    "untether_agy_precheck", default=None
+)
 
 
 # ── one-time notices ────────────────────────────────────────────────────────
@@ -367,6 +567,16 @@ class AntigravityStreamState:
     t_init: float | None = None
     resumed: bool = False
     argv: list[str] | None = None
+    # Phase 02: the mode agy actually runs in (``workspace`` / ``full`` in
+    # rc1), its footer label, the unattended trigger (``cron:…`` /
+    # ``webhook:…``) and what run_impl learnt before spawn.
+    effective_mode: str = "workspace"
+    mode_label: str = "workspace"
+    unattended: str | None = None
+    precheck: _RunPrecheck | None = None
+    # D22.7: init reported always-proceed without our bypass flag → the run
+    # was stopped; every later line is ignored.
+    permission_refused: bool = False
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -398,9 +608,18 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     resume_re: re.Pattern[str] = _RESUME_RE
     antigravity_cmd: str = "agy"
     model: str | None = None
+    # ``[antigravity] permission_mode`` (validated in build_runner).
+    default_permission_mode: str | None = None
+    # untether.toml; the small state files live beside chat_prefs.json.
+    config_path: Path | None = None
     session_title: str = "antigravity"
     logger = logger
     _EXPOSE_ENGINE_STATE = True
+    _seen_store: SeenConfigStore | None = field(default=None, init=False, repr=False)
+    _notice_store: NoticeStore | None = field(default=None, init=False, repr=False)
+    _config_rows_shown: set[tuple[str, str]] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
@@ -427,10 +646,20 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if refusal is not None:
             yield refusal
             return
+        gate_block = self._gate_missing_refusal(resume)
+        if gate_block is not None:
+            yield gate_block
+            return
         version_block = await self._unsupported_version_event(resume)
         if version_block is not None:
             yield version_block
             return
+        precheck_block, precheck = await self._precheck(resume)
+        if precheck_block is not None:
+            yield precheck_block
+            return
+        # Consumed by ``new_state`` inside the base run_impl (same task).
+        _PRECHECK.set(precheck)
         _log_tos_notice_once()
         # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True).
         async with contextlib.aclosing(
@@ -464,6 +693,203 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             resume=resume,
             usage={PRESPAWN_BLOCKED_KEY: NO_PROJECT_BLOCK},
         )
+
+    # -- permission modes ---------------------------------------------------
+
+    def _effective_mode(self) -> str:
+        """The mode agy runs in: ``workspace`` / ``ask`` / ``plan`` / ``full``.
+
+        Chat/topic override (or a cron's own mode) → ``[antigravity]
+        permission_mode`` → Workspace. Unknown values fail **closed** to
+        Workspace (warned once per value). 08 §10: an unattended run whose
+        Full access isn't the trigger's own setting runs as Workspace.
+        """
+        options = get_run_options()
+        raw = options.permission_mode if options is not None else None
+        origin = "chat"
+        if raw is None:
+            raw, origin = self.default_permission_mode, "toml"
+        if raw is None:
+            mode = "workspace"
+        elif raw in ANTIGRAVITY_PERMISSION_MODES:
+            mode = raw
+        else:
+            _warn_unknown_mode(raw)
+            mode = "workspace"
+        trigger = options.unattended_trigger if options is not None else None
+        if (
+            trigger is not None
+            and mode == "full"
+            and (options is None or options.trigger_permission_mode != "full")
+        ):
+            key = (trigger, origin)
+            if key not in _UNATTENDED_DOWNGRADE_WARNED:
+                if len(_UNATTENDED_DOWNGRADE_WARNED) >= _WARNED_MAX:
+                    _UNATTENDED_DOWNGRADE_WARNED.clear()
+                _UNATTENDED_DOWNGRADE_WARNED.add(key)
+                logger.warning(
+                    "antigravity.unattended_full_downgraded",
+                    trigger=trigger,
+                    origin=origin,
+                    note="unattended runs get Full access only from the "
+                    "trigger's own permission_mode",
+                )
+            mode = "workspace"
+        return mode
+
+    def _gate_missing_refusal(self, resume: ResumeToken | None) -> UntetherEvent | None:
+        """rc1: Ask me / Plan first need the approval gate (rc3) — refuse
+        before spawn rather than run them as something else."""
+        mode = self._effective_mode()
+        if mode not in _GATE_MODES:
+            return None
+        logger.warning("antigravity.permission_mode.gate_missing", mode=mode)
+        return EventFactory(ENGINE).completed_error(
+            error=gate_missing_message(mode),
+            resume=resume,
+            usage={PRESPAWN_BLOCKED_KEY: GATE_MISSING_BLOCK},
+        )
+
+    def _seen(self) -> SeenConfigStore:
+        if self._seen_store is None:
+            path = (
+                self.config_path.with_name(SEEN_CONFIG_FILENAME)
+                if self.config_path is not None
+                else None
+            )
+            self._seen_store = SeenConfigStore(path)
+        return self._seen_store
+
+    def _notices(self) -> NoticeStore:
+        if self._notice_store is None:
+            path = (
+                self.config_path.with_name(NOTICES_FILENAME)
+                if self.config_path is not None
+                else None
+            )
+            self._notice_store = NoticeStore(path)
+        return self._notice_store
+
+    async def _precheck(
+        self, resume: ResumeToken | None
+    ) -> tuple[UntetherEvent | None, _RunPrecheck | None]:
+        """Before spawn (08 §9 order): the planted-config scan and its
+        unattended refusal (REVIEW-2 B2), then agy's own settings via the
+        cached ``-p /config`` check (REVIEW-2 M5)."""
+        mode = self._effective_mode()
+        options = get_run_options()
+        trigger = options.unattended_trigger if options is not None else None
+        pre = _RunPrecheck()
+        cwd = get_run_base_dir()
+        if cwd is not None:
+            pre.cwd = cwd
+            try:
+                pre.scan = await anyio.to_thread.run_sync(
+                    antigravity_scan.scan_workspace_config, cwd
+                )
+            except Exception as exc:  # noqa: BLE001 — never block a run on it
+                logger.warning(
+                    "antigravity.workspace_config.scan_failed",
+                    error_type=exc.__class__.__name__,
+                )
+        scan = pre.scan
+        if (
+            scan is not None
+            and scan.agy
+            and self._seen().get(scan.root) != scan.agy_digest
+        ):
+            if trigger is not None:
+                paths = sorted(scan.agy)
+                logger.warning(
+                    "antigravity.workspace_config.unattended_refused",
+                    trigger=trigger,
+                    paths=paths[:20],
+                    digest=scan.agy_digest[:12],
+                )
+                return (
+                    EventFactory(ENGINE).completed_error(
+                        error=config_changed_message(paths),
+                        resume=resume,
+                        usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
+                    ),
+                    None,
+                )
+            pre.first_sight = True
+        config = await antigravity_quota.agy_config(self)
+        pre.config = config
+        pre.auth_route = antigravity_quota.auth_route(config)
+        if config is None:
+            return None, pre
+        if mode == "workspace" and config.tool_permission == "always-proceed":
+            logger.error(
+                "antigravity.permission_mode.mismatch",
+                source="config",
+                requested=mode,
+                reported=config.tool_permission,
+            )
+            return (
+                EventFactory(ENGINE).completed_error(
+                    error=ALWAYS_PROCEED_TEXT,
+                    resume=resume,
+                    usage={PRESPAWN_BLOCKED_KEY: ALWAYS_PROCEED_BLOCK},
+                ),
+                None,
+            )
+        self._note_config_widening(pre, mode)
+        return None, pre
+
+    def _note_config_widening(self, pre: _RunPrecheck, mode: str) -> None:
+        config = pre.config
+        if config is None:
+            return
+        widened = config.allow_non_workspace_access or config.allow_rules_count > 0
+        if not widened:
+            return
+        if mode == "full":
+            # Full access already allows everything: log only.
+            logger.info(
+                "antigravity.config.widened",
+                key="full_access",
+                allow_non_workspace_access=config.allow_non_workspace_access,
+                count=config.allow_rules_count,
+                permission_mode=mode,
+            )
+            return
+        if config.allow_non_workspace_access:
+            pre.label_suffix = " (agy allows files outside the project)"
+        root = pre.scan.root if pre.scan is not None else pre.cwd
+        pre.config_key = (str(root), config.digest)
+        if pre.config_key in self._config_rows_shown:
+            return
+        if config.allow_non_workspace_access:
+            logger.warning(
+                "antigravity.config.widened",
+                key="allowNonWorkspaceAccess",
+                permission_mode=mode,
+            )
+            pre.config_rows.append(
+                (
+                    "antigravity.config.non_workspace",
+                    "⚠️ agy's own settings let it read and write files outside "
+                    "the project (allowNonWorkspaceAccess), so Workspace isn't "
+                    "limited to this project.",
+                )
+            )
+        if config.allow_rules_count:
+            logger.info(
+                "antigravity.config.widened",
+                key="permissions.allow",
+                count=config.allow_rules_count,
+                permission_mode=mode,
+            )
+            pre.config_rows.append(
+                (
+                    "antigravity.config.allow_rules",
+                    "⚠️ agy's own allow rules let it run "
+                    f"{config.allow_rules_count} command pattern(s) without "
+                    "asking (see agy's settings).",
+                )
+            )
 
     async def _unsupported_version_event(
         self, resume: ResumeToken | None
@@ -509,7 +935,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # is agy's default (unlimited) made explicit — on expiry agy reports
         # SUCCESS with a partial answer, so never rely on it (REVIEW m2).
         # `--disable-slash-commands` makes a `/`-leading prompt a normal turn
-        # instead of an rc 2 exit (P22, D30). Never bypass permissions here.
+        # instead of an rc 2 exit (P22, D30).
         args = [
             "--input-format",
             "stream-json",
@@ -528,7 +954,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         model = self._model()
         if model:
             args.extend(["--model", model])
+        # Phase 02 (D21): the bypass flag only for an explicit Full access.
+        # Ask me / Plan first never get here in rc1 (refused before spawn);
+        # anything else fails closed to Workspace (no flag).
+        mode = self._effective_mode()
+        if mode == "full":
+            args.append(BYPASS_FLAG)
         if isinstance(state, AntigravityStreamState):
+            state.effective_mode = mode
             state.argv = list(args)
         return args
 
@@ -563,10 +996,21 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         expected = (
             resume.value if resume is not None and not resume.is_continue else None
         )
+        precheck = _PRECHECK.get()
+        _PRECHECK.set(None)
+        options = get_run_options()
+        mode = self._effective_mode()
+        label = _mode_label(mode)
+        if precheck is not None:
+            label += precheck.label_suffix
         return AntigravityStreamState(
             factory=EventFactory(ENGINE),
             expected_resume=expected or None,
             resumed=resume is not None,
+            effective_mode=mode,
+            mode_label=label,
+            unattended=options.unattended_trigger if options is not None else None,
+            precheck=precheck,
         )
 
     def start_run(
@@ -635,9 +1079,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return str(run_options.model)
         return self.model
 
-    def _meta(self, state: AntigravityStreamState) -> dict[str, Any] | None:
+    def _meta(self, state: AntigravityStreamState) -> dict[str, Any]:
+        meta: dict[str, Any] = {}
         model = self._model() or state.init_model
-        return {"model": model} if model else None
+        if model:
+            meta["model"] = model
+        # Phase 05 adds "effort" here (between model and mode in the footer).
+        meta["permissionMode"] = state.mode_label
+        return meta
 
     def translate(
         self,
@@ -647,12 +1096,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
-        if state.conversation_missing:
+        if state.conversation_missing or state.permission_refused:
             return []
         match data:
             case agy_schema.Init(conversation_id=cid, init=payload):
                 if payload is not None and payload.model:
                     state.init_model = payload.model
+                refused = self._check_reported_mode(
+                    state, payload.permission_mode if payload else None, resume
+                )
+                if refused is not None:
+                    return refused
                 if not cid:
                     logger.warning("antigravity.init.no_conversation_id")
                     return []
@@ -698,8 +1152,96 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return [
             state.factory.started(
                 token, title=self.session_title, meta=self._meta(state)
-            )
+            ),
+            *self._startup_rows(state),
         ]
+
+    def _check_reported_mode(
+        self,
+        state: AntigravityStreamState,
+        reported: str | None,
+        resume: ResumeToken | None,
+    ) -> list[UntetherEvent] | None:
+        """D22.7: agy's ``toolPermission: always-proceed`` setting stands in
+        for the bypass flag. Reported without our flag → stop the run before
+        any tool (``init`` comes ≈ 2.7 s before the first model output)."""
+        bypass = state.effective_mode == "full"
+        if reported == "always-proceed" and not bypass:
+            state.permission_refused = True
+            logger.error(
+                "antigravity.permission_mode.mismatch",
+                source="init",
+                requested=state.effective_mode,
+                reported=reported,
+            )
+            if state.agy_pid is not None:
+                with contextlib.suppress(OSError):
+                    os.kill(state.agy_pid, signal.SIGTERM)
+            keep = resume if resume is not None and not resume.is_continue else None
+            return [
+                state.factory.completed_error(error=ALWAYS_PROCEED_TEXT, resume=keep)
+            ]
+        if bypass and reported == "request-review":
+            _warn_bypass_unreported()
+        return None
+
+    def _warning_row(
+        self,
+        state: AntigravityStreamState,
+        action_id: str,
+        title: str,
+        detail: dict[str, Any] | None = None,
+    ) -> UntetherEvent:
+        # #868/#987: an ok=True warning that leads with ⚠️ renders the ⚠️ as
+        # its status (never ✓ / ✗).
+        return state.factory.action_completed(
+            action_id=action_id,
+            kind="warning",
+            title=title,
+            ok=True,
+            detail=detail or {},
+            level="warning",
+        )
+
+    def _startup_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
+        """⚠️ rows learnt before spawn, shown right after Started."""
+        pre = state.precheck
+        if pre is None:
+            return []
+        out: list[UntetherEvent] = []
+        scan = pre.scan
+        if pre.first_sight and scan is not None:
+            pre.first_sight = False
+            paths = sorted(scan.agy)
+            logger.warning(
+                "antigravity.workspace_config_present",
+                paths=paths[:20],
+                digest=scan.agy_digest[:12],
+                permission_mode=state.effective_mode,
+            )
+            self._seen().set(scan.root, scan.agy_digest)
+            out.append(
+                self._warning_row(
+                    state,
+                    "antigravity.config.present",
+                    "⚠️ This project has agy hooks, plugins or MCP servers that "
+                    f"Untether doesn't manage ({_paths_text(paths)}). They run "
+                    "their own commands in every mode, including Workspace. "
+                    "Review them if you didn't add them.",
+                    {"paths": paths},
+                )
+            )
+        if pre.config_rows:
+            out.extend(
+                self._warning_row(state, action_id, title)
+                for action_id, title in pre.config_rows
+            )
+            if pre.config_key is not None:
+                if len(self._config_rows_shown) >= _WARNED_MAX:
+                    self._config_rows_shown.clear()
+                self._config_rows_shown.add(pre.config_key)
+            pre.config_rows = []
+        return out
 
     def _conversation_gone(
         self, state: AntigravityStreamState, cid: str
@@ -842,7 +1384,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             return [self._complete(action, state, ok=False, message=message)]
         output = info.output if info is not None else None
-        if (output is None or output == "") and tool_name in _DENIABLE_TOOLS:
+        if (output is None or output == "") and (
+            tool_name in _DENIABLE_TOOLS or tool_name.startswith("browser_")
+        ):
             state.verdict_pending[action_id] = action
             return []
         detail = dict(action.detail)
@@ -881,26 +1425,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         ok: bool,
         message: str | None,
-        denied: list[agy_schema.DeniedAction] | None = None,
     ) -> list[UntetherEvent]:
-        """Close every row still open so none is left "running" at the end."""
-        out: list[UntetherEvent] = []
-        if state.verdict_pending:
-            denied_ids = _denied_action_ids(state.verdict_pending, denied or [])
-            for action_id, action in list(state.verdict_pending.items()):
-                if action_id in denied_ids:
-                    out.append(
-                        self._complete(
-                            action,
-                            state,
-                            ok=False,
-                            message=_DENIED_TEXT,
-                            extra={"denied": True},
-                        )
-                    )
-                else:
-                    out.append(self._complete(action, state, ok=True))
-            state.verdict_pending.clear()
+        """Close every row still open so none is left "running" at the end.
+        Parked rows ``denied_actions`` didn't claim weren't denied → ok."""
+        out: list[UntetherEvent] = [
+            self._complete(action, state, ok=True)
+            for action in state.verdict_pending.values()
+        ]
+        state.verdict_pending.clear()
         out.extend(
             self._complete(action, state, ok=ok, message=message)
             for action in state.pending_actions.values()
@@ -939,15 +1471,30 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         status = res.status or ""
         error = _error_text(res.error)
         interrupted = status == "ERROR" and error == "interrupted"
+        denial_rows, denied_labels = self._resolve_denials(
+            state, res.denied_actions or []
+        )
+        out.extend(denial_rows)
         out.extend(
             self._settle_open_actions(
                 state,
                 ok=status == "SUCCESS",
                 message="interrupted" if interrupted else error,
-                denied=res.denied_actions,
             )
         )
+        out.extend(self._config_change_rows(state))
         answer = self._answer(state, res.response)
+        if denied_labels:
+            answer = _append_paragraph(
+                answer,
+                denial_paragraph(
+                    denied_labels, mode=state.effective_mode, trigger=state.unattended
+                ),
+            )
+        if status == "SUCCESS":
+            notice = self._oauth_notice(state)
+            if notice is not None:
+                answer = _append_paragraph(answer, notice)
         usage = self._usage(res, state)
         self._log_timing(res, state)
         resume_token = self._resume_for_completed(state, resume)
@@ -976,6 +1523,124 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             )
         return out
+
+    def _resolve_denials(
+        self,
+        state: AntigravityStreamState,
+        denied: list[agy_schema.DeniedAction],
+    ) -> tuple[list[UntetherEvent], list[str]]:
+        """``result.denied_actions`` → ⚠️ rows (the parked step of that tool
+        family, else a standalone row) and the labels for the final text.
+
+        Matching is by tool family (agy gives no step id); with 1.3.1's
+        stop-at-first-denial that is exact (02 risks)."""
+        if not denied:
+            return [], []
+        out: list[UntetherEvent] = []
+        labels: list[str] = []
+        actions: list[str] = []
+        names: list[str] = []
+        for item in denied:
+            action = item.action or "unknown"
+            display = item.display_name or action
+            label = _DENIED_LABEL.get(action, "tool")
+            family = _DENIED_FAMILY.get(action, frozenset())
+            hits = [
+                action_id
+                for action_id, parked in state.verdict_pending.items()
+                if _in_family(parked.detail.get("tool_name"), family)
+            ]
+            detail = {"denied": True, "denied_action": action}
+            for action_id in hits:
+                parked = state.verdict_pending.pop(action_id)
+                out.append(
+                    self._warning_row(
+                        state,
+                        action_id,
+                        f"⚠️ Blocked: {label} ({display}) — {parked.title}",
+                        {**parked.detail, **detail},
+                    )
+                )
+            if not hits:
+                out.append(
+                    self._warning_row(
+                        state,
+                        f"antigravity.denied.{action}",
+                        f"⚠️ Blocked: {label} ({display})",
+                        detail,
+                    )
+                )
+            if label not in labels:
+                labels.append(label)
+            actions.append(action)
+            names.append(display)
+        logger.info(
+            "antigravity.denied_actions",
+            actions=actions,
+            display_names=names,
+            permission_mode=state.effective_mode,
+            trigger=state.unattended,
+            session_id=state.session_id,
+        )
+        return out, labels
+
+    def _config_change_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
+        """Planted config changed during the run (either set) → one ⚠️ row
+        per set (REVIEW B2, REVIEW-2 M4). Never refuses anything here."""
+        pre = state.precheck
+        if pre is None or pre.scan is None or pre.cwd is None:
+            return []
+        try:
+            after = antigravity_scan.scan_workspace_config(pre.cwd)
+        except Exception as exc:  # noqa: BLE001 — a warning must never break a run
+            logger.warning(
+                "antigravity.workspace_config.scan_failed",
+                error_type=exc.__class__.__name__,
+            )
+            return []
+        out: list[UntetherEvent] = []
+        for set_name, before_set, after_set in (
+            ("agy", pre.scan.agy, after.agy),
+            ("cross_engine", pre.scan.cross, after.cross),
+        ):
+            paths = antigravity_scan.changed_paths(before_set, after_set)
+            if not paths:
+                continue
+            logger.warning(
+                "antigravity.workspace_config_changed",
+                paths=paths[:20],
+                set=set_name,
+                permission_mode=state.effective_mode,
+            )
+            out.append(
+                self._warning_row(
+                    state,
+                    f"antigravity.config.changed.{set_name}",
+                    f"⚠️ Antigravity changed {_paths_text(paths)} — agy (or "
+                    "another engine) will load it on the next run. Review it "
+                    "before sending another message.",
+                    {"paths": paths, "set": set_name},
+                )
+            )
+        return out
+
+    def _oauth_notice(self, state: AntigravityStreamState) -> str | None:
+        """REVIEW-2 M14: once per chat, only on a Google sign-in host (a
+        failed ``-p /config`` check counts as one)."""
+        pre = state.precheck
+        if pre is None or pre.auth_route != "oauth":
+            return None
+        chat_id = get_run_channel_id()
+        if chat_id is None:
+            return None
+        store = self._notices()
+        if store.seen(chat_id):
+            return None
+        store.mark(chat_id)
+        logger.info(
+            "antigravity.tos_notice.shown", chat_id=chat_id, auth_route=pre.auth_route
+        )
+        return OAUTH_NOTICE_TEXT
 
     @staticmethod
     def _usage(
@@ -1097,38 +1762,28 @@ def _step_of(action_id: str) -> int:
         return -1
 
 
-def _denied_action_ids(
-    parked: dict[str, Action], denied: list[agy_schema.DeniedAction]
-) -> set[str]:
-    """Which parked rows ``result.denied_actions`` covers. Known actions match
-    their tool family; an unknown one falls back to the last parked row (agy
-    1.3.1 ends the turn at the first denial)."""
-    if not denied or not parked:
-        return set()
-    ids: set[str] = set()
-    unmatched = False
-    for item in denied:
-        tools = _DENIED_ACTION_TOOLS.get(item.action or "")
-        hits = (
-            [a for a, act in parked.items() if act.detail.get("tool_name") in tools]
-            if tools
-            else []
-        )
-        if hits:
-            ids.update(hits)
-        else:
-            unmatched = True
-    if unmatched:
-        ids.add(max(parked, key=_step_of))
-    return ids
+def _in_family(tool_name: Any, family: frozenset[str]) -> bool:
+    if not isinstance(tool_name, str):
+        return False
+    return any(
+        tool_name.startswith(entry[:-1]) if entry.endswith("*") else tool_name == entry
+        for entry in family
+    )
+
+
+def _append_paragraph(answer: str, paragraph: str) -> str:
+    if not answer.strip():
+        return paragraph
+    return f"{answer.rstrip()}\n\n{paragraph}"
 
 
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     """Build an ``AntigravityRunner`` from ``[antigravity]`` config.
 
-    rc1 keys: ``model`` (str), ``cmd`` (str, ``~`` expanded). Unknown keys —
-    including PR #766's ``dangerously_skip_permissions`` / ``antigravity_cmd``
-    — are ignored; permissions come from phase 02's explicit modes.
+    rc1 keys: ``model`` (str), ``cmd`` (str, ``~`` expanded) and
+    ``permission_mode`` (``workspace`` / ``ask`` / ``plan`` / ``full``,
+    validated here; ``full`` warns once). Unknown keys — including PR #766's
+    ``dangerously_skip_permissions`` / ``antigravity_cmd`` — are ignored.
     """
     model = config.get("model")
     if model is not None and not isinstance(model, str):
@@ -1150,8 +1805,29 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         raise ConfigError(
             f"Invalid `antigravity.cmd` in {config_path}; expected a string."
         )
+    mode = config.get("permission_mode")
+    if mode is not None and (
+        not isinstance(mode, str) or mode not in ANTIGRAVITY_PERMISSION_MODES
+    ):
+        allowed = ", ".join(sorted(ANTIGRAVITY_PERMISSION_MODES))
+        logger.warning(
+            "antigravity.config.invalid",
+            error="unknown permission_mode",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `antigravity.permission_mode` {mode!r} in {config_path}; "
+            f"expected one of: {allowed}."
+        )
+    if mode == "full":
+        _warn_full_access_from_toml(config_path)
     cmd = os.path.expanduser(raw_cmd) if raw_cmd else default_antigravity_cmd()
-    return AntigravityRunner(antigravity_cmd=cmd, model=model or None)
+    return AntigravityRunner(
+        antigravity_cmd=cmd,
+        model=model or None,
+        default_permission_mode=mode,
+        config_path=config_path,
+    )
 
 
 BACKEND = EngineBackend(

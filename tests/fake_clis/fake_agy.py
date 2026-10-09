@@ -13,14 +13,22 @@ replayed faithfully::
     out:<json line>      write to stdout (flushed)
     err:<text>           write to stderr (flushed)
     sleep:<seconds>      wait (scaled by UNTETHER_FAKE_AGY_TIME_SCALE)
+    write:<relpath>      create/overwrite a file under the cwd (planted
+                         config tests, phase 02)
     rc:<int>             exit code (last line)
+
+``agy -p /<command> …`` (zero-token slash probes, ``run_agy_slash``) prints
+a ``command_result`` + ``result`` pair instead of replaying a script: the
+data comes from ``UNTETHER_FAKE_AGY_SLASH_DATA`` (JSON) or, for ``/config``,
+agy 1.3.1's defaults. ``UNTETHER_FAKE_AGY_SLASH_UNAUTH=1`` answers like a
+signed-out agy (stderr ``authentication required``, rc 1).
 
 Environment (the ``UNTETHER_`` prefix survives the runner's env filter):
 
 - ``UNTETHER_FAKE_AGY_SCENARIO``   fixture name (default ``ok``)
 - ``UNTETHER_FAKE_AGY_SCRIPT``     absolute script path (wins over the name)
 - ``UNTETHER_FAKE_AGY_VERSION``    what ``--version`` prints (default 1.3.1)
-- ``UNTETHER_FAKE_AGY_RECORD``     write ``{"argv","stdin","env_keys"}`` here
+- ``UNTETHER_FAKE_AGY_RECORD``     write ``{"argv","stdin","env_keys","cwd"}`` here
 - ``UNTETHER_FAKE_AGY_TIME_SCALE`` multiply ``sleep:`` lines (default 0)
 - ``UNTETHER_FAKE_AGY_HOLD_S``     sleep after the last line before exiting
 
@@ -82,18 +90,57 @@ def _interrupted(signum: int, _frame: object) -> None:
     os._exit(1)
 
 
+_DEFAULT_CONFIG = {
+    "agentMode": "",
+    "allowNonWorkspaceAccess": False,
+    "artifactReviewPolicy": "asks-for-review",
+    "model": "",
+    "modelProvider": "",
+    "permissions": None,
+    "toolPermission": "request-review",
+}
+
+
+def _record(argv: list[str], stdin: str) -> None:
+    record = os.environ.get("UNTETHER_FAKE_AGY_RECORD")
+    if record:
+        Path(record).write_text(
+            json.dumps(
+                {
+                    "argv": argv,
+                    "stdin": stdin,
+                    "env_keys": sorted(os.environ),
+                    "cwd": os.getcwd(),
+                }
+            )
+        )
+
+
+def _slash(argv: list[str]) -> int:
+    command = argv[argv.index("-p") + 1].lstrip("/")
+    _record(argv, sys.stdin.read() if not sys.stdin.isatty() else "")
+    if os.environ.get("UNTETHER_FAKE_AGY_SLASH_UNAUTH"):
+        _err("Error: authentication required. Run 'agy' to log in, then retry.")
+        return 1
+    raw = os.environ.get("UNTETHER_FAKE_AGY_SLASH_DATA")
+    data = json.loads(raw) if raw else {"config": _DEFAULT_CONFIG}
+    payload = {"name": command, "data": data}
+    _out(json.dumps({"event": "command_result", "command": payload}))
+    result = {"conversation_id": "", "status": "SUCCESS", "response": ""}
+    _out(json.dumps({"event": "result", "result": {**result, "command": payload}}))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if "--version" in argv:
         print(os.environ.get("UNTETHER_FAKE_AGY_VERSION", "1.3.1"), flush=True)
         return 0
+    if "-p" in argv:
+        return _slash(argv)
     signal.signal(signal.SIGTERM, _interrupted)
     signal.signal(signal.SIGINT, _interrupted)
     stdin = sys.stdin.read()
-    record = os.environ.get("UNTETHER_FAKE_AGY_RECORD")
-    if record:
-        Path(record).write_text(
-            json.dumps({"argv": argv, "stdin": stdin, "env_keys": sorted(os.environ)})
-        )
+    _record(argv, stdin)
     script_path = os.environ.get("UNTETHER_FAKE_AGY_SCRIPT")
     if not script_path:
         name = os.environ.get("UNTETHER_FAKE_AGY_SCENARIO", "ok")
@@ -110,6 +157,10 @@ def main(argv: list[str]) -> int:
             delay = float(payload) * scale
             if delay > 0:
                 time.sleep(delay)
+        elif kind == "write":
+            target = Path.cwd() / payload
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"written": time.time_ns()}))
         elif kind == "rc":
             rc = int(payload)
     hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)

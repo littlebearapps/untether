@@ -9,6 +9,7 @@ from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ...transport import RenderedMessage
+from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
     BUTTON_MODES,
@@ -159,6 +160,12 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "full auto": "Codex's own sandbox",
         "safe": "read-only sandbox",
         "full access": "all tools approved",
+        # #558 D21: Antigravity (shares "full access" above).
+        **{
+            text.label: text.hint
+            for text in agy_mode.ANTIGRAVITY_MODE_TEXT.values()
+            if text.label != "full access"
+        },
         "edit files": "files ok, no shell",
         "read-only": "write tools blocked",
     },
@@ -257,6 +264,7 @@ async def _page_home(ctx: CommandContext) -> None:
     _cu_ac: bool | None = None
     _cu_su: bool | None = None
     engine_override = None
+    pm_source = ""
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -267,6 +275,14 @@ async def _page_home(ctx: CommandContext) -> None:
             pm_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
         elif current_engine == "codex":
             pm_label = "safe" if pm == "safe" else "full auto"
+        elif current_engine == "antigravity":
+            # #558 REVIEW M4: same resolver as the permission page, so a TOML
+            # Full access shows on both.
+            agy_value, agy_source = await agy_mode.antigravity_effective_mode(
+                prefs, chat_id, ctx.runtime
+            )
+            pm_label = agy_mode.antigravity_mode_label(agy_value)
+            pm_source = agy_mode.source_suffix(agy_source)
         elif current_engine == "gemini":
             if pm == "yolo":
                 pm_label = "full access"
@@ -377,6 +393,12 @@ async def _page_home(ctx: CommandContext) -> None:
             lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
             lines.append(
                 f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
+            )
+        elif current_engine == "antigravity":
+            lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
+            lines.append(
+                f"Permission mode: <b>{pm_label}</b>{pm_source}"
+                f"{_home_hint('pm', pm_label)}"
             )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
@@ -546,6 +568,10 @@ async def _page_home(ctx: CommandContext) -> None:
     else:
         # Other engines
         row1 = []
+        if show_plan_mode:
+            # Antigravity (#558): the only non-Claude/Codex/Gemini engine
+            # with a permission mode.
+            row1.append({"text": "📋 Permission mode", "callback_data": "config:pm"})
         if show_cost_usage:
             row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
         row1.append({"text": "↩️ Resume line", "callback_data": "config:rl"})
@@ -625,7 +651,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ctx,
             (
                 "<b>📋 Permission mode</b>\n\n"
-                "Only available for Claude Code, Codex, and Gemini CLI."
+                "Only available for Claude Code, Codex, Antigravity CLI and"
+                " Gemini CLI."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
@@ -642,6 +669,26 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
+        await _page_home(ctx)
+        return
+
+    # --- Antigravity permission mode actions (#558, D21) ---
+    if engine == "antigravity" and action in agy_mode.ANTIGRAVITY_PM_ACTIONS:
+        mode_value = agy_mode.ANTIGRAVITY_PM_ACTIONS[action]
+        if not agy_mode.ANTIGRAVITY_MODE_TEXT[mode_value].available:
+            # "· soon" button: the early-answer toast explains; store nothing.
+            logger.info(
+                "config.antigravity_permission_mode.unavailable",
+                chat_id=chat_id,
+                mode=action,
+            )
+            return
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = with_override(current, permission_mode=mode_value)
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info(
+            "config.antigravity_permission_mode.set", chat_id=chat_id, mode=action
+        )
         await _page_home(ctx)
         return
 
@@ -771,6 +818,62 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                 {"text": "← Back", "callback_data": "config:home"},
             ],
         ]
+
+    elif engine == "antigravity":
+        agy_value, agy_source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        current_label = agy_mode.antigravity_mode_label(agy_value)
+        active_mode = agy_mode.canonical_mode(agy_value)
+        lines = [
+            "<b>📋 Permission mode</b>",
+            "",
+            "Antigravity runs headless, so today it can't stop to ask you."
+            " This picks what it may do on its own.",
+            "",
+            "• <b>Workspace</b> — edits files in this project (and temp"
+            " folders); agy blocks its own shell, web and MCP calls. Not a"
+            " sandbox: a run can still write files that later runs or tools"
+            " execute (default)",
+            "• <b>Ask me</b> — asks you in Telegram before shell, web and MCP"
+            " calls (coming soon: needs Untether's approval gate)",
+            "• <b>Plan first</b> — writes a plan and waits for your approval"
+            " before changing anything (coming soon: needs the gate)",
+            "• <b>Full access</b> — every tool is approved, including shell,"
+            " network and files outside the project (agy's"
+            " --dangerously-skip-permissions). Cron and webhook runs only get"
+            " this when the cron itself sets it",
+            "",
+            "ℹ️ To allow specific commands without Full access, add rules such"
+            " as <code>command(git status)</code> to"
+            " <code>permissions.allow</code> in agy's settings file (exact"
+            " commands are the reliable form).",
+            "ℹ️ Changes apply from your next message.",
+            "",
+            f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
+            "",
+            _learn_more("interactive-approval", "antigravity-cli--permission-mode"),
+        ]
+        buttons = [
+            [
+                {
+                    "text": _check(
+                        agy_mode.button_text(action_id),
+                        active=active_mode
+                        == agy_mode.ANTIGRAVITY_PM_ACTIONS[action_id],
+                    ),
+                    "callback_data": f"config:pm:{action_id}",
+                }
+                for action_id in row
+            ]
+            for row in agy_mode.BUTTON_ROWS
+        ]
+        buttons.append(
+            [
+                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                {"text": "← Back", "callback_data": "config:home"},
+            ]
+        )
 
     elif engine == "gemini":
         if pm == "yolo":
@@ -2245,6 +2348,11 @@ class ConfigCommand:
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
+                # #558: Antigravity (the "· soon" modes store nothing).
+                "agw": "Permission mode: workspace",
+                "agf": "Permission mode: full access",
+                "aga": agy_mode.GATE_SOON_TOAST,
+                "agp": agy_mode.GATE_SOON_TOAST,
             },
             "vb": {
                 "on": "Verbose: on",

@@ -221,6 +221,28 @@ class TestCronConfig:
                 permission_mode="yoloMode",
             )
 
+    @pytest.mark.parametrize("mode", ["workspace", "ask", "plan", "full"])
+    def test_cron_antigravity_permission_mode_validated(self, mode):
+        c = CronConfig(
+            id="cr",
+            schedule="* * * * *",
+            engine="antigravity",
+            prompt="Hi",
+            permission_mode=mode,
+        )
+        assert c.permission_mode == mode
+
+    @pytest.mark.parametrize("mode", ["yolo", "accept-edits", "bypassPermissions"])
+    def test_cron_antigravity_permission_mode_rejects_unknown(self, mode):
+        with pytest.raises(ValidationError, match="unknown permission_mode"):
+            CronConfig(
+                id="cr",
+                schedule="* * * * *",
+                engine="antigravity",
+                prompt="Hi",
+                permission_mode=mode,
+            )
+
     def test_permission_mode_accepts_anything_for_unknown_engine(self):
         # Forward-compatible behaviour: engines not in
         # VALID_PERMISSION_MODES_BY_ENGINE accept any non-empty string; the

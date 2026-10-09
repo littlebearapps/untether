@@ -218,6 +218,11 @@ def _apply_trigger_overrides(
     derived: dict[str, object] = {}
     if (source := unattended_trigger(context)) is not None:
         derived["unattended_trigger"] = source
+    if "permission_mode" in fields:
+        # #558 (08 §10, REVIEW M3): keep the trigger's own mode apart from
+        # an inherited one, so the agy runner can refuse to inherit Full
+        # access. Every other runner ignores the field.
+        derived["trigger_permission_mode"] = fields["permission_mode"]
     if not fields and not derived:
         return run_options
     from dataclasses import replace

@@ -24,7 +24,11 @@ from untether.runners.antigravity import (
     AntigravityRunner,
     AntigravityStreamState,
 )
-from untether.runners.run_options import EngineRunOptions, apply_run_options
+from untether.runners.run_options import (
+    EngineRunOptions,
+    apply_run_options,
+    get_run_options,
+)
 from untether.schemas import antigravity as schema
 
 FIXTURES = Path(__file__).parent / "fixtures" / "antigravity"
@@ -36,6 +40,13 @@ def _runner(**kwargs: Any) -> AntigravityRunner:
     return AntigravityRunner(**kwargs)
 
 
+def _captured_under_bypass(lines: list[str]) -> bool:
+    """The capture ran with --dangerously-skip-permissions (agy reports
+    ``always-proceed``); replaying it in Workspace would trip phase 02's
+    D22.7 cross-check, so replay it in Full access, as captured."""
+    return any('"permission_mode":"always-proceed"' in line for line in lines)
+
+
 def _replay(
     name: str,
     *,
@@ -44,26 +55,30 @@ def _replay(
     lines: list[str] | None = None,
 ) -> tuple[list[Any], AntigravityStreamState]:
     runner = runner or _runner()
-    state = runner.new_state("prompt", resume)
-    runner.start_run("prompt", resume, state=state)
     if lines is None:
         lines = [
             line
             for line in (FIXTURES / f"{name}.jsonl").read_text().splitlines()
             if line.strip()
         ]
+    options = get_run_options()
+    if options is None and _captured_under_bypass(lines):
+        options = EngineRunOptions(permission_mode="full")
     events: list[Any] = []
-    for line in lines:
-        events.extend(
-            runner.translate(
-                schema.decode_event(line),
-                state=state,
-                resume=resume,
-                found_session=None,
+    with apply_run_options(options):
+        state = runner.new_state("prompt", resume)
+        runner.start_run("prompt", resume, state=state)
+        for line in lines:
+            events.extend(
+                runner.translate(
+                    schema.decode_event(line),
+                    state=state,
+                    resume=resume,
+                    found_session=None,
+                )
             )
-        )
-        if events and isinstance(events[-1], CompletedEvent):
-            break
+            if events and isinstance(events[-1], CompletedEvent):
+                break
     return events, state
 
 
@@ -144,10 +159,14 @@ def test_build_args_always_disables_slash_commands_and_print_timeout_zero() -> N
     assert args[idx + 1] == "0"
 
 
-def test_build_args_default_never_bypasses_for_any_mode() -> None:
-    for mode in (None, "full", "auto", "bypassPermissions", "plan", "default"):
+def test_build_args_bypasses_only_for_full() -> None:
+    # Phase 02: only an explicit Full access gets the flag (full matrix in
+    # test_antigravity_permissions.py).
+    for mode in (None, "auto", "bypassPermissions", "plan", "default"):
         args = _args(options=EngineRunOptions(permission_mode=mode))
         assert "--dangerously-skip-permissions" not in args
+    args = _args(options=EngineRunOptions(permission_mode="full"))
+    assert args[-1] == "--dangerously-skip-permissions"
 
 
 def test_build_args_resume_uses_conversation() -> None:
@@ -381,7 +400,10 @@ def test_translate_soft_denied_done_parked_until_result() -> None:
         if e.phase == "completed" and "probe-shell" in e.action.title
     ]
     assert len(done) == 1
-    assert done[0].ok is False
+    # Phase 02: a ⚠️ warning row (ok=True), not a ✗ failure.
+    assert done[0].ok is True
+    assert done[0].action.kind == "warning"
+    assert done[0].action.title.startswith("⚠️ Blocked: shell command")
     assert done[0].action.detail.get("denied") is True
     view = [
         e
@@ -519,15 +541,16 @@ def test_usage_flat_per_run_no_num_turns() -> None:
 
 
 def test_meta_model_from_options_config_or_init() -> None:
+    ws = {"permissionMode": "workspace"}  # phase 02: the mode is always shown
     events, _ = _replay("slash_prompt_literal")
-    assert events[0].meta == {"model": "gemini-3.8-flash"}
+    assert events[0].meta == {"model": "gemini-3.8-flash", **ws}
     events, _ = _replay("slash_prompt_literal", runner=_runner(model="cfg-model"))
-    assert events[0].meta == {"model": "cfg-model"}
+    assert events[0].meta == {"model": "cfg-model", **ws}
     with apply_run_options(EngineRunOptions(model="opt-model")):
         events, _ = _replay("ok", runner=_runner(model="cfg-model"))
-    assert events[0].meta == {"model": "opt-model"}
+    assert events[0].meta == {"model": "opt-model", **ws}
     events, _ = _replay("ok")
-    assert events[0].meta is None
+    assert events[0].meta == ws
 
 
 def test_invalid_json_events_truncated() -> None:
@@ -739,17 +762,18 @@ def test_background_steps_tracked_and_cleared() -> None:
         if line.strip()
     ]
     runner = _runner()
-    state = runner.new_state("p", None)
-    runner.start_run("p", None, state=state)
-    for line in lines[:4]:  # init, user_input, agent_response, run_command ACTIVE
+    with apply_run_options(EngineRunOptions(permission_mode="full")):  # as captured
+        state = runner.new_state("p", None)
+        runner.start_run("p", None, state=state)
+        for line in lines[:4]:  # init, user_input, agent_response, run_command ACTIVE
+            runner.translate(
+                schema.decode_event(line), state=state, resume=None, found_session=None
+            )
+        assert list(state.bg_steps) == [2]
+        assert state.has_live_background_work() is True
         runner.translate(
-            schema.decode_event(line), state=state, resume=None, found_session=None
+            schema.decode_event(lines[4]), state=state, resume=None, found_session=None
         )
-    assert list(state.bg_steps) == [2]
-    assert state.has_live_background_work() is True
-    runner.translate(
-        schema.decode_event(lines[4]), state=state, resume=None, found_session=None
-    )
     assert state.bg_steps == {}
     assert state.has_live_background_work() is False
 
