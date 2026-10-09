@@ -311,14 +311,54 @@ def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
     return False
 
 
+def _event_type(raw: dict[str, Any]) -> str:
+    """The frame's event name: ``type`` (every engine but Antigravity), else
+    agy's ``event`` envelope key (#558), else ``"unknown"``."""
+    t = raw.get("type")
+    if isinstance(t, str):
+        return t
+    e = raw.get("event")
+    if isinstance(e, str):
+        return e
+    return "unknown"
+
+
+# #558: agy tool steps that carry a verdict (DONE / ERROR) — the
+# tool_result-equivalent for the #322 detector.
+_ANTIGRAVITY_TOOL_TERMINAL_STATES = frozenset({"DONE", "ERROR"})
+
+
+def _classify_antigravity_event(raw: dict[str, Any]) -> str | None:
+    """agy's ``{"event": …}`` envelope (#558); None for any other shape."""
+    if "type" in raw:
+        return None
+    event = raw.get("event")
+    if event == "result":
+        return _ASSISTANT_EVENT_KIND
+    if event != "step_update":
+        return None
+    su = raw.get("step_update")
+    if not isinstance(su, dict):
+        return _OTHER_EVENT_KIND
+    step_type = su.get("step_type")
+    if step_type == "tool" and su.get("state") in _ANTIGRAVITY_TOOL_TERMINAL_STATES:
+        return _TOOL_RESULT_EVENT_KIND
+    if step_type == "agent_response":
+        return _ASSISTANT_EVENT_KIND
+    return _OTHER_EVENT_KIND
+
+
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
 
-    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Gemini, AMP.
-    Conservative — unknown shapes return "other".
+    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Antigravity, and the
+    deprecated Gemini and AMP. Conservative — unknown shapes return "other".
     """
     if not isinstance(raw, dict):
         return _OTHER_EVENT_KIND
+    agy_kind = _classify_antigravity_event(raw)
+    if agy_kind is not None:
+        return agy_kind
     t = raw.get("type")
     if not isinstance(t, str):
         return _OTHER_EVENT_KIND
@@ -1157,7 +1197,7 @@ class JsonlSubprocessRunner(BaseRunner):
         except (json.JSONDecodeError, ValueError):
             raw_dict = None
         if isinstance(raw_dict, dict):
-            etype = str(raw_dict.get("type", "unknown"))
+            etype = _event_type(raw_dict)
             etool = None
             # Cover common engine conventions for tool name
             for key in ("tool_name", "tool", "name"):
@@ -1165,6 +1205,15 @@ class JsonlSubprocessRunner(BaseRunner):
                 if isinstance(val, str) and val:
                     etool = val
                     break
+            # #558: agy nests the tool name (and the step kind) one level down.
+            step_label: str | None = None
+            step = raw_dict.get("step_update") if etype == "step_update" else None
+            if isinstance(step, dict):
+                tool_name = step.get("tool_name")
+                if etool is None and isinstance(tool_name, str) and tool_name:
+                    etool = tool_name
+                step_type = step.get("step_type")
+                step_label = f"step:{step_type}" if isinstance(step_type, str) else None
             # Also check nested item.type for Codex-style events
             item = raw_dict.get("item")
             if etool is None and isinstance(item, dict):
@@ -1187,7 +1236,7 @@ class JsonlSubprocessRunner(BaseRunner):
             if liveness_label is not None:
                 label = liveness_label
             else:
-                label = f"tool:{etool}" if etool else etype
+                label = f"tool:{etool}" if etool else (step_label or etype)
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
             # intervening "other" events (attachments, system hooks) and is
@@ -1276,6 +1325,19 @@ class JsonlSubprocessRunner(BaseRunner):
     # #590: post-exit orphan sweep ([watchdog] reap_orphans, default true).
     # Refreshed per run from WatchdogSettings by the bridge.
     _reap_orphans: bool = True
+
+    # #558 (08 §2): opt in to publishing the runner's own state as
+    # ``stream.engine_state`` so the duck-typed watchdog / stall-monitor
+    # probes can see it. Claude sets it from its own ``run_impl``; every
+    # other runner keeps ``None`` unless it opts in here.
+    _EXPOSE_ENGINE_STATE: bool = False
+
+    def on_spawned(self, *, state: Any, pid: int) -> None:
+        """Hook called once the subprocess exists (after ``publish_run_stream``).
+
+        No-op by default. ``translate`` never sees the process, so a runner
+        that needs the PID (e.g. for a descendant snapshot) records it here.
+        """
 
     def _check_prespawn_ram_guard(
         self, resume: ResumeToken | None
@@ -1625,6 +1687,10 @@ class JsonlSubprocessRunner(BaseRunner):
         async with manage_subprocess(
             cmd,
             reap_orphans=self._reap_orphans,
+            # #558 (08 §2): a runner whose state collects descendant PIDs
+            # (agy's background children) gets them swept at teardown.
+            # ``None`` for everyone else — identical to before.
+            orphan_pid_snapshot=getattr(state, "orphan_pid_snapshot", None),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1659,9 +1725,12 @@ class JsonlSubprocessRunner(BaseRunner):
             # pid + stream together, so nobody ever sees this spawn's pid
             # paired with a previous spawn's stream.
             stream = JsonlStreamState(expected_session=resume)
+            if self._EXPOSE_ENGINE_STATE:
+                stream.engine_state = state
             self.last_pid = proc.pid
             self.current_stream = stream
             publish_run_stream(stream, proc.pid)
+            self.on_spawned(state=state, pid=proc.pid)
 
             await self._send_payload(proc, payload, logger=logger, resume=resume)
 

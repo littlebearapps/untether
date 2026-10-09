@@ -2153,6 +2153,29 @@ _BLOCKED_PROC_STATES = frozenset({"D"})
 _CHILD_WORK_ENGINES = frozenset({"claude"})
 
 
+def engine_background_busy(engine_state: Any) -> bool:
+    """Engine-neutral "has live background work" (#346 gate; #558 REVIEW-2 B1).
+
+    A state with its own callable ``has_live_background_work`` method
+    (Antigravity) answers for itself; a Claude ``ClaudeStreamState`` goes
+    through Claude's module function exactly as before; anything else is
+    False. Never raises — the stall monitor's call site has no ``try``.
+    """
+    if engine_state is None:
+        return False
+    try:
+        method = getattr(engine_state, "has_live_background_work", None)
+        if callable(method):
+            return bool(method())
+        from .runners.claude import ClaudeStreamState, has_live_background_work
+
+        if isinstance(engine_state, ClaudeStreamState):
+            return bool(has_live_background_work(engine_state))
+    except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+        logger.debug("engine_background_busy.probe_failed", error=str(exc))
+    return False
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -4135,21 +4158,15 @@ class ProgressEdits:
         # so this stays engine-agnostic; Claude populates it via #347. Engines
         # without background-task awareness leave engine_state=None and this
         # check no-ops.
-        engine_state = getattr(stream, "engine_state", None)
-        if engine_state is not None:
-            try:
-                from .runners.claude import has_live_background_work
-            except ImportError:
-                has_live_background_work = None  # type: ignore[assignment]
-            if has_live_background_work is not None and has_live_background_work(
-                engine_state
-            ):
-                logger.info(
-                    "progress_edits.stuck_after_tool_result.suppressed",
-                    reason="live_background_work",
-                    tr_elapsed=tr_elapsed,
-                )
-                return False
+        # #558 (REVIEW-2 B1): dispatched per engine — Claude's helper only
+        # ever sees a ClaudeStreamState.
+        if engine_background_busy(getattr(stream, "engine_state", None)):
+            logger.info(
+                "progress_edits.stuck_after_tool_result.suppressed",
+                reason="live_background_work",
+                tr_elapsed=tr_elapsed,
+            )
+            return False
         # Reuse the existing frozen-ring-buffer escalation threshold (3) so
         # this detector never fires before the user has seen the generic
         # frozen-ring warning it escalates from.
@@ -6161,7 +6178,8 @@ _RESUME_FAILURE_RE = re.compile(
     r"|session not found"  # opencode: NotFoundError
     r"|no session found"  # pi: No session found matching '…'
     r"|finished but no session_id"  # codex/opencode: never confirmed it
-    r"|failed to load on resume",  # pi: zero events on a resumed run
+    r"|failed to load on resume"  # pi: zero events on a resumed run
+    r"|antigravity conversation not found",  # agy: unknown --conversation (#558)
     re.IGNORECASE,
 )
 _SESSION_CLEARED_NOTICE = (

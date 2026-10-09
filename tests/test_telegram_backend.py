@@ -799,3 +799,39 @@ def test_836_failure_never_breaks_startup(monkeypatch: pytest.MonkeyPatch) -> No
         msg = _msg_836([{"id": "c", "permission_mode": "default"}])
     assert "_triggers:_" in msg and "unattended" not in msg
     assert any(e["event"] == "startup.unattended_line_failed" for e in logs)
+
+
+@pytest.mark.anyio
+async def test_versions_line_probes_backend_cli_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#993 (08 §3): the probe uses the backend's ``cli_cmd`` (agy for
+    antigravity) while the label stays the engine id."""
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return {"agy": "1.3.2", "claude": "2.1.300"}.get(cmd)
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    line = await telegram_backend._build_versions_line(("antigravity", "claude"))
+    assert "agy" in probed and "antigravity" not in probed
+    assert line is not None
+    assert line.endswith("antigravity 1.3.2 · claude 2.1.300")
+
+
+@pytest.mark.anyio
+async def test_versions_line_existing_engines_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return None
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    await telegram_backend._build_versions_line(
+        ("claude", "codex", "opencode", "pi", "not-an-engine")
+    )
+    assert sorted(probed) == ["claude", "codex", "not-an-engine", "opencode", "pi"]

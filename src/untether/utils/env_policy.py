@@ -241,6 +241,31 @@ def filtered_env(
     }
 
 
+def load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Read ``[security] env_extra_allow`` / ``env_extra_prefix_allow`` (#409).
+
+    Returns ``(extra_exact, extra_prefix)``. Best-effort: config errors must
+    never block a run, so any failure falls back to ``((), ())``.
+
+    Scope note: Antigravity opts in through this helper (#558). Claude and
+    Pi still carry their own private copies (``_load_env_extras``); folding
+    them onto this one is a later dedupe.
+    """
+    from ..settings import load_settings_if_exists
+
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return ((), ())
+        settings, _ = result
+        return (
+            tuple(settings.security.env_extra_allow),
+            tuple(settings.security.env_extra_prefix_allow),
+        )
+    except Exception:  # noqa: BLE001 — never let config errors block a run
+        return ((), ())
+
+
 # Module-level latch so we emit `env_policy.user_extension` at most once
 # per process even if multiple runners (Claude + Pi) call it. Reset is
 # only useful in tests; expose the underlying flag via _RESET_LOG_LATCH.
@@ -286,5 +311,6 @@ __all__ = [
     "filtered_env",
     "is_allowed",
     "is_allowed_with_extras",
+    "load_env_extras",
     "log_user_extensions_once",
 ]

@@ -72,8 +72,8 @@ def _parse_cli_version(output: str) -> str | None:
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
-        # #202: cmd comes from EngineBackend.cli_cmd (e.g. "claude", "codex"),
-        # a fixed table of engine entrypoints configured in pyproject.toml.
+        # #202: cmd is EngineBackend.cli_cmd (e.g. "claude", "agy") or the
+        # engine id (#993), a fixed table of entrypoints from pyproject.toml.
         # No shell, fixed argv, 5-second timeout (#951: the probes now run
         # side by side, so Node start-up is slower than the ~2-3 s serial).
         result = subprocess.run(  # nosec B603
@@ -109,6 +109,17 @@ async def _cli_version(cmd: str) -> str | None:
     return version
 
 
+def _engine_cli_cmd(engine: str) -> str:
+    """#993: the binary to ``--version`` for an engine — its backend's
+    ``cli_cmd`` (``agy`` for ``antigravity``), else the engine id."""
+    try:
+        from ..engines import get_backend
+
+        return get_backend(engine).cli_cmd or engine
+    except Exception:  # noqa: BLE001 — a lookup failure must not hide the line
+        return engine
+
+
 async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     """Build a ``py X.Y.Z · engine X.Y.Z`` versions line.
 
@@ -121,7 +132,7 @@ async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     versions: dict[str, str | None] = {}
 
     async def probe(engine: str) -> None:
-        versions[engine] = await _cli_version(engine)
+        versions[engine] = await _cli_version(_engine_cli_cmd(engine))
 
     async with anyio.create_task_group() as tg:
         for engine in engines:

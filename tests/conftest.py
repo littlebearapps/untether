@@ -308,3 +308,17 @@ def _no_opencode_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     opencode_runner._VERSION_CACHE.clear()
     yield
     opencode_runner._VERSION_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_agy_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """#558/#976: ``AntigravityRunner.run_impl`` asks ``agy --version`` (once
+    per binary) before every run. Unit tests must never spawn the host's real
+    agy (lba-1 has one), so the probe reports "unknown" (→ the run is allowed)
+    unless a test points it back at ``_run_agy_version`` with a fake agy."""
+    from untether.runners import antigravity as antigravity_runner
+
+    monkeypatch.setattr(antigravity_runner, "_probe_agy_version", lambda path: None)
+    antigravity_runner._VERSION_CACHE.clear()
+    yield
+    antigravity_runner._VERSION_CACHE.clear()

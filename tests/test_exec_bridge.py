@@ -13203,3 +13203,338 @@ async def test_929_session_summary_counts_surfaces() -> None:
         )
     (summary,) = [e for e in logs if e.get("event") == "session.summary"]
     assert summary["approval_surfaces"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #558 Antigravity framework fixes (08 §1, §2, §8 + REVIEW-2 B1)
+# ---------------------------------------------------------------------------
+
+
+def _agy_step(step_type: str, state: str = "DONE", **extra: Any) -> dict:
+    su = {"conversation_id": "c1", "step_index": 1, "state": state}
+    su["step_type"] = step_type
+    su.update(extra)
+    return {"event": "step_update", "step_update": su}
+
+
+class TestAntigravityEnvelopeClassifier:
+    """08 §1: agy's ``{"event": …}`` envelope reaches the #322 detector."""
+
+    def test_classify_antigravity_step_update_shapes(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        tool = {"tool_name": "run_command"}
+        assert _classify_jsonl_event(_agy_step("tool", "DONE", **tool)) == (
+            "tool_result"
+        )
+        assert _classify_jsonl_event(_agy_step("tool", "ERROR", **tool)) == (
+            "tool_result"
+        )
+        assert _classify_jsonl_event(_agy_step("tool", "ACTIVE", **tool)) == "other"
+        assert _classify_jsonl_event(_agy_step("agent_response", "ACTIVE")) == (
+            "assistant"
+        )
+        assert _classify_jsonl_event({"event": "result", "result": {}}) == ("assistant")
+        for step_type in ("user_input", "system_message", "subagent", "finish"):
+            assert _classify_jsonl_event(_agy_step(step_type)) == "other"
+        assert _classify_jsonl_event({"event": "init"}) == "other"
+        assert _classify_jsonl_event({"event": "step_update"}) == "other"
+
+    @pytest.mark.parametrize(
+        ("fixture", "expected"),
+        [
+            ("claude_stream_json_session.jsonl", "ooattaoooo"),
+            ("codex_exec_json_all_formats.jsonl", "oooooototttotottoaooooo"),
+            ("opencode_run_json.jsonl", "ooooo"),
+            ("opencode_stream_success.jsonl", "oooooo"),
+            ("pi_stream_success.jsonl", "oooooooo"),
+            ("pi_print_mode_events.jsonl", "o" * 50),
+        ],
+    )
+    def test_classify_existing_engine_shapes_unchanged(
+        self, fixture: str, expected: str
+    ) -> None:
+        """Snapshot taken before the agy branch was added (HEAD 70c4315)."""
+        import json
+        from pathlib import Path
+
+        from untether.runner import _classify_jsonl_event
+
+        letters = {"assistant": "a", "other": "o", "tool_result": "t"}
+        path = Path(__file__).parent / "fixtures" / fixture
+        got = ""
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            got += letters[_classify_jsonl_event(json.loads(line))]
+        assert got == expected
+
+    def test_event_type_prefers_type_then_event(self) -> None:
+        from untether.runner import _event_type
+
+        assert _event_type({"type": "result", "event": "x"}) == "result"
+        assert _event_type({"event": "step_update"}) == "step_update"
+        assert _event_type({"type": 3, "event": "result"}) == "result"
+        assert _event_type({"event": None}) == "unknown"
+        assert _event_type({}) == "unknown"
+
+    def test_line_handler_labels_agy_steps_and_latches_result(self) -> None:
+        import json
+
+        from untether.runner import JsonlStreamState
+        from untether.runners.antigravity import AntigravityRunner
+
+        runner = AntigravityRunner(antigravity_cmd="agy")
+        state = runner.new_state("hi", None)
+        stream = JsonlStreamState(expected_session=None)
+        log = runner.get_logger()
+
+        def feed(obj: dict) -> None:
+            runner._handle_jsonl_line(
+                raw_line=json.dumps(obj).encode(),
+                stream=stream,
+                state=state,
+                resume=None,
+                logger=log,
+                pid=1,
+            )
+
+        feed({"event": "init", "conversation_id": "c1", "init": {}})
+        feed(_agy_step("tool", "ACTIVE", tool_name="view_file"))
+        feed(_agy_step("tool", "DONE", tool_name="view_file"))
+        assert stream.last_event_type == "step_update"
+        assert stream.last_event_tool == "view_file"
+        assert stream.last_tool_result_at > 0
+        feed(_agy_step("system_message"))
+        labels = [label for _, label in stream.recent_events]
+        assert labels == [
+            "init",
+            "tool:view_file",
+            "tool:view_file",
+            "step:system_message",
+        ]
+        feed(
+            {
+                "event": "result",
+                "result": {"conversation_id": "c1", "status": "SUCCESS"},
+            }
+        )
+        assert stream.last_event_type == "result"
+        assert stream.saw_result is True
+        assert stream.last_tool_result_at == 0.0
+
+
+class TestEngineStateOptIn:
+    """08 §2: ``engine_state`` / ``on_spawned`` / orphan snapshot pass-through."""
+
+    @staticmethod
+    def _runner(expose: bool, snapshot: list[int] | None = None):
+        import json
+        from dataclasses import dataclass, field
+
+        from untether.events import EventFactory
+        from untether.runner import JsonlSubprocessRunner
+
+        script = (
+            "import sys\nsys.stdin.read()\n"
+            "print('" + json.dumps({"type": "done"}) + "', flush=True)\n"
+        )
+
+        @dataclass
+        class _State:
+            factory: EventFactory = field(default_factory=lambda: EventFactory("codex"))
+            note_seq: int = 0
+            spawned_pid: int | None = None
+            orphan_pid_snapshot: list[int] | None = None
+
+        class _Runner(JsonlSubprocessRunner):
+            engine = "codex"
+            _EXPOSE_ENGINE_STATE = expose
+
+            def command(self) -> str:
+                return sys.executable
+
+            def build_args(self, prompt, resume, *, state):
+                return ["-c", script]
+
+            def new_state(self, prompt, resume):
+                return _State(orphan_pid_snapshot=snapshot)
+
+            def on_spawned(self, *, state, pid: int) -> None:
+                state.spawned_pid = pid
+
+            def translate(self, data, *, state, resume, found_session):
+                return [state.factory.completed_ok(answer="ok")]
+
+        return _Runner()
+
+    @pytest.mark.anyio
+    async def test_engine_state_not_exposed_by_default(self) -> None:
+        from untether.runners.codex import CodexRunner
+
+        assert CodexRunner._EXPOSE_ENGINE_STATE is False
+        runner = self._runner(expose=False)
+        events = [evt async for evt in runner.run_impl("hi", None)]
+        assert isinstance(events[-1], CompletedEvent)
+        assert runner.current_stream is not None
+        assert runner.current_stream.engine_state is None
+
+    @pytest.mark.anyio
+    async def test_engine_state_exposed_when_opted_in(self) -> None:
+        runner = self._runner(expose=True)
+        [evt async for evt in runner.run_impl("hi", None)]
+        stream = runner.current_stream
+        assert stream is not None
+        assert stream.engine_state is not None
+        assert stream.engine_state.spawned_pid == runner.last_pid
+
+    @pytest.mark.anyio
+    async def test_orphan_snapshot_passed_through_when_state_has_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import untether.runner as runner_mod
+
+        seen: list[Any] = []
+        real = runner_mod.manage_subprocess
+
+        def recording(cmd, **kwargs):
+            seen.append(kwargs.get("orphan_pid_snapshot", "absent"))
+            return real(cmd, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "manage_subprocess", recording)
+        snapshot: list[int] = []
+        runner = self._runner(expose=False, snapshot=snapshot)
+        [evt async for evt in runner.run_impl("hi", None)]
+        assert seen == [snapshot]
+        assert seen[0] is snapshot
+
+        seen.clear()
+        plain = self._runner(expose=False, snapshot=None)
+        [evt async for evt in plain.run_impl("hi", None)]
+        assert seen == [None]
+
+
+class TestEngineBackgroundBusy:
+    """REVIEW-2 B1: the #346 detector block dispatches per engine, never
+    calling Claude's helper on another engine's state."""
+
+    @staticmethod
+    def _agy_state():
+        from untether.runners.antigravity import AntigravityRunner
+
+        return AntigravityRunner(antigravity_cmd="agy").new_state("hi", None)
+
+    def test_stuck_detector_agy_state_never_calls_claude_helper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import untether.runners.claude as claude_mod
+
+        def boom(_state: Any) -> bool:
+            raise AssertionError("Claude helper called on a non-Claude state")
+
+        monkeypatch.setattr(claude_mod, "has_live_background_work", boom)
+        edits, clock = TestStuckAfterToolResultDetector._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3
+        )
+        clock.set(1000.0)
+        edits.stream.engine_state = self._agy_state()  # type: ignore[attr-defined]
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_stuck_detector_suppressed_while_agy_background(self) -> None:
+        edits, clock = TestStuckAfterToolResultDetector._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3
+        )
+        clock.set(1000.0)
+        state = self._agy_state()
+        state.bg_steps[2] = 0.0
+        edits.stream.engine_state = state  # type: ignore[attr-defined]
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_engine_background_busy_claude_path_unchanged(self) -> None:
+        import time
+
+        from untether.runner_bridge import engine_background_busy
+        from untether.runners.claude import ClaudeStreamState
+
+        claude_state = ClaudeStreamState()
+        assert engine_background_busy(claude_state) is False
+        claude_state.live_monitors["toolu_M1"] = time.monotonic() + 60.0
+        assert engine_background_busy(claude_state) is True
+        assert engine_background_busy(None) is False
+        assert engine_background_busy(SimpleNamespace()) is False
+
+        class _Raises:
+            def has_live_background_work(self) -> bool:
+                raise RuntimeError("probe broke")
+
+        assert engine_background_busy(_Raises()) is False
+
+        agy = self._agy_state()
+        assert engine_background_busy(agy) is False
+        agy.bg_steps[1] = 0.0
+        assert engine_background_busy(agy) is True
+
+
+class TestAntigravityRegistries:
+    """08 §8: the bridge tables agy joins (or deliberately doesn't)."""
+
+    def test_resume_failure_regex_matches_antigravity_conversation_not_found(
+        self,
+    ) -> None:
+        from untether.runner_bridge import _RESUME_FAILURE_RE
+        from untether.runners.antigravity import CONVERSATION_GONE_TEXT
+
+        assert _RESUME_FAILURE_RE.search(CONVERSATION_GONE_TEXT)
+        assert _RESUME_FAILURE_RE.search("Antigravity conversation not found")
+
+    def test_antigravity_usage_never_has_num_turns_so_auto_clear_uses_regex(
+        self,
+    ) -> None:
+        from pathlib import Path
+
+        from untether.runner_bridge import (
+            _TURN_COUNT_ENGINES,
+            _resume_failure_clears_session,
+        )
+        from untether.runners.antigravity import (
+            CONVERSATION_GONE_TEXT,
+            AntigravityRunner,
+        )
+        from untether.schemas import antigravity as schema
+
+        assert "antigravity" not in _TURN_COUNT_ENGINES
+        runner = AntigravityRunner(antigravity_cmd="agy")
+        resume = ResumeToken(
+            engine="antigravity", value="b66a64cf-dd95-4344-9df6-25d35539e10f"
+        )
+        state = runner.new_state("hi", resume)
+        runner.start_run("hi", resume, state=state)
+        path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "antigravity"
+            / "resume_after_interrupt.jsonl"
+        )
+        completed = None
+        for line in path.read_text().splitlines():
+            for evt in runner.translate(
+                schema.decode_event(line),
+                state=state,
+                resume=resume,
+                found_session=None,
+            ):
+                if isinstance(evt, CompletedEvent):
+                    completed = evt
+        assert completed is not None and completed.usage is not None
+        assert "num_turns" not in completed.usage
+        assert not _resume_failure_clears_session(
+            "antigravity", completed.usage, "antigravity failed (rc=1)."
+        )
+        assert _resume_failure_clears_session(
+            "antigravity", completed.usage, CONVERSATION_GONE_TEXT
+        )
+
+    def test_child_work_engines_exclude_antigravity(self) -> None:
+        from untether.runner_bridge import _CHILD_WORK_ENGINES
+
+        assert "antigravity" not in _CHILD_WORK_ENGINES

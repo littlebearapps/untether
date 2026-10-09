@@ -58,6 +58,7 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+antigravity = "untether.runners.antigravity:BACKEND"
 gemini = "untether.runners.gemini:BACKEND"
 amp = "untether.runners.amp:BACKEND"
 
