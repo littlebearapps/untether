@@ -632,6 +632,187 @@ async def test_drain_stderr_no_capture() -> None:
         await drain_stderr(receive, __import__("structlog").get_logger(), "test")  # type: ignore[arg-type]
 
 
+@pytest.mark.anyio
+async def test_drain_stderr_on_line_called_per_line() -> None:
+    """#558 phase 03: the opt-in hook sees every line, past the capture cap."""
+    import anyio
+
+    from untether.utils.streams import _STDERR_CAPTURE_MAX, drain_stderr
+
+    send, receive = anyio.create_memory_object_stream[bytes](64)
+    seen: list[str] = []
+    capture: list[str] = []
+    total = _STDERR_CAPTURE_MAX + 5
+
+    async with anyio.create_task_group() as tg:
+
+        async def _write() -> None:
+            async with send:
+                for i in range(total):
+                    await send.send(f"line {i}\n".encode())
+
+        tg.start_soon(_write)
+        await drain_stderr(
+            receive,  # type: ignore[arg-type]
+            __import__("structlog").get_logger(),
+            "test",
+            capture,
+            on_line=seen.append,
+        )
+
+    assert seen == [f"line {i}" for i in range(total)]
+    assert len(capture) == _STDERR_CAPTURE_MAX
+
+
+@pytest.mark.anyio
+async def test_drain_stderr_on_line_exception_does_not_break_drain() -> None:
+    import anyio
+    from structlog.testing import capture_logs
+
+    from untether.utils.streams import drain_stderr
+
+    send, receive = anyio.create_memory_object_stream[bytes](8)
+    capture: list[str] = []
+
+    def _boom(line: str) -> None:
+        raise ValueError(f"hook failed on {line}")
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def _write() -> None:
+                async with send:
+                    await send.send(b"one\n")
+                    await send.send(b"two\n")
+
+            tg.start_soon(_write)
+            await drain_stderr(
+                receive,  # type: ignore[arg-type]
+                __import__("structlog").get_logger(),
+                "test",
+                capture,
+                on_line=_boom,
+            )
+
+    assert capture == ["one", "two"]
+    hook_errors = [e for e in logs if e["event"] == "subprocess.stderr.hook_error"]
+    assert len(hook_errors) == 2
+
+
+def _record_drain_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
+    calls: list[tuple[Any, Any]] = []
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.stdout = object()
+            self.stderr = object()
+            self.stdin = None
+            self.pid = 4242
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    class _FakeManager:
+        async def __aenter__(self) -> _FakeProc:
+            return _FakeProc()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    async def fake_drain_stderr(*args: Any, **kwargs: Any) -> None:
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        runner_module, "manage_subprocess", lambda *a, **k: _FakeManager()
+    )
+    monkeypatch.setattr(runner_module, "drain_stderr", fake_drain_stderr)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_base_run_impl_passes_no_hook_when_not_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engines that don't override ``on_stderr_line`` drain byte-identically:
+    the same four positional args, no keyword."""
+    calls = _record_drain_calls(monkeypatch)
+    events = [evt async for evt in _RunJsonlRunner().run_impl("hello", None)]
+    assert any(isinstance(evt, CompletedEvent) for evt in events)
+    ((args, kwargs),) = calls
+    assert len(args) == 4 and kwargs == {}
+
+
+@pytest.mark.anyio
+async def test_base_run_impl_passes_hook_when_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    class _Hooked(_RunJsonlRunner):
+        def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+            seen.append(line)
+
+    calls = _record_drain_calls(monkeypatch)
+    events = [evt async for evt in _Hooked().run_impl("hello", None)]
+    assert any(isinstance(evt, CompletedEvent) for evt in events)
+    ((args, kwargs),) = calls
+    assert len(args) == 4 and set(kwargs) == {"on_line"}
+    kwargs["on_line"]("hello stderr")
+    assert seen == ["hello stderr"]
+
+
+def test_only_antigravity_overrides_the_stderr_hook() -> None:
+    """Codex, OpenCode, Pi (and the deprecated engines) keep the base no-op,
+    so their stderr drain is unchanged (#558 phase 03, REVIEW M2)."""
+    from untether.runners.antigravity import AntigravityRunner
+    from untether.runners.codex import CodexRunner
+    from untether.runners.opencode import OpenCodeRunner
+    from untether.runners.pi import PiRunner
+
+    base = JsonlSubprocessRunner.on_stderr_line
+    for cls in (CodexRunner, OpenCodeRunner, PiRunner):
+        assert cls.on_stderr_line is base, cls
+    assert AntigravityRunner.on_stderr_line is not base
+
+
+@pytest.mark.anyio
+async def test_kill_with_escalation_sigkills_a_sigterm_proof_process() -> None:
+    import sys
+    import time
+
+    import anyio
+
+    from untether.runner import _STDERR_HOOK_TG
+
+    script = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print('ready', flush=True); time.sleep(60)"
+    )
+    proc = await anyio.open_process(
+        [sys.executable, "-c", script], start_new_session=True
+    )
+    try:
+        assert proc.stdout is not None
+        await proc.stdout.receive()  # SIGTERM handler installed
+        runner = _RunJsonlRunner()
+        runner._KILL_ESCALATION_S = 0.5
+        start = time.monotonic()
+        async with anyio.create_task_group() as tg:
+            token = _STDERR_HOOK_TG.set(tg)
+            try:
+                runner.kill_with_escalation(proc)
+            finally:
+                _STDERR_HOOK_TG.reset(token)
+        rc = await proc.wait()
+        assert rc == -9
+        assert 0.4 <= time.monotonic() - start < 5
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.aclose()
+
+
 # ===========================================================================
 # Signal error hints
 # ===========================================================================

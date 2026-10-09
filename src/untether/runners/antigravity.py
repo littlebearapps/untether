@@ -63,6 +63,7 @@ from ..runner import (
     ResumeTokenMixin,
     Runner,
     _rc_label,
+    _sanitise_stderr,
     _session_label,
     _stderr_excerpt,
 )
@@ -99,6 +100,29 @@ CONVERSATION_GONE_TEXT = (
 INTERRUPTED_TEXT = (
     "Antigravity was interrupted — the conversation can be resumed by "
     "replying to its resume line."
+)
+# Phase 03 (D27): distinct, non-retryable error cards for the stderr kill
+# classes. None of them matches ``_RESUME_FAILURE_RE``, so the chat keeps its
+# saved session.
+AUTH_TEXT = (
+    "Antigravity CLI isn't signed in on this host — agy wanted a browser "
+    "sign-in, which a bot can't complete. Run `agy` once in a terminal on the "
+    "host and finish the Google sign-in, then retry. On a keyring desktop, also "
+    "check that `DBUS_SESSION_BUS_ADDRESS` reaches Untether. For servers, the "
+    "Gemini API key route avoids sign-in (see the Antigravity runner docs)."
+)
+ACCOUNT_BLOCKED_TEXT = (
+    "Google is asking this account to verify itself or appeal a Terms of "
+    "Service block. Sign in with `agy` in a terminal on the host to see "
+    "Google's link. Untether won't retry."
+)
+QUOTA_TEXT = (
+    "This Antigravity quota is used up. /usage shows when each group resets; "
+    "Untether won't retry."
+)
+CREDITS_TEXT = (
+    "Antigravity's AI credits balance is too low to continue. Top up or wait "
+    "for the quota reset (/usage)."
 )
 NO_PROJECT_TEXT = (
     "Antigravity needs a project — bind this chat with /ctx set … or a "
@@ -190,6 +214,83 @@ _DENIED_LABEL: dict[str, str] = {
     "read_file": "file outside the project",
     "write_file": "file outside the project",
 }
+
+# ── stderr kill classes (phase 03, D27) ─────────────────────────────────────
+
+# Only this much of a stderr line is matched (a hostile or chatty child can
+# write arbitrarily long lines); an ``AGY_ERROR`` payload is parsed only up
+# to this size.
+_STDERR_HOOK_MAX_CHARS = 4096
+_AGY_ERROR_MAX_CHARS = 16384
+_STDERR_LOG_CHARS = 200
+_ERROR_TEXT_LINES = 3
+
+# Lines agy prints when it would otherwise wait (or retry) forever with
+# ``--print-timeout 0``. The auth prefixes are anchored so an MCP server's
+# own "authentication required" chatter can't stop the run.
+_AUTH_PREFIXES = (
+    "authentication required",
+    "error: authentication required",
+    "waiting for authentication",
+)
+_TOS_WORDS = ("block", "appeal", "violat", "suspend")
+_KILL_TEXT: dict[str, str] = {
+    "auth": AUTH_TEXT,
+    "account_blocked": ACCOUNT_BLOCKED_TEXT,
+    "quota": QUOTA_TEXT,
+    "credits": CREDITS_TEXT,
+    "conversation_gone": CONVERSATION_GONE_TEXT,
+}
+_KILL_DETECTED_EVENT: dict[str, str] = {
+    "auth": "antigravity.auth.required",
+    "account_blocked": "antigravity.account.blocked",
+    "quota": "antigravity.quota.exhausted",
+    "credits": "antigravity.credits.low",
+}
+_KILL_DONE_EVENT: dict[str, str] = {
+    "auth": "antigravity.auth.killed",
+    "account_blocked": "antigravity.account.killed",
+    "quota": "antigravity.quota.killed",
+    "credits": "antigravity.credits.killed",
+    "conversation_gone": "antigravity.conversation.killed",
+}
+
+
+def stderr_kill_kind(line: str) -> str | None:
+    """The D27 kill class a stderr line announces, or None."""
+    lower = line[:_STDERR_HOOK_MAX_CHARS].strip().lower()
+    if lower.startswith(_AUTH_PREFIXES):
+        return "auth"
+    if "verify your account" in lower or (
+        "terms of service" in lower and any(w in lower for w in _TOS_WORDS)
+    ):
+        return "account_blocked"
+    if "individual quota reached" in lower:
+        return "quota"
+    if "ai credits balance is too low" in lower:
+        return "credits"
+    if lower.startswith('warning: conversation "') and '" not found' in lower:
+        return "conversation_gone"
+    return None
+
+
+def _trim_error_lines(text: str, limit: int = _ERROR_TEXT_LINES) -> str:
+    """agy's own error text, first *limit* lines + "…" (model/effort errors
+    list every valid option)."""
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return text
+    return "\n".join([*lines[:limit], "…"])
+
+
+def _log_scalar(value: Any) -> Any:
+    """An ``AGY_ERROR`` field safe to log: short scalars only, sanitised."""
+    if isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return _sanitise_stderr(value[:80])
+    return None
+
 
 # 08 §6 (#975): tools that can hold agy's single result while they run.
 _BACKGROUND_TOOLS = frozenset({"run_command", "schedule", "manage_task"})
@@ -618,6 +719,17 @@ class AntigravityStreamState:
     # D22.7: init reported always-proceed without our bypass flag → the run
     # was stopped; every later line is ignored.
     permission_refused: bool = False
+    # Phase 03 (D27): a stderr line stopped agy (``auth`` / ``account_blocked``
+    # / ``quota`` / ``credits`` / ``conversation_gone``); it decides the final
+    # text whatever agy's result says.
+    kill_reason: str | None = None
+    kill_detected_at: float | None = None
+    kill_logged: bool = False
+    # First parseable ``AGY_ERROR: {json}`` stderr payload (keys unverified,
+    # P19) and the one-shot stderr notices already logged.
+    agy_error: dict[str, Any] | None = None
+    stderr_flags: set[str] = field(default_factory=set)
+    result_seen: bool = False
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -1118,6 +1230,148 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if isinstance(state, AntigravityStreamState):
             state.agy_pid = pid
 
+    # -- stderr (phase 03, D27) ---------------------------------------------
+
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        """Kill agy on the stderr lines that announce a headless hang
+        (signed out, account blocked, quota/credits used up, stale
+        ``--conversation``) and note the rest. Never logs a raw line above
+        DEBUG: the sign-in URL carries a PKCE challenge."""
+        if not isinstance(state, AntigravityStreamState):
+            return
+        text = line[:_STDERR_HOOK_MAX_CHARS]
+        kind = stderr_kill_kind(text)
+        if kind is not None:
+            self._stderr_kill(state, proc, kind)
+            return
+        stripped = text.strip()
+        lower = stripped.lower()
+        if stripped.startswith("AGY_ERROR:"):
+            self._note_agy_error(state, line)
+        elif lower.startswith("warning: unrecognized --mode value"):
+            self._note_stderr_once(state, "antigravity.mode.rejected", stripped)
+        elif lower.startswith("[agy] print timeout after"):
+            # agy then reports SUCCESS with a partial answer (REVIEW m2).
+            self._note_stderr_once(state, "antigravity.print_timeout", stripped)
+        elif lower.startswith("jetski: no output produced"):
+            state.stderr_flags.add("no_output")
+            logger.debug("antigravity.stderr.no_output")
+        elif lower.startswith("warning: ignoring unsupported stream input"):
+            state.stderr_flags.add("stream_input_ignored")
+            logger.debug("antigravity.stderr.stream_input_ignored")
+
+    def _stderr_kill(self, state: AntigravityStreamState, proc: Any, kind: str) -> None:
+        if state.kill_reason is not None or state.permission_refused:
+            return
+        state.kill_reason = kind
+        state.kill_detected_at = time.monotonic()
+        if kind == "conversation_gone":
+            logger.warning(
+                "antigravity.conversation.missing",
+                expected=state.expected_resume,
+                detected_by="stderr",
+            )
+        else:
+            logger.warning(
+                _KILL_DETECTED_EVENT[kind],
+                pid=getattr(proc, "pid", None),
+                elapsed_ms=self._kill_elapsed_ms(state),
+            )
+        if getattr(proc, "returncode", None) is None:
+            self.kill_with_escalation(proc)
+
+    def _note_stderr_once(
+        self, state: AntigravityStreamState, event: str, text: str
+    ) -> None:
+        if event in state.stderr_flags:
+            return
+        state.stderr_flags.add(event)
+        logger.warning(event, line=_sanitise_stderr(text[:_STDERR_LOG_CHARS]))
+
+    def _note_agy_error(self, state: AntigravityStreamState, line: str) -> None:
+        """``AGY_ERROR: {json}`` (rc 3, turn-level failure). Key names are
+        unverified (P19): log key names and a few short scalars, never the
+        payload."""
+        payload = line.strip()[len("AGY_ERROR:") :].strip()
+        parsed: Any = None
+        if len(payload) <= _AGY_ERROR_MAX_CHARS:
+            try:
+                parsed = json.loads(payload)
+            except (ValueError, RecursionError):
+                parsed = None
+        event = (
+            "antigravity.stderr.post_result"
+            if state.result_seen
+            else "antigravity.agy_error"
+        )
+        if not isinstance(parsed, dict):
+            state.stderr_flags.add("agy_error_unparsed")
+            logger.warning(event, kind="agy_error", parsed=False)
+            return
+        if state.agy_error is None:
+            state.agy_error = parsed
+        fields = {
+            key: _log_scalar(parsed.get(key)) for key in ("status", "code", "retryable")
+        }
+        log = logger.info if state.result_seen else logger.warning
+        log(
+            event,
+            kind="agy_error",
+            keys=sorted(str(k)[:40] for k in parsed)[:20],
+            **fields,
+        )
+
+    @staticmethod
+    def _kill_elapsed_ms(state: AntigravityStreamState) -> int | None:
+        if not state.t_spawn or state.kill_detected_at is None:
+            return None
+        return int((state.kill_detected_at - state.t_spawn) * 1000)
+
+    def _failure_text(
+        self, state: AntigravityStreamState, error: str | None
+    ) -> str | None:
+        """The kill class's card (stderr kill wins over whatever agy's
+        result says), else the auth card for agy's own auth failure."""
+        kind = state.kill_reason
+        if kind is not None:
+            if not state.kill_logged:
+                state.kill_logged = True
+                logger.error(
+                    _KILL_DONE_EVENT[kind],
+                    elapsed_ms=self._kill_elapsed_ms(state),
+                    session_id=state.session_id,
+                )
+            return _KILL_TEXT[kind]
+        if error and "authentication failed or timed out" in error.lower():
+            logger.error("antigravity.auth.failed", session_id=state.session_id)
+            return AUTH_TEXT
+        return None
+
+    def _failure_completed(
+        self,
+        state: AntigravityStreamState,
+        resume: ResumeToken | None,
+        text: str,
+        *,
+        answer: str,
+        usage: dict[str, Any] | None = None,
+    ) -> list[UntetherEvent]:
+        out = self._settle_open_actions(state, ok=False, message=state.kill_reason)
+        if state.kill_reason == "conversation_gone" and state.expected_resume:
+            state.conversation_missing = True
+            token: ResumeToken | None = ResumeToken(
+                engine=ENGINE, value=state.expected_resume
+            )
+            answer = ""
+        else:
+            token = self._resume_for_completed(state, resume)
+        out.append(
+            state.factory.completed_error(
+                error=text, answer=answer, resume=token, usage=usage
+            )
+        )
+        return out
+
     # -- decoding ------------------------------------------------------------
 
     def decode_jsonl(self, *, line: bytes) -> agy_schema.AntigravityEvent:
@@ -1350,11 +1604,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         conversation they didn't pick) and say so."""
         assert state.expected_resume is not None
         state.conversation_missing = True
-        logger.warning(
-            "antigravity.conversation.missing",
-            expected=state.expected_resume,
-            got=cid,
-        )
+        if state.kill_reason != "conversation_gone":
+            logger.warning(
+                "antigravity.conversation.missing",
+                expected=state.expected_resume,
+                got=cid,
+                detected_by="init",
+            )
         if state.agy_pid is not None:
             # agy answers SIGTERM with an "interrupted" result (rc 1).
             with contextlib.suppress(OSError):
@@ -1567,8 +1823,25 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             out.extend(self._adopt_session(state, res.conversation_id))
             if state.conversation_missing:
                 return out
+        state.result_seen = True
         status = res.status or ""
         error = _error_text(res.error)
+        failure = self._failure_text(state, error) if status != "SUCCESS" else None
+        if failure is None and state.kill_reason is not None:
+            failure = self._failure_text(state, None)
+        if failure is not None:
+            usage = self._usage(res, state)
+            self._log_timing(res, state)
+            out.extend(
+                self._failure_completed(
+                    state,
+                    resume,
+                    failure,
+                    answer=self._answer(state, res.response),
+                    usage=usage,
+                )
+            )
+            return out
         interrupted = status == "ERROR" and error == "interrupted"
         denial_rows, denied_labels = self._resolve_denials(
             state, res.denied_actions or []
@@ -1611,10 +1884,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             )
         else:
+            if status == "ERROR" and error:
+                message = _trim_error_lines(error)
+            else:
+                # CANCELED / INVALID / WAITING / RUNNING / anything newer
+                # (upstream #902: long turns sometimes end CANCELED).
+                message = f"antigravity ended with status {status or 'unknown'}"
+                if error:
+                    message += f": {_trim_error_lines(error)}"
             out.append(
                 factory.completed_error(
-                    error=error
-                    or f"antigravity ended with status {status or 'unknown'}",
+                    error=message,
                     answer=answer,
                     resume=resume_token,
                     usage=usage,
@@ -1811,7 +2091,32 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[UntetherEvent]:
         # Only reached without a ``result`` (the base returns early after a
         # CompletedEvent), so stderr never overrides a real result (R1).
-        parts = [f"antigravity failed ({_rc_label(rc)})."]
+        failure = self._failure_text(state, None)
+        if failure is not None:
+            logger.info("antigravity.process.killed", rc=rc, reason=state.kill_reason)
+            return self._failure_completed(
+                state, resume, failure, answer=self._answer(state, None)
+            )
+        if state.agy_error is not None or rc == 3:
+            parts = [self._agy_error_summary(state, rc)]
+        else:
+            parts = [f"antigravity failed ({_rc_label(rc)})."]
+        if rc == 2:
+            argv_error = next(
+                (
+                    line.strip()
+                    for line in stderr_lines or ()
+                    if "flags provided but not defined" in line
+                ),
+                None,
+            )
+            if argv_error is not None:
+                logger.error(
+                    "antigravity.argv.rejected",
+                    rc=rc,
+                    first_error_line=_sanitise_stderr(argv_error[:_STDERR_LOG_CHARS]),
+                    args=state.argv,
+                )
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
@@ -1831,6 +2136,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         return out
 
+    @staticmethod
+    def _agy_error_summary(state: AntigravityStreamState, rc: int) -> str:
+        info = state.agy_error or {}
+        status = _log_scalar(info.get("status")) or _log_scalar(info.get("code"))
+        retryable = info.get("retryable")
+        retry = str(retryable).lower() if isinstance(retryable, bool) else "unknown"
+        return (
+            f"agy reported a model/agent error ({status or 'unknown'}, "
+            f"retryable={retry}; {_rc_label(rc)})."
+        )
+
     def stream_end_events(
         self,
         *,
@@ -1839,6 +2155,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AntigravityStreamState,
         stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
+        failure = self._failure_text(state, None)
+        if failure is not None:
+            return self._failure_completed(
+                state, resume, failure, answer=self._answer(state, None)
+            )
         out = self._settle_open_actions(state, ok=False, message="no result")
         session = found_session or self._resume_for_completed(state, resume)
         if state.session_id is None:

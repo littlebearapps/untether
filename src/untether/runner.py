@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import re
 import signal
@@ -29,9 +30,20 @@ from .model import (
 )
 from .utils.paths import get_run_base_dir
 from .utils.streams import drain_stderr, iter_bytes_lines
-from .utils.subprocess import manage_subprocess
+from .utils.subprocess import (
+    kill_process,
+    manage_subprocess,
+    terminate_process,
+    wait_for_process,
+)
 
 _lock_logger = get_logger(__name__)
+
+# #558 phase 03: the task group of the stderr drain task that is running an
+# opt-in ``on_stderr_line`` hook. ``kill_with_escalation`` schedules its
+# SIGKILL follow-up there, so the escalation never blocks draining. Set only
+# inside that task (a hook runs synchronously in it).
+_STDERR_HOOK_TG: ContextVar[Any] = ContextVar("untether_stderr_hook_tg", default=None)
 
 
 class ResumeTokenMixin:
@@ -1332,6 +1344,72 @@ class JsonlSubprocessRunner(BaseRunner):
     # other runner keeps ``None`` unless it opts in here.
     _EXPOSE_ENGINE_STATE: bool = False
 
+    # #558 phase 03 (REVIEW M2): SIGKILL follows SIGTERM after this long when
+    # ``kill_with_escalation`` finds the process still alive.
+    _KILL_ESCALATION_S: float = 3.0
+
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        """Opt-in per-line stderr hook (#558 phase 03, REVIEW M2).
+
+        Called from the stderr drain task for every line. It must be cheap
+        and non-blocking, and may call ``self.kill_with_escalation(proc)``.
+        The base runner passes a hook to ``drain_stderr`` only when a
+        subclass overrides this method, so every other engine drains
+        stderr exactly as before.
+        """
+        return
+
+    def kill_with_escalation(self, proc: Any) -> None:
+        """SIGTERM *proc* (its process group) now; SIGKILL it after
+        ``_KILL_ESCALATION_S`` if it is still alive.
+
+        Synchronous. The SIGKILL follow-up runs on the stderr hook's task
+        group; called anywhere else, only the SIGTERM is sent (the
+        ``manage_subprocess`` teardown still escalates on exit).
+        """
+        if getattr(proc, "returncode", None) is not None:
+            return
+        terminate_process(proc)
+        tg = _STDERR_HOOK_TG.get()
+        if tg is not None:
+            tg.start_soon(self._escalate_kill, proc)
+
+    async def _escalate_kill(self, proc: Any) -> None:
+        timed_out = await wait_for_process(proc, timeout=self._KILL_ESCALATION_S)
+        if not timed_out or proc.returncode is not None:
+            return
+        self.get_logger().warning(
+            "subprocess.kill_escalated",
+            pid=proc.pid,
+            after_s=self._KILL_ESCALATION_S,
+        )
+        kill_process(proc)
+
+    async def _drain_stderr_hooked(
+        self,
+        proc: Any,
+        state: Any,
+        logger: Any,
+        tag: str,
+        capture: list[str],
+    ) -> None:
+        """``drain_stderr`` with this runner's ``on_stderr_line`` hook, in a
+        task group of its own that also hosts any kill escalation."""
+        async with anyio.create_task_group() as hook_tg:
+            token = _STDERR_HOOK_TG.set(hook_tg)
+            try:
+                await drain_stderr(
+                    proc.stderr,
+                    logger,
+                    tag,
+                    capture,
+                    on_line=functools.partial(
+                        self.on_stderr_line, state=state, proc=proc
+                    ),
+                )
+            finally:
+                _STDERR_HOOK_TG.reset(token)
+
     def on_spawned(self, *, state: Any, pid: int) -> None:
         """Hook called once the subprocess exists (after ``publish_run_stream``).
 
@@ -1737,13 +1815,29 @@ class JsonlSubprocessRunner(BaseRunner):
             reader_done = anyio.Event()
 
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    drain_stderr,
-                    proc.stderr,
-                    logger,
-                    tag,
-                    stream.stderr_capture,
-                )
+                # #558 phase 03: only a runner that overrides
+                # ``on_stderr_line`` gets a hooked drain; every other engine
+                # keeps the exact four-argument call.
+                if (
+                    type(self).on_stderr_line
+                    is not JsonlSubprocessRunner.on_stderr_line
+                ):
+                    tg.start_soon(
+                        self._drain_stderr_hooked,
+                        proc,
+                        state,
+                        logger,
+                        tag,
+                        stream.stderr_capture,
+                    )
+                else:
+                    tg.start_soon(
+                        drain_stderr,
+                        proc.stderr,
+                        logger,
+                        tag,
+                        stream.stderr_capture,
+                    )
                 tg.start_soon(
                     self._subprocess_watchdog,
                     proc,

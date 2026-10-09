@@ -540,3 +540,54 @@ class TestReasoningEffortHints:
         assert get_error_hint(with_search.error) == self.specific
         assert "unsupported_value" in json.dumps(without_search.error)
         assert get_error_hint(without_search.error) == self.broad
+
+
+class TestAntigravityHints:
+    """#558 phase 03: Antigravity (agy) error texts get their own hints."""
+
+    def test_not_signed_in(self):
+        from untether.runners.antigravity import AUTH_TEXT
+
+        hint = get_error_hint(AUTH_TEXT) or ""
+        assert "GEMINI_API_KEY" in hint and "AGY_ADC_AUTH" in hint
+
+    def test_go_flag_rejection_matches_clap_hint(self):
+        hint = get_error_hint("flags provided but not defined: -print-timeout")
+        assert hint == _hint_for("' for '--")
+
+    def test_invalid_model(self):
+        hint = get_error_hint(
+            'invalid model selection (--model "nope" --effort ""): model nope is '
+            "not recognized as a known model or custom model in settings"
+        )
+        assert hint is not None and "agy models" in hint
+
+    def test_effort_errors_outrank_invalid_model(self):
+        effort_hint = _hint_for('" effort (available:')
+        for msg in (
+            'invalid model selection (--model "gemini-3.1-pro" --effort "max"): '
+            'gemini-3.1-pro has no "max" effort (available: low, high)',
+            'invalid model selection (--model "" --effort "bogus"): invalid '
+            '--effort "bogus" (valid: low, medium, high, xhigh, max)',
+            'invalid model selection (--model "a-high" --effort "max"): --model '
+            "a-high conflicts with --effort=max",
+        ):
+            assert get_error_hint(msg) == effort_hint, msg
+
+    def test_status_canceled(self):
+        hint = get_error_hint("antigravity ended with status CANCELED: x") or ""
+        assert "antigravity-cli#902" in hint
+
+    def test_quota_and_credits_point_at_usage(self):
+        from untether.runners.antigravity import CREDITS_TEXT, QUOTA_TEXT
+
+        for text in (QUOTA_TEXT, CREDITS_TEXT):
+            assert "/usage" in (get_error_hint(text) or ""), text
+
+    def test_gemini_hints_unchanged(self):
+        assert _hint_for("ineligibletiererror").startswith(
+            "Gemini CLI is end-of-life for individual and free Google accounts"
+        )
+        assert get_error_hint("gemini result status: weird") == (
+            "Gemini returned an unexpected result. Try a fresh session with /new."
+        )

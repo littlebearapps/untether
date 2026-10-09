@@ -65,6 +65,13 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         " version may not match the installed CLI. Update Untether, and report"
         " it if the problem persists.",
     ),
+    # Antigravity CLI (agy, Go flag package): an unknown flag exits rc 2.
+    (
+        "flags provided but not defined",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
     (
         "no longer supported",
         "The engine CLI reports that this client version or account tier is no"
@@ -72,6 +79,12 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         " via /config.",
     ),
     # --- Authentication ---
+    (
+        "isn't signed in on this host",
+        'On a server, the Gemini API key route (`modelProvider: "gemini"` +'
+        " `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids"
+        " interactive sign-in.",
+    ),
     (
         "access token could not be refreshed",
         "Run `codex login --device-auth` to re-authenticate.",
@@ -143,6 +156,15 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Google API quota exhausted. Check your quota at"
         " console.cloud.google.com, then resume.",
     ),
+    # Antigravity's own quota / credits errors (#558).
+    (
+        "quota is used up",
+        "/usage shows each quota group and when it resets.",
+    ),
+    (
+        "ai credits balance is too low",
+        "/usage shows each quota group and when it resets.",
+    ),
     # --- API overload / server errors ---
     (
         "overloaded_error",
@@ -184,6 +206,31 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Rate limited \N{EM DASH} the engine will retry automatically.",
     ),
     # --- Model errors ---
+    # Antigravity (#558): every agy model/effort rejection starts "invalid
+    # model selection", so the effort shapes must outrank it.
+    (
+        '" effort (available:',
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "invalid --effort",
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "conflicts with --effort",
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "invalid model selection",
+        "Antigravity doesn't recognise that model. Run `agy models` on the host"
+        " for the list, or `/model clear`.",
+    ),
     (
         "model_not_found",
         "Model not available. Check the model name in /config"
@@ -370,6 +417,11 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     (
         "amp login",
         "Run `amp login` to authenticate with Sourcegraph.",
+    ),
+    (
+        "antigravity ended with status canceled",
+        "Antigravity cancelled the turn upstream (long turns sometimes do,"
+        " antigravity-cli#902). Retry, or split the task into smaller steps.",
     ),
     (
         "gemini result status:",

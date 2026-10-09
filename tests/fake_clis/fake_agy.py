@@ -31,6 +31,8 @@ Environment (the ``UNTETHER_`` prefix survives the runner's env filter):
 - ``UNTETHER_FAKE_AGY_RECORD``     write ``{"argv","stdin","env_keys","cwd"}`` here
 - ``UNTETHER_FAKE_AGY_TIME_SCALE`` multiply ``sleep:`` lines (default 0)
 - ``UNTETHER_FAKE_AGY_HOLD_S``     sleep after the last line before exiting
+- ``UNTETHER_FAKE_AGY_IGNORE_TERM`` ignore SIGTERM (a Go binary blocked on an
+  OAuth paste may; phase 03's kill escalation must SIGKILL it)
 
 SIGTERM / SIGINT behave like agy 1.3.1: an ``ERROR`` ``"interrupted"`` result
 on stdout, ``error: interrupted`` on stderr, rc 1.
@@ -137,7 +139,10 @@ def main(argv: list[str]) -> int:
         return 0
     if "-p" in argv:
         return _slash(argv)
-    signal.signal(signal.SIGTERM, _interrupted)
+    if os.environ.get("UNTETHER_FAKE_AGY_IGNORE_TERM"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    else:
+        signal.signal(signal.SIGTERM, _interrupted)
     signal.signal(signal.SIGINT, _interrupted)
     stdin = sys.stdin.read()
     _record(argv, stdin)
