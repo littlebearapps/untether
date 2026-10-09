@@ -1,6 +1,6 @@
 # Integration Testing
 
-Structured, repeatable integration test process run against `@untether_dev_bot` before every release. Tests exercise all 4 supported engines across the full feature surface.
+Structured, repeatable integration test process run against `@untether_dev_bot` before every release. Tests exercise all 5 supported engines across the full feature surface.
 
 > **Deprecated engines are out of the matrix.** `gemini` and `amp` are deprecated
 > and no longer supported (they may be removed in a future release). Both are currently non-functional on the
@@ -16,9 +16,11 @@ Structured, repeatable integration test process run against `@untether_dev_bot` 
 | | Details |
 |---|---|
 | **Dev service** | `untether-dev.service` → `@untether_dev_bot` |
-| **Test projects** | `test-projects/test-{claude,codex,opencode,pi}/` (plus deprecated `test-{gemini,amp}/`) |
-| **Test chats** | 6 dedicated Telegram groups in the `ut-dev` folder, one per engine (2 deprecated) |
-| **Engines** | Claude, Codex, OpenCode, Pi (⚠️ Gemini, Amp — deprecated, opt-in only) |
+| **Test projects** | `test-projects/test-{claude,codex,opencode,pi,antigravity}/` (plus deprecated `test-{gemini,amp}/`) |
+| **Test chats** | 7 dedicated Telegram groups in the `ut-dev` folder, one per engine (2 deprecated) |
+| **Engines** | Claude, Codex, OpenCode, Pi, Antigravity (⚠️ Gemini, Amp — deprecated, opt-in only) |
+
+Antigravity (`agy`, [#558](https://github.com/littlebearapps/untether/issues/558)) joins the matrix with 0.36.1rc1. Of the five fleet hosts only lba-1 has `agy` installed, and its test project and test chat are set up as part of the 0.36.1rc1 run (see "0.36.1rc1 scenarios / results" at the end of this file).
 
 ## Automated Testing via Telegram MCP
 
@@ -32,7 +34,7 @@ All integration test tiers are fully automated by Claude Code using Telegram MCP
 
 ### Test chats
 
-Tests are sent to the 4 supported engine chats (plus 2 opt-in chats for the deprecated, unsupported Gemini and AMP engines) via `@untether_dev_bot` (bot ID `8678330610`).
+Tests are sent to the 5 supported engine chats (plus 2 opt-in chats for the deprecated, unsupported Gemini and AMP engines) via `@untether_dev_bot` (bot ID `8678330610`).
 For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID with the bot — **not** the bot ID itself. The bot ID identifies the bot account; private chats are addressed by the user's chat ID. Resolve via the Telegram MCP `resolve_username` or by inspecting incoming `update.message.from.id` in the dev logs.
 
 | Chat | Chat ID | Bot API chat_id |
@@ -41,6 +43,7 @@ For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID
 | Codex CLI | `4929463515` | `-4929463515` |
 | OpenCode | `5200822877` | `-5200822877` |
 | Pi | `5156256333` | `-5156256333` |
+| Antigravity CLI | TBD (group not created yet) | TBD (group not created yet) |
 | Gemini CLI | `5207762142` | `-5207762142` |
 | AMP CLI | `5230875989` | `-5230875989` |
 
@@ -84,28 +87,36 @@ These tests were previously considered "manual" but can be automated via MCP and
 
 ## Engine Feature Matrix
 
-| Capability | Claude | Codex | OpenCode | Pi | Gemini ⚠️ | Amp ⚠️ |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Support status** | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
-| Interactive approval | Yes | - | - | - | Flag only | - |
-| Plan mode | Yes | - | - | - | - | - |
-| Ask questions | Yes | - | - | - | - | - |
-| Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes |
-| Model override | Yes | Yes | Yes | Yes | Yes | Yes |
-| Reasoning levels | Yes | Yes | - | - | - | - |
-| API cost tracking | Yes | - | Yes | - | Yes | Yes |
-| Subscription usage | Yes | - | - | - | - | - |
-| Diff preview | Yes | - | - | - | - | - |
+| Capability | Claude | Codex | OpenCode | Pi | Antigravity | Gemini ⚠️ | Amp ⚠️ |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Support status** | Yes | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
+| Interactive approval | Yes | - | - | - | - (pre-run mode; gate in rc3) | Flag only | - |
+| Plan mode | Yes | - | - | - | rc3 (gate) | - | - |
+| Ask questions | Yes | - | - | - | - | - | - |
+| Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Model override | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Reasoning levels | Yes | Yes | - | - | Yes (per model) | - | - |
+| API cost tracking | Yes | - | Yes | - | - (tokens only) | Yes | Yes |
+| Subscription usage | Yes | - | - | - | Quota groups (`/usage`) | - | - |
+| Diff preview | Yes | - | - | - | - | - | - |
+
+Antigravity in 0.36.1rc1 has two permission modes, picked before the run: **Workspace** (the default: file edits, no
+shell) and **Full access** (explicit). **Ask me** and **Plan first** are shown as `· soon` and are refused before
+anything spawns until the approval gate ships in rc3. A blocked tool shows as a `⚠️ Blocked: …` progress row.
 
 ---
 
 ## Test Tiers
 
-### Tier 1: Universal Tests (all 4 supported engines)
+### Tier 1: Universal Tests (all 5 supported engines)
 
 Run in every supported engine's dedicated chat. Validates the core event pipeline.
 The deprecated `gemini` and `amp` chats are excluded — they cannot pass U1 and are
 not required at any tier.
+
+In the Antigravity chat the default **Workspace** mode is enough for every row: U4's rename and U7's read of a
+missing file need no shell. U6 needs a prompt that runs long without a shell command (for example a 1500-word essay),
+because Workspace blocks shell loops.
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
@@ -116,7 +127,7 @@ not required at any tier.
 | U5 | **Model override** | `/model set <name>` (the `/config` → Engine & model page points there; it has no picker), then send a prompt; `/model clear` afterwards | Footer shows overridden model name | #77 (AMP model flag), build_args correctness |
 | U6 | **Cancel mid-run** | Send a long prompt (not a bare `sleep N` — Claude Code may block a standalone foreground sleep (`Blocked: standalone sleep 90` seen on rc18); use e.g. a `for i in $(seq 1 90); do sleep 1; done` loop), then `/cancel` before it finishes | Run stops, completion message appears, no orphan process | Graceful cancellation, process cleanup |
 | U7 | **Error handling** | Send a prompt that will fail (e.g. `read /nonexistent/file/path`) | Error renders in Telegram, no crash, session ends cleanly | Stderr sanitisation (#85), error formatting |
-| U8 | **/usage** | `/usage` after a completed run | Claude: subscription info; Codex/OpenCode/Pi: last-session token totals (`📊 <engine> · last session in this chat`, #417) | #89 (429 handling), cost tracking |
+| U8 | **/usage** | `/usage` after a completed run | Claude: subscription info; Codex/OpenCode/Pi: last-session token totals (`📊 <engine> · last session in this chat`, #417); Antigravity: per-group quota + last-session tokens | #89 (429 handling), cost tracking |
 | U9 | **/export** | `/export` after a completed run | A reply with an attached `untether-export-<engine>-<sid>-<stamp>.md` document captioned `📄 Session export — <engine> · N events · Markdown` / `Session: <id>` (`/export json` attaches a `.json`). The file has the session header, `**Usage:** … · last run` (`· thread total` for Codex), every action and the full, untruncated answers; it doesn't include the user prompts. Log: `command.attachment_sent command=export` | #63 (missing usage in export), #418 (file attachment) |
 | U10 | **/browse** | `/browse` | File browser appears with inline keyboard, can navigate directories | Browse command, path traversal safety |
 
@@ -161,7 +172,7 @@ Tests for per-chat and per-topic settings that affect run behaviour. Use forum t
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
 | O1 | **Engine override** | `/agent set opencode`, then send a plain prompt (no directive) | OpenCode runs, footer shows OpenCode model | Per-chat engine default, override hierarchy |
-| O2 | **Reasoning level** | `/config` → Reasoning → pick a level (e.g. Low), then send a prompt (Claude and Codex only) | Reasoning model used, footer reflects it | Reasoning flag in build_args |
+| O2 | **Reasoning level** | `/config` → Reasoning → pick a level (e.g. Low), then send a prompt (Claude and Codex; Antigravity's page is **Effort**, with the levels its current model accepts) | Reasoning model used, footer reflects it | Reasoning flag in build_args |
 | O3 | **Listen mode** | `/listen mentions` in group, send plain text, then `@bot do something` | Plain text ignored, @mention triggers run | Listen mode filtering (renamed from `/trigger` in v0.35.3 [#297](https://github.com/littlebearapps/untether/issues/297); deprecated alias still works) |
 | O4 | **Ask mode toggle** | `/config` → ❓ Ask mode → off, send prompt that would trigger AskUserQuestion | Question auto-denied instead of shown | Ask mode auto-deny path |
 | O5 | **Context set** | `/ctx set test-claude main`, send prompt | Run uses test-claude project on main branch | Context resolution, project switching |
@@ -426,7 +437,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
    Claude Code sends each command to an engine chat via MCP, verifies responses
 
 5. Run Tier 1 (universal) — 30 minutes
-   Claude Code runs U1-U10 in the 4 supported engine chats via MCP
+   Claude Code runs U1-U10 in the 5 supported engine chats via MCP
    (skip the deprecated gemini/amp chats — they cannot pass U1)
    Focus on: progress rendering, final message, model footer, resume
 
@@ -472,7 +483,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Release type | Required tiers | Focus areas | Time |
 |-------------|---------------|-------------|------|
 | **Patch** (bug fix) | Tier 7 + Tier 1 (affected engine + Claude) + relevant Tier 6 | The specific bug area + regression check | ~30 min |
-| **Minor** (new feature) | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 + Tier 3 (relevant) + Tier 4 (relevant) + Tier 6 + upgrade path | New feature + all engine regression + config compat | ~75 min |
+| **Minor** (new feature) | Tier 7 + Tier 1 (all 5 supported engines) + Tier 2 + Tier 3 (relevant) + Tier 4 (relevant) + Tier 6 + upgrade path | New feature + all engine regression + config compat | ~75 min |
 | **Major** (breaking) | All tiers, all supported engines, full upgrade path | Everything — no shortcuts | ~120 min |
 
 ### What to focus on per change type
@@ -480,6 +491,9 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Changed area | Must-run tests |
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all supported engines), U6, U7 |
+| Antigravity engine (`runners/antigravity.py`, `schemas/antigravity.py`, `utils/antigravity_quota.py`) | Tier 1 (Antigravity) + AG-* |
+| Base runner / liveness watchdog / stall monitor (`runner.py` `JsonlSubprocessRunner`, `_subprocess_watchdog`; `runner_bridge.py` expected-wait branches) | Tier 1 U1 + U6 on every supported engine |
+| Preamble (`runner_bridge.py` `_apply_preamble`) | U1 + U2 + U6 on Codex, OpenCode and Pi; C1, C2, C4 on Claude (`preamble.applied preamble_len=3338` unchanged for Claude) |
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1, R20-922a…c (usage-credits cap latch) |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7, R20-919a…d + R20-920a…e (approval reminders) |
@@ -605,7 +619,7 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 - **Model override (U5)** availability depends on which models each engine supports. `/model` shows the current model; `/config` → Engine & model has no picker (an interactive picker is [#512](https://github.com/littlebearapps/untether/issues/512), planned for v0.36.2), so pass a model id to `/model set`.
 - **Long response (U3)** behaviour varies by engine — some produce shorter responses. The key check is message splitting, not word count.
 - **Concurrent sessions (S2)** may hit rate limits on some engine APIs. Space the prompts a few seconds apart.
-- **Reasoning levels (O2)** only available for Claude and Codex.
+- **Reasoning levels (O2)** only available for Claude, Codex and Antigravity (per model: `/config` → Effort).
 
 ### Config and state
 
@@ -1500,3 +1514,102 @@ Run on the dev bot by three parallel QA agents (one per set of chats) plus the c
 | Logs | PASS | No Traceback. Every warning and error is explained (placeholder startup `chat_id = 123`, a deliberate bad Pi model, the triggers `restart_required` notice, webhook port already bound by another instance, one benign `stdout_held_after_exit`); 11 FDs, 0 zombies |
 
 **Filed:** [#996](https://github.com/littlebearapps/untether/issues/996) (`/ctx` vs a live session), [#997](https://github.com/littlebearapps/untether/issues/997) (`/browse` ignores `/ctx`), [#998](https://github.com/littlebearapps/untether/issues/998) (`/model clear` keeps the resumed session's model).
+
+## 0.36.1rc1 scenarios / results (Antigravity, #558)
+
+0.36.1rc1 ("Safe core") adds the Antigravity CLI (`agy`) engine ([#558](https://github.com/littlebearapps/untether/issues/558)), with [#975](https://github.com/littlebearapps/untether/issues/975) (a result held for a background task is an expected wait), [#976](https://github.com/littlebearapps/untether/issues/976) (`agy_version` in the logs) and [#993](https://github.com/littlebearapps/untether/issues/993) (the About versions line). The same change touches the base runner, the liveness watchdog, the stall monitor, cron options and the preamble, so the run is the **Minor** tiers plus the AG rows below, with a regression pass on Claude, Codex, OpenCode and Pi.
+
+> **Status: NOT RUN.** This section was written with the code, before any live run. No row below has been run, no attestation marker exists for 0.36.1rc1 and nothing has been rolled out. Fill in the results table as rows are run; a row that is skipped is recorded as NOT RUN with a reason, never as a pass.
+
+- **When and what:** not run yet. Dev bot only (`@untether_dev_bot`), on the merged `dev` head for 0.36.1rc1.
+- **CLIs:** `agy` 1.3.2 on lba-1 when this was written. `agy` updates itself, so record `agy --version` at the start and end of the run; if it changes mid-run, re-run the drift suite and note both versions.
+- **Marker:** `~/.untether-dev/integration-test-pass-0.36.1rc1.json`, not written.
+
+### Before the run
+
+- `test-projects/test-antigravity/` exists as a git repo with an `AGENTS.md` and a `hello.py`, and **no** `.agents/` folder.
+- The "ut-dev · Antigravity" group exists (Nathan + the dev bot), its ID is filled in under "Test chats" above, and the dev config binds it to the test project with `antigravity` as the engine. The dev bot has been restarted on the code under test from a normal shell, never from inside an Untether session.
+- The drift suite is green the same day: `UNTETHER_AGY_DRIFT=1 uv run pytest tests/test_antigravity_cli_schema_drift.py`.
+- `/usage` in the Antigravity chat first: pause if the 5-hour Gemini group is past 50 %. The run is about 40 short `agy` turns; record the auth route (API key or OAuth) and the turn count in the attestation notes.
+- AG-12c and AG-12d fire test crons, so `[triggers] enabled` must be on in the dev config (turning it on needs a restart).
+- Log tail in a second shell: `journalctl --user -u untether-dev -f -o cat | grep -E "antigravity|runner\.(start|completed)|usage\.token_delta|preamble|subprocess\.(background_wait|liveness_stall)|ERROR|WARNING"`.
+
+### Required for 0.36.1rc1
+
+1. **Tier 7** Q1–Q16 in the Antigravity chat and one other chat. Q8 stays `/planmode show` in the Claude chat; also send `/planmode show` in the Antigravity chat, which answers with the `Use /config → Permission mode instead.` hint (AG-8).
+2. **Tier 1** U1–U10 in the Antigravity chat (Workspace mode; see the note under Tier 1) and in the Claude chat. **U1 + U2 + U6 on Codex, OpenCode and Pi**: the preamble is now built from each engine's capabilities, so the text those three receive has changed, and the base runner and stall monitor changed under all of them.
+3. **Tier 2** C1, C2 and C4 in the Claude chat. Claude's preamble must be byte-identical: `preamble.applied preamble_len=3338 source=default` on a Claude run, AskUserQuestion buttons still appear (C4) and ExitPlanMode still renders.
+4. **Tier 3** T1 (voice, in the Antigravity chat), T6, and T9 as `/antigravity list the files here` sent in the Claude chat.
+5. **Tier 4** O1 (`/agent set antigravity` in the Codex chat, a prompt, then `/agent clear`) and O2 (Effort, in the Antigravity chat; see AG-12).
+6. **Tier 6** S2 (Antigravity and Claude at the same time), **S2b** (two Antigravity chats or topics bound to the same project, run in parallel: both finish, neither reads the other's conversation), S6, and S8 (a 5,000-character prompt in the Antigravity chat, which goes to `agy` on stdin).
+7. **AG-1 … AG-12 and AG-12a–d** below. AG-12a-long is opt-in.
+8. **Upgrade path:** start the dev bot with a config that has no `[antigravity]` table: no config error and the chat preferences load. A scratch chat whose stored Antigravity mode is hand-edited to `accept-edits` runs as Workspace, with one `antigravity.permission_mode.unknown` WARNING.
+9. **Log sweep:** `journalctl --user -u untether-dev --since "<start>" -o cat | grep -E "WARNING|ERROR"` shows only the lines the rows provoke on purpose: `antigravity.permission_mode.gate_missing` (AG-5), `antigravity.auth.*` (AG-9), `antigravity.conversation.*` (AG-12b), `antigravity.unattended_full_downgraded` (AG-12c), `antigravity.workspace_config_present` and `antigravity.workspace_config.unattended_refused` (AG-12d) and the upgrade-path WARNING. No `subprocess.liveness_stall`, no `subprocess.stderr.hook_error`, no zombies, and `pgrep -fa "agy --input-format"` is empty after the run.
+10. `git -C test-projects/test-antigravity status --porcelain` shows only the agent's own edits. Untether writes no `.agents/` folder; AG-12d's hand-written file is deleted after that row.
+
+### AG scenarios
+
+Run in the Antigravity chat unless a row says otherwise, and send exactly the quoted text. `<uuid>` is the conversation ID from the resume line.
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-1 plain run | `/config` → Permission mode → Clear override. `create a file called hello.txt containing hello world` | The final confirms and the file exists; the footer ends `· workspace`; the resume line is `` `agy --conversation <uuid>` `` | `runner.start engine=antigravity` with args starting `--input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands`, **no prompt text and no `--dangerously-skip-permissions`**; `antigravity.version.probe`; `antigravity.session.started … agy_version=<the installed version>`; `antigravity.run.timing resumed=False`; `runner.completed engine=antigravity ok=True`; `session.summary … last_event_type=result` |
+| AG-2 resume | Reply to AG-1's final: `append a second line saying bye to hello.txt` | Same ID in the resume line; the file has 2 lines; the footer tokens are this run's only (no `· thread total`) | Args have `--conversation <same uuid>`; `antigravity.run.timing resumed=True`; `usage.token_delta engine=antigravity source=ledger runs=2` |
+| AG-3 tool denial | ``Run the shell command `git status` and summarise it.`` | A `⚠️ Blocked: shell command (…)` progress row; the final is **not empty** and says Antigravity was blocked from using a shell command, with `/config → Permission mode → Full access` as the way to allow it | `antigravity.denied_actions actions=['command'] … permission_mode=workspace` |
+| AG-4 Full access | `/config` → Permission mode → **Full access**; ``Run `python3 hello.py` and tell me the output.``; then Clear override and send `Reply with exactly: OK` | The output is shown; the footer ends `· full access`; after Clear override it ends `· workspace` again | `config.antigravity_permission_mode.set`; args contain `--dangerously-skip-permissions` for the first run only; no `antigravity.denied_actions` |
+| AG-5 later modes refused | `/config` → Permission mode → tap **Ask me · soon**, then **Plan first · soon**. Then set `[antigravity] permission_mode = "plan"` in the dev config (hot-reload), send `Reply with exactly: OK`, and remove the key | Two toasts and nothing stored. The run is refused before anything spawns: `Plan first needs Untether's approval gate, which arrives in a later 0.36.1 release — switch to Workspace or Full access in /config.` | `antigravity.permission_mode.gate_missing mode=plan`; **no** `runner.start` |
+| AG-6 no project | In a chat with no project bound (the DM): `/agent set antigravity`, `Reply with exactly: OK`, then `/agent clear` | A refusal that names `/ctx set`; no run | `antigravity.no_project_dir`; no `runner.start` |
+| AG-7 `/usage` | After AG-1: `/usage`, `/usage` again within 60 s, `/usage` a third time after 60 s, then `/usage debug` | Quota per group (5-hour and Weekly windows with reset times) plus the last session's tokens; the debug output is escaped and names the `agy` version | `antigravity.quota.fetched` on the first and third calls only (60 s cache); never during a run |
+| AG-8 `/config` labels, Effort, About | `/config` home; the Permission mode page; the Effort page; `/config` → About; `/planmode show`. Then `/model set <a Gemini Pro model id>`, open the Effort page again, and `/model clear` | Home: `Agent controls (Antigravity CLI)` and `Permission mode: workspace · edits files, no shell — not a sandbox`. The page says "Not a sandbox" and never "read-only". Effort offers Low / Medium / High for the default model, and Low / High only for a Pro model. About's versions line includes `antigravity <version>`. `/planmode show`: `Plan mode is only available for Claude Code. … Use /config → Permission mode instead.` | `config.*` lines only; no WARNING |
+| AG-9 signed out | Write a wrapper script under `test-projects/.ag-unauth/` that runs the real `agy` with `HOME` pointed at a new empty folder under `/tmp` (nothing under the real `~/.gemini` is touched). Set `[antigravity] cmd = "<that script>"`, send `Reply with exactly: OK`, then `/usage`, then remove `cmd` | An error final within about 10 s: `Antigravity CLI isn't signed in on this host…` with its hint; **no URL** in Telegram; `/usage` says it isn't signed in within 15 s | `antigravity.auth.required`, then either `antigravity.auth.killed elapsed_ms<5000` or `agy`'s own exit (1.3.2 exits by itself in about 6 s, so the kill is a safety net); `runner.completed ok=False`; no sign-in URL in any log line |
+| AG-10 cancel mid-run | `Write a detailed 1500-word essay about ocean tides, in plain prose.`, then `/cancel` at the first progress edit | A cancelled card, not an "interrupted" error; the next prompt works | The cancelled `runner.completed`; `subprocess.exit` for the `agy` pid; `pgrep -f "agy --input-format"` empty within 5 s |
+| AG-11 long-chat resume latency | Six replies in one conversation: `Reply with exactly: t1` … `t6` | Six short finals | `antigravity.run.timing` with `total_ms` and `cumulative_input_tokens` on each turn. Bar: turn 6's `total_ms` is at most twice turn 2's (or at most 15 s) and the tokens only grow. Put the numbers in the attestation notes |
+| AG-12 `/continue` + effort | `/config` → Effort → High; then `/continue reply with the word continued`; then clear the Effort override | Runs on this project's latest conversation; the footer shows `· high · workspace` | Args contain `--effort high` and `--continue` (and no `--conversation`); `session_lock.acquired session_id=<a real uuid>` |
+| AG-12a background hold, short ([#975](https://github.com/littlebearapps/untether/issues/975)) | `/config` → Permission mode → Full access. ``Start `sleep 90; echo done > bg.txt` in the background, reply STARTED straight away, then tell me when bg.txt exists.`` Wait about 2 minutes, then Clear override | **One** final after about 90 s, carrying both replies; `bg.txt` exists; no stall warning and no cancel in the chat while it waits. If `agy` prints anything during the wait, the row is retitled `⏳ background: …` | **No** `subprocess.liveness_stall`, no `progress_edits.stall_detected`, no `progress_edits.stall_auto_cancel`; one `runner.completed ok=True`. `subprocess.background_wait` is **not** expected here (see the note below) |
+| AG-12a-long background hold, 10 minutes (opt-in) | As AG-12a with `sleep 700` in place of `sleep 90`. Wait about 12 minutes | One final after about 700 s; **no** stall warning at the 10-minute mark, where a plain running tool would get one | One `subprocess.background_wait … idle_seconds≥600 background=1`; no `subprocess.liveness_stall`; no `progress_edits.stall_detected`; one `runner.completed ok=True`. If `agy` printed during the wait, idle never reached 600 s: record the row as NOT EXERCISED |
+| AG-12b stale resume | Send a two-line message: `` `agy --conversation 00000000-1111-2222-3333-444444444444` `` on the first line and `Reply OK` on the second | `That Antigravity conversation no longer exists … send your message again to start a new one.` (with the saved-session-cleared notice when it was the chat's saved session); the next message starts a new conversation | `antigravity.conversation.missing detected_by=stderr`; no `runner.started.error`. `detected_by=init` (the error arrives after `agy`'s turn ends) is still a pass: note it |
+| AG-12c unattended Full access | With the chat on Full access, add a dev cron for the Antigravity project **without** `permission_mode`, prompt ``Run `ls` and list the files``, due in the next minute. Then add `permission_mode = "full"` to the cron and let it fire again. Remove the cron and Clear override | First run: a `⚠️ Blocked` row and advice that names the cron (``set `permission_mode = "full"` on this cron``). Second run: the listing | First: `antigravity.unattended_full_downgraded trigger=cron:<id>` and args without `--dangerously-skip-permissions`. Second: args with it |
+| AG-12d planted config | By hand, add `test-projects/test-antigravity/.agents/hooks.json` with one named group holding a `Stop` hook that runs `true`. Send `Reply with exactly: OK` twice. Edit the hook command to `true # v2` and fire a 1-minute test cron for the project. Send `Reply with exactly: OK` in the chat, fire the cron again, then delete the file | First message: `⚠️ This project has agy hooks, plugins or MCP servers that Untether doesn't manage (.agents/hooks.json)…`. Second: no such row. First cron: refused with `agy's workspace config changed since someone last ran Antigravity in this chat's project…`. The chat message shows the ⚠️ row again, and the second cron then runs | `antigravity.workspace_config_present digest=…` twice, with two different digests; `antigravity.workspace_config.unattended_refused` for the first cron, with no `runner.start` for it |
+
+**AG-12a and the real thresholds.** The plan's AG-12a waited 90 s and expected both `subprocess.background_wait` in the log and a `⏳ Antigravity is waiting for 1 background task…` line in the chat. Neither can appear that early:
+
+- The liveness watchdog logs `subprocess.background_wait` only after 600 s with no output from `agy` (`_LIVENESS_TIMEOUT_SECONDS`), and at most once every 1800 s after that.
+- The stall monitor's chat line uses the 1800 s expected-wait threshold, checked once a minute, while Untether treats the hold as expected only for 1860 s (`agy`'s own 30-minute cap plus 60 s). That leaves a window of at most 60 s, so the chat line can't be relied on in a live run. It is covered by unit tests only (`test_stall_monitor_background_waiting_is_expected_wait`, `test_background_held_result_is_expected_wait`, `test_background_wait_expires_after_cap`).
+
+So the row is split. AG-12a (required) proves the user-visible half in 2 minutes: one final with both replies and nothing stall-like. AG-12a-long (opt-in, about 12 minutes of mostly idle time) is the only live check of the `subprocess.background_wait` path.
+
+**Unit-test only (can't be triggered on demand):** the chat line above; an unattended run held because the project's `agy` config could not be checked (a scan timeout or failure: `antigravity.workspace_config.unattended_refused reason=…`); the version guard's refusal of an `agy` older than 1.3.1; and the quota, credits and account-block error cards.
+
+### Results
+
+| ID | Engine / chat | Result | Note |
+|---|---|---|---|
+| Q1–Q16 | Antigravity + one other | NOT RUN | |
+| U1–U10 | Antigravity | NOT RUN | |
+| U1–U10 | Claude | NOT RUN | |
+| U1, U2, U6 | Codex | NOT RUN | |
+| U1, U2, U6 | OpenCode | NOT RUN | |
+| U1, U2, U6 | Pi | NOT RUN | |
+| C1, C2, C4 (+ `preamble_len=3338`) | Claude | NOT RUN | |
+| T1, T6, T9 (`/antigravity`) | Antigravity / Claude | NOT RUN | |
+| O1, O2 | Codex / Antigravity | NOT RUN | |
+| S2, S2b, S6, S8 | Antigravity (+ Claude) | NOT RUN | |
+| AG-1 | Antigravity | NOT RUN | |
+| AG-2 | Antigravity | NOT RUN | |
+| AG-3 | Antigravity | NOT RUN | |
+| AG-4 | Antigravity | NOT RUN | |
+| AG-5 | Antigravity | NOT RUN | |
+| AG-6 | DM | NOT RUN | |
+| AG-7 | Antigravity | NOT RUN | |
+| AG-8 | Antigravity | NOT RUN | |
+| AG-9 | Antigravity | NOT RUN | |
+| AG-10 | Antigravity | NOT RUN | |
+| AG-11 | Antigravity | NOT RUN | |
+| AG-12 | Antigravity | NOT RUN | |
+| AG-12a | Antigravity | NOT RUN | |
+| AG-12a-long (opt-in) | Antigravity | NOT RUN | |
+| AG-12b | Antigravity | NOT RUN | |
+| AG-12c | Antigravity (cron) | NOT RUN | |
+| AG-12d | Antigravity (chat + cron) | NOT RUN | |
+| Upgrade path | dev | NOT RUN | |
+| Logs | dev | NOT RUN | |
