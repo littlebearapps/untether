@@ -467,3 +467,112 @@ async def test_mode_rejected_and_print_timeout_warnings_logged(
     names = {e["event"]: e for e in logs}
     assert names["antigravity.mode.rejected"]["log_level"] == "warning"
     assert names["antigravity.print_timeout"]["log_level"] == "warning"
+
+
+# ── URL redaction (follow-up to 8ac5db5c) ───────────────────────────────────
+# The shared ``_sanitise_stderr`` redacts paths before URLs, so its generic
+# path pattern eats ``//host/path`` and a URL's query string survives
+# (``https:[path]?code=…``). Everything agy surfaces redacts whole URLs first.
+
+_LEAKY_URL = (
+    "https://accounts.google.com/o/oauth2/auth?client_id=x&code=SECRETCODE"
+    "&state=SECRETSTATE"
+)
+
+
+def _assert_no_url_secrets(value: object) -> None:
+    text = repr(value)
+    for needle in ("SECRETCODE", "SECRETSTATE", "client_id", "accounts.google"):
+        assert needle not in text, text
+
+
+@pytest.mark.anyio
+async def test_stderr_excerpt_in_error_card_redacts_whole_urls(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sign-in URL on stderr that no kill class matched (reworded agy)
+    must not reach Telegram through the rc != 0 excerpt."""
+    _script(tmp_path, monkeypatch, f"err:Open this link: {_LEAKY_URL}\nrc:1\n")
+    with structlog.testing.capture_logs() as logs:
+        events = await _run()
+    done = _done(events)
+    assert (done.error or "").startswith("antigravity failed (rc=1).")
+    assert "Open this link: [url]" in (done.error or "")
+    _assert_no_url_secrets(done.error)
+    for entry in logs:
+        if entry.get("log_level") != "debug":
+            _assert_no_url_secrets(entry)
+
+
+@pytest.mark.anyio
+async def test_stream_end_excerpt_redacts_whole_urls(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _script(tmp_path, monkeypatch, f"out:{_INIT}\nerr:see {_LEAKY_URL}\nrc:0\n")
+    done = _done(await _run())
+    assert "without a result event" in (done.error or "")
+    assert "see [url]" in (done.error or "")
+    _assert_no_url_secrets(done.error)
+
+
+@pytest.mark.anyio
+async def test_argv_rejected_log_redacts_whole_urls(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _script(
+        tmp_path,
+        monkeypatch,
+        f"err:flags provided but not defined: -x {_LEAKY_URL}\nrc:2\n",
+    )
+    with structlog.testing.capture_logs() as logs:
+        done = _done(await _run())
+    (rejected,) = [e for e in logs if e["event"] == "antigravity.argv.rejected"]
+    assert rejected["first_error_line"].endswith("-x [url]")
+    _assert_no_url_secrets(rejected)
+    _assert_no_url_secrets(done.error)
+
+
+def test_stderr_notice_and_agy_error_logs_redact_whole_urls() -> None:
+    runner = AntigravityRunner(antigravity_cmd="agy")
+    state = runner.new_state("prompt", None)
+
+    class _Proc:
+        pid = 1
+        returncode = None
+
+    with structlog.testing.capture_logs() as logs:
+        runner.on_stderr_line(
+            f'warning: unrecognized --mode value "{_LEAKY_URL}"',
+            state=state,
+            proc=_Proc(),
+        )
+        runner.on_stderr_line(
+            'AGY_ERROR: {"status": "' + _LEAKY_URL[:70] + '", "code": "X"}',
+            state=state,
+            proc=_Proc(),
+        )
+    assert {e["event"] for e in logs} == {
+        "antigravity.mode.rejected",
+        "antigravity.agy_error",
+    }
+    for entry in logs:
+        _assert_no_url_secrets(entry)
+    summary = runner._agy_error_summary(state, 3)
+    assert "([url]," in summary
+    _assert_no_url_secrets(summary)
+
+
+def test_result_error_text_drops_url_query_strings() -> None:
+    """agy's own ``result.error`` reaches Telegram: a link stays readable,
+    its query string / fragment (codes, state tokens) doesn't."""
+    for status, prefix in (
+        ("ERROR", ""),
+        ("CANCELED", "antigravity ended with status CANCELED: "),
+    ):
+        events, _ = _replay(
+            [_INIT, _result(status, f"sign in at {_LEAKY_URL}#frag=SECRETCODE now")]
+        )
+        error = _done(events).error or ""
+        assert error == (
+            f"{prefix}sign in at https://accounts.google.com/o/oauth2/auth now"
+        )

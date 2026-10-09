@@ -65,7 +65,6 @@ from ..runner import (
     _rc_label,
     _sanitise_stderr,
     _session_label,
-    _stderr_excerpt,
 )
 from ..schemas import antigravity as agy_schema
 from ..utils import antigravity_quota, antigravity_scan
@@ -274,9 +273,36 @@ def stderr_kill_kind(line: str) -> str | None:
     return None
 
 
+# The shared ``_sanitise_stderr`` redacts paths before URLs: its generic path
+# pattern eats ``//host/path`` and leaves ``https:[path]?code=…`` — the query
+# string (OAuth code, state token, PKCE challenge) survives. Everything agy
+# surfaces therefore redacts whole URLs first.
+_URL_ANY_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_URL_QUERY_RE = re.compile(r"(https?://[^\s\"'<>?#]+)[?#][^\s\"'<>]*", re.IGNORECASE)
+_STDERR_EXCERPT_CHARS = 300
+
+
+def _redact_stderr(text: str) -> str:
+    """Whole URLs (query string included) first, then absolute paths."""
+    return _sanitise_stderr(_URL_ANY_RE.sub("[url]", text))
+
+
+def _agy_stderr_excerpt(lines: list[str] | None) -> str | None:
+    """The first ~300 chars of captured stderr for an error card. Redacted
+    before truncation, so a cut never leaves half a URL behind."""
+    if not lines:
+        return None
+    text = _redact_stderr("\n".join(line[:_STDERR_HOOK_MAX_CHARS] for line in lines))
+    if len(text) > _STDERR_EXCERPT_CHARS:
+        text = text[:_STDERR_EXCERPT_CHARS] + "…"
+    return text
+
+
 def _trim_error_lines(text: str, limit: int = _ERROR_TEXT_LINES) -> str:
     """agy's own error text, first *limit* lines + "…" (model/effort errors
-    list every valid option)."""
+    list every valid option). A link stays readable; its query string and
+    fragment (sign-in codes, state tokens) are dropped."""
+    text = _URL_QUERY_RE.sub(r"\1", text)
     lines = text.splitlines()
     if len(lines) <= limit:
         return text
@@ -288,7 +314,7 @@ def _log_scalar(value: Any) -> Any:
     if isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
-        return _sanitise_stderr(value[:80])
+        return _redact_stderr(value)[:80]
     return None
 
 
@@ -1286,7 +1312,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if event in state.stderr_flags:
             return
         state.stderr_flags.add(event)
-        logger.warning(event, line=_sanitise_stderr(text[:_STDERR_LOG_CHARS]))
+        logger.warning(event, line=_redact_stderr(text)[:_STDERR_LOG_CHARS])
 
     def _note_agy_error(self, state: AntigravityStreamState, line: str) -> None:
         """``AGY_ERROR: {json}`` (rc 3, turn-level failure). Key names are
@@ -2114,13 +2140,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 logger.error(
                     "antigravity.argv.rejected",
                     rc=rc,
-                    first_error_line=_sanitise_stderr(argv_error[:_STDERR_LOG_CHARS]),
+                    first_error_line=_redact_stderr(
+                        argv_error[:_STDERR_HOOK_MAX_CHARS]
+                    )[:_STDERR_LOG_CHARS],
                     args=state.argv,
                 )
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
-        excerpt = _stderr_excerpt(stderr_lines)
+        excerpt = _agy_stderr_excerpt(stderr_lines)
         if excerpt:
             parts.append(excerpt)
         message = "\n".join(parts)
@@ -2172,7 +2200,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         label = _session_label(found_session, resume)
         if label:
             parts.append(f"session: {label}")
-        excerpt = _stderr_excerpt(stderr_lines)
+        excerpt = _agy_stderr_excerpt(stderr_lines)
         if excerpt:
             parts.append(excerpt)
         out.append(
