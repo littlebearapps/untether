@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from ..logging import get_logger
+from . import antigravity_argv
 from .subprocess import manage_subprocess
 
 if TYPE_CHECKING:
@@ -137,16 +138,24 @@ async def run_agy_slash(
     runner: AntigravityRunner,
     command: str,
     *,
-    extra_args: tuple[str, ...] = (),
+    flags: tuple[tuple[str, str], ...] = (),
     timeout_s: float = 15.0,
     cwd: Path | None = None,
 ) -> dict[str, Any]:
     """Run ``agy -p <command> --output-format stream-json``; return its data.
 
+    *command* is one slash word and *flags* are ``(flag, value)`` pairs;
+    both go through ``utils/antigravity_argv.py`` (validated, emitted as
+    ``--flag=value``), so no caller can hand agy a free-form argument.
     Never passes ``--conversation`` (account-level commands only). Raises
-    ``AgySlashError`` (``prespawn_blocked`` / ``timeout`` / ``spawn`` /
-    ``unparseable``) or ``AntigravityNotSignedIn``.
+    ``AgySlashError`` (``invalid_argument`` / ``prespawn_blocked`` /
+    ``timeout`` / ``spawn`` / ``unparseable``) or ``AntigravityNotSignedIn``.
     """
+    try:
+        command = antigravity_argv.check_slash_command(command)
+        joined = [antigravity_argv.agy_flag(flag, value) for flag, value in flags]
+    except antigravity_argv.AgyArgvError as exc:
+        raise AgySlashError("invalid_argument", f"{exc.field}:{exc.reason}") from None
     blocked = runner._check_prespawn_ram_guard(None)
     if blocked is not None:
         raise AgySlashError("prespawn_blocked")
@@ -160,7 +169,7 @@ async def run_agy_slash(
         command,
         "--output-format",
         "stream-json",
-        *extra_args,
+        *joined,
     ]
     env = runner.env(state=None)
     if env is not None:
@@ -669,7 +678,7 @@ async def _run_model_efforts(
     return await run_agy_slash(
         runner,
         "/effort",
-        extra_args=("--model", model) if model else (),
+        flags=(("--model", model),) if model else (),
         timeout_s=EFFORT_TIMEOUT_S,
     )
 
@@ -696,6 +705,18 @@ async def agy_model_efforts(
         hit = peek_model_efforts(cmd, model)
         if hit is not None:
             return hit
+        if model is not None:
+            try:
+                antigravity_argv.check_model(model)
+            except antigravity_argv.AgyArgvError as exc:
+                # Never spawned, never cached, never echoed.
+                logger.warning(
+                    "antigravity.effort.probe_failed",
+                    model=antigravity_argv.safe_preview(model),
+                    kind="invalid_model",
+                    reason=exc.reason,
+                )
+                return None
         label = (model or _DEFAULT_MODEL_KEY)[:_MODEL_LOG_CHARS]
         levels: tuple[str, ...] | None = None
         kind = "unparseable"

@@ -129,6 +129,19 @@ NO_PROJECT_TEXT = (
     "can edit files there."
 )
 NO_PROJECT_BLOCK = "no_project"
+INVALID_ARGUMENT_BLOCK = "invalid_argument"
+# A model or conversation id that agy could read as a flag
+# (``utils/antigravity_argv.py``): refused before anything spawns.
+INVALID_MODEL_TEXT = (
+    "🛑 That model id isn't valid for Antigravity, so nothing was started. "
+    "A model id uses letters, digits and . _ - : / only, with no spaces and "
+    "no leading dash (for example gemini-3.8-flash). Set one with /model set, "
+    "or go back to the default with /model clear."
+)
+INVALID_CONVERSATION_TEXT = (
+    "🛑 That Antigravity conversation id isn't valid, so nothing was started. "
+    "Send /new to start a fresh conversation."
+)
 UNSUPPORTED_VERSION_BLOCK = "unsupported_version"
 GATE_MISSING_BLOCK = "gate_missing"
 CONFIG_CHANGED_BLOCK = "config_changed"
@@ -862,6 +875,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if refusal is not None:
             yield refusal
             return
+        argv_block = self._invalid_argument_refusal(resume)
+        if argv_block is not None:
+            yield argv_block
+            return
         gate_block = self._gate_missing_refusal(resume)
         if gate_block is not None:
             yield gate_block
@@ -926,6 +943,48 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             resume=resume,
             usage={PRESPAWN_BLOCKED_KEY: NO_PROJECT_BLOCK},
         )
+
+    def _invalid_argument_refusal(
+        self, resume: ResumeToken | None
+    ) -> UntetherEvent | None:
+        """Refuse a model or conversation id agy could parse as a flag
+        (``--model --dangerously-skip-permissions``). ``build_args`` would
+        raise on the same value; this turns it into one plain card and a log
+        line that never echoes the raw value."""
+        from ..utils import antigravity_argv
+
+        checks: list[tuple[str, Any, Any, str]] = []
+        model = self._model()
+        if model is not None and model != "":
+            checks.append(
+                ("model", model, antigravity_argv.check_model, INVALID_MODEL_TEXT)
+            )
+        if resume is not None and not resume.is_continue:
+            checks.append(
+                (
+                    "conversation",
+                    resume.value,
+                    antigravity_argv.check_conversation,
+                    INVALID_CONVERSATION_TEXT,
+                )
+            )
+        for field_name, value, check, text in checks:
+            try:
+                check(value)
+            except antigravity_argv.AgyArgvError as exc:
+                logger.warning(
+                    "antigravity.argv.invalid_value",
+                    field=field_name,
+                    reason=exc.reason,
+                    preview=antigravity_argv.safe_preview(value),
+                )
+                # Never hand a bad id back as the run's resume token.
+                return EventFactory(ENGINE).completed_error(
+                    error=text,
+                    resume=None,
+                    usage={PRESPAWN_BLOCKED_KEY: INVALID_ARGUMENT_BLOCK},
+                )
+        return None
 
     # -- permission modes ---------------------------------------------------
 
@@ -1201,6 +1260,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # SUCCESS with a partial answer, so never rely on it (REVIEW m2).
         # `--disable-slash-commands` makes a `/`-leading prompt a normal turn
         # instead of an rc 2 exit (P22, D30).
+        # Every value goes through ``agy_flag``: validated, and joined as
+        # ``--flag=value`` so agy can't read it as another flag. It raises
+        # ``AgyArgvError`` on a bad value; ``run_impl`` refused that run
+        # before getting here.
+        from ..utils.antigravity_argv import agy_flag
+
         args = [
             "--input-format",
             "stream-json",
@@ -1215,13 +1280,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if resume.is_continue:
                 args.append("--continue")
             else:
-                args.extend(["--conversation", resume.value])
+                args.append(agy_flag("--conversation", resume.value))
         model = self._model()
         if model:
-            args.extend(["--model", model])
+            args.append(agy_flag("--model", model))
         effort = self._effort_arg(model, state)
         if effort:
-            args.extend(["--effort", effort])
+            args.append(agy_flag("--effort", effort))
         # Phase 02 (D21): the bypass flag only for an explicit Full access.
         # Ask me / Plan first never get here in rc1 (refused before spawn);
         # anything else fails closed to Workspace (no flag).
@@ -2422,6 +2487,22 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         raise ConfigError(
             f"Invalid `antigravity.model` in {config_path}; expected a string."
         )
+    if model is not None:
+        from ..utils import antigravity_argv
+
+        try:
+            antigravity_argv.check_model(model)
+        except antigravity_argv.AgyArgvError as exc:
+            logger.warning(
+                "antigravity.config.invalid",
+                error=f"model is not a valid model id ({exc.reason})",
+                config_path=str(config_path),
+            )
+            raise ConfigError(
+                f"Invalid `antigravity.model` in {config_path}; expected a model "
+                "id made of letters, digits and . _ - : / with no spaces and no "
+                "leading dash (for example gemini-3.8-flash)."
+            ) from None
     raw_cmd = config.get("cmd")
     if raw_cmd is not None and not isinstance(raw_cmd, str):
         logger.warning(

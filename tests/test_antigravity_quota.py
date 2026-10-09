@@ -388,14 +388,16 @@ async def test_model_efforts_probe_runs_effort_slash_with_model(
     assert levels == ("low", "high")
     argv = json.loads(usage_env.read_text())["argv"]
     assert argv[:2] == ["-p", "/effort"]
-    assert argv[-2:] == ["--model", "gemini-3.1-pro"]
+    assert argv[-1] == "--model=gemini-3.1-pro"
     (probe,) = [e for e in logs if e["event"] == "antigravity.effort.probe"]
     assert probe["model"] == "gemini-3.1-pro"
     assert probe["available"] == ["low", "high"]
     # Default model: no --model at all.
     usage_env.unlink()
     assert await quota.agy_model_efforts(runner, None) == ("low", "high")
-    assert "--model" not in json.loads(usage_env.read_text())["argv"]
+    assert not any(
+        a.startswith("--model") for a in json.loads(usage_env.read_text())["argv"]
+    )
 
 
 @pytest.mark.anyio

@@ -138,7 +138,8 @@ def _untether_flags() -> set[str]:
                 ResumeToken(engine="antigravity", value="", is_continue=True),
             ):
                 args = runner.build_args("p", resume, state=None)
-                flags.update(a for a in args if a.startswith("--"))
+                # Values are joined (``--model=x``): compare the flag name.
+                flags.update(a.partition("=")[0] for a in args if a.startswith("--"))
     return flags
 
 
@@ -254,6 +255,45 @@ def test_default_model_efforts(
         assert isinstance(available, list) and available
         assert {"low", "high"} <= set(available), available
         assert data.get("current") in available
+
+
+@gated
+def test_joined_flag_values_are_never_parsed_as_flags(
+    signed_in: subprocess.CompletedProcess, tmp_path: Path
+) -> None:
+    """Pins what ``utils/antigravity_argv.py`` relies on (agy 1.3.2): a
+    dash-leading token after ``--model`` is parsed as a flag
+    (``--model --version`` prints the version), while the joined
+    ``--flag=value`` form is always a value. ``--conversation=`` rests on
+    the same parser. If the joined form ever stops being a value, the
+    validator is the only defence left — fix the runner before shipping."""
+    joined = _run_agy(
+        ["-p", "/effort", "--output-format", "stream-json", "--model=--version"],
+        tmp_path,
+    )
+    assert joined.returncode == 1, joined.stdout[:300]
+    assert "invalid model selection" in joined.stderr, joined.stderr[:300]
+    assert '"--version"' in joined.stderr  # read as the model id
+    assert not re.fullmatch(r"\d+\.\d+(\.\d+)?", joined.stdout.strip())
+
+    ok = _run_agy(
+        ["-p", "/effort", "--output-format", "stream-json", "--effort=high"],
+        tmp_path,
+    )
+    assert "flags provided but not defined" not in ok.stderr, ok.stderr[:300]
+
+    conversation = _run_agy(
+        [
+            "-p",
+            "/effort",
+            "--output-format",
+            "stream-json",
+            "--conversation=--version",
+        ],
+        tmp_path,
+    )
+    assert not re.fullmatch(r"\d+\.\d+(\.\d+)?", conversation.stdout.strip())
+    assert "flags provided but not defined" not in conversation.stderr
 
 
 @gated

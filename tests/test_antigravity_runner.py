@@ -171,26 +171,27 @@ def test_build_args_bypasses_only_for_full() -> None:
 
 def test_build_args_resume_uses_conversation() -> None:
     args = _args(ResumeToken(engine=ENGINE, value="conv-1234"))
-    idx = args.index("--conversation")
-    assert args[idx + 1] == "conv-1234"
+    assert "--conversation=conv-1234" in args
+    assert "--conversation" not in args  # never the two-token form
     assert "--continue" not in args
 
 
 def test_build_args_continue_checked_before_value() -> None:
     args = _args(ResumeToken(engine=ENGINE, value="", is_continue=True))
     assert "--continue" in args
-    assert "--conversation" not in args
+    assert not any(a.startswith("--conversation") for a in args)
     assert "" not in args
 
 
 def test_build_args_model_from_run_options_overrides_config() -> None:
-    assert "--model" not in _args()
+    assert not any(a.startswith("--model") for a in _args())
     args = _args(model="gemini-3.8-flash")
-    assert args[args.index("--model") + 1] == "gemini-3.8-flash"
+    assert "--model=gemini-3.8-flash" in args
     args = _args(
         options=EngineRunOptions(model="gemini-3.1-pro"), model="gemini-3.8-flash"
     )
-    assert args[args.index("--model") + 1] == "gemini-3.1-pro"
+    assert "--model=gemini-3.1-pro" in args
+    assert "--model=gemini-3.8-flash" not in args
 
 
 def test_build_args_stores_argv_on_state() -> None:
@@ -881,7 +882,9 @@ def test_tos_notice_logged_once(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _effort_of(args: list[str]) -> str | None:
-    return args[args.index("--effort") + 1] if "--effort" in args else None
+    found = [a.partition("=")[2] for a in args if a.startswith("--effort=")]
+    assert len(found) <= 1 and "--effort" not in args
+    return found[0] if found else None
 
 
 def _built(
@@ -929,7 +932,6 @@ def test_build_args_effort_only_allowed_levels(
     args, state, _ = _built(EngineRunOptions(reasoning=level))
     assert _effort_of(args) == expected
     assert state.effort == expected
-    assert args.count("--effort") == (1 if expected else 0)
     assert "--dangerously-skip-permissions" not in args
 
 
@@ -937,7 +939,7 @@ def test_build_args_effort_goes_before_the_bypass_flag_and_into_state_argv() -> 
     args, state, _ = _built(
         EngineRunOptions(reasoning="high", permission_mode="full", model="m")
     )
-    assert args[-5:] == ["--model", "m", "--effort", "high", agy.BYPASS_FLAG]
+    assert args[-3:] == ["--model=m", "--effort=high", agy.BYPASS_FLAG]
     assert state.argv == args
 
 
@@ -954,8 +956,8 @@ def test_build_args_effort_goes_before_the_bypass_flag_and_into_state_argv() -> 
 def test_build_args_no_effort_with_suffixed_model_id(model: str) -> None:
     with structlog.testing.capture_logs() as logs:
         args, state, _ = _built(EngineRunOptions(reasoning="low", model=model))
-    assert "--effort" not in args
-    assert args[args.index("--model") + 1] == model  # ids are passed as given
+    assert _effort_of(args) is None
+    assert f"--model={model}" in args  # ids are passed as given
     assert state.effort is None
     (note,) = [e for e in logs if e["event"] == "antigravity.effort.from_model_id"]
     assert note["model"] == model and note["effort"] == "low"
@@ -982,7 +984,7 @@ def test_build_args_drops_effort_known_unsupported_for_model() -> None:
             resume=None,
             found_session=None,
         )
-    assert "--effort" not in args
+    assert _effort_of(args) is None
     assert state.effort is None
     (dropped,) = [e for e in logs if e["event"] == "antigravity.effort.dropped"]
     assert dropped["model"] == "gemini-3.1-pro" and dropped["effort"] == "medium"
@@ -1002,11 +1004,11 @@ def test_build_args_drops_effort_known_unsupported_for_model() -> None:
 def test_build_args_drops_effort_for_fixed_effort_model_and_default_model() -> None:
     _seed_efforts("gpt-oss-120b", ())
     args, _, _ = _built(EngineRunOptions(reasoning="medium", model="gpt-oss-120b"))
-    assert "--effort" not in args
+    assert _effort_of(args) is None
     # The default model has its own cache slot.
     _seed_efforts(None, ("low", "high"))
     args, state, _ = _built(EngineRunOptions(reasoning="medium"))
-    assert "--effort" not in args
+    assert _effort_of(args) is None
     runner = _runner()
     with apply_run_options(EngineRunOptions(reasoning="medium")):
         state = runner.new_state("p", None)
@@ -1047,7 +1049,7 @@ def test_build_args_effort_never_spawns_a_probe(
 
 
 def test_model_id_is_bounded_in_the_effort_row() -> None:
-    model = "<b>evil</b>" + "x" * 500
+    model = "m" + "x" * 127
     _seed_efforts(model, ("low",))
     options = EngineRunOptions(reasoning="high", model=model)
     runner = _runner()

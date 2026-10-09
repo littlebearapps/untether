@@ -955,7 +955,7 @@ async def test_run_agy_slash_temp_cwd_devnull_and_parse(
     assert data["config"]["toolPermission"] == "request-review"
     rec = json.loads(record.read_text())
     assert rec["argv"][:4] == ["-p", "/config", "--output-format", "stream-json"]
-    assert "--conversation" not in rec["argv"]
+    assert not any(a.startswith("--conversation") for a in rec["argv"])
     assert rec["stdin"] == ""
     assert Path(rec["cwd"]).name.startswith("untether-agy-")
     assert not Path(rec["cwd"]).exists()  # temp dir removed

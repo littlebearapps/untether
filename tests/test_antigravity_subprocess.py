@@ -112,7 +112,7 @@ async def test_run_resume_end_to_end(
     assert events[0].resume == resume
     assert done.ok is True and done.answer == "RESUMED\n"
     argv = json.loads(record.read_text())["argv"]
-    assert argv[argv.index("--conversation") + 1] == resume.value
+    assert f"--conversation={resume.value}" in argv
 
 
 @pytest.mark.anyio
@@ -126,7 +126,8 @@ async def test_run_continue_end_to_end(
     assert events[0].resume.value == "5bcf649b-0dfc-44b4-b691-2f3314724abf"
     assert done.resume == events[0].resume
     argv = json.loads(record.read_text())["argv"]
-    assert "--continue" in argv and "--conversation" not in argv
+    assert "--continue" in argv
+    assert not any(a.startswith("--conversation") for a in argv)
 
 
 @pytest.mark.anyio
@@ -407,8 +408,8 @@ async def test_run_passes_effort_and_shows_it_in_meta(
     done = _assert_contract(events)
     assert done.ok is True
     argv = json.loads(record.read_text())["argv"]
-    assert argv[argv.index("--effort") + 1] == "high"
-    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash"
+    assert "--effort=high" in argv
+    assert "--model=gemini-3.8-flash" in argv
     # (the base runner appends ``pid``)
     assert list(events[0].meta)[:3] == ["model", "effort", "permissionMode"]
     assert events[0].meta["effort"] == "high"
@@ -420,7 +421,8 @@ async def test_run_without_effort_has_no_effort_flag(
 ) -> None:
     _scenario(monkeypatch, "ok")
     events = await _run()
-    assert "--effort" not in json.loads(record.read_text())["argv"]
+    argv = json.loads(record.read_text())["argv"]
+    assert not any(a.startswith("--effort") for a in argv)
     assert "effort" not in events[0].meta
 
 
