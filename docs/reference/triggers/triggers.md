@@ -193,8 +193,13 @@ non-empty value parses; if the cron resolves to Claude (via its `project`'s
 startup and every config reload log WARNING `trigger.cron.permission_mode_invalid`
 instead of disabling every trigger ([#751](https://github.com/littlebearapps/untether/issues/751)).
 
+**Antigravity.** An Antigravity cron's value is validated too: `workspace`, `full`,
+`ask` or `plan` (`ask` and `plan` are refused at run time until a later 0.36.1
+release). A cron gets Full access only from its own `permission_mode = "full"`;
+webhook runs never do.
+
 **Other engines.** The value is still handed to whichever engine runs the cron,
-but only Claude validates it. Codex honours `safe` (read-only sandbox) and treats
+but only Claude and Antigravity validate it. Codex honours `safe` (read-only sandbox) and treats
 `auto` as full auto (any other value logs `codex.permission_mode.unknown` and
 runs full auto); the deprecated Gemini runner passes it through as
 `--approval-mode`; OpenCode, Pi and AMP ignore it. Webhooks have no

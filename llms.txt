@@ -1,6 +1,6 @@
 # Untether
 
-> Telegram bridge for AI coding agents. Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere. Works with Claude Code, Codex, OpenCode and Pi (Gemini CLI and Amp still load but are deprecated and no longer supported).
+> Telegram bridge for AI coding agents. Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere. Works with Claude Code, Codex, OpenCode, Pi and Antigravity CLI (Gemini CLI and Amp still load but are deprecated and no longer supported).
 
 Website: [untether.cc](https://untether.cc) · User guides: [help centre](https://littlebearapps.com/help/untether/) · Source and docs below: [GitHub](https://github.com/littlebearapps/untether)
 
@@ -10,7 +10,7 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 - [First run](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/first-run.md): Send your first task, watch progress stream, continue conversations
 - [Interactive control](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/interactive-control.md): Approve, deny and plan Claude Code actions with Telegram buttons
 - [Projects and branches](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/projects-and-branches.md): Register repos, target them from chat, run on feature branches
-- [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md): Switch between Claude Code, Codex, OpenCode, and Pi
+- [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md): Switch between Claude Code, Codex, OpenCode, Pi and Antigravity CLI
 - [Conversation modes](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/conversation-modes.md): Assistant, workspace, and handoff modes
 
 ## How-to guides
@@ -76,6 +76,9 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 - [Pi runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/runner.md): Multi-provider auth, model and provider selection
 - [Pi stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/stream-json-cheatsheet.md): JSONL event shapes for Pi
 - [Pi event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/untether-events.md): Pi JSONL to Untether event translation
+- [Antigravity CLI runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/antigravity/runner.md): Google terms note, sign-in routes, permission modes, errors, quota and effort
+- [Antigravity stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/antigravity/stream-json-cheatsheet.md): JSONL event shapes for Antigravity CLI (agy)
+- [Antigravity event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/antigravity/untether-events.md): Antigravity JSONL to Untether event translation
 - [Telegram transport](https://github.com/littlebearapps/untether/blob/master/docs/reference/transports/telegram.md): Bot API client, outbox, rate limiting, voice, forum topics
 
 ## Explanation

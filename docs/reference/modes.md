@@ -113,7 +113,7 @@ There is no migration step — the new mode takes effect on restart.
 
 These work identically in all three modes:
 
-- All engine runners (Claude, Codex, OpenCode, Pi; plus the deprecated, unsupported Gemini and AMP)
+- All engine runners (Claude, Codex, OpenCode, Pi, Antigravity; plus the deprecated, unsupported Gemini and AMP)
 - All commands except `/topic` (workspace-only); `/ctx` binds the chat instead of a topic outside workspace mode
 - Permission control (approve/deny/discuss, plan mode) — Claude Code only
 - AskUserQuestion with option buttons — Claude Code only

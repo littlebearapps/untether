@@ -18,7 +18,7 @@ per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
 - **Approval reminders** — after 10 min (then every 30 min) a reminder names what is pending: an answer (AskUserQuestion), a plan approval, or a tool approval ([#919](https://github.com/littlebearapps/untether/issues/919)); one reminder at a time, removed once answered or at run end (`progress_edits.approval_reminder_sent` / `approval_reminder_retired`, [#920](https://github.com/littlebearapps/untether/issues/920)); genuine stall warnings show a plain `Last:` title (0.35.5rc20)
 - **Ephemeral message cleanup** — approval-related messages auto-delete when run finishes, incl. the pending-approval reminder, deleted once answered ([#920](https://github.com/littlebearapps/untether/issues/920))
 - **Bold formatting** — command responses use HTML bold for key values
-- **`/usage`** — Claude: subscription usage (5h/weekly quota); other engines: the chat's last-session token totals — session total, last run, run count (#417)
+- **`/usage`** — Claude: subscription usage (5h/weekly quota); Antigravity: agy's quota groups, on demand (#558, below); other engines: the chat's last-session token totals — session total, last run, run count (#417)
 - **`/export`** — attaches the session transcript as a `.md` / `.json` document with a summary caption; never truncated, 10 MB cap with an inline-preview fallback (#418)
 - **`/browse`** — navigate project files via inline keyboard buttons
 - **Cost tracking and budget** — per-run and daily cost limits with configurable alerts (`cost_tracker.py`, `runner_bridge.py`). Budget-independent per-run spend signal `cost.run_outlier` above `[cost_budget] warn_run_above_usd` (default $20, `0` disables) with an optional chat line (`notify_run_outlier`), logging the run's shape — turns, `usd_per_turn`, durations, token block (#702, #717); one-shot `config.cost_visibility_gap` WARNING when spend is neither displayed nor bounded (#658); cost and usage footer lines go on the last chunk of a split final (#770)
@@ -93,6 +93,17 @@ per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
 - **Per-turn error cost + usage-limit fold** ([#889](https://github.com/littlebearapps/untether/issues/889), [#890](https://github.com/littlebearapps/untether/issues/890), 0.35.5rc18) — a resumed run's or later live turn's error line shows that run's own cost/API time (`live turn N`) with the cumulative figure labelled `session cost:` (`runners/claude.py`); once a usage limit is hit, later background wake-ups hitting the same limit fold into the first error message as `+N more background wake-ups hit the same limit` instead of each pushing a message (`runner_bridge.py`; `consolidate_wake_turns = false` keeps one message per wake)
 - **`/continue` locks the real session** ([#817](https://github.com/littlebearapps/untether/issues/817)) — a `/continue` run is locked on the session id named by its first `StartedEvent` instead of a shared `<engine>:` key (`runner.py`)
 - **Codex warning rows** ([#987](https://github.com/littlebearapps/untether/issues/987), 0.36.0rc2) — non-fatal Codex warnings (e.g. an ignored config key, emitted twice by the CLI) render as one ⚠️ row rather than two ✗ failure rows (`runners/codex.py`)
+- **Antigravity CLI engine** ([#558](https://github.com/littlebearapps/untether/issues/558), 0.36.1; built on [#766](https://github.com/littlebearapps/untether/pull/766) by @manuelnaranjo) — `runners/antigravity.py` runs one `agy` process per message (agy ≥ 1.3.1, version guard fails open, `agy_version` logged, [#976](https://github.com/littlebearapps/untether/issues/976)): prompt on stdin as one stream-json line (never argv), `--disable-slash-commands`, `--print-timeout 0`, `--conversation` / `--continue`; refuses to run without a project. Engine id is `antigravity`, never `gemini`
+  - **Permission modes** — Workspace by default (no bypass flag, ever), Full access only when chosen (`/config`, `[antigravity] permission_mode`, a cron's own value); unattended runs never inherit it (`EngineRunOptions.trigger_permission_mode`); Ask me / Plan first refused before spawn until the approval gate ships; unknown values fail closed; Workspace refused when agy's `toolPermission` (`-p /config`, or the mode `init` reports) isn't `request-review` / `strict`. Labels and buttons in `telegram/commands/_antigravity_mode_text.py`; `/planmode` points at `/config`
+  - **Denial rows** — a soft-denied step is `DONE` with no output; `result.denied_actions` turns it into a `⚠️ Blocked: …` row plus a trigger-aware closing paragraph
+  - **Planted-config tripwire** — `utils/antigravity_scan.py` digests agy-executable config under `.agents/` (and stats `~/.gemini/config/`): first-sight ⚠️ row, unattended runs refused on change or when unchecked (`config_changed` / `config_unchecked`), post-run ⚠️ row incl. other engines' files; state in `antigravity_seen_config.json`. Limits are listed in the module docstring and the runner doc
+  - **stderr stop classes** — signed out, account verify / Terms block, quota, credits, unknown conversation: agy is stopped (SIGTERM, SIGKILL after 3 s) with one non-retryable message; base-runner hook `on_stderr_line` is opt-in, other engines unchanged. All surfaced agy text passes `utils/antigravity_redact.py`
+  - **Tokens and quota** — `antigravity` is a `thread_cumulative` token-ledger scope (per-run delta); `/usage` fetches agy's quota groups with a zero-token `agy -p /usage` on demand only (60 s cache, `/usage debug`), then the last-session token block (`utils/antigravity_quota.py`)
+  - **Per-model effort** — low/medium/high; `/config` → Effort probes `agy -p /effort` when the page opens (cached per binary and model), refused levels dropped with a ⚠️ row; footer shows model · effort · mode
+  - **Background wait** ([#975](https://github.com/littlebearapps/untether/issues/975)) — a background-held `result` is an expected wait (`subprocess.background_wait`, stall reason `background_waiting`, `⏳ Antigravity is waiting for N background task(s)`), captured child processes are swept at exit
+  - **One-time Google sign-in notice** per chat (`antigravity_notices.json`); not shown when agy reports the API-key route or `AGY_ADC_AUTH=true`
+- **Capability-driven preamble** ([#558](https://github.com/littlebearapps/untether/issues/558), 0.36.1) — `_apply_preamble(prompt, engine)`: only engines in `PLAN_EXIT_TOOL_ENGINES` get the ExitPlanMode block and only engines with question buttons the AskUserQuestion paragraph; the others are told to raise questions in their final reply. Claude's text is byte-identical; a custom `[preamble] text` is sent verbatim
+- **Versions line probes the real CLI** ([#993](https://github.com/littlebearapps/untether/issues/993), 0.36.1) — `/config` → About uses each backend's `cli_cmd` (`agy` for `antigravity`), keeping the engine id as the label
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -101,6 +112,13 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | File | Purpose |
 |------|---------|
 | `runners/claude.py` | Claude Code runner, interactive features |
+| `runners/antigravity.py` | Antigravity CLI (`agy`) runner: permission modes, denial rows, stderr stop classes, version guard, background wait (#558) |
+| `schemas/antigravity.py` | msgspec structs for agy's stream-json (`init`, `step_update`, `result`, `command_result`) |
+| `utils/antigravity_scan.py` | Planted-config tripwire: digest of agy-executable project config, or "not checked" |
+| `utils/antigravity_quota.py` | Zero-token agy slash probes: `/config` settings check, `/usage` quota (60 s cache), `/effort` per-model levels |
+| `utils/antigravity_redact.py` | Single redaction pass for all surfaced agy text (URLs, tokens, paths) |
+| `utils/antigravity_state.py` | Seen-config digests and shown-notice chats (`antigravity_seen_config.json`, `antigravity_notices.json`) |
+| `telegram/commands/_antigravity_mode_text.py` | Antigravity permission-mode labels, hints and `/config` buttons |
 | `runners/gemini.py` | Gemini CLI runner (⚠️ deprecated) |
 | `runners/amp.py` | AMP CLI runner (Sourcegraph) (⚠️ deprecated) |
 | `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
@@ -192,6 +210,9 @@ Detailed protocol specs and event cheatsheets for each integration:
 | AMP runner spec | `docs/reference/runners/amp/runner.md` | CLI invocation, stream-json, mode/model selection |
 | AMP stream-json | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
 | AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
+| Antigravity runner | `docs/reference/runners/antigravity/runner.md` | Google terms note, sign-in routes, invocation, permission modes, planted-config tripwire, errors, quota, effort, background wait |
+| Antigravity stream-json | `docs/reference/runners/antigravity/stream-json-cheatsheet.md` | agy 1.3.x event shapes with real examples (`init`, `step_update`, `result`, `command_result`) |
+| Antigravity event mapping | `docs/reference/runners/antigravity/untether-events.md` | agy JSONL → Untether event translation rules, pre-spawn refusals |
 | Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
 | Workflow modes | `docs/reference/modes.md` | Assistant, workspace, handoff — settings, commands, mode-agnostic features |
 
@@ -222,8 +243,8 @@ test — do NOT fix the runner. Security fixes still apply. Both are excluded fr
 integration-test tier. Full rule in `.claude/rules/runner-development.md` → "Deprecated
 engines — sweep exemption".
 
-Antigravity CLI (#558, ships in v0.36.1) is a **new engine**, not a `gemini` rename — it must not reuse
-the `gemini` engine id.
+Antigravity CLI (#558, supported from v0.36.1 — see the Features bullet above) is a **new engine**, not a
+`gemini` rename — it must not reuse the `gemini` engine id.
 
 ## CI Pipeline
 

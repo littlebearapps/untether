@@ -170,12 +170,23 @@ Toggle via `/config` → **Permission mode**:
 | **Plan first** | — | Coming in a later 0.36.1 release: writes a plan and waits for your approval before changing anything |
 | **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
 
-This is a pre-run policy: headless agy can't stop to ask. When it blocks a tool, the progress message shows a ⚠️ **Blocked** row and the final reply says how to allow it. To allow specific commands without Full access, add exact rules such as `command(git status)` to `permissions.allow` in agy's own settings file.
+This is a pre-run policy: headless agy can't stop to ask, so there are no Approve / Deny buttons for Antigravity yet. **Ask me** and **Plan first** will add them; until then `/config` shows both with "· soon", and a run set to either one (for example from `untether.toml`) is refused before it starts rather than run as something else. `/planmode` is a Claude command; in an Antigravity chat it points you to `/config` → **Permission mode**.
 
-You can also set a default with `permission_mode = "full"` (or `"workspace"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
+**When agy blocks a tool.** In Workspace, a shell command, web fetch or MCP call isn't run. The progress message shows a row such as `⚠️ Blocked: shell command (RunCommand) — npm test`, the turn stops there, and the final reply ends with how to allow it:
+
+!!! untether "Untether"
+    ⚠️ Antigravity was blocked from using a shell command — headless runs can't ask for approval, so it stopped there. To allow it: /config → Permission mode → Full access, or add an allow rule such as `command(git status)` to agy's settings file.
+
+**Allow single commands without Full access.** Add exact rules to `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
+
+**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
+
+**agy's own settings can override the mode.** If agy's settings file sets `toolPermission` to anything other than `request-review` or `strict` (for example `always-proceed`), agy would approve tools by itself, so Untether refuses to run Workspace and tells you to set it back or pick Full access.
 
 !!! warning "Workspace is not a sandbox"
-    Workspace only limits agy's own tool calls. agy hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers run their own commands in every mode, and a run can write those files for the next run to execute. Untether shows a ⚠️ row when a project carries agy config it doesn't manage or when a run changes it (or another engine's files such as `.claude/`, `.envrc` or `.github/workflows/`), and holds scheduled runs after such a change until someone sends a message in the chat.
+    Workspace only limits agy's own tool calls. agy hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers run their own commands in every mode, and a run can write those files for the next run to execute. Untether shows a ⚠️ row when a project carries agy config it doesn't manage, and when a run changes it or another engine's files (such as `.claude/`, `.envrc` or `.github/workflows/`). After agy's config changes, or when Untether can't check it, cron and webhook runs in that project are held until someone sends a message in the chat. This is a warning system with [known limits](../reference/runners/antigravity/runner.md#agy-hooks-plugins-and-mcp-servers), not isolation. Only run Antigravity in projects you trust.
+
+Before you use a Google account sign-in with Antigravity, read the [terms note](switch-engines.md#antigravity-cli).
 
 ### Gemini CLI — Approval mode
 

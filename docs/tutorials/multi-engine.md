@@ -1,6 +1,6 @@
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode and Pi with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode, Pi and Antigravity CLI with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 
@@ -14,10 +14,11 @@ Different engines have different strengths:
 | **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe = read-only sandbox), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
+| **Antigravity CLI** | Google's Gemini models (plus Claude and GPT models on some plans) | Effort levels per model, pre-run permission mode, quota groups in `/usage` |
 | **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
 | **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
-Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, arrives as its own engine in v0.36.1. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
+Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, is supported as its own `antigravity` engine from v0.36.1 — see [Switch engines](../how-to/switch-engines.md#antigravity-cli). See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md#engine-compatibility) for a full feature-by-feature breakdown.
 

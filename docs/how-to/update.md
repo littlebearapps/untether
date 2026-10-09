@@ -27,16 +27,24 @@ systemctl --user restart untether
 ```
 
 !!! note "Agent CLIs are separate"
-    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
+    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, and the deprecated Gemini CLI and Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
 
     ```sh
     npm update -g @anthropic-ai/claude-code
     npm update -g @openai/codex
     npm install -g opencode-ai@1   # OpenCode: stay on the 1.x CLI (2.x isn't supported yet)
     npm update -g @mariozechner/pi-coding-agent
+    agy update                         # Antigravity CLI (it also updates itself)
     npm update -g @google/gemini-cli   # deprecated, unsupported
     npm update -g @sourcegraph/amp     # deprecated, unsupported
     ```
+
+## Upgrading to v0.36.1
+
+Nothing to change in your config.
+
+- **New engine: Antigravity CLI.** Install `agy` (1.3.1 or newer), choose a sign-in route and select it with `/agent set antigravity`. Read the terms note in [Switch engines](switch-engines.md#antigravity-cli) before using a Google account sign-in. ([#558](https://github.com/littlebearapps/untether/issues/558))
+- **Codex, OpenCode and Pi get a shorter built-in preamble.** It no longer tells them to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; it asks them to raise questions in their final reply instead. Claude's preamble and any custom `[preamble] text` are unchanged. See [Agent preamble](preamble.md). ([#558](https://github.com/littlebearapps/untether/issues/558))
 
 ## Upgrading to v0.36.0
 
@@ -65,7 +73,7 @@ v0.36.0 is the release that was tested as 0.35.5rc1–rc20 and then 0.36.0rcN; i
 - **OpenCode 2.x is refused.** Untether supports the OpenCode 1.x CLI (npm `opencode-ai`). If `opencode --version` reports 2.x (npm `@opencode/cli`), the run isn't started and the reply tells you how to reinstall 1.x (`npm install -g opencode-ai@1`); the chat's saved session is kept. ([#970](https://github.com/littlebearapps/untether/issues/970))
 - **Codex no longer offers the `minimal` reasoning level.** A saved `minimal` is ignored with a one-line note and the run uses Codex's default. ([#416](https://github.com/littlebearapps/untether/issues/416))
 - **Voice transcription has a default vocabulary hint.** Unless you set `voice_transcription_prompt`, Untether now biases transcription towards engine and project names such as Claude, `CLAUDE.md` and Codex. Set it to `""` to send no hint. See [Voice notes](voice-notes.md#improve-recognition-of-names). ([#703](https://github.com/littlebearapps/untether/issues/703), [#789](https://github.com/littlebearapps/untether/issues/789))
-- **Gemini CLI and Amp are deprecated and no longer supported.** Both are still included, but they get no fixes, are excluded from testing, and may be removed in a future release. Antigravity CLI support is planned for v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)). See [Switch engines](switch-engines.md).
+- **Gemini CLI and Amp are deprecated and no longer supported.** Both are still included, but they get no fixes, are excluded from testing, and may be removed in a future release. Antigravity CLI is supported as its own `antigravity` engine from v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)). See [Switch engines](switch-engines.md#antigravity-cli).
 
 New in v0.36.0 and worth a look after upgrading: [steering a running Claude run](steer-follow-ups.md) with `/steer`, the [background-task status message and context-window percentage](verbose-progress.md) in Claude runs, approval [diff previews](interactive-approval.md#diff-previews) as a proper diff block, and a [per-cron model and effort](schedule-tasks.md#pick-a-model-per-cron) (`model` / `reasoning` on `[[triggers.crons]]`, [#743](https://github.com/littlebearapps/untether/issues/743)).
 

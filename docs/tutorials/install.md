@@ -75,6 +75,14 @@ npm install -g @mariozechner/pi-coding-agent
 
 Pi can authenticate via a provider login or use API billing. You can log in with Anthropic (Claude subscription), OpenAI (ChatGPT subscription), GitHub Copilot, Google Cloud Code Assist (Gemini CLI), or Antigravity (Gemini 3, Claude, GPT-OSS), or choose API billing instead.
 
+### Antigravity CLI
+
+```sh
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Antigravity CLI (`agy`, 1.3.1 or newer) is Google's successor to Gemini CLI. Untether recommends signing it in with a **Gemini API key** or a **Gemini Enterprise** sign-in: Google's terms don't allow third-party tools to use a Google account sign-in, and Google may suspend the account. Setup steps and the full note are in [Switch engines → Antigravity CLI](../how-to/switch-engines.md#antigravity-cli).
+
 ### Gemini CLI ⚠️ deprecated
 
 !!! warning "Deprecated — don't install for new setups"
@@ -89,8 +97,8 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 
     The `gemini` engine is still included but **deprecated and no longer
     supported**: no bug fixes, no testing, and it may be removed in a future
-    release. Antigravity CLI support is planned as a separate `antigravity` engine
-    in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)).
+    release. Antigravity CLI is supported as its own `antigravity` engine
+    from v0.36.1 — see [Switch engines](../how-to/switch-engines.md#antigravity-cli).
 
 ```sh
 npm install -g @google/gemini-cli
@@ -316,7 +324,7 @@ untether runs these engines on your computer. switch anytime with /agent.
    claude
 ```
 
-Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode or Pi. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 

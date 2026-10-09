@@ -80,6 +80,9 @@ npm install -g opencode-ai@1
 # Pi
 npm install -g @mariozechner/pi-coding-agent
 
+# Antigravity CLI (agy 1.3.1 or newer)
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+
 # Gemini CLI — DEPRECATED, see below
 npm install -g @google/gemini-cli
 
@@ -111,6 +114,7 @@ The version is checked again whenever the `opencode` binary changes, so the next
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
+- **Antigravity CLI:** see [Antigravity says it isn't signed in](#antigravity-says-it-isnt-signed-in) — a Gemini API key or Enterprise sign-in is recommended over a Google account sign-in
 - **Gemini CLI** (⚠️ deprecated): see below — individual Google accounts (free, Google AI Pro and Ultra) can no longer authenticate at all
 - **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
 
@@ -160,8 +164,8 @@ events and no exit — hence the stall rather than an error message. Filed as
 
 Gemini CLI reached **end-of-life for individual Google accounts (free, Google AI Pro and Ultra) on
 18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to
-[Antigravity CLI](https://antigravity.google) (Untether support is planned as a
-separate engine in v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)) or use a supported engine. Enterprise / Google Cloud licences
+[Antigravity CLI](https://antigravity.google) (supported as its own `antigravity` engine, see
+[Switch engines](switch-engines.md#antigravity-cli)) or use another supported engine. Enterprise / Google Cloud licences
 may still work, but Untether no longer verifies this.
 
 ### What to do
@@ -171,6 +175,74 @@ but get no fixes, are excluded from testing, and may be removed in a future
 release — see
 [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
 Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
+
+## Antigravity CLI
+
+Antigravity (`agy`) runs headless: it can't ask for approval or a sign-in mid-run, so Untether turns each of those cases into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli).
+
+### Antigravity says it isn't signed in
+
+**Symptoms:** `Antigravity CLI isn't signed in on this host — agy wanted a browser sign-in, which a bot can't complete.`
+
+agy has no usable sign-in in Untether's environment. Pick one:
+
+- **Gemini API key:** `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` and `GEMINI_API_KEY` in the service environment (both are needed).
+- **Enterprise:** `AGY_ADC_AUTH=true` with `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_CLOUD_LOCATION`.
+- **Google account:** run `agy` in a terminal on the host as the same user and finish the sign-in. Read the [terms note](switch-engines.md#antigravity-cli) first.
+
+If `agy` works in your terminal but not under Untether, the sign-in is probably in a desktop keyring the service can't reach: make sure `DBUS_SESSION_BUS_ADDRESS` is set in the service environment. Variables outside the [env allowlist](security.md#engine-subprocess-env-allowlist) (a proxy, for example) need `[security] env_extra_allow`.
+
+### "Google is asking this account to verify itself or appeal a Terms of Service block"
+
+Google has challenged or blocked the account. Run `agy` in a terminal on the host to see Google's link. Untether doesn't retry. A Gemini API key or Enterprise sign-in avoids the Google-account terms that cause this.
+
+### Antigravity was blocked from using a shell command
+
+**Symptoms:** a `⚠️ Blocked: shell command (RunCommand) — …` row, and the reply ends with "headless runs can't ask for approval, so it stopped there".
+
+The chat is in **Workspace** mode, where agy blocks its own shell, web and MCP calls. Either switch to **Full access** in `/config` → **Permission mode**, or add an exact allow rule such as `command(git status)` to `permissions.allow` in agy's settings file. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access. See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+### "Ask me needs Untether's approval gate"
+
+Ask me and Plan first aren't available yet. Pick Workspace or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+
+### "That Antigravity conversation no longer exists"
+
+agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session. Send your message again to start fresh.
+
+### "Effort … isn't available"
+
+Antigravity models accept different effort levels. Open `/config` → **Effort**: it shows only the levels the chat's model takes. See [Antigravity effort](model-reasoning.md#antigravity-effort).
+
+### "The engine CLI rejected a command-line flag"
+
+The installed agy doesn't accept a flag this Untether version passes. agy updates itself often, so this usually means Untether is behind: update Untether, and report it if it persists.
+
+### "Antigravity CLI … is older than 1.3.1"
+
+Run `agy update` on the host. The next message works without a restart.
+
+### Antigravity seems stuck after answering
+
+**Symptoms:** `⏳ Antigravity is waiting for 1 background task (N min) — agy holds its answer until they finish (up to 30 min).`
+
+agy sends one answer per run and holds it until background commands it started have finished, for up to 30 minutes. This isn't a stall, and the run isn't auto-cancelled for it. `/cancel` stops the run and the background commands. A command that hangs in the foreground looks the same for up to about 31 minutes; after that the ordinary [stall warnings](#stall-warnings) apply.
+
+### A scheduled Antigravity run was refused because its workspace config changed
+
+**Symptoms:** a cron or webhook run replies `agy's workspace config changed since someone last ran Antigravity in this chat's project (…)`, or `Untether couldn't check agy's hooks, plugins and MCP servers …`.
+
+agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. Send any message in that chat: the run shows a ⚠️ row listing the files. Review them, and the schedule works again from the next fire. If the check itself can't finish, the row says why (for example too many files under `.agents/`, or a config file that isn't plain JSON).
+
+### Antigravity won't run Workspace because agy's own settings allow every tool
+
+**Symptoms:** `agy's own settings change its permission checks (toolPermission: always-proceed), so Untether won't run Workspace mode`.
+
+agy's settings file tells it to approve tools without asking, which would make "Workspace" mean something it doesn't say. Set `toolPermission` back to `request-review` in `~/.gemini/antigravity-cli/settings.json`, or pick Full access in `/config` if that is what you want.
+
+### "Antigravity needs a project"
+
+Antigravity edits files where it runs, so it is refused in a chat with no project. Bind one with `/ctx set <project>`, or use a chat or topic routed to a project.
 
 ## Progress stuck on "starting"
 
@@ -225,6 +297,8 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
 
 The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan". The reminder is removed once you answer, and a later reminder replaces the earlier one.
+
+While Antigravity holds its answer for a background command, the stall warning is replaced by a `⏳ Antigravity is waiting for 1 background task …` line and the run isn't auto-cancelled; see [Antigravity seems stuck after answering](#antigravity-seems-stuck-after-answering).
 
 For Codex, OpenCode and Pi, a child process only earns the 15 min threshold while the process tree is using CPU: Codex's npm wrapper and OpenCode's MCP servers are always there, so an idle engine falls back to 5 min ([#953](https://github.com/littlebearapps/untether/issues/953)).
 
@@ -724,7 +798,7 @@ Telegram bot tokens, OpenAI API keys (`sk-...`), GitHub tokens (`ghp_`, `ghs_`, 
 
 When an engine fails, Untether scans the error message and shows an actionable recovery hint above the raw error. The raw error is wrapped in a code block for visual separation. Hints are case-insensitive and pattern-matched — the first match wins. Your session is automatically saved in most cases, so you can resume after resolving the issue.
 
-Untether recognises **77 error patterns**, grouped like this:
+Untether recognises **86 error patterns**, grouped like this:
 
 | Category | Examples | Engines |
 |----------|----------|---------|

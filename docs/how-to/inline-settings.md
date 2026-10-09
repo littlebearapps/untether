@@ -47,7 +47,7 @@ Effort: default  · high
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Antigravity CLI** shows **Permission mode** (workspace / full access) and **Effort**. **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -84,12 +84,12 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Permission mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
+- **Permission mode** — Claude Code, and Antigravity CLI with its own page: **Workspace** (default) or **Full access**, plus **Ask me** and **Plan first** marked "· soon" (not selectable yet). For Antigravity this is a pre-run policy, not mid-run approval; see [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode). Codex and Gemini have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
 - **Approval mode** — Gemini CLI only (deprecated). Toggle between "read-only", "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy. Despite its label, "read-only" (also what an unset chat shows) runs Gemini with `--approval-mode yolo`, i.e. full access — see [Interactive approval](interactive-approval.md#gemini-cli-approval-mode).
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
 - **Follow-up** — Claude Code only ([#775](https://github.com/littlebearapps/untether/issues/775)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
-- **Reasoning** — Claude Code and Codex only. Hidden for OpenCode, Pi, Gemini, and Amp.
+- **Reasoning** — Claude Code, Codex and Antigravity CLI (where the page is called **Effort** and shows only the levels the chat's model accepts). Hidden for OpenCode, Pi, Gemini, and Amp.
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.

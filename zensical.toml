@@ -96,6 +96,11 @@ nav = [
         { "Stream JSON cheatsheet" = "reference/runners/pi/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/pi/untether-events.md" },
       ] },
+      { "Antigravity" = [
+        { "Runner" = "reference/runners/antigravity/runner.md" },
+        { "Stream JSON cheatsheet" = "reference/runners/antigravity/stream-json-cheatsheet.md" },
+        { "Untether events" = "reference/runners/antigravity/untether-events.md" },
+      ] },
       { "Gemini" = [
         { "Runner" = "reference/runners/gemini/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/gemini/stream-json-cheatsheet.md" },

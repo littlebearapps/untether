@@ -45,6 +45,7 @@ Each engine CLI stores sessions per directory. Untether projects map to director
 | Gemini CLI | ⚠️ | `--resume latest` | Deprecated; individual Google accounts can no longer sign in |
 | OpenCode | ✅ | `--continue` | Tested via dev bot; requires latest OpenCode version |
 | Pi | ✅ | `--continue` | Requires `provider` config for OAuth subscriptions (see below) |
+| Antigravity CLI | ✅ | `--continue` | Picks the most recent conversation for the project directory; agy may also pick one from a parent or child directory |
 | Amp | — | N/A | Deprecated; requires explicit thread ID, no "most recent" mode |
 
 ### Pi provider configuration

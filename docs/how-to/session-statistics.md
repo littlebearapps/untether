@@ -80,7 +80,7 @@ v0.35.2 adds per-session tracking for Claude Code's long-running primitives. Cou
 
 Run and session cost footers were tightened in v0.35.2. Claude usage queries use a 60 s TTL cache (stale-while-error), Gemini pulls from `stats.total_cost_usd`, and AMP now reports `total_cost_usd`. Zero-turn sessions render `$0.00` instead of a blank. ([#316](https://github.com/littlebearapps/untether/issues/316))
 
-Since v0.36.0 a resumed session's figures are per run. Claude reports a running cost total for the whole session and Codex a running token total for the whole thread, so Untether records the difference from the previous run; footers and budgets no longer count a session's earlier runs again ([#778](https://github.com/littlebearapps/untether/issues/778), [#419](https://github.com/littlebearapps/untether/issues/419)). A turn Claude runs by itself after a background task counts as its own small run. In Codex and OpenCode chats, `/usage` shows the token totals of the chat's last session — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
+Since v0.36.0 a resumed session's figures are per run. Claude reports a running cost total for the whole session, and Codex and Antigravity a running token total for the whole thread, so Untether records the difference from the previous run; footers and budgets no longer count a session's earlier runs again ([#778](https://github.com/littlebearapps/untether/issues/778), [#419](https://github.com/littlebearapps/untether/issues/419)). A turn Claude runs by itself after a background task counts as its own small run. In Codex and OpenCode chats, `/usage` shows the token totals of the chat's last session — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
 
 ## Related
 

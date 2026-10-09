@@ -84,7 +84,7 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 
 ## Engine subprocess env allowlist
 
-Claude and Pi engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers. This reduces the blast radius of any tool call or MCP that exfiltrates process env.
+Claude, Pi and Antigravity engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers. This reduces the blast radius of any tool call or MCP that exfiltrates process env.
 
 If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), you have two options:
 
@@ -99,6 +99,8 @@ If a new engine or MCP genuinely needs a variable that isn't allowlisted (sympto
     Names must match `[A-Z_][A-Z0-9_]*`. Untether logs `env_policy.user_extension` once per process at first runner spawn so the addition is visible in `journalctl`. The runtime audit also honours these so user-allowed names aren't false-flagged as leaks. See [config: `[security]`](../reference/config.md#security) ([#409](https://github.com/littlebearapps/untether/issues/409)).
 
 2. **For names that benefit every Untether user**: add to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py` and submit a PR. `BWS_ACCESS_TOKEN` (Bitwarden Secrets Manager) was promoted into the built-in defaults in v0.35.3 by exactly this path.
+
+Antigravity gets the same allowlist plus four names only it needs (`DBUS_SESSION_BUS_ADDRESS` for a desktop keyring, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_GEMINI_BASE_URL`), and honours `env_extra_allow`. Proxy variables such as `HTTPS_PROXY` aren't allowlisted: add them with `env_extra_allow` if agy needs a proxy.
 
 Codex and OpenCode (and the deprecated Gemini and AMP) still inherit Untether's full environment; per-runner filtering for them is tracked in [#375](https://github.com/littlebearapps/untether/issues/375). Codex itself starts its MCP servers with a minimal env, so a credential needs `env_vars` — see [Env for Codex and OpenCode](../reference/env-vars.md#env-codex-opencode).
 
@@ -149,6 +151,19 @@ Treat write access to `untether.toml`, the engines' config directories or the se
 - **Prompting modes prompt.** In `acceptEdits` (`/planmode off`), `default` and `manual`, Untether no longer pre-approves `Bash`, `Read`, `Edit` and `Write` or silently approves other tools: anything Claude Code would ask about becomes an Approve / Deny message ([#749](https://github.com/littlebearapps/untether/issues/749)).
 - **A silent downgrade is caught.** If you ask for `auto` but Claude Code starts in another mode (auto mode isn't available on every model), Untether shows `⚠️ Asked for auto mode — Claude Code is running default`, logs `claude.permission_mode.mismatch`, and sends permission requests to Telegram instead of approving them ([#751](https://github.com/littlebearapps/untether/issues/751)). In that case `Bash`, `Read`, `Edit` and `Write` stay pre-approved, because `auto` keeps the default `allowed_tools`.
 - **Unattended triggers fail closed.** A cron or webhook run never waits on an approval nobody can give: requests it would have asked about are denied at once (`permission.unattended_deny`, listed in the run's final), and in `auto` / `dontAsk` / `bypassPermissions` every request that still reaches Untether is denied too ([#835](https://github.com/littlebearapps/untether/issues/835)). At startup and on a config reload, Untether logs `trigger.unattended_approval_risk` for crons whose mode would ask, and logs it again when such a cron or webhook fires. A cron `permission_mode` that Claude Code would reject is reported as `trigger.cron.permission_mode_invalid`. See [Plan mode → Per-cron override](plan-mode.md#cron-override).
+
+## Antigravity permission modes and project config
+
+Antigravity (`agy`) runs headless and can't ask for approval, so its mode is fixed before each run ([Permission mode](interactive-approval.md#antigravity-cli-permission-mode)).
+
+- **Safe by default.** Without a setting, a run is **Workspace**: Untether passes no bypass flag and agy's own policy applies (file edits allowed, shell, web and MCP calls blocked). An unknown stored mode also runs as Workspace.
+- **Full access is always explicit.** It passes agy's `--dangerously-skip-permissions`: every tool is approved, including shell, network and files outside the project. It comes only from `/config`, `[antigravity] permission_mode = "full"` (logged once as `antigravity.full_access_from_toml`), or a cron's own `permission_mode = "full"`.
+- **Scheduled runs never inherit it.** A cron or webhook run whose Full access would come from the chat or `untether.toml` runs as Workspace instead; webhooks never get Full access.
+- **Workspace is not a sandbox.** It doesn't stop a run writing files that something else executes later, and it doesn't stop agy's own hooks, plugins, custom agents or project MCP servers, which agy runs in every mode. Untether shows a ⚠️ row the first time a project carries such config and whenever a run changes it, and holds cron and webhook runs after a change (or when it can't check) until someone sends a message in that chat. It also flags changes a run makes to files other engines act on, such as `.claude/`, `.mcp.json`, `.envrc`, `.github/workflows/` and `.git/hooks/`. Treat this as a tripwire with [known limits](../reference/runners/antigravity/runner.md#agy-hooks-plugins-and-mcp-servers): it notices changes, it can't prevent them. Run Antigravity only in projects you trust, and use an OS-level sandbox or container if you need isolation.
+- **agy's own settings are checked.** If agy's settings would approve tools by themselves (`toolPermission` other than `request-review` or `strict`), Untether refuses to run Workspace. Allow rules and `allowNonWorkspaceAccess` are shown as ⚠️ rows.
+- **No project, no run.** Antigravity is refused in a chat with no project, and never runs in the home directory, `/` or Untether's own directory.
+- **The prompt never appears on the command line**, and sign-in URLs, tokens and paths in agy's error output are redacted before they reach Telegram or the logs (INFO level and above).
+- **Google account sign-ins carry an account risk** under Google's terms; an API key or Enterprise sign-in avoids it. See [Switch engines](switch-engines.md#antigravity-cli).
 
 ## File transfer deny globs
 

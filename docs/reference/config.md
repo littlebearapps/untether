@@ -530,7 +530,7 @@ Runtime security knobs. Defaults are safe — operators only flip these when inv
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `env_audit` | bool | `true` | One-shot `/proc/<claude_pid>/environ` sample on first `system.init` ([#361](https://github.com/littlebearapps/untether/issues/361)). Emits `claude.env_audit.leaked_var` WARNING per non-allowlisted name observed (dedup per session per name). Reuses `utils/env_policy.is_allowed`. Linux-only — silently no-ops elsewhere or when /proc is unreadable. Set `false` to opt out (e.g. on hardened hosts where `/proc/<pid>/environ` reads are sensitive). The companion `env -i` wrap on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361)) is always on and not configurable. |
-| `env_extra_allow` | list[str] | `[]` | Per-deployment exact-match additions to the engine-subprocess env allowlist ([#409](https://github.com/littlebearapps/untether/issues/409)). Use for credential-manager tokens that aren't in the global defaults — e.g. `["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN", "INFISICAL_TOKEN"]`. Each entry must match `[A-Z_][A-Z0-9_]*` (uppercase, digits, underscore; cannot start with a digit). Empty / whitespace / lowercase entries are rejected at config-load time. Currently honoured by the Claude and Pi runners. The audit (`env_audit`) honours these too, so user-allowed names aren't false-flagged as leaks. Untether emits one `env_policy.user_extension` INFO log per process at first runner spawn so the addition is visible in journalctl. |
+| `env_extra_allow` | list[str] | `[]` | Per-deployment exact-match additions to the engine-subprocess env allowlist ([#409](https://github.com/littlebearapps/untether/issues/409)). Use for credential-manager tokens that aren't in the global defaults — e.g. `["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN", "INFISICAL_TOKEN"]`. Each entry must match `[A-Z_][A-Z0-9_]*` (uppercase, digits, underscore; cannot start with a digit). Empty / whitespace / lowercase entries are rejected at config-load time. Currently honoured by the Claude, Pi and Antigravity runners. The audit (`env_audit`) honours these too, so user-allowed names aren't false-flagged as leaks. Untether emits one `env_policy.user_extension` INFO log per process at first runner spawn so the addition is visible in journalctl. |
 | `env_extra_prefix_allow` | list[str] | `[]` | Like `env_extra_allow` but for name *prefixes* — convenient for credential-manager families where many vars share a prefix. Examples: `["VAULT_"]` admits `VAULT_TOKEN`, `VAULT_ADDR`, `VAULT_NAMESPACE`. Each entry must match the same env-var name shape as `env_extra_allow`. |
 
 ## Engine-specific config tables
@@ -644,6 +644,33 @@ message) rather than dropping its other settings.
     ```toml
     [opencode]
     model = "anthropic/claude-sonnet-5-5"
+    ```
+
+### `antigravity`
+
+Antigravity CLI (`agy` 1.3.1 or newer). Read the [terms note](runners/antigravity/runner.md) before using a Google account sign-in.
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `model` | string | (unset) | Optional model, passed as `--model`. Prefer a base id; an id that names its effort (ending `-low`, `-medium`, `-high`) fixes the effort level. `agy models` lists them. |
+| `cmd` | string | `agy` on `PATH`, then `~/.local/bin/agy` | Path to the agy binary (`~` is expanded). The "installed engines" check at startup looks for `agy` on `PATH` only. |
+| `permission_mode` | string | `workspace` | `workspace` or `full` (passes `--dangerously-skip-permissions`; logged once at startup). `ask` and `plan` are accepted but refused at run time until a later 0.36.1 release. Any other value is a config error. A chat's `/config` → **Permission mode** overrides it; cron and webhook runs never inherit `full` from here. See [Permission mode](../how-to/interactive-approval.md#antigravity-cli-permission-mode). |
+
+Other keys are ignored. Sign-in is configured in agy and the service environment, not here: see the [runner reference](runners/antigravity/runner.md#sign-in-routes).
+
+=== "untether config"
+
+    ```sh
+    untether config set antigravity.model "gemini-3.8-flash"
+    untether config set antigravity.permission_mode "workspace"
+    ```
+
+=== "toml"
+
+    ```toml
+    [antigravity]
+    model = "gemini-3.8-flash"
+    permission_mode = "workspace"
     ```
 
 ### `gemini`

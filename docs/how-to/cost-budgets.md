@@ -128,6 +128,27 @@ The `/usage` command reads your Claude Code OAuth credentials to fetch live data
     Sonnet:    ████░░░░░░ 38%<br>
     Opus:      ░░░░░░░░░░ 4%
 
+### Antigravity
+
+In an Antigravity chat `/usage` asks agy for its own quota groups, then shows the last session's tokens. Each group is a separate pool with its own limits. Untether fetches this only when you send `/usage` (it costs no tokens, and the answer is reused for 60 seconds); `/usage debug` adds cache age, the last error and the agy version. Antigravity reports tokens but no dollar cost, so `[cost_budget]` limits never trip for it.
+
+!!! untether "Untether"
+    📊 **Antigravity quota**<br>
+    **Gemini Models**<br>
+    • 5-hour: ██░░░░░░░░ 18% used · resets in 3h 12m<br>
+    • Weekly: █░░░░░░░░░ 6% used · resets in 4d 2h<br>
+    **Claude and GPT models**<br>
+    • 5-hour: ░░░░░░░░░░ 0% used<br>
+    • Weekly: ░░░░░░░░░░ 0% used<br>
+    *From agy /usage (no quota spent).*<br>
+    <br>
+    **Last session in this chat**<br>
+    Session `90ca6744…` · 2 runs<br>
+    **Session total:** 27k in · 290 out<br>
+    **Last run:** 14k in · 150 out
+
+A limit that hasn't been touched shows no reset time. Because agy reports a running token total for the whole conversation, Untether records each run's difference, as it does for Codex.
+
 ### Other engines
 
 Codex, OpenCode and the other engines don't report subscription quota, so in their chats `/usage` shows the token totals of the chat's last session of that engine instead: the session total, the last run, the run count, and the last run's cost when the engine reports one. Codex reports a running total for the whole thread, so Untether records each run's difference — the footer (`🔢12.3k/400`) shows *this run's* tokens, and `/usage` shows the thread total. A token-only footer uses `🔢`; `💰` means the footer carries a cost.

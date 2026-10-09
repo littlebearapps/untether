@@ -14,12 +14,14 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 | `this version of amp is no longer supported` | AMP is refusing this client version. Run `amp update` to upgrade. The `amp` engine is deprecated in Untether and may stop working again without notice. | AMP (deprecated) |
 | `is no longer supported; remove this setting` | A setting in your Codex config (`~/.codex/config.toml`, a `--profile` file, or `[engines.codex] extra_args`) is no longer supported by the installed Codex CLI — remove the key the error names. | Codex |
 | `' for '--` / `a value is required for '--` / `error: unexpected argument '-` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Codex (clap argv errors) |
+| `flags provided but not defined` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Antigravity (agy argv errors) |
 | `no longer supported` | The engine CLI reports that this client version or account tier is no longer supported by its provider. Update the CLI, or switch engines via /config. | All |
 
 ## Authentication
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
+| `isn't signed in on this host` | On a server, the Gemini API key route (`modelProvider: "gemini"` + `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids interactive sign-in. | Antigravity |
 | `access token could not be refreshed` | Run `codex login --device-auth` to re-authenticate. | Codex |
 | `log out and sign in again` | Run `codex login` to re-authenticate. | Codex |
 | `anthropic_api_key` | Check that ANTHROPIC_API_KEY is set in your environment. | Claude, Pi |
@@ -39,6 +41,8 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 | `exceeded your current quota` | OpenAI billing quota exceeded. Check platform.openai.com and add credits. | Codex, OpenCode |
 | `billing_hard_limit_reached` | OpenAI billing hard limit reached. Increase your spend limit. | Codex, OpenCode |
 | `resource_exhausted` | Google API quota exhausted. Check console.cloud.google.com. | Gemini |
+| `quota is used up` | /usage shows each quota group and when it resets. | Antigravity |
+| `ai credits balance is too low` | /usage shows each quota group and when it resets. | Antigravity |
 
 ## API overload and server errors
 
@@ -60,8 +64,12 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 
 ## Model errors
 
+Every Antigravity model or effort rejection starts with `invalid model selection`, so the effort patterns are checked before it.
+
 | Pattern | Hint | Engines |
 |---------|------|---------|
+| `" effort (available:` / `invalid --effort` / `conflicts with --effort` | That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix. | Antigravity |
+| `invalid model selection` | Antigravity doesn't recognise that model. Run `agy models` on the host for the list, or `/model clear`. | Antigravity |
 | `model_not_found` | Model not available. Check the model name in `/config`. | All |
 | `invalid_model` | Model not available. Check the model name in `/config`. | All |
 | `model not available` | Model not available. Check the model name in `/config`. | All |
@@ -150,7 +158,30 @@ These are checked before the generic `invalid_request_error` pattern, because th
 |---------|------|---------|
 | `require paid credits` | AMP execute mode requires paid credits. Add credits at ampcode.com/pay. | AMP (deprecated) |
 | `amp login` | Run `amp login` to authenticate with Sourcegraph. | AMP (deprecated) |
+| `antigravity ended with status canceled` | Antigravity cancelled the turn upstream (long turns sometimes do, antigravity-cli#902). Retry, or split the task into smaller steps. | Antigravity |
 | `gemini result status:` | Gemini returned an unexpected result. Try a fresh session with `/new`. | Gemini (deprecated) |
+
+## Antigravity messages
+
+Antigravity CLI (`agy`) errors are Untether's own messages, written when the runner recognises what went wrong. Where a hint above applies, it is shown with them. The agy output that triggers each one is listed in the [Antigravity runner reference](runners/antigravity/runner.md#errors).
+
+| Message starts | Meaning | What to do |
+|---|---|---|
+| `Antigravity CLI isn't signed in on this host` | agy wanted a browser sign-in | Sign in with `agy` in a terminal on the host, or use the API-key or Enterprise route |
+| `Google is asking this account to verify itself or appeal a Terms of Service block` | Google has blocked or challenged the account | Run `agy` in a terminal on the host to see Google's link. Untether won't retry |
+| `This Antigravity quota is used up` | A quota group is exhausted | `/usage` shows when each group resets |
+| `Antigravity's AI credits balance is too low to continue` | Out of AI credits | Top up, or wait for the quota reset |
+| `That Antigravity conversation no longer exists` | agy doesn't know the resume id | Send the message again; a new conversation starts |
+| `Antigravity was interrupted` | The run was cancelled or the process was signalled | Reply to the resume line to continue |
+| `Antigravity needs a project` | The chat has no project directory | `/ctx set <project>`, or add a `[projects.*]` entry |
+| `🛑 Antigravity CLI <version> is older than 1.3.1` | agy is too old | `agy update` on the host |
+| `Ask me needs Untether's approval gate` / `Plan first needs …` | That mode isn't available yet | Pick Workspace or Full access in `/config` |
+| `agy's own settings change its permission checks` | agy's `toolPermission` setting would approve tools by itself | Set it back to `request-review`, or pick Full access |
+| `agy's workspace config changed since someone last ran Antigravity` | A scheduled run was held because the project's agy hooks, plugins or MCP config changed | Send any message in the chat, review the ⚠️ row; the schedule then runs again |
+| `Untether couldn't check agy's hooks, plugins and MCP servers` | A scheduled run was held because the check couldn't finish | Send a message in the chat to see why, or trim the project's `.agents/` folder |
+| `agy reported a model/agent error` | agy exited with a turn-level failure | Retry; check `/usage` |
+| `antigravity ended with status <status>` | agy finished with a status other than success or error | Retry, or split the task |
+| `antigravity failed (<exit>)` | agy exited without a result | Read the excerpt underneath; URLs, tokens and paths in it are redacted |
 
 ## Account errors
 

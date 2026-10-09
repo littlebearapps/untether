@@ -61,6 +61,9 @@ restart.
 | Variable | Description |
 |----------|-------------|
 | `PI_CODING_AGENT_DIR` | Override Pi agent session directory base path (default `~/.pi/agent`). |
+| `GEMINI_API_KEY` | Antigravity CLI's API-key sign-in. Only used when agy's settings file also sets `"modelProvider": "gemini"`; `GOOGLE_API_KEY` is ignored by agy. `GOOGLE_GEMINI_BASE_URL` optionally overrides the endpoint. |
+| `AGY_ADC_AUTH` | Set to `true` for Antigravity CLI's Gemini Enterprise / Google Cloud sign-in (Application Default Credentials), with `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_CLOUD_LOCATION`. |
+| `DBUS_SESSION_BUS_ADDRESS` | Lets Antigravity CLI reach a Linux desktop keyring holding a Google account sign-in. Passed to agy only. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's config directory. Untether reads it to recognise plan files under `$CLAUDE_CONFIG_DIR/plans/` (as well as `.claude/plans/`) and to keep a separate rate-limit state per Claude config directory. |
 
 ## Runner environment
@@ -87,6 +90,8 @@ As of v0.35.2, arbitrary process env vars are **not** forwarded to Claude/Pi sub
 
 - **Exact names:** OS essentials (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TMP`, `TEMP`, `TZ`); CLI output (`NO_COLOR`, `CI`, `FORCE_COLOR`, `COLORTERM`, `CLICOLOR`, `CLICOLOR_FORCE`); `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`; language runtimes (`PYTHONPATH`, `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYTHONIOENCODING`, `NODE_PATH`, `NODE_OPTIONS`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`); git/SSH (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`); provider keys (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`, `GEMINI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `FIREWORKS_API_KEY`); `GITHUB_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `GH_TOKEN`; `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `BWS_ACCESS_TOKEN` (a default since v0.35.3); `UNTETHER_SESSION`; `PROJECT_ROOT`, `DIRENV_DIR`.
 - **Prefixes:** `CLAUDE_`, `CLAUDE_CODE_`, `MCP_`, `MAX_MCP_`, `LC_`, `UV_`, `NPM_`, `PNPM_`, `NODE_`, `PIP_`, `UNTETHER_`.
+
+The Antigravity runner uses the same allowlist and your `[security]` extras, plus four names passed to agy only: `DBUS_SESSION_BUS_ADDRESS`, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_GEMINI_BASE_URL` ([#558](https://github.com/littlebearapps/untether/issues/558)). Proxy variables (`HTTPS_PROXY`, `NO_PROXY`) are not on the list; add them with `env_extra_allow` if agy needs them.
 
 The Claude runner always execs under `env -i KEY=VAL …`, so the resolved environment is exactly the allowlist ([#361](https://github.com/littlebearapps/untether/issues/361)). When `[security] env_audit = true` (default — see [config reference](config.md#security)), Untether also samples `/proc/<pid>/environ` once at session start and logs `claude.env_audit.leaked_var` for any non-allowlisted name it finds.
 

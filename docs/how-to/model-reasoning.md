@@ -66,10 +66,20 @@ Valid levels depend on the engine:
 
 - **Claude Code**: `low`, `medium`, `high`, `xhigh`, `max` (passed as `--effort`)
 - **Codex CLI**: `low`, `medium`, `high`, `xhigh`
+- **Antigravity CLI**: `low`, `medium`, `high` (passed as `--effort`), narrowed to what the chat's model accepts — see [Antigravity effort](#antigravity-effort)
 
 `minimal` was removed for Codex in v0.36.0: no current Codex model supports it, and it fails alongside Codex's default web search. A saved `minimal` is ignored with a one-line note on each run, and the run uses the engine default until you pick another level.
 
 Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.
+
+### Antigravity effort
+
+Antigravity models don't all take the same levels: some accept only two of the three, and some have a fixed effort. When you open `/config` → **Effort** in an Antigravity chat, Untether asks agy which levels the chat's model accepts (this uses no tokens) and shows only those buttons. A fixed-effort model shows none. If agy can't be asked, the page shows all three with a note.
+
+- If a saved level isn't one the model accepts, that run drops it and shows `⚠️ Effort high isn't available for <model>, so agy used its default`.
+- Untether learns a model's levels only when the Effort page is opened. On a model you switched to without opening it, a level the model refuses makes the run fail with `That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix.` Open the page once, or clear the level with `/reasoning clear`.
+- Prefer a base model id. A model id that already names its effort (ending `-low`, `-medium` or `-high`) fixes the level, and Untether doesn't pass `--effort` with it. Run `agy models` on the host to list model ids.
+- The footer shows what was used: model · effort · mode.
 
 ## Per-engine reasoning
 
@@ -106,7 +116,7 @@ The resolution order for model and reasoning is (highest priority first):
 1. **Cron override** — a `[[triggers.crons]]` entry's own `model` / `reasoning`, for that scheduled run only ([#743](https://github.com/littlebearapps/untether/issues/743); see [Schedule tasks](schedule-tasks.md#pick-a-model-per-cron))
 2. **Topic override** — set via `/model set` or `/reasoning set` in a forum topic
 3. **Chat default** — set via `/model set` or `/reasoning set` in a private or group chat
-4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]` or `[engines.pi]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
+4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]`, `[engines.pi]` or `[engines.antigravity]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
 5. **CLI default** — whatever the engine CLI picks on its own
 
 There is no per-project model setting; projects only pick a `default_engine`.

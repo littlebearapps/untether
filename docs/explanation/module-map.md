@@ -88,7 +88,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp). |
+| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, and the deprecated Gemini CLI and Amp). |
 | `runners/run_options.py` | Per-run options (model, reasoning, permission mode) and the Claude permission-mode tables. |
 | `runners/extra_args_guard.py` | Rejects approval- and sandbox-bypass flags in `extra_args`. |
 | `runners/tool_actions.py` | Shared tool-call → action kind and title mapping used by the runners' event translation. |

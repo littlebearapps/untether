@@ -25,7 +25,7 @@
 
 ---
 
-Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai) and [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
+Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) and [Antigravity CLI](https://antigravity.google) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/littlebearapps/untether/master/docs/assets/screenshots/hero-collage.jpg" alt="Send tasks by voice, approve plans remotely, and get reports back from background agents and CI" width="100%" />
@@ -81,29 +81,32 @@ Every command is listed in the [commands reference](https://littlebearapps.com/h
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@1` | 75+ providers via Models.dev, local models (**1.x only** — 2.x is refused before it starts) |
 | [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
+| [Antigravity CLI](https://antigravity.google)⁴ | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google's Gemini models, per-model effort, quota groups in `/usage` (agy 1.3.1+) |
 
 Use your existing Claude or ChatGPT subscription — no extra API keys needed unless you want API billing. Switch engines per message (`/codex …`) or per chat (`/agent set claude`) — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/).
 
 ### Engine compatibility
 
-| Feature | Claude Code | Codex | OpenCode | Pi |
-|---------|:-----------:|:-----:|:--------:|:--:|
-| Progress streaming, resume, voice input, model override | ✅ | ✅ | ✅ | ✅ |
-| Terminal resume (`/continue`) | ✅ | ✅ | ✅ | ✅² |
-| Cost tracking | ✅ | ~¹ | ✅ | ~¹ |
-| Reasoning / effort levels | ✅ | ✅ | — | — |
-| Pre-run approval policy (`/config`) | ✅ | ✅ | — | — |
-| Interactive approvals, plan mode, ask mode, diff preview | ✅ | — | —³ | — |
-| Live sessions, background tasks, `/steer` | ✅ | — | — | — |
-| Context % in status line, subscription usage | ✅ | — | — | — |
-| Context compaction shown | ✅ | — | — | ✅ |
-| Device re-auth (`/auth codex`) | — | ✅ | — | — |
+| Feature | Claude Code | Codex | OpenCode | Pi | Antigravity⁴ |
+|---------|:-----------:|:-----:|:--------:|:--:|:-:|
+| Progress streaming, resume, voice input, model override | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Terminal resume (`/continue`) | ✅ | ✅ | ✅ | ✅² | ✅ |
+| Cost tracking | ✅ | ~¹ | ✅ | ~¹ | ~¹ |
+| Reasoning / effort levels | ✅ | ✅ | — | — | ✅⁵ |
+| Pre-run approval policy (`/config`) | ✅ | ✅ | — | — | ✅⁴ |
+| Interactive approvals, plan mode, ask mode, diff preview | ✅ | — | —³ | — | —⁴ |
+| Live sessions, background tasks, `/steer` | ✅ | — | — | — | — |
+| Context % in status line, subscription usage | ✅ | — | — | — | ~⁶ |
+| Context compaction shown | ✅ | — | — | ✅ | — |
+| Device re-auth (`/auth codex`) | — | ✅ | — | — | — |
 
-¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use.
+¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use. ⁴ Antigravity runs with a pre-run permission mode: **Workspace** (default — edits files, agy blocks its own shell, web and MCP calls; not a sandbox) or **Full access**. Approval buttons and a plan gate arrive in a later 0.36.1 release. ⁵ The levels offered depend on the model. ⁶ `/usage` shows agy's quota groups; no context % or quota footer.
+
+> ⚠️ **Antigravity and Google account sign-ins.** Google's [Antigravity terms](https://antigravity.google/terms) say that using third-party software to access the service with an Antigravity sign-in is a breach that may lead to suspension of your Antigravity and/or Gemini CLI accounts. Untether runs Google's own `agy` binary and never reads your Google credentials, but it is still third-party software driving the CLI. **We recommend a Gemini API key or an Enterprise sign-in** — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli). If you use a Google account sign-in anyway, you accept that risk for that account.
 
 ### Deprecated engines
 
-[Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Amp](https://ampcode.com) still ship and load, but are **deprecated and no longer supported** — no testing, no bug fixes, and they may be removed in a future release. Google retired Gemini CLI for individual accounts on 18 June 2026; its successor, Antigravity CLI, arrives as its own engine in v0.36.1. Amp remotely refuses clients it considers out of date, so a working setup can stop without notice. Details: [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/#why-does-my-gemini-run-stall-or-my-amp-run-fail-immediately).
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Amp](https://ampcode.com) still ship and load, but are **deprecated and no longer supported** — no testing, no bug fixes, and they may be removed in a future release. Google retired Gemini CLI for individual accounts on 18 June 2026; its successor, Antigravity CLI, is supported as its own `antigravity` engine (above). Amp remotely refuses clients it considers out of date, so a working setup can stop without notice. Details: [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/#why-does-my-gemini-run-stall-or-my-amp-run-fail-immediately).
 
 ---
 

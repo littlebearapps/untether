@@ -2,9 +2,32 @@
 
 ## v0.36.1 (unreleased)
 
+### changes
+
+- **feat(antigravity):** new `antigravity` engine for Google's Antigravity CLI (`agy` 1.3.1 or newer; tested on 1.3.2), built on [#766](https://github.com/littlebearapps/untether/pull/766) by [@manuelnaranjo](https://github.com/manuelnaranjo) — thank you! Select it with `/agent set antigravity` or `/antigravity <prompt>`. It streams progress, resumes with `agy --conversation <id>` and `/continue`, and takes a model and an effort level. **Read the terms note in [Switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli) before using a Google account sign-in:** Google's Antigravity terms don't allow third-party tools to use that sign-in and Google may suspend the account, so we recommend a Gemini API key or an Enterprise sign-in [#558](https://github.com/littlebearapps/untether/issues/558)
+  - safe by default: a run is **Workspace** unless you pick otherwise — Antigravity edits files in the project while agy blocks its own shell, web and MCP calls. Workspace is not a sandbox. **Full access** (agy's `--dangerously-skip-permissions`) applies only when you choose it in `/config` → Permission mode, in `[antigravity] permission_mode`, or on a cron; cron and webhook runs never inherit it. **Ask me** and **Plan first** are shown as "· soon" and refused until a later 0.36.1 release
+  - when agy blocks a tool, the progress message shows a `⚠️ Blocked` row and the reply says how to allow it; Untether refuses to run Workspace when agy's own settings would approve tools by themselves
+  - Untether warns when a project carries agy hooks, plugins or MCP servers it doesn't manage (they run in every mode), and holds cron and webhook runs after that config changes, or when it can't be checked, until someone sends a message in the chat. This is a tripwire with documented limits, not isolation
+  - clear errors within seconds when agy isn't signed in, the account is blocked, the quota or credits are used up, or the conversation no longer exists; sign-in URLs, tokens and paths in agy's output are redacted before they reach Telegram or the logs (INFO and above)
+  - prompts go to agy on stdin, never on the command line; Antigravity won't run in a chat without a project; chats on a Google account sign-in get a one-time notice about Google's terms
+  - footers show this run's tokens (agy reports a running total per conversation and no dollar cost, so cost budgets never trip for it); `/usage` shows agy's quota groups on demand, then the last session's tokens
+  - `/config` → Effort shows only the levels the chat's model accepts (`low` / `medium` / `high`); a level the model refuses is dropped with a ⚠️ row
+- **feat(preamble):** the built-in preamble now depends on what the engine can do. Codex, OpenCode and Pi (and the deprecated Gemini CLI and Amp) are no longer told to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; they are asked to raise questions in their final reply instead. Claude's preamble is unchanged, and a custom `[preamble] text` is still sent as written [#558](https://github.com/littlebearapps/untether/issues/558)
+
+### fixes
+
+- **fix(antigravity):** while agy holds its answer for a background command (up to 30 minutes), the progress message shows `⏳ Antigravity is waiting for 1 background task …` instead of a stall warning, the run isn't auto-cancelled, and the background commands are stopped when the run ends or is cancelled [#975](https://github.com/littlebearapps/untether/issues/975)
+- **fix(antigravity):** the agy version is checked before each run (1.3.1 minimum, with a clear message for an older one) and logged as `agy_version` on `antigravity.session.started` [#976](https://github.com/littlebearapps/untether/issues/976)
+- **fix(config):** `/config` → About probes each engine's real CLI command, so Antigravity's version (`agy`) shows there [#993](https://github.com/littlebearapps/untether/issues/993)
+
 ### docs
 
+- Antigravity CLI docs: runner reference, stream-json cheatsheet and event mapping; install, sign-in and Google terms note in Switch engines; permission mode, effort, security, troubleshooting, config and error references; FAQ and README compatibility tables [#558](https://github.com/littlebearapps/untether/issues/558)
 - replace maintainer host names, bot usernames, session IDs and private project names in the public docs (older changelog sections, the dev-setup sample log, the Claude runner and config references) with neutral placeholders [#1027](https://github.com/littlebearapps/untether/issues/1027)
+
+### tests
+
+- Antigravity suite: a fake `agy` replaying real 1.3.x captures through the real runner, schema, permission, error, quota and redaction tests, and a CLI drift probe (network checks only with `UNTETHER_AGY_DRIFT=1`) [#558](https://github.com/littlebearapps/untether/issues/558) [#976](https://github.com/littlebearapps/untether/issues/976)
 
 ## v0.36.0 (2026-10-08)
 
