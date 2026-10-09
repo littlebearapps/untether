@@ -309,6 +309,25 @@ class TestCronModelReasoning:
         )
         assert c.reasoning == level
 
+    def test_cron_antigravity_reasoning_high_accepted(self):
+        """#558 phase 05: agy joins the reasoning engines (low/medium/high)."""
+        c = CronConfig(
+            id="x",
+            schedule="* * * * *",
+            prompt="Hi",
+            engine="antigravity",
+            reasoning="high",
+        )
+        assert c.reasoning == "high"
+        with pytest.raises(ValidationError, match="allowed values"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine="antigravity",
+                reasoning="max",
+            )
+
     def test_743_reasoning_normalised_to_lower_case(self):
         c = CronConfig(
             id="x", schedule="* * * * *", prompt="Hi", engine="claude", reasoning="HIGH"

@@ -341,3 +341,149 @@ def test_time_until_formats() -> None:
     assert fmt((now + timedelta(hours=4, minutes=58)).isoformat(), now) == "4h 58m"
     assert fmt((now + timedelta(days=6, hours=23)).isoformat(), now) == "6d 23h"
     assert fmt("2026-10-07T00:00:00Z", now) == "0m"
+
+
+# ── per-model effort probe (phase 05, D29) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (
+            {"adjustable": True, "available": ["low", "medium", "high"]},
+            ("low", "medium", "high"),
+        ),
+        (
+            {"adjustable": True, "current": "high", "available": ["low", "high"]},
+            ("low", "high"),
+        ),
+        # gpt-oss-120b: one fixed level, any --effort is refused.
+        ({"adjustable": False}, ()),
+        # Unknown names and junk are dropped; the order is ours.
+        ({"available": ["max", "bogus", 7, "low", "low"]}, ("low", "max")),
+        ({"available": "low"}, None),
+        ({}, None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_parse_model_efforts(data: Any, expected: Any) -> None:
+    assert quota.parse_model_efforts(data) == expected
+
+
+@pytest.mark.anyio
+async def test_model_efforts_probe_runs_effort_slash_with_model(
+    usage_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SLASH_DATA",
+        json.dumps(
+            {"adjustable": True, "current": "high", "available": ["low", "high"]}
+        ),
+    )
+    monkeypatch.setattr(quota, "_probe_model_efforts", quota._run_model_efforts)
+    runner = _runner()
+    with structlog.testing.capture_logs() as logs:
+        levels = await quota.agy_model_efforts(runner, "gemini-3.1-pro")
+    assert levels == ("low", "high")
+    argv = json.loads(usage_env.read_text())["argv"]
+    assert argv[:2] == ["-p", "/effort"]
+    assert argv[-2:] == ["--model", "gemini-3.1-pro"]
+    (probe,) = [e for e in logs if e["event"] == "antigravity.effort.probe"]
+    assert probe["model"] == "gemini-3.1-pro"
+    assert probe["available"] == ["low", "high"]
+    # Default model: no --model at all.
+    usage_env.unlink()
+    assert await quota.agy_model_efforts(runner, None) == ("low", "high")
+    assert "--model" not in json.loads(usage_env.read_text())["argv"]
+
+
+@pytest.mark.anyio
+async def test_model_efforts_probe_cached_per_version_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str | None] = []
+
+    async def probe(runner: Any, model: str | None) -> dict[str, Any]:
+        calls.append(model)
+        return {"available": ["low", "high"] if model else ["low", "medium", "high"]}
+
+    monkeypatch.setattr(quota, "_probe_model_efforts", probe)
+    key = ["/opt/agy", 1.0]
+    monkeypatch.setattr(quota, "_agy_binary_key", lambda cmd: tuple(key))
+    runner = _runner()
+    with structlog.testing.capture_logs() as logs:
+        assert await quota.agy_model_efforts(runner, "gemini-3.1-pro") == (
+            "low",
+            "high",
+        )
+        assert await quota.agy_model_efforts(runner, "gemini-3.1-pro") == (
+            "low",
+            "high",
+        )
+        assert await quota.agy_model_efforts(runner, None) == ("low", "medium", "high")
+        assert await quota.agy_model_efforts(runner, None) == ("low", "medium", "high")
+    assert calls == ["gemini-3.1-pro", None]
+    assert [e["event"] for e in logs].count("antigravity.effort.probe") == 2
+    assert quota.peek_model_efforts(runner.command(), "gemini-3.1-pro") == (
+        "low",
+        "high",
+    )
+    # agy self-updated (new mtime): the old answers are gone.
+    key[1] = 2.0
+    assert quota.peek_model_efforts(runner.command(), "gemini-3.1-pro") is None
+    await quota.agy_model_efforts(runner, "gemini-3.1-pro")
+    assert calls == ["gemini-3.1-pro", None, "gemini-3.1-pro"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["slash", "garbage", "crash"])
+async def test_model_efforts_probe_failure_returns_none(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    calls = 0
+
+    async def probe(runner: Any, model: str | None) -> Any:
+        nonlocal calls
+        calls += 1
+        if failure == "slash":
+            raise quota.AgySlashError("timeout")
+        if failure == "crash":
+            raise RuntimeError(
+                "https://accounts.example/o/oauth2?code_challenge=SECRET"
+            )
+        return {"unexpected": True}
+
+    monkeypatch.setattr(quota, "_probe_model_efforts", probe)
+    runner = _runner()
+    with structlog.testing.capture_logs() as logs:
+        assert await quota.agy_model_efforts(runner, "m") is None
+    (failed,) = [e for e in logs if e["event"] == "antigravity.effort.probe_failed"]
+    assert "SECRET" not in json.dumps(failed)
+    assert quota.peek_model_efforts(runner.command(), "m") is None
+    # Not cached: the next page open asks again.
+    await quota.agy_model_efforts(runner, "m")
+    assert calls == 2
+
+
+@pytest.mark.anyio
+async def test_peek_never_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def probe(runner: Any, model: str | None) -> Any:
+        raise AssertionError("peek must not probe")
+
+    monkeypatch.setattr(quota, "_probe_model_efforts", probe)
+    monkeypatch.setattr(quota, "run_agy_slash", probe)
+    assert quota.peek_model_efforts(str(FAKE_AGY), "gemini-3.1-pro") is None
+    assert quota.peek_model_efforts(str(FAKE_AGY), None) is None
+
+
+@pytest.mark.anyio
+async def test_effort_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def probe(runner: Any, model: str | None) -> dict[str, Any]:
+        return {"available": ["low"]}
+
+    monkeypatch.setattr(quota, "_probe_model_efforts", probe)
+    runner = _runner()
+    for i in range(quota.EFFORT_CACHE_MAX + 20):
+        await quota.agy_model_efforts(runner, f"model-{i}")
+    assert len(quota._EFFORT_CACHE) <= quota.EFFORT_CACHE_MAX

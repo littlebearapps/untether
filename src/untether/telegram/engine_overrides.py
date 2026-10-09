@@ -13,7 +13,7 @@ OverrideSource = Literal["topic_override", "chat_default", "default"]
 # #416: no `minimal` — every allowed tuple must only hold levels that have a
 # /config button.
 REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
+REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex", "antigravity"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
@@ -22,10 +22,20 @@ _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     # test_codex_cli_schema_drift.py::test_bundled_catalogue_has_no_minimal
     # (and ::test_listed_models_support_untether_codex_levels).
     "codex": ("low", "medium", "high", "xhigh"),
+    # #558 (D29): the ceiling for agy's buttons. Its CLI also names `xhigh`
+    # and `max`, but no model accepts them (Pro takes low/high only, gpt-oss
+    # a fixed medium), so /config narrows this per model from a cached
+    # `agy -p /effort` probe. Pinned by test_antigravity_cli_schema_drift.py
+    # (::test_effort_values_superset, ::test_default_model_efforts).
+    "antigravity": ("low", "medium", "high"),
 }
 
 
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
+
+# #558 (D23): engines with an `ExitPlanMode` tool — the only ones whose
+# preamble carries the plan-mode requirements block.
+PLAN_EXIT_TOOL_ENGINES = frozenset({"claude"})
 
 PERMISSION_MODE_SUPPORTED_ENGINES = frozenset(
     {"claude", "codex", "antigravity", "gemini"}
@@ -307,6 +317,7 @@ _ENGINE_REASONING_LABEL: dict[str, str] = {
     "claude": "Effort",
     "codex": "Reasoning",
     "pi": "Thinking",
+    "antigravity": "Effort",
 }
 
 
@@ -350,7 +361,8 @@ def get_engine_default_model(engine: str) -> str | None:
             return None
         return None
     # claude/codex/gemini auto-route; amp derives from mode — no stable
-    # settings-file source, keep the static hint.
+    # settings-file source, keep the static hint. antigravity: agy's own
+    # settings file is never read (D33), so the static hint too.
     return None
 
 

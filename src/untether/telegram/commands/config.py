@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import html
+from typing import Any
+
+import anyio
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...ids import DEPRECATED_ENGINES
@@ -197,6 +200,9 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
     "amp": "smart mode (Opus 4.6)",
     "opencode": "provider/model (e.g. openai/gpt-4o)",
     "pi": "from provider config",
+    # #558 (D29): never guessed from agy's settings file; `-p /model` would
+    # spawn agy on a page render.
+    "antigravity": "agy default (run agy models on the host to list them)",
 }
 
 
@@ -1424,6 +1430,37 @@ _RS_ACTIONS: dict[str, str] = {
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
 
 
+def _antigravity_runner_and_model(
+    ctx: CommandContext, override_model: str | None
+) -> tuple[Any, str | None]:
+    """The agy runner and the model a plain message in this chat would use
+    (chat override, then ``[antigravity] model``, else agy's default)."""
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="antigravity"
+        ).runner
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None, override_model
+    toml_model = getattr(runner, "model", None)
+    model = override_model or (toml_model if isinstance(toml_model, str) else None)
+    return runner, model or None
+
+
+async def _antigravity_model_efforts(
+    runner: Any, model: str | None
+) -> tuple[str, ...] | None:
+    """#558 (D29): ask agy which effort levels *model* accepts — a cached
+    zero-token probe, bounded at 10 s. None when it can't say."""
+    from ...utils import antigravity_quota
+
+    if runner is None:
+        return None
+    levels: tuple[str, ...] | None = None
+    with anyio.move_on_after(antigravity_quota.EFFORT_TIMEOUT_S + 1.0):
+        levels = await antigravity_quota.agy_model_efforts(runner, model)
+    return levels
+
+
 def _effective_reasoning(
     engine: str, stored: str | None
 ) -> tuple[str | None, str | None]:
@@ -1522,6 +1559,33 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         current_label = f"default ({engine_default})" if engine_default else "default"
 
     levels = allowed_reasoning_levels(current_engine)
+    # #558 (D29): agy's levels depend on the model. Asked here — on a page
+    # open, never on a button tap (those return above) — and cached.
+    agy_lines: list[str] = []
+    if current_engine == "antigravity":
+        agy_runner, agy_model = _antigravity_runner_and_model(
+            ctx, override.model if override else None
+        )
+        available = await _antigravity_model_efforts(agy_runner, agy_model)
+        model_label = html.escape(agy_model[:80]) if agy_model else "agy default"
+        if available is None:
+            agy_lines = [
+                f"Model: <b>{model_label}</b>",
+                "<i>Couldn't ask agy which levels this model supports"
+                " \N{EM DASH} showing the usual three.</i>",
+            ]
+        else:
+            levels = tuple(lv for lv in levels if lv in available)
+            supports = (
+                f"supports {', '.join(available)}" if available else "fixed effort"
+            )
+            agy_lines = [f"Model: <b>{model_label}</b> · {supports}"]
+            if reasoning and reasoning not in available:
+                current_label = (
+                    f"default ({reasoning} isn't available for this model"
+                    " \N{EM DASH} ignored)"
+                )
+                reasoning = None
 
     level_descriptions: list[str] = []
     if "low" in levels or "medium" in levels or "high" in levels:
@@ -1548,6 +1612,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         f"ℹ️ <i>Default: uses engine's own {rs_label_lower} level</i>",
         "",
         f"Engine: <b>{current_engine}</b>",
+        *agy_lines,
         f"Current: <b>{current_label}</b>",
         "",
         _learn_more("model-reasoning", "set-reasoning-level"),

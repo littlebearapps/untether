@@ -323,6 +323,37 @@ def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
     return False
 
 
+def _background_pending(stream: JsonlStreamState, logger: Any = None) -> int:
+    """How many background tasks the engine is holding its answer for (#975);
+    0 when it isn't waiting on any.
+
+    agy holds its single ``result`` — and prints nothing — until a background
+    ``run_command`` finishes (up to 30 min), which is an expected wait, not a
+    liveness stall. Duck-typed like :func:`_approval_pending`:
+    ``engine_state.awaiting_background()`` (bounded by the engine's own cap,
+    after which ordinary liveness handling resumes) and, for the count,
+    ``background_count()``. Engines without the probe — every one but
+    Antigravity — always get 0.
+    """
+    es = getattr(stream, "engine_state", None)
+    probe = getattr(es, "awaiting_background", None)
+    if not callable(probe):
+        return 0
+    try:
+        if not probe():
+            return 0
+    except Exception as exc:  # noqa: BLE001 - watchdog must not die
+        if logger is not None:
+            logger.debug("subprocess.background_probe_failed", error=str(exc))
+        return 0
+    counter = getattr(es, "background_count", None)
+    try:
+        count = int(counter()) if callable(counter) else 1
+    except Exception:  # noqa: BLE001 - watchdog must not die
+        count = 1
+    return max(1, count)
+
+
 def _event_type(raw: dict[str, Any]) -> str:
     """The frame's event name: ``type`` (every engine but Antigravity), else
     agy's ``event`` envelope key (#558), else ``"unknown"``."""
@@ -1584,6 +1615,7 @@ class JsonlSubprocessRunner(BaseRunner):
         # deliberates. Tracked as a local rather than on the stream so
         # the lifetime matches the watchdog loop (per-subprocess).
         last_approval_pending_emit_at: float = 0.0
+        last_background_wait_emit_at: float = 0.0
 
         # Poll until the process is dead or the reader finishes.
         while not reader_done.is_set():
@@ -1645,6 +1677,27 @@ class JsonlSubprocessRunner(BaseRunner):
                                 source="watchdog",
                             )
                             prev_diag = diag
+                    elif background := _background_pending(stream, logger):
+                        # #975: agy is holding its answer for a background
+                        # task. Same shape as the approval wait above: a
+                        # paced INFO, no auto-kill, ``liveness_warned`` not
+                        # latched so a real hang afterwards still warns.
+                        now = time.monotonic()
+                        if (
+                            last_background_wait_emit_at == 0.0
+                            or now - last_background_wait_emit_at
+                            >= _APPROVAL_PENDING_REFIRE_S
+                        ):
+                            last_background_wait_emit_at = now
+                            logger.info(
+                                "subprocess.background_wait",
+                                pid=pid,
+                                idle_seconds=round(idle, 1),
+                                background=background,
+                                event_count=stream.event_count,
+                                last_event_type=stream.last_event_type,
+                                source="watchdog",
+                            )
                     else:
                         liveness_warned = True
                         stream.liveness_stalls += 1
@@ -1769,6 +1822,9 @@ class JsonlSubprocessRunner(BaseRunner):
             # (agy's background children) gets them swept at teardown.
             # ``None`` for everyone else — identical to before.
             orphan_pid_snapshot=getattr(state, "orphan_pid_snapshot", None),
+            # Each collected PID's /proc start time, so the sweep refuses a
+            # recycled PID (#590 hardening).
+            orphan_pid_starttimes=getattr(state, "orphan_pid_starttimes", None),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

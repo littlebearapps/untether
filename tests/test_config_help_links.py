@@ -269,7 +269,8 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
     )
     table[("dp", "claude")] = frozenset({_u("interactive-approval", "diff-previews")})
     table[("loop", "claude")] = frozenset({_u("schedule-tasks", "loop-mode")})
-    for engine in ("claude", "codex"):
+    # antigravity: its Effort page ships with #558 phase 05.
+    for engine in ("claude", "codex", "antigravity"):
         table[("rs", engine)] = frozenset(
             {_u("model-reasoning", "set-reasoning-level")}
         )

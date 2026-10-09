@@ -2149,7 +2149,7 @@ class TestReasoning:
         assert "minimal not supported" in text
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("engine", ["claude", "codex"])
+    @pytest.mark.parametrize("engine", ["claude", "codex", "antigravity"])
     async def test_reasoning_page_renders_every_allowed_level(self, tmp_path, engine):
         """Guards the `_LEVEL_BUTTON_MAP[level]` lookup against tuple edits."""
         from untether.telegram.engine_overrides import (
@@ -2176,7 +2176,7 @@ class TestReasoning:
     def test_reasoning_supported_engines_all_parametrised(self):
         from untether.telegram.engine_overrides import REASONING_SUPPORTED_ENGINES
 
-        assert set(REASONING_SUPPORTED_ENGINES) == {"claude", "codex"}
+        assert set(REASONING_SUPPORTED_ENGINES) == {"claude", "codex", "antigravity"}
 
     @pytest.mark.anyio
     async def test_reasoning_clear_returns_home(self, tmp_path):
@@ -2401,6 +2401,195 @@ class TestReasoning:
 # ---------------------------------------------------------------------------
 # Reasoning toasts
 # ---------------------------------------------------------------------------
+
+
+class TestAntigravityEffortPage:
+    """#558 phase 05 (D29): agy's Effort page asks agy which levels the
+    chat's model supports (a zero-token ``-p /effort`` probe, stubbed here)."""
+
+    @staticmethod
+    def _ctx(tmp_path, action: str | None = None, *, toml_model: str | None = None):
+        args = "rs" if action is None else f"rs:{action}"
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}",
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity", "claude"),
+        )
+        runner = ctx.runtime.resolve_runner.return_value.runner
+        runner.command.return_value = "agy-under-test"
+        runner.model = toml_model
+        return ctx
+
+    @staticmethod
+    def _stub(monkeypatch, data=None, *, error: str | None = None) -> list:
+        from untether.utils import antigravity_quota
+
+        calls: list = []
+
+        async def probe(runner, model):
+            calls.append(model)
+            if error is not None:
+                raise antigravity_quota.AgySlashError(error)
+            return data
+
+        monkeypatch.setattr(antigravity_quota, "_probe_model_efforts", probe)
+        antigravity_quota.clear_effort_cache()
+        return calls
+
+    @staticmethod
+    async def _set(tmp_path, **fields):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(123, "antigravity", EngineOverrides(**fields))
+
+    @staticmethod
+    async def _override(tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        return await prefs.get_engine_override(123, "antigravity")
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_default_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(
+            monkeypatch,
+            {
+                "adjustable": True,
+                "current": "high",
+                "available": ["low", "medium", "high"],
+            },
+        )
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "<b>🧠 Effort</b>" in msg.text
+        assert "Model: <b>agy default</b> · supports low, medium, high" in msg.text
+        assert _buttons_labels(msg) == [
+            "Low",
+            "Medium",
+            "High",
+            "Clear override",
+            "← Back",
+        ]
+        assert "config:rs:xhi" not in _buttons_data(msg)
+        assert "config:rs:max" not in _buttons_data(msg)
+        assert calls == [None]
+        # A second page open uses the cache: no new probe.
+        await ConfigCommand().handle(self._ctx(tmp_path))
+        assert calls == [None]
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_filters_by_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(
+            monkeypatch,
+            {"adjustable": True, "current": "high", "available": ["low", "high"]},
+        )
+        await self._set(tmp_path, model="gemini-3.1-pro", reasoning="medium")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert _buttons_labels(msg) == ["Low", "High", "Clear override", "← Back"]
+        assert "Model: <b>gemini-3.1-pro</b> · supports low, high" in msg.text
+        # The stored level this model can't use is named, not ticked.
+        assert "medium isn't available for this model" in msg.text
+        assert calls == ["gemini-3.1-pro"]
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_uses_toml_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(monkeypatch, {"adjustable": False})
+        ctx = self._ctx(tmp_path, toml_model="gpt-oss-120b")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert calls == ["gpt-oss-120b"]
+        assert _buttons_labels(msg) == ["Clear override", "← Back"]
+        assert "Model: <b>gpt-oss-120b</b> · fixed effort" in msg.text
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_probe_failure_falls_back(
+        self, tmp_path, monkeypatch
+    ):
+        self._stub(monkeypatch, error="timeout")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert _buttons_labels(msg)[:3] == ["Low", "Medium", "High"]
+        assert (
+            "Couldn't ask agy which levels this model supports — showing the"
+            " usual three" in msg.text
+        )
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_escapes_model_id(
+        self, tmp_path, monkeypatch
+    ):
+        self._stub(monkeypatch, error="timeout")
+        await self._set(tmp_path, model="<b>x</b>&y")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "&lt;b&gt;x&lt;/b&gt;&amp;y" in text
+        assert "<b>x</b>&y" not in text
+
+    @pytest.mark.anyio
+    async def test_antigravity_effort_setter_keeps_other_overrides(
+        self, tmp_path, monkeypatch
+    ):
+        """#903: the setter goes through ``with_override``; a tap never
+        spawns the probe."""
+        calls = self._stub(monkeypatch, error="must_not_run")
+        await self._set(tmp_path, model="gemini-3.8-flash", permission_mode="full")
+        await ConfigCommand().handle(self._ctx(tmp_path, "hi"))
+        override = await self._override(tmp_path)
+        assert override.reasoning == "high"
+        assert override.model == "gemini-3.8-flash"
+        assert override.permission_mode == "full"
+        assert calls == []
+        # xhigh / max aren't agy levels: a crafted tap stores nothing.
+        await ConfigCommand().handle(self._ctx(tmp_path, "max"))
+        assert (await self._override(tmp_path)).reasoning == "high"
+
+    def test_antigravity_model_hint_static(self):
+        from untether.telegram.commands.config import _engine_model_hint
+
+        hint = _engine_model_hint("antigravity")
+        assert hint.startswith("agy default")
+        assert "agy models" in hint
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("engine", "label", "buttons"),
+        [
+            ("claude", "Effort", ["Low", "Medium", "High", "Xhigh", "Max"]),
+            ("codex", "Reasoning", ["Low", "Medium", "High", "Xhigh"]),
+        ],
+    )
+    async def test_codex_and_claude_reasoning_pages_unchanged(
+        self, tmp_path, monkeypatch, engine, label, buttons
+    ):
+        calls = self._stub(monkeypatch, error="must_not_run")
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=tmp_path / "prefs.json",
+            default_engine=engine,
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert f"<b>🧠 {label}</b>" in msg.text
+        assert _buttons_labels(msg) == [*buttons, "Clear override", "← Back"]
+        assert "Model:" not in msg.text
+        assert "agy" not in msg.text
+        assert calls == []
 
 
 class TestReasoningToasts:

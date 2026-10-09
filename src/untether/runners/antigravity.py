@@ -321,6 +321,22 @@ def _log_scalar(value: Any) -> Any:
 
 # 08 §6 (#975): tools that can hold agy's single result while they run.
 _BACKGROUND_TOOLS = frozenset({"run_command", "schedule", "manage_task"})
+# 08 §6 (#975, D26/D27): agy holds its answer for a background task for at
+# most 30 min (1.2.9); past that + 60 s grace the wait is no longer expected
+# and ordinary liveness / stall handling resumes.
+_AGY_BACKGROUND_CAP_S = 1860.0
+# D33: the stream carries no ``WaitMsBeforeAsync``, so a background-capable
+# step ACTIVE for longer than this is shown as a background row.
+_BACKGROUND_TITLE_AFTER_S = 5.0
+_BACKGROUND_TITLE_CHARS = 120
+# Descendant PIDs handed to the #590 teardown sweep: bounded, and each one
+# pinned by its /proc start time so a recycled PID is never signalled.
+_ORPHAN_SNAPSHOT_MAX = 256
+_DESCENDANT_SCAN_MAX = 1024
+# Phase 05 (D29): a model id that already names its effort
+# (``gemini-3.8-flash-high``); agy refuses a different ``--effort`` with it.
+_EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|xhigh|max)$")
+_MODEL_ROW_CHARS = 80
 
 _OUTPUT_PREVIEW_CHARS = 500
 _ERROR_MESSAGE_CHARS = 300
@@ -728,10 +744,17 @@ class AntigravityStreamState:
     # 08 §6 (#975): step_index → monotonic time the background-capable tool
     # went ACTIVE. Cleared on its DONE/ERROR or at the result.
     bg_steps: dict[int, float] = field(default_factory=dict)
-    # 08 §2/§6: descendant PIDs swept by manage_subprocess at teardown
-    # (collected by 08 §6; empty until then).
+    # 08 §2/§6: descendant PIDs swept by manage_subprocess at teardown,
+    # collected on ``run_command`` steps, with their /proc start times.
     orphan_pid_snapshot: list[int] = field(default_factory=list)
+    orphan_pid_starttimes: dict[int, int] = field(default_factory=dict)
+    # Background steps already retitled ``⏳ background: …`` (once each).
+    bg_retitled: set[int] = field(default_factory=set)
     agy_pid: int | None = None
+    # Phase 05: the ``--effort`` level actually passed (footer), and the one
+    # ⚠️ row to show when a stored level was dropped for this model.
+    effort: str | None = None
+    effort_note: str | None = None
     agy_version: str | None = None
     t_spawn: float = 0.0
     t_init: float | None = None
@@ -762,6 +785,18 @@ class AntigravityStreamState:
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
         return bool(self.bg_steps)
+
+    def background_count(self) -> int:
+        return len(self.bg_steps)
+
+    def awaiting_background(self) -> bool:
+        """08 §6 (#975): agy is holding its answer for a background task —
+        an expected wait for the liveness watchdog and the stall monitor.
+        False once the oldest task is past agy's own cap (D27)."""
+        if not self.bg_steps:
+            return False
+        oldest = min(self.bg_steps.values())
+        return time.monotonic() - oldest < _AGY_BACKGROUND_CAP_S
 
 
 # ── runner ──────────────────────────────────────────────────────────────────
@@ -1184,6 +1219,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         model = self._model()
         if model:
             args.extend(["--model", model])
+        effort = self._effort_arg(model, state)
+        if effort:
+            args.extend(["--effort", effort])
         # Phase 02 (D21): the bypass flag only for an explicit Full access.
         # Ask me / Plan first never get here in rc1 (refused before spawn);
         # anything else fails closed to Workspace (no flag).
@@ -1194,6 +1232,39 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.effective_mode = mode
             state.argv = list(args)
         return args
+
+    def _effort_arg(self, model: str | None, state: Any) -> str | None:
+        """Phase 05 (D29): the ``--effort`` level to pass, if any.
+
+        Only a level with an agy button (the executor already told the user
+        about anything else, #416); never beside a model id that names its
+        own effort; and never one the Effort page learnt this model refuses
+        (``peek`` only — no probe per run). An unknown model passes it
+        through: agy's own rc 1 maps to the error hint."""
+        from ..telegram.engine_overrides import allowed_reasoning_levels
+        from ..utils import antigravity_quota
+
+        options = get_run_options()
+        level = options.reasoning if options is not None else None
+        if not level or level not in allowed_reasoning_levels(ENGINE):
+            return None
+        shown = (model or "")[:_MODEL_ROW_CHARS]
+        if model and _EFFORT_SUFFIX_RE.search(model):
+            logger.info("antigravity.effort.from_model_id", model=shown, effort=level)
+            return None
+        available = antigravity_quota.peek_model_efforts(self.antigravity_cmd, model)
+        if available is not None and level not in available:
+            logger.info("antigravity.effort.dropped", model=shown, effort=level)
+            if isinstance(state, AntigravityStreamState):
+                who = shown or "agy's default model"
+                state.effort_note = (
+                    f"⚠️ Effort {level} isn't available for {who}, so agy used"
+                    " its default"
+                )
+            return None
+        if isinstance(state, AntigravityStreamState):
+            state.effort = level
+        return level
 
     def stdin_payload(
         self,
@@ -1457,7 +1528,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         model = self._model() or state.init_model
         if model:
             meta["model"] = model
-        # Phase 05 adds "effort" here (between model and mode in the footer).
+        if state.effort:  # the level actually passed (phase 05)
+            meta["effort"] = state.effort
         meta["permissionMode"] = state.mode_label
         return meta
 
@@ -1494,6 +1566,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     if state.conversation_missing:
                         return out
                 out.extend(self._translate_step(su, state))
+                out.extend(self._background_title_updates(state))
                 return out
             case agy_schema.AntigravityResult(result=res):
                 if res is None:
@@ -1578,10 +1651,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def _startup_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
         """⚠️ rows learnt before spawn, shown right after Started."""
+        out: list[UntetherEvent] = []
+        if state.effort_note is not None:
+            out.append(
+                self._warning_row(
+                    state, "antigravity.effort.dropped", state.effort_note
+                )
+            )
+            state.effort_note = None
         pre = state.precheck
         if pre is None:
-            return []
-        out: list[UntetherEvent] = []
+            return out
         scan = pre.scan
         if pre.scan_problem is not None:
             out.append(
@@ -1734,6 +1814,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     detail["changes"] = [{"path": path, "kind": "update"}]
             if idx is not None and tool_name in _BACKGROUND_TOOLS:
                 state.bg_steps.setdefault(idx, time.monotonic())
+            if tool_name == "run_command":
+                self._collect_descendants(state)
             if action_id in state.pending_actions:
                 return []
             action = Action(id=action_id, kind=kind, title=title, detail=detail)
@@ -1745,6 +1827,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
         if idx is not None:
             state.bg_steps.pop(idx, None)
+        if tool_name == "run_command":
+            # By DONE the background child exists (ACTIVE can precede it).
+            self._collect_descendants(state)
         action = state.pending_actions.pop(action_id, None)
         if action is None:
             kind, title = _antigravity_tool_kind_and_title(tool_name, params)
@@ -1780,6 +1865,67 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             id=action.id, kind=action.kind, title=action.title, detail=detail
         )
         return [self._complete(action, state, ok=True)]
+
+    @staticmethod
+    def _collect_descendants(state: AntigravityStreamState) -> None:
+        """D26 kill hygiene: remember agy's current descendants so the #590
+        sweep reaches a background child that left agy's process group, on
+        cancel and on clean exit. Only PIDs found under our own live agy
+        process (``find_descendants``, depth 4) are recorded, each with its
+        /proc start time — the sweep refuses a PID whose start time changed
+        — and the list is capped. Best-effort; never raises."""
+        pid = state.agy_pid
+        if not pid or pid <= 0:
+            return
+        room = _ORPHAN_SNAPSHOT_MAX - len(state.orphan_pid_snapshot)
+        if room <= 0:
+            return
+        try:
+            from ..utils import proc_diag
+
+            found = proc_diag.find_descendants(pid)[:_DESCENDANT_SCAN_MAX]
+            for child in found:
+                if room <= 0:
+                    break
+                if child == pid or child in state.orphan_pid_starttimes:
+                    continue
+                born = proc_diag.pid_starttime(child)
+                if born is None:  # gone already, or no /proc: can't pin it
+                    continue
+                state.orphan_pid_snapshot.append(child)
+                state.orphan_pid_starttimes[child] = born
+                room -= 1
+        except Exception:  # noqa: BLE001 — diagnostics must not break a run
+            logger.debug("antigravity.descendants.scan_failed", exc_info=True)
+
+    @staticmethod
+    def _background_title_updates(
+        state: AntigravityStreamState,
+    ) -> list[UntetherEvent]:
+        """08 §6: retitle a background-capable step that has been ACTIVE for
+        more than 5 s as ``⏳ background: <command>``, once, when another
+        stdout line arrives (no timers in the translator). The row closes
+        under its original title."""
+        if not state.bg_steps:
+            return []
+        now = time.monotonic()
+        out: list[UntetherEvent] = []
+        for idx, since in state.bg_steps.items():
+            if idx in state.bg_retitled or now - since <= _BACKGROUND_TITLE_AFTER_S:
+                continue
+            action = state.pending_actions.get(f"step-{idx}")
+            if action is None:
+                continue
+            state.bg_retitled.add(idx)
+            out.append(
+                state.factory.action_updated(
+                    action_id=action.id,
+                    kind=action.kind,
+                    title=f"⏳ background: {action.title}"[:_BACKGROUND_TITLE_CHARS],
+                    detail=action.detail,
+                )
+            )
+        return out
 
     @staticmethod
     def _complete(

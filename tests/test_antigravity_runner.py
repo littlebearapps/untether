@@ -875,3 +875,383 @@ def test_tos_notice_logged_once(monkeypatch: pytest.MonkeyPatch) -> None:
     notices = [e for e in logs if e["event"] == "antigravity.tos_notice"]
     assert len(notices) == 1
     assert notices[0]["docs"] == "docs/reference/runners/antigravity/runner.md"
+
+
+# ── effort (phase 05, D29) ──────────────────────────────────────────────────
+
+
+def _effort_of(args: list[str]) -> str | None:
+    return args[args.index("--effort") + 1] if "--effort" in args else None
+
+
+def _built(
+    options: EngineRunOptions | None, **kwargs: Any
+) -> tuple[list[str], AntigravityStreamState, AntigravityRunner]:
+    runner = _runner(**kwargs)
+    with apply_run_options(options):
+        state = runner.new_state("p", None)
+        args = runner.build_args("p", None, state=state)
+    return args, state, runner
+
+
+def _seed_efforts(model: str | None, levels: tuple[str, ...]) -> None:
+    from untether.utils import antigravity_quota
+
+    antigravity_quota.remember_model_efforts("agy", model, levels)
+
+
+@pytest.fixture(autouse=True)
+def _clean_effort_cache() -> Any:
+    from untether.utils import antigravity_quota
+
+    antigravity_quota.clear_effort_cache()
+    yield
+    antigravity_quota.clear_effort_cache()
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        (None, None),
+        # Outside agy's tuple (the executor already told the user, #416).
+        ("xhigh", None),
+        ("max", None),
+        ("minimal", None),
+        ("--dangerously-skip-permissions", None),
+    ],
+)
+def test_build_args_effort_only_allowed_levels(
+    level: str | None, expected: str | None
+) -> None:
+    args, state, _ = _built(EngineRunOptions(reasoning=level))
+    assert _effort_of(args) == expected
+    assert state.effort == expected
+    assert args.count("--effort") == (1 if expected else 0)
+    assert "--dangerously-skip-permissions" not in args
+
+
+def test_build_args_effort_goes_before_the_bypass_flag_and_into_state_argv() -> None:
+    args, state, _ = _built(
+        EngineRunOptions(reasoning="high", permission_mode="full", model="m")
+    )
+    assert args[-5:] == ["--model", "m", "--effort", "high", agy.BYPASS_FLAG]
+    assert state.argv == args
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gemini-3.8-flash-high",
+        "gemini-3.1-pro-low",
+        "claude-opus-5-5-medium",
+        "x-xhigh",
+        "x-max",
+    ],
+)
+def test_build_args_no_effort_with_suffixed_model_id(model: str) -> None:
+    with structlog.testing.capture_logs() as logs:
+        args, state, _ = _built(EngineRunOptions(reasoning="low", model=model))
+    assert "--effort" not in args
+    assert args[args.index("--model") + 1] == model  # ids are passed as given
+    assert state.effort is None
+    (note,) = [e for e in logs if e["event"] == "antigravity.effort.from_model_id"]
+    assert note["model"] == model and note["effort"] == "low"
+
+
+def test_build_args_suffix_lookalike_model_ids_still_get_effort() -> None:
+    for model in ("gemini-3.8-flash", "highlow", "my-highway", "x-HIGHER"):
+        args, _, _ = _built(EngineRunOptions(reasoning="low", model=model))
+        assert _effort_of(args) == "low", model
+
+
+def test_build_args_drops_effort_known_unsupported_for_model() -> None:
+    _seed_efforts("gemini-3.1-pro", ("low", "high"))
+    options = EngineRunOptions(reasoning="medium", model="gemini-3.1-pro")
+    runner = _runner()
+    with apply_run_options(options), structlog.testing.capture_logs() as logs:
+        state = runner.new_state("p", None)
+        args = runner.build_args("p", None, state=state)
+        events = runner.translate(
+            schema.decode_event(
+                '{"event":"init","conversation_id":"c-1","init":{"cwd":"/x"}}'
+            ),
+            state=state,
+            resume=None,
+            found_session=None,
+        )
+    assert "--effort" not in args
+    assert state.effort is None
+    (dropped,) = [e for e in logs if e["event"] == "antigravity.effort.dropped"]
+    assert dropped["model"] == "gemini-3.1-pro" and dropped["effort"] == "medium"
+    assert dropped["log_level"] == "info"
+    assert isinstance(events[0], StartedEvent)
+    assert "effort" not in events[0].meta
+    (row,) = _actions(events)
+    assert row.phase == "completed" and row.ok is True  # #987: a ⚠️ row, not ✗
+    assert row.action.title == (
+        "⚠️ Effort medium isn't available for gemini-3.1-pro, so agy used its default"
+    )
+    # A level the model does support still goes through.
+    args, state, _ = _built(EngineRunOptions(reasoning="high", model="gemini-3.1-pro"))
+    assert _effort_of(args) == "high" and state.effort == "high"
+
+
+def test_build_args_drops_effort_for_fixed_effort_model_and_default_model() -> None:
+    _seed_efforts("gpt-oss-120b", ())
+    args, _, _ = _built(EngineRunOptions(reasoning="medium", model="gpt-oss-120b"))
+    assert "--effort" not in args
+    # The default model has its own cache slot.
+    _seed_efforts(None, ("low", "high"))
+    args, state, _ = _built(EngineRunOptions(reasoning="medium"))
+    assert "--effort" not in args
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(reasoning="medium")):
+        state = runner.new_state("p", None)
+        runner.build_args("p", None, state=state)
+        events = runner.translate(
+            schema.decode_event(
+                '{"event":"init","conversation_id":"c-1","init":{"cwd":"/x"}}'
+            ),
+            state=state,
+            resume=None,
+            found_session=None,
+        )
+    (row,) = _actions(events)
+    assert "isn't available for agy's default model" in row.action.title
+
+
+def test_build_args_passes_effort_when_model_unknown() -> None:
+    """No page visit yet → no cached list → pass it; agy's own rc 1 maps to
+    the error hint (D29: validate on page open, not per run)."""
+    _seed_efforts("gemini-3.1-pro", ("low", "high"))
+    args, state, _ = _built(EngineRunOptions(reasoning="medium", model="other-model"))
+    assert _effort_of(args) == "medium"
+    assert state.effort == "medium"
+
+
+def test_build_args_effort_never_spawns_a_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.utils import antigravity_quota
+
+    async def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("build_args must not probe")
+
+    monkeypatch.setattr(antigravity_quota, "run_agy_slash", boom)
+    monkeypatch.setattr(antigravity_quota, "_probe_model_efforts", boom)
+    args, _, _ = _built(EngineRunOptions(reasoning="low", model="m"))
+    assert _effort_of(args) == "low"
+
+
+def test_model_id_is_bounded_in_the_effort_row() -> None:
+    model = "<b>evil</b>" + "x" * 500
+    _seed_efforts(model, ("low",))
+    options = EngineRunOptions(reasoning="high", model=model)
+    runner = _runner()
+    with apply_run_options(options):
+        state = runner.new_state("p", None)
+        runner.build_args("p", None, state=state)
+        events = runner.translate(
+            schema.decode_event(
+                '{"event":"init","conversation_id":"c-1","init":{"cwd":"/x"}}'
+            ),
+            state=state,
+            resume=None,
+            found_session=None,
+        )
+    (row,) = _actions(events)
+    assert len(row.action.title) < 200
+
+
+def test_meta_model_effort_mode() -> None:
+    options = EngineRunOptions(reasoning="high", model="gemini-3.8-flash")
+    runner = _runner()
+    with apply_run_options(options):
+        state = runner.new_state("p", None)
+        runner.build_args("p", None, state=state)
+        meta = runner._meta(state)
+    assert meta == {
+        "model": "gemini-3.8-flash",
+        "effort": "high",
+        "permissionMode": "workspace",
+    }
+    assert list(meta) == ["model", "effort", "permissionMode"]  # footer order
+    # No effort passed → no key.
+    _, state, runner = _built(EngineRunOptions(model="gemini-3.8-flash"))
+    assert "effort" not in runner._meta(state)
+
+
+# ── #975 background wait (08 §6, D26) ───────────────────────────────────────
+
+
+def _bg_lines() -> list[str]:
+    return [
+        line
+        for line in (FIXTURES / "background_held.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def _feed(
+    runner: AntigravityRunner, state: AntigravityStreamState, lines: list[str]
+) -> list[Any]:
+    out: list[Any] = []
+    for line in lines:
+        out.extend(
+            runner.translate(
+                schema.decode_event(line), state=state, resume=None, found_session=None
+            )
+        )
+    return out
+
+
+def test_awaiting_background_and_count() -> None:
+    lines = _bg_lines()
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(permission_mode="full")):  # as captured
+        state = runner.new_state("p", None)
+        assert state.awaiting_background() is False
+        assert state.background_count() == 0
+        _feed(runner, state, lines[:4])  # … run_command ACTIVE
+        assert state.awaiting_background() is True
+        assert state.background_count() == 1
+        _feed(runner, state, lines[4:5])  # run_command DONE
+    assert state.awaiting_background() is False
+    assert state.background_count() == 0
+
+
+def test_awaiting_background_expires_at_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D27: past agy's 30 min + 60 s the wait is no longer expected."""
+    import time
+
+    assert agy._AGY_BACKGROUND_CAP_S == 1860.0
+    state = _runner().new_state("p", None)
+    state.bg_steps[2] = time.monotonic() - 1859.0
+    assert state.awaiting_background() is True
+    state.bg_steps[2] = time.monotonic() - 1861.0
+    assert state.awaiting_background() is False
+    assert state.background_count() == 1  # still counted, just not excused
+    # The oldest entry decides.
+    state.bg_steps[3] = time.monotonic()
+    assert state.awaiting_background() is False
+
+
+def test_subagent_and_plain_tool_steps_are_not_background() -> None:
+    for name in ("subagent", "tools_denied", "ok"):
+        events, state = _replay(name)
+        assert state.awaiting_background() is False, name
+
+
+def _fake_tree(monkeypatch: pytest.MonkeyPatch, tree: dict[int, list[int]]) -> None:
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "find_descendants", lambda pid: list(tree[pid]))
+    monkeypatch.setattr(proc_diag, "pid_starttime", lambda pid: pid * 10)
+
+
+def test_orphan_snapshot_collected_on_run_command_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = _bg_lines()
+    tree: dict[int, list[int]] = {4242: [5001]}
+    _fake_tree(monkeypatch, tree)
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(permission_mode="full")):
+        state = runner.new_state("p", None)
+        runner.on_spawned(state=state, pid=4242)
+        _feed(runner, state, lines[:3])
+        assert state.orphan_pid_snapshot == []  # nothing before a run_command
+        _feed(runner, state, lines[3:4])  # ACTIVE
+        assert state.orphan_pid_snapshot == [5001]
+        tree[4242] = [5001, 5002, 5003]  # the shell and its sleep, by DONE
+        _feed(runner, state, lines[4:5])  # DONE
+    assert state.orphan_pid_snapshot == [5001, 5002, 5003]  # no duplicates
+    # Each PID carries its birth identity so the sweep rejects a recycled one.
+    assert state.orphan_pid_starttimes == {5001: 50010, 5002: 50020, 5003: 50030}
+
+
+def test_orphan_snapshot_skips_pids_without_identity_and_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.utils import proc_diag
+
+    lines = _bg_lines()
+    monkeypatch.setattr(
+        proc_diag, "find_descendants", lambda pid: list(range(6000, 9000))
+    )
+    monkeypatch.setattr(
+        proc_diag, "pid_starttime", lambda pid: None if pid == 6000 else 1
+    )
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(permission_mode="full")):
+        state = runner.new_state("p", None)
+        runner.on_spawned(state=state, pid=4242)
+        _feed(runner, state, lines[:5])
+    assert 6000 not in state.orphan_pid_snapshot  # gone before we could pin it
+    assert len(state.orphan_pid_snapshot) == agy._ORPHAN_SNAPSHOT_MAX
+    assert set(state.orphan_pid_snapshot) == set(state.orphan_pid_starttimes)
+
+
+def test_orphan_snapshot_needs_a_pid_and_survives_proc_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.utils import proc_diag
+
+    lines = _bg_lines()
+    calls: list[int] = []
+
+    def boom(pid: int) -> list[int]:
+        calls.append(pid)
+        raise OSError("no /proc")
+
+    monkeypatch.setattr(proc_diag, "find_descendants", boom)
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(permission_mode="full")):
+        state = runner.new_state("p", None)
+        _feed(runner, state, lines[:5])  # no agy pid recorded: never walks
+        assert calls == []
+        runner.on_spawned(state=state, pid=4242)
+        state2 = runner.new_state("p", None)
+        runner.on_spawned(state=state2, pid=4242)
+        events = _feed(runner, state2, lines)
+    assert calls and state2.orphan_pid_snapshot == []
+    assert isinstance(events[-1], CompletedEvent) and events[-1].ok is True
+
+
+def test_background_row_retitled_after_five_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D33: no ``WaitMsBeforeAsync`` in the stream, so a background-capable
+    step ACTIVE for > 5 s is shown as ``⏳ background: <command>`` on the
+    next stdout line (no timers in the translator)."""
+    import time
+
+    lines = _bg_lines()
+    other = (
+        '{"event":"step_update","step_update":{"conversation_id":'
+        '"c3ebf2af-5ffc-4c41-a240-0b68537ec4c4","step_index":9,"state":"DONE",'
+        '"step_type":"system_message"}}'
+    )
+    runner = _runner()
+    with apply_run_options(EngineRunOptions(permission_mode="full")):
+        state = runner.new_state("p", None)
+        _feed(runner, state, lines[:4])
+        assert _feed(runner, state, [other]) == []  # younger than 5 s: untouched
+        state.bg_steps[2] = time.monotonic() - 6.0
+        (updated,) = _feed(runner, state, [other])
+        assert isinstance(updated, ActionEvent) and updated.phase == "updated"
+        assert updated.action.id == "step-2"
+        assert updated.action.title.startswith("⏳ background: ")
+        assert "sleep 20" in updated.action.title
+        assert _feed(runner, state, [other]) == []  # once per step
+        rest = _feed(runner, state, lines[4:])
+    closed = [e for e in _actions(rest) if e.action.id == "step-2"]
+    assert [e.phase for e in closed] == ["completed"] and closed[0].ok is True
+    assert not closed[0].action.title.startswith("⏳")  # finished: no hourglass
+    assert isinstance(rest[-1], CompletedEvent)
+    assert rest[-1].answer.startswith("STARTED\n")

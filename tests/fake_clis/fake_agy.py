@@ -15,6 +15,10 @@ replayed faithfully::
     sleep:<seconds>      wait (scaled by UNTETHER_FAKE_AGY_TIME_SCALE)
     write:<relpath>      create/overwrite a file under the cwd (planted
                          config tests, phase 02)
+    spawn:<seconds>      start ``sleep <seconds>`` in its own session (a
+                         background task that escapes agy's process group,
+                         #975) and write its pid to
+                         ``UNTETHER_FAKE_AGY_CHILD_PIDFILE``
     rc:<int>             exit code (last line)
 
 ``agy -p /<command> …`` (zero-token slash probes, ``run_agy_slash``) prints
@@ -182,6 +186,19 @@ def main(argv: list[str]) -> int:
             target = Path.cwd() / payload
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({"written": time.time_ns()}))
+        elif kind == "spawn":
+            import subprocess
+
+            child = subprocess.Popen(
+                ["sleep", str(float(payload))],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            pidfile = os.environ.get("UNTETHER_FAKE_AGY_CHILD_PIDFILE")
+            if pidfile:
+                Path(pidfile).write_text(str(child.pid))
         elif kind == "rc":
             rc = int(payload)
     hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)

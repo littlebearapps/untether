@@ -808,7 +808,7 @@ def _should_stream_idle_retry(
     return not _stream_idle_retry_budget_blocked(usage)
 
 
-_DEFAULT_PREAMBLE = (
+_PREAMBLE_HEAD = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
     "Key constraints:\n"
@@ -831,6 +831,11 @@ _DEFAULT_PREAMBLE = (
     "- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, "
     "`message_overflow`, turning on `[triggers] enabled`) are flagged at "
     "reload time — if you didn't see such a warning, no restart is needed.\n\n"
+)
+
+# #558 (D23): names a Claude-only tool, so only engines in
+# ``PLAN_EXIT_TOOL_ENGINES`` get it.
+_CLAUDE_PLAN_MODE_BLOCK = (
     "Plan-mode requirements (when you call `ExitPlanMode`):\n"
     "- Your `plan` parameter MUST be a concise 3–5 bullet summary of your "
     "findings, decisions, or proposed changes — never just a file path. "
@@ -843,6 +848,9 @@ _DEFAULT_PREAMBLE = (
     "~500–1500 characters total. Do NOT re-paste the full plan content — "
     "the user has already seen it during approval. Brevity is the goal; "
     'do not just write "Plan approved" either.\n\n'
+)
+
+_PREAMBLE_TAIL = (
     "Every response that completes work MUST end with a structured summary "
     "(keep each section brief — headline bullets, not full content; aim "
     "for ~500–1500 characters total across the whole summary):\n"
@@ -868,6 +876,33 @@ _DEFAULT_PREAMBLE = (
     "  - [Blocking questions — state your recommended option clearly]"
 )
 
+# The full text (Claude's). ``[preamble] text`` overrides are compared
+# against it, and it is what every engine got before #558.
+_DEFAULT_PREAMBLE = _PREAMBLE_HEAD + _CLAUDE_PLAN_MODE_BLOCK + _PREAMBLE_TAIL
+
+_ASK_QUESTIONS_OFF_TEXT = (
+    "\n\nDo NOT call AskUserQuestion. Proceed with reasonable defaults. "
+    "State any assumptions in your Decisions Needed summary section."
+)
+_ASK_QUESTIONS_ON_TEXT = (
+    "\n\nWhen you need clarification from the user, use AskUserQuestion "
+    "with clear options. The user will see interactive buttons to choose from."
+)
+# Engines with no question buttons (everything but Claude until agy's
+# arrive in rc3).
+_REPLY_CLARIFICATION_TEXT = (
+    "\n\nIf you need clarification, say so in your final reply — the user "
+    "will answer in their next message."
+)
+
+
+def _default_preamble(engine: str) -> str:
+    from .telegram.engine_overrides import PLAN_EXIT_TOOL_ENGINES
+
+    if engine in PLAN_EXIT_TOOL_ENGINES:
+        return _DEFAULT_PREAMBLE
+    return _PREAMBLE_HEAD + _PREAMBLE_TAIL
+
 
 def _load_preamble_settings():
     """Load preamble settings from config, returning defaults if unavailable."""
@@ -886,33 +921,37 @@ def _load_preamble_settings():
         return PreambleSettings()
 
 
-def _apply_preamble(prompt: str) -> str:
-    """Prepend the context preamble to the prompt if enabled."""
+def _apply_preamble(prompt: str, engine: str) -> str:
+    """Prepend the context preamble to the prompt if enabled.
+
+    Capability-driven (#558, D23): only engines with question buttons are
+    told to call ``AskUserQuestion`` and only engines with ``ExitPlanMode``
+    get the plan-mode block. Claude's text is byte-identical to before; a
+    ``[preamble] text`` override is used verbatim for every engine.
+    """
     cfg = _load_preamble_settings()
     if not cfg.enabled:
         logger.debug("preamble.disabled")
         return prompt
-    text = cfg.text if cfg.text is not None else _DEFAULT_PREAMBLE
+    text = cfg.text if cfg.text is not None else _default_preamble(engine)
     if not text:
         logger.debug("preamble.disabled")
         return prompt
 
-    # Append AskUserQuestion guidance based on per-chat toggle
     from .runners.run_options import get_run_options
+    from .telegram.engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES
 
-    run_opts = get_run_options()
-    # Default is ON (ask_questions=None treated as True)
-    ask_questions = run_opts.ask_questions if run_opts else None
-    if ask_questions is False:
-        text += (
-            "\n\nDo NOT call AskUserQuestion. Proceed with reasonable defaults. "
-            "State any assumptions in your Decisions Needed summary section."
-        )
+    if engine in ASK_QUESTIONS_SUPPORTED_ENGINES:
+        # AskUserQuestion guidance based on the per-chat toggle.
+        run_opts = get_run_options()
+        # Default is ON (ask_questions=None treated as True)
+        ask_questions = run_opts.ask_questions if run_opts else None
+        if ask_questions is False:
+            text += _ASK_QUESTIONS_OFF_TEXT
+        else:
+            text += _ASK_QUESTIONS_ON_TEXT
     else:
-        text += (
-            "\n\nWhen you need clarification from the user, use AskUserQuestion "
-            "with clear options. The user will see interactive buttons to choose from."
-        )
+        text += _REPLY_CLARIFICATION_TEXT
 
     source = "default"
     if cfg.text is not None:
@@ -2676,6 +2715,14 @@ class ProgressEdits:
                 # action.
                 threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "compacting"
+            elif self._is_background_waiting():
+                # #975: agy holds its answer (and prints nothing) until a
+                # background task finishes — up to 30 min, bounded by the
+                # engine's own cap, after which the branches below apply
+                # again. Before ``running_tool``: the open background row
+                # counts as a running action.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "background_waiting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
@@ -2845,6 +2892,7 @@ class ProgressEdits:
                 "rate_limit_waiting",
                 "api_retry_waiting",
                 "compacting",
+                "background_waiting",
             )
             _expected_wait = (
                 (_post_result_idle and not _post_result_limbo)
@@ -2896,6 +2944,7 @@ class ProgressEdits:
                 "rate_limit_waiting",
                 "api_retry_waiting",
                 "compacting",
+                "background_waiting",
             ):
                 if (
                     self._last_approval_pending_emit_at == 0.0
@@ -3139,7 +3188,11 @@ class ProgressEdits:
             # tool and MCP children keep CPU busy while the main process
             # sleeps, which silenced every reminder after the first.
             _approval_wait = threshold_reason == "pending_approval"
-            _notify_anyway = frozen_escalate or _approval_wait
+            # #975: the ⏳ line for a background wait is information, not a
+            # stall warning — the open command row and its busy child would
+            # otherwise swallow it the same way.
+            _background_wait = threshold_reason == "background_waiting"
+            _notify_anyway = frozen_escalate or _approval_wait or _background_wait
             if not _notify_anyway and _post_result_idle:
                 self._bump_stall_suppression("post_result")
                 logger.info(
@@ -3348,6 +3401,13 @@ class ProgressEdits:
                         and _approval_info.question
                     ):
                         parts.append(f"❓ {_approval_info.question}")
+                elif _background_wait:
+                    n_bg = self._background_wait_count()
+                    parts = [
+                        f"⏳ Antigravity is waiting for {n_bg} background"
+                        f" task{'' if n_bg == 1 else 's'} ({mins} min) — agy"
+                        " holds its answer until they finish (up to 30 min)."
+                    ]
                 elif (
                     diag is not None
                     and diag.alive
@@ -3406,6 +3466,7 @@ class ProgressEdits:
                 if (
                     self._stall_warn_count > 1
                     and threshold_reason != "pending_approval"
+                    and not _background_wait
                 ):
                     parts[0] += f" (warned {self._stall_warn_count}x)"
                 # "session may be stuck" — only when genuinely stuck
@@ -3417,6 +3478,7 @@ class ProgressEdits:
                     and mcp_server is None
                     and threshold_reason != "active_children"
                     and threshold_reason != "pending_approval"
+                    and not _background_wait
                     and not (_tool_name and main_sleeping)
                     and cpu_active is not True
                 )
@@ -4048,6 +4110,29 @@ class ProgressEdits:
                 logger.debug("progress_edits.compaction_probe_failed", error=str(exc))
                 return False
         return False
+
+    def _is_background_waiting(self) -> bool:
+        """#975: True while the engine holds its answer for a background
+        task (Antigravity's ``awaiting_background``, bounded by its own
+        30 min + 60 s cap). Duck-typed like :meth:`_is_compacting`; engines
+        without the probe → False."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_background", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.background_probe_failed", error=str(exc))
+                return False
+        return False
+
+    def _background_wait_count(self) -> int:
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        counter = getattr(es, "background_count", None)
+        try:
+            return max(1, int(counter())) if callable(counter) else 1
+        except Exception:  # noqa: BLE001 - monitor loop must not die
+            return 1
 
     def _has_running_tool(self) -> bool:
         """Check if any action is still running (e.g. Bash command, TaskOutput)."""
@@ -6479,7 +6564,7 @@ async def handle_message(
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
     runner_text = _strip_resume_lines(incoming.text, is_resume_line=resume_strip)
-    runner_text = _apply_preamble(runner_text)
+    runner_text = _apply_preamble(runner_text, runner.engine)
 
     progress_tracker = ProgressTracker(engine=runner.engine, clock=clock)
     # rc4 (#271): seed trigger source into meta so the footer renders it.

@@ -389,3 +389,187 @@ async def test_run_sigterm_maps_to_interrupted(
     assert isinstance(done, CompletedEvent) and done.ok is False
     assert "interrupted" in (done.error or "")
     assert done.resume == ResumeToken(engine=ENGINE, value=OK_ID)
+
+
+# ── effort in argv (phase 05) ───────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_run_passes_effort_and_shows_it_in_meta(
+    project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    _scenario(monkeypatch, "ok")
+    options = EngineRunOptions(reasoning="high", model="gemini-3.8-flash")
+    with apply_run_options(options):
+        events = await _run()
+    done = _assert_contract(events)
+    assert done.ok is True
+    argv = json.loads(record.read_text())["argv"]
+    assert argv[argv.index("--effort") + 1] == "high"
+    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash"
+    # (the base runner appends ``pid``)
+    assert list(events[0].meta)[:3] == ["model", "effort", "permissionMode"]
+    assert events[0].meta["effort"] == "high"
+
+
+@pytest.mark.anyio
+async def test_run_without_effort_has_no_effort_flag(
+    project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _scenario(monkeypatch, "ok")
+    events = await _run()
+    assert "--effort" not in json.loads(record.read_text())["argv"]
+    assert "effort" not in events[0].meta
+
+
+# ── #975: a background-held result is an expected wait (08 §6, D26) ─────────
+
+
+def _background_script(tmp_path: Path, *, hold_s: float, spawn: bool = False) -> Path:
+    """``background_held`` with our own timing: no gaps except *hold_s* while
+    the ``run_command`` step is ACTIVE (agy holds its answer there)."""
+    source = (
+        Path(__file__).parent / "fixtures" / "antigravity" / "background_held.script"
+    ).read_text()
+    out: list[str] = []
+    for line in source.splitlines():
+        if not line.startswith("out:"):
+            continue
+        active = '"state":"ACTIVE","step_type":"tool"' in line
+        if active and spawn:
+            out.append("spawn:60")
+        out.append(line)
+        if active:
+            out.append(f"sleep:{hold_s}")
+    script = tmp_path / "background.script"
+    script.write_text("\n".join([*out, "rc:0"]) + "\n")
+    return script
+
+
+async def _run_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, hold_s: float = 2.5, **kw: Any
+) -> tuple[list[Any], list[dict[str, Any]], AntigravityRunner]:
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    script = _background_script(tmp_path, hold_s=hold_s, **kw)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCRIPT", str(script))
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_TIME_SCALE", "1")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    runner._LIVENESS_TIMEOUT_SECONDS = 1.0
+    runner._WATCHDOG_POLL_SECONDS = 0.1
+    # As captured (always-proceed); the watchdog logs through the runner's
+    # module logger, which capture_logs sees.
+    with (
+        apply_run_options(EngineRunOptions(permission_mode="full")),
+        structlog.testing.capture_logs() as logs,
+    ):
+        events = await _run("start it in the background", runner=runner)
+    return events, logs, runner
+
+
+@pytest.mark.anyio
+async def test_background_held_result_is_expected_wait(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events, logs, runner = await _run_background(tmp_path, monkeypatch)
+    done = _assert_contract(events)
+    assert done.ok is True
+    # One Completed with both replies, concatenated by agy.
+    assert done.answer == (
+        "STARTED\nThe background task has finished successfully (`bg.txt` created).\n"
+    )
+    names = [e["event"] for e in logs]
+    assert "subprocess.liveness_stall" not in names
+    assert "subprocess.liveness_kill" not in names
+    waits = [e for e in logs if e["event"] == "subprocess.background_wait"]
+    assert len(waits) == 1  # paced: one INFO per 30 min of waiting
+    assert waits[0]["log_level"] == "info"
+    assert waits[0]["background"] == 1
+    assert waits[0]["pid"] == runner.last_pid
+    assert waits[0]["idle_seconds"] >= 1.0
+    stream = runner.current_stream
+    assert stream is not None and stream.liveness_stalls == 0
+    assert stream.engine_state.awaiting_background() is False  # cleared at DONE
+
+
+@pytest.mark.anyio
+async def test_background_wait_expires_after_cap(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D27: past the cap the probe is False, so the ordinary liveness WARN
+    (and whatever follows it) applies again."""
+    monkeypatch.setattr(agy, "_AGY_BACKGROUND_CAP_S", 0.2)
+    events, logs, runner = await _run_background(tmp_path, monkeypatch)
+    assert _assert_contract(events).ok is True
+    names = [e["event"] for e in logs]
+    assert "subprocess.background_wait" not in names
+    (stall,) = [e for e in logs if e["event"] == "subprocess.liveness_stall"]
+    assert stall["log_level"] == "warning"
+    assert runner.current_stream is not None
+    assert runner.current_stream.liveness_stalls == 1
+
+
+@pytest.mark.anyio
+async def test_quiet_run_without_background_step_still_warns(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """08 §7: a held result with no ACTIVE background step is not an
+    expected wait."""
+    lines = (
+        Path(__file__).parent / "fixtures" / "antigravity" / "ok.script"
+    ).read_text()
+    outs = [ln for ln in lines.splitlines() if ln.startswith("out:")]
+    script = tmp_path / "quiet.script"
+    script.write_text("\n".join([*outs[:-1], "sleep:2.5", outs[-1], "rc:0"]) + "\n")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCRIPT", str(script))
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_TIME_SCALE", "1")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    runner._LIVENESS_TIMEOUT_SECONDS = 1.0
+    runner._WATCHDOG_POLL_SECONDS = 0.1
+    with structlog.testing.capture_logs() as logs:
+        events = await _run(runner=runner)
+    assert _assert_contract(events).ok is True
+    names = [e["event"] for e in logs]
+    assert "subprocess.liveness_stall" in names
+    assert "subprocess.background_wait" not in names
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+async def test_background_child_in_its_own_session_is_swept_at_exit(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D26 kill hygiene: a background child that left agy's process group is
+    collected into ``orphan_pid_snapshot`` on the ``run_command`` steps and
+    reaped by the #590 sweep when agy exits."""
+    import signal
+
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_CHILD_PIDFILE", str(pidfile))
+    child: int | None = None
+    try:
+        events, _, runner = await _run_background(
+            tmp_path, monkeypatch, hold_s=0.3, spawn=True
+        )
+        child = int(pidfile.read_text())
+        assert _assert_contract(events).ok is True
+        state = runner.current_stream.engine_state  # type: ignore[union-attr]
+        assert child in state.orphan_pid_snapshot
+        assert child in state.orphan_pid_starttimes
+        assert runner.last_pid not in state.orphan_pid_snapshot
+        assert not _pid_alive(child)
+    finally:
+        if child is None and pidfile.exists():
+            child = int(pidfile.read_text())
+        if child is not None and _pid_alive(child):
+            os.kill(child, signal.SIGKILL)

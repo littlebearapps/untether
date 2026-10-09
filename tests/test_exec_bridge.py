@@ -13466,7 +13466,11 @@ class TestEngineStateOptIn:
     """08 §2: ``engine_state`` / ``on_spawned`` / orphan snapshot pass-through."""
 
     @staticmethod
-    def _runner(expose: bool, snapshot: list[int] | None = None):
+    def _runner(
+        expose: bool,
+        snapshot: list[int] | None = None,
+        starttimes: dict[int, int] | None = None,
+    ):
         import json
         from dataclasses import dataclass, field
 
@@ -13484,6 +13488,7 @@ class TestEngineStateOptIn:
             note_seq: int = 0
             spawned_pid: int | None = None
             orphan_pid_snapshot: list[int] | None = None
+            orphan_pid_starttimes: dict[int, int] | None = None
 
         class _Runner(JsonlSubprocessRunner):
             engine = "codex"
@@ -13496,7 +13501,9 @@ class TestEngineStateOptIn:
                 return ["-c", script]
 
             def new_state(self, prompt, resume):
-                return _State(orphan_pid_snapshot=snapshot)
+                return _State(
+                    orphan_pid_snapshot=snapshot, orphan_pid_starttimes=starttimes
+                )
 
             def on_spawned(self, *, state, pid: int) -> None:
                 state.spawned_pid = pid
@@ -13548,6 +13555,37 @@ class TestEngineStateOptIn:
 
         seen.clear()
         plain = self._runner(expose=False, snapshot=None)
+        [evt async for evt in plain.run_impl("hi", None)]
+        assert seen == [None]
+
+    @pytest.mark.anyio
+    async def test_orphan_starttimes_passed_through_with_the_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#590 hardening: a state that pins each collected PID's start time
+        hands it to the sweep, which then refuses a recycled PID. A state
+        without the attribute (every engine but agy) passes None."""
+        import untether.runner as runner_mod
+
+        seen: list[Any] = []
+        real = runner_mod.manage_subprocess
+
+        def recording(cmd, **kwargs):
+            seen.append(kwargs.get("orphan_pid_starttimes", "absent"))
+            return real(cmd, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "manage_subprocess", recording)
+        starttimes: dict[int, int] = {}
+        runner = self._runner(expose=False, snapshot=[], starttimes=starttimes)
+        [evt async for evt in runner.run_impl("hi", None)]
+        assert seen[0] is starttimes
+
+        seen.clear()
+        from untether.runners.codex import CodexRunner
+
+        state = CodexRunner(codex_cmd="codex", extra_args=[]).new_state("hi", None)
+        assert not hasattr(state, "orphan_pid_starttimes")
+        plain = self._runner(expose=False)
         [evt async for evt in plain.run_impl("hi", None)]
         assert seen == [None]
 
@@ -13676,3 +13714,124 @@ class TestAntigravityRegistries:
         from untether.runner_bridge import _CHILD_WORK_ENGINES
 
         assert "antigravity" not in _CHILD_WORK_ENGINES
+
+
+# ── #975 (08 §6, D26): agy's background-held result is an expected wait ──────
+
+
+def _sent_texts(edits: ProgressEdits) -> list[str]:
+    return [c["message"].text for c in edits.transport.send_calls]
+
+
+@pytest.mark.anyio
+async def test_stall_monitor_background_waiting_is_expected_wait() -> None:
+    edits, clock = _stall_edits(
+        awaiting_background=lambda: True, background_count=lambda: 2
+    )
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and selected[0]["reason"] == "background_waiting"
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.stall_auto_cancel" not in events
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending and pending[0]["reason"] == "background_waiting"
+    assert edits._total_stall_warn_count == 0
+    texts = _sent_texts(edits)
+    assert texts, "the ⏳ status line is sent"
+    assert texts[0].startswith(
+        "⏳ Antigravity is waiting for 2 background tasks (0 min) — agy holds its"
+        " answer until they finish (up to 30 min)."
+    )
+    assert all("session may be stuck" not in t for t in texts)
+    assert all("warned" not in t for t in texts)
+    assert texts[0].rstrip().endswith("/cancel to stop.")
+
+
+@pytest.mark.anyio
+async def test_stall_monitor_background_waiting_singular_and_uses_approval_threshold() -> (
+    None
+):
+    edits, clock = _stall_edits(
+        awaiting_background=lambda: True, background_count=lambda: 1
+    )
+    # Only the expected-wait threshold is long: nothing fires inside it.
+    edits._STALL_THRESHOLD_APPROVAL = 3600.0
+    logs = await _run_stall_window(edits, clock)
+    assert not [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert _sent_texts(edits) == []
+    edits2, clock2 = _stall_edits(
+        awaiting_background=lambda: True, background_count=lambda: 1
+    )
+    await _run_stall_window(edits2, clock2)
+    assert "waiting for 1 background task (" in _sent_texts(edits2)[0]
+
+
+@pytest.mark.anyio
+async def test_stall_monitor_pending_approval_outranks_background_waiting() -> None:
+    edits, clock = _stall_edits(
+        awaiting_background=lambda: True,
+        background_count=lambda: 1,
+        awaiting_user_approval=lambda: True,
+    )
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and selected[0]["reason"] == "pending_approval"
+
+
+@pytest.mark.anyio
+async def test_stall_monitor_unchanged_without_probe() -> None:
+    """A Codex/OpenCode/Pi-shaped state (no ``awaiting_background``) stalls
+    exactly as before: reason ``normal``, a WARN, the generic text."""
+    edits, clock = _stall_edits()
+    assert edits._is_background_waiting() is False
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and selected[0]["reason"] == "normal"
+    assert "progress_edits.stall_detected" in [e.get("event") for e in logs]
+    texts = _sent_texts(edits)
+    assert texts and texts[0].startswith("⏳ No progress for 0 min")
+    assert all("background task" not in t for t in texts)
+
+
+def test_is_background_waiting_probe_shapes() -> None:
+    edits, _ = _stall_edits(awaiting_background=lambda: True)
+    assert edits._is_background_waiting() is True
+    edits, _ = _stall_edits(awaiting_background=lambda: False)
+    assert edits._is_background_waiting() is False
+
+    def boom() -> bool:
+        raise RuntimeError("probe broke")
+
+    edits, _ = _stall_edits(awaiting_background=boom)
+    assert edits._is_background_waiting() is False  # the monitor must not die
+    edits, _ = _stall_edits(awaiting_background="not callable")
+    assert edits._is_background_waiting() is False
+    edits.stream = None
+    assert edits._is_background_waiting() is False
+
+
+def test_is_background_waiting_real_states() -> None:
+    """Only agy's state has the probe; Claude's never reports a background
+    wait through it."""
+    import time
+
+    from untether.runners.antigravity import AntigravityRunner
+    from untether.runners.claude import ClaudeStreamState
+
+    edits, _ = _stall_edits()
+    edits.stream.engine_state = ClaudeStreamState()  # type: ignore[union-attr]
+    assert edits._is_background_waiting() is False
+    state = AntigravityRunner(antigravity_cmd="agy").new_state("hi", None)
+    edits.stream.engine_state = state  # type: ignore[union-attr]
+    assert edits._is_background_waiting() is False
+    state.bg_steps[2] = time.monotonic()
+    assert edits._is_background_waiting() is True

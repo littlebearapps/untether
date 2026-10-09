@@ -1,11 +1,14 @@
-"""Zero-token ``agy -p /<command>`` probes (#558).
+"""agy zero-token slash probes: ``agy -p /<command>`` (#558).
 
 rc1 ships the shared runner (``run_agy_slash``), the cached ``-p /config``
-sanity check (phase 02, REVIEW-2 M5) and the on-demand ``/usage`` quota
+sanity check (phase 02, REVIEW-2 M5), the on-demand ``/usage`` quota
 (phase 04: ``get_quota`` → private 60 s cache → ``parse_quota`` /
-``format_quota_html``). 05's effort probe and 13's ``-p /hooks`` precheck
-reuse ``run_agy_slash``. Nothing here runs before, during or after an agy
-run: the quota is fetched only when someone sends ``/usage`` (D5, REVIEW M8).
+``format_quota_html``) and the per-model effort list (phase 05, D29:
+``agy_model_efforts`` when ``/config`` → Effort opens, ``peek_model_efforts``
+for the runner). 13's ``-p /hooks`` precheck reuses ``run_agy_slash``. The
+quota is fetched only when someone sends ``/usage`` and the effort list only
+when the Effort page opens — never before, during or after an agy run (D5,
+REVIEW M8).
 
 ``run_agy_slash`` runs the guard first (#838), then agy through
 ``manage_subprocess`` (#590: new session + descendant-aware kill) with stdin
@@ -592,3 +595,119 @@ def quota_cache_stats() -> QuotaCacheStats:
 
 def reset_quota_cache() -> None:
     _QUOTA_CACHE.reset()
+
+
+# ── per-model effort levels (phase 05, D29) ─────────────────────────────────
+# `-p /effort [--model <m>]` answers `{"adjustable": true, "current": …,
+# "available": [...]}` for 0 tokens (probes/1.3.x/z-model-effort-combos.txt);
+# a fixed-effort model (gpt-oss-120b) answers `{"adjustable": false}`.
+
+EFFORT_TIMEOUT_S = 10.0
+EFFORT_VOCABULARY: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+EFFORT_CACHE_MAX = 64
+_DEFAULT_MODEL_KEY = "<default>"
+_MODEL_LOG_CHARS = 80
+
+# (agy command, its (realpath, mtime) or None, model or "<default>") → levels.
+_EFFORT_CACHE: dict[tuple[Any, ...], tuple[str, ...]] = {}
+_EFFORT_LOCK: anyio.Lock | None = None
+
+
+def clear_effort_cache() -> None:
+    global _EFFORT_LOCK
+    _EFFORT_CACHE.clear()
+    _EFFORT_LOCK = None
+
+
+def _agy_binary_key(cmd: str) -> tuple[str, float] | None:
+    """The version cache's key (08 §4): agy self-updates in place, so a new
+    mtime drops every remembered list. A stat, never a spawn."""
+    from ..runners import antigravity as agy_runner
+
+    return agy_runner._cache_key(cmd)
+
+
+def _effort_key(cmd: str, model: str | None) -> tuple[Any, ...]:
+    return (cmd, _agy_binary_key(cmd), model or _DEFAULT_MODEL_KEY)
+
+
+def parse_model_efforts(data: Any) -> tuple[str, ...] | None:
+    """agy ``/effort`` ``command.data`` → the levels the model accepts, in
+    our order. ``()`` for a fixed-effort model; None when unreadable."""
+    if not isinstance(data, dict):
+        return None
+    available = data.get("available")
+    if isinstance(available, list):
+        names = {item for item in available[:32] if isinstance(item, str)}
+        return tuple(level for level in EFFORT_VOCABULARY if level in names)
+    if data.get("adjustable") is False:
+        return ()
+    return None
+
+
+def peek_model_efforts(cmd: str, model: str | None) -> tuple[str, ...] | None:
+    """The remembered list for *model* (None = agy's default model), or None
+    when the Effort page hasn't asked yet. Never spawns."""
+    return _EFFORT_CACHE.get(_effort_key(cmd, model))
+
+
+def remember_model_efforts(
+    cmd: str, model: str | None, levels: tuple[str, ...]
+) -> None:
+    key = _effort_key(cmd, model)
+    if key not in _EFFORT_CACHE and len(_EFFORT_CACHE) >= EFFORT_CACHE_MAX:
+        # Drop lists for an older binary first, then the oldest entry.
+        stale = [k for k in _EFFORT_CACHE if k[:2] != key[:2]]
+        for old in stale or [next(iter(_EFFORT_CACHE))]:
+            _EFFORT_CACHE.pop(old, None)
+    _EFFORT_CACHE[key] = levels
+
+
+async def _run_model_efforts(
+    runner: AntigravityRunner, model: str | None
+) -> dict[str, Any]:
+    return await run_agy_slash(
+        runner,
+        "/effort",
+        extra_args=("--model", model) if model else (),
+        timeout_s=EFFORT_TIMEOUT_S,
+    )
+
+
+# Indirection so tests stub the probe (``tests/conftest.py``).
+_probe_model_efforts = _run_model_efforts
+
+
+async def agy_model_efforts(
+    runner: AntigravityRunner, model: str | None
+) -> tuple[str, ...] | None:
+    """The effort levels *model* accepts, from the cache or one zero-token
+    ``-p /effort`` probe (≤ 10 s). Cached for the process lifetime per agy
+    binary and model; a failure returns None and is not cached. Only the
+    ``/config`` Effort page calls this (D29: on page open, not per run)."""
+    global _EFFORT_LOCK
+    cmd = runner.command()
+    hit = peek_model_efforts(cmd, model)
+    if hit is not None:
+        return hit
+    if _EFFORT_LOCK is None:
+        _EFFORT_LOCK = anyio.Lock()
+    async with _EFFORT_LOCK:
+        hit = peek_model_efforts(cmd, model)
+        if hit is not None:
+            return hit
+        label = (model or _DEFAULT_MODEL_KEY)[:_MODEL_LOG_CHARS]
+        levels: tuple[str, ...] | None = None
+        kind = "unparseable"
+        try:
+            levels = parse_model_efforts(await _probe_model_efforts(runner, model))
+        except AgySlashError as exc:
+            kind = exc.kind
+        except Exception as exc:  # noqa: BLE001 — a page render must not fail
+            kind = exc.__class__.__name__
+        if levels is None:
+            logger.warning("antigravity.effort.probe_failed", model=label, kind=kind)
+            return None
+        remember_model_efforts(cmd, model, levels)
+        logger.info("antigravity.effort.probe", model=label, available=list(levels))
+        return levels
