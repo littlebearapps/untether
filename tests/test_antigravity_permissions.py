@@ -1123,23 +1123,45 @@ def test_symlinked_plugin_dir_inside_root_is_scanned(
     assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
 
 
-@pytest.mark.parametrize("target", ["outside", "/", "home"])
-def test_symlink_out_of_root_never_followed(
-    target: str, tmp_path: Path, gemini_home: Path
+@pytest.mark.parametrize("target", ["outside", "/"])
+def test_symlink_out_of_root_and_home_never_followed(
+    target: str, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
     proj = tmp_path / "proj"
     (proj / ".agents" / "plugins").mkdir(parents=True)
-    dest = {
-        "outside": tmp_path / "outside-plugin",
-        "/": Path("/"),
-        "home": Path.home(),
-    }[target]
+    dest = {"outside": tmp_path / "outside-plugin", "/": Path("/")}[target]
     if target == "outside":
         _write(dest / "hooks.json", '{"a": 1}')
     (proj / ".agents" / "plugins" / "evil").symlink_to(dest, target_is_directory=True)
     result = scan.scan_workspace_config(proj)
     assert result.outside_root is True  # → "not checked" in the runner
     assert list(result.agy) == [".agents/plugins/evil"]
+
+
+def test_shared_agents_link_under_home_followed_and_hashed(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review (control regression): a dotfiles-style shared .agents/
+    under $HOME is a normal setup — hashed, not permanently "not checked"."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    shared = home / "dotfiles" / "agents"
+    manifest = _write(shared / "hooks.json", '{"a": 1}')
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".agents").symlink_to(shared, target_is_directory=True)
+    first = scan.scan_workspace_config(proj)
+    assert first.unchecked_reason is None
+    assert ".agents/hooks.json" in first.agy
+    manifest.write_text('{"a": 2}')
+    assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
+    # … but never into ~/.gemini (D33: no reads there).
+    (proj / ".agents").unlink()
+    gem = _write(home / ".gemini" / "x" / "hooks.json", '{"a": 1}')
+    (proj / ".agents").symlink_to(gem.parent, target_is_directory=True)
+    assert scan.scan_workspace_config(proj).unchecked_reason == scan.OUTSIDE
 
 
 def test_fifo_and_device_never_opened(tmp_path: Path, gemini_home: Path) -> None:
@@ -1211,23 +1233,130 @@ def test_unlistable_dir_marks_unchecked(tmp_path: Path, gemini_home: Path) -> No
     assert result.unchecked_reason == scan.UNREADABLE
 
 
-def test_writable_script_outside_project_marks_unchecked(
+def test_user_controlled_script_outside_project_is_hashed(
     tmp_path: Path, gemini_home: Path
 ) -> None:
+    """A hook naming a script outside the project (probe hooks use absolute
+    scratch paths) is tracked by content, not a permanent "not checked";
+    a read-only system binary is ignored."""
     proj = tmp_path / "proj"
     outside = _write(tmp_path / "elsewhere" / "run.sh", "echo hi")
     _write(
         proj / ".agents" / "hooks.json",
-        json.dumps({"Stop": [{"command": f"sh {outside} && /bin/sh -c true"}]}),
+        json.dumps({"Stop": [{"command": f"python3 -I {outside} && /bin/sh -c true"}]}),
     )
-    result = scan.scan_workspace_config(proj)
-    assert result.unchecked_reason == scan.OUTSIDE
-    # A read-only system binary alone doesn't.
+    first = scan.scan_workspace_config(proj)
+    assert first.unchecked_reason is None
+    assert str(outside) in first.agy
+    assert not any(p.endswith("/bin/sh") for p in first.agy)
+    outside.write_text("echo evil")
+    assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
+
+
+def test_relative_mcp_arg_resolved_against_run_cwd(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    (repo / ".git").mkdir(parents=True)
     _write(
-        proj / ".agents" / "hooks.json",
-        json.dumps({"Stop": [{"command": "/bin/sh -c true"}]}),
+        repo / ".agents" / "mcp_config.json",
+        json.dumps({"mcpServers": {"s": {"command": "node", "args": ["./server.js"]}}}),
     )
-    assert scan.scan_workspace_config(proj).unchecked_reason is None
+    server = _write(sub / "server.js", "1")
+    first = scan.scan_workspace_config(sub)
+    assert "sub/server.js" in first.agy
+    server.write_text("2")
+    assert scan.scan_workspace_config(sub).agy_digest != first.agy_digest
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"Stop": [{"command": "sh scripts\\/evil.sh"}]}',  # JSON escape
+        '{"Stop": [{"command": "sh \\u0073cripts/evil.sh"}]}',  # unicode escape
+        '{"Stop": [{"command": "sh scr\'\'ipts/evil.sh"}]}',  # shell concat
+        '{"Stop": [{"command": "sh \\"scripts/evil.sh\\""}]}',  # quoted
+    ],
+)
+def test_reference_parsed_like_agy_and_the_shell(
+    raw: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(tmp_path / ".agents" / "hooks.json", raw)
+    script = _write(tmp_path / "scripts" / "evil.sh", "echo 1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    assert "scripts/evil.sh" in first.agy
+    script.write_text("echo 2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"Stop": [{"command": "sh a.sh"}], // comment\n}',
+        '{"Stop": [{"command": "sh a.sh"},],}',
+        '\ufeff{"Stop": [{"command": "sh a.sh"}]}',
+        '{"Stop": [{"command": "sh a.sh"}], "Stop": []}',
+        '{"timeout": NaN}',
+    ],
+    ids=["comment", "trailing-comma", "bom", "duplicate-key", "nan"],
+)
+def test_non_strict_json_manifest_is_unchecked(
+    raw: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(tmp_path / ".agents" / "hooks.json", raw)
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+
+
+@pytest.mark.parametrize("name", ["hooks.yaml", "mcp_config.jsonc", "plugin.toml"])
+def test_alternate_manifest_format_is_unchecked(
+    name: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(tmp_path / ".agents" / name, "Stop: sh a.sh")
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+
+
+def test_manifest_names_compared_case_insensitively(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    """On a case-insensitive filesystem (macOS) agy opens HOOKS.JSON as
+    hooks.json: its references must still be followed."""
+    _write(tmp_path / ".agents" / "HOOKS.JSON", '{"Stop": [{"command": "sh x/a.sh"}]}')
+    _write(tmp_path / "x" / "a.sh", "echo 1")
+    assert "x/a.sh" in scan.scan_workspace_config(tmp_path).agy
+
+
+def test_glob_or_substitution_path_is_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(
+        tmp_path / ".agents" / "hooks.json",
+        json.dumps({"description": "saves $5", "Stop": [{"command": "echo $USER"}]}),
+    )
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason is None
+    for command in ("sh scripts/*.sh", "sh $(cat x)/a.sh", "sh `pwd`/a.sh"):
+        _write(
+            tmp_path / ".agents" / "hooks.json",
+            json.dumps({"Stop": [{"command": command}]}),
+        )
+        assert scan.scan_workspace_config(tmp_path).unchecked_reason == (
+            scan.VARIABLE_PATH
+        ), command
+
+
+def test_normal_project_and_settings_never_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    """Final review (control regression): agy's own settings.json and
+    instruction trees (skills/rules) don't make every project's set
+    non-empty — a cron in a plain project isn't held."""
+    _write(gemini_home.parent / "antigravity-cli" / "settings.json", "{}")
+    _write(tmp_path / ".agents" / "skills" / "s" / "SKILL.md", "# skill")
+    _write(tmp_path / ".agents" / "rules" / "style.md", "# rules")
+    result = scan.scan_workspace_config(tmp_path)
+    assert result.agy == {}
+    assert result.unchecked_reason is None
 
 
 def test_variable_script_path_marks_unchecked(
@@ -1274,24 +1403,35 @@ def test_references_beyond_old_token_cap_and_agent_md_tracked(
     assert scan.scan_workspace_config(tmp_path).agy_digest != second.agy_digest
 
 
-def test_user_settings_and_linked_user_dirs(tmp_path: Path, gemini_home: Path) -> None:
-    settings = _write(gemini_home.parent / "antigravity-cli" / "settings.json", "{}")
-    first = scan.scan_workspace_config(tmp_path)
-    assert scan.USER_SETTINGS_DISPLAY in first.agy
+def test_linked_user_dirs(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ~/.gemini/config link into $HOME (dotfiles) is followed (stat only);
+    one leading outside $HOME is "not checked"."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    dotfiles = home / "dotfiles-plugins"
+    manifest = _write(dotfiles / "p" / "hooks.json", '{"a": 1}')
+    (gemini_home / "plugins").symlink_to(dotfiles, target_is_directory=True)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    first = scan.scan_workspace_config(proj)
     assert first.unchecked_reason is None
-    settings.write_text('{"hooks": {"Stop": "curl evil"}}')
-    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
-    linked = tmp_path / "dotfiles-plugins"
-    _write(linked / "hooks.json", '{"a": 1}')
-    (gemini_home / "plugins").symlink_to(linked, target_is_directory=True)
-    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.OUTSIDE
+    assert "~/.gemini/config/plugins/p/hooks.json" in first.agy
+    manifest.write_text('{"a": 22}')
+    assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
+    (gemini_home / "plugins").unlink()
+    elsewhere = tmp_path / "elsewhere"
+    _write(elsewhere / "hooks.json", '{"a": 1}')
+    (gemini_home / "plugins").symlink_to(elsewhere, target_is_directory=True)
+    assert scan.scan_workspace_config(proj).unchecked_reason == scan.OUTSIDE
 
 
 def test_huge_directory_is_bounded_per_entry(
     tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(scan, "MAX_FILES", 5)
-    junk = tmp_path / ".agents" / "skills" / "junk"
+    junk = tmp_path / ".agents" / "plugins" / "junk"
     junk.mkdir(parents=True)
     for i in range(50):
         (junk / f"f{i}").write_text("x")

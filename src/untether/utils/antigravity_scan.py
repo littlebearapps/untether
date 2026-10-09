@@ -1,57 +1,71 @@
 """Planted-config scanner for Antigravity (agy) runs (#558; REVIEW B2 widened
 per C10 / D22.5, REVIEW-2 B2 + M4).
 
+This is a **tripwire, not a sandbox**: it notices agy-executable config that
+changed since a person last looked, so unattended runs don't execute it
+unseen. It can't stop a determined local attacker.
+
+Known limitations (accepted; the rc3 gate's ``agy -p /hooks`` precheck, which
+asks agy itself what it loaded, is the stronger control):
+
+- Only *literal* script paths in commands are followed. Code reached
+  indirectly — ``python -m pkg``, ``npm run x`` / ``package.json``,
+  ``make``, a ``cd`` before a relative path, ``PATH`` lookups, network
+  fetches (``npx pkg``) — isn't tracked.
+- User-level config under ``~/.gemini`` is stat only (D33: never read): the
+  scripts its manifests name aren't followed, and an edit within one
+  timestamp tick of the last scan is invisible on coarse-timestamp
+  filesystems. agy's own ``settings.json`` (which can carry hooks) isn't in
+  the digest: agy rewrites it itself, which would hold every cron on every
+  host. Both live outside the workspace (only Full access or the user can
+  write them).
+- Instruction trees (``.agents/skills/``, ``.agents/rules/``, ``AGENTS.md``,
+  ``GEMINI.md``) aren't in the agy-executable set: they steer the model but
+  run nothing without a tool call, which the run's mode gates. Root-level
+  instruction files are in the cross-engine set (post-run ⚠️ row).
+- Empty files are skipped (they define and run nothing; filling one changes
+  the digest anyway).
+- A writer still running after the pre-spawn scan can change files before
+  agy reads them; the post-run re-scan reports it.
+- agy's JSON tolerance is assumed strict (every probe manifest is strict
+  JSON; no JSONC is documented). Anything else is "not checked".
+
 Threat model
 ------------
 A hostile repo or PR — or a Workspace agy run, which may write in-project and
 temp files — plants or edits something agy executes with no tool call (hook
-commands of every event, plugins, custom agents with ``hooks:``, ``.agents/
-mcp_config.json`` stdio servers, which start in ``-p`` even when disabled,
-#1088, and the scripts those name), so that a later unattended run (cron,
-webhook) executes it unseen; or it tries to wedge the scan. Another engine's
-auto-exec and instruction files (``.claude/``, ``.envrc`` …) are the same risk
-for the next Claude or Codex run.
+commands of every event, plugins, custom agents with ``hooks:``,
+``.agents/mcp_config.json`` stdio servers, which start in ``-p`` even when
+disabled, #1088, and the scripts those name), so a later unattended run
+executes it unseen; or it tries to wedge the scan.
 
-The scan therefore answers exactly one of: a **digest** that changes whenever
-anything agy could load changes, or **"not checked"** (``unchecked_reason``)
-— a ⚠️ row on every attended run, unattended runs refused, nothing recorded
-as seen. Nothing is ever skipped silently.
+The scan answers exactly one of: a **digest** that changes when anything it
+tracks changes, or **"not checked"** (``unchecked_reason``) — a ⚠️ row on
+every attended run, unattended runs refused, nothing recorded as seen.
 
-What goes into the agy set
---------------------------
-- every entry under every ``.agents/`` from the cwd up to the project root
+What's tracked (agy set)
+------------------------
+- every file under every ``.agents/`` from the cwd up to the project root
   (the nearest ancestor holding ``.git``; with no ``.git``, every ancestor
-  below ``$HOME``, since agy's own walk-up can't be bounded then), content-
-  hashed in full;
-- the files that reference-bearing manifests (``hooks.json``,
-  ``mcp_config.json``, ``plugin.json``, the 1.2.16 ``*.json`` manifests and
-  custom agents ``agents/*.md``) name: in-project ones are hashed; one outside
-  the project that this user can write (``/tmp/x.sh``, ``~/x.sh``) or a
-  variable path (``$X/run.sh``) means "not checked"; read-only system files
-  (``/usr/bin/python3``) are ignored, as are bare command names resolved via
-  ``PATH`` (an attacker who can write a ``PATH`` dir already owns the user);
-- agy's user-level manifests under ``~/.gemini/config/`` and
-  ``~/.gemini/antigravity-cli/settings.json`` (which can carry hooks) —
-  **stat only** (D33: no reads under ``~/.gemini``), excluding
-  ``plugins/untether-gate/``.
+  below ``$HOME``), except the instruction trees above, hashed in full;
+- every file a reference manifest (``hooks.json``, ``mcp_config.json``,
+  ``plugin.json``, the 1.2.16 ``*.json`` manifests, the front matter of
+  custom agents ``agents/*.md``; names compared case-insensitively) names by
+  literal path, resolved like a shell would (JSON-decoded, then shell words)
+  against the manifest's folder, the run's cwd and the project root: hashed
+  when this user controls it (owns or can write it or any folder above it),
+  ignored when it's a system file (``/usr/bin/python3``);
+- agy's user-level manifests under ``~/.gemini/config/`` — stat only —
+  excluding ``plugins/untether-gate/``.
 
-"Not checked" whenever: the entry, byte or time budget runs out; a symlink (or
-named file) leads out of the scanned tree; a FIFO, device or socket sits where
-agy loads files; an entry or folder can't be stat'd, listed or read; a file
-changes identity while being read; a manifest is too large to search for
-references. Symlinked directories inside the tree are followed once each
-(cycle protection).
-
-Deliberately not in the digest
-------------------------------
-- Empty files: an empty file defines and runs nothing, and filling it later
-  adds an entry, which changes the digest just as a new fingerprint would
-  (agy's own migration leaves a 0-byte ``~/.gemini/config/mcp_config.json``).
-- User-level contents (stat only, D33): an edit within the same filesystem
-  timestamp tick as the last scan is invisible on coarse-timestamp
-  filesystems; ext4/xfs/apfs record nanoseconds.
-- A writer still running after the pre-spawn scan (a background process)
-  can change files before agy reads them; the post-run re-scan reports it.
+"Not checked" whenever: a budget (entries, bytes, wall clock) runs out; a
+link under ``.agents/`` (or in ``~/.gemini/config``) leads outside both the
+project and ``$HOME``; a FIFO, device or socket sits where agy loads files;
+an entry or folder can't be stat'd, listed or read; a file changes identity
+while read; a reference manifest is too large, not strict JSON (comments,
+trailing commas, BOM, duplicate keys, NaN), in another format agy might read
+(``hooks.yaml``, ``mcp_config.jsonc`` …), or names a path through a variable,
+command substitution or glob.
 
 The cross-engine set (project root only, stat only) never refuses (REVIEW-2
 M4); it only feeds the post-run ⚠️ row.
@@ -65,11 +79,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import time
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..logging import get_logger
 
@@ -88,15 +105,23 @@ SCAN_TIMEOUT_S = 5.0
 _CHUNK_BYTES = 256 * 1024
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
-USER_SETTINGS_DISPLAY = "~/.gemini/antigravity-cli/settings.json"
 _GATE_PLUGIN = "plugins/untether-gate/"
 _AGENTS_DIR = ".agents"
+# Instruction trees directly under .agents/ (exact names: anything else is
+# hashed — failing towards more coverage on case-insensitive filesystems).
+_INSTRUCTION_TREES = frozenset({"skills", "rules"})
 _TOP_MANIFESTS = frozenset(
     {"mcp_config.json", "skills.json", "rules.json", "plugins.json", "agents.json"}
 )
-# Manifests whose strings may name a script agy runs.
+# Manifests whose strings may name a script agy runs (casefolded).
 _REFERENCE_MANIFESTS = _TOP_MANIFESTS | {"hooks.json", "plugin.json"}
-_TOKEN_SPLIT = re.compile(r"[\s;&|()<>'\"`=,\[\]{}]+")
+# Other formats of the same manifests agy might also read: never assume.
+_ALT_MANIFEST = re.compile(
+    r"^(hooks|mcp_config|plugin|plugins|agents|skills|rules|settings)"
+    r"\.(jsonc|json5|ya?ml|toml)$"
+)
+_RAW_SPLIT = re.compile(r"[\s;&|()<>'\"`=,\[\]{}]+")
+_SHELL_DYNAMIC = re.compile(r"[$`*?\[\]{}]")
 _SCRIPT_SUFFIX = re.compile(
     r"\.(?:sh|bash|zsh|fish|py|js|mjs|cjs|ts|rb|pl|php|lua|ps1|exe|bin|jar)$"
 )
@@ -121,6 +146,7 @@ UNREADABLE = "files Untether can't read"
 VARIABLE_PATH = "a hook or MCP command path Untether can't resolve"
 TOO_LARGE = "a config file too large to check"
 CHANGING = "files changing while they were checked"
+AMBIGUOUS = "a config file agy might read differently (not strict JSON)"
 
 # (size, content hash | stat stamp)
 type Fingerprint = tuple[int, str | int]
@@ -131,11 +157,6 @@ def user_config_dir() -> Path:
     return Path.home() / ".gemini" / "config"
 
 
-def user_settings_path() -> Path:
-    """agy's settings file (hooks can live inside it) — stat only."""
-    return user_config_dir().parent / "antigravity-cli" / "settings.json"
-
-
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     root: Path
@@ -144,7 +165,7 @@ class ScanResult:
     # The agy set ran out of budget.
     truncated: bool = False
     cross_truncated: bool = False
-    # A link or named file leads out of the scanned tree.
+    # A link leads outside both the project and $HOME.
     outside_root: bool = False
     # Every other reason the agy set couldn't be checked.
     problems: tuple[str, ...] = ()
@@ -180,6 +201,10 @@ def changed_paths(
     return sorted(
         p for p in before.keys() | after.keys() if before.get(p) != after.get(p)
     )
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def _below_home(path: Path, home: Path) -> bool:
@@ -227,18 +252,20 @@ def _is_user_manifest(rel: str) -> bool:
     """*rel* is relative to ``~/.gemini/config``."""
     if rel.startswith(_GATE_PLUGIN):
         return False  # Untether's own gate plugin (rc3), trusted separately
-    name = rel.rsplit("/", 1)[-1]
-    if name == "hooks.json" or rel.startswith("plugins/"):
+    folded = _fold(rel)
+    name = folded.rsplit("/", 1)[-1]
+    if name == "hooks.json" or folded.startswith("plugins/"):
         return True
-    if rel in _TOP_MANIFESTS:
+    if folded in _TOP_MANIFESTS:
         return True
-    parts = rel.split("/")
+    parts = folded.split("/")
     return len(parts) == 2 and parts[0] == "agents" and name.endswith(".md")
 
 
 def _is_reference_manifest(path: Path) -> bool:
-    return path.name in _REFERENCE_MANIFESTS or (
-        path.suffix == ".md" and path.parent.name == "agents"
+    name = _fold(path.name)
+    return name in _REFERENCE_MANIFESTS or (
+        name.endswith(".md") and _fold(path.parent.name) == "agents"
     )
 
 
@@ -276,24 +303,34 @@ class _Budget:
             self.problems.append(reason)
 
 
-def _contained(path: str | Path, base: str) -> bool:
+def _contained(
+    path: str | Path, bases: tuple[str, ...], exclude: tuple[str, ...] = ()
+) -> bool:
+    """*path*'s real path is inside one of *bases* and none of *exclude*."""
     real = os.path.realpath(path)
-    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+    def inside(base: str) -> bool:
+        return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+    return any(inside(b) for b in bases) and not any(inside(e) for e in exclude)
 
 
 def _walk(
     base: Path,
     budget: _Budget,
     *,
-    follow_within: str | None,
+    follow_within: tuple[str, ...],
     seen: set[str],
+    skip_top: frozenset[str] = frozenset(),
+    exclude: tuple[str, ...] = (),
 ) -> Iterator[Path]:
     """Every non-directory entry under *base* (and symlinked directories it
     won't follow), bounded per entry — a huge directory can't stall it.
 
     Symlinked directories are followed only while their real path stays
-    inside *follow_within*, each real path once. A folder that can't be
-    listed is flagged, never skipped quietly.
+    inside *follow_within*, each real path once. Names in *skip_top* (exact)
+    are skipped directly under *base*. A folder that can't be listed is
+    flagged, never skipped quietly.
     """
     stack = [base]
     while stack:
@@ -324,11 +361,13 @@ def _walk(
                 budget.flag(UNREADABLE)
                 yield path
                 continue
+            if directory == base and entry.name in skip_top and is_dir:
+                continue
             if is_link and os.path.isdir(path):
-                if follow_within is not None and _contained(path, follow_within):
+                if follow_within and _contained(path, follow_within, exclude):
                     subdirs.append(path)
                 else:
-                    yield path  # recorded by the caller, never followed
+                    yield path  # recorded (and flagged) by the caller
             elif is_dir:
                 subdirs.append(path)
             else:
@@ -393,8 +432,9 @@ def _fingerprint(
     budget: _Budget,
     *,
     read: bool,
-    contain: str | None,
+    contain: tuple[str, ...],
     collect: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> tuple[Fingerprint | None, bytes | None]:
     """Fingerprint one entry. Never raises; never opens anything but a
     regular file; never follows a link out of *contain*. Anything it can't
@@ -410,7 +450,7 @@ def _fingerprint(
             target = os.readlink(path)
         except OSError:
             target = "?"
-        if contain is not None and not _contained(path, contain):
+        if contain and not _contained(path, contain, exclude):
             budget.outside = True
             return (-1, f"outside:{target}"), None
         try:
@@ -438,34 +478,137 @@ def _fingerprint(
     return (fp[0], f"{fp[1]}{link}"), data
 
 
-def _writable(path: str) -> bool:
-    return os.access(path, os.W_OK) or os.access(os.path.dirname(path), os.W_OK)
+def _user_controlled(path: str) -> bool:
+    """This user owns or can write *path* or any folder above it (so could
+    replace it). System files (root-owned, read-only chain) are not."""
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    current = path
+    while True:
+        try:
+            st = os.stat(current)
+        except OSError:
+            return True  # can't tell: assume it can be changed
+        if (uid is not None and st.st_uid == uid) or os.access(current, os.W_OK):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
+def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-standard constant {value}")
+
+
+def _strict_json_strings(data: bytes) -> list[str] | None:
+    """Every key and string value of a strict-JSON document, decoded (so
+    ``\\/`` and ``\\u`` escapes resolve as agy sees them), or None when the
+    document isn't strict JSON (BOM, comments, trailing commas, duplicate
+    keys, NaN/Infinity, bad UTF-8)."""
+    try:
+        text = data.decode("utf-8")  # strict; a BOM survives and fails below
+        doc = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    out: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                out.append(key)
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(doc)
+    return out
+
+
+def _front_matter(data: bytes) -> list[str] | None:
+    """The front-matter lines of a custom agent (``---`` … ``---``); None
+    when it uses escapes the scan can't decode the way agy's YAML would."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    body: list[str] = []
+    for line in lines[1:]:
+        if line.strip() in {"---", "..."}:
+            break
+        body.append(line)
+    if any("\\" in line for line in body):
+        return None
+    return body
+
+
+_HOME_VAR = re.compile(r"\$(?:HOME|\{HOME\})(?=/)")
+_GLOB = re.compile(r"[*?\[\]{}]")
+
+
+def _words(value: str) -> tuple[list[str], bool]:
+    """Shell words of *value* (quotes removed, concatenation resolved) plus
+    the raw tokens, and whether the command builds anything dynamically: a
+    variable other than ``$HOME``, command substitution or backticks
+    anywhere, or a glob / brace in a path-ish word."""
+    value = _HOME_VAR.sub("~", value)
+    words: list[str] = [t for t in _RAW_SPLIT.split(value) if t]
+    try:
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words.extend(lexer)
+    except ValueError:
+        pass  # unbalanced quotes: the shell refuses it too; raw tokens stand
+    pathish = "/" in value or bool(_SCRIPT_SUFFIX.search(value))
+    dynamic = pathish and ("$" in value or "`" in value)
+    dynamic = dynamic or any(
+        _GLOB.search(w) and ("/" in w or _SCRIPT_SUFFIX.search(w)) for w in words
+    )
+    return words, dynamic
 
 
 def _references(
-    data: bytes, manifest: Path, contain: str, budget: _Budget
+    strings: list[str],
+    manifest: Path,
+    bases: tuple[str, ...],
+    budget: _Budget,
 ) -> Iterator[str]:
-    """Real paths of in-tree files *data* names. Out-of-tree files this user
-    can write, and variable paths, flag the scan instead."""
-    text = data.decode("utf-8", errors="replace")
-    tokens = {t for t in _TOKEN_SPLIT.split(text) if t}
-    for token in sorted(tokens):
-        if "/" not in token and not _SCRIPT_SUFFIX.search(token):
-            continue  # bare words and PATH commands (see module docstring)
-        if token.startswith(("http://", "https://")):
-            continue
-        if "$" in token:
-            if token.startswith(("$HOME/", "${HOME}/")):
-                token = os.path.expanduser("~/" + token.split("/", 1)[1])
-            else:
-                budget.flag(VARIABLE_PATH)
+    """Real paths of user-controlled regular files that *strings* name."""
+    candidates: set[str] = set()
+    for value in strings:
+        words, dynamic = _words(value)
+        if dynamic:
+            budget.flag(VARIABLE_PATH)
+        for word in words:
+            if _SHELL_DYNAMIC.search(word):
+                continue  # can't resolve; already flagged above
+            if "/" not in word and not _SCRIPT_SUFFIX.search(word):
+                continue  # bare words and PATH commands (known limitation)
+            if word.startswith(("http://", "https://")):
                 continue
-        token = os.path.expanduser(token)
-        bases = [""] if os.path.isabs(token) else [str(manifest.parent), contain]
-        for base in bases:
+            candidates.add(os.path.expanduser(word))
+    for word in sorted(candidates):
+        roots = ("",) if os.path.isabs(word) else (str(manifest.parent), *bases)
+        for base in roots:
             if not budget.take():
                 return
-            candidate = os.path.normpath(os.path.join(base, token))
+            candidate = os.path.normpath(os.path.join(base, word))
             try:
                 st = os.stat(candidate)
             except OSError:
@@ -473,37 +616,65 @@ def _references(
             if not stat.S_ISREG(st.st_mode):
                 continue
             real = os.path.realpath(candidate)
-            if _contained(real, contain):
+            if _user_controlled(real):
                 yield real
-            elif _writable(real):
-                budget.outside = True
             break
+
+
+def _display(real: str, root_real: str, home_real: str) -> str:
+    if real == root_real or real.startswith(root_real + os.sep):
+        return os.path.relpath(real, root_real)
+    if real.startswith(home_real + os.sep):
+        return "~/" + os.path.relpath(real, home_real)
+    return real
 
 
 def _scan_agents(
     root: Path, cwd: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
     root_real = os.path.realpath(root)
+    home_real = os.path.realpath(Path.home())
+    gemini_real = os.path.realpath(Path.home() / ".gemini")
+    # Links may lead anywhere in the project or $HOME (shared agent folders),
+    # never into ~/.gemini (D33) or outside both.
+    follow = (root_real, home_real)
+    no_follow = (gemini_real,)
     seen: set[str] = set()
-    pending: list[tuple[Path, bytes, str]] = []
+    pending: list[tuple[Path, bytes]] = []
     for parent in _agents_parents(cwd, root):
         agents = parent / _AGENTS_DIR
         if not os.path.lexists(agents):
             continue
-        parent_real = os.path.realpath(parent)
-        contain = root_real if _contained(parent_real, root_real) else parent_real
-        if not _contained(agents, contain) or not os.path.isdir(agents):
-            fp, _ = _fingerprint(agents, budget, read=False, contain=contain)
+        rel_agents = os.path.relpath(agents, root)
+        # An ancestor's .agents/ (no .git bound) may link within its own tree.
+        here = (*follow, os.path.realpath(parent))
+        if not os.path.isdir(agents) or not _contained(agents, here, no_follow):
+            fp, _ = _fingerprint(
+                agents, budget, read=False, contain=here, exclude=no_follow
+            )
             if fp is not None:
-                out[os.path.relpath(agents, root)] = fp
-            budget.outside = budget.outside or not _contained(agents, contain)
+                out[rel_agents] = fp
             continue
-        for path in _walk(agents, budget, follow_within=contain, seen=seen):
+        for path in _walk(
+            agents,
+            budget,
+            follow_within=here,
+            seen=seen,
+            skip_top=_INSTRUCTION_TREES,
+            exclude=no_follow,
+        ):
             if not budget.take():
                 return
+            if _ALT_MANIFEST.match(_fold(path.name)):
+                budget.flag(AMBIGUOUS)
             collect = _is_reference_manifest(path)
             fp, data = _fingerprint(
-                path, budget, read=True, contain=contain, collect=collect
+                path,
+                budget,
+                read=True,
+                contain=here,
+                collect=collect,
+                exclude=no_follow,
             )
             if budget.exceeded:
                 return
@@ -511,41 +682,47 @@ def _scan_agents(
                 continue
             out[os.path.relpath(path, root)] = fp
             if data is not None:
-                pending.append((path, data, contain))
-    for manifest, data, contain in pending:
-        for real in _references(data, manifest, contain, budget):
+                pending.append((path, data))
+    cwd_real = os.path.realpath(cwd)
+    for manifest, data in pending:
+        if _fold(manifest.name).endswith(".md"):
+            strings = _front_matter(data)
+        else:
+            strings = _strict_json_strings(data)
+        if strings is None:
+            budget.flag(AMBIGUOUS)
+            continue
+        for real in _references(strings, manifest, (cwd_real, root_real), budget):
             if budget.exceeded:
                 return
-            rel = os.path.relpath(real, root)
-            if rel in out:
+            key = _display(real, root_real, home_real)
+            if key in out:
                 continue
-            fp, _ = _fingerprint(Path(real), budget, read=True, contain=contain)
+            under_gemini = _contained(real, no_follow)
+            fp, _ = _fingerprint(Path(real), budget, read=not under_gemini, contain=())
             if budget.exceeded:
                 return
             if fp is not None:
-                out[rel] = fp
+                out[key] = fp
 
 
 def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
-    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33)."""
-    settings = user_settings_path()
-    if os.path.lexists(settings):
-        fp, _ = _fingerprint(settings, budget, read=False, contain=None)
-        if fp is not None:
-            out[USER_SETTINGS_DISPLAY] = fp
+    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33).
+    Linked folders are followed while they stay in ``$HOME`` (dotfiles)."""
     user_dir = user_config_dir()
     if not os.path.isdir(user_dir):
         return
+    follow = (os.path.realpath(Path.home()),)
     seen: set[str] = set()
-    for path in _walk(user_dir, budget, follow_within=None, seen=seen):
+    for path in _walk(user_dir, budget, follow_within=follow, seen=seen):
         rel = path.relative_to(user_dir).as_posix()
-        if not _is_user_manifest(rel) and not path.is_symlink():
-            continue
         if rel.startswith(_GATE_PLUGIN):
+            continue
+        if not _is_user_manifest(rel) and not path.is_symlink():
             continue
         if not budget.take():
             return
-        fp, _ = _fingerprint(path, budget, read=False, contain=None)
+        fp, _ = _fingerprint(path, budget, read=False, contain=follow)
         if fp is not None:
             out[f"{USER_DISPLAY_PREFIX}{rel}"] = fp
 
@@ -559,7 +736,7 @@ def _scan_cross_engine(
     for tree in _CROSS_ENGINE_TREES:
         base = root / tree
         if os.path.isdir(base) and not os.path.islink(base):
-            candidates.extend(_walk(base, budget, follow_within=None, seen=seen))
+            candidates.extend(_walk(base, budget, follow_within=(), seen=seen))
         elif os.path.lexists(base):
             candidates.append(base)
         if budget.exceeded:
@@ -569,7 +746,7 @@ def _scan_cross_engine(
             continue
         if not budget.take():
             return
-        fp, _ = _fingerprint(path, budget, read=False, contain=None)
+        fp, _ = _fingerprint(path, budget, read=False, contain=())
         if fp is not None:
             out[path.relative_to(root).as_posix()] = fp
 
