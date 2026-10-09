@@ -298,11 +298,23 @@ BYPASS_FLAG = "--dangerously-skip-permissions"
 _GATE_MODES = frozenset({"ask", "plan"})
 _GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
 
-ALWAYS_PROCEED_TEXT = (
-    "agy's own settings turn off its permission checks (toolPermission: "
-    "always-proceed), so Untether won't run Workspace mode — change that "
-    "setting or pick Full access in /config."
-)
+# agy ``toolPermission`` / ``init.permission_mode`` values a Workspace run
+# may proceed under. Anything else — ``always-proceed`` (D22.7),
+# ``proceed-in-sandbox`` (auto-runs sandboxed shell) or a value a newer agy
+# invents — fails closed: the label would otherwise promise "no shell".
+_WORKSPACE_TOOL_PERMISSIONS = frozenset({"request-review", "strict"})
+CONFIG_UNCHECKED_BLOCK = "config_unchecked"
+
+
+def permission_override_message(value: str) -> str:
+    return (
+        f"agy's own settings change its permission checks (toolPermission: "
+        f"{value}), so Untether won't run Workspace mode — set it back to "
+        "request-review or pick Full access in /config."
+    )
+
+
+ALWAYS_PROCEED_TEXT = permission_override_message("always-proceed")
 
 _UNKNOWN_MODE_WARNED: set[str] = set()
 _UNATTENDED_DOWNGRADE_WARNED: set[tuple[str, str]] = set()
@@ -417,6 +429,24 @@ def config_changed_message(paths: list[str]) -> str:
     )
 
 
+def config_unchecked_message(reason: str) -> str:
+    return (
+        "Untether couldn't check agy's hooks, plugins and MCP servers in this "
+        f"chat's project ({reason}), so this scheduled run is held. Send any "
+        "message in the chat to look at the project, or trim its .agents/ "
+        "folder."
+    )
+
+
+def config_unchecked_row(reason: str) -> str:
+    return (
+        "⚠️ Untether couldn't check this project's agy hooks, plugins and MCP "
+        f"servers ({reason}). They run their own commands in every mode, "
+        "including Workspace, and scheduled runs stay held until a check "
+        "succeeds."
+    )
+
+
 OAUTH_NOTICE_TEXT = (
     "⚠️ This host signs Antigravity in with a Google account. Google's "
     "Antigravity terms say third-party tools such as Untether mustn't use "
@@ -434,6 +464,9 @@ class _RunPrecheck:
     cwd: Path | None = None
     scan: antigravity_scan.ScanResult | None = None
     first_sight: bool = False  # show the "hooks … Untether doesn't manage" row
+    # The planted-config scan failed or was truncated: show a ⚠️ row (never
+    # record a digest as seen); unattended runs were already refused.
+    scan_problem: str | None = None
     config: antigravity_quota.AgyConfig | None = None
     config_key: tuple[str, str] | None = None  # (project root, settings digest)
     config_rows: list[tuple[str, str]] = field(default_factory=list)
@@ -787,13 +820,34 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 pre.scan = await anyio.to_thread.run_sync(
                     antigravity_scan.scan_workspace_config, cwd
                 )
-            except Exception as exc:  # noqa: BLE001 — never block a run on it
+            except Exception as exc:  # noqa: BLE001 — fails closed below
                 logger.warning(
                     "antigravity.workspace_config.scan_failed",
                     error_type=exc.__class__.__name__,
                 )
+                pre.scan_problem = "the check failed"
         scan = pre.scan
-        if (
+        if scan is not None and scan.truncated:
+            pre.scan_problem = "too many files to check in time"
+        if pre.scan_problem is not None:
+            # Security review: an unfinished scan is "not checked", never a
+            # stable digest — attended runs warn every time, unattended
+            # runs are held.
+            if trigger is not None:
+                logger.warning(
+                    "antigravity.workspace_config.unattended_refused",
+                    trigger=trigger,
+                    reason=pre.scan_problem,
+                )
+                return (
+                    EventFactory(ENGINE).completed_error(
+                        error=config_unchecked_message(pre.scan_problem),
+                        resume=resume,
+                        usage={PRESPAWN_BLOCKED_KEY: CONFIG_UNCHECKED_BLOCK},
+                    ),
+                    None,
+                )
+        elif (
             scan is not None
             and scan.agy
             and self._seen().get(scan.root) != scan.agy_digest
@@ -820,7 +874,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         pre.auth_route = antigravity_quota.auth_route(config)
         if config is None:
             return None, pre
-        if mode == "workspace" and config.tool_permission == "always-proceed":
+        if (
+            mode == "workspace"
+            and config.tool_permission
+            and config.tool_permission not in _WORKSPACE_TOOL_PERMISSIONS
+        ):
             logger.error(
                 "antigravity.permission_mode.mismatch",
                 source="config",
@@ -829,7 +887,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             return (
                 EventFactory(ENGINE).completed_error(
-                    error=ALWAYS_PROCEED_TEXT,
+                    error=permission_override_message(config.tool_permission),
                     resume=resume,
                     usage={PRESPAWN_BLOCKED_KEY: ALWAYS_PROCEED_BLOCK},
                 ),
@@ -1163,10 +1221,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
     ) -> list[UntetherEvent] | None:
         """D22.7: agy's ``toolPermission: always-proceed`` setting stands in
-        for the bypass flag. Reported without our flag → stop the run before
-        any tool (``init`` comes ≈ 2.7 s before the first model output)."""
+        for the bypass flag. Without our flag, anything but agy's default or
+        a stricter policy (fail closed: ``proceed-in-sandbox``, a value a
+        newer agy invents) stops the run before any tool (``init`` comes
+        ≈ 2.7 s before the first model output). A missing value can't be
+        checked here; the ``-p /config`` check covers that host."""
         bypass = state.effective_mode == "full"
-        if reported == "always-proceed" and not bypass:
+        if (
+            not bypass
+            and reported is not None
+            and reported not in _WORKSPACE_TOOL_PERMISSIONS
+        ):
             state.permission_refused = True
             logger.error(
                 "antigravity.permission_mode.mismatch",
@@ -1179,7 +1244,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     os.kill(state.agy_pid, signal.SIGTERM)
             keep = resume if resume is not None and not resume.is_continue else None
             return [
-                state.factory.completed_error(error=ALWAYS_PROCEED_TEXT, resume=keep)
+                state.factory.completed_error(
+                    error=permission_override_message(reported), resume=keep
+                )
             ]
         if bypass and reported == "request-review":
             _warn_bypass_unreported()
@@ -1210,6 +1277,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return []
         out: list[UntetherEvent] = []
         scan = pre.scan
+        if pre.scan_problem is not None:
+            out.append(
+                self._warning_row(
+                    state,
+                    "antigravity.config.unchecked",
+                    config_unchecked_row(pre.scan_problem),
+                )
+            )
         if pre.first_sight and scan is not None:
             pre.first_sight = False
             paths = sorted(scan.agy)
@@ -1586,10 +1661,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def _config_change_rows(self, state: AntigravityStreamState) -> list[UntetherEvent]:
         """Planted config changed during the run (either set) → one ⚠️ row
-        per set (REVIEW B2, REVIEW-2 M4). Never refuses anything here."""
+        per set (REVIEW B2, REVIEW-2 M4). Never refuses anything here; a
+        re-check that fails or is truncated says so (fail visible)."""
         pre = state.precheck
         if pre is None or pre.scan is None or pre.cwd is None:
             return []
+        problem: str | None = None
         try:
             after = antigravity_scan.scan_workspace_config(pre.cwd)
         except Exception as exc:  # noqa: BLE001 — a warning must never break a run
@@ -1597,8 +1674,24 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "antigravity.workspace_config.scan_failed",
                 error_type=exc.__class__.__name__,
             )
-            return []
+            after = None
+            problem = "the check failed"
+        if after is not None and (after.truncated or after.cross_truncated):
+            problem = "too many files to check in time"
         out: list[UntetherEvent] = []
+        if problem is not None:
+            out.append(
+                self._warning_row(
+                    state,
+                    "antigravity.config.recheck",
+                    "⚠️ Untether couldn't re-check this project's agy and "
+                    f"other engines' config after the run ({problem}). Review "
+                    ".agents/ and files like .claude/ or .envrc before "
+                    "sending another message.",
+                )
+            )
+        if after is None:
+            return out
         for set_name, before_set, after_set in (
             ("agy", pre.scan.agy, after.agy),
             ("cross_engine", pre.scan.cross, after.cross),

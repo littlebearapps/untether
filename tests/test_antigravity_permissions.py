@@ -502,11 +502,12 @@ def test_workspace_config_ancestor_scan_stops_at_git_root(
     _write(repo / "pkg" / ".agents" / "agents" / "helper.md", "# agent")
     _write(repo / ".agents" / "plugins" / "p" / "plugin.json")
     _write(repo / ".agents" / "skills.json")
-    _write(repo / ".agents" / "notes.txt")  # not a manifest
+    _write(repo / ".agents" / "notes.txt")  # every file under .agents counts
     result = scan.scan_workspace_config(sub)
     assert result.root == repo
     assert sorted(result.agy) == [
         ".agents/hooks.json",
+        ".agents/notes.txt",
         ".agents/plugins/p/plugin.json",
         ".agents/skills.json",
         "pkg/.agents/agents/helper.md",
@@ -1078,3 +1079,145 @@ def test_claude_options_unchanged_by_new_field() -> None:
 def test_env_has_no_test_leak() -> None:
     # Guard for the fixtures above: the ADC route is opt-in per test.
     assert os.environ.get("AGY_ADC_AUTH") is None
+
+
+# ── security review of 2b4d66c: fail closed ─────────────────────────────────
+
+
+def test_change_past_hash_cap_detected(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "HASH_CAP_BYTES", 16)
+    manifest = _write(tmp_path / ".agents" / "hooks.json", "x" * 64)
+    first = scan.scan_workspace_config(tmp_path).agy_digest
+    before = manifest.stat()
+    manifest.write_text("x" * 32 + "y" * 32)  # same size, change after the cap
+    # … with the mtime set back (only the inode change time can't be).
+    os.utime(manifest, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first
+
+
+def test_symlinked_plugin_dir_is_scanned(tmp_path: Path, gemini_home: Path) -> None:
+    proj = tmp_path / "proj"
+    outside = tmp_path / "outside-plugin"
+    manifest = _write(outside / "hooks.json", '{"a": 1}')
+    (proj / ".agents" / "plugins").mkdir(parents=True)
+    (proj / ".agents" / "plugins" / "evil").symlink_to(
+        outside, target_is_directory=True
+    )
+    (outside / "loop").symlink_to(outside, target_is_directory=True)  # no hang
+    first = scan.scan_workspace_config(proj)
+    assert ".agents/plugins/evil/hooks.json" in first.agy
+    manifest.write_text('{"a": 2}')
+    assert scan.scan_workspace_config(proj).agy_digest != first.agy_digest
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_manifest_still_counted(tmp_path: Path, gemini_home: Path) -> None:
+    manifest = _write(tmp_path / ".agents" / "hooks.json", '{"a": 1}')
+    manifest.chmod(0)
+    try:
+        result = scan.scan_workspace_config(tmp_path)
+    finally:
+        manifest.chmod(0o644)
+    assert ".agents/hooks.json" in result.agy
+
+
+def test_every_file_under_agents_and_hook_scripts_tracked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(tmp_path / ".agents" / "hooks" / "run.sh", "echo hi")
+    _write(
+        tmp_path / ".agents" / "hooks.json",
+        json.dumps({"Stop": [{"command": "sh scripts/guard.sh --fast"}]}),
+    )
+    script = _write(tmp_path / "scripts" / "guard.sh", "echo ok")
+    first = scan.scan_workspace_config(tmp_path)
+    assert ".agents/hooks/run.sh" in first.agy
+    assert "scripts/guard.sh" in first.agy
+    script.write_text("curl evil")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+@pytest.mark.anyio
+async def test_truncated_scan_never_counts_as_seen(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    monkeypatch.setattr(scan, "MAX_FILES", 3)
+    for i in range(5):
+        _write(project / ".agents" / "plugins" / "p" / f"f{i}.json", '{"x": 1}')
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    for _ in range(2):  # every attended run warns; nothing becomes "seen"
+        rows = _warning_rows(await _run(runner))
+        assert any("couldn't check" in r.action.title for r in rows)
+    events = await _run(runner, EngineRunOptions(unattended_trigger="cron:x"))
+    assert events[-1].usage == {PRESPAWN_BLOCKED_KEY: "config_unchecked"}
+
+
+@pytest.mark.anyio
+async def test_scan_failure_refuses_unattended_and_warns_attended(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+
+    def boom(cwd: Path) -> scan.ScanResult:
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(scan, "scan_workspace_config", boom)
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    (done,) = await _run(runner, EngineRunOptions(unattended_trigger="webhook:y"))
+    assert done.usage == {PRESPAWN_BLOCKED_KEY: "config_unchecked"}
+    events = await _run(runner)
+    assert _completed(events).ok is True
+    assert any("couldn't check" in r.action.title for r in _warning_rows(events))
+
+
+@pytest.mark.anyio
+async def test_result_rescan_failure_warns(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    real = scan.scan_workspace_config
+    calls = {"n": 0}
+
+    def flaky(cwd: Path) -> scan.ScanResult:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("gone")
+        return real(cwd)
+
+    monkeypatch.setattr(scan, "scan_workspace_config", flaky)
+    events = await _run(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    assert any("couldn't re-check" in r.action.title for r in _warning_rows(events))
+
+
+@pytest.mark.parametrize("reported", ["proceed-in-sandbox", "something-new"])
+def test_init_any_non_default_mode_without_bypass_refused(reported: str) -> None:
+    events, _ = _replay(_with_init_mode(_lines("tools_denied"), reported))
+    (done,) = events
+    assert isinstance(done, CompletedEvent) and done.ok is False
+    assert reported in (done.error or "")
+
+
+@pytest.mark.parametrize("reported", ["request-review", "strict"])
+def test_init_default_or_stricter_mode_runs(reported: str) -> None:
+    events, _ = _replay(_with_init_mode(_lines("ok"), reported))
+    assert isinstance(events[0], StartedEvent)
+
+
+@pytest.mark.anyio
+async def test_config_non_default_tool_permission_refuses_workspace(
+    project: Path,
+    gemini_home: Path,
+    agy_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    agy_config["value"] = _config(toolPermission="proceed-in-sandbox")
+    (done,) = await _run(runner)
+    assert done.usage == {PRESPAWN_BLOCKED_KEY: "agy_always_proceed"}
+    assert "proceed-in-sandbox" in (done.error or "")
+    agy_config["value"] = _config(toolPermission="strict")
+    assert _completed(await _run(runner)).ok is True
