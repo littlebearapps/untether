@@ -562,9 +562,9 @@ def test_stderr_notice_and_agy_error_logs_redact_whole_urls() -> None:
     _assert_no_url_secrets(summary)
 
 
-def test_result_error_text_drops_url_query_strings() -> None:
-    """agy's own ``result.error`` reaches Telegram: a link stays readable,
-    its query string / fragment (codes, state tokens) doesn't."""
+def test_result_error_text_redacts_whole_urls() -> None:
+    """agy's own ``result.error`` reaches Telegram: URLs are redacted whole
+    (``redact_agy_text``, shapes in ``test_antigravity_redact.py``)."""
     for status, prefix in (
         ("ERROR", ""),
         ("CANCELED", "antigravity ended with status CANCELED: "),
@@ -573,6 +573,4 @@ def test_result_error_text_drops_url_query_strings() -> None:
             [_INIT, _result(status, f"sign in at {_LEAKY_URL}#frag=SECRETCODE now")]
         )
         error = _done(events).error or ""
-        assert error == (
-            f"{prefix}sign in at https://accounts.google.com/o/oauth2/auth now"
-        )
+        assert error == f"{prefix}sign in at [url] now"

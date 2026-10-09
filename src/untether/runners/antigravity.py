@@ -63,11 +63,11 @@ from ..runner import (
     ResumeTokenMixin,
     Runner,
     _rc_label,
-    _sanitise_stderr,
     _session_label,
 )
 from ..schemas import antigravity as agy_schema
 from ..utils import antigravity_quota, antigravity_scan
+from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
     SEEN_CONFIG_FILENAME,
@@ -273,36 +273,37 @@ def stderr_kill_kind(line: str) -> str | None:
     return None
 
 
-# The shared ``_sanitise_stderr`` redacts paths before URLs: its generic path
-# pattern eats ``//host/path`` and leaves ``https:[path]?code=…`` — the query
-# string (OAuth code, state token, PKCE challenge) survives. Everything agy
-# surfaces therefore redacts whole URLs first.
-_URL_ANY_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
-_URL_QUERY_RE = re.compile(r"(https?://[^\s\"'<>?#]+)[?#][^\s\"'<>]*", re.IGNORECASE)
+# Every piece of agy text that reaches a Telegram card or an INFO+ log goes
+# through ``redact_agy_text`` (utils/antigravity_redact.py) — never the shared
+# stderr sanitiser, which lets a URL's query string through. Redact first,
+# truncate afterwards. ``tests/test_antigravity_redact.py`` fails if a new
+# surface bypasses it.
 _STDERR_EXCERPT_CHARS = 300
 
 
-def _redact_stderr(text: str) -> str:
-    """Whole URLs (query string included) first, then absolute paths."""
-    return _sanitise_stderr(_URL_ANY_RE.sub("[url]", text))
-
-
 def _agy_stderr_excerpt(lines: list[str] | None) -> str | None:
-    """The first ~300 chars of captured stderr for an error card. Redacted
-    before truncation, so a cut never leaves half a URL behind."""
+    """The first ~300 chars of captured stderr for an error card."""
     if not lines:
         return None
-    text = _redact_stderr("\n".join(line[:_STDERR_HOOK_MAX_CHARS] for line in lines))
+    text = redact_agy_text("\n".join(line[:_STDERR_HOOK_MAX_CHARS] for line in lines))
     if len(text) > _STDERR_EXCERPT_CHARS:
         text = text[:_STDERR_EXCERPT_CHARS] + "…"
     return text
 
 
+def _first_argv_error(lines: list[str] | None) -> str | None:
+    """agy's (Go flag package) unknown-flag line, redacted, or None."""
+    for line in lines or ():
+        if "flags provided but not defined" in line:
+            return redact_agy_text(line[:_STDERR_HOOK_MAX_CHARS]).strip()[
+                :_STDERR_LOG_CHARS
+            ]
+    return None
+
+
 def _trim_error_lines(text: str, limit: int = _ERROR_TEXT_LINES) -> str:
-    """agy's own error text, first *limit* lines + "…" (model/effort errors
-    list every valid option). A link stays readable; its query string and
-    fragment (sign-in codes, state tokens) are dropped."""
-    text = _URL_QUERY_RE.sub(r"\1", text)
+    """agy's own error text (already redacted by ``_error_text``), first
+    *limit* lines + "…" (model/effort errors list every valid option)."""
     lines = text.splitlines()
     if len(lines) <= limit:
         return text
@@ -314,7 +315,7 @@ def _log_scalar(value: Any) -> Any:
     if isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
-        return _redact_stderr(value)[:80]
+        return redact_agy_text(value)[:80]
     return None
 
 
@@ -688,19 +689,20 @@ def _subagent_title(info: dict[str, Any] | None) -> str:
 
 
 def _error_text(error: Any) -> str | None:
-    """A ``result.error`` of any shape → text (None when absent/empty)."""
+    """A ``result.error`` of any shape → redacted text (None when
+    absent/empty). The one place agy's own error text enters the runner."""
     if error is None or error == "":
         return None
     if isinstance(error, str):
-        return error
+        return redact_agy_text(error)
     if isinstance(error, dict):
         message = error.get("message") or error.get("error")
         if isinstance(message, str) and message:
-            return message
+            return redact_agy_text(message)
     try:
-        return json.dumps(error, ensure_ascii=False)
+        return redact_agy_text(json.dumps(error, ensure_ascii=False))
     except (TypeError, ValueError):
-        return str(error)
+        return redact_agy_text(str(error))
 
 
 # ── state ───────────────────────────────────────────────────────────────────
@@ -1312,7 +1314,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if event in state.stderr_flags:
             return
         state.stderr_flags.add(event)
-        logger.warning(event, line=_redact_stderr(text)[:_STDERR_LOG_CHARS])
+        logger.warning(event, line=redact_agy_text(text)[:_STDERR_LOG_CHARS])
 
     def _note_agy_error(self, state: AntigravityStreamState, line: str) -> None:
         """``AGY_ERROR: {json}`` (rc 3, turn-level failure). Key names are
@@ -2128,21 +2130,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         else:
             parts = [f"antigravity failed ({_rc_label(rc)})."]
         if rc == 2:
-            argv_error = next(
-                (
-                    line.strip()
-                    for line in stderr_lines or ()
-                    if "flags provided but not defined" in line
-                ),
-                None,
-            )
+            argv_error = _first_argv_error(stderr_lines)
             if argv_error is not None:
                 logger.error(
                     "antigravity.argv.rejected",
                     rc=rc,
-                    first_error_line=_redact_stderr(
-                        argv_error[:_STDERR_HOOK_MAX_CHARS]
-                    )[:_STDERR_LOG_CHARS],
+                    first_error_line=argv_error,
                     args=state.argv,
                 )
         session = _session_label(found_session, resume)
