@@ -22,6 +22,9 @@ a ``command_result`` + ``result`` pair instead of replaying a script: the
 data comes from ``UNTETHER_FAKE_AGY_SLASH_DATA`` (JSON) or, for ``/config``,
 agy 1.3.1's defaults. ``UNTETHER_FAKE_AGY_SLASH_UNAUTH=1`` answers like a
 signed-out agy (stderr ``authentication required``, rc 1).
+``UNTETHER_FAKE_AGY_HOLD_S`` holds a slash probe (after the auth error, or
+before any output); ``UNTETHER_FAKE_AGY_CHILD_PIDFILE`` makes it spawn a
+``sleep 60`` child first and write the child's pid there.
 
 Environment (the ``UNTETHER_`` prefix survives the runner's env filter):
 
@@ -87,8 +90,10 @@ def _interrupted(signum: int, _frame: object) -> None:
             "num_turns": 1,
         },
     }
-    _out(json.dumps(result))
-    _err("error: interrupted")
+    # Raw fds: the signal can land inside ``_out``'s own flush, and a second
+    # buffered write there raises "reentrant call inside BufferedWriter".
+    os.write(1, ("\n" + json.dumps(result) + "\n").encode())  # end any half line
+    os.write(2, b"error: interrupted\n")
     os._exit(1)
 
 
@@ -121,9 +126,20 @@ def _record(argv: list[str], stdin: str) -> None:
 def _slash(argv: list[str]) -> int:
     command = argv[argv.index("-p") + 1].lstrip("/")
     _record(argv, sys.stdin.read() if not sys.stdin.isatty() else "")
+    hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)
+    pidfile = os.environ.get("UNTETHER_FAKE_AGY_CHILD_PIDFILE")
+    if pidfile:  # a descendant the caller's kill must reach (#590)
+        import subprocess
+
+        child = subprocess.Popen(["sleep", "60"])
+        Path(pidfile).write_text(str(child.pid))
     if os.environ.get("UNTETHER_FAKE_AGY_SLASH_UNAUTH"):
         _err("Error: authentication required. Run 'agy' to log in, then retry.")
+        if hold > 0:  # 1.2.14-style: wait for a paste that never comes
+            time.sleep(hold)
         return 1
+    if hold > 0:  # a hung agy (timeout tests)
+        time.sleep(hold)
     raw = os.environ.get("UNTETHER_FAKE_AGY_SLASH_DATA")
     data = json.loads(raw) if raw else {"config": _DEFAULT_CONFIG}
     payload = {"name": command, "data": data}

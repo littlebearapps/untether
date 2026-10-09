@@ -1153,6 +1153,8 @@ def _apply_cost_delta(
 # ``exec resume`` run included), so runs report the delta.
 _TOKEN_LEDGER_SCOPES: dict[str, TokenScope] = {
     "codex": "thread_cumulative",
+    # #558: agy's result.usage is cumulative across --conversation resumes.
+    "antigravity": "thread_cumulative",
     # #417: OpenCode reports per run; the ledger keeps a session total.
     "opencode": "per_run",
 }

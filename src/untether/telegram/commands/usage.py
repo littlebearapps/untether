@@ -1,7 +1,8 @@
-"""Command backend for Claude Code subscription usage reporting.
+"""Command backend for ``/usage``.
 
-Only available when the current chat's engine is Claude — other engines
-do not use Anthropic OAuth credentials.
+Claude: subscription quota from Anthropic's OAuth usage API. Antigravity:
+agy's own quota groups from the zero-token ``agy -p /usage`` (#558), plus
+the last session's tokens. Other engines: the last session's tokens (#417).
 """
 
 from __future__ import annotations
@@ -340,9 +341,10 @@ def _format_token_breakdown(counts: dict[str, int]) -> str:
     return f"{in_part} · {out_part}"
 
 
-def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
-    """``/usage`` for an engine without subscription-quota data (#417): the
-    token totals of the chat's last session of ``engine``."""
+def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
+    """The #417 block for the chat's last session of ``engine`` (header line
+    first), or ``None`` when this chat has no completed run of it. Shared by
+    the token-only reply and Antigravity's quota reply (#558)."""
     from ...runner_bridge import _TOKEN_LEDGER_SCOPES
     from ...session_costs import get_session_cost_ledger, token_counts
     from .export import latest_session_for_chat
@@ -354,16 +356,7 @@ def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
         else None
     )
     if sess is None:
-        return CommandResult(
-            text=(
-                f"Subscription quota tracking is not available for the"
-                f" <b>{esc_engine}</b> engine, and this chat has no completed"
-                f" {esc_engine} run since Untether last started. Send a prompt,"
-                " then try /usage again — or use /export for a transcript."
-            ),
-            notify=True,
-            parse_mode="HTML",
-        )
+        return None
 
     sid = sess.session_id
     shown_sid = sid if len(sid) <= _SESSION_ID_SHOWN else sid[:_SESSION_ID_SHOWN] + "…"
@@ -397,6 +390,25 @@ def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
     cost = sess.usage.get("total_cost_usd") if sess.usage else None
     if isinstance(cost, (int, float)) and not isinstance(cost, bool):
         lines.append(f"<b>Last run cost:</b> ${cost:.4f}")
+    return lines
+
+
+def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
+    """``/usage`` for an engine without subscription-quota data (#417): the
+    token totals of the chat's last session of ``engine``."""
+    esc_engine = html.escape(engine)
+    lines = _session_token_lines(channel_id, engine)
+    if lines is None:
+        return CommandResult(
+            text=(
+                f"Subscription quota tracking is not available for the"
+                f" <b>{esc_engine}</b> engine, and this chat has no completed"
+                f" {esc_engine} run since Untether last started. Send a prompt,"
+                " then try /usage again — or use /export for a transcript."
+            ),
+            notify=True,
+            parse_mode="HTML",
+        )
     source = "its exec mode" if engine == "codex" else "its CLI"
     lines.append(
         f"Quota and plan limits are not available for {esc_engine} — {source}"
@@ -405,13 +417,108 @@ def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
     return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
 
 
+_AGY_ENGINE = "antigravity"
+
+
+async def _antigravity_debug_lines(cmd: str) -> list[str]:
+    from ...utils.antigravity_quota import quota_cache_stats
+    from ..backend import _cli_version
+
+    stats = quota_cache_stats()
+    lines = ["", "<b>🔧 debug</b>"]
+    if stats.last_success_wall is None:
+        lines.append("• cache: no successful fetch yet")
+    else:
+        wall = datetime.fromtimestamp(stats.last_success_wall, tz=UTC).isoformat(
+            timespec="seconds"
+        )
+        age = f" ({stats.age_s:.0f}s ago)" if stats.age_s is not None else ""
+        lines.append(f"• cache: last success {wall}{age}")
+    kind = stats.last_error_kind
+    lines.append(
+        f"• last error: <code>{html.escape(kind)}</code>"
+        if kind
+        else "• last error: none"
+    )
+    lines.append(f"• CLI: <code>{html.escape(cmd)}</code>")
+    version = await _cli_version(cmd)  # #951 cache: no spawn when warm
+    lines.append(f"• agy version: {html.escape(version or 'unknown')}")
+    return lines
+
+
+async def _antigravity_usage_reply(
+    ctx: CommandContext, debug_mode: bool
+) -> CommandResult:
+    """``/usage`` for Antigravity (#558): agy's own quota groups from the
+    zero-token ``agy -p /usage`` (cached 60 s, on demand only), then the #417
+    last-session token block. Every agy string is escaped; errors show a
+    short kind, never agy's raw text (R10)."""
+    from ...runners.antigravity import AUTH_TEXT, AntigravityRunner
+    from ...utils import antigravity_quota as agy_quota
+
+    lines = ["📊 <b>Antigravity quota</b>"]
+    runner: AntigravityRunner | None = None
+    try:
+        resolved = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override=_AGY_ENGINE
+        )
+    except Exception:  # noqa: BLE001 — fall through to the "not available" line
+        resolved = None
+    if resolved is not None and resolved.available:
+        candidate = resolved.runner
+        if isinstance(candidate, AntigravityRunner):
+            runner = candidate
+    if runner is None:
+        issue = getattr(resolved, "issue", None) if resolved is not None else None
+        detail = f" ({html.escape(str(issue)[:200])})" if issue else ""
+        lines.append(f"Antigravity CLI isn't available on this host{detail}.")
+    else:
+        try:
+            snapshot = await agy_quota.get_quota(runner)
+        except agy_quota.AntigravityNotSignedIn:
+            lines.append(html.escape(AUTH_TEXT))
+        except agy_quota.AgySlashError as exc:
+            if exc.kind == "timeout":
+                lines.append(
+                    "agy didn't answer /usage within"
+                    f" {agy_quota.QUOTA_TIMEOUT_S:.0f} s — try again shortly."
+                )
+            else:
+                lines.append(
+                    f"Couldn't read agy's quota ({html.escape(exc.kind[:40])})."
+                )
+        except Exception as exc:  # noqa: BLE001 — logged by the cache
+            lines.append(
+                f"Couldn't read agy's quota ({html.escape(type(exc).__name__)})."
+            )
+        else:
+            lines.extend(agy_quota.format_quota_html(snapshot.groups))
+            lines.append("<i>From agy /usage (no quota spent).</i>")
+
+    channel_id = getattr(ctx.message, "channel_id", None)
+    session = _session_token_lines(channel_id, _AGY_ENGINE)
+    lines.append("")
+    if session is None:
+        lines.append(
+            "No completed antigravity run in this chat since Untether last started."
+        )
+    else:
+        lines.append("<b>Last session in this chat</b>")
+        lines.extend(session[1:])
+    if debug_mode:
+        cmd = runner.command() if runner is not None else "agy"
+        lines.extend(await _antigravity_debug_lines(cmd))
+    return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
+
+
 class UsageCommand:
     """Command backend for usage reporting: Claude Code subscription quota,
-    or the last session's token totals for other engines (#417)."""
+    Antigravity quota (#558), or the last session's token totals for other
+    engines (#417)."""
 
     id = "usage"
     description = (
-        "Show usage (Claude: subscription quota; other engines: session tokens)"
+        "Show usage (Claude, Antigravity: quota; other engines: session tokens)"
     )
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
@@ -423,6 +530,11 @@ class UsageCommand:
         debug_mode = ctx.args_text.strip().lower() == "debug"
 
         current_engine = await resolve_effective_engine(ctx)
+        if current_engine == _AGY_ENGINE:
+            # #558: agy's own quota, on demand — never Claude's usage cache
+            # or lock, and not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES (that
+            # set also shows the /config subscription-footer toggle).
+            return await _antigravity_usage_reply(ctx, debug_mode)
         if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
             # #417: token totals for the chat's last session instead of a
             # flat "not available" (``/usage debug`` too — the debug block

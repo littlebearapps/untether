@@ -1874,6 +1874,144 @@ async def test_codex_usage_accounted_once_per_run() -> None:
 
 
 # ===========================================================================
+# #558 phase 04: Antigravity's result.usage is conversation-cumulative
+# ===========================================================================
+
+AGY_ENGINE = "antigravity"
+
+
+def _agy_usage(inp: int, out: int, *, duration_ms: int = 5600) -> dict:
+    # The flat shape AntigravityRunner._usage reports (no num_turns).
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "duration_ms": duration_ms,
+    }
+
+
+async def _run_agy_usage(
+    usage: dict, *, session_id: str, resume: bool, transport: "FakeTransport"
+) -> None:
+    runner = ScriptRunner(
+        [Return(answer="done", usage=usage)],
+        engine=AGY_ENGINE,
+        resume_value=session_id,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=(
+            ResumeToken(engine=AGY_ENGINE, value=session_id) if resume else None
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_antigravity_token_delta_thread_cumulative() -> None:
+    sid = f"agy-558-{uuid.uuid4().hex[:8]}"
+    transport = FakeTransport()
+    with structlog.testing.capture_logs() as logs:
+        await _run_agy_usage(
+            _agy_usage(13604, 40), session_id=sid, resume=False, transport=transport
+        )
+        await _run_agy_usage(
+            _agy_usage(27495, 89), session_id=sid, resume=True, transport=transport
+        )
+    deltas = [
+        e
+        for e in logs
+        if e["event"] == "usage.token_delta" and e["engine"] == AGY_ENGINE
+    ]
+    assert [e["source"] for e in deltas] == ["new_session", "ledger"]
+    assert deltas[1]["input_delta"] == 13891
+    assert deltas[1]["output_delta"] == 49
+    assert deltas[1]["runs"] == 2
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert completed[-1]["input_tokens"] == 13891
+
+
+@pytest.mark.anyio
+async def test_antigravity_footer_no_num_turns_and_per_run_duration(
+    monkeypatch,
+) -> None:
+    _force_show_api_cost(monkeypatch)
+    sid = f"agy-558-{uuid.uuid4().hex[:8]}"
+    await _run_agy_usage(
+        _agy_usage(13604, 40), session_id=sid, resume=False, transport=FakeTransport()
+    )
+    transport = FakeTransport()
+    await _run_agy_usage(
+        _agy_usage(27495, 89, duration_ms=4200),
+        session_id=sid,
+        resume=True,
+        transport=transport,
+    )
+    final_text = transport.send_calls[-1]["message"].text
+    assert "4.2s · 13.9k/49" in final_text
+    assert " tn" not in final_text
+    assert "thread total" not in final_text
+
+
+@pytest.mark.anyio
+async def test_antigravity_unseen_resume_labelled_thread_total(monkeypatch) -> None:
+    _force_show_api_cost(monkeypatch)
+    transport = FakeTransport()
+    await _run_agy_usage(
+        _agy_usage(27495, 89),
+        session_id=f"agy-558-{uuid.uuid4().hex[:8]}",
+        resume=True,
+        transport=transport,
+    )
+    assert "27.5k/89 · thread total" in transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_antigravity_run_never_spawns_quota_fetch(monkeypatch, tmp_path) -> None:
+    """D5 / REVIEW M8: no ``agy -p /usage`` before, during or after a run."""
+    from pathlib import Path
+
+    from untether.runners.antigravity import AntigravityRunner
+    from untether.utils import antigravity_quota
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    async def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an agy run must never fetch the quota")
+
+    monkeypatch.setattr(antigravity_quota, "run_agy_slash", boom)
+    monkeypatch.setattr(antigravity_quota, "get_quota", boom)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    _force_show_api_cost(monkeypatch)
+    fake = Path(__file__).parent / "fake_clis" / "fake_agy.py"
+    project = tmp_path / "proj"
+    project.mkdir()
+    token = set_run_base_dir(project)
+    transport = FakeTransport()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            await handle_message(
+                ExecBridgeConfig(
+                    transport=transport,
+                    presenter=MarkdownPresenter(),
+                    final_notify=True,
+                ),
+                runner=AntigravityRunner(antigravity_cmd=str(fake)),
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+                resume_token=None,
+            )
+    finally:
+        reset_run_base_dir(token)
+    final_text = transport.send_calls[-1]["message"].text
+    assert "OK" in final_text
+    assert not [e for e in logs if str(e["event"]).startswith("antigravity.quota")]
+
+
+# ===========================================================================
 # #417: token footer for flat (Codex) usage, 🔢 prefix, thread-total label
 # ===========================================================================
 

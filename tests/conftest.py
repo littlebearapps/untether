@@ -332,8 +332,10 @@ def _no_agy_version_probe(
 
     monkeypatch.setattr(antigravity_quota, "_probe_agy_config", _no_config_probe)
     antigravity_quota.clear_config_cache()
+    antigravity_quota.reset_quota_cache()
     empty_config_dir = tmp_path_factory.mktemp("agy-user-config")
     monkeypatch.setattr(antigravity_scan, "user_config_dir", lambda: empty_config_dir)
     yield
     antigravity_runner._VERSION_CACHE.clear()
     antigravity_quota.clear_config_cache()
+    antigravity_quota.reset_quota_cache()

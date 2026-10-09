@@ -29,10 +29,27 @@ class FakeRunContext:
 
 class FakeTransportRuntime:
     def __init__(
-        self, *, default_engine: str = "claude", project_engine: str | None = None
+        self,
+        *,
+        default_engine: str = "claude",
+        project_engine: str | None = None,
+        runner: object | None = None,
+        available: bool = True,
     ):
         self._default_engine = default_engine
         self._project_engine = project_engine
+        self._runner = runner
+        self._available = available
+
+    def resolve_runner(self, *, resume_token: object, engine_override: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            engine=engine_override,
+            runner=self._runner,
+            available=self._available,
+            issue=None if self._available else "agy not found on PATH <here>",
+        )
 
     @property
     def default_engine(self) -> str:
@@ -175,9 +192,14 @@ def _seed_session(
         record_session_usage(session_id, usage, channel_id=channel_id)
 
 
-async def _usage_reply(engine: str, args: str = "") -> str:
+async def _usage_reply(
+    engine: str, args: str = "", *, runner: object | None = None, **runtime_kw
+) -> str:
     ctx = FakeCommandContext(
-        args_text=args, runtime=FakeTransportRuntime(default_engine=engine)
+        args_text=args,
+        runtime=FakeTransportRuntime(
+            default_engine=engine, runner=runner, **runtime_kw
+        ),
     )
     result = await UsageCommand().handle(ctx)  # type: ignore[arg-type]
     assert result is not None
@@ -233,17 +255,23 @@ class TestUsageNonClaudeTokens:
         assert "Last run:" not in text
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["codex", "antigravity"])
     async def test_usage_non_claude_never_fetches_claude_usage(
-        self, export_history, monkeypatch
+        self, export_history, monkeypatch, engine
     ):
         from untether.telegram.commands import usage as usage_mod
+        from untether.utils import antigravity_quota
 
         async def boom() -> None:
-            raise AssertionError("fetch_claude_usage must not run for codex")
+            raise AssertionError(f"fetch_claude_usage must not run for {engine}")
+
+        async def no_quota(runner, command, **kwargs):
+            raise antigravity_quota.AgySlashError("timeout")
 
         monkeypatch.setattr(usage_mod, "fetch_claude_usage", boom)
-        _seed_session("sid-x", "codex", _codex_totals(10, 1))
-        text = await _usage_reply("codex", args="debug")
+        monkeypatch.setattr(antigravity_quota, "run_agy_slash", no_quota)
+        _seed_session("sid-x", engine, _codex_totals(10, 1))
+        text = await _usage_reply(engine, args="debug", runner=_agy_runner())
         assert "Session total:" in text
 
     @pytest.mark.anyio
@@ -364,6 +392,169 @@ class TestUsageNonClaudeTokens:
 # ---------------------------------------------------------------------------
 # /planmode engine gate
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# /usage for Antigravity: on-demand agy quota + the #417 session block (#558)
+# ---------------------------------------------------------------------------
+
+_AGY_FIXTURES = Path(__file__).parent / "fixtures" / "antigravity"
+
+
+def _agy_usage_data() -> dict:
+    import json
+
+    first = (_AGY_FIXTURES / "usage.script").read_text().splitlines()[0]
+    return json.loads(first[4:])["command"]["data"]
+
+
+def _agy_runner(cmd: str = "/opt/agy/bin/agy"):
+    from untether.runners.antigravity import AntigravityRunner
+
+    return AntigravityRunner(antigravity_cmd=cmd)
+
+
+@pytest.fixture
+def agy_slash(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from untether.utils import antigravity_quota
+
+    calls: list[str] = []
+
+    async def fake(runner, command, **kwargs):
+        calls.append(command)
+        return _agy_usage_data()
+
+    monkeypatch.setattr(antigravity_quota, "run_agy_slash", fake)
+    return calls
+
+
+class TestUsageAntigravity:
+    @pytest.mark.anyio
+    async def test_usage_antigravity_shows_quota_and_session_tokens(
+        self, export_history, agy_slash
+    ):
+        from untether.session_costs import get_session_cost_ledger
+
+        sid = "b66a64cf-dd95-4344-9df6-25d35539e10f"
+        _seed_session(sid, "antigravity", {"input_tokens": 27495, "output_tokens": 89})
+        ledger = get_session_cost_ledger()
+        for inp, out, resumed in ((13604, 40, False), (27495, 89, True)):
+            ledger.record_tokens(
+                "antigravity",
+                sid,
+                {"input_tokens": inp, "output_tokens": out},
+                scope="thread_cumulative",
+                resumed=resumed,
+            )
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert text.startswith("📊 <b>Antigravity quota</b>")
+        assert "<b>Gemini Models</b>" in text
+        assert "<b>Claude and GPT models</b>" in text
+        assert "• 5-hour: " in text and "• Weekly: " in text
+        assert "<i>From agy /usage (no quota spent).</i>" in text
+        assert "Session total:" in text and "2 runs" in text
+        assert "Last run:" in text and "14k in" in text
+        assert "Quota and plan limits are not available" not in text
+        # a second /usage inside 60 s is served from the cache
+        await _usage_reply("antigravity", runner=_agy_runner())
+        assert agy_slash == ["/usage"]
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_without_a_session(self, export_history, agy_slash):
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert "<b>Gemini Models</b>" in text
+        assert "No completed antigravity run in this chat" in text
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_debug_escaped(
+        self, export_history, agy_slash, monkeypatch
+    ):
+        from untether.telegram import backend
+
+        async def version(cmd: str) -> str:
+            assert cmd == "/opt/a<b>&c/agy"
+            return "1.3.2 <beta>"
+
+        monkeypatch.setattr(backend, "_cli_version", version)
+        text = await _usage_reply(
+            "antigravity", args="debug", runner=_agy_runner("/opt/a<b>&c/agy")
+        )
+        assert "<b>🔧 debug</b>" in text
+        assert "<code>/opt/a&lt;b&gt;&amp;c/agy</code>" in text
+        assert "1.3.2 &lt;beta&gt;" in text
+        assert "cache:" in text and "last error: none" in text
+        assert "<beta>" not in text and "a<b>" not in text
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_not_signed_in_message(
+        self, export_history, monkeypatch
+    ):
+        import html as html_mod
+
+        from untether.runners.antigravity import AUTH_TEXT
+        from untether.utils import antigravity_quota
+
+        async def unauth(runner, command, **kwargs):
+            raise antigravity_quota.AntigravityNotSignedIn()
+
+        monkeypatch.setattr(antigravity_quota, "run_agy_slash", unauth)
+        _seed_session("sid-agy", "antigravity", {"input_tokens": 5, "output_tokens": 1})
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert html_mod.escape(AUTH_TEXT) in text
+        assert "Session total:" in text  # the session block still shows
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("exc_factory", "expected", "absent"),
+        [
+            (
+                lambda q: q.AgySlashError("timeout"),
+                "agy didn't answer /usage within 15 s",
+                None,
+            ),
+            (
+                lambda q: RuntimeError("secret <path> /home/nathan/token"),
+                "RuntimeError",
+                "/home/nathan",
+            ),
+            (
+                lambda q: q.AgySlashError("unparseable", "rc=1 https://x.example/?c=1"),
+                "(unparseable)",
+                "x.example",
+            ),
+        ],
+    )
+    async def test_usage_antigravity_errors_render_kind_only(
+        self, export_history, monkeypatch, exc_factory, expected, absent
+    ):
+        from untether.utils import antigravity_quota
+
+        async def failing(runner, command, **kwargs):
+            raise exc_factory(antigravity_quota)
+
+        monkeypatch.setattr(antigravity_quota, "run_agy_slash", failing)
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert expected in text
+        if absent:
+            assert absent not in text
+        assert "<path>" not in text
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_unavailable_engine(
+        self, export_history, agy_slash
+    ):
+        text = await _usage_reply("antigravity", runner=None, available=False)
+        assert "isn't available" in text
+        assert "&lt;here&gt;" in text
+        assert agy_slash == []
+
+    def test_antigravity_not_in_subscription_usage_engines(self):
+        from untether.telegram.engine_overrides import (
+            SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        )
+
+        # rc1: no /config subscription-footer toggle for agy (phase 11 owns it)
+        assert "antigravity" not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
 
 
 class TestPlanModeEngineGate:
