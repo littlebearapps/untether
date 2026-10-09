@@ -1,44 +1,60 @@
 """Planted-config scanner for Antigravity (agy) runs (#558; REVIEW B2 widened
 per C10 / D22.5, REVIEW-2 B2 + M4).
 
-agy runs code with no tool call: hook commands of every event, plugins,
-custom agents that declare ``hooks:`` and ``.agents/mcp_config.json`` stdio
-servers (which start in ``-p`` even when disabled, #1088). A Workspace run may
-write those files (in-project writes are allowed) and the *next* run —
-possibly an unattended cron — executes them. Another engine's auto-exec and
-instruction files (``.claude/``, ``.envrc``, ``.github/workflows/`` …) are the
-same risk for the next Claude or Codex run in the project.
+Threat model
+------------
+A hostile repo or PR — or a Workspace agy run, which may write in-project and
+temp files — plants or edits something agy executes with no tool call (hook
+commands of every event, plugins, custom agents with ``hooks:``, ``.agents/
+mcp_config.json`` stdio servers, which start in ``-p`` even when disabled,
+#1088, and the scripts those name), so that a later unattended run (cron,
+webhook) executes it unseen; or it tries to wedge the scan. Another engine's
+auto-exec and instruction files (``.claude/``, ``.envrc`` …) are the same risk
+for the next Claude or Codex run.
 
-Two sets, both relative to the project root:
+The scan therefore answers exactly one of: a **digest** that changes whenever
+anything agy could load changes, or **"not checked"** (``unchecked_reason``)
+— a ⚠️ row on every attended run, unattended runs refused, nothing recorded
+as seen. Nothing is ever skipped silently.
 
-- **agy-executable**: *every* file under every ``.agents/`` from the cwd up to
-  the nearest ancestor holding ``.git`` (inclusive; at most 10 levels; never
-  ``$HOME`` or above), plus the in-project scripts that ``hooks.json`` /
-  ``mcp_config.json`` commands name, all content-hashed; plus agy's
-  user-level manifests under ``~/.gemini/config/`` — **stat only** (D33: no
-  reads under ``~/.gemini``), excluding ``plugins/untether-gate/``.
-- **cross-engine**: at the project root only, stat only.
+What goes into the agy set
+--------------------------
+- every entry under every ``.agents/`` from the cwd up to the project root
+  (the nearest ancestor holding ``.git``; with no ``.git``, every ancestor
+  below ``$HOME``, since agy's own walk-up can't be bounded then), content-
+  hashed in full;
+- the files that reference-bearing manifests (``hooks.json``,
+  ``mcp_config.json``, ``plugin.json``, the 1.2.16 ``*.json`` manifests and
+  custom agents ``agents/*.md``) name: in-project ones are hashed; one outside
+  the project that this user can write (``/tmp/x.sh``, ``~/x.sh``) or a
+  variable path (``$X/run.sh``) means "not checked"; read-only system files
+  (``/usr/bin/python3``) are ignored, as are bare command names resolved via
+  ``PATH`` (an attacker who can write a ``PATH`` dir already owns the user);
+- agy's user-level manifests under ``~/.gemini/config/`` and
+  ``~/.gemini/antigravity-cli/settings.json`` (which can carry hooks) —
+  **stat only** (D33: no reads under ``~/.gemini``), excluding
+  ``plugins/untether-gate/``.
 
-Fail-closed rules (security review of 2b4d66c):
+"Not checked" whenever: the entry, byte or time budget runs out; a symlink (or
+named file) leads out of the scanned tree; a FIFO, device or socket sits where
+agy loads files; an entry or folder can't be stat'd, listed or read; a file
+changes identity while being read; a manifest is too large to search for
+references. Symlinked directories inside the tree are followed once each
+(cycle protection).
 
-- symlinked directories are followed only while they stay inside the
-  project root (each real path once — cycle protection); a link out of the
-  root, or a manifest naming a script outside it, is recorded but never
-  followed and marks the scan ``outside_root`` ("not checked");
-- only regular files are ever opened (``stat`` first, then ``O_NONBLOCK`` +
-  ``fstat`` on the fd), so a FIFO, ``/dev/zero`` or a device can't wedge it;
-- each set has one budget — entries (files and directories), total bytes
-  hashed and wall clock; running over it sets ``truncated``;
-- a file larger than the hash cap, or one that can't be read, still counts:
-  its fingerprint carries the inode change time (``st_ctime_ns``), which a
-  writer can't set back the way it can ``mtime``;
-- a scan that hits the file or time budget sets ``truncated``; callers must
-  treat that as "not checked" (warn every attended run, refuse unattended),
-  never as a stable digest.
+Deliberately not in the digest
+------------------------------
+- Empty files: an empty file defines and runs nothing, and filling it later
+  adds an entry, which changes the digest just as a new fingerprint would
+  (agy's own migration leaves a 0-byte ``~/.gemini/config/mcp_config.json``).
+- User-level contents (stat only, D33): an edit within the same filesystem
+  timestamp tick as the last scan is invisible on coarse-timestamp
+  filesystems; ext4/xfs/apfs record nanoseconds.
+- A writer still running after the pre-spawn scan (a background process)
+  can change files before agy reads them; the post-run re-scan reports it.
 
-Empty files are skipped: agy's own migration leaves a 0-byte
-``mcp_config.json`` in ``~/.gemini/config``, and an empty file defines and
-runs nothing (filling it later changes the digest).
+The cross-engine set (project root only, stat only) never refuses (REVIEW-2
+M4); it only feeds the post-run ⚠️ row.
 
 The 13 §8 gate precheck reuses this helper; keep it free of runner imports.
 """
@@ -54,31 +70,36 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ..logging import get_logger
 
 logger = get_logger(__name__)
 
 MAX_ANCESTOR_LEVELS = 10
+# Per-set budgets: entries (dirs + files + reference lookups), bytes hashed,
+# wall clock. Running out of any of them is "not checked", never partial.
 MAX_FILES = 2000
+MAX_HASH_BYTES = 64 * 1024 * 1024
 TIME_BUDGET_S = 2.0
-# Per-file hash cap (the rest is covered by the inode change time) and the
-# per-set totals: a hostile repo can't make the scan read or walk unbounded.
-HASH_CAP_BYTES = 4 * 1024 * 1024
-MAX_HASH_BYTES = 32 * 1024 * 1024
+# The runner's own bound on the blocking scan thread (a read on a hung
+# network mount can't be interrupted from inside): past it the run goes on
+# as "not checked" and the thread is abandoned.
+SCAN_TIMEOUT_S = 5.0
 _CHUNK_BYTES = 256 * 1024
-_MAX_TOKENS = 200
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
+USER_SETTINGS_DISPLAY = "~/.gemini/antigravity-cli/settings.json"
 _GATE_PLUGIN = "plugins/untether-gate/"
 _AGENTS_DIR = ".agents"
 _TOP_MANIFESTS = frozenset(
     {"mcp_config.json", "skills.json", "rules.json", "plugins.json", "agents.json"}
 )
-# Manifests whose command strings may name an in-project script.
-_COMMAND_MANIFESTS = frozenset({"hooks.json", "mcp_config.json"})
-_TOKEN_SPLIT = re.compile(r"[\s;&|()<>'\"`=,]+")
+# Manifests whose strings may name a script agy runs.
+_REFERENCE_MANIFESTS = _TOP_MANIFESTS | {"hooks.json", "plugin.json"}
+_TOKEN_SPLIT = re.compile(r"[\s;&|()<>'\"`=,\[\]{}]+")
+_SCRIPT_SUFFIX = re.compile(
+    r"\.(?:sh|bash|zsh|fish|py|js|mjs|cjs|ts|rb|pl|php|lua|ps1|exe|bin|jar)$"
+)
 # REVIEW-2 M4: files that become code execution or instructions for the
 # *next* engine run in the same project.
 _CROSS_ENGINE_FILES = (
@@ -92,6 +113,15 @@ _CROSS_ENGINE_FILES = (
 )
 _CROSS_ENGINE_TREES = (".claude", ".github/workflows", ".husky", ".git/hooks")
 
+# Problem reasons (shown in the ⚠️ row / refusal text).
+TOO_MANY = "too many files to check in time"
+OUTSIDE = "links outside the project"
+SPECIAL = "a FIFO or device file where agy loads config"
+UNREADABLE = "files Untether can't read"
+VARIABLE_PATH = "a hook or MCP command path Untether can't resolve"
+TOO_LARGE = "a config file too large to check"
+CHANGING = "files changing while they were checked"
+
 # (size, content hash | stat stamp)
 type Fingerprint = tuple[int, str | int]
 
@@ -101,18 +131,33 @@ def user_config_dir() -> Path:
     return Path.home() / ".gemini" / "config"
 
 
+def user_settings_path() -> Path:
+    """agy's settings file (hooks can live inside it) — stat only."""
+    return user_config_dir().parent / "antigravity-cli" / "settings.json"
+
+
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     root: Path
     agy: dict[str, Fingerprint] = field(default_factory=dict)
     cross: dict[str, Fingerprint] = field(default_factory=dict)
-    # The agy set hit the file/time budget: not checked. Never compare its
-    # digest as if it were complete.
+    # The agy set ran out of budget.
     truncated: bool = False
     cross_truncated: bool = False
-    # A link under .agents/ (or a script a manifest names) resolves outside
-    # the project root: its target can change unseen, so "not checked".
+    # A link or named file leads out of the scanned tree.
     outside_root: bool = False
+    # Every other reason the agy set couldn't be checked.
+    problems: tuple[str, ...] = ()
+
+    @property
+    def unchecked_reason(self) -> str | None:
+        """Why the agy set is "not checked", or None when the digest is
+        complete. Callers must never compare or record the digest then."""
+        if self.truncated:
+            return TOO_MANY
+        if self.outside_root:
+            return OUTSIDE
+        return self.problems[0] if self.problems else None
 
     @property
     def agy_digest(self) -> str:
@@ -137,6 +182,10 @@ def changed_paths(
     )
 
 
+def _below_home(path: Path, home: Path) -> bool:
+    return path != home and path not in home.parents
+
+
 def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
     """Nearest ancestor of *cwd* (inclusive) holding ``.git``; *cwd* if none.
 
@@ -147,7 +196,7 @@ def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
     start = cwd.resolve()
     current = start
     for _ in range(MAX_ANCESTOR_LEVELS + 1):
-        if current == home or current in home.parents:
+        if not _below_home(current, home):
             break
         if (current / ".git").exists():
             return current
@@ -155,6 +204,23 @@ def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
             break
         current = current.parent
     return start
+
+
+def _agents_parents(cwd: Path, root: Path) -> list[Path]:
+    """Directories whose ``.agents/`` agy may load: cwd → root, and — when
+    no ``.git`` bounds the walk — every further ancestor below ``$HOME``."""
+    home = Path.home().resolve()
+    current = cwd.resolve()
+    git_bounded = (root / ".git").exists()
+    out: list[Path] = []
+    for _ in range(MAX_ANCESTOR_LEVELS + 1):
+        if not _below_home(current, home):
+            break
+        out.append(current)
+        if (git_bounded and current == root) or current.parent == current:
+            break
+        current = current.parent
+    return out
 
 
 def _is_user_manifest(rel: str) -> bool:
@@ -170,18 +236,23 @@ def _is_user_manifest(rel: str) -> bool:
     return len(parts) == 2 and parts[0] == "agents" and name.endswith(".md")
 
 
-class _Budget:
-    """One budget per set: entries (files + dirs), bytes hashed, wall clock.
+def _is_reference_manifest(path: Path) -> bool:
+    return path.name in _REFERENCE_MANIFESTS or (
+        path.suffix == ".md" and path.parent.name == "agents"
+    )
 
-    Running over any of them marks the scan ``exceeded`` (→ "not checked":
-    a ⚠️ row on attended runs, unattended runs refused)."""
+
+class _Budget:
+    """One per set: entries, bytes hashed, wall clock, plus the reasons the
+    set couldn't be checked. Every early stop goes through here."""
 
     def __init__(self) -> None:
         self.deadline = time.monotonic() + TIME_BUDGET_S
         self.entries = 0
         self.bytes = 0
         self.exceeded = False
-        self.outside = False  # a symlink or script points outside the root
+        self.outside = False
+        self.problems: list[str] = []
 
     def _check(self) -> bool:
         if (
@@ -200,104 +271,140 @@ class _Budget:
         self.bytes += nbytes
         return self._check()
 
+    def flag(self, reason: str) -> None:
+        if reason not in self.problems:
+            self.problems.append(reason)
+
 
 def _contained(path: str | Path, base: str) -> bool:
     real = os.path.realpath(path)
     return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
 
-def _walk_files(
+def _walk(
     base: Path,
     budget: _Budget,
     *,
     follow_within: str | None,
-    seen: set[str] | None = None,
+    seen: set[str],
 ) -> Iterator[Path]:
-    """Every entry under *base* that isn't a directory, bounded by *budget*.
+    """Every non-directory entry under *base* (and symlinked directories it
+    won't follow), bounded per entry — a huge directory can't stall it.
 
-    Symlinked directories are followed only when their real path stays
-    inside *follow_within* (and only once each — cycle protection); any
-    other symlinked directory is yielded as an entry, never descended.
+    Symlinked directories are followed only while their real path stays
+    inside *follow_within*, each real path once. A folder that can't be
+    listed is flagged, never skipped quietly.
     """
-    seen = set() if seen is None else seen
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        real = os.path.realpath(dirpath)
-        if real in seen or not budget.take():
-            dirnames[:] = []
-            if budget.exceeded:
-                return
+    stack = [base]
+    while stack:
+        directory = stack.pop()
+        real = os.path.realpath(directory)
+        if real in seen:
             continue
         seen.add(real)
-        keep: list[str] = []
-        for name in sorted(dirnames):
-            full = os.path.join(dirpath, name)
-            if os.path.islink(full):
-                if follow_within is not None and _contained(full, follow_within):
-                    # os.walk won't descend a link with followlinks=False;
-                    # walk it explicitly (bounded by the same budget).
-                    yield from _walk_files(
-                        Path(full), budget, follow_within=follow_within, seen=seen
-                    )
+        if not budget.take():
+            return
+        entries: list[os.DirEntry[str]] = []
+        try:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    if not budget.take():
+                        return
+                    entries.append(entry)
+        except OSError:
+            budget.flag(UNREADABLE)
+            continue
+        subdirs: list[Path] = []
+        for entry in sorted(entries, key=lambda e: e.name):
+            path = Path(entry.path)
+            try:
+                is_link = entry.is_symlink()
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                budget.flag(UNREADABLE)
+                yield path
+                continue
+            if is_link and os.path.isdir(path):
+                if follow_within is not None and _contained(path, follow_within):
+                    subdirs.append(path)
                 else:
-                    yield Path(full)
+                    yield path  # recorded by the caller, never followed
+            elif is_dir:
+                subdirs.append(path)
             else:
-                keep.append(name)
-        dirnames[:] = keep
-        for name in sorted(filenames):
-            yield Path(dirpath) / name
+                yield path
+        stack.extend(reversed(subdirs))
 
 
 def _stamp(st: os.stat_result) -> str:
-    return f"ctime:{st.st_ctime_ns}"
+    return f"{st.st_mtime_ns}:ctime:{st.st_ctime_ns}"
 
 
-def _hash_regular(path: Path, st: os.stat_result, budget: _Budget) -> Fingerprint:
-    """Hash a regular file without ever blocking on it: ``O_NONBLOCK`` and a
-    post-open ``fstat`` reject a file swapped for a FIFO or device."""
+def _hash_regular(
+    path: Path, st: os.stat_result, budget: _Budget, *, collect: bool
+) -> tuple[Fingerprint | None, bytes | None]:
+    """Hash the whole file (to EOF, whatever ``st_size`` claims) without ever
+    blocking on a FIFO or device: ``O_NONBLOCK`` plus a post-open ``fstat``
+    that must match the file that was stat'd. None for an empty file."""
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
     try:
         fd = os.open(path, flags)
     except OSError:
-        return (st.st_size, f"unreadable:{_stamp(st)}")
+        budget.flag(UNREADABLE)
+        return (st.st_size, f"unreadable:{_stamp(st)}"), None
     digest = hashlib.sha256()
+    kept = bytearray() if collect else None
+    total = 0
     try:
         fst = os.fstat(fd)
-        if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino:
-            return (-1, f"special:{stat.S_IFMT(fst.st_mode)}:{_stamp(fst)}")
-        remaining = min(fst.st_size, HASH_CAP_BYTES)
-        while remaining > 0:
-            chunk = os.read(fd, min(_CHUNK_BYTES, remaining))
+        if (
+            not stat.S_ISREG(fst.st_mode)
+            or fst.st_ino != st.st_ino
+            or fst.st_dev != st.st_dev
+        ):
+            budget.flag(CHANGING)
+            return (-1, f"swapped:{_stamp(fst)}"), None
+        while True:
+            chunk = os.read(fd, _CHUNK_BYTES)
             if not chunk:
                 break
             digest.update(chunk)
-            remaining -= len(chunk)
+            total += len(chunk)
+            if kept is not None:
+                if len(kept) + len(chunk) > _REF_PARSE_CAP_BYTES:
+                    budget.flag(TOO_LARGE)
+                    kept = None
+                else:
+                    kept.extend(chunk)
             if not budget.spend(len(chunk)):
-                return (fst.st_size, f"unfinished:{_stamp(fst)}")
+                return (total, "unfinished"), None
     except OSError:
-        return (st.st_size, f"unreadable:{_stamp(st)}")
+        budget.flag(UNREADABLE)
+        return (st.st_size, f"unreadable:{_stamp(st)}"), None
     finally:
         os.close(fd)
-    if fst.st_size > HASH_CAP_BYTES:
-        # Content past the cap isn't hashed: the change time catches edits.
-        return (fst.st_size, f"{digest.hexdigest()}:partial:{_stamp(fst)}")
-    return (fst.st_size, digest.hexdigest())
+    if total == 0:
+        return None, None
+    return (total, digest.hexdigest()), (bytes(kept) if kept is not None else None)
 
 
 def _fingerprint(
     path: Path,
+    budget: _Budget,
     *,
     read: bool,
-    budget: _Budget,
-    contain: str | None = None,
-) -> Fingerprint | None:
-    """None for an empty regular file. Never raises, never opens anything but
-    a regular file, and never follows a link out of *contain*: such entries
-    still count (by stat / link target), so they can't drop out of the
-    digest."""
+    contain: str | None,
+    collect: bool = False,
+) -> tuple[Fingerprint | None, bytes | None]:
+    """Fingerprint one entry. Never raises; never opens anything but a
+    regular file; never follows a link out of *contain*. Anything it can't
+    vouch for is flagged on *budget* (→ "not checked"), never dropped."""
     try:
         lst = os.lstat(path)
     except OSError:
-        return (-1, "unstatable")
+        budget.flag(UNREADABLE)
+        return (-1, "unstatable"), None
+    target = ""
     if stat.S_ISLNK(lst.st_mode):
         try:
             target = os.readlink(path)
@@ -305,146 +412,140 @@ def _fingerprint(
             target = "?"
         if contain is not None and not _contained(path, contain):
             budget.outside = True
-            return (-1, f"outside:{target}")
+            return (-1, f"outside:{target}"), None
         try:
             st = os.stat(path)
         except OSError:
-            return (-1, f"dangling:{target}")
+            # Dangling: agy can't load it; creating the target changes this.
+            return (-1, f"dangling:{target}"), None
     else:
         st = lst
+    link = f":link:{target}" if target else ""
+    if stat.S_ISDIR(st.st_mode):
+        # A directory link the walk wouldn't follow: its contents are unseen.
+        budget.outside = True
+        return (-1, f"dir{link}"), None
     if not stat.S_ISREG(st.st_mode):
-        # FIFO, device, socket, directory link: never opened.
-        return (-1, f"special:{stat.S_IFMT(st.st_mode)}:{_stamp(st)}")
-    if st.st_size == 0:
-        return None
+        budget.flag(SPECIAL)
+        return (-1, f"special:{stat.S_IFMT(st.st_mode)}{link}"), None
     if not read:
-        return (st.st_size, f"{st.st_mtime_ns}:{_stamp(st)}")
-    return _hash_regular(path, st, budget)
+        if st.st_size == 0:
+            return None, None
+        return (st.st_size, f"{_stamp(st)}{link}"), None
+    fp, data = _hash_regular(path, st, budget, collect=collect)
+    if fp is None:
+        return None, None
+    return (fp[0], f"{fp[1]}{link}"), data
 
 
-def _strings(value: Any) -> Iterator[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
+def _writable(path: str) -> bool:
+    return os.access(path, os.W_OK) or os.access(os.path.dirname(path), os.W_OK)
 
 
-def _read_small_regular(path: Path, limit: int) -> str | None:
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        return os.read(fd, limit).decode("utf-8", errors="replace")
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def _referenced_scripts(manifest: Path, root_real: str) -> list[Path]:
-    """In-project regular files that a hooks / MCP manifest's commands name.
-
-    Hook commands run with the manifest's directory as cwd; also try the
-    project root. Paths resolving outside the project root (``/dev/zero``,
-    ``~``, ``../..``) are never touched.
-    """
-    text = _read_small_regular(manifest, _REF_PARSE_CAP_BYTES)
-    if text is None:
-        return []
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return []
-    found: list[Path] = []
-    for value in _strings(data):
-        for token in _TOKEN_SPLIT.split(value)[:_MAX_TOKENS]:
-            if not token or ("/" not in token and "." not in token):
+def _references(
+    data: bytes, manifest: Path, contain: str, budget: _Budget
+) -> Iterator[str]:
+    """Real paths of in-tree files *data* names. Out-of-tree files this user
+    can write, and variable paths, flag the scan instead."""
+    text = data.decode("utf-8", errors="replace")
+    tokens = {t for t in _TOKEN_SPLIT.split(text) if t}
+    for token in sorted(tokens):
+        if "/" not in token and not _SCRIPT_SUFFIX.search(token):
+            continue  # bare words and PATH commands (see module docstring)
+        if token.startswith(("http://", "https://")):
+            continue
+        if "$" in token:
+            if token.startswith(("$HOME/", "${HOME}/")):
+                token = os.path.expanduser("~/" + token.split("/", 1)[1])
+            else:
+                budget.flag(VARIABLE_PATH)
                 continue
-            for base in (str(manifest.parent), root_real):
-                candidate = os.path.normpath(os.path.join(base, token))
-                if not _contained(candidate, root_real):
-                    continue
-                try:
-                    if stat.S_ISREG(os.stat(candidate).st_mode):
-                        found.append(Path(os.path.realpath(candidate)))
-                        break
-                except OSError:
-                    continue
-    return found
+        token = os.path.expanduser(token)
+        bases = [""] if os.path.isabs(token) else [str(manifest.parent), contain]
+        for base in bases:
+            if not budget.take():
+                return
+            candidate = os.path.normpath(os.path.join(base, token))
+            try:
+                st = os.stat(candidate)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            real = os.path.realpath(candidate)
+            if _contained(real, contain):
+                yield real
+            elif _writable(real):
+                budget.outside = True
+            break
 
 
-def _scan_agents_dirs(
+def _scan_agents(
     root: Path, cwd: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
     root_real = os.path.realpath(root)
-    current = cwd.resolve()
-    dirs: list[Path] = []
-    for _ in range(MAX_ANCESTOR_LEVELS + 1):
-        dirs.append(current)
-        if current == root or current.parent == current:
-            break
-        current = current.parent
-    manifests: list[Path] = []
-    for directory in dirs:
-        agents = directory / _AGENTS_DIR
-        if not agents.is_dir() or not _contained(agents, root_real):
-            if agents.is_symlink():
-                budget.outside = True
-                out[agents.relative_to(root).as_posix()] = (-1, "outside")
+    seen: set[str] = set()
+    pending: list[tuple[Path, bytes, str]] = []
+    for parent in _agents_parents(cwd, root):
+        agents = parent / _AGENTS_DIR
+        if not os.path.lexists(agents):
             continue
-        for path in _walk_files(agents, budget, follow_within=root_real):
+        parent_real = os.path.realpath(parent)
+        contain = root_real if _contained(parent_real, root_real) else parent_real
+        if not _contained(agents, contain) or not os.path.isdir(agents):
+            fp, _ = _fingerprint(agents, budget, read=False, contain=contain)
+            if fp is not None:
+                out[os.path.relpath(agents, root)] = fp
+            budget.outside = budget.outside or not _contained(agents, contain)
+            continue
+        for path in _walk(agents, budget, follow_within=contain, seen=seen):
             if not budget.take():
                 return
-            fp = _fingerprint(path, read=True, budget=budget, contain=root_real)
+            collect = _is_reference_manifest(path)
+            fp, data = _fingerprint(
+                path, budget, read=True, contain=contain, collect=collect
+            )
             if budget.exceeded:
                 return
             if fp is None:
                 continue
-            out[path.relative_to(root).as_posix()] = fp
-            if path.name in _COMMAND_MANIFESTS and fp[0] >= 0:
-                manifests.append(path)
-    for manifest in manifests:
-        for script in _referenced_scripts(manifest, root_real):
-            rel = Path(script).relative_to(root_real).as_posix()
+            out[os.path.relpath(path, root)] = fp
+            if data is not None:
+                pending.append((path, data, contain))
+    for manifest, data, contain in pending:
+        for real in _references(data, manifest, contain, budget):
+            if budget.exceeded:
+                return
+            rel = os.path.relpath(real, root)
             if rel in out:
                 continue
-            if not budget.take():
-                return
-            fp = _fingerprint(script, read=True, budget=budget, contain=root_real)
+            fp, _ = _fingerprint(Path(real), budget, read=True, contain=contain)
             if budget.exceeded:
                 return
             if fp is not None:
                 out[rel] = fp
 
 
-def _scan_user_dir(
-    user_dir: Path, out: dict[str, Fingerprint], budget: _Budget
-) -> None:
-    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33).
-    Symlinked dirs are recorded, not followed."""
-    if not user_dir.is_dir():
+def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
+    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33)."""
+    settings = user_settings_path()
+    if os.path.lexists(settings):
+        fp, _ = _fingerprint(settings, budget, read=False, contain=None)
+        if fp is not None:
+            out[USER_SETTINGS_DISPLAY] = fp
+    user_dir = user_config_dir()
+    if not os.path.isdir(user_dir):
         return
-    for path in _walk_files(user_dir, budget, follow_within=None):
+    seen: set[str] = set()
+    for path in _walk(user_dir, budget, follow_within=None, seen=seen):
         rel = path.relative_to(user_dir).as_posix()
         if not _is_user_manifest(rel) and not path.is_symlink():
             continue
+        if rel.startswith(_GATE_PLUGIN):
+            continue
         if not budget.take():
             return
-        fp = _fingerprint(path, read=False, budget=budget)
+        fp, _ = _fingerprint(path, budget, read=False, contain=None)
         if fp is not None:
             out[f"{USER_DISPLAY_PREFIX}{rel}"] = fp
 
@@ -452,13 +553,14 @@ def _scan_user_dir(
 def _scan_cross_engine(
     root: Path, out: dict[str, Fingerprint], budget: _Budget
 ) -> None:
-    """Stat only; symlinked dirs are recorded, not followed."""
+    """Stat only; links recorded, not followed. Its problems never refuse."""
     candidates: list[Path] = [root / rel for rel in _CROSS_ENGINE_FILES]
+    seen: set[str] = set()
     for tree in _CROSS_ENGINE_TREES:
         base = root / tree
-        if base.is_dir() and not base.is_symlink():
-            candidates.extend(_walk_files(base, budget, follow_within=None))
-        elif base.is_symlink():
+        if os.path.isdir(base) and not os.path.islink(base):
+            candidates.extend(_walk(base, budget, follow_within=None, seen=seen))
+        elif os.path.lexists(base):
             candidates.append(base)
         if budget.exceeded:
             return
@@ -467,7 +569,7 @@ def _scan_cross_engine(
             continue
         if not budget.take():
             return
-        fp = _fingerprint(path, read=False, budget=budget)
+        fp, _ = _fingerprint(path, budget, read=False, contain=None)
         if fp is not None:
             out[path.relative_to(root).as_posix()] = fp
 
@@ -475,31 +577,34 @@ def _scan_cross_engine(
 def scan_workspace_config(cwd: Path) -> ScanResult:
     """Fingerprint both sets for a run in *cwd*.
 
-    Blocking and bounded (entries, bytes hashed, wall clock); callers run it
-    off the event loop (``anyio.to_thread``)."""
+    Blocking and bounded (entries, bytes, wall clock); callers run it off the
+    event loop under ``SCAN_TIMEOUT_S``."""
     root = find_project_root(cwd)
     agy: dict[str, Fingerprint] = {}
     cross: dict[str, Fingerprint] = {}
     agy_budget = _Budget()
-    _scan_agents_dirs(root, cwd, agy, agy_budget)
+    _scan_agents(root, cwd, agy, agy_budget)
     if not agy_budget.exceeded:
-        _scan_user_dir(user_config_dir(), agy, agy_budget)
+        _scan_user_level(agy, agy_budget)
     cross_budget = _Budget()
     _scan_cross_engine(root, cross, cross_budget)
-    if agy_budget.exceeded or cross_budget.exceeded or agy_budget.outside:
-        logger.warning(
-            "antigravity.workspace_config.scan_truncated",
-            root=str(root),
-            agy_files=len(agy),
-            cross_files=len(cross),
-            over_budget=agy_budget.exceeded or cross_budget.exceeded,
-            outside_root=agy_budget.outside,
-        )
-    return ScanResult(
+    result = ScanResult(
         root=root,
         agy=agy,
         cross=cross,
         truncated=agy_budget.exceeded,
         cross_truncated=cross_budget.exceeded,
         outside_root=agy_budget.outside,
+        problems=tuple(agy_budget.problems),
     )
+    if result.unchecked_reason is not None or cross_budget.exceeded:
+        logger.warning(
+            "antigravity.workspace_config.unchecked",
+            root=str(root),
+            reason=result.unchecked_reason,
+            problems=list(result.problems),
+            agy_files=len(agy),
+            cross_files=len(cross),
+            cross_truncated=cross_budget.exceeded,
+        )
+    return result

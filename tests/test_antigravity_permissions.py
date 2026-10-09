@@ -515,15 +515,18 @@ def test_workspace_config_ancestor_scan_stops_at_git_root(
     ]
 
 
-def test_workspace_config_without_git_scans_cwd_only(
+def test_workspace_config_without_git_scans_ancestor_agents(
     tmp_path: Path, gemini_home: Path
 ) -> None:
+    """No .git bounds agy's walk-up, so ancestor .agents/ count too (3rd
+    security review): a parent-dir hook must not run unseen."""
     proj = tmp_path / "a" / "proj"
     proj.mkdir(parents=True)
     _write(tmp_path / "a" / ".agents" / "hooks.json")
     result = scan.scan_workspace_config(proj)
     assert result.root == proj
-    assert result.agy == {}
+    assert "../.agents/hooks.json" in result.agy
+    assert result.unchecked_reason is None
 
 
 def test_empty_manifest_files_ignored(tmp_path: Path, gemini_home: Path) -> None:
@@ -1091,17 +1094,17 @@ def test_env_has_no_test_leak() -> None:
 # ── security review of 2b4d66c: fail closed ─────────────────────────────────
 
 
-def test_change_past_hash_cap_detected(
-    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(scan, "HASH_CAP_BYTES", 16)
-    manifest = _write(tmp_path / ".agents" / "hooks.json", "x" * 64)
-    first = scan.scan_workspace_config(tmp_path).agy_digest
-    before = manifest.stat()
-    manifest.write_text("x" * 32 + "y" * 32)  # same size, change after the cap
-    # … with the mtime set back (only the inode change time can't be).
-    os.utime(manifest, ns=(before.st_atime_ns, before.st_mtime_ns))
-    assert scan.scan_workspace_config(tmp_path).agy_digest != first
+def test_large_file_hashed_in_full(tmp_path: Path, gemini_home: Path) -> None:
+    """No per-file cap: a same-size edit at the end of a 5 MiB file, with the
+    mtime set back, still changes the digest (no ctime reliance)."""
+    size = 5 * 1024 * 1024
+    blob = _write(tmp_path / ".agents" / "plugins" / "p" / "bundle.js", "x" * size)
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    before = blob.stat()
+    blob.write_text("x" * (size - 1) + "y")
+    os.utime(blob, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
 
 
 def test_symlinked_plugin_dir_inside_root_is_scanned(
@@ -1149,6 +1152,7 @@ def test_fifo_and_device_never_opened(tmp_path: Path, gemini_home: Path) -> None
     )
     result = scan.scan_workspace_config(tmp_path)  # would hang if opened
     assert result.agy[".agents/hooks.json"][1].startswith("special:")
+    assert result.unchecked_reason == scan.SPECIAL  # never just recorded
     assert "pipe.sh" not in result.agy  # not a regular file
     assert not any("dev/zero" in p or "passwd" in p for p in result.agy)
 
@@ -1190,6 +1194,151 @@ def test_unreadable_manifest_still_counted(tmp_path: Path, gemini_home: Path) ->
     finally:
         manifest.chmod(0o644)
     assert ".agents/hooks.json" in result.agy
+    assert result.unchecked_reason == scan.UNREADABLE  # a stat stamp isn't enough
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists mode-100 dirs")
+def test_unlistable_dir_marks_unchecked(tmp_path: Path, gemini_home: Path) -> None:
+    """A --x folder can't be listed, but agy can still open known names in
+    it: never skip it quietly."""
+    hidden = tmp_path / ".agents" / "plugins" / "p"
+    _write(hidden / "hooks.json", '{"a": 1}')
+    hidden.chmod(0o100)
+    try:
+        result = scan.scan_workspace_config(tmp_path)
+    finally:
+        hidden.chmod(0o755)
+    assert result.unchecked_reason == scan.UNREADABLE
+
+
+def test_writable_script_outside_project_marks_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    proj = tmp_path / "proj"
+    outside = _write(tmp_path / "elsewhere" / "run.sh", "echo hi")
+    _write(
+        proj / ".agents" / "hooks.json",
+        json.dumps({"Stop": [{"command": f"sh {outside} && /bin/sh -c true"}]}),
+    )
+    result = scan.scan_workspace_config(proj)
+    assert result.unchecked_reason == scan.OUTSIDE
+    # A read-only system binary alone doesn't.
+    _write(
+        proj / ".agents" / "hooks.json",
+        json.dumps({"Stop": [{"command": "/bin/sh -c true"}]}),
+    )
+    assert scan.scan_workspace_config(proj).unchecked_reason is None
+
+
+def test_variable_script_path_marks_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    _write(
+        tmp_path / ".agents" / "mcp_config.json",
+        json.dumps({"s": {"command": "node", "args": ["$PLUGIN_DIR/server.js"]}}),
+    )
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == (scan.VARIABLE_PATH)
+
+
+def test_oversize_reference_manifest_marks_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    padding = "x" * (300 * 1024)
+    _write(
+        tmp_path / ".agents" / "hooks.json",
+        json.dumps({"pad": padding, "Stop": [{"command": "sh scripts/a.sh"}]}),
+    )
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.TOO_LARGE
+
+
+def test_references_beyond_old_token_cap_and_agent_md_tracked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    filler = " ".join(f"w{i}" for i in range(500))
+    _write(
+        tmp_path / ".agents" / "hooks.json",
+        json.dumps({"Stop": [{"command": f"echo {filler}; sh scripts/late.sh"}]}),
+    )
+    _write(
+        tmp_path / ".agents" / "agents" / "helper.md",
+        "---\nhooks:\n  Stop: ./tools/agent-hook.py\n---\n",
+    )
+    late = _write(tmp_path / "scripts" / "late.sh", "echo ok")
+    agent_hook = _write(tmp_path / "tools" / "agent-hook.py", "print(1)")
+    first = scan.scan_workspace_config(tmp_path)
+    assert {"scripts/late.sh", "tools/agent-hook.py"} <= set(first.agy)
+    late.write_text("echo evil")
+    second = scan.scan_workspace_config(tmp_path)
+    assert second.agy_digest != first.agy_digest
+    agent_hook.write_text("print(2)")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != second.agy_digest
+
+
+def test_user_settings_and_linked_user_dirs(tmp_path: Path, gemini_home: Path) -> None:
+    settings = _write(gemini_home.parent / "antigravity-cli" / "settings.json", "{}")
+    first = scan.scan_workspace_config(tmp_path)
+    assert scan.USER_SETTINGS_DISPLAY in first.agy
+    assert first.unchecked_reason is None
+    settings.write_text('{"hooks": {"Stop": "curl evil"}}')
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+    linked = tmp_path / "dotfiles-plugins"
+    _write(linked / "hooks.json", '{"a": 1}')
+    (gemini_home / "plugins").symlink_to(linked, target_is_directory=True)
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.OUTSIDE
+
+
+def test_huge_directory_is_bounded_per_entry(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "MAX_FILES", 5)
+    junk = tmp_path / ".agents" / "skills" / "junk"
+    junk.mkdir(parents=True)
+    for i in range(50):
+        (junk / f"f{i}").write_text("x")
+    assert scan.scan_workspace_config(tmp_path).truncated is True
+
+
+@pytest.mark.anyio
+async def test_scan_timeout_is_unchecked_not_wedged(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scan stuck in a blocking read (hung mount) is abandoned: attended runs
+    warn, unattended runs are held."""
+    import threading
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    monkeypatch.setattr(scan, "SCAN_TIMEOUT_S", 0.2)
+    release = threading.Event()
+
+    def stuck(cwd: Path) -> scan.ScanResult:
+        release.wait(5)
+        return scan.ScanResult(root=cwd)
+
+    monkeypatch.setattr(scan, "scan_workspace_config", stuck)
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    try:
+        (done,) = await _run(runner, EngineRunOptions(unattended_trigger="cron:x"))
+        assert done.usage == {PRESPAWN_BLOCKED_KEY: "config_unchecked"}
+        events = await _run(runner)
+        assert _completed(events).ok is True
+        assert any("timed out" in r.action.title for r in _warning_rows(events))
+    finally:
+        release.set()
+
+
+@pytest.mark.anyio
+async def test_unchecked_reason_from_scan_reaches_runner(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    os.mkfifo(project / ".agents-fifo")
+    (project / ".agents").mkdir()
+    os.symlink(project / ".agents-fifo", project / ".agents" / "hooks.json")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    rows = _warning_rows(await _run(runner))
+    assert any(scan.SPECIAL in r.action.title for r in rows)
+    (done,) = await _run(runner, EngineRunOptions(unattended_trigger="cron:x"))
+    assert done.usage == {PRESPAWN_BLOCKED_KEY: "config_unchecked"}
 
 
 def test_every_file_under_agents_and_hook_scripts_tracked(

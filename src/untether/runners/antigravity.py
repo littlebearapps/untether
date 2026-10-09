@@ -713,9 +713,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     and precheck.scan is not None
                 ):
                     # Off the event loop: the re-scan is bounded but blocking.
-                    rows = await anyio.to_thread.run_sync(
-                        self._config_change_rows, precheck
-                    )
+                    rows: list[UntetherEvent] | None = None
+                    with anyio.move_on_after(antigravity_scan.SCAN_TIMEOUT_S):
+                        rows = await anyio.to_thread.run_sync(
+                            self._config_change_rows,
+                            precheck,
+                            abandon_on_cancel=True,
+                        )
+                    if rows is None:
+                        rows = [_recheck_warning("the check timed out")]
                     for row in rows:
                         yield row
                 yield evt
@@ -836,9 +842,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if cwd is not None:
             pre.cwd = cwd
             try:
-                pre.scan = await anyio.to_thread.run_sync(
-                    antigravity_scan.scan_workspace_config, cwd
-                )
+                # Bounded inside, but a read on a hung mount can't be
+                # interrupted: abandon the thread and go on "not checked".
+                with anyio.move_on_after(antigravity_scan.SCAN_TIMEOUT_S):
+                    pre.scan = await anyio.to_thread.run_sync(
+                        antigravity_scan.scan_workspace_config,
+                        cwd,
+                        abandon_on_cancel=True,
+                    )
+                if pre.scan is None:
+                    pre.scan_problem = "the check timed out"
             except Exception as exc:  # noqa: BLE001 — fails closed below
                 logger.warning(
                     "antigravity.workspace_config.scan_failed",
@@ -846,10 +859,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
                 pre.scan_problem = "the check failed"
         scan = pre.scan
-        if scan is not None and scan.truncated:
-            pre.scan_problem = "too many files to check in time"
-        elif scan is not None and scan.outside_root:
-            pre.scan_problem = "links outside the project"
+        if scan is not None and scan.unchecked_reason is not None:
+            pre.scan_problem = scan.unchecked_reason
         if pre.scan_problem is not None:
             # Security review: an unfinished scan is "not checked", never a
             # stable digest — attended runs warn every time, unattended
@@ -1688,22 +1699,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             after = None
             problem = "the check failed"
-        if after is not None and (after.truncated or after.cross_truncated):
-            problem = "too many files to check in time"
-        elif after is not None and after.outside_root:
-            problem = "links outside the project"
+        if after is not None and after.unchecked_reason is not None:
+            problem = after.unchecked_reason
+        elif after is not None and after.cross_truncated:
+            problem = antigravity_scan.TOO_MANY
         out: list[UntetherEvent] = []
         if problem is not None:
-            out.append(
-                _warning_event(
-                    factory,
-                    "antigravity.config.recheck",
-                    "⚠️ Untether couldn't re-check this project's agy and "
-                    f"other engines' config after the run ({problem}). Review "
-                    ".agents/ and files like .claude/ or .envrc before "
-                    "sending another message.",
-                )
-            )
+            out.append(_recheck_warning(problem, factory))
         if after is None:
             return out
         for set_name, before_set, after_set in (
@@ -1867,6 +1869,18 @@ def _step_of(action_id: str) -> int:
         return int(action_id.removeprefix("step-"))
     except ValueError:
         return -1
+
+
+def _recheck_warning(
+    problem: str, factory: EventFactory | None = None
+) -> UntetherEvent:
+    return _warning_event(
+        factory or EventFactory(ENGINE),
+        "antigravity.config.recheck",
+        "⚠️ Untether couldn't re-check this project's agy and other engines' "
+        f"config after the run ({problem}). Review .agents/ and files like "
+        ".claude/ or .envrc before sending another message.",
+    )
 
 
 def _warning_event(
