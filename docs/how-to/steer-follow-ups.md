@@ -17,6 +17,8 @@ Send `/steer` followed by your text while a run is working:
 
 You'll get `↪️ Steered into the current run.` as a reply. Once Claude has read it, the run's progress message shows a `↪️ steer received: also tell me the hostname` row, and the final answer covers both the original request and the steer.
 
+<img src="../assets/screenshots/steer-mid-run.jpg" alt="A /steer message sent while Claude is working, with the Steered into the current run reply" width="360" loading="lazy" />
+
 If Claude has already finished its turn when the message arrives (the session is idle), there is nothing to steer: the message simply runs as the next turn and its answer replies to it — no `Steered` acknowledgement.
 
 If the steer arrives after Claude's last tool call (it is already writing its answer), Claude finishes the first answer and then answers the steer as its next turn — you get a second reply, threaded under your `/steer` message. Nothing is lost either way.

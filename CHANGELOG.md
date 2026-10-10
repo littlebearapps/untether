@@ -5,6 +5,7 @@
 ### docs
 
 - replace maintainer host names, bot usernames, session IDs and private project names in the public docs (older changelog sections, the dev-setup sample log, the Claude runner and config references) with neutral placeholders [#1027](https://github.com/littlebearapps/untether/issues/1027)
+- refresh 15 stale screenshots from the v0.36.0 demo recording (plan approval, outline, questions, diff approval, progress, final footer, `/config` home) and add four new ones: `/steer`, the background tasks panel, the Permission mode page and the Cost & usage page with Stop at limit; `/planmode on` / `plan-auto` shots and the terminal captures are still owed [#783](https://github.com/littlebearapps/untether/issues/783)
 
 ## v0.36.0 (2026-10-08)
 

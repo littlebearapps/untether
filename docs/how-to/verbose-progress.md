@@ -140,6 +140,8 @@ When Claude launches background work — a background `Agent`, `Bash run_in_back
 
 Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell tasks and Monitors (🐚) show elapsed time. Only background work is listed — a subagent's own tool calls are not, and a subagent's background task is folded into its agent's row until that agent ends (then it gets its own row, since it still keeps the session open). "tok" counts tokens (it includes cached and system-prompt tokens), not cost. The block refreshes with the progress message and on the heartbeat tick.
 
+<img src="../assets/screenshots/background-tasks-panel.jpg" alt="Background status message listing two running agents with elapsed time, tokens and current step" width="360" loading="lazy" />
+
 **After Claude answers**, if background work is still running, Untether sends one silent status message replying to the prompt that launched it and edits it in place — at most every 30 s, sooner when a task finishes:
 
 ```

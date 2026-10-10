@@ -184,7 +184,7 @@ All engines support outbox delivery — any agent that can write files to disk c
 - **Failed runs deliver no files** — the actual file send is still gated on a successful run, but the skipped-items notice fires either way so the user always learns what the agent intended to ship.
 - **No real-time delivery** — files are sent after the run completes, not during.
 
-<!-- TODO: capture screenshot of outbox delivery in Telegram -->
+<img src="../assets/screenshots/outbox-delivery.jpg" alt="A file from the outbox delivered as a Telegram document with a paperclip caption" width="360" loading="lazy" />
 
 ## Related
 
