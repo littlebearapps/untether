@@ -210,13 +210,16 @@ for this, as a tripwire and not a sandbox:
   it never refuses a run.
 
 What is tracked: every file under each `.agents/` folder from the working directory up to the project root (except
-the `skills/` and `rules/` instruction folders), the scripts those manifests name by a literal path, and agy's
-user-level manifests under `~/.gemini/config/` (by file size and timestamps only; Untether doesn't read them).
+the `skills/` and `rules/` instruction folders), the scripts those manifests name by a literal path (wherever the
+name exists: beside the manifest, in the working directory or at the project root), the plugin folders and manifests
+a custom agent's `plugins:`, `hooks:` or `agents:` front matter points at, and agy's user-level manifests under
+`~/.gemini/config/` (by file size and timestamps only; Untether doesn't read them).
 
 Known limits:
 
 - Only scripts named by a literal path are followed. Code reached indirectly (a package manager script, a module
-  name, a `PATH` lookup, a download) isn't tracked.
+  name, a `PATH` lookup, a download) isn't tracked, and a folder passed to a hook or MCP command as an argument
+  isn't walked.
 - User-level config is checked by timestamp, not content, and agy's own `settings.json` isn't part of the check
   because agy rewrites it itself. Both sit outside the project.
 - Instruction files (`AGENTS.md`, `.agents/skills/`, `.agents/rules/`) steer the model but run nothing by

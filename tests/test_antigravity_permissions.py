@@ -1618,3 +1618,175 @@ async def test_scans_run_off_the_event_loop(
     events = await _run(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
     assert _completed(events).ok is True
     assert threads == [False, False]  # pre-spawn and post-run, both off-loop
+
+
+# ── scan: parser differentials found in the rc1 review ──────────────────────
+
+
+def _mcp(args: list[str], command: str = "node") -> str:
+    return json.dumps({"mcpServers": {"s": {"command": command, "args": args}}})
+
+
+def test_reference_tracked_at_every_base_it_resolves(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    """A decoy beside the manifest must not hide the file agy loads from the
+    run's cwd (hooks run in the manifest folder, MCP servers in the cwd)."""
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path / ".agents" / "mcp_config.json", _mcp(["./server.js"]))
+    _write(tmp_path / ".agents" / "server.js", "decoy")
+    real = _write(tmp_path / "server.js", "1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert {".agents/server.js", "server.js"} <= set(first.agy)
+    real.write_text("2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+@pytest.mark.parametrize(
+    ("command", "arg", "rel"),
+    [
+        ("node", "my tools/server.js", "my tools/server.js"),  # literal argv
+        ("node", "it's/server.js", "it's/server.js"),  # unbalanced quote
+        ("bun", "server.tsx", "server.tsx"),  # suffix outside the old list
+        ("sh", "start", "start"),  # bare relative file
+    ],
+)
+def test_mcp_args_are_literal_argv(
+    command: str, arg: str, rel: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path / ".agents" / "mcp_config.json", _mcp([arg], command))
+    target = _write(tmp_path / rel, "1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    assert rel in first.agy
+    target.write_text("2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+def test_bare_words_do_not_spend_the_entry_budget(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scan, "MAX_FILES", 40)
+    filler = " ".join(f"word{i}" for i in range(400))
+    _write(
+        tmp_path / ".agents" / "plugin.json",
+        json.dumps({"description": filler}),
+    )
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason is None
+
+
+def _agent(tmp_path: Path, front: str) -> Path:
+    return _write(tmp_path / ".agents" / "agents" / "helper.md", front)
+
+
+def test_agent_plugin_directory_is_walked(tmp_path: Path, gemini_home: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    _agent(tmp_path, "---\nname: helper\nplugins: ../../vendor/plug\n---\n")
+    _write(
+        tmp_path / "vendor" / "plug" / "hooks.json",
+        json.dumps({"Stop": [{"command": "sh ./run.sh"}]}),
+    )
+    run = _write(tmp_path / "vendor" / "plug" / "run.sh", "echo 1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    assert {"vendor/plug/hooks.json", "vendor/plug/run.sh"} <= set(first.agy)
+    run.write_text("echo 2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+def test_agent_nested_manifest_is_parsed(tmp_path: Path, gemini_home: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    _agent(tmp_path, "---\nhooks: ../../tools/agent-hooks.json\n---\n")
+    nested = _write(
+        tmp_path / "tools" / "agent-hooks.json",
+        json.dumps({"Stop": [{"command": "sh ./lib/run.sh"}]}),
+    )
+    run = _write(tmp_path / "tools" / "lib" / "run.sh", "echo 1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    assert "tools/lib/run.sh" in first.agy
+    run.write_text("echo 2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+    nested.write_text('{"Stop": [{"command": "sh ./lib/run.sh"}], // c\n}')
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+
+
+def test_agent_directory_that_holds_the_project_is_unchecked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    _agent(tmp_path, "---\nplugins: ../..\n---\n")
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.VARIABLE_PATH
+
+
+def test_mcp_directory_argument_is_not_walked(
+    tmp_path: Path, gemini_home: Path
+) -> None:
+    """A folder passed to a command (``--root ./data``) isn't config."""
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path / ".agents" / "mcp_config.json", _mcp(["--root", "./data"]))
+    data = _write(tmp_path / "data" / "rows.csv", "1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert first.unchecked_reason is None
+    assert "data/rows.csv" not in first.agy
+    data.write_text("2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest == first.agy_digest
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        "---\ndescription: |\n  intro\n  ---\nhooks:\n  Stop: sh ../../scripts/h.sh\n---\n",
+        "---\ndescription: |\n  intro\n  ...\nhooks:\n  Stop: sh ../../scripts/h.sh\n---\n",
+    ],
+)
+def test_front_matter_indented_delimiter_does_not_end_it(
+    front: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    _agent(tmp_path, front)
+    script = _write(tmp_path / "scripts" / "h.sh", "echo 1")
+    first = scan.scan_workspace_config(tmp_path)
+    assert "scripts/h.sh" in first.agy
+    script.write_text("echo 2")
+    assert scan.scan_workspace_config(tmp_path).agy_digest != first.agy_digest
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        "﻿---\nhooks:\n  Stop: sh ../../scripts/h.sh\n---\n",  # BOM
+        "\n---\nhooks:\n  Stop: sh ../../scripts/h.sh\n---\n",  # blank first line
+        " ---\nhooks:\n  Stop: sh ../../scripts/h.sh\n---\n",  # indented opener
+        "---\nhooks:\n  Stop: sh ../../scripts/h\x85.sh\n---\n",  # NEL in a path
+    ],
+)
+def test_front_matter_agy_might_read_differently_is_unchecked(
+    front: str, tmp_path: Path, gemini_home: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    _agent(tmp_path, front)
+    _write(tmp_path / "scripts" / "h.sh", "echo 1")
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+
+
+def test_agent_without_front_matter_is_fine(tmp_path: Path, gemini_home: Path) -> None:
+    _agent(tmp_path, "# Notes\n\nplain text\n\n---\n\nmore\n")
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason is None
+
+
+def test_project_root_search_exhausted_is_unchecked(
+    tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the ancestor cap the root (and its .agents/) is never reached."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    _write(repo / ".agents" / "hooks.json", '{"Stop": []}')
+    deep = repo.joinpath(*[f"d{i}" for i in range(scan.MAX_ANCESTOR_LEVELS + 2)])
+    deep.mkdir(parents=True)
+    assert scan.scan_workspace_config(deep).unchecked_reason == scan.TOO_DEEP
+    shallow = repo / "d0" / "d1"
+    shallow.mkdir(parents=True, exist_ok=True)
+    assert scan.scan_workspace_config(shallow).unchecked_reason is None

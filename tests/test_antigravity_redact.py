@@ -70,6 +70,7 @@ _SHAPES: dict[str, str] = {
     "json_token_list": f'{{"tokens": ["{S}", "{S}"]}}',
     "json_token_object": f'token: {{"value": "{S}"}}',
     "json_escaped_amp": f"x=1\\u0026code={S}\\u0026state={S}",
+    "json_escaped_newline": f'{{"error": "sign-in failed\\\\nya29.{S}\\\\tAIzaSy{S}_abcdefgh"}}',
     "auth_other_scheme": f"Authorization: Token {S}",
     "proxy_auth": f"Proxy-Authorization: Negotiate {S}",
     "cookie_header": f"Cookie: SID=aaa; HSID={S}",

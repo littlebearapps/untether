@@ -44,6 +44,9 @@ _HTML_AMP_RE = re.compile(r"&(?:amp|#38|#x26);", re.IGNORECASE)
 # ``&`` and ``=`` as Go's json.Marshal (and a JSON-in-JSON string) writes them.
 _JSON_SEP_RE = re.compile(r"\\+u00(26|3d)", re.IGNORECASE)
 _JSON_SEP_MAP = {"26": "&", "3d": "="}
+# A JSON-escaped line break or tab glues a letter onto the next token
+# (``\\nya29.…``), which would defeat the word-boundary anchors below.
+_JSON_SPACE_RE = re.compile(r"\\+[nrt]")
 _PCT_RE = re.compile(r"%(3a|2f|3f|3d|26|23|40|25)", re.IGNORECASE)
 _PCT_MAP = {
     "3a": ":",
@@ -177,6 +180,7 @@ def redact_agy_text(text: str) -> str:
     text = _ANSI_RE.sub("", text[:_MAX_CHARS])
     text = _HTML_AMP_RE.sub("&", text)
     text = _JSON_SEP_RE.sub(lambda m: _JSON_SEP_MAP[m.group(1).lower()], text)
+    text = _JSON_SPACE_RE.sub(" ", text)
     for _ in range(2):  # single and double encoding
         text = _PCT_RE.sub(lambda m: _PCT_MAP[m.group(1).lower()], text)
     text = _SCHEME_URL_RE.sub("[url]", text)

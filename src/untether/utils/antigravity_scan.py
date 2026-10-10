@@ -51,10 +51,18 @@ What's tracked (agy set)
 - every file a reference manifest (``hooks.json``, ``mcp_config.json``,
   ``plugin.json``, the 1.2.16 ``*.json`` manifests, the front matter of
   custom agents ``agents/*.md``; names compared case-insensitively) names by
-  literal path, resolved like a shell would (JSON-decoded, then shell words)
-  against the manifest's folder, the run's cwd and the project root: hashed
-  when this user controls it (owns or can write it or any folder above it),
+  literal path — as a shell would read it (JSON-decoded, then shell words)
+  and as a literal argv entry (the whole string) — at *every* one of the
+  manifest's folder, the run's cwd and the project root where it exists (a
+  decoy in one can't hide the file agy loads from another): hashed when
+  this user controls it (owns or can write it or any folder above it),
   ignored when it's a system file (``/usr/bin/python3``);
+- what a custom agent's ``plugins:`` / ``hooks:`` / ``agents:`` front matter
+  or a path-only string in a declarative manifest (``plugin.json``, the
+  ``*.json`` lists) points at: a folder is walked like ``.agents/``, a
+  ``.json`` / ``.md`` file is parsed as a manifest in turn. A folder passed
+  to a hook or MCP command (``--root ./data``) is an argument, not config,
+  and isn't walked;
 - agy's user-level manifests under ``~/.gemini/config/`` — stat only —
   excluding ``plugins/untether-gate/``.
 
@@ -65,7 +73,10 @@ an entry or folder can't be stat'd, listed or read; a file changes identity
 while read; a reference manifest is too large, not strict JSON (comments,
 trailing commas, BOM, duplicate keys, NaN), in another format agy might read
 (``hooks.yaml``, ``mcp_config.jsonc`` …), or names a path through a variable,
-command substitution or glob.
+command substitution or glob; an agent file whose front matter agy might
+delimit differently (BOM, indented or late ``---``, unusual line breaks); a
+referenced folder that holds the project itself; a cwd so deep that the
+project root is out of reach.
 
 The cross-engine set (project root only, stat only) never refuses (REVIEW-2
 M4); it only feeds the post-run ⚠️ row.
@@ -83,6 +94,7 @@ import shlex
 import stat
 import time
 import unicodedata
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,7 +135,8 @@ _ALT_MANIFEST = re.compile(
 _RAW_SPLIT = re.compile(r"[\s;&|()<>'\"`=,\[\]{}]+")
 _SHELL_DYNAMIC = re.compile(r"[$`*?\[\]{}]")
 _SCRIPT_SUFFIX = re.compile(
-    r"\.(?:sh|bash|zsh|fish|py|js|mjs|cjs|ts|rb|pl|php|lua|ps1|exe|bin|jar)$"
+    r"\.(?:sh|bash|zsh|fish|py|js|mjs|cjs|jsx|ts|mts|cts|tsx|rb|pl|php|lua|go|ps1"
+    r"|exe|bin|jar)$"
 )
 # REVIEW-2 M4: files that become code execution or instructions for the
 # *next* engine run in the same project.
@@ -147,6 +160,7 @@ VARIABLE_PATH = "a hook or MCP command path Untether can't resolve"
 TOO_LARGE = "a config file too large to check"
 CHANGING = "files changing while they were checked"
 AMBIGUOUS = "a config file agy might read differently (not strict JSON)"
+TOO_DEEP = "a project folder too deep to check"
 
 # (size, content hash | stat stamp)
 type Fingerprint = tuple[int, str | int]
@@ -231,6 +245,22 @@ def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
     return start
 
 
+def _root_search_exhausted(cwd: Path, *, home: Path | None = None) -> bool:
+    """``find_project_root`` gave up at the ancestor cap: the real root (and
+    any ``.agents/`` above the cap) was never looked at."""
+    home = (home or Path.home()).resolve()
+    current = cwd.resolve()
+    for _ in range(MAX_ANCESTOR_LEVELS + 1):
+        if (
+            not _below_home(current, home)
+            or (current / ".git").exists()
+            or current.parent == current
+        ):
+            return False
+        current = current.parent
+    return True
+
+
 def _agents_parents(cwd: Path, root: Path) -> list[Path]:
     """Directories whose ``.agents/`` agy may load: cwd → root, and — when
     no ``.git`` bounds the walk — every further ancestor below ``$HOME``."""
@@ -292,6 +322,10 @@ class _Budget:
 
     def take(self) -> bool:
         self.entries += 1
+        return self._check()
+
+    def alive(self) -> bool:
+        """The budget still holds (no entry charged)."""
         return self._check()
 
     def spend(self, nbytes: int) -> bool:
@@ -538,24 +572,78 @@ def _strict_json_strings(data: bytes) -> list[str] | None:
     return out
 
 
+_LINE_BREAK = re.compile(r"\r\n|\n|\r")
+# Breaks ``str.splitlines`` honours and YAML 1.2 doesn't (or the reverse).
+_ODD_BREAKS = re.compile("[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# Front-matter keys whose values are paths agy loads config from (skills and
+# rules are instruction trees, see the limitations above).
+_PATH_KEYS = frozenset({"plugins", "hooks", "agents", "mcp"})
+_FRONT_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:(.*)$")
+# Manifests whose strings are commands and their arguments, not paths.
+_COMMAND_MANIFESTS = frozenset({"hooks.json", "mcp_config.json"})
+
+
 def _front_matter(data: bytes) -> list[str] | None:
-    """The front-matter lines of a custom agent (``---`` … ``---``); None
-    when it uses escapes the scan can't decode the way agy's YAML would."""
+    """The front-matter lines of a custom agent (``---`` … ``---``), ``[]``
+    when it has none; None when agy's reader might delimit or decode it
+    differently (BOM, an indented or late opener, escapes, odd line breaks)."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    lines = _LINE_BREAK.split(text)
+    if lines[0].rstrip(" \t") != "---":
+        first = next((line for line in lines if line.strip()), "")
+        if first.lstrip("\ufeff").strip() == "---":
+            return None
         return []
     body: list[str] = []
     for line in lines[1:]:
-        if line.strip() in {"---", "..."}:
+        # Column 0 only: an indented ``---`` inside a block scalar is text.
+        if line.rstrip(" \t") in {"---", "..."}:
             break
         body.append(line)
-    if any("\\" in line for line in body):
+    if any("\\" in line or _ODD_BREAKS.search(line) for line in body):
         return None
     return body
+
+
+def _front_matter_paths(lines: list[str]) -> list[str]:
+    """Values under the path keys of a custom agent's front matter (scalar,
+    flow list or block list)."""
+    out: list[str] = []
+    current: str | None = None
+    for line in lines:
+        match = _FRONT_KEY.match(line)
+        if match is not None:
+            current = _fold(match.group(1))
+            value = match.group(2)
+        elif line[:1] in {" ", "\t", "-"}:
+            value = line
+        else:
+            current = None
+            continue
+        if current not in _PATH_KEYS:
+            continue
+        for part in value.strip().strip("[]").split(","):
+            part = part.strip().lstrip("-").strip().strip("\"'")
+            if part:
+                out.append(part)
+                out.append(part.rsplit(": ", 1)[-1].strip().strip("\"'"))
+    return out
+
+
+def _manifest_paths(manifest: Path, strings: list[str], *, is_md: bool) -> list[str]:
+    """Strings of *manifest* that may name a folder or manifest agy loads."""
+    if is_md:
+        return _front_matter_paths(strings)
+    if _fold(manifest.name) in _COMMAND_MANIFESTS:
+        return []
+    return [
+        value
+        for value in strings
+        if "/" in value or _fold(value).endswith((".json", ".md"))
+    ]
 
 
 _HOME_VAR = re.compile(r"\$(?:HOME|\{HOME\})(?=/)")
@@ -589,24 +677,30 @@ def _references(
     bases: tuple[str, ...],
     budget: _Budget,
 ) -> Iterator[str]:
-    """Real paths of user-controlled regular files that *strings* name."""
+    """Real paths of user-controlled regular files that *strings* name, at
+    every base where the name resolves."""
     candidates: set[str] = set()
     for value in strings:
         words, dynamic = _words(value)
         if dynamic:
             budget.flag(VARIABLE_PATH)
+        if len(value) <= 4096:
+            words.append(value)  # an MCP ``args`` entry is literal argv
         for word in words:
+            if not word or "\0" in word or "\n" in word:
+                continue
             if _SHELL_DYNAMIC.search(word):
                 continue  # can't resolve; already flagged above
-            if "/" not in word and not _SCRIPT_SUFFIX.search(word):
-                continue  # bare words and PATH commands (known limitation)
             if word.startswith(("http://", "https://")):
                 continue
             candidates.add(os.path.expanduser(word))
     for word in sorted(candidates):
+        # A bare word is nearly always prose or a PATH command: it costs an
+        # entry only when a file by that name is really there.
+        pathish = "/" in word or bool(_SCRIPT_SUFFIX.search(word))
         roots = ("",) if os.path.isabs(word) else (str(manifest.parent), *bases)
         for base in roots:
-            if not budget.take():
+            if not (budget.take() if pathish else budget.alive()):
                 return
             candidate = os.path.normpath(os.path.join(base, word))
             try:
@@ -615,10 +709,17 @@ def _references(
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
+            if not pathish and not budget.take():
+                return
             real = os.path.realpath(candidate)
             if _user_controlled(real):
                 yield real
-            break
+
+
+def _holds(folder: str, *paths: str) -> bool:
+    """*folder* is one of *paths* or an ancestor of one."""
+    prefix = folder.rstrip(os.sep) + os.sep
+    return any(p == folder or p.startswith(prefix) for p in paths)
 
 
 def _display(real: str, root_real: str, home_real: str) -> str:
@@ -635,12 +736,36 @@ def _scan_agents(
     root_real = os.path.realpath(root)
     home_real = os.path.realpath(Path.home())
     gemini_real = os.path.realpath(Path.home() / ".gemini")
+    cwd_real = os.path.realpath(cwd)
     # Links may lead anywhere in the project or $HOME (shared agent folders),
     # never into ~/.gemini (D33) or outside both.
     follow = (root_real, home_real)
     no_follow = (gemini_real,)
     seen: set[str] = set()
-    pending: list[tuple[Path, bytes]] = []
+    pending: deque[tuple[Path, bytes]] = deque()
+
+    def track(path: Path, key: str, contain: tuple[str, ...]) -> bool:
+        """Fingerprint one walked file; False once the budget is gone."""
+        if not budget.take():
+            return False
+        if _ALT_MANIFEST.match(_fold(path.name)):
+            budget.flag(AMBIGUOUS)
+        fp, data = _fingerprint(
+            path,
+            budget,
+            read=True,
+            contain=contain,
+            collect=_is_reference_manifest(path),
+            exclude=no_follow,
+        )
+        if budget.exceeded:
+            return False
+        if fp is not None:
+            out[key] = fp
+            if data is not None:
+                pending.append((path, data))
+        return True
+
     for parent in _agents_parents(cwd, root):
         agents = parent / _AGENTS_DIR
         if not os.path.lexists(agents):
@@ -663,36 +788,67 @@ def _scan_agents(
             skip_top=_INSTRUCTION_TREES,
             exclude=no_follow,
         ):
+            if not track(path, os.path.relpath(path, root), here):
+                return
+
+    def follow_path(word: str, manifest: Path) -> bool:
+        """Walk the folder, or queue the manifest, that *word* names."""
+        roots = ("",) if os.path.isabs(word) else (str(manifest.parent), *bases)
+        for base in roots:
             if not budget.take():
-                return
-            if _ALT_MANIFEST.match(_fold(path.name)):
-                budget.flag(AMBIGUOUS)
-            collect = _is_reference_manifest(path)
-            fp, data = _fingerprint(
-                path,
-                budget,
-                read=True,
-                contain=here,
-                collect=collect,
-                exclude=no_follow,
-            )
-            if budget.exceeded:
-                return
-            if fp is None:
+                return False
+            try:
+                real = os.path.realpath(os.path.join(base, word))
+                st = os.stat(real)
+            except (OSError, ValueError):
                 continue
-            out[os.path.relpath(path, root)] = fp
-            if data is not None:
-                pending.append((path, data))
-    cwd_real = os.path.realpath(cwd)
-    for manifest, data in pending:
-        if _fold(manifest.name).endswith(".md"):
-            strings = _front_matter(data)
-        else:
-            strings = _strict_json_strings(data)
+            if _contained(real, no_follow) or not _user_controlled(real):
+                continue  # ~/.gemini is stat only (user-level set); system files
+            if stat.S_ISDIR(st.st_mode):
+                if _holds(real, root_real, cwd_real, home_real):
+                    budget.flag(VARIABLE_PATH)  # would walk the whole project
+                    continue
+                for path in _walk(
+                    Path(real),
+                    budget,
+                    follow_within=follow,
+                    seen=seen,
+                    skip_top=_INSTRUCTION_TREES,
+                    exclude=no_follow,
+                ):
+                    key = _display(str(path), root_real, home_real)
+                    if not track(path, key, follow):
+                        return False
+            elif (
+                stat.S_ISREG(st.st_mode)
+                and real not in parsed
+                and _fold(real).endswith((".json", ".md"))
+            ):
+                fp, data = _fingerprint(
+                    Path(real), budget, read=True, contain=(), collect=True
+                )
+                if budget.exceeded:
+                    return False
+                if fp is not None:
+                    out[_display(real, root_real, home_real)] = fp
+                if data is not None:
+                    pending.append((Path(real), data))
+        return True
+
+    bases = (cwd_real, root_real)
+    parsed: set[str] = set()
+    while pending:
+        manifest, data = pending.popleft()
+        manifest_real = os.path.realpath(manifest)
+        if manifest_real in parsed:
+            continue
+        parsed.add(manifest_real)
+        is_md = _fold(manifest.name).endswith(".md")
+        strings = _front_matter(data) if is_md else _strict_json_strings(data)
         if strings is None:
             budget.flag(AMBIGUOUS)
             continue
-        for real in _references(strings, manifest, (cwd_real, root_real), budget):
+        for real in _references(strings, manifest, bases, budget):
             if budget.exceeded:
                 return
             key = _display(real, root_real, home_real)
@@ -704,6 +860,13 @@ def _scan_agents(
                 return
             if fp is not None:
                 out[key] = fp
+        if budget.exceeded:
+            return
+        for word in sorted(set(_manifest_paths(manifest, strings, is_md=is_md))):
+            if not word or "\0" in word or _SHELL_DYNAMIC.search(word):
+                continue
+            if not follow_path(os.path.expanduser(word), manifest):
+                return
 
 
 def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
@@ -760,6 +923,8 @@ def scan_workspace_config(cwd: Path) -> ScanResult:
     agy: dict[str, Fingerprint] = {}
     cross: dict[str, Fingerprint] = {}
     agy_budget = _Budget()
+    if _root_search_exhausted(cwd):
+        agy_budget.flag(TOO_DEEP)
     _scan_agents(root, cwd, agy, agy_budget)
     if not agy_budget.exceeded:
         _scan_user_level(agy, agy_budget)
