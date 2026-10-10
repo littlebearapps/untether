@@ -16,7 +16,7 @@ triggers:
 
 # JSONL Subprocess Runner Framework
 
-All Untether engine runners (Claude, Codex, OpenCode, Pi; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
+All Untether engine runners (Claude, Codex, OpenCode, Pi, Antigravity; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
 
 ## Key files
 
@@ -39,6 +39,7 @@ Runner (Protocol)
       CodexRunner
       OpenCodeRunner (wraps run_impl: refuses OpenCode 2.x before spawning, #970)
       PiRunner
+      AntigravityRunner (prompt on stdin; refuses before spawn without a project or with an invalid argv value, #558)
       GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
   (each concrete runner also mixes in ResumeTokenMixin)
@@ -225,6 +226,7 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+antigravity = "untether.runners.antigravity:BACKEND"
 gemini = "untether.runners.gemini:BACKEND"  # deprecated
 amp = "untether.runners.amp:BACKEND"        # deprecated
 ```

@@ -17,7 +17,7 @@ triggers:
 
 # Untether Architecture
 
-Telegram bridge for agent CLIs (Claude Code, Codex, OpenCode, Pi). Control coding agents from anywhere.
+Telegram bridge for agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI). Control coding agents from anywhere.
 
 ## Data flow
 
@@ -200,6 +200,7 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+antigravity = "untether.runners.antigravity:BACKEND"
 gemini = "untether.runners.gemini:BACKEND"  # deprecated, unsupported
 amp = "untether.runners.amp:BACKEND"        # deprecated, unsupported
 ```

@@ -1,6 +1,6 @@
 # Untether — Agent Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, and Antigravity CLI (v0.36.1+, engine id `antigravity`, never `gemini`) from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
@@ -9,7 +9,7 @@ Website: https://untether.cc · Help centre (user docs, synced flat from `docs/`
 ## Architecture
 
 ```
-Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/gemini/amp)
+Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/antigravity/gemini/amp)
                                        |
                                   ProgressTracker
 ```

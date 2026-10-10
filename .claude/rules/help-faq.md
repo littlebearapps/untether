@@ -40,8 +40,8 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
   questions correctly?
 - Specifically watch for (Q numbers as of 0.36.0rc1 — they drift as questions are added, so match on the quoted heading):
   - **Engine support changes** — Q3 ("Which AI coding agents…")
-    enumerates the 4 supported engines plus the 2 deprecated ones (Gemini
-    CLI, Amp). If a new engine lands (e.g. Antigravity, #558, in v0.36.1) or one is
+    enumerates the 5 supported engines (Antigravity CLI joined in v0.36.1,
+    #558) plus the 2 deprecated ones (Gemini CLI, Amp). If a new engine lands or one is
     deprecated or removed, update.
   - **Subscription / API key model changes** — Q4 ("Do I need an API
     key?") describes which engines use OAuth vs API key. Any auth-flow

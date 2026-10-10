@@ -115,7 +115,7 @@ individual accounts 2026-06-18; AMP: remote `426` refusal of out-of-date
 clients), and neither has observed Untether usage.
 
 **The rule that matters for day-to-day work:** cross-engine sweeps mechanically
-touch all six runners — `stream_end_events` threading (#565),
+touch all seven runners — `stream_end_events` threading (#565),
 `manage_subprocess` (#599), `_classify_jsonl_event` (#322), `build_args`. When a
 sweep breaks `gemini` or `amp`:
 
@@ -142,8 +142,18 @@ CLIs, cost nothing, and deleting ~100 tests would flatter the 80% coverage gate
 while reducing compatibility coverage.
 
 Antigravity CLI ([#558](https://github.com/littlebearapps/untether/issues/558))
-is a **new engine**, not a `gemini` rename — it must not reuse the `gemini`
-engine id, because its auth, flags, and session semantics differ.
+is a **separate, supported engine** (`antigravity`, from v0.36.1), not a `gemini`
+rename — it must not reuse the `gemini` engine id, because its auth, flags, and
+session semantics differ. Two rules specific to it:
+
+- `agy` parses a dash-leading token after a value-taking flag as another flag
+  (`--model --version` prints the version). Build every user-influenced argv
+  value with `utils/antigravity_argv.agy_flag()` (allow-list + joined
+  `--flag=value`); never append a separate value token.
+- Text that came from `agy` (stderr, `result.error`, `AGY_ERROR`) is surfaced
+  only through `utils/antigravity_redact.redact_agy_text()`.
+
+Reference: `docs/reference/runners/antigravity/`.
 
 ## After changes
 
@@ -151,4 +161,4 @@ engine id, because its auth, flags, and session semantics differ.
 uv run pytest tests/test_*_runner.py tests/test_claude_control.py -x
 ```
 
-If this change will be released, also run integration tests U1-U4, U6, U7 (all 4 supported engines) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps runner changes to required tests.
+If this change will be released, also run integration tests U1-U4, U6, U7 (all 5 supported engines) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps runner changes to required tests.

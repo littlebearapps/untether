@@ -35,7 +35,7 @@ From `docs/reference/integration-testing.md` and
 | Change scope | Required tiers | Time |
 |---|---|---|
 | **Patch** (bug fix) | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** (new feature) | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport if changed) + Tier 4 (overrides if changed) + Tier 6 + upgrade path | ~75 min |
+| **Minor** (new feature) | Tier 7 + Tier 1 (all 5 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport if changed) + Tier 4 (overrides if changed) + Tier 6 + upgrade path | ~75 min |
 | **Major** (breaking) | ALL tiers (1–7), all supported engines, full upgrade path | ~120 min |
 
 Integration tests are automated via Telegram MCP tools (`send_message`,

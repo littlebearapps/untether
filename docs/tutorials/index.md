@@ -22,7 +22,7 @@ Work through these in order. Each tutorial builds on the previous one.
 | 2 | [First run](first-run.md) | Send a task, watch progress stream, continue conversations | 10 min |
 | 3 | [Interactive control](interactive-control.md) | Approve/deny agent actions, request plans, answer questions | 10 min |
 | 4 | [Projects & branches](projects-and-branches.md) | Target repos from chat, work on feature branches | 10 min |
-| 5 | [Multi-engine](multi-engine.md) | Switch between Claude Code, Codex, OpenCode and Pi | 10 min |
+| 5 | [Multi-engine](multi-engine.md) | Switch between Claude Code, Codex, OpenCode, Pi and Antigravity CLI | 10 min |
 
 **Supplementary:** [Conversation modes](conversation-modes.md) — understand chat mode vs stateless mode and how to switch.
 

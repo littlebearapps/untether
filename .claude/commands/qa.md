@@ -48,7 +48,7 @@ rules the command obeys:
    STOPS. Live drive requires `--run` (or explicit operator confirmation in text
    under Untether-mode).
 2. **Allowlist only.** Drive `@untether_dev_bot` and the documented engine chat
-   IDs **only** (`docs/reference/integration-testing.md` → Test chats: the 4
+   IDs **only** (`docs/reference/integration-testing.md` → Test chats: the 5
    supported engines; the deprecated Gemini/AMP chats are opt-in spot checks
    only, never part of a required tier). Prove the
    target is the dev bot first (`mcp__telegram__get_me` / bot ID `8678330610`);

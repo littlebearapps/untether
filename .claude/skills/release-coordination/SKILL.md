@@ -202,7 +202,7 @@ journalctl --user -u untether-dev -f
 | Release type | Required tiers | Time |
 |---|---|---|
 | **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
-| **Minor** | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
+| **Minor** | Tier 7 + Tier 1 (all 5 supported engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
 | **Major** | ALL tiers (1-7), all supported engines, full upgrade path testing | ~120 min |
 
 ### What to focus on per change type
@@ -219,7 +219,7 @@ journalctl --user -u untether-dev -f
 
 ### Automated testing via Telegram MCP
 
-All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash. Claude Code sends test prompts to the 4 supported `ut-dev:` engine chats (the gemini/amp chats are opt-in spot checks only), reads back responses, verifies expected behaviour, checks logs, and creates GitHub issues for any bugs found.
+All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash. Claude Code sends test prompts to the 5 supported `ut-dev:` engine chats (the gemini/amp chats are opt-in spot checks only), reads back responses, verifies expected behaviour, checks logs, and creates GitHub issues for any bugs found.
 
 **MCP tools used:** `send_message`, `get_history`, `get_messages`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`
 
@@ -231,6 +231,7 @@ All integration test tiers are fully automated by Claude Code via Telegram MCP t
 | `ut-dev: codex` | 4929463515 |
 | `ut-dev: opencode` | 5200822877 |
 | `ut-dev: pi` | 5156256333 |
+| `ut-dev · Antigravity` | TBD (group not created yet; see `docs/reference/integration-testing.md`) |
 | `ut-dev: gemini` (deprecated) | 5207762142 |
 | `ut-dev: amp` (deprecated) | 5230875989 |
 
