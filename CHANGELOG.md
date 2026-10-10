@@ -12,7 +12,7 @@
   - prompts go to agy on stdin, never on the command line; Antigravity won't run in a chat without a project; chats on a Google account sign-in get a one-time notice about Google's terms
   - footers show this run's tokens (agy reports a running total per conversation and no dollar cost, so cost budgets never trip for it); `/usage` shows agy's quota groups on demand, then the last session's tokens
   - `/config` → Effort shows only the levels the chat's model accepts (`low` / `medium` / `high`); a level the model refuses is dropped with a ⚠️ row
-- **feat(preamble):** the built-in preamble now depends on what the engine can do. Codex, OpenCode and Pi (and the deprecated Gemini CLI and Amp) are no longer told to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; they are asked to raise questions in their final reply instead. Claude's preamble is unchanged, and a custom `[preamble] text` is still sent as written [#558](https://github.com/littlebearapps/untether/issues/558)
+- **feat(preamble):** the built-in preamble now depends on what the engine can do. Codex, OpenCode and Pi (and the deprecated Gemini CLI and Amp) are no longer told to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; they are asked to raise questions in their final reply instead. Claude's preamble is unchanged, and a custom `[preamble] text` is still sent as written [#1035](https://github.com/littlebearapps/untether/issues/1035)
 
 ### fixes
 
