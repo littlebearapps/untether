@@ -7,14 +7,18 @@ challenge) when it is signed out, and a terminal, a browser and Telegram each
 recognise more URL shapes than any one regex does. So the pass is
 conservative and never relies on spotting the URL:
 
-1. cap the input, strip ANSI / control characters, undo ``&amp;`` and
-   percent-encoded separators (so a secret can't hide behind an escape)
+1. cap the input, strip ANSI / control characters, undo ``&amp;``, JSON
+   ``\\u0026`` / ``\\u003d`` and percent-encoded separators (so a secret
+   can't hide behind an escape)
 2. redact whole URLs — any scheme and case, ``//host/…``, scheme-less
    ``host.tld/…``
-3. independently redact bearer tokens, query-string-shaped runs
-   (``a=1&b=2``) and the value of every secret-looking ``key=value`` /
-   ``"key": "value"`` pair, wherever they sit (a URL split across two
-   stderr lines leaves its query on a line with no scheme)
+3. independently redact bearer tokens, bare Google credential shapes (API
+   keys, client secrets, JWTs), query-string-shaped runs (``a=1&b=2``) and
+   the value of every secret-looking ``key=value`` / ``"key": "value"``
+   pair, wherever they sit (a URL split across two stderr lines leaves its
+   query on a line with no scheme). A secret's value runs to its closing
+   quote or bracket; an ``Authorization`` / ``Cookie`` header loses the
+   rest of its line
 4. absolute paths, via the shared sanitiser
 
 The shared ``runner._sanitise_stderr`` is deliberately not used on its own
@@ -37,6 +41,9 @@ _ANSI_RE = re.compile(
     r"|[\x00-\x08\x0b-\x1f\x7f]"
 )
 _HTML_AMP_RE = re.compile(r"&(?:amp|#38|#x26);", re.IGNORECASE)
+# ``&`` and ``=`` as Go's json.Marshal (and a JSON-in-JSON string) writes them.
+_JSON_SEP_RE = re.compile(r"\\+u00(26|3d)", re.IGNORECASE)
+_JSON_SEP_MAP = {"26": "&", "3d": "="}
 _PCT_RE = re.compile(r"%(3a|2f|3f|3d|26|23|40|25)", re.IGNORECASE)
 _PCT_MAP = {
     "3a": ":",
@@ -59,7 +66,11 @@ _BARE_HOST_URL_RE = re.compile(
 )
 
 _BEARER_RE = re.compile(r"\b(bearer|basic)\s+[^\s\"'<>,;]+", re.IGNORECASE)
-_GOOGLE_TOKEN_RE = re.compile(r"\bya29\.[\w.~+/=-]+|\b1//[\w-]{10,}|\b4/[\w-]{10,}")
+_GOOGLE_TOKEN_RE = re.compile(
+    r"\bya29\.[\w.~+/=-]+|\b1//[\w-]{10,}|\b4/[\w-]{10,}"
+    r"|\bAIza[\w-]{10,}|\bGOCSPX-[\w-]+"
+    r"|\beyJ[\w-]{5,}\.[\w-]+(?:\.[\w-]+)?"
+)
 _KEY = r"[\w.%~+-]{1,64}"
 _VALUE = rf"[^{_STOP}&]*"
 _QUERY_RUN_RE = re.compile(rf"[?&#]?{_KEY}={_VALUE}(?:&(?:{_KEY}={_VALUE})?)+")
@@ -85,8 +96,9 @@ _SECRET_FRAGMENTS = (
     "authorization",
     "cookie",
 )
-# OAuth parameter names that are ordinary words: redacted only as ``key=value``
-# (``exit code: 3`` and ``state: ACTIVE`` stay readable).
+# OAuth parameter names that are ordinary words: redacted as ``key=value`` or
+# as a quoted JSON key (``"code": "…"``); ``exit code: 3`` and
+# ``state: ACTIVE`` stay readable.
 _SECRET_EXACT = frozenset(
     {
         "code",
@@ -103,6 +115,37 @@ _SECRET_EXACT = frozenset(
 )
 
 
+# Header-style keys whose value is several words (``Token abc``, ``a=1; b=2``).
+_LINE_VALUE_FRAGMENTS = ("authorization", "cookie")
+_CLOSERS = {"[": "]", "{": "}"}
+
+
+def _value_end(text: str, key: str, sep: str, start: int, default: int) -> int:
+    """Where a secret's value ends: the rest of the line for a header, the
+    closing quote of a quoted value, the matching bracket of a JSON list or
+    object; *default* (the first token) otherwise."""
+    line_end = text.find("\n", start)
+    if line_end == -1:
+        line_end = len(text)
+    if any(fragment in key for fragment in _LINE_VALUE_FRAGMENTS):
+        return line_end
+    if sep[-1] in "\"'":
+        close = text.find(sep[-1], start, line_end)
+        return line_end if close == -1 else close
+    opener = text[start]
+    if opener in _CLOSERS:
+        depth = 0
+        for index in range(start, line_end):
+            if text[index] == opener:
+                depth += 1
+            elif text[index] == _CLOSERS[opener]:
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        return line_end
+    return default
+
+
 def _redact_pairs(text: str) -> str:
     """Redact the value of every secret-looking pair. A non-secret key only
     consumes itself, so ``"status":"code=…"`` still gets its inner pair."""
@@ -112,11 +155,13 @@ def _redact_pairs(text: str) -> str:
         key = match.group(1).lower()
         sep = match.group(2)
         if any(fragment in key for fragment in _SECRET_FRAGMENTS) or (
-            key in _SECRET_EXACT and ":" not in sep
+            key in _SECRET_EXACT
+            # ``"code": "4/0A…"`` is a secret; ``"code": 429`` is a status.
+            and (":" not in sep or (sep[0] in "\"'" and sep[-1] in "\"'"))
         ):
             out.append(text[pos : match.end(2)])
             out.append("[redacted]")
-            pos = match.end()
+            pos = _value_end(text, key, sep, match.end(2), match.end())
         else:
             out.append(text[pos : match.end(1)])
             pos = match.end(1)
@@ -131,6 +176,7 @@ def redact_agy_text(text: str) -> str:
 
     text = _ANSI_RE.sub("", text[:_MAX_CHARS])
     text = _HTML_AMP_RE.sub("&", text)
+    text = _JSON_SEP_RE.sub(lambda m: _JSON_SEP_MAP[m.group(1).lower()], text)
     for _ in range(2):  # single and double encoding
         text = _PCT_RE.sub(lambda m: _PCT_MAP[m.group(1).lower()], text)
     text = _SCHEME_URL_RE.sub("[url]", text)

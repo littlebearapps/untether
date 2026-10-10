@@ -63,6 +63,20 @@ _SHAPES: dict[str, str] = {
     "bearer": f"Authorization: Bearer {S}{S}",
     "other_scheme": f"open vscode://auth/callback?code={S}",
     "ya29": f"token ya29.{S}-abc_def",
+    # A dict ``result.error`` reaches the pass as ``json.dumps`` output.
+    "json_exact_code": f'{{"code": "{S}", "state": "{S}"}}',
+    "json_exact_nonce": f'{{"nonce":"{S}","client_id":"{S}"}}',
+    "json_exact_key": f'{{"key": "AIzaSy{S}"}}',
+    "json_token_list": f'{{"tokens": ["{S}", "{S}"]}}',
+    "json_token_object": f'token: {{"value": "{S}"}}',
+    "json_escaped_amp": f"x=1\\u0026code={S}\\u0026state={S}",
+    "auth_other_scheme": f"Authorization: Token {S}",
+    "proxy_auth": f"Proxy-Authorization: Negotiate {S}",
+    "cookie_header": f"Cookie: SID=aaa; HSID={S}",
+    "quoted_spaced_secret": f'client_secret="abc {S}"',
+    "bare_api_key": f"API key AIzaSy{S}_abcdefghijklmnop is invalid",
+    "bare_client_secret_shape": f"using GOCSPX-{S}",
+    "bare_jwt": f"got eyJhbGciOi{S}.eyJzdWIiOi{S}.sig-{S}",
 }
 
 
@@ -84,6 +98,10 @@ def test_keeps_ordinary_error_text() -> None:
         "Available models:\n  Gemini 3.8 Flash (High)",
         "error: /model is answered by the CLI itself and is unavailable with "
         "--input-format stream-json; run it as its own --print /model invocation",
+        '{"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}}',
+        "exit code: 3",
+        "state: ACTIVE",
+        "the key: value pairs are listed below",
     ):
         assert redact_agy_text(text) == text
 
