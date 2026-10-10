@@ -29,7 +29,7 @@ format. Built on [#766](https://github.com/littlebearapps/untether/pull/766) by
 
 | | |
 |---|---|
-| Tested against | agy **1.3.2** (fixtures captured on 1.3.1 and 1.3.2) |
+| Tested against | agy **1.3.3** (fixtures captured on 1.3.1 and 1.3.2; the drift probes pass on 1.3.3) |
 | Minimum | agy **1.3.1**. An older agy is refused before anything starts: `🛑 Antigravity CLI <version> is older than 1.3.1, which this Untether version needs. Run agy update on the host, then retry.` |
 | Tested platform | Linux x86_64 with a file-stored sign-in token. macOS, Linux hosts with a desktop keyring, and ARM64 are untested |
 

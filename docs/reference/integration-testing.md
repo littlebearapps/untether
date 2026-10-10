@@ -1521,8 +1521,9 @@ Run on the dev bot by three parallel QA agents (one per set of chats) plus the c
 
 > **Status: NOT RUN.** This section was written with the code, before any live run. No row below has been run, no attestation marker exists for 0.36.1rc1 and nothing has been rolled out. Fill in the results table as rows are run; a row that is skipped is recorded as NOT RUN with a reason, never as a pass.
 
-- **When and what:** not run yet. Dev bot only (`@untether_dev_bot`), on the merged `dev` head for 0.36.1rc1.
-- **CLIs:** `agy` 1.3.2 on lba-1 when this was written. `agy` updates itself, so record `agy --version` at the start and end of the run; if it changes mid-run, re-run the drift suite and note both versions.
+- **When and what:** not run yet. Dev bot only (`@untether_dev_bot`). The full run happens on the `feature/558-antigravity` head before the PR; the smoke rows are then repeated on the merged `dev` head for 0.36.1rc1, and the marker binds that SHA.
+- **Prerequisites at 2026-10-10:** test project, group, chat ID, dev-config project block and `[triggers] enabled` are in place; `/usage` in the Antigravity chat answered (Gemini 5-hour group at 0 %). Still owed: one dev-bot restart onto the branch head, then the run. Auth route chosen: Google sign-in.
+- **CLIs:** `agy` 1.3.2 on lba-1 when this was written; it updated itself to 1.3.3 on 2026-10-10 (drift suite 10/10 on 1.3.3 that day). `agy` updates itself, so record `agy --version` at the start and end of the run; if it changes mid-run, re-run the drift suite and note both versions.
 - **Marker:** `~/.untether-dev/integration-test-pass-0.36.1rc1.json`, not written.
 
 ### Before the run

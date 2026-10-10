@@ -42,8 +42,9 @@ from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas import antigravity as agy_schema
 
 # Last CLI these probes were re-derived against (the pack was written on
-# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09 with no drift here).
-PROBED_CLI_VERSION = "1.3.2"
+# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09 and to 1.3.3 on
+# 2026-10-10, with no drift here either time).
+PROBED_CLI_VERSION = "1.3.3"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
