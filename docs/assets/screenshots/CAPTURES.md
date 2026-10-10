@@ -75,9 +75,8 @@ frame at 650×1420, not cropped to the message, so they match `hero-collage.jpg`
 - [ ] `journalctl-startup.jpg` — journalctl output showing untether-dev starting cleanly.
 - [ ] `worktree-run.jpg` — Worktree run with @branch directive and project context in footer.
 
-## Tier 5: v0.35.0 features (7 images)
+## Tier 5: v0.35.0 features (6 images)
 
-- [x] `config-menu-v035.jpg` — superseded: `config-menu.jpg` now shows the 2-column layout with the help/bug links footer. No separate file.
 - [ ] `outline-formatted.jpg` — Formatted plan outline with headings/bold/code blocks in Telegram.
 - [ ] `outline-buttons-bottom.jpg` — Approve/Deny buttons on the last chunk of a multi-message outline.
 - [x] `outbox-delivery.jpg` — Agent-sent file appearing as a Telegram document with a `📎` caption. *(v0.36 demo take.)*
@@ -114,3 +113,4 @@ file to use; docs reference the same image via relative paths.
 ## Retired
 
 - `cooldown-auto-deny.jpg` — removed in v0.36.0 ([#783](https://github.com/littlebearapps/untether/issues/783)); the progressive cooldown it illustrated was retired in v0.35.4 ([#570](https://github.com/littlebearapps/untether/issues/570)), and the file was a byte-for-byte copy of `post-outline-buttons.jpg`. Don't recapture.
+- `config-menu-v035.jpg` — never captured as a separate file. `config-menu.jpg` was recaptured for v0.36.0 and shows the 2-column layout with the help/bug links footer.
