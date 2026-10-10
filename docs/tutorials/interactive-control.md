@@ -226,7 +226,7 @@ To check your current mode at any time:
 !!! untether "Untether"
     permission mode: **plan-auto** (plan): plan mode, but the plan is approved for you: no plan buttons.
 
-<img src="../assets/screenshots/planmode-show.jpg" alt="/planmode show output showing current mode" width="360" loading="lazy" />
+<img src="../assets/screenshots/planmode-show.jpg" alt="/planmode show output (here with the mode set to on)" width="360" loading="lazy" />
 
 ## What just happened
 

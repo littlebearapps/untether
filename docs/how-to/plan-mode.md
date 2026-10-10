@@ -40,6 +40,10 @@ Toggle per chat:
 
 Mode is stored per chat and persists across sessions. New runs in the chat use the configured mode. The change applies from your next message; until then the current run and any background wake-ups keep the old mode.
 
+The same choices are in `/config` → **📋 Permission mode**:
+
+<img src="../assets/screenshots/config-permission-mode.jpg" alt="Permission mode page in /config with Off, On, Plan-auto and Auto buttons" width="360" loading="lazy" />
+
 A mode that `/planmode` can't set (`default`/`manual`, `dontAsk`, `bypassPermissions`, set in `untether.toml` or by hand) is shown under its own name, never as `off`. With no override, `/planmode show` and `/config` say **engine default**: the chat uses `[engines.claude] permission_mode` from `untether.toml`, or Claude Code's own settings with no approval buttons if that's unset.
 
 !!! warning "`dangerously_skip_permissions` overrides every mode"

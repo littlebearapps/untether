@@ -89,6 +89,8 @@ With the cost footer on (`[footer] show_api_cost = true`, the default), the aler
 
 Set `auto_cancel = true` (or turn on **Stop at limit** in `/config` → **💰 Cost & usage**) to make the limits act, not just alert ([#896](https://github.com/littlebearapps/untether/issues/896)). Budgets must be enabled for the chat. Claude reports cost only when a reply finishes, so Untether acts at the two points it safely can; it never interrupts a reply in progress.
 
+<img src="../assets/screenshots/config-cost-budget.jpg" alt="Cost and usage page in /config with the Budget and Stop at limit buttons" width="360" loading="lazy" />
+
 - **Daily budget reached:** new runs are refused until midnight: prompts, `/continue`, follow-ups into a live session, `/at`, loop fires, crons and webhooks. In a chat you get a message with a **Run anyway** button, which starts the refused run once (only in that chat):
 
     !!! untether "Untether"

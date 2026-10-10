@@ -44,7 +44,7 @@ Effort: default  · high
 📖 Help guides · 🐛 Report a bug
 ```
 
-<!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
+<img src="../assets/screenshots/config-menu.jpg" alt="/config home page with the settings summary and two-column buttons" width="360" loading="lazy" />
 
 !!! note "Engine-specific controls"
     The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
