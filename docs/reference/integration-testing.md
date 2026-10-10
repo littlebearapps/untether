@@ -43,7 +43,7 @@ For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID
 | Codex CLI | `4929463515` | `-4929463515` |
 | OpenCode | `5200822877` | `-5200822877` |
 | Pi | `5156256333` | `-5156256333` |
-| Antigravity CLI | TBD (group not created yet) | TBD (group not created yet) |
+| Antigravity CLI | `5540298446` | `-5540298446` |
 | Gemini CLI | `5207762142` | `-5207762142` |
 | AMP CLI | `5230875989` | `-5230875989` |
 

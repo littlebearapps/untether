@@ -231,7 +231,7 @@ All integration test tiers are fully automated by Claude Code via Telegram MCP t
 | `ut-dev: codex` | 4929463515 |
 | `ut-dev: opencode` | 5200822877 |
 | `ut-dev: pi` | 5156256333 |
-| `ut-dev · Antigravity` | TBD (group not created yet; see `docs/reference/integration-testing.md`) |
+| `ut-dev · Antigravity` | 5540298446 |
 | `ut-dev: gemini` (deprecated) | 5207762142 |
 | `ut-dev: amp` (deprecated) | 5230875989 |
 
