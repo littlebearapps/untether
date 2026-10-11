@@ -20,7 +20,7 @@ per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
 - **Bold formatting** — command responses use HTML bold for key values
 - **`/usage`** — Claude: subscription usage (5h/weekly quota); Antigravity: agy's quota groups, on demand (#558, below); other engines: the chat's last-session token totals — session total, last run, run count (#417)
 - **`/export`** — attaches the session transcript as a `.md` / `.json` document with a summary caption; never truncated, 10 MB cap with an inline-preview fallback (#418)
-- **`/browse`** — navigate project files via inline keyboard buttons
+- **`/browse`** — navigate project files via inline keyboard buttons; the root is the project a message in that chat/topic would run in (`/ctx` binding → chat-bound project → `default_project`), for the command and its button taps alike ([#997](https://github.com/littlebearapps/untether/issues/997))
 - **Cost tracking and budget** — per-run and daily cost limits with configurable alerts (`cost_tracker.py`, `runner_bridge.py`). Budget-independent per-run spend signal `cost.run_outlier` above `[cost_budget] warn_run_above_usd` (default $20, `0` disables) with an optional chat line (`notify_run_outlier`), logging the run's shape — turns, `usd_per_turn`, durations, token block (#702, #717); one-shot `config.cost_visibility_gap` WARNING when spend is neither displayed nor bounded (#658); cost and usage footer lines go on the last chunk of a split final (#770)
 - **Subscription usage footer** — configurable `[footer]` to show 5h/weekly subscription usage instead of/alongside API costs
 - **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain

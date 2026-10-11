@@ -520,7 +520,7 @@ Run `untether doctor` to check the voice API key. It doesn't check the transcrip
 
 ## `/browse` says "No project directory for this chat"
 
-Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, or set `default_project`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
+Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, set `default_project`, or point the chat at a project with `/ctx set <project>`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
 
 ## Topics not appearing
 

@@ -316,8 +316,15 @@ async def _dispatch_callback(
     stateful_mode: bool,
     default_engine_override: EngineId | None,
     callback_query_id: str | None = None,
+    *,
+    ambient_context_resolver: Callable[[], Awaitable[RunContext | None]] | None = None,
 ) -> None:
-    """Dispatch a callback query to a command backend."""
+    """Dispatch a callback query to a command backend.
+
+    ``ambient_context_resolver`` (#997) looks up the chat/topic's ambient run
+    context for ``CommandContext.ambient_context`` — after the early answer,
+    so it never delays clearing the button spinner.
+    """
     # Validate sender in group chats — prevent unauthorised users pressing
     # another user's approval buttons (#192).
     if (
@@ -462,6 +469,18 @@ async def _dispatch_callback(
             # whole point. A None toast just means no toast text will appear.
             await _answer_callback(toast, early=True)
 
+        ambient_context: RunContext | None = None
+        if ambient_context_resolver is not None:
+            try:
+                ambient_context = await ambient_context_resolver()
+            except Exception as exc:  # noqa: BLE001 — a tap must still be handled
+                logger.warning(
+                    "callback.ambient_context_failed",
+                    command=command_id,
+                    chat_id=chat_id,
+                    error_type=exc.__class__.__name__,
+                )
+
         # For callbacks, text is the full callback data and args come from parsing
         text = msg.data or ""
         ctx = CommandContext(
@@ -480,6 +499,7 @@ async def _dispatch_callback(
             default_chat_id=cfg.chat_id,
             file_deny_globs=tuple(cfg.files.deny_globs),
             callback_query_id=callback_query_id,
+            ambient_context=ambient_context,  # #997
         )
         try:
             result = await backend.handle(ctx)

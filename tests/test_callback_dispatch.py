@@ -780,6 +780,82 @@ async def test_950_command_context_carries_engine_default_and_context(
     assert backend.contexts[1].ambient_context is None
 
 
+@pytest.mark.anyio
+async def test_997_callback_context_carries_the_ambient_context(monkeypatch) -> None:
+    """#997: a button tap sees the same ambient (topic/chat `/ctx`) context
+    as the command that drew the button; without a resolver, or when the
+    lookup fails, it is ``None`` and the tap is still handled."""
+    from structlog.testing import capture_logs
+
+    from untether.context import RunContext
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    ambient = RunContext(project="beta", branch="feat")
+
+    async def resolve() -> RunContext | None:
+        return ambient
+
+    async def broken() -> RunContext | None:
+        raise OSError("prefs unreadable")
+
+    async def tap(**kw) -> None:
+        await _dispatch_callback(
+            cfg,
+            _make_callback_query(),
+            "test_cmd",
+            "args",
+            None,
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            "cb-123",
+            **kw,
+        )
+
+    await tap(ambient_context_resolver=resolve)
+    await tap()
+    with capture_logs() as logs:
+        await tap(ambient_context_resolver=broken)
+
+    assert [c.ambient_context for c in backend.contexts] == [ambient, None, None]
+    assert [e for e in logs if e["event"] == "callback.ambient_context_failed"]
+
+
+@pytest.mark.anyio
+async def test_997_early_answer_is_not_held_by_the_context_lookup(monkeypatch) -> None:
+    """The spinner is cleared before the context is looked up (#247)."""
+    cfg = make_cfg(FakeTransport())
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _CapturingBackend()
+    backend.answer_early = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    answered_before: list[int] = []
+
+    async def resolve() -> None:
+        answered_before.append(len(bot.callback_calls))
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+        ambient_context_resolver=resolve,
+    )
+
+    assert answered_before == [1]
+
+
 # ---------------------------------------------------------------------------
 # #418 — CommandResult.attachment is delivered as a Telegram document
 # ---------------------------------------------------------------------------

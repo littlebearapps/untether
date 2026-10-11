@@ -11,6 +11,7 @@ from structlog.testing import capture_logs
 
 import untether.telegram.commands.browse as browse_mod
 from untether.config import ConfigError
+from untether.context import RunContext
 from untether.telegram.commands.browse import (
     _MAX_ENTRIES,
     _PATH_REGISTRY,
@@ -59,9 +60,13 @@ def _root_ctx(
     chat_root: Path | None = None,
     default_root: Path | None = None,
     chat_error: Exception | None = None,
+    ambient: RunContext | None = None,
+    ambient_root: Path | None = None,
 ):
-    """A ctx whose runtime resolves a chat-bound and/or default project."""
+    """A ctx whose runtime resolves a chat-bound and/or default project, and
+    optionally the chat's ``/ctx`` binding (project ``"bound"``, #997)."""
     ctx = _make_ctx("")
+    ctx.ambient_context = ambient
 
     def default_context_for_chat(chat_id):
         if chat_error is not None:
@@ -75,6 +80,8 @@ def _root_ctx(
             return chat_root
         if run_context.project == "dflt":
             return default_root
+        if run_context.project == "bound":
+            return ambient_root
         return None
 
     ctx.runtime = SimpleNamespace(
@@ -522,6 +529,60 @@ class TestProjectRootExplicit:
         _link(tmp_path / "link", Path("real"))
         root = _get_project_root(_root_ctx(chat_root=tmp_path / "link"))
         assert root == (tmp_path / "real").resolve()
+
+    # -- #997: the chat's /ctx binding (CommandContext.ambient_context) -------
+
+    def test_997_root_from_ctx_binding_without_any_project(self, tmp_path):
+        ctx = _root_ctx(ambient=RunContext(project="bound"), ambient_root=tmp_path)
+        assert _get_project_root(ctx) == tmp_path.resolve()
+
+    def test_997_ctx_binding_beats_chat_bound_and_default_project(self, tmp_path):
+        for name in ("bound", "chat", "dflt"):
+            (tmp_path / name).mkdir()
+        ctx = _root_ctx(
+            chat_root=tmp_path / "chat",
+            default_root=tmp_path / "dflt",
+            ambient=RunContext(project="bound"),
+            ambient_root=tmp_path / "bound",
+        )
+        assert _get_project_root(ctx) == (tmp_path / "bound").resolve()
+
+    def test_997_branch_only_binding_uses_the_chat_project(self, tmp_path):
+        """A context without a project is no root; the chat's project is."""
+        ctx = _root_ctx(
+            chat_root=tmp_path, ambient=RunContext(project=None, branch="feat")
+        )
+        assert _get_project_root(ctx) == tmp_path.resolve()
+
+    @pytest.mark.anyio
+    async def test_997_command_and_button_tap_share_the_bound_root(self, tmp_path):
+        """`/browse` lists the bound project, and tapping into a subdirectory
+        resolves against that same root (not the chat's other project)."""
+        bound = tmp_path / "bound"
+        (bound / "sub").mkdir(parents=True)
+        (bound / "sub" / "inner.txt").write_text("x")
+        other = tmp_path / "chat"
+        other.mkdir()
+        (other / "other.txt").write_text("x")
+
+        def ctx_for(args: str):
+            ctx = _root_ctx(
+                chat_root=other,
+                ambient=RunContext(project="bound"),
+                ambient_root=bound,
+            )
+            ctx.args_text = args
+            return ctx
+
+        first = ctx_for("")
+        assert await BrowseCommand().handle(first) is None
+        (button,) = _buttons(first)
+        assert button["text"] == "📂 sub/"
+
+        tap = ctx_for(button["callback_data"].removeprefix("browse:"))
+        assert await BrowseCommand().handle(tap) is None
+        assert _sent_text(tap).startswith("📁 sub")
+        assert any("inner.txt" in b["text"] for b in _buttons(tap))
 
     @pytest.mark.anyio
     async def test_handle_no_root_message(self):

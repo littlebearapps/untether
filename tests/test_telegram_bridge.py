@@ -5540,6 +5540,102 @@ async def test_950_command_context_sees_chat_engine_default_and_bound_context(
 
 
 @pytest.mark.anyio
+async def test_997_browse_and_its_buttons_follow_the_chats_ctx_binding(
+    tmp_path: Path,
+) -> None:
+    """#997: in a chat bound by chat_id to one project and by `/ctx` to
+    another, `/browse` lists the `/ctx` project — as runs and `/file` do —
+    and a tap on one of its directory buttons stays in that project."""
+    state_path = tmp_path / "untether.toml"
+    for name in ("alpha", "beta/sub"):
+        (tmp_path / name).mkdir(parents=True)
+    (tmp_path / "alpha" / "alpha-only.txt").write_text("a")
+    (tmp_path / "beta" / "sub" / "inner.txt").write_text("b")
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    projects = ProjectsConfig(
+        projects={
+            "alpha": ProjectConfig(
+                alias="Alpha",
+                path=tmp_path / "alpha",
+                worktrees_dir=Path(".worktrees"),
+                chat_id=123,
+            ),
+            "beta": ProjectConfig(
+                alias="Beta",
+                path=tmp_path / "beta",
+                worktrees_dir=Path(".worktrees"),
+            ),
+        },
+        default_project=None,
+        chat_map={123: "alpha"},
+    )
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=runner.engine, runner=runner)],
+        default_engine=runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=projects, config_path=state_path)
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    await prefs.set_context(123, RunContext(project="beta"))
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+    def keyboards() -> list[list[dict]]:
+        return [
+            [
+                b
+                for row in call["message"].extra["reply_markup"]["inline_keyboard"]
+                for b in row
+            ]
+            for call in transport.send_calls
+            if "reply_markup" in call["message"].extra
+        ]
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="/browse",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+        with anyio.fail_after(5):
+            while not keyboards():
+                await anyio.sleep(0.01)
+        (button,) = keyboards()[0]
+        yield TelegramCallbackQuery(
+            transport="telegram",
+            chat_id=123,
+            message_id=2,
+            callback_query_id="cb-997",
+            data=button["callback_data"],
+            sender_id=123,
+        )
+        with anyio.fail_after(5):
+            while len(transport.send_calls) < 2:
+                await anyio.sleep(0.01)
+
+    await run_main_loop(cfg, poller)
+
+    first, second = keyboards()
+    assert [b["text"] for b in first] == ["📂 sub/"]
+    assert transport.send_calls[1]["message"].text.startswith("📁 sub")
+    assert any("inner.txt" in b["text"] for b in second)
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_command_defaults_to_chat_project(
     monkeypatch,
 ) -> None:

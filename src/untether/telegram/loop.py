@@ -3127,21 +3127,12 @@ async def run_main_loop(
                 resolve_prompt_message=resolve_prompt_message,
             )
 
-            async def build_message_context(
-                msg: TelegramIncomingMessage,
-            ) -> TelegramMsgContext:
-                chat_id = msg.chat_id
-                reply_id = msg.reply_to_message_id
-                reply_ref = (
-                    MessageRef(channel_id=chat_id, message_id=reply_id)
-                    if reply_id is not None
-                    else None
-                )
-                topic_key = resolve_topic_key(msg)
-                chat_session_key = _chat_session_key(
-                    msg, store=state.chat_session_store
-                )
-                stateful_mode = topic_key is not None or chat_session_key is not None
+            async def resolve_ambient_context(
+                chat_id: int, topic_key: tuple[int, int] | None
+            ) -> tuple[str | None, RunContext | None]:
+                """``(chat_project, ambient_context)`` for a chat/topic: the
+                topic's ``/ctx`` binding, else the chat's, else the chat's
+                project. Shared by messages and button taps (#997)."""
                 chat_project = (
                     _topics_chat_project(cfg, chat_id) if cfg.topics.enabled else None
                 )
@@ -3163,6 +3154,43 @@ async def run_main_loop(
                     ambient_context = _merge_topic_context(
                         chat_project=chat_project, bound=None
                     )
+                return chat_project, ambient_context
+
+            async def callback_ambient_context(
+                chat_id: int, thread_id: int | None
+            ) -> RunContext | None:
+                # Same topic-key rule as a message (`_topic_key`).
+                topic_key = (
+                    (chat_id, thread_id)
+                    if state.topic_store is not None
+                    and thread_id is not None
+                    and cfg.topics.enabled
+                    and _topics_chat_allowed(
+                        cfg, chat_id, scope_chat_ids=state.topics_chat_ids
+                    )
+                    else None
+                )
+                _, ambient_context = await resolve_ambient_context(chat_id, topic_key)
+                return ambient_context
+
+            async def build_message_context(
+                msg: TelegramIncomingMessage,
+            ) -> TelegramMsgContext:
+                chat_id = msg.chat_id
+                reply_id = msg.reply_to_message_id
+                reply_ref = (
+                    MessageRef(channel_id=chat_id, message_id=reply_id)
+                    if reply_id is not None
+                    else None
+                )
+                topic_key = resolve_topic_key(msg)
+                chat_session_key = _chat_session_key(
+                    msg, store=state.chat_session_store
+                )
+                stateful_mode = topic_key is not None or chat_session_key is not None
+                chat_project, ambient_context = await resolve_ambient_context(
+                    chat_id, topic_key
+                )
                 return TelegramMsgContext(
                     chat_id=chat_id,
                     thread_id=msg.thread_id,
@@ -3672,7 +3700,16 @@ async def run_main_loop(
                             )
                             cb_stateful_mode = cb_topic_key is not None
                             tg.start_soon(
-                                dispatch_callback,
+                                # #997: a tap sees the context the command
+                                # that drew the button saw (/browse root).
+                                partial(
+                                    dispatch_callback,
+                                    ambient_context_resolver=partial(
+                                        callback_ambient_context,
+                                        update.chat_id,
+                                        cb_thread_id,
+                                    ),
+                                ),
                                 cfg,
                                 update,
                                 cb_command_id,

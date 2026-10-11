@@ -107,12 +107,23 @@ def _existing_dir(path: Path | None) -> Path | None:
     return None
 
 
+def _ambient_context(ctx: CommandContext) -> RunContext | None:
+    """The context a plain prompt here would run in (#950), if it names a
+    project; a branch-only binding has no root of its own."""
+    ambient = getattr(ctx, "ambient_context", None)
+    if isinstance(ambient, RunContext) and ambient.project is not None:
+        return ambient
+    return None
+
+
 def _get_project_root(ctx: CommandContext | None = None) -> Path | None:
     """Get the (resolved) project root directory, or ``None``.
 
     Checks in order:
     1. Active run base dir (set during runner execution)
-    2. Project bound to the current chat (``[projects.<alias>] chat_id``)
+    2. The chat's ambient context — its topic/chat ``/ctx`` binding, else the
+       project bound to the chat (``[projects.<alias>] chat_id``) — the same
+       precedence a plain prompt, ``/at`` and ``/file`` use (#997)
     3. The configured ``default_project``
 
     There is deliberately no ``Path.cwd()`` fallback (#389): under systemd
@@ -124,8 +135,9 @@ def _get_project_root(ctx: CommandContext | None = None) -> Path | None:
     if ctx is None:
         return None
     try:
-        chat_id = ctx.message.channel_id
-        run_context = ctx.runtime.default_context_for_chat(chat_id)
+        run_context = _ambient_context(ctx)
+        if run_context is None:
+            run_context = ctx.runtime.default_context_for_chat(ctx.message.channel_id)
         if run_context is not None:
             cwd = _existing_dir(ctx.runtime.resolve_run_cwd(run_context))
             if cwd is not None:
