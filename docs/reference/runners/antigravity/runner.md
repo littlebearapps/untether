@@ -91,7 +91,8 @@ One `agy` process per message:
 
 ```text
 agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
-    [--conversation=<id> | --continue] [--model=<model>] [--effort=<level>] [--dangerously-skip-permissions]
+    [--conversation=<id> | --continue] [--model=<model>] [--effort=<level>]
+    (--mode=accept-edits | --dangerously-skip-permissions)
 ```
 
 - **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
@@ -99,7 +100,9 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 --d
 - `--disable-slash-commands` makes a prompt that starts with `/` an ordinary message. Untether adds no prefix.
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
   success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
-- `--dangerously-skip-permissions` is passed only in Full access (see [Permission modes](#permission-modes)).
+- The last argument is the permission mode: `--mode=accept-edits` for Workspace, `--dangerously-skip-permissions`
+  only in Full access (see [Permission modes](#permission-modes)). `accept-edits` is a fixed value; nothing a user
+  types reaches `--mode`.
 - **Values are always joined to their flag** (`--model=<model>`, `--conversation=<id>`, `--effort=<level>`), and
   each is checked first. agy reads a separate value that starts with a dash as another flag, so Untether never
   passes one as its own argument. A model id may use ASCII letters, digits and `. _ - : / @ +`, must start with a

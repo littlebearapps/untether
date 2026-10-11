@@ -100,15 +100,16 @@ LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 # validator accepts any non-empty string for those).
 # Extending this dict requires auditing the runner to ensure each value maps to
 # a defined CLI / protocol outcome — see issues #331 (Codex + Gemini completion)
-# and #332 (full cross-engine extension). Last audited 2026-10-09 for
-# ``antigravity`` (#558, agy 1.3.2): every value below maps to a defined
+# and #332 (full cross-engine extension). Last audited 2026-10-11 for
+# ``antigravity`` (#558, agy 1.3.3): every value below maps to a defined
 # outcome in ``runners/antigravity.py`` (``_effective_mode``).
 #
-# Antigravity (D21): ``workspace`` = no flag (agy's ``request-review``),
+# Antigravity (D21, D37): ``workspace`` = agy's ``--mode=accept-edits``
+# (without it headless agy refuses file writes inside the project),
 # ``full`` = ``--dangerously-skip-permissions``; ``ask`` / ``plan`` need
 # Untether's approval gate and are refused before spawn until it ships, but
-# stay valid so configs written now keep working. ``accept-edits`` is not a
-# value: on agy 1.3.1 it behaves exactly like the default (REVIEW m5). Unknown
+# stay valid so configs written now keep working. ``accept-edits`` is not an
+# Untether value: it is what Workspace already passes to agy. Unknown
 # stored values fail **closed** to Workspace — unlike Codex, whose unknown
 # mode fails open (``codex.py``).
 ANTIGRAVITY_PERMISSION_MODES: frozenset[str] = frozenset(
