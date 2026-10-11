@@ -22,6 +22,10 @@ logger = get_logger(__name__)
 
 _SAFE_FILENAME_RE = __import__("re").compile(r"^[a-zA-Z0-9._-]+$")
 
+# #906: rate-limiter key prefix for a webhook's failed-auth bucket. Webhook
+# ids are bare limiter keys, so the prefix keeps the two apart.
+_AUTH_FAILED_KEY_PREFIX = "__auth_failed__:"
+
 
 def is_loopback_host(host: str) -> bool:
     """#382: whether a bind host is loopback-only (safe for unauthenticated
@@ -304,6 +308,19 @@ def build_webhook_app(
     async def _process_webhook(
         request: web.Request, webhook: WebhookConfig, path: str
     ) -> web.Response:
+        # #906: failed auth has its own per-webhook bucket. Once it is empty
+        # the webhook answers 429 before any credential is checked — even a
+        # correct one — so guessing can't run past the limit. Checked before
+        # the body is read; logged at debug so a flood can't fill the logs.
+        auth_failed_key = f"{_AUTH_FAILED_KEY_PREFIX}{webhook.id}"
+        if not rate_limiter.available(auth_failed_key):
+            logger.debug(
+                "triggers.webhook.auth_locked_out",
+                webhook_id=webhook.id,
+                path=path,
+            )
+            return web.Response(status=429, text="rate limited")
+
         # Size check
         if request.content_length and request.content_length > max_body:
             return web.Response(status=413, text="payload too large")
@@ -314,6 +331,7 @@ def build_webhook_app(
 
         # Auth
         if not verify_auth(webhook, request.headers, raw_body):
+            rate_limiter.allow(auth_failed_key)
             logger.warning(
                 "triggers.webhook.auth_failed",
                 webhook_id=webhook.id,
@@ -321,8 +339,9 @@ def build_webhook_app(
             )
             return web.Response(status=401, text="unauthorized")
 
-        # Rate limit (per-webhook + global)
-        if not rate_limiter.allow(webhook.id) or not rate_limiter.allow("__global__"):
+        # Rate limit (per-webhook + global). #906: all-or-nothing, so a
+        # request the global bucket refuses doesn't spend the webhook's token.
+        if not rate_limiter.allow_all(webhook.id, "__global__"):
             logger.warning(
                 "triggers.webhook.rate_limited",
                 webhook_id=webhook.id,

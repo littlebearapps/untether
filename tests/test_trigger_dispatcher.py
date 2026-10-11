@@ -747,3 +747,45 @@ async def test_896_budget_check_failure_fails_open() -> None:
         )
         assert await dispatcher.dispatch_cron(_make_cron()) is True
     assert len(run_job.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_906_undelivered_fetch_failure_notice_is_logged(monkeypatch) -> None:
+    """#906: the fetch-failure notice send used to be fire-and-forget — when
+    it failed, the cron aborted with nothing in the chat and nothing in the
+    logs to say the user was never told."""
+    import structlog
+
+    import untether.triggers.fetch as fetch_mod
+    from untether.triggers.settings import CronFetchConfig
+
+    async def _execute_fetch(cfg):
+        return False, "boom", None
+
+    monkeypatch.setattr(fetch_mod, "execute_fetch", _execute_fetch)
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = _make_cron(
+            fetch=CronFetchConfig(
+                type="http_get", url="https://example.com", on_failure="abort"
+            )
+        )
+        with structlog.testing.capture_logs() as logs:
+            await dispatcher.dispatch_cron(cron)
+
+    assert run_job.calls == []
+    assert transport.attempts == 1
+    undelivered = [
+        e for e in logs if e["event"] == "triggers.cron.fetch_failed_notice_undelivered"
+    ]
+    assert len(undelivered) == 1
+    assert undelivered[0]["log_level"] == "error"
+    assert undelivered[0]["cron_id"] == "test-cron"
+    assert undelivered[0]["chat_id"] == 100

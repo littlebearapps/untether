@@ -738,3 +738,177 @@ async def test_run_webhook_server_refuses_unauthenticated_public_bind():
     ]
     assert refused, "expected refusal log"
     assert refused[0]["webhook_ids"] == ["open"]
+
+
+# ── #906: auth hardening ────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "token",
+    ["t\u00f6k_123", "\u2603", "tok_123\u00a0"],
+)
+async def test_906_non_ascii_bearer_returns_401_not_500(token):
+    settings = _make_settings()
+    dispatcher, transport, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        resp = await cl.post(
+            "/hooks/test",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"text": "hello"},
+        )
+        assert resp.status == 401
+    assert transport.sent == []
+
+
+@pytest.mark.anyio
+async def test_906_non_ascii_hmac_signature_returns_401_not_500():
+    settings = _make_settings(
+        webhooks=[
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "auth": "hmac-sha256",
+                "secret": "s3cret",
+                "prompt_template": "x",
+            }
+        ]
+    )
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        resp = await cl.post(
+            "/hooks/gh",
+            headers={"X-Hub-Signature-256": "sha256=d\u00e9adbeef"},
+            json={},
+        )
+        assert resp.status == 401
+
+
+def _two_hook_settings(rate_limit: int) -> TriggersSettings:
+    return parse_trigger_config(
+        {
+            "enabled": True,
+            "server": {"rate_limit": rate_limit},
+            "webhooks": [
+                {
+                    "id": hook,
+                    "path": f"/hooks/{hook}",
+                    "auth": "bearer",
+                    "secret": "tok_123",
+                    "action": "notify_only",
+                    "message_template": "x",
+                }
+                for hook in ("a", "b")
+            ],
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_906_failed_auth_is_rate_limited():
+    """A flood of bad credentials used to get an unlimited stream of 401s:
+    the limiter ran only after auth passed."""
+    dispatcher, transport, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(3), dispatcher)
+    bad = {"Authorization": "Bearer wrong"}
+    good = {"Authorization": "Bearer tok_123"}
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (await cl.post("/hooks/a", headers=bad, json={})).status for _ in range(8)
+        ]
+        assert statuses[:3] == [401, 401, 401]
+        assert set(statuses[3:]) == {429}
+
+        # Fail closed: while locked out, even the right secret is refused,
+        # so guessing can't continue past the limit.
+        assert (await cl.post("/hooks/a", headers=good, json={})).status == 429
+
+        # The lockout is per webhook — another webhook still works.
+        assert (await cl.post("/hooks/b", headers=good, json={})).status == 202
+        import asyncio
+
+        await asyncio.sleep(0)
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.anyio
+async def test_906_failed_auth_does_not_spend_the_request_budget():
+    """Bad credentials below the lockout threshold must not eat the tokens
+    that legitimate deliveries use."""
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(3), dispatcher)
+    bad = {"Authorization": "Bearer wrong"}
+    good = {"Authorization": "Bearer tok_123"}
+    async with TestClient(TestServer(app)) as cl:
+        for _ in range(2):
+            assert (await cl.post("/hooks/a", headers=bad, json={})).status == 401
+        statuses = [
+            (await cl.post("/hooks/a", headers=good, json={})).status for _ in range(3)
+        ]
+        assert statuses == [202, 202, 202]
+
+
+@pytest.mark.anyio
+async def test_906_global_refusal_does_not_spend_the_webhook_token(monkeypatch):
+    """``allow(webhook) or not allow(global)`` spent a per-webhook token even
+    when the global bucket then answered 429."""
+    import untether.triggers.server as server_mod
+
+    limiters: list[Any] = []
+
+    class _SpyLimiter(server_mod.TokenBucketLimiter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            limiters.append(self)
+
+    monkeypatch.setattr(server_mod, "TokenBucketLimiter", _SpyLimiter)
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(2), dispatcher)
+    good = {"Authorization": "Bearer tok_123"}
+    async with TestClient(TestServer(app)) as cl:
+        # Two deliveries to "a" drain the global bucket.
+        for _ in range(2):
+            assert (await cl.post("/hooks/a", headers=good, json={})).status == 202
+        for _ in range(3):
+            assert (await cl.post("/hooks/b", headers=good, json={})).status == 429
+
+    (limiter,) = limiters
+    # "b" was refused by the global bucket every time, so its own bucket is
+    # untouched (never created, or still full).
+    tokens, _ = limiter._buckets.get("b", (2.0, 0.0))
+    assert tokens >= 2.0
+
+
+@pytest.mark.anyio
+async def test_906_multipart_destination_uses_the_files_deny_list(tmp_path):
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "webhooks": [
+                {
+                    "id": "mp",
+                    "path": "/hooks/mp",
+                    "auth": "bearer",
+                    "secret": "tok_123",
+                    "action": "file_write",
+                    "file_path": str(tmp_path / "raw.bin"),
+                    "accept_multipart": True,
+                    "file_destination": str(tmp_path / "{{file.filename}}"),
+                }
+            ],
+        }
+    )
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    import aiohttp
+
+    form = aiohttp.FormData()
+    form.add_field("file", b"KEY", filename="server.key")
+    async with TestClient(TestServer(app)) as cl:
+        resp = await cl.post(
+            "/hooks/mp", headers={"Authorization": "Bearer tok_123"}, data=form
+        )
+        assert resp.status == 400
+    assert not (tmp_path / "server.key").exists()

@@ -34,3 +34,26 @@ class TestTokenBucketLimiter:
         now = time.monotonic()
         limiter._buckets["key"] = (0.0, now - 2.0)  # 2 seconds ago
         assert limiter.allow("key") is True
+
+    # ── #906: non-consuming check + all-or-nothing consumption ──────────
+
+    def test_available_does_not_consume(self):
+        limiter = TokenBucketLimiter(rate=1, window=60.0)
+        for _ in range(5):
+            assert limiter.available("key") is True
+        assert limiter.allow("key") is True
+        assert limiter.available("key") is False
+
+    def test_allow_all_consumes_from_every_key(self):
+        limiter = TokenBucketLimiter(rate=1, window=60.0)
+        assert limiter.allow_all("a", "b") is True
+        assert limiter.allow("a") is False
+        assert limiter.allow("b") is False
+
+    def test_allow_all_refusal_consumes_nothing(self):
+        # #906: a request the global bucket refuses must not also spend the
+        # per-webhook token.
+        limiter = TokenBucketLimiter(rate=1, window=60.0)
+        assert limiter.allow("global") is True
+        assert limiter.allow_all("hook", "global") is False
+        assert limiter.allow("hook") is True

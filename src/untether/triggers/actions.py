@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from ..logging import get_logger
+from ..settings import TelegramFilesSettings
 from ..telegram.files import deny_reason as _files_deny_reason
 from .settings import WebhookConfig
 from .ssrf import SSRFError, clamp_timeout, validate_url_with_dns
@@ -20,14 +21,12 @@ from .templating import render_template_fields
 
 logger = get_logger(__name__)
 
-# Default deny globs — block writes to sensitive paths.
-_DENY_GLOBS: tuple[str, ...] = (
-    ".git/**",
-    ".env",
-    ".envrc",
-    "**/*.pem",
-    "**/.ssh/**",
-)
+# Deny globs for trigger file access (``file_write``, multipart uploads and the
+# cron ``file_read`` fetch). #906: these are the ``[transports.telegram.files]
+# deny_globs`` defaults, taken from the one place they are defined — a private
+# five-entry copy here let ``.env.local``, ``*.key``, ``id_rsa`` and ``.netrc``
+# through.
+_DENY_GLOBS: tuple[str, ...] = tuple(TelegramFilesSettings().deny_globs)
 
 # Maximum file size for file_write action (50 MB).
 _MAX_FILE_BYTES: int = 50 * 1024 * 1024

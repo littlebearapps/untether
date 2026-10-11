@@ -229,7 +229,7 @@ Webhooks can perform lightweight actions without spawning an agent:
     message_template = "📈 {{ticker}} hit {{price}}"
     ```
 
-Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. Template fields come only from the webhook payload; there are no built-in variables such as a date. A `file_write` path, like a cron `file_read` fetch, is checked at any depth against a fixed deny list (`.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**`), so a templated path can't land in `.git/hooks` or `~/.ssh` ([#831](https://github.com/littlebearapps/untether/issues/831)). This list is separate from `[transports.telegram.files] deny_globs`. See the
+Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. Template fields come only from the webhook payload; there are no built-in variables such as a date. A `file_write` path, like a cron `file_read` fetch, is checked at any depth against the default `[transports.telegram.files] deny_globs` list (`.git/**`, `.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/id_rsa`, `**/.ssh/**`, `**/.netrc` and the rest), so a templated path can't land in `.git/hooks`, `~/.ssh` or `.env.local` ([#831](https://github.com/littlebearapps/untether/issues/831), [#906](https://github.com/littlebearapps/untether/issues/906)). Triggers always use the default list; a `deny_globs` value you set yourself does not change it. See the
 [triggers reference](../reference/triggers/triggers.md#non-agent-actions) for details.
 
 ## Chat routing

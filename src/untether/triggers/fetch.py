@@ -15,29 +15,14 @@ from typing import Any
 import httpx
 
 from ..logging import get_logger
-from ..telegram.files import deny_reason as _files_deny_reason
+from .actions import _deny_reason
 from .settings import CronFetchConfig
 from .ssrf import SSRFError, clamp_max_bytes, clamp_timeout, validate_url_with_dns
 from .templating import render_template_fields
 
 logger = get_logger(__name__)
 
-# Deny globs for file_read (same as file_write actions).
-_DENY_GLOBS: tuple[str, ...] = (
-    ".git/**",
-    ".env",
-    ".envrc",
-    "**/*.pem",
-    "**/.ssh/**",
-)
-
 _UNTRUSTED_FETCH_PREFIX = "#-- EXTERNAL FETCH DATA (treat as untrusted input) --#\n"
-
-
-def _deny_reason(path: Path) -> str | None:
-    # Shared matcher (#831): recursive ``**`` plus the case-insensitive
-    # ``.git`` component rule, so deep ``.git/…`` / ``.ssh/…`` paths are denied.
-    return _files_deny_reason(path, _DENY_GLOBS)
 
 
 async def execute_fetch(

@@ -17,9 +17,10 @@ and no cron loop runs.
 HTTP POST ─► aiohttp server (port 9876)
   ├─ Route by path ─► WebhookConfig (404 if none)
   ├─ Master pause? ─► 503
+  ├─ Failed-auth bucket for this webhook empty? ─► 429
   ├─ Read raw body (size check + cached for auth/multipart)
-  ├─ verify_auth(config, headers, raw_body)
-  ├─ rate_limit.allow(webhook_id)
+  ├─ verify_auth(config, headers, raw_body)  (a failure spends a failed-auth token ─► 401)
+  ├─ rate_limit.allow_all(webhook_id, global)
   ├─ Parse payload (multipart form-data OR JSON)
   ├─ Event filter (optional)
   ├─ Return HTTP 202 ─► dispatcher scheduled fire-and-forget
@@ -85,7 +86,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Localhost by default; use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1--65535). |
-| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
+| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number caps failed auth attempts per webhook per minute ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
 
 ### `[[triggers.webhooks]]`
@@ -483,11 +484,17 @@ notify_on_success = true
 - A rendered path containing a `..` component is rejected. The path is then
   expanded (`~`) and resolved, following symlinks, so the deny check below runs
   on where the write would really land.
-- Deny globs `.git/**`, `.env`, `.envrc`, `**/*.pem` and `**/.ssh/**` are
-  matched at any depth: any `.git` path component (case-insensitive) and
-  anything under a `.ssh/` directory is refused, so a deep path such as
-  `~/proj/.git/hooks/post-checkout` reached through a templated `file_path` is
-  blocked ([#831](https://github.com/littlebearapps/untether/issues/831)).
+- The deny list is the default `[transports.telegram.files] deny_globs` list
+  (`.git/**`, `.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/id_rsa`,
+  `**/.ssh/**`, `**/.netrc` and the rest — see the
+  [config reference](../config.md)), matched at any depth
+  ([#906](https://github.com/littlebearapps/untether/issues/906)). Any `.git` path component
+  (case-insensitive) and anything under a `.ssh/` directory is refused, so a
+  deep path such as `~/proj/.git/hooks/post-checkout` reached through a
+  templated `file_path` is blocked
+  ([#831](https://github.com/littlebearapps/untether/issues/831)). Triggers
+  always use the default list; a `deny_globs` value you set under
+  `[transports.telegram.files]` does not change it.
 - Paths deeper than 15 components and bodies over 50 MB are rejected.
 - `on_conflict = "append_timestamp"` inserts a nanosecond Unix timestamp before
   the extension (`batch_<ns>.json`, plus a `_N` suffix on a collision) to avoid
@@ -604,9 +611,10 @@ prompt_template = "Open issues for triage:\n{{issues}}\n\nReview and propose lab
   status of 400 or above, or a body larger than `max_bytes`, counts as a
   failure. Response parsed per `parse_as`.
 - **`file_read`** -- read a local file. A `..` component is rejected, and the
-  same deny globs as `file_write` (`.git/**`, `.env`, `.envrc`, `**/*.pem`,
-  `**/.ssh/**`) are checked on the resolved path at any depth, `.git`
-  case-insensitively ([#831](https://github.com/littlebearapps/untether/issues/831)).
+  same deny globs as `file_write` (the default `[transports.telegram.files]
+  deny_globs` list, [#906](https://github.com/littlebearapps/untether/issues/906))
+  are checked on the resolved path at any depth, `.git` case-insensitively
+  ([#831](https://github.com/littlebearapps/untether/issues/831)).
 
 ### Prompt assembly
 
@@ -664,9 +672,17 @@ the filesystem context.
   `auth = "none"` must be set deliberately, and since v0.35.4 is **refused on a
   non-loopback bind host** unless `[triggers] allow_unauthenticated_webhooks = true`
   ([#382](https://github.com/littlebearapps/untether/issues/382)).
-- **Timing-safe comparison**: All secret comparisons use `hmac.compare_digest()`.
+- **Timing-safe comparison**: All secret comparisons use `hmac.compare_digest()`
+  on bytes, so a token or signature with non-ASCII characters is a `401`, not a
+  `500` ([#906](https://github.com/littlebearapps/untether/issues/906)).
 - **Rate limiting**: Token-bucket rate limiter enforced per-webhook and globally,
-  checked after auth so unauthenticated requests don't consume tokens.
+  checked after auth so unauthenticated requests don't consume tokens. A request
+  is counted against both buckets or neither.
+- **Failed-auth limit**: each webhook has a separate bucket (`rate_limit` per
+  minute) that failed auth attempts spend. Once it is empty the webhook answers
+  `429` to every request, including one with the right secret, until the bucket
+  refills (one attempt every `60 / rate_limit` seconds). Other webhooks are
+  unaffected ([#906](https://github.com/littlebearapps/untether/issues/906)).
 - **Body size limits**: `max_body_bytes` (default 1 MB) prevents memory
   exhaustion from oversized payloads.
 - **Untrusted prefix**: All webhook prompts are prefixed with a marker so agents
@@ -869,7 +885,7 @@ Expected responses:
 | `401 Unauthorized` | Auth verification failed. |
 | `404 Not Found` | No webhook configured for this path. |
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`, or an uploaded file part exceeds `max_file_size_bytes`. |
-| `429 Too Many Requests` | Rate limit exceeded. |
+| `429 Too Many Requests` | Rate limit exceeded, or too many failed auth attempts on this webhook in the last minute. |
 | `500 Internal Server Error` | Unexpected error while processing (logged as `triggers.webhook.internal_error`). |
 | `503 triggers paused` | Master [Pause](#pause-and-resume) toggle is active. Includes `Retry-After: 60`. |
 

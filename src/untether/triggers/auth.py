@@ -44,6 +44,20 @@ def verify_auth(
     return False
 
 
+def _secrets_equal(provided: str, expected: str) -> bool:
+    """Constant-time comparison that never raises (#906).
+
+    ``hmac.compare_digest`` accepts ``str`` only when both sides are ASCII and
+    raises ``TypeError`` otherwise, which turned a non-ASCII credential into a
+    500. Bytes compare for any input; ``surrogatepass`` covers the lone
+    surrogates aiohttp produces for header bytes that aren't valid UTF-8.
+    """
+    return hmac.compare_digest(
+        provided.encode("utf-8", "surrogatepass"),
+        expected.encode("utf-8", "surrogatepass"),
+    )
+
+
 def _verify_bearer(secret: str, headers: Mapping[str, str]) -> bool:
     auth_header = headers.get("authorization", "")
     # RFC 6750: scheme keyword is case-insensitive.
@@ -51,7 +65,7 @@ def _verify_bearer(secret: str, headers: Mapping[str, str]) -> bool:
         logger.debug("auth.bearer.missing_header")
         return False
     token = auth_header[7:]
-    return hmac.compare_digest(token, secret)
+    return _secrets_equal(token, secret)
 
 
 def _verify_hmac(
@@ -71,7 +85,7 @@ def _verify_hmac(
         # Strip algorithm prefix (e.g. "sha256=", "sha1=")
         if "=" in sig:
             sig = sig.split("=", 1)[1]
-        if hmac.compare_digest(sig, expected):
+        if _secrets_equal(sig, expected):
             return True
     logger.debug("auth.hmac.no_match", algo=algo.__name__)
     return False

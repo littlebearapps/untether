@@ -21,11 +21,35 @@ class TokenBucketLimiter:
         self._window = window
         self._buckets: dict[str, tuple[float, float]] = {}
 
-    def allow(self, key: str) -> bool:
-        now = time.monotonic()
+    def _tokens(self, key: str, now: float) -> float:
+        """Tokens in *key*'s bucket at *now*, after refill. Changes nothing."""
         tokens, last = self._buckets.get(key, (float(self._rate), now))
         elapsed = now - last
-        tokens = min(self._rate, tokens + elapsed * (self._rate / self._window))
+        return min(self._rate, tokens + elapsed * (self._rate / self._window))
+
+    def available(self, key: str) -> bool:
+        """Whether *key* has a token, without spending it (#906)."""
+        return self._tokens(key, time.monotonic()) >= 1.0
+
+    def allow_all(self, *keys: str) -> bool:
+        """Spend one token from every key, or from none of them (#906).
+
+        ``allow(a) and allow(b)`` spends ``a``'s token even when ``b`` then
+        refuses, so a request that is turned away still costs budget.
+        """
+        now = time.monotonic()
+        levels = {key: self._tokens(key, now) for key in keys}
+        for key, tokens in levels.items():
+            if tokens < 1.0:
+                logger.debug("rate_limit.denied", key=key, tokens=tokens)
+                return False
+        for key, tokens in levels.items():
+            self._buckets[key] = (tokens - 1.0, now)
+        return True
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        tokens = self._tokens(key, now)
         if tokens >= 1.0:
             self._buckets[key] = (tokens - 1.0, now)
             return True
