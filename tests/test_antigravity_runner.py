@@ -133,6 +133,17 @@ def _args(
         return runner.build_args("do the thing", resume, state=state)
 
 
+def test_build_args_resume_passes_the_configured_model() -> None:
+    """#998: after `/model clear`, a resumed run names `[antigravity] model`
+    (joined, via `agy_flag`); with none configured it passes no model."""
+    resume = ResumeToken(engine="antigravity", value="conv-1234")
+    args = _args(resume, model="gemini-3.8-flash")
+    assert "--conversation=conv-1234" in args
+    assert "--model=gemini-3.8-flash" in args
+    bare = _args(resume)
+    assert not any(a.startswith("--model") for a in bare)
+
+
 def test_build_args_stream_json_no_prompt_in_argv() -> None:
     args = _args()
     assert args[:4] == [

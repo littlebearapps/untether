@@ -2496,7 +2496,128 @@ async def test_model_command_set_and_clear_chat_override(tmp_path: Path) -> None
     assert override is not None
     assert override.model is None
     assert override.reasoning == "low"
-    assert "chat model override cleared." in transport.send_calls[-1]["message"].text
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    # #998: nothing configured to fall back to, so the reply says what a
+    # resumed session may do and how to get the engine default back.
+    assert "/new" in text
+
+
+async def _clear_model(
+    cfg: TelegramBridgeConfig,
+    *,
+    topic_store: TopicStateStore | None = None,
+    chat_prefs: ChatPrefsStore | None = None,
+    thread_id: int | None = None,
+) -> None:
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=11,
+        text="/model clear",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=456,
+        chat_type="supergroup",
+        thread_id=thread_id,
+    )
+    await _handle_model_command(
+        cfg,
+        msg,
+        "clear",
+        ambient_context=None,
+        topic_store=topic_store,
+        chat_prefs=chat_prefs,
+        resolved_scope="main" if thread_id is not None else None,
+        scope_chat_ids=frozenset({123}) if thread_id is not None else None,
+    )
+
+
+@pytest.mark.anyio
+async def test_model_clear_names_the_configured_default(tmp_path: Path) -> None:
+    """#998: with `[<engine>] model` set, Untether passes it on the next run
+    (resumed or not), so the reply names it and needs no `/new`."""
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runner.model = "gpt-5.5"  # type: ignore[attr-defined]
+    cfg = make_cfg(transport, runner)
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(cfg, chat_prefs=chat_prefs)
+
+    override = await chat_prefs.get_engine_override(123, CODEX_ENGINE)
+    assert override is None or override.model is None
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    assert "configured default gpt-5.5" in text
+    assert "/new" not in text
+
+
+@pytest.mark.anyio
+async def test_model_clear_without_a_default_suggests_new(tmp_path: Path) -> None:
+    """#998: no configured model means Untether passes none, and a resumed
+    session can keep the cleared model (Claude, Pi) — the reply says so."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(cfg, chat_prefs=chat_prefs)
+
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    assert "resumed session may stay on the model it was using" in text
+    assert "/new" in text
+    assert "configured default" not in text
+
+
+@pytest.mark.anyio
+async def test_model_clear_topic_names_the_chat_override(tmp_path: Path) -> None:
+    """#998: clearing a topic override leaves the chat override in charge."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = replace(cfg, topics=TelegramTopicsSettings(enabled=True, scope="main"))
+    topic_store = TopicStateStore(tmp_path / "telegram_topics_state.json")
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await topic_store.set_engine_override(
+        123, 77, CODEX_ENGINE, EngineOverrides(model="gpt-4.1", reasoning=None)
+    )
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(
+        cfg, topic_store=topic_store, chat_prefs=chat_prefs, thread_id=77
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert "topic model override cleared for codex." in text
+    assert "chat override gpt-4.1-mini" in text
+    assert "/new" not in text
+
+
+@pytest.mark.anyio
+async def test_model_clear_topic_without_any_model_suggests_new(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = replace(cfg, topics=TelegramTopicsSettings(enabled=True, scope="main"))
+    topic_store = TopicStateStore(tmp_path / "telegram_topics_state.json")
+    await topic_store.set_engine_override(
+        123, 77, CODEX_ENGINE, EngineOverrides(model="gpt-4.1", reasoning=None)
+    )
+
+    await _clear_model(cfg, topic_store=topic_store, thread_id=77)
+
+    text = transport.send_calls[-1]["message"].text
+    assert "topic model override cleared for codex." in text
+    assert "/new" in text
 
 
 @pytest.mark.anyio

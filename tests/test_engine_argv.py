@@ -218,6 +218,36 @@ def test_continue_carries_no_value(engine: str) -> None:
     assert not any(a.startswith(("--resume=", "--session=")) for a in args)
 
 
+# ── #998: after `/model clear`, a resumed run names the configured default ──
+
+
+@pytest.mark.parametrize("engine", ["claude", "opencode", "pi"])
+def test_resumed_run_passes_the_configured_model(engine: str) -> None:
+    """With the chat override gone (or emptied), `[<engine>] model` is passed
+    on a resumed run too — the engine would otherwise keep the session's
+    model (Claude 2.1.296 and Pi 0.78.0 do)."""
+    model = VALID_MODELS[engine][0]
+    for override in (None, ""):
+        args = _args(
+            engine, model=override, config_model=model, resume=VALID_RESUMES[engine]
+        )
+        if engine == "pi":
+            assert args[args.index("--model") + 1] == model
+            assert "--session" in args
+        else:
+            assert f"--model={model}" in args
+            assert any(a.startswith(("--resume=", "--session=")) for a in args)
+
+
+@pytest.mark.parametrize("engine", ["claude", "codex", "opencode", "pi"])
+def test_resumed_run_without_any_model_passes_none(engine: str) -> None:
+    """Nothing configured: Untether has no model to name, so the engine
+    decides (the `/model clear` reply then points at `/new`). Codex has no
+    `[codex] model` key at all — `codex exec resume` uses its own config."""
+    args = _args(engine, resume=VALID_RESUMES[engine])
+    assert not any(a == "--model" or a.startswith("--model=") for a in args)
+
+
 # ── the run is refused before anything spawns ───────────────────────────────
 
 

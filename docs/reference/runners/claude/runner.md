@@ -954,7 +954,7 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 | Preamble | prepended to the user prompt | `--append-system-prompt[-file]` | fixed at process start |
 | `% ctx` | derived from `usage` + `context_windows.json` | `get_context_usage` request | makes token-counting API calls |
 | `/cancel` of a running turn | SIGINT / SIGTERM | `interrupt` request (session survives) | the interrupted turn's messages must be drained |
-| `/model` on a live session | close and resume | `set_model` request | — |
+| `/model` on a live session | close and resume with `--model=<id>` | `set_model` request (`model` omitted = back to the CLI's default) | not live-tested. On 2.1.296 a resume without `--model` keeps the session's last model and `--model` on resume switches it (probed 2026-10-11), so after `/model clear` with no `[claude] model` the session keeps its model until `/new` ([#998](https://github.com/littlebearapps/untether/issues/998)) |
 | Steer / queue | own steer window, no `priority` sent | user-message `priority` (`now` / `next` / `later`) | documented for TypeScript only |
 | `/export` | Untether's recorded events | the CLI's session transcript | no export API |
 | Stopping one background task | not offered | `stop_task` request | — |

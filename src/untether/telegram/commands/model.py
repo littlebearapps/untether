@@ -32,6 +32,61 @@ MODEL_USAGE = (
 )
 
 
+async def _remaining_model(
+    cfg: TelegramBridgeConfig,
+    msg: TelegramIncomingMessage,
+    engine: str,
+    *,
+    tkey: tuple[int, int] | None,
+    topic_store: TopicStateStore | None,
+    chat_prefs: ChatPrefsStore | None,
+) -> tuple[str, str] | None:
+    """``(source label, model)`` Untether passes to *engine* once an override
+    is cleared — a remaining override, else the engine's configured model —
+    or None when it passes no model at all (#998)."""
+    topic_override = None
+    if tkey is not None and topic_store is not None:
+        topic_override = await topic_store.get_engine_override(tkey[0], tkey[1], engine)
+    chat_override = None
+    if chat_prefs is not None:
+        chat_override = await chat_prefs.get_engine_override(msg.chat_id, engine)
+    resolution = resolve_override_value(
+        topic_override=topic_override, chat_override=chat_override, field="model"
+    )
+    if resolution.value:
+        label = (
+            "topic override"
+            if resolution.source == "topic_override"
+            else "chat override"
+        )
+        return (label, resolution.value)
+    try:
+        runner = cfg.runtime.resolve_runner(
+            resume_token=None, engine_override=engine
+        ).runner
+    except Exception:  # noqa: BLE001 — a reply line must never break /model
+        return None
+    configured = getattr(runner, "model", None)
+    if isinstance(configured, str) and configured:
+        return ("configured default", configured)
+    return None
+
+
+def _after_clear_line(engine: str, remaining: tuple[str, str] | None) -> str:
+    """#998: what the next run gets. Every runner passes a model it knows on
+    resumed runs too; with none, the engine decides and a resumed session can
+    keep the cleared model (Claude Code 2.1.296 and Pi 0.78.0 do), so the
+    only sure way back to the engine's default is a fresh session."""
+    if remaining is not None:
+        label, model = remaining
+        return f"From the next run Untether passes the {label} `{model}`."
+    return (
+        f"Untether no longer chooses a model for `{engine}`, and a resumed "
+        "session may stay on the model it was using. Run `/new` to start a "
+        "fresh session on the engine's default."
+    )
+
+
 async def _handle_model_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -243,10 +298,15 @@ async def _handle_model_command(
         if scope is None:
             return
         logger.info("model.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
-        if scope == "topic":
-            await reply(text="topic model override **cleared** (using chat default).")
-            return
-        await reply(text="chat model override **cleared**.")
+        remaining = await _remaining_model(
+            cfg, msg, engine, tkey=tkey, topic_store=topic_store, chat_prefs=chat_prefs
+        )
+        await reply(
+            text=(
+                f"{scope} model override **cleared** for `{engine}`.\n"
+                f"{_after_clear_line(engine, remaining)}"
+            )
+        )
         return
 
     await reply(text=MODEL_USAGE)
