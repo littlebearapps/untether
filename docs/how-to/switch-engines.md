@@ -98,9 +98,15 @@ one. Bind the chat with `/ctx set <project>` or use a chat that already routes t
 
 **4. Select it:** `/agent set antigravity`, or `/antigravity <prompt>` for one message.
 
-**5. Pick a permission mode** in `/config` → **Permission mode**. The default, **Workspace**, lets Antigravity edit
-files in the project but blocks its shell, web and MCP calls; **Full access** approves everything. See
+**5. Pick a permission mode** in `/config` → **Permission mode**. The default, **Workspace**, lets Antigravity read,
+create and edit files in the project. It has no shell, web or MCP tools, so it can't run commands, and can't delete or
+rename files (a "rename" is a copy; the original stays). **Full access** approves everything. See
 [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+!!! warning "After switching to Full access, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in Workspace still can't run
+    shell commands after you switch to Full access, even though the footer says `full access`. Send `/new`: Full
+    access applies from the next new conversation.
 
 Not available for Antigravity yet: approval buttons, plan approval, question buttons, `/steer` and live sessions.
 If something goes wrong, see [Troubleshooting](troubleshooting.md#antigravity-cli).

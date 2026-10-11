@@ -196,11 +196,33 @@ If `agy` works in your terminal but not under Untether, the sign-in is probably 
 
 Google has challenged or blocked the account. Run `agy` in a terminal on the host to see Google's link. Untether doesn't retry. A Gemini API key or Enterprise sign-in avoids the Google-account terms that cause this.
 
-### Antigravity was blocked from using a shell command
+### Antigravity says it can't run shell commands after I switched to Full access
 
-**Symptoms:** a `⚠️ Blocked: shell command (RunCommand) — …` row, and the reply ends with "headless runs can't ask for approval, so it stopped there".
+**Symptoms:** the footer says `full access`, but Antigravity still answers that shell commands need Full access, or won't delete or rename a file.
 
-The chat is in **Workspace** mode, where agy blocks its own shell, web and MCP calls. Either switch to **Full access** in `/config` → **Permission mode**, or add an exact allow rule such as `command(git status)` to `permissions.allow` in agy's settings file. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access. See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+!!! warning "Send `/new`"
+    agy keeps a conversation on the tools it started with. This conversation began in **Workspace**, so it keeps its no-shell tools. Send `/new`, then your message again: Full access applies from the next new conversation.
+
+The `/config` toast says the same when you pick Full access (`Permission mode: full access — send /new to start using it`). See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+### Antigravity says a shell command needs Full access
+
+The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access.
+
+### Antigravity was blocked from using a shell command or a file outside the project
+
+**Symptoms:** a `⚠️ Blocked: …` row, and the reply ends with "headless runs can't ask for approval, so it stopped there. To allow it: /config → Permission mode → Full access, then /new."
+
+- **A file outside the project.** Workspace only reaches the project. Switch to **Full access** in `/config` → **Permission mode**, then send `/new`.
+- **A shell command** (`⚠️ Blocked: shell command (RunCommand) — …`). Workspace conversations normally have no shell tool at all, so this means the conversation isn't on Untether's no-shell agent: it started in Full access, or the [agent file is unavailable](#antigravity-workspace-agent-file-unavailable). Send `/new` to get a clean Workspace conversation, or switch to Full access and send `/new`. In these conversations an exact allow rule such as `command(git status)` in `permissions.allow` in agy's settings file also lets that one command through.
+
+For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access. See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+### Antigravity Workspace agent file unavailable
+
+**Symptoms:** the log has WARNING `antigravity.workspace_agent.unavailable` (with a `reason` and `path`), and Workspace turns end on `⚠️ Antigravity was blocked from using a shell command…` again.
+
+Untether couldn't write its no-shell agent file, `~/.gemini/config/agents/untether-workspace/agent.md`, or that path is a symlink. The run still goes ahead in Workspace, but on agy's default agent, which tends to open with a shell command that agy then blocks. Check that `~/.gemini/config/agents`, its `untether-workspace` folder and `agent.md` are real paths (none of them a symlink) and that the Untether user can write there. Untether tries again on every Workspace run, so no restart is needed, but the warning is logged only once per cause until Untether restarts. Don't edit the file: Untether overwrites changes.
 
 ### "Ask me needs Untether's approval gate"
 

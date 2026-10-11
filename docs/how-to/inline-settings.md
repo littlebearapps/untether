@@ -84,7 +84,7 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Permission mode** — Claude Code, and Antigravity CLI with its own page: **Workspace** (default) or **Full access**, plus **Ask me** and **Plan first** marked "· soon" (not selectable yet). For Antigravity this is a pre-run policy, not mid-run approval; see [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode). Codex and Gemini have their own pre-run policies instead.
+- **Permission mode** — Claude Code, and Antigravity CLI with its own page: **Workspace** (default) or **Full access**, plus **Ask me** and **Plan first** marked "· soon" (not selectable yet). For Antigravity this is a pre-run policy, not mid-run approval; see [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode). The page carries a ⚠️ line and the Full access toast reads `Permission mode: full access — send /new to start using it` (see the warning below). Codex and Gemini have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
 - **Approval mode** — Gemini CLI only (deprecated). Toggle between "read-only", "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy. Despite its label, "read-only" (also what an unset chat shows) runs Gemini with `--approval-mode yolo`, i.e. full access — see [Interactive approval](interactive-approval.md#gemini-cli-approval-mode).
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
@@ -93,6 +93,9 @@ Settings are engine-specific and only appear when relevant:
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.
+
+!!! warning "Antigravity: after switching Workspace → Full access, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you pick **Full access**, even though the footer says `full access`; Full access applies from the next new conversation. Switching back to Workspace applies from your next message.
 
 ## Available settings
 

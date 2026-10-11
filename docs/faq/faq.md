@@ -95,7 +95,13 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 The **plan-auto** mode was called `auto` before v0.36.0. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
-For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Antigravity CLI uses a permission mode (`/config` → Permission mode: **Workspace** by default, which edits files but blocks shell, web and MCP calls and shows a ⚠️ row when it does; or **Full access**), the deprecated Gemini CLI uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Antigravity CLI uses a permission mode (`/config` → Permission mode: **Workspace** by default, which reads and edits files in the project and has no shell, web or MCP tools; or **Full access**), the deprecated Gemini CLI uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
+
+## Why can't Antigravity run shell commands after I switched to Full access?
+
+**Send `/new`.** Antigravity (`agy`) keeps a conversation on the tools it started with. A conversation that began in **Workspace** mode keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Full access takes effect from the next new conversation, so send `/new` and then your message. The `/config` toast says the same: `Permission mode: full access — send /new to start using it`.
+
+In Workspace, Antigravity can read, create and edit files in the project but has no shell, web or MCP tools. Ask for a shell command and it tells you that needs Full access; the command doesn't run. It also can't delete or rename files, so a "rename" is a copy and the original stays. Switching from Full access back to Workspace applies from your next message. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/#antigravity-cli--permission-mode).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 

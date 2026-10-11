@@ -838,7 +838,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " This picks what it may do on its own.",
             "",
             "• <b>Workspace</b> — edits files in this project (and temp"
-            " folders); agy blocks its own shell, web and MCP calls. Not a"
+            " folders); it has no shell, web or MCP tools. Not a"
             " sandbox: a run can still write files that later runs or tools"
             " execute (default)",
             "• <b>Ask me</b> — asks you in Telegram before shell, web and MCP"
@@ -850,11 +850,10 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " --dangerously-skip-permissions). Cron and webhook runs only get"
             " this when the cron itself sets it",
             "",
-            "ℹ️ To allow specific commands without Full access, add rules such"
-            " as <code>command(git status)</code> to"
-            " <code>permissions.allow</code> in agy's settings file (exact"
-            " commands are the reliable form).",
-            "ℹ️ Changes apply from your next message.",
+            "⚠️ <b>After switching Workspace → Full access, send /new.</b> A"
+            " conversation that started in Workspace keeps its no-shell"
+            " tools; Full access applies from the next new conversation."
+            " Other changes apply from your next message.",
             "",
             f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
             "",
@@ -2415,7 +2414,8 @@ class ConfigCommand:
                 "safe": "Approval policy: safe",
                 # #558: Antigravity (the "· soon" modes store nothing).
                 "agw": "Permission mode: workspace",
-                "agf": "Permission mode: full access",
+                # #1037: a Workspace conversation keeps its no-shell agent.
+                "agf": agy_mode.FULL_ACCESS_TOAST,
                 "aga": agy_mode.GATE_SOON_TOAST,
                 "agp": agy_mode.GATE_SOON_TOAST,
             },

@@ -177,6 +177,7 @@ Antigravity CLI (`agy`) errors are Untether's own messages, written when the run
 | `🛑 That Antigravity conversation id isn't valid, so nothing was started.` | The resume line or saved session holds something that isn't a conversation id | `/new`, then send the message again |
 | `Antigravity needs a project` | The chat has no project directory | `/ctx set <project>`, or add a `[projects.*]` entry |
 | `🛑 Antigravity CLI <version> is older than 1.3.1` | agy is too old | `agy update` on the host |
+| `⚠️ Antigravity was blocked from using a …` | agy refused a tool in Workspace: usually a file outside the project; a shell command only in a conversation that isn't on Untether's no-shell agent | `/config` → Permission mode → Full access, then `/new` (agy keeps a conversation on the tools it started with). See [Troubleshooting](../how-to/troubleshooting.md#antigravity-cli) |
 | `Ask me needs Untether's approval gate` / `Plan first needs …` | That mode isn't available yet | Pick Workspace or Full access in `/config` |
 | `agy's own settings change its permission checks` | agy's `toolPermission` setting would approve tools by itself | Set it back to `request-review`, or pick Full access |
 | `agy's workspace config changed since someone last ran Antigravity` | A scheduled run was held because the project's agy hooks, plugins or MCP config changed | Send any message in the chat, review the ⚠️ row; the schedule then runs again |

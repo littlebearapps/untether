@@ -71,6 +71,9 @@ _OWN_FLAGS = {
     agy.BYPASS_FLAG,
 }
 _WORKSPACE_FLAG = "--mode=accept-edits"
+_AGENT_FLAG = "--agent=untether-workspace"
+# Fixed tokens a Workspace run ends with; never built from a user's value.
+_WORKSPACE_FLAGS = (_WORKSPACE_FLAG, _AGENT_FLAG)
 _VALUE_FLAGS = ("--model", "--conversation", "--effort")
 
 
@@ -99,7 +102,7 @@ def _runner(**kwargs: Any) -> AntigravityRunner:
 
 def _assert_no_injected_flag(args: list[str], hostile: str) -> None:
     for token in args:
-        if not token.startswith("-") or token == _WORKSPACE_FLAG:
+        if not token.startswith("-") or token in _WORKSPACE_FLAGS:
             continue
         name, sep, _ = token.partition("=")
         if sep:

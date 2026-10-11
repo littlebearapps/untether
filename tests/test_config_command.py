@@ -1075,7 +1075,10 @@ class TestAntigravityPermissionPage:
         assert "Cron and webhook runs only get this when the cron itself sets it" in (
             text
         )
-        assert "<code>command(git status)</code>" in text
+        # #1037: Workspace has no shell tool, so no allow-rule tip; the
+        # page says a switch to Full access needs /new.
+        assert "command(git status)" not in text
+        assert "After switching Workspace → Full access, send /new." in text
         assert "Current: <b>workspace</b> (default)" in text
         assert "interactive-approval/#antigravity-cli--permission-mode" in text
         labels = _buttons_labels(msg)
@@ -1181,7 +1184,9 @@ class TestAntigravityPermissionPage:
     def test_antigravity_toast_labels_present(self):
         toast = ConfigCommand.early_answer_toast
         assert toast("pm:agw") == "Permission mode: workspace"
-        assert toast("pm:agf") == "Permission mode: full access"
+        assert toast("pm:agf") == (
+            "Permission mode: full access — send /new to start using it"
+        )
         for soon in ("pm:aga", "pm:agp"):
             assert toast(soon) == (
                 "Needs Untether's Telegram approval gate — coming in a later "

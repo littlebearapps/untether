@@ -112,6 +112,14 @@ def check_mode(value: Any) -> str:
     return value
 
 
+def check_agent(value: Any) -> str:
+    """Only Untether's own no-shell Workspace agent (#1037); never a name a
+    user typed or a project supplied."""
+    if value != "untether-workspace":
+        raise AgyArgvError("agent", "unknown_agent")
+    return value
+
+
 def check_slash_command(value: Any) -> str:
     """``/usage``, ``/config``, ``/effort`` …: one lower-case slash word."""
     if not isinstance(value, str) or _SLASH_COMMAND_RE.match(value) is None:
@@ -124,6 +132,7 @@ _CHECKS = {
     "--conversation": check_conversation,
     "--effort": check_effort,
     "--mode": check_mode,
+    "--agent": check_agent,
 }
 
 

@@ -92,7 +92,7 @@ One `agy` process per message:
 ```text
 agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
     [--conversation=<id> | --continue] [--model=<model>] [--effort=<level>]
-    (--mode=accept-edits | --dangerously-skip-permissions)
+    (--mode=accept-edits --agent=untether-workspace | --dangerously-skip-permissions)
 ```
 
 - **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
@@ -100,9 +100,9 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 --d
 - `--disable-slash-commands` makes a prompt that starts with `/` an ordinary message. Untether adds no prefix.
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
   success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
-- The last argument is the permission mode: `--mode=accept-edits` for Workspace, `--dangerously-skip-permissions`
-  only in Full access (see [Permission modes](#permission-modes)). `accept-edits` is a fixed value; nothing a user
-  types reaches `--mode`.
+- The last arguments are the permission mode: `--mode=accept-edits --agent=untether-workspace` for Workspace,
+  `--dangerously-skip-permissions` only in Full access (see [Permission modes](#permission-modes)). Both Workspace
+  values are fixed; nothing a user types reaches `--mode` or `--agent`.
 - **Values are always joined to their flag** (`--model=<model>`, `--conversation=<id>`, `--effort=<level>`), and
   each is checked first. agy reads a separate value that starts with a dash as another flag, so Untether never
   passes one as its own argument. A model id may use ASCII letters, digits and `. _ - : / @ +`, must start with a
@@ -151,7 +151,7 @@ user guide.
 
 | Mode | Value | Flag | What happens |
 |---|---|---|---|
-| **Workspace** (default) | `workspace` | `--mode=accept-edits` | agy's own accept-edits mode under its `request-review` policy: file edits in the project and temp folders go ahead; shell, web and MCP calls, and files outside the project, are blocked by agy. Not a sandbox. Without the flag, headless agy refuses every write outside a temp folder (agy 1.3.3) |
+| **Workspace** (default) | `workspace` | `--mode=accept-edits` `--agent=untether-workspace` | agy's own accept-edits mode under its `request-review` policy, run as Untether's [no-shell agent](#the-workspace-agent): file edits in the project and temp folders go ahead; the model has no shell, web, MCP or subagent tool; files outside the project are blocked by agy. Not a sandbox. Without `--mode`, headless agy refuses every write outside a temp folder (agy 1.3.3) |
 | **Full access** | `full` | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
 | **Ask me** | `ask` | — | Not available yet: refused before agy starts, until Untether's approval gate ships in a later 0.36.1 release |
 | **Plan first** | `plan` | — | Not available yet: refused the same way |
@@ -175,6 +175,32 @@ Rules the runner enforces:
   ⚠️ row (once per project and settings change), and the footer label becomes
   `workspace (agy allows files outside the project)`.
 
+### The Workspace agent
+
+A blocked tool ends an agy 1.3.x turn, and agy's default agent often opens with a shell command (`ls -la`), so a
+Workspace reply used to be nothing but the blocked notice
+([#1037](https://github.com/littlebearapps/untether/issues/1037)). agy has no per-run system prompt and no way to
+take a tool away from its default agent, but a custom agent's `tools:` list is the model's whole toolset. So:
+
+- Before a Workspace run Untether makes sure `~/.gemini/config/agents/untether-workspace/agent.md` (agy's
+  user-level agent folder) holds its agent: file tools only (`view_file`, `list_dir`, `find_by_name`,
+  `grep_search`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`) and a short system prompt.
+  A changed file is rewritten (`antigravity.workspace_agent.installed`). The file does nothing unless an agy run
+  names it.
+- The run then passes `--agent=untether-workspace`. Full access never does.
+- If the file can't be put in place (unwritable folder, or a symlink anywhere on the path), the run goes ahead
+  without `--agent` and logs `antigravity.workspace_agent.unavailable` once per reason. That run behaves as before:
+  a shell attempt ends the turn with the blocked notice.
+- Asked for a shell command, the agent says it needs Full access; nothing is blocked, so there is no ⚠️ row. It
+  can't delete or rename a file either (a "rename" is a copy).
+
+!!! warning "A conversation keeps the agent it started with"
+    agy ignores `--agent` on a resume and reports nothing about it in `init`. A conversation that started in
+    Workspace has no shell tool even after the chat is switched to Full access, and one that started in Full
+    access (or before this change) keeps agy's default agent in Workspace. **After switching Workspace → Full
+    access, send `/new`.** The `/config` toast and page, the agent's own text and the blocked notice all say so.
+    Untether keeps no per-conversation record of this.
+
 ### When agy blocks a tool
 
 A blocked tool doesn't fail in agy's stream: the step ends normally with no output, and the final event lists
@@ -183,12 +209,14 @@ A blocked tool doesn't fail in agy's stream: the step ends normally with no outp
 - the step becomes `⚠️ Blocked: shell command (RunCommand) — <command>` (also `MCP tool`, `web fetch`,
   `browser action`, `file outside the project`);
 - the final reply ends with a paragraph that depends on how the run started, for example in a chat:
-  `⚠️ Antigravity was blocked from using a shell command — headless runs can't ask for approval, so it stopped
-  there. To allow it: /config → Permission mode → Full access, or add an allow rule such as command(git status) to
-  agy's settings file.` A cron is told to set `permission_mode = "full"` on the cron; a webhook is told it never
-  gets Full access; in Full access the paragraph points at agy's own `permissions.deny` rules.
+  `⚠️ Antigravity was blocked from using a file outside the project — headless runs can't ask for approval, so it
+  stopped there. To allow it: /config → Permission mode → Full access, then /new.` A cron is told to set
+  `permission_mode = "full"` on the cron; a webhook is told it never gets Full access; in Full access the paragraph
+  points at agy's own `permissions.deny` rules. Only a blocked shell command also gets
+  `or add an allow rule such as command(git status) to agy's settings file`.
 
-Exact commands are the reliable form of allow rule. agy 1.3.x stops the turn at the first blocked tool.
+With the Workspace agent a shell block is rare: it needs a conversation that began without the agent. Exact
+commands are the reliable form of allow rule. agy 1.3.x stops the turn at the first blocked tool.
 
 ### agy hooks, plugins and MCP servers
 
@@ -323,6 +351,21 @@ aren't tracked.
 - **Quota and MCP start-up hangs.** A used-up quota on a Google sign-in is stopped by the stderr match above. An
   MCP server that hangs at start-up is left to the ordinary stall warnings and watchdog.
 
+## Native vs custom register
+
+The record required by `.claude/rules/runner-development.md` → "Native-first". Checked 2026-10-11 against agy 1.3.3
+(`--help`, `agy changelog`, the docs at antigravity.google, and live probes in a scratch repo under `$HOME`).
+
+| Untether feature | Native route used | What was checked and ruled out |
+|---|---|---|
+| Workspace = edits in the project | `--mode=accept-edits` | No flag: writes outside temp folders are refused. `--sandbox`: shell is still soft-denied |
+| Workspace has no shell tool ([#1037](https://github.com/littlebearapps/untether/issues/1037)) | A custom agent's `tools:` list, chosen with `--agent`; its body is the system prompt | No per-run system prompt (no flag, env var or stream-json field). `permissions.allow` rules are global settings only, prefix-matched, and chained commands still match, so they are not a safe read-only list. An agent's `commandExecutionPolicy: sandbox` doesn't stop the soft-denial. `--add-dir` pointing at a folder with the agent moves agy's workspace there. A workspace `.agents/agents/` file works but writes into the user's repo (rejected, D20) |
+| The agent file on disk | — (custom: Untether writes one file under `~/.gemini/config/agents/`) | agy has no way to pass an agent definition per run; a plugin is the other documented place and arrives with the approval gate |
+| Telling the user to send `/new` after Workspace → Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses |
+
+Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
+lets `--agent` change on a resume.
+
 ## Configuration
 
 ```toml
@@ -341,7 +384,7 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.credits.low`, `antigravity.conversation.missing`, `antigravity.permission_mode.mismatch`,
 `antigravity.workspace_config_present` / `_changed` / `.unattended_refused`, `antigravity.config_check.fetched` /
 `.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`,
-`antigravity.argv.invalid_value`.
+`antigravity.argv.invalid_value`, `antigravity.workspace_agent.installed` / `.unavailable`.
 
 ## See also
 

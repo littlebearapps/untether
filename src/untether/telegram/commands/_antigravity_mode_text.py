@@ -77,6 +77,10 @@ ANTIGRAVITY_PM_ACTIONS: dict[str, str] = {
 # Button rows, in order.
 BUTTON_ROWS: tuple[tuple[str, ...], ...] = (("agw", "agf"), ("aga", "agp"))
 
+# #1037: agy keeps a conversation on the agent it started with, so a chat
+# that began in Workspace has no shell until a new conversation starts.
+FULL_ACCESS_TOAST = "Permission mode: full access — send /new to start using it"
+
 GATE_SOON_SUFFIX = " · soon"
 GATE_SOON_TOAST = (
     "Needs Untether's Telegram approval gate — coming in a later 0.36.1 release"

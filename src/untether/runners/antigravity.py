@@ -578,18 +578,29 @@ def _join_labels(labels: list[str]) -> str:
 def denial_paragraph(labels: list[str], *, mode: str, trigger: str | None) -> str:
     """Why the run stopped and how to allow it — trigger-aware (audit §6)."""
     what = f"⚠️ Antigravity was blocked from using a {_join_labels(labels)}"
-    rule = "add an allow rule such as `command(git status)` to agy's settings file"
     if mode == "full":
         return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
     head = f"{what} — headless runs can't ask for approval, so it stopped there."
+    # An allow rule only helps for a shell command (#1037): agy has no rule
+    # that lets a run reach a file outside the project.
+    rule = (
+        ", or add an allow rule such as `command(git status)` to agy's settings file"
+        if "shell command" in labels
+        else ""
+    )
     if trigger is not None and trigger.startswith("webhook:"):
-        return f"{head} Webhook runs never get Full access; {rule}, or run it from the chat."
-    if trigger is not None:
-        return (
-            f'{head} To allow it, set `permission_mode = "full"` on this cron, '
-            f"or {rule}."
+        tail = (
+            f"{rule.removeprefix(', or ')}, or run it from the chat"
+            if rule
+            else "run it from the chat"
         )
-    return f"{head} To allow it: /config → Permission mode → Full access, or {rule}."
+        return f"{head} Webhook runs never get Full access; {tail}."
+    if trigger is not None:
+        return f'{head} To allow it, set `permission_mode = "full"` on this cron{rule}.'
+    # A conversation that started in Workspace keeps its no-shell agent.
+    return (
+        f"{head} To allow it: /config → Permission mode → Full access, then /new{rule}."
+    )
 
 
 def _paths_text(paths: list[str], limit: int = 5) -> str:
@@ -1277,6 +1288,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # ``--flag=value`` so agy can't read it as another flag. It raises
         # ``AgyArgvError`` on a bad value; ``run_impl`` refused that run
         # before getting here.
+        from ..utils import antigravity_agent
         from ..utils.antigravity_argv import agy_flag
 
         args = [
@@ -1304,9 +1316,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Ask me / Plan first never get here in rc1 (refused before spawn);
         # anything else fails closed to Workspace.
         mode = self._effective_mode()
-        args.append(
-            BYPASS_FLAG if mode == "full" else agy_flag("--mode", WORKSPACE_AGY_MODE)
-        )
+        if mode == "full":
+            args.append(BYPASS_FLAG)
+        else:
+            args.append(agy_flag("--mode", WORKSPACE_AGY_MODE))
+            # #1037: Workspace runs use Untether's no-shell agent, so the
+            # model has no shell tool to open with (a soft-denied shell call
+            # ends the turn). Skipped when the file can't be put in place.
+            if antigravity_agent.ensure_workspace_agent():
+                args.append(agy_flag("--agent", antigravity_agent.WORKSPACE_AGENT_NAME))
         if isinstance(state, AntigravityStreamState):
             state.effective_mode = mode
             state.argv = list(args)

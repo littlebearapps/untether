@@ -118,6 +118,9 @@ _CHUNK_BYTES = 256 * 1024
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
 _GATE_PLUGIN = "plugins/untether-gate/"
+# Untether's own no-shell Workspace agent (#1037), written and verified by
+# the runner before each Workspace run.
+_WORKSPACE_AGENT = "agents/untether-workspace/"
 _AGENTS_DIR = ".agents"
 # Instruction trees directly under .agents/ (exact names: anything else is
 # hashed — failing towards more coverage on case-insensitive filesystems).
@@ -879,7 +882,7 @@ def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
     seen: set[str] = set()
     for path in _walk(user_dir, budget, follow_within=follow, seen=seen):
         rel = path.relative_to(user_dir).as_posix()
-        if rel.startswith(_GATE_PLUGIN):
+        if rel.startswith((_GATE_PLUGIN, _WORKSPACE_AGENT)):
             continue
         if not _is_user_manifest(rel) and not path.is_symlink():
             continue
