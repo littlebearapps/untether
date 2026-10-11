@@ -569,8 +569,7 @@ def test_build_args_new_session() -> None:
         "run",
         "--format",
         "json",
-        "--model",
-        "claude-sonnet",
+        "--model=claude-sonnet",
         "--",
         "hello world",
     ]
@@ -585,8 +584,7 @@ def test_build_args_with_resume() -> None:
         "run",
         "--format",
         "json",
-        "--session",
-        "ses_abc123",
+        "--session=ses_abc123",
         "--",
         "continue",
     ]

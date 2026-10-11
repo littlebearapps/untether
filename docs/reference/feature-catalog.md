@@ -119,6 +119,7 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | `utils/antigravity_quota.py` | Zero-token agy slash probes: `/config` settings check, `/usage` quota (60 s cache), `/effort` per-model levels |
 | `utils/antigravity_agent.py` | Untether's no-shell Workspace agent file for agy: content, install, symlink refusal (#1037) |
 | `utils/antigravity_argv.py` | The one place a value becomes agy argv: per-flag allow-list, joined `--flag=value` form |
+| `utils/engine_argv.py` | Model / resume value checks for every other engine's argv, and the joined `--flag=value` form for Claude, Codex and OpenCode (#1034) |
 | `utils/antigravity_redact.py` | Single redaction pass for all surfaced agy text (URLs, tokens, paths) |
 | `utils/antigravity_state.py` | Seen-config digests and shown-notice chats (`antigravity_seen_config.json`, `antigravity_notices.json`) |
 | `telegram/commands/_antigravity_mode_text.py` | Antigravity permission-mode labels, hints and `/config` buttons |

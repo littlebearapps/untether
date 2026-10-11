@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ...context import RunContext
 from ...logging import get_logger
+from ...utils.engine_argv import model_problem, safe_preview
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import resolve_override_value, with_override
 from ..files import split_command_args
@@ -99,6 +100,18 @@ async def _handle_model_command(
         engine_arg, model = parse_set_args(tokens, engine_ids=engine_ids)
         if model is None:
             await reply(text=MODEL_USAGE)
+            return
+        # #1034: the value becomes part of an engine CLI's argv. Refuse one
+        # that could read as a flag before it is stored (never echoed back).
+        problem = model_problem(model)
+        if problem is not None:
+            logger.warning(
+                "model.set.invalid",
+                chat_id=msg.chat_id,
+                preview=safe_preview(model),
+                command="model",
+            )
+            await reply(text=f"invalid model: a model id {problem}.\n\n{MODEL_USAGE}")
             return
         if not await require_admin_or_private(
             cfg,

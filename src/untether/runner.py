@@ -1456,6 +1456,65 @@ class JsonlSubprocessRunner(BaseRunner):
         that needs the PID (e.g. for a descendant snapshot) records it here.
         """
 
+    def _invalid_argv_refusal(
+        self, resume: ResumeToken | None
+    ) -> CompletedEvent | None:
+        """Refuse a model or resume value the engine CLI could parse as a
+        flag (#1034), before anything spawns or registers.
+
+        ``build_args`` raises on the same values; this turns that into one
+        plain card and a log line that never echoes the raw value. A resume
+        line typed in chat (``claude --resume --some-flag``), ``/model set``,
+        ``[engine] model`` and a cron's ``model`` all end up here.
+        """
+        from .runners.run_options import get_run_options
+        from .utils import engine_argv
+
+        run_options = get_run_options()
+        model = getattr(self, "model", None)
+        if run_options is not None and run_options.model:
+            model = run_options.model
+        checks: list[tuple[str, Any, Callable[[Any], str], str]] = []
+        if model is not None and model != "":
+            checks.append(
+                (
+                    "model",
+                    model if isinstance(model, str) else str(model),
+                    engine_argv.check_model,
+                    engine_argv.INVALID_MODEL_TEXT,
+                )
+            )
+        if resume is not None and not resume.is_continue:
+            checks.append(
+                (
+                    "resume",
+                    resume.value,
+                    engine_argv.check_resume,
+                    engine_argv.INVALID_RESUME_TEXT,
+                )
+            )
+        for field_name, value, check, text in checks:
+            try:
+                check(value)
+            except engine_argv.EngineArgvError as exc:
+                self.get_logger().warning(
+                    "runner.argv.invalid_value",
+                    engine=self.engine,
+                    field=field_name,
+                    reason=exc.reason,
+                    preview=engine_argv.safe_preview(value),
+                )
+                # Never hand a bad id back as the run's resume token.
+                return CompletedEvent(
+                    engine=self.engine,
+                    ok=False,
+                    answer="",
+                    resume=None,
+                    error=text,
+                    usage={PRESPAWN_BLOCKED_KEY: engine_argv.INVALID_ARGUMENT_BLOCK},
+                )
+        return None
+
     def _check_prespawn_ram_guard(
         self, resume: ResumeToken | None
     ) -> CompletedEvent | None:
@@ -1796,6 +1855,11 @@ class JsonlSubprocessRunner(BaseRunner):
         block_result = self._check_prespawn_ram_guard(resume)
         if block_result is not None:
             yield block_result
+            return
+        # #1034: a model / resume value the CLI could read as a flag.
+        refusal = self._invalid_argv_refusal(resume)
+        if refusal is not None:
+            yield refusal
             return
 
         state = self.new_state(prompt, resume)

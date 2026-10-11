@@ -9,13 +9,14 @@ This document describes how Codex exec --json events are translated to Untether'
 Untether runs Codex non-interactively; it never stops to ask for approval, and approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only. The argv (prompt on stdin) is:
 
 ```text
-codex [extra_args] [--profile <p>] [--model <m>] [-c model_reasoning_effort=<level>] \
+codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<level>] \
   exec --json --skip-git-repo-check --color=never [--sandbox read-only] \
   [resume <thread_id> | resume --last] -
 ```
 
 * **`extra_args`** default to `["-c", "notify=[]"]` and sit at the root, before `exec`. A deny-list rejects managed flags (`--json`, `--skip-git-repo-check`, `--color`, `--output-schema`, `--output-last-message`, `--ask-for-approval`/`-a`, exec-only `--ignore-rules`/`--ignore-user-config`), bypass flags (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, `-c` values mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), workspace flags (`--cd`/`-C`, `--worktree`) and a bare `--`, in every spelling. A blocked flag stops the Codex engine loading, and the error names the flag ([#209](https://github.com/littlebearapps/untether/issues/209), see [Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). Root `--sandbox read-only|workspace-write` stays allowed.
 * **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto.
+* **Model and resume id** are validated before spawn (no leading dash, no control characters; `runner.argv.invalid_value`). The model is joined to its flag; the thread id is positional in `exec resume`, where clap (0.160.1) reads a dash-leading token as an option, so validation is the whole defence there ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 * **Reasoning** (`/config` → Reasoning): `low`, `medium`, `high` or `xhigh`, passed as `-c model_reasoning_effort=<level>`. `minimal` is not offered ([#416](https://github.com/littlebearapps/untether/issues/416)).
 * **Exit code 2** with a clap argv error on stderr (`error: unexpected argument …` and similar) also logs `codex.argv.rejected` with the argv, to flag upstream flag drift.
 

@@ -44,6 +44,7 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import gemini as gemini_schema
+from ..utils import engine_argv
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -347,13 +348,14 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if resume.is_continue:
                 args.extend(["--resume", "latest"])
             else:
-                args.extend(["--resume", resume.value])
+                # #1034 (security): never a dash-leading value token.
+                args.extend(["--resume", engine_argv.check_resume(resume.value)])
         args.extend(["--output-format", "stream-json"])
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model
         if model:
-            args.extend(["--model", str(model)])
+            args.extend(["--model", engine_argv.check_model(str(model))])
         if run_options is not None and run_options.permission_mode:
             args.extend(["--approval-mode", run_options.permission_mode])
         else:

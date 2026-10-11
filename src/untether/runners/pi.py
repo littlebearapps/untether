@@ -36,6 +36,7 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import pi as pi_schema
+from ..utils import engine_argv
 from ..utils.paths import get_run_base_dir
 from .run_options import get_run_options
 from .tool_actions import tool_kind_and_title
@@ -533,12 +534,15 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model
+        # #1034: validated only. Pi's own parser (0.78.0) has no
+        # `--model=` / `--session=` form — it takes the next token as the
+        # value unconditionally — so the separate token stays.
         if model:
-            args.extend(["--model", model])
+            args.extend(["--model", engine_argv.check_model(model)])
         if state.resume.is_continue:
             args.append("--continue")
         else:
-            args.extend(["--session", state.resume.value])
+            args.extend(["--session", engine_argv.check_resume(state.resume.value)])
         args.append(self.sanitize_prompt(prompt))
         return args
 
@@ -774,6 +778,12 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             config_path=str(config_path),
         )
         raise ConfigError(f"Invalid `pi.model` in {config_path}; expected a string.")
+    if model:
+        problem = engine_argv.model_problem(model)
+        if problem is not None:  # #1034
+            raise ConfigError(
+                f"Invalid `pi.model` in {config_path}; a model id {problem}."
+            )
 
     provider = config.get("provider")
     if provider is not None and not isinstance(provider, str):

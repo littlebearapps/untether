@@ -45,6 +45,8 @@ Untether should parse either:
 
 **Note:** Claude Code session IDs should be treated as **opaque strings**. Do not assume UUID format.
 
+Untether passes the id (and the model) joined to its flag — `--resume=<id>`, `--model=<model>` — and refuses a value that starts with a dash or carries control characters before anything spawns (`runner.argv.invalid_value`). Claude Code 2.1.296 reads a dash-leading token after `--resume` as another flag (`claude -p --resume --version` prints the version), and a resume line typed in chat reaches the argv ([#1034](https://github.com/littlebearapps/untether/issues/1034), `utils/engine_argv.py`).
+
 ### Permissions
 
 Untether supports two modes:

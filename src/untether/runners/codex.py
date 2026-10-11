@@ -21,6 +21,7 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import codex as codex_schema
+from ..utils import engine_argv
 from ..utils.paths import relativize_command
 from .extra_args_guard import (
     SECURITY_DOC_REF,
@@ -751,7 +752,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         args = [*self.extra_args]
         if run_options is not None:
             if run_options.model:
-                args.extend(["--model", str(run_options.model)])
+                # #1034: validated + joined, never a separate value token.
+                args.append(
+                    engine_argv.joined(
+                        "--model", engine_argv.check_model(str(run_options.model))
+                    )
+                )
             if run_options.reasoning:
                 args.extend(
                     [
@@ -779,7 +785,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if resume.is_continue:
                 args.extend(["resume", "--last", "-"])
             else:
-                args.extend(["resume", resume.value, "-"])
+                # #1034: the session id is positional, so there is no joined
+                # form — clap (0.160.1) reads a dash-leading one as an option
+                # of `exec resume`. Validation is the whole defence here.
+                args.extend(["resume", engine_argv.check_resume(resume.value), "-"])
         else:
             args.append("-")
         if isinstance(state, CodexRunState):

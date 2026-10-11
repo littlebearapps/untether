@@ -86,8 +86,10 @@ untether opencode
 ## Invocation
 
 ```text
-opencode run --format json [--session <ses_id> | --continue] [--model <provider/model>] -- <prompt>
+opencode run --format json [--session=<ses_id> | --continue] [--model=<provider/model>] -- <prompt>
 ```
+
+The session id and model are validated and joined to their flag: OpenCode 1.14.33 reads a dash-leading token after `--session` / `--model` as another flag ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 
 The prompt goes after `--`, so a prompt starting with `-` is never read as a flag.
 `--continue` is used for `/continue`; a reply to a message with a resume line uses

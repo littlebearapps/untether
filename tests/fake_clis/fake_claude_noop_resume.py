@@ -22,7 +22,7 @@ emitting their last line.
 ``ClaudeRunner`` in legacy (non permission-mode) invocation passes the
 prompt as the final CLI argument after a bare ``--`` and never writes
 anything to this process's stdin, so this script only needs to read argv
-(specifically: whether ``--resume <value>`` is present) — stdin is ignored
+(specifically: whether ``--resume=<value>`` is present) — stdin is ignored
 entirely.
 
 This file is test-only. Nothing under ``src/`` imports it.
@@ -43,7 +43,12 @@ def emit(obj: dict[str, Any]) -> None:
 
 
 def _resume_arg(argv: list[str]) -> str | None:
-    """Return the value following ``--resume``/``-r`` in argv, or None."""
+    """Return the ``--resume`` value in argv, or None: the joined
+    ``--resume=<id>`` form Untether sends (#1034), or the token following
+    ``--resume``/``-r``."""
+    for arg in argv:
+        if arg.startswith("--resume="):
+            return arg.split("=", 1)[1]
     for flag in ("--resume", "-r"):
         if flag in argv:
             idx = argv.index(flag)

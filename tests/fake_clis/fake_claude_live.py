@@ -1229,7 +1229,11 @@ def scenario_followup_launches_bg(first: dict) -> None:
 
 
 def scenario_resume_after_killed_task(first: dict) -> None:
-    resumed = "--resume" in sys.argv or "-r" in sys.argv
+    resumed = (
+        "--resume" in sys.argv
+        or "-r" in sys.argv
+        or any(a.startswith("--resume=") for a in sys.argv)
+    )
     if resumed:
         emit(
             {

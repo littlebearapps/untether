@@ -2916,7 +2916,7 @@ async def test_run_serializes_new_session_after_session_is_known(
         "}\n"
         "\n"
         "args = sys.argv[1:]\n"
-        "if '--resume' in args or '-r' in args:\n"
+        "if any(a.startswith('--resume=') for a in args):\n"
         "    print(json.dumps(init), flush=True)\n"
         "    with open(resume_marker, 'w', encoding='utf-8') as f:\n"
         "        f.write('started')\n"

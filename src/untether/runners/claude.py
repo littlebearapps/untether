@@ -64,6 +64,7 @@ from ..runner import (
 from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
+from ..utils import engine_argv
 from ..utils.env_audit import audit_proc_env
 from ..utils.json_state import atomic_write_json
 from ..utils.paths import get_run_base_dir, get_run_channel_id, get_run_sender_id
@@ -10117,16 +10118,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ):
             args.append(_HOOK_EVENTS_FLAG)
 
+        # #1034: validated, and joined as `--flag=value`. Claude Code reads a
+        # dash-leading token after `--resume` as another flag (2.1.296:
+        # `--resume --version` prints the version), and a resume line typed
+        # in chat reaches here; the joined form is never re-parsed.
         if resume is not None:
             if resume.is_continue:
                 args.append("--continue")
             else:
-                args.extend(["--resume", resume.value])
+                args.append(
+                    engine_argv.joined(
+                        "--resume", engine_argv.check_resume(resume.value)
+                    )
+                )
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model
-        if model is not None:
-            args.extend(["--model", str(model)])
+        if model is not None and model != "":
+            args.append(
+                engine_argv.joined("--model", engine_argv.check_model(str(model)))
+            )
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning
@@ -12481,6 +12492,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if block_result is not None:
             yield block_result
             return
+        # #1034: a model / resume value the CLI could read as a flag — also
+        # before start_run, so a bad id never lands in _ACTIVE_RUNNERS.
+        refusal = self._invalid_argv_refusal(resume)
+        if refusal is not None:
+            yield refusal
+            return
 
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
@@ -12981,10 +12998,22 @@ def _validate_permission_mode(value: object, config_path: Path) -> str | None:
     return mode
 
 
+def _check_config_model(model: Any, config_path: Path) -> None:
+    """#1034: refuse a `[claude] model` that could read as a CLI flag."""
+    if model is None or model == "":
+        return
+    problem = engine_argv.model_problem(str(model))
+    if problem is not None:
+        raise ConfigError(
+            f"Invalid `claude.model` in {config_path}; a model id {problem}."
+        )
+
+
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     claude_cmd = shutil.which("claude") or "claude"
 
     model = config.get("model")
+    _check_config_model(model, config_path)
     # #749 remember which branch this came from: an explicit user choice
     # survives into prompting modes, the inherited default does not.
     allowed_tools_explicit = "allowed_tools" in config

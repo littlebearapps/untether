@@ -46,9 +46,9 @@ class TestClaudeBuildArgs:
         state = ClaudeStreamState()
         token = ResumeToken(engine="claude", value="sess123")
         args = runner.build_args("hello", token, state=state)
-        assert "--resume" in args
-        idx = args.index("--resume")
-        assert args[idx + 1] == "sess123"
+        # #1034: joined, never a separate value token.
+        assert "--resume=sess123" in args
+        assert "--resume" not in args and "sess123" not in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -58,7 +58,7 @@ class TestClaudeBuildArgs:
         token = ResumeToken(engine="claude", value="", is_continue=True)
         args = runner.build_args("hello", token, state=state)
         assert "--continue" in args
-        assert "--resume" not in args
+        assert not any(a.startswith("--resume") for a in args)
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -68,9 +68,8 @@ class TestClaudeBuildArgs:
         opts = RunOptions(model="opus-4")
         with patch("untether.runners.claude.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "opus-4"
+        assert "--model=opus-4" in args
+        assert "--model" not in args
 
     def test_permission_mode(self) -> None:
         runner = self._runner()
@@ -183,7 +182,7 @@ class TestClaudeBuildArgs:
         assert "--chrome" in args
         chrome_idx = args.index("--chrome")
         verbose_idx = args.index("--verbose")
-        resume_idx = args.index("--resume")
+        resume_idx = args.index("--resume=sess123")
         assert verbose_idx < chrome_idx < resume_idx
         # Prompt still last after `--`
         assert args[-2] == "--"
@@ -663,9 +662,8 @@ class TestCodexBuildArgs:
         opts = RunOptions(model="gpt-4o")
         with patch("untether.runners.codex.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "gpt-4o"
+        assert "--model=gpt-4o" in args
+        assert "--model" not in args
 
     def test_reasoning_effort(self) -> None:
         runner = self._runner()
@@ -821,9 +819,8 @@ class TestOpenCodeBuildArgs:
         state = runner.new_state("hello", None)
         token = ResumeToken(engine="opencode", value="ses_abc123")
         args = runner.build_args("hello", token, state=state)
-        assert "--session" in args
-        idx = args.index("--session")
-        assert args[idx + 1] == "ses_abc123"
+        assert "--session=ses_abc123" in args
+        assert "--session" not in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -831,7 +828,7 @@ class TestOpenCodeBuildArgs:
         token = ResumeToken(engine="opencode", value="", is_continue=True)
         args = runner.build_args("hello", token, state=state)
         assert "--continue" in args
-        assert "--session" not in args
+        assert not any(a.startswith("--session") for a in args)
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -839,9 +836,8 @@ class TestOpenCodeBuildArgs:
         opts = RunOptions(model="gpt-4o")
         with patch("untether.runners.opencode.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "gpt-4o"
+        assert "--model=gpt-4o" in args
+        assert "--model" not in args
 
 
 # ---------------------------------------------------------------------------

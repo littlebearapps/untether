@@ -107,6 +107,8 @@ The runner should launch Pi in headless JSON mode:
 pi [extra_args] --print --mode json [--provider <provider>] [--model <model>] --session <session.jsonl> <prompt>
 ```
 
+The model and session token stay separate tokens: Pi's own parser (0.78.0) has no `--model=` / `--session=` form and takes the next token as the value unconditionally. Untether still refuses a dash-leading value or one with control characters before spawning ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
+
 When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat; `/continue` passes `--continue` instead of `--session`. The subprocess gets an allowlisted environment (plus `NO_COLOR=1` and `CI=1`), not Untether's full environment.
 
 #### Event translation
