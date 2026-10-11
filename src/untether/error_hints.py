@@ -8,6 +8,14 @@ from __future__ import annotations
 # → overload/server → rate limits → model → context → content safety
 # → setting compatibility (#416) → invalid request → session → network
 # → signals → execution.
+# #228: a resume that fails before its first turn. Named so the bridge can
+# withhold it from a run that did have turns (#887) — the patterns below only
+# see the error text.
+SESSION_NOT_LOADED_HINT = (
+    "The session could not be loaded \N{EM DASH} Claude Code may have"
+    " archived or expired it. Send /new to start a fresh session."
+)
+
 _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Engine end-of-life / unsupported client ---
     # These MUST stay first. Both signatures are emitted by CLIs that exit
@@ -390,11 +398,7 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "The process aborted unexpectedly. Try starting a fresh session with /new.",
     ),
     # --- Execution errors ---
-    (
-        "error_during_execution",
-        "The session could not be loaded \N{EM DASH} Claude Code may have"
-        " archived or expired it. Send /new to start a fresh session.",
-    ),
+    ("error_during_execution", SESSION_NOT_LOADED_HINT),
     # --- Process / session errors ---
     (
         "finished without a result event",

@@ -781,6 +781,80 @@ def test_829_max_hold_notice_names_the_quiet_time(
     assert "reply to continue" not in text.lower()
 
 
+@pytest.mark.parametrize(
+    ("max_s", "span"),
+    [(14400.0, "4 h"), (43200.0, "12 h"), (5400.0, "1.5 h"), (600.0, "10 min")],
+)
+def test_887_abs_cap_mid_turn_notice_needs_no_background_task(
+    max_s: float, span: str
+) -> None:
+    """#887: a turn cut short at the session time limit is announced even
+    when there is no background task to name."""
+    text = rb._live_closing_notice("abs_cap", [], mid_turn=True, max_s=max_s)
+    assert text == (
+        "\N{HOURGLASS WITH FLOWING SAND} Closing session — it reached the session "
+        f"time limit ({span}) and the turn in progress didn't finish in time. "
+        "Stopping it."
+    )
+    assert "/new" not in text
+
+
+def test_887_abs_cap_notice_with_tasks_is_unchanged() -> None:
+    assert rb._live_closing_notice(
+        "abs_cap", ["a"], mid_turn=True, max_s=14400.0
+    ) == rb._live_closing_notice("abs_cap", ["a"])
+
+
+_EDE = "Claude Code run failed (error_during_execution)\nsession: 0202db2b"
+
+
+def test_887_abs_cap_close_never_gets_the_archive_hint() -> None:
+    """#887: the run failed because Untether closed the session at its time
+    limit — the hint says so and never suggests /new."""
+    hint = rb._run_error_hint(
+        _EDE + " \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 50",
+        usage={"num_turns": 50},
+        close_reason="abs_cap",
+    )
+    assert hint is not None
+    assert "time limit" in hint and "live_session_max_s" in hint
+    assert "did not archive or expire" in hint
+    assert "could not be loaded" not in hint and "/new" not in hint
+    # ...whatever the error text was (the CLI may die without a result).
+    assert (
+        rb._run_error_hint(
+            "claude finished without a result event", usage=None, close_reason="abs_cap"
+        )
+        == hint
+    )
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"num_turns": 50}, False),  # the session loaded and ran: not archived
+        ({"num_turns": 1}, False),
+        ({"num_turns": 0}, True),  # #228: a resume that never started
+        ({}, True),  # no turn count reported: keep the hint
+        (None, True),
+    ],
+)
+def test_887_archive_hint_only_for_a_run_with_no_turns(
+    usage: dict | None, expected: bool
+) -> None:
+    hint = rb._run_error_hint(_EDE, usage=usage, close_reason=None)
+    assert (hint is not None and "could not be loaded" in hint) is expected
+
+
+def test_887_other_hints_are_untouched() -> None:
+    from untether.error_hints import get_error_hint
+
+    for raw in ("rate limit exceeded", "something with no hint at all"):
+        assert rb._run_error_hint(
+            raw, usage={"num_turns": 9}, close_reason="max_hold"
+        ) == get_error_hint(raw)
+
+
 def test_829_closed_notice_wording() -> None:
     assert rb._live_closed_notice(False) == (
         "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to "

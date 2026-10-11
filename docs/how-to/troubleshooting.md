@@ -597,14 +597,17 @@ To turn this off and get the pre-v0.36.0 behaviour back (stop at the first answe
 
 ## Session closed after 4 hours and the next message started fresh
 
-**Symptoms:** After a long Claude session — often one where background agents kept reporting back by themselves — you see `⏳ Closing session — 2 background tasks still running at the session time limit: … Stopping them.`, then `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.` The background status message ends `⏹️ … stopped (session time limit reached)`.
+**Symptoms:** After a long Claude session — often one where background agents kept reporting back by themselves — you see `⏳ Closing session — 2 background tasks still running at the session time limit: … Stopping them.` (or `⏳ Closing session — it reached the session time limit (4 h) and the turn in progress didn't finish in time. Stopping it.`), then either `↩️ Reply to continue in the same session.` or `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.` The background status message ends `⏹️ … stopped (session time limit reached)`.
 
 Every open Claude session has an absolute time limit, `[watchdog] live_session_max_s` (default `14400`, 4 hours). It's a backstop against a session that never ends, such as an endless `Monitor`. The clock starts when the session's Claude process starts (usually your first message) and isn't reset by follow-ups or by `🔔 Background task finished` turns, so a session kept busy by background agents reaches the limit even if you only sent one message. There's no warning before it.
 
 What happens at the limit depends on what's running:
 
 - **Nothing running** (Claude had answered and no background work was live): the session closes cleanly and your next message continues it, with a fresh 4-hour clock.
-- **A turn or background tasks still running:** they're stopped, and the next message starts a fresh session. Untether currently does this even when Claude's own reply had finished and the session could have been resumed ([#887](https://github.com/littlebearapps/untether/issues/887)).
+- **Claude is in the middle of a reply:** Untether waits for that reply to finish (up to 30 more minutes) and closes the session straight after it, so the reply isn't lost. Only a reply still running after those 30 minutes is stopped; the error message then says Untether closed the session at its time limit.
+- **Background tasks still running after Claude's reply:** they're stopped. When Claude Code shuts down cleanly, which is the usual case, you see `↩️ Reply to continue in the same session.` and your next message picks up where it left off. If it doesn't shut down cleanly you see the `⚠️` warning and the next message starts a fresh session.
+
+Before v0.36.1 the limit stopped a reply in mid-flight, always started a fresh session when background tasks were running, and could show a misleading "The session could not be loaded … Send /new" hint ([#887](https://github.com/littlebearapps/untether/issues/887)). You never need `/new` after this limit unless you want a fresh start.
 
 A session that closes by itself between tasks (about a minute after the last background work ends) resumes on your next message with a fresh clock, so the limit mostly affects workflows that keep background agents running back to back for hours.
 
@@ -619,7 +622,8 @@ A session that closes by itself between tasks (about a minute after the last bac
 
     It's read each time a session starts, so the next new session uses it without a restart. A session that's already open keeps the limit it started with.
 
-- **After a fresh start**, check `git status` for partial work the stopped tasks left behind, and tell Claude where it was up to (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
+- **Reply to continue.** The stopped background tasks don't restart by themselves, so tell Claude what was running (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
+- **After a fresh start** (the `⚠️` warning), check `git status` for partial work the stopped tasks left behind, and tell Claude where it was up to (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
 
 ## "Asked for auto mode — Claude Code is running default"
 

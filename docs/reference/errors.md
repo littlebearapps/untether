@@ -148,7 +148,7 @@ These are checked before the generic `invalid_request_error` pattern, because th
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. | Claude |
+| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. Shown only when the run had no turns; a run that did work before failing gets no hint, and a session Untether closed at its time limit says so instead ([#887](https://github.com/littlebearapps/untether/issues/887)). | Claude |
 | `finished without a result event` | The engine exited before producing a final answer. Try sending a new message to resume. | All |
 | `finished but no session_id` | The engine crashed during startup. Check that the CLI is installed and working. | All |
 

@@ -547,6 +547,8 @@ Kill switch: `[watchdog] hold_for_async_hooks = false` passes no flag and holds 
 
 **Lifecycle** (`_live_session_lifecycle`, per run). While idle: nothing live for `post_result_limbo_grace` (60 s) → close stdin; background work still live but **quiet** for `post_result_bg_max_hold` (1800 s) → notice + close; `live_session_max_s` (4 h) from spawn → notice + close; a pending approval/ask or an injected line not yet started pauses the timers.
 
+**Absolute cap ([#887](https://github.com/littlebearapps/untether/issues/887)).** The cap bounds the process, not the turn. When it is reached while a turn is running (or a follow-up has been written and not yet started), the close is deferred to that turn's result — logged once as `claude.live_session.abs_cap_deferred` (`turn`, `cap_s`, `grace_s`, `live_tasks`) — and the session is closed at the turn boundary (`only_if_idle`), where the transcript is complete. The deferral lasts at most `_abs_cap_turn_grace_s` (30 min, a runner knob, not a setting); a turn still running after that is closed mid-turn as before, always with a `closing` notice (`mid_turn: true`, `max_s`) even when no background task is live. Follow-ups written during the deferral are still injected and run. `stdin_closed` carries `turn_idle` (False = a turn or injected line was open at the close).
+
 **Background hold = quiet time** ([#829](https://github.com/littlebearapps/untether/issues/829)). The hold counts from the newest background activity, not from the last turn. Activity is read from the native task map (`latest_background_progress`) and comes from:
 
 - a turn, or a task starting or being revived (#801);
@@ -563,8 +565,8 @@ A silent command (`sleep 600`) and an agent that has stopped reporting still clo
 The session is quarantined (`forced_teardown_after_result`) only when the close was not clean:
 
 - a close of an idle turn with no live background work leaves a complete transcript, so it isn't quarantined even if the CLI needed a signal ([#791](https://github.com/littlebearapps/untether/issues/791));
-- **#829 B2:** an Untether-initiated close (`max_hold`, `cancel`, `new`, `drain`, `options_changed`) of a session whose turn was closed isn't quarantined when the CLI exits **rc 0 on the SIGINT**. Probed 6/6 resumable, no dangling `tool_use`. It logs `claude.live_session.exited_after_sigint stopped_clean=True`, and the decision is taken after the SIGINT wait;
-- `abs_cap` (it can close mid-turn), the `error` close, a non-zero exit and a CLI that also ignores SIGINT (the SIGTERM path) keep the quarantine.
+- **#829 B2:** an Untether-initiated close (`max_hold`, `abs_cap` since [#887](https://github.com/littlebearapps/untether/issues/887), `cancel`, `new`, `drain`, `options_changed`) of a session whose turn was closed isn't quarantined when the CLI exits **rc 0 on the SIGINT**. Probed 6/6 resumable, no dangling `tool_use`. It logs `claude.live_session.exited_after_sigint stopped_clean=True`, and the decision is taken after the SIGINT wait;
+- an `abs_cap` close of a turn that outlived the cap's grace (mid-turn), the `error` close, a non-zero exit and a CLI that also ignores SIGINT (the SIGTERM path) keep the quarantine.
 
 The #631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
 
@@ -574,6 +576,8 @@ The #631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain
 - quarantined: `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.`
 
 After `options_changed` only the warning is sent, because the queued message already resumes.
+
+**Time-limit notices ([#887](https://github.com/littlebearapps/untether/issues/887)).** The bridge subscribes to a session's notices when the session starts, but until the first result it passes only `abs_cap` ones, so a first turn cut short at the cap is announced too: `⏳ Closing session — it reached the session time limit (4 h) and the turn in progress didn't finish in time. Stopping it.`, then the turn's error final, then the continue / fresh-session line. The error final's hint comes from `_run_error_hint`: for an `abs_cap` close it says Untether closed the session at its time limit and that Claude Code did not archive or expire it, whatever the CLI's last words were; the #228 "could not be loaded … send /new" hint for `error_during_execution` is shown only when the result reports no turns.
 
 **Unexpected exit while idle ([#1001](https://github.com/littlebearapps/untether/issues/1001)).** When the CLI of an idle live session exits without a close by Untether — killed from outside (`kill`, the OOM killer, `systemd-oomd`) or crashing between turns — `run_impl` reports it once the exit code is known (`_note_live_session_death`). It applies only when no close reason is set, no turn is open (an interrupted turn already gets its error final, #806), Untether isn't shutting down (the drain notice covers a restart), and the exit was non-zero or took background tasks with it; a clean rc 0 exit with nothing running stays the silent #820 `reader_done`. The tasks it took down are those still live in the map (SIGKILL: the CLI said nothing) plus those ended unsuccessfully in the last 10 s (`_DEATH_TASK_WINDOW_S`: on SIGTERM the CLI ends its tasks itself, as `failed`, and exits 143). They are marked `stopped`, `state.live_exit_cause` is set (`external_signal` for `-N` / `128+N`, `crash` for another non-zero rc, `exited` for rc 0 with work still live), and the WARN `claude.live_session.died_unexpectedly` logs `rc`, `signal`, `signal_name`, `exit_cause`, `live_tasks`, `task_ids`, `idle_s`, `last_progress_age_s`, `age_s` and `quarantined`. Listeners get one `died` event; the bridge re-finalises the background status message under the `died` reason (`⏹️ background tasks ended · 2 stopped (session ended unexpectedly)`, even when the poll had already finalised it with ❌ rows) and sends one pushed notice replying to the message that launched the work, e.g. `⚠️ The Claude session ended unexpectedly (terminated by SIGTERM / exit 143) — 2 background tasks were stopped: A, B.` followed by the #829 continue/fresh-session line. `session.summary` then logs `ok=False` with `exit_cause`. OOM kills are not told apart from other SIGKILLs.
 
@@ -954,6 +958,7 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 | Steer / queue | own steer window, no `priority` sent | user-message `priority` (`now` / `next` / `later`) | documented for TypeScript only |
 | `/export` | Untether's recorded events | the CLI's session transcript | no export API |
 | Stopping one background task | not offered | `stop_task` request | — |
+| Ending a turn that outlives the session time limit's grace (#887) | close stdin, then SIGINT | `interrupt` request, then close at the idle boundary | same catch as `/cancel`: the interrupted turn's messages must be drained; needs a dev-bot run |
 
 **Custom because native fails a "works on Untether's surface" test:**
 
@@ -963,7 +968,7 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 | Loop mode owning the schedule | `CronCreate` / `ScheduleWakeup` fire only while the process is alive and idle, with no catch-up |
 | Outbox file delivery | `SendUserFile` needs a Remote Control client or cloud session |
 
-**No native equivalent:** stall and liveness watchdogs, diff previews, Pause & Outline, approval reminders, daily
+**No native equivalent:** the live-session lifetime cap (`live_session_max_s`; CLI 2.1.296 has no session-lifetime or idle-exit flag in `--help` — only closing stdin ends a stream-json session; re-checked 2026-10-11 for #887), stall and liveness watchdogs, diff previews, Pause & Outline, approval reminders, daily
 budget, empty-resume quarantine and auto-continue (upstream-bug workarounds), wake-ack consolidation.
 
 Adopting the `claude-agent-sdk` Python package in place of the hand-written control channel is deferred (Nathan,

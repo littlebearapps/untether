@@ -569,6 +569,9 @@ class LiveSession:
     # live" part. A close that stopped live tasks from such a turn, asked
     # for by Untether and exiting rc 0 on SIGINT, stopped cleanly (B2).
     closed_turn_idle: bool = False
+    # #887: the absolute cap was reached while a turn was running; the close
+    # is deferred to the turn boundary (logged once).
+    abs_cap_deferred: bool = False
     # #829: the tasks named when stdin was closed, and whether the
     # lifecycle has emitted its ``"closed"`` notice (once).
     close_tasks: list[str] = field(default_factory=list)
@@ -842,6 +845,8 @@ async def close_live_session(
         live_tasks=len(tasks),
         turn=live.state.turn,
         age_s=round(time.monotonic() - live.spawned_at, 1),
+        # #887: False = a turn (or an injected line) was open at the close.
+        turn_idle=live.closed_turn_idle,
         # #829: how long the background work had been quiet at the close.
         last_progress_age_s=_last_progress_age_s(live.state),
     )
@@ -869,6 +874,11 @@ async def close_live_session(
         if reason == "wake_cap":
             # #925 §14.4: the notice names the cap.
             payload["wake_cap"] = live.state.wake_cap
+        if reason == "abs_cap":
+            # #887: the notice names the limit and says whether a turn was
+            # cut short (there may be no background task to name).
+            payload["mid_turn"] = not live.closed_turn_idle
+            payload["max_s"] = live.state.live_session_max_s
         if hook_notice:
             payload["hooks"] = hooks
             payload["hook_count"] = live.close_hook_count
@@ -887,11 +897,14 @@ async def close_live_session(
 # cut short is expected, so it logs at INFO and gets no extra notice.
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 # #829 B2: Untether-initiated closes that may stop cleanly on SIGINT (rc 0,
-# transcript complete, resumable — P0 G7-G9). ``abs_cap`` closes mid-turn and
-# ``error`` follows a failed run: both keep the forced-teardown quarantine.
+# transcript complete, resumable — P0 G7-G9). ``error`` follows a failed run
+# and keeps the forced-teardown quarantine. #887: ``abs_cap`` qualifies like
+# ``max_hold`` when it closed between turns (``closed_turn_idle``, checked by
+# ``_may_stop_clean``); a turn that outlived the cap's grace does not.
 _STOPPED_CLEAN_REASONS = frozenset(
     {
         "max_hold",
+        "abs_cap",
         "cancel",
         "new",
         "drain",
@@ -10889,6 +10902,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # a wake-up's fire time) the hold waits this much longer, so the CLI's own
     # stop notice / wake turn lands before Untether would close.
     _declared_wait_grace_s: float = 60.0
+    # #887: how long past ``live_session_max_s`` a turn already running may
+    # take to reach its result before the session is closed under it.
+    _abs_cap_turn_grace_s: float = 1800.0
 
     async def _live_session_lifecycle(
         self,
@@ -10916,7 +10932,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         - #872, ``state.bg_hold_declared_waits``: never before a declared wait
           ends (``declared_wait_until``: a background Bash's ``timeout``, a
           pending ScheduleWakeup's fire time, + ``_declared_wait_grace_s``);
-        - ``abs_cap_s`` from spawn → notice + close (``abs_cap``).
+        - ``abs_cap_s`` from spawn → notice + close (``abs_cap``). #887: a
+          turn running at the cap is not closed under — the close waits for
+          its result (the turn boundary), for at most
+          ``_abs_cap_turn_grace_s``; only a turn still running after that is
+          closed mid-turn, always with a notice.
         Closing stdin makes the CLI stop its tasks and exit rc=0 (F3/F4). Only
         if it doesn't exit within ``_live_close_grace_s`` does
         ``_await_live_exit_or_force`` log ``close_grace_expired`` and escalate
@@ -11022,8 +11042,30 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 elif not hooks_pending:
                     state.hook_hold_logged = False
                 if abs_cap_s > 0 and now - live.spawned_at >= abs_cap_s:
-                    await close_live_session(sid, "abs_cap", notice=live_work)
-                    continue
+                    # #887: the cap bounds the process, not the turn. A turn
+                    # in flight (or a follow-up already written) gets a
+                    # bounded grace to reach its result; the session is then
+                    # closed between turns, where it stays resumable.
+                    turn_open = not live.idle or _awaiting_injected(state)
+                    over_s = now - live.spawned_at - abs_cap_s
+                    if not turn_open or over_s >= self._abs_cap_turn_grace_s:
+                        await close_live_session(
+                            sid,
+                            "abs_cap",
+                            notice=live_work or turn_open,
+                            only_if_idle=not turn_open,
+                        )
+                        continue
+                    if not live.abs_cap_deferred:
+                        live.abs_cap_deferred = True
+                        run_logger.info(
+                            "claude.live_session.abs_cap_deferred",
+                            session_id=sid,
+                            turn=state.turn,
+                            cap_s=abs_cap_s,
+                            grace_s=self._abs_cap_turn_grace_s,
+                            live_tasks=len(live_task_descriptions(state)),
+                        )
                 if not live.idle:
                     live.idle_since = None
                     live.hold_started = None
@@ -11436,7 +11478,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # background agent ignores EOF, P0 G6) may still stop cleanly on
         # SIGINT: rc 0, a complete transcript, resumable (P0 G7-G9). Its
         # quarantine is decided after the SIGINT wait instead of before it.
-        # ``abs_cap`` (mid-turn) and ``error`` never qualify.
+        # ``error`` never qualifies; ``abs_cap`` only between turns (#887).
         may_stop_clean = not idle_clean and _may_stop_clean(live)
         # #791 (a): record what the CLI was doing before any signal changes it.
         run_logger.warning(

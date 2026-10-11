@@ -60,6 +60,8 @@ _ENV = (
     "FAKE_CLAUDE_WAKE_DELAY_S",
     # #1001
     "FAKE_CLAUDE_DEATH",
+    # #887: hold the first turn open past the absolute cap.
+    "FAKE_CLAUDE_RESULT_DELAY_S",
 )
 
 
@@ -130,11 +132,12 @@ async def _run(
     wake_s: float = 0.3,
     timeout: float = 20,
     permission_mode: str = "bypassPermissions",
+    timings: dict[str, float] | None = None,
 ) -> tuple[ClaudeRunner, list[Any]]:
     os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
     os.environ["FAKE_CLAUDE_WAKE_S"] = str(wake_s)
     runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode=permission_mode)
-    for name, value in _TIMINGS.items():
+    for name, value in {**_TIMINGS, **(timings or {})}.items():
         setattr(runner, name, value)
     events: list[Any] = []
     with anyio.fail_after(timeout):
@@ -1300,19 +1303,108 @@ async def test_829_b2_nonzero_exit_on_sigint_still_quarantines(
     assert closed["quarantined"] is True
 
 
-async def test_829_b2_abs_cap_close_still_quarantines(
+async def test_887_abs_cap_close_of_an_idle_turn_stopped_by_sigint_is_not_quarantined(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:
+    """#887: the cap reached between turns over a running background agent
+    is the same state as a ``max_hold`` close (#829 B2) — the CLI exits rc 0
+    on SIGINT with a complete transcript, so the session stays resumable.
+    (Until #887 this close was always quarantined.)"""
     from structlog.testing import capture_logs
 
     _settings(monkeypatch, live_session_max_s=0.5)
     _progress_env(eof_mode="until_sigint")
+    clock = _CloseClock()
     with capture_logs() as logs:
-        runner, _ = await _run("bg_agent_silent")
+        runner, _ = await _run("bg_agent_silent", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "abs_cap"
+    assert runner.current_stream.proc_returncode == 0
+    assert not quarantine.is_quarantined("claude", SID)
+    assert _events(logs, "session.quarantined") == []
+    sigint = _events(logs, "claude.live_session.exited_after_sigint")
+    assert sigint[0]["stopped_clean"] is True and sigint[0]["quarantined"] is False
+    closed, _ = clock.first("closed")
+    assert closed == {"reason": "abs_cap", "quarantined": False, "tasks": ["bg a1"]}
+
+
+async def test_887_abs_cap_nonzero_exit_on_sigint_still_quarantines(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    _settings(monkeypatch, live_session_max_s=0.5)
+    _progress_env(eof_mode="until_sigint", sigint_rc=1)
+    runner, _ = await _run("bg_agent_silent")
     assert _engine_state(runner).live_close_reason == "abs_cap"
     assert quarantine.is_quarantined("claude", SID)
-    sigint = _events(logs, "claude.live_session.exited_after_sigint")
-    assert sigint[0]["stopped_clean"] is False and sigint[0]["quarantined"] is True
+
+
+async def test_887_abs_cap_waits_for_the_running_turn_to_end(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#887: the cap is reached 0.5 s into a 1.5 s turn. The session is not
+    closed under the turn — it closes at the turn boundary, cleanly."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, live_session_max_s=0.5)
+    _progress_env(result_delay_s=1.5)
+    notices: list[tuple[str, dict]] = []
+    subscribed = False
+
+    async def subscribe(evt: Any) -> None:
+        nonlocal subscribed
+        if not subscribed:
+            subscribed = True
+            add_live_session_listener(SID, lambda kind, p: notices.append((kind, p)))
+
+    with capture_logs() as logs:
+        runner, events = await _run("followup", on_event=subscribe)
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is True and events[-1].answer == "FIRST"
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert [c["reason"] for c in closes] == ["abs_cap"]
+    assert closes[0]["age_s"] >= 1.4  # after the turn, not at the 0.5 s cap
+    assert closes[0]["turn_idle"] is True
+    deferred = _events(logs, "claude.live_session.abs_cap_deferred")
+    assert len(deferred) == 1 and deferred[0]["cap_s"] == 0.5
+    assert runner.current_stream.proc_returncode == 0
+    assert runner.current_stream.sigterm_sent is False
+    assert not quarantine.is_quarantined("claude", SID)
+    # Nothing was cut short, so there is no closing notice.
+    assert [k for k, _ in notices] == ["closed"]
+    assert notices[0][1]["quarantined"] is False
+
+
+async def test_887_abs_cap_closes_a_turn_that_outlives_the_grace_with_a_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#887: a turn still running when the bounded grace after the cap runs
+    out is closed as before — and listeners are always told why, even with
+    no background task to name (the original report got no notice)."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, live_session_max_s=0.5)
+    _progress_env(result_delay_s=2.5)
+    notices: list[tuple[str, dict]] = []
+    subscribed = False
+
+    async def subscribe(evt: Any) -> None:
+        nonlocal subscribed
+        if not subscribed:
+            subscribed = True
+            add_live_session_listener(SID, lambda kind, p: notices.append((kind, p)))
+
+    with capture_logs() as logs:
+        runner, _ = await _run(
+            "followup", on_event=subscribe, timings={"_abs_cap_turn_grace_s": 0.4}
+        )
+    assert _engine_state(runner).live_close_reason == "abs_cap"
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert [c["reason"] for c in closes] == ["abs_cap"]
+    assert 0.9 <= closes[0]["age_s"] < 2.0  # cap + grace, before the result
+    assert closes[0]["turn_idle"] is False
+    assert notices and notices[0] == (
+        "closing",
+        {"reason": "abs_cap", "tasks": [], "mid_turn": True, "max_s": 0.5},
+    )
 
 
 @pytest.mark.parametrize(
@@ -1324,7 +1416,8 @@ async def test_829_b2_abs_cap_close_still_quarantines(
         ("drain", True, True),
         ("options_changed", True, True),
         ("max_hold", False, False),  # a turn (or injected line) was open
-        ("abs_cap", True, False),  # closes mid-turn too — never exempt
+        ("abs_cap", True, True),  # #887: reached between turns
+        ("abs_cap", False, False),  # #887: the turn outlived the cap's grace
         ("error", True, False),  # follows a failed run
         ("idle_no_tasks", True, False),  # nothing live: #791's idle_clean covers it
     ],

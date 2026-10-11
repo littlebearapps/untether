@@ -1394,6 +1394,38 @@ async def test_on_resume_failed_called_for_zero_turn_error() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("num_turns", "hinted"), [(50, False), (0, True)])
+async def test_887_archive_hint_not_shown_for_a_run_that_had_turns(
+    num_turns: int, hinted: bool
+) -> None:
+    """#887: ``error_during_execution`` after 50 turns is not a session that
+    "could not be loaded" — the user must not be told to send /new."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="Claude Code run failed (error_during_execution)",
+                usage={"num_turns": num_turns},
+            )
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="long-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="long-session"),
+    )
+    texts = [c["message"].text for c in transport.send_calls + transport.edit_calls]
+    assert any("error_during_execution" in t for t in texts)
+    assert any("could not be loaded" in t for t in texts) is hinted
+
+
+@pytest.mark.anyio
 async def test_on_resume_failed_not_called_on_success() -> None:
     """Callback does not fire when the run succeeds."""
     transport = FakeTransport()

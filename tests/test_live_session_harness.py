@@ -316,6 +316,45 @@ async def test_829_unclean_close_warns_of_a_fresh_session(
     assert not any("Reply to continue" in t for t in _texts(transport))
 
 
+async def test_887_turn_cut_short_at_the_time_limit_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#887 end to end: a turn that outlives the session time limit and its
+    grace is closed with a notice naming the limit, an error final that says
+    Untether closed it, and the continue line — never "/new"."""
+    _watchdog(monkeypatch, live_session_max_s=0.5)
+    os.environ["FAKE_CLAUDE_RESULT_DELAY_S"] = "20"
+    transport = await _drive(
+        "followup", timings={**_FAST_CLOSE, "_abs_cap_turn_grace_s": 0.3}
+    )
+    texts = _texts(transport)
+    everything = texts + [c["message"].text for c in transport.edit_calls]
+    notices = [t for t in texts if "Closing session" in t]
+    assert len(notices) == 1
+    assert "session time limit" in notices[0] and "turn in progress" in notices[0]
+    finals = [t for t in everything if "did not archive or expire" in t]
+    assert finals and all("live_session_max_s" in t for t in finals)
+    assert any(t.endswith("Reply to continue in the same session.") for t in texts)
+    assert texts.index(notices[0]) < next(
+        i for i, t in enumerate(texts) if "Reply to continue" in t
+    )
+    assert not any("/new" in t or "could not be loaded" in t for t in everything)
+
+
+async def test_887_turn_that_ends_within_the_grace_is_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#887: the time limit passes mid-turn; the turn finishes and its answer
+    is delivered, with no closing notice and no error."""
+    _watchdog(monkeypatch, live_session_max_s=0.5)
+    os.environ["FAKE_CLAUDE_RESULT_DELAY_S"] = "1.5"
+    transport = await _drive("followup", timings=_FAST_CLOSE)
+    everything = _texts(transport) + [c["message"].text for c in transport.edit_calls]
+    assert any("FIRST" in t for t in everything)
+    assert not any("Closing session" in t for t in everything)
+    assert not any("time limit" in t or "/new" in t for t in everything)
+
+
 def _summary(logs: list[dict]) -> dict:
     (summary,) = [e for e in logs if e.get("event") == "session.summary"]
     return summary
