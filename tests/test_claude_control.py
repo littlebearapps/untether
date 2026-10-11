@@ -17,6 +17,7 @@ from untether.runners.claude import (
     _DISCUSS_APPROVED,
     _HANDLED_REQUESTS,
     _INFLIGHT_CONTROL_RESPONSES,
+    _OUTLINE_MIN_CHARS,
     _OUTLINE_PENDING,
     _PLAN_EXIT_APPROVED,
     _REQUEST_TO_INPUT,
@@ -4393,3 +4394,175 @@ def test_929_live_idle_request_emits_action_without_turn() -> None:
     assert len(started) == 1
     assert started[0].action.detail.get("inline_keyboard")
     assert state.turn_open is False
+
+
+# ===========================================================================
+# #771: an answered plan keyboard is dropped on the next event, whatever it is
+# ===========================================================================
+
+_771_SESSION = "sess-771"
+
+
+@pytest.fixture
+def _clean_771(_clean_684):
+    # A ``da:`` approve leaves the session flagged until its next ExitPlanMode.
+    _DISCUSS_APPROVED.clear()
+    yield
+    _DISCUSS_APPROVED.clear()
+
+
+pytest_771 = pytest.mark.usefixtures("_clean_771")
+
+
+def _771_assistant(*blocks: dict[str, Any]) -> claude_schema.StreamJsonMessage:
+    return _decode_event(
+        {"type": "assistant", "message": {"id": "msg-771", "content": list(blocks)}}
+    )
+
+
+def _771_tool_use(tool_use_id: str, name: str, **tool_input: Any) -> dict[str, Any]:
+    return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
+
+
+class _771Run:
+    """One Claude run fed through the real translate → tracker → presenter
+    path, with taps going through the real ``claude_control`` callback."""
+
+    def __init__(self) -> None:
+        from untether.progress import ProgressTracker
+        from untether.telegram.bridge import TelegramPresenter
+
+        self.state, self.factory = _make_state_with_session(_771_SESSION)
+        self.tracker = ProgressTracker(engine=ENGINE)
+        self.presenter = TelegramPresenter()
+        _ACTIVE_RUNNERS[_771_SESSION] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+        _SESSION_STDIN[_771_SESSION] = AsyncMock()
+
+    def feed(self, event: claude_schema.StreamJsonMessage) -> None:
+        for evt in translate_claude_event(
+            event, title="claude", state=self.state, factory=self.factory
+        ):
+            self.tracker.note_event(evt)
+
+    async def tap(self, action: str, request_id: str) -> None:
+        from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+        await ClaudeControlCommand().handle(_ctl_ctx(action, request_id))
+
+    def callbacks(self) -> list[str]:
+        """Callback data of every button the next render would carry."""
+        rendered = self.presenter.render_progress(
+            self.tracker.snapshot(), elapsed_s=0.0
+        )
+        return [
+            button["callback_data"]
+            for row in rendered.extra["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+
+    def plan_request(self, request_id: str, tool_use_id: str) -> None:
+        self.feed(_771_assistant(_771_tool_use(tool_use_id, "ExitPlanMode")))
+        self.feed(_929_request(request_id, "ExitPlanMode", tool_use_id=tool_use_id))
+
+    async def pause_and_outline(self, *, outline_chars: int) -> None:
+        """ExitPlanMode → Pause & Outline → outline text → ExitPlanMode again."""
+        self.plan_request("r-plan1", "toolu_plan1")
+        await self.tap("discuss", "r-plan1")
+        self.feed(_929_tool_result("toolu_plan1"))
+        self.feed(_771_assistant({"type": "text", "text": "o" * outline_chars}))
+        self.plan_request("r-plan2", "toolu_plan2")
+
+    def work(self, tool_use_id: str = "toolu_edit") -> None:
+        """Ordinary tool activity that raises no control request."""
+        self.feed(_771_assistant(_771_tool_use(tool_use_id, "Edit", file_path="a.py")))
+        self.feed(_929_tool_result(tool_use_id))
+
+
+def _771_plan_buttons(callbacks: list[str]) -> list[str]:
+    return [c for c in callbacks if c.startswith("claude_control:")]
+
+
+@pytest_771
+@pytest.mark.anyio
+@pytest.mark.parametrize("verdict", ["approve", "deny"])
+async def test_771_post_outline_verdict_drops_the_plan_keyboard(verdict: str) -> None:
+    """Held-open outline (real request id): after the tap, the run goes on
+    with no further control request — the keyboard must still go."""
+    run = _771Run()
+    await run.pause_and_outline(outline_chars=_OUTLINE_MIN_CHARS + 100)
+    assert f"claude_control:{verdict}:r-plan2" in run.callbacks()
+
+    await run.tap(verdict, "r-plan2")
+    run.feed(_929_tool_result("toolu_plan2"))
+    run.work()
+
+    assert _771_plan_buttons(run.callbacks()) == []
+
+
+@pytest_771
+@pytest.mark.anyio
+@pytest.mark.parametrize("verdict", ["approve", "deny"])
+async def test_771_outline_guard_verdict_drops_the_plan_keyboard(verdict: str) -> None:
+    """Short outline (synthetic ``da:`` id, request already auto-denied)."""
+    run = _771Run()
+    await run.pause_and_outline(outline_chars=10)
+    run.feed(_929_tool_result("toolu_plan2"))
+    assert f"claude_control:{verdict}:da:{_771_SESSION}" in run.callbacks()
+
+    await run.tap(verdict, f"da:{_771_SESSION}")
+    run.work()
+
+    assert _771_plan_buttons(run.callbacks()) == []
+
+
+@pytest_771
+@pytest.mark.anyio
+async def test_771_outline_guard_approve_then_auto_approved_plan_exit() -> None:
+    """After a ``da:`` approve the next ExitPlanMode is auto-approved, an
+    early return that never reached the reconcile pass."""
+    run = _771Run()
+    await run.pause_and_outline(outline_chars=10)
+    run.feed(_929_tool_result("toolu_plan2"))
+
+    await run.tap("approve", f"da:{_771_SESSION}")
+    run.plan_request("r-plan3", "toolu_plan3")
+
+    assert _771_plan_buttons(run.callbacks()) == []
+
+
+@pytest_771
+@pytest.mark.anyio
+@pytest.mark.parametrize("verdict", ["approve", "deny", "discuss"])
+async def test_771_first_plan_request_verdict_drops_the_plan_keyboard(
+    verdict: str,
+) -> None:
+    """Pre-outline control: the first ExitPlanMode prompt, every button."""
+    run = _771Run()
+    run.plan_request("r-plan1", "toolu_plan1")
+    assert f"claude_control:{verdict}:r-plan1" in run.callbacks()
+
+    await run.tap(verdict, "r-plan1")
+    run.feed(_929_tool_result("toolu_plan1"))
+
+    assert _771_plan_buttons(run.callbacks()) == []
+
+
+@pytest_771
+@pytest.mark.anyio
+async def test_771_unrelated_pending_approval_keeps_its_buttons() -> None:
+    """Retiring the answered outline keyboard must not touch a request that
+    is still waiting on the same progress message."""
+    run = _771Run()
+    await run.pause_and_outline(outline_chars=_OUTLINE_MIN_CHARS + 100)
+    await run.tap("approve", "r-plan2")
+    run.feed(_929_tool_result("toolu_plan2"))
+
+    run.state.prompting_mode = True
+    run.feed(_771_assistant(_771_tool_use("toolu_bash", "Bash", command="ls")))
+    run.feed(_929_request("r-bash", tool_use_id="toolu_bash", command="ls"))
+    run.work("toolu_sibling")
+
+    assert _771_plan_buttons(run.callbacks()) == [
+        "claude_control:approve:r-bash",
+        "claude_control:deny:r-bash",
+    ]

@@ -7396,6 +7396,48 @@ def _complete_control_action(
     )
 
 
+def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]:
+    """Complete the keyboard action of every request a Telegram tap answered.
+
+    ``respond_to_control_request`` and the synthetic ``da:`` claim can't reach
+    the run's state, so they record the answer in ``_HANDLED_REQUESTS`` and
+    this pass turns it into an ``action_completed`` — the only thing that
+    takes a keyboard off the progress message (#229).
+
+    #683: sweeps ``request_to_action`` as well as ``pending_control_requests``.
+    The Pause & Outline paths return their synthetic
+    ``claude.discuss_approve.N`` action early, before the request is recorded
+    as pending, so that action is reachable only through the mapping.
+
+    #771: called for every assistant and user frame, not only when another
+    control request arrives. A synthetic action has no tool call whose result
+    completes it, so after Approve Plan (which usually leaves plan mode and
+    raises no further request) its keyboard stayed up for the rest of the run.
+    """
+    events: list[UntetherEvent] = []
+    # dict.fromkeys de-dupes while preserving order.
+    handled = [
+        rid
+        for rid in dict.fromkeys(
+            (*state.pending_control_requests, *state.request_to_action)
+        )
+        if rid in _HANDLED_REQUESTS
+    ]
+    for rid in handled:
+        state.pending_control_requests.pop(rid, None)
+        # Also drops the action from control_action_for_tool, so the tool's
+        # result doesn't complete it a second time.
+        completed = _complete_control_action(state, rid, title="Permission resolved")
+        if completed is not None:
+            events.append(completed)
+        logger.debug(
+            "control_request.reconciled",
+            request_id=rid,
+            action_id=completed.action.id if completed is not None else None,
+        )
+    return events
+
+
 def _retire_superseded_discuss_approval(
     state: ClaudeStreamState, *, session_id: str
 ) -> list[UntetherEvent]:
@@ -8710,7 +8752,8 @@ def _translate_claude_event_base(
         case claude_schema.StreamAssistantMessage(
             message=message, parent_tool_use_id=parent_tool_use_id
         ):
-            out: list[UntetherEvent] = []
+            # #771: an answered request's keyboard goes with the next frame.
+            out: list[UntetherEvent] = _reconcile_handled_requests(state)
             for content in message.content:
                 match content:
                     case (
@@ -8808,7 +8851,8 @@ def _translate_claude_event_base(
                 compaction_frame = True
             if not isinstance(message.content, list):
                 return []
-            out: list[UntetherEvent] = []
+            # #771: before the tool results, so one isn't completed twice.
+            out: list[UntetherEvent] = _reconcile_handled_requests(state)
             saw_tool_result = False
             saw_non_tool_result = False
             for content in message.content:
@@ -9561,49 +9605,10 @@ def _translate_claude_event_base(
                     session_id=session_id,
                 )
 
-            # Reconcile requests that were handled via Telegram callback.
-            # send_claude_control_response() can't access state, so it marks
-            # handled requests in _HANDLED_REQUESTS.  We reconcile here to:
-            # 1. Remove from pending (prevents spurious expired_auto_deny)
-            # 2. Emit action_completed to clear stale inline keyboards
-            # See: https://github.com/littlebearapps/untether/issues/229
-            reconciled_events: list[UntetherEvent] = []
-            # #683: also sweep request_to_action, not just
-            # pending_control_requests. The Pause & Outline hold-open path
-            # returns its synthetic action early — before the request is
-            # recorded in pending_control_requests — so its action_id is only
-            # reachable here. dict.fromkeys de-dupes while preserving order.
-            callback_handled = [
-                rid
-                for rid in dict.fromkeys(
-                    (*state.pending_control_requests, *state.request_to_action)
-                )
-                if rid in _HANDLED_REQUESTS
-            ]
-            for rid in callback_handled:
-                state.pending_control_requests.pop(rid, None)
-                action_id_for_req = state.request_to_action.pop(rid, None)
-                if action_id_for_req:
-                    # Remove from control_action_for_tool so tool_result
-                    # doesn't try to complete it again
-                    state.control_action_for_tool = {
-                        k: v
-                        for k, v in state.control_action_for_tool.items()
-                        if v != action_id_for_req
-                    }
-                    reconciled_events.append(
-                        factory.action_completed(
-                            action_id=action_id_for_req,
-                            kind="warning",
-                            title="Permission resolved",
-                            ok=True,
-                        )
-                    )
-                logger.debug(
-                    "control_request.reconciled",
-                    request_id=rid,
-                    action_id=action_id_for_req,
-                )
+            # Reconcile requests that were handled via Telegram callback
+            # (#229, #683): drop them from pending — no spurious
+            # expired_auto_deny below — and complete their keyboard actions.
+            reconciled_events = _reconcile_handled_requests(state)
 
             # Clean up expired requests (older than timeout).
             # Send auto-deny to unblock the subprocess — without this,
