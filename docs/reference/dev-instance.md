@@ -139,6 +139,8 @@ This reinstalls the last stable PyPI version.
 
 **Dev systemd unit** (`~/.config/systemd/user/untether-dev.service`): Sets `UNTETHER_CONFIG_PATH` and points `ExecStart` at the local `.venv`. Run `systemctl --user daemon-reload` after editing.
 
+**Engine credentials**: each engine CLI keeps its own sign-in on the host (for Pi, `~/.pi/agent/auth.json`, which takes priority over environment variables). Don't put provider API keys in the dev unit or in a drop-in under `untether-dev.service.d/`: a hard-coded key there goes stale without anyone noticing, and one did exactly that to the Pi rows of the first 0.36.1rc1 run (removed 2026-10-11). Keys belong in the secrets manager, read by the engine's own auth store.
+
 ## Test project directories
 
 Seven dev-bot test workspaces live under `test-projects/` in the repo (gitignored, not version-controlled):
