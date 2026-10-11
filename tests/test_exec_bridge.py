@@ -3003,6 +3003,93 @@ async def test_stall_auto_cancel_no_pid_no_events() -> None:
 
 
 @pytest.mark.anyio
+async def test_994_no_pid_no_events_auto_cancel_survives_render_bumps() -> None:
+    """#994: Untether's own re-renders (stall-path heartbeats, the #954 header
+    tick) bump ``event_seq`` but are not engine events — a run with no PID
+    that never produced one is still auto-cancelled."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS_NO_PID = 2
+    edits.pid = None
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for i in range(8):
+                clock.set(100.1 + i * 0.1)
+                await anyio.sleep(0.03)
+                if i == 0:
+                    # The first stall warning is out; a stall-path heartbeat
+                    # then repaints the progress message.
+                    assert edits._stall_warn_count >= 1
+                    assert not cancel_event.is_set()
+                    edits._bump_heartbeat()
+                if cancel_event.is_set():
+                    break
+            if not cancel_event.is_set():
+                edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert edits.event_seq > 0  # it did repaint
+    assert edits.engine_event_count == 0
+    assert cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "no_pid_no_events" in auto_cancel_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_994_engine_event_blocks_no_pid_no_events_auto_cancel() -> None:
+    """#994: one real engine event means the run did start — the aggressive
+    ``no_pid_no_events`` arm stands down (the absolute cap still applies)."""
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS_NO_PID = 2
+    edits.pid = None
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+    await edits.on_event(
+        ActionEvent(
+            engine="codex",
+            action=Action(id="a1", kind="note", title="thinking"),
+            phase="completed",
+            ok=True,
+        )
+    )
+    assert edits.engine_event_count == 1
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for i in range(6):
+                clock.set(100.1 + i * 0.1)
+                await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert edits._stall_warn_count >= 2
+    assert not cancel_event.is_set()
+
+
+@pytest.mark.anyio
 async def test_stall_auto_cancel_max_warnings() -> None:
     """Stall monitor auto-cancels after _STALL_MAX_WARNINGS absolute cap."""
     from unittest.mock import patch
@@ -7520,7 +7607,6 @@ def test_954_heartbeat_ticks_header_during_silent_generation() -> None:
     edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
     edits._heartbeat_interval = 30.0
     edits._heartbeat_tick()  # never rendered, but no engine event yet either
-    # event_seq stays 0 — the no_pid_no_events auto-cancel's signal.
     assert edits.event_seq == 0
     edits.event_seq = before = 1  # the engine's first event...
     edits._last_render_at = 95.0  # ...rendered 5 s ago

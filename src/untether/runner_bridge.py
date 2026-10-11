@@ -2331,8 +2331,14 @@ class ProgressEdits:
         self.pid: int | None = None
         self.stream: Any = None  # JsonlStreamState, set from run_runner_with_cancel
         self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
+        # Render-wakeup counter: bumped by engine events AND by Untether's
+        # own repaints (heartbeats, stall-path refreshes). ``_run_loop``
+        # repaints whenever it differs from ``rendered_seq``.
         self.event_seq = 0
         self.rendered_seq = 0
+        # #994: engine events this monitor has received, and nothing else —
+        # the ``no_pid_no_events`` auto-cancel's "never started" signal.
+        self.engine_event_count = 0
         self._outline_sent: bool = False
         self._outline_refs: list[MessageRef] = []
         self._outline_just_resolved: bool = False
@@ -3010,7 +3016,7 @@ class ProgressEdits:
                 auto_cancel_reason = "process_dead"
             elif (
                 self.pid is None
-                and self.event_seq == 0
+                and self.engine_event_count == 0
                 and self._stall_warn_count >= self._STALL_MAX_WARNINGS_NO_PID
             ):
                 auto_cancel_reason = "no_pid_no_events"
@@ -3069,6 +3075,7 @@ class ProgressEdits:
                     stall_warn_count=self._stall_warn_count,
                     pid=self.pid,
                     event_seq=self.event_seq,
+                    engine_events=self.engine_event_count,
                     last_event_type=(
                         self.stream.last_event_type if self.stream else None
                     ),
@@ -4781,6 +4788,7 @@ class ProgressEdits:
             )
             self._stuck_state = None
         self._last_event_at = now
+        self.engine_event_count += 1
         self.event_seq += 1
         try:
             self.signal_send.send_nowait(None)
