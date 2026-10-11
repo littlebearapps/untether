@@ -39,6 +39,31 @@ second failure logs ERROR `telegram.network_error`. `getUpdates` is never
 retried here — the poll loop retries on its own
 ([#861](https://github.com/littlebearapps/untether/issues/861)).
 
+A `sendMessage` that ends that way has an **unknown outcome**: Telegram may have
+posted the message, and the Bot API has no idempotency key and no way to look a
+message up, so its id is lost. `telegram.network_error` and
+`transport.send.failed` then carry `delivery_unknown=true`, and
+`TelegramTransport.pop_unconfirmed_send(chat_id)` reports it once to the caller.
+Only a run's progress message acts on it
+([#1029](https://github.com/littlebearapps/untether/issues/1029)):
+
+- the progress message is sent **once** more, so the run has a message it can
+  edit, finalise and be cancelled from (WARNING `progress.send.unconfirmed`). A
+  second lost response ends it there — the run goes on without a progress
+  message, and a live turn stops asking for one. A send that certainly failed is
+  not repeated.
+- if the first send did arrive, the chat holds an untracked copy
+  (`starting · 0s` / `working · 0s` with a `cancel` button). The transport
+  remembers the chat and the time window of each such send (in memory, 48 h, 64
+  entries). A `cancel` tap on a message that no run or queued job owns, whose
+  Telegram `date` falls in one of those windows (±30 s), is that copy: it is
+  deleted and the tap is answered `out-of-date copy of a progress message —
+  removed. Nothing was cancelled; use /cancel to stop a run.` (INFO
+  `cancel.unconfirmed_progress_removed`). No run is cancelled by it.
+- an untracked copy nobody taps stays in the chat, and the record does not
+  survive a restart: after one, the tap gets the usual `nothing is currently
+  running for that message.`
+
 ## Incoming messages
 
 `parse_incoming_update` accepts text messages (and media captions), voice

@@ -5012,6 +5012,16 @@ class ProgressEdits:
 class ProgressMessageState:
     ref: MessageRef | None
     last_rendered: RenderedMessage | None
+    # #1029: no ``ref``, yet Telegram may have posted the message (the
+    # response was lost twice). The caller must not keep sending more.
+    unconfirmed: bool = False
+
+
+def _pop_unconfirmed_send(transport: Transport, channel_id: ChannelId) -> bool:
+    """#1029: did the transport's latest failed send to the channel end with
+    its delivery unknown? Transports that can't tell answer False."""
+    pop = getattr(transport, "pop_unconfirmed_send", None)
+    return bool(pop(channel_id)) if callable(pop) else False
 
 
 async def send_initial_progress(
@@ -5037,16 +5047,34 @@ async def send_initial_progress(
         elapsed_s=0.0,
         label=label,
     )
-    with message_kind("progress"):
-        sent_ref, _ = await _send_or_edit_message(
-            cfg.transport,
+    unconfirmed = False
+    # #1029: a send whose response was lost may or may not have been posted,
+    # and its message id is gone either way. Send once more so the run has a
+    # progress message it can edit, finalise and be cancelled from; a second
+    # lost response ends it there, so copies never pile up. A send that
+    # certainly failed is not repeated.
+    for attempt in range(2):
+        with message_kind("progress"):
+            sent_ref, _ = await _send_or_edit_message(
+                cfg.transport,
+                channel_id=channel_id,
+                message=initial_rendered,
+                edit_ref=progress_ref,
+                reply_to=reply_to,
+                notify=False,
+                replace_ref=progress_ref,
+                thread_id=thread_id,
+            )
+        unconfirmed = sent_ref is None and _pop_unconfirmed_send(
+            cfg.transport, channel_id
+        )
+        if not unconfirmed:
+            break
+        logger.warning(
+            "progress.send.unconfirmed",
             channel_id=channel_id,
-            message=initial_rendered,
-            edit_ref=progress_ref,
-            reply_to=reply_to,
-            notify=False,
-            replace_ref=progress_ref,
-            thread_id=thread_id,
+            attempt=attempt + 1,
+            resend=attempt == 0,
         )
     if sent_ref is not None:
         last_rendered = initial_rendered
@@ -5069,6 +5097,7 @@ async def send_initial_progress(
     return ProgressMessageState(
         ref=sent_ref,
         last_rendered=last_rendered,
+        unconfirmed=unconfirmed,
     )
 
 
@@ -6010,6 +6039,9 @@ class _TurnCtx:
     detail: dict[str, Any] = field(default_factory=dict)
     edits: ProgressEdits | None = None
     progress_ref: MessageRef | None = None
+    # #1029: the turn's progress sends ended with their delivery unknown —
+    # stop asking for one, or every later action posts another copy.
+    progress_gave_up: bool = False
     edits_scope: anyio.CancelScope | None = None
     lazy_scope: anyio.CancelScope | None = None
     delivery: dict[str, bool] = field(default_factory=lambda: {"sent": False})
@@ -6161,6 +6193,8 @@ class FollowupTurnRouter:
             if self.current is not ctx:
                 return
             if ctx.edits is not None or ctx.delivery["sent"]:
+                return
+            if ctx.progress_gave_up:
                 return
             try:
                 await self._create_progress(ctx)
@@ -7895,6 +7929,7 @@ async def handle_message(
             thread_id=incoming.thread_id,
         )
         if st.ref is None:
+            ctx.progress_gave_up = st.unconfirmed  # #1029
             return
         turn_edits = ProgressEdits(
             transport=cfg.transport,

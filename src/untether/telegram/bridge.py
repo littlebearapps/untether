@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -55,6 +57,27 @@ CANCEL_MARKUP = {
     "inline_keyboard": [[{"text": "cancel", "callback_data": CANCEL_CALLBACK_DATA}]]
 }
 CLEAR_MARKUP = {"inline_keyboard": []}
+
+# #1029: how far a message's Telegram ``date`` may sit outside the local
+# window of the send it is matched to (clock skew, whole-second dates), how
+# long a lost send stays claimable, and how many are remembered.
+_UNCONFIRMED_DATE_SLACK_S = 30.0
+_UNCONFIRMED_TTL_S = 48 * 3600.0
+_UNCONFIRMED_MAX = 64
+
+
+def _has_cancel_button(reply_markup: Any) -> bool:
+    if not isinstance(reply_markup, dict):
+        return False
+    rows = reply_markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return False
+    return any(
+        isinstance(button, dict) and button.get("callback_data") == CANCEL_CALLBACK_DATA
+        for row in rows
+        if isinstance(row, list)
+        for button in row
+    )
 
 
 class TelegramPresenter:
@@ -251,8 +274,74 @@ class TelegramBridgeConfig:
 
 
 class TelegramTransport:
-    def __init__(self, bot: BotClient) -> None:
+    def __init__(
+        self, bot: BotClient, *, wall_clock: Callable[[], float] = time.time
+    ) -> None:
         self._bot = bot
+        self._wall_clock = wall_clock
+        # #1029: chats whose latest send ended with its delivery unknown.
+        self._unconfirmed_chats: set[int] = set()
+        # #1029: (chat_id, sent_from, sent_until) of each cancel-button
+        # message that may exist in a chat without Untether knowing its id.
+        self._unconfirmed_progress: deque[tuple[int, float, float]] = deque(
+            maxlen=_UNCONFIRMED_MAX
+        )
+
+    def pop_unconfirmed_send(self, channel_id: int | str) -> bool:
+        """#1029: True once if the latest ``send`` to the chat returned
+        ``None`` although Telegram may have posted the message.
+
+        The response was lost after the request left (a read timeout). The
+        Bot API has no idempotency key and no way to look a message up, so
+        the outcome stays unknown: the caller may send a replacement, never
+        assume either way."""
+        chat_id = cast(int, channel_id)
+        if chat_id in self._unconfirmed_chats:
+            self._unconfirmed_chats.discard(chat_id)
+            return True
+        return False
+
+    def claim_unconfirmed_progress(
+        self, channel_id: int | str, message_date: object
+    ) -> bool:
+        """#1029: is this untracked message the copy of a lost progress send?
+
+        ``message_date`` is the Telegram ``date`` of a message whose cancel
+        button was tapped and that no run owns. It matches when a progress
+        send to the chat was in flight at that moment and ended with its
+        delivery unknown. A match is consumed: one lost send, one message."""
+        if isinstance(message_date, bool) or not isinstance(message_date, int):
+            return False
+        if message_date <= 0:  # an inaccessible (too old) message
+            return False
+        chat_id = cast(int, channel_id)
+        cutoff = self._wall_clock() - _UNCONFIRMED_TTL_S
+        while self._unconfirmed_progress and self._unconfirmed_progress[0][2] < cutoff:
+            self._unconfirmed_progress.popleft()
+        for entry in self._unconfirmed_progress:
+            entry_chat, sent_from, sent_until = entry
+            if entry_chat != chat_id:
+                continue
+            if (
+                sent_from - _UNCONFIRMED_DATE_SLACK_S
+                <= message_date
+                <= sent_until + _UNCONFIRMED_DATE_SLACK_S
+            ):
+                self._unconfirmed_progress.remove(entry)
+                return True
+        return False
+
+    def _note_send_failed(
+        self, *, chat_id: int, reply_markup: Any, sent_from: float
+    ) -> bool:
+        """#1029: record a failed send whose delivery is unknown."""
+        pop = getattr(self._bot, "pop_unconfirmed_send", None)
+        if not callable(pop) or not pop(chat_id):
+            return False
+        self._unconfirmed_chats.add(chat_id)
+        if _has_cancel_button(reply_markup):
+            self._unconfirmed_progress.append((chat_id, sent_from, self._wall_clock()))
+        return True
 
     @staticmethod
     def _extract_followups(message: RenderedMessage) -> list[RenderedMessage]:
@@ -413,6 +502,8 @@ class TelegramTransport:
             )
             notify = bool(message.extra.get("followup_notify", True))
         followups = self._extract_followups(message)
+        self._unconfirmed_chats.discard(chat_id)
+        sent_from = self._wall_clock()
         try:
             sent = await self._bot.send_message(
                 chat_id=chat_id,
@@ -437,12 +528,19 @@ class TelegramTransport:
             )
             raise
         if sent is None:
+            delivery_unknown = self._note_send_failed(
+                chat_id=chat_id,
+                reply_markup=message.extra.get("reply_markup"),
+                sent_from=sent_from,
+            )
             logger.warning(
                 "transport.send.failed",
                 kind=current_message_kind(),
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
                 text_len=len(message.text) if message.text else 0,
+                # #1029: True = Telegram may have posted it all the same.
+                delivery_unknown=delivery_unknown,
             )
             return None
         if followups:

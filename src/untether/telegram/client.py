@@ -263,6 +263,12 @@ class TelegramClient:
             return pop("editMessageText", chat_id, message_id)
         return None
 
+    def pop_unconfirmed_send(self, chat_id: int) -> bool:
+        """#1029: True once if the last ``sendMessage`` to the chat ended
+        with its delivery unknown (a response lost after the request left)."""
+        pop = getattr(self._client, "pop_unconfirmed_send", None)
+        return bool(pop(chat_id)) if callable(pop) else False
+
     async def edit_message_text(
         self,
         chat_id: int,

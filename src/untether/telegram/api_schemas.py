@@ -119,6 +119,8 @@ class Message(msgspec.Struct, forbid_unknown_fields=False):
 class CallbackQueryMessage(msgspec.Struct, forbid_unknown_fields=False):
     message_id: int
     chat: Chat
+    # #1029: when Telegram posted the message (0 if it is inaccessible).
+    date: int | None = None
 
 
 class CallbackQuery(msgspec.Struct, forbid_unknown_fields=False):

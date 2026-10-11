@@ -270,6 +270,8 @@ class HttpBotClient:
         # a separate, uncorrelated ``telegram.api_error`` line. Bounded
         # insertion-ordered dict; entries are popped on read.
         self._last_api_errors: dict[tuple[str, Any, Any], str] = {}
+        # #1029: chats whose latest ``sendMessage`` has an unknown outcome.
+        self._unconfirmed_sends: set[Any] = set()
         # #746: sliding window of benign rejections per (method, reason_class)
         # and the time of the last burst WARNING per key.
         self._clock = clock
@@ -291,6 +293,14 @@ class HttpBotClient:
         self._last_api_errors[(method, chat_id, message_id)] = description
         while len(self._last_api_errors) > 64:
             self._last_api_errors.pop(next(iter(self._last_api_errors)))
+
+    def pop_unconfirmed_send(self, chat_id: Any) -> bool:
+        """#1029: True once if the last ``sendMessage`` to ``chat_id`` failed
+        in a way that leaves its delivery unknown (see ``_request``)."""
+        if chat_id in self._unconfirmed_sends:
+            self._unconfirmed_sends.discard(chat_id)
+            return True
+        return False
 
     def pop_last_api_error(
         self, method: str, chat_id: Any, message_id: Any
@@ -418,6 +428,9 @@ class HttpBotClient:
     ) -> Any | None:
         request_payload = json if json is not None else data
         logger.debug("telegram.request", method=method, payload=request_payload)
+        if method == "sendMessage":
+            # #1029: the flag describes the latest send to the chat only.
+            self._unconfirmed_sends.discard(_payload_target(request_payload)[0])
         timeout_kwargs: dict[str, Any] = {}
         if request_timeout is not None:
             timeout_kwargs["timeout"] = request_timeout
@@ -444,6 +457,17 @@ class HttpBotClient:
         except httpx.HTTPError as exc:
             exc_url = getattr(exc.request, "url", None)
             chat_id, message_id = _payload_target(request_payload)
+            # #1029: the request may have reached Telegram, and a send can't
+            # be repeated or looked up — the message may exist with an id
+            # Untether never learns. Remember it so the caller can tell this
+            # from a send that certainly failed.
+            delivery_unknown = method == "sendMessage" and isinstance(
+                exc, _IDEMPOTENT_RETRY_ERRORS
+            )
+            if delivery_unknown and chat_id is not None:
+                self._unconfirmed_sends.add(chat_id)
+                while len(self._unconfirmed_sends) > 64:
+                    self._unconfirmed_sends.pop()
             logger.error(
                 "telegram.network_error",
                 method=method,
@@ -453,6 +477,7 @@ class HttpBotClient:
                 chat_id=chat_id,
                 message_id=message_id,
                 kind=current_message_kind(),
+                delivery_unknown=delivery_unknown,
             )
             self._record_api_error(
                 method, request_payload, f"network error: {exc.__class__.__name__}"

@@ -7,7 +7,7 @@ from ...logging import get_logger
 from ...progress import ProgressTracker
 from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
 from ...scheduler import ThreadJob, ThreadScheduler
-from ...transport import MessageRef
+from ...transport import MessageRef, message_kind
 from ..topics import thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
@@ -283,6 +283,8 @@ async def handle_callback_cancel(
                     text="dropped from queue.",
                 )
                 return
+        if await _remove_unconfirmed_progress(cfg, query, progress_ref):
+            return
         await cfg.bot.answer_callback_query(
             callback_query_id=query.callback_query_id,
             text="nothing is currently running for that message.",
@@ -314,6 +316,47 @@ async def handle_callback_cancel(
         callback_query_id=query.callback_query_id,
         text=f"{_idle_closed_label(1)}." if idle else "cancelling...",
     )
+
+
+async def _remove_unconfirmed_progress(
+    cfg: TelegramBridgeConfig,
+    query: TelegramCallbackQuery,
+    progress_ref: MessageRef,
+) -> bool:
+    """#1029: remove the untracked copy of a progress message.
+
+    A progress ``sendMessage`` that lost its response may still have been
+    posted. Untether never learns that message's id, so it can't edit,
+    finalise or delete it — until someone taps its cancel button, which is
+    the one place the id arrives. No run owns the message, so nothing is
+    cancelled: the copy is deleted and the toast says so.
+    """
+    claim = getattr(cfg.exec_cfg.transport, "claim_unconfirmed_progress", None)
+    if not callable(claim):
+        return False
+    message = (query.raw or {}).get("message")
+    date = message.get("date") if isinstance(message, dict) else None
+    if not claim(query.chat_id, date):
+        return False
+    with message_kind("progress"):
+        removed = await cfg.exec_cfg.transport.delete(ref=progress_ref)
+    logger.info(
+        "cancel.unconfirmed_progress_removed",
+        chat_id=query.chat_id,
+        progress_message_id=query.message_id,
+        removed=removed,
+    )
+    await cfg.bot.answer_callback_query(
+        callback_query_id=query.callback_query_id,
+        text=(
+            "out-of-date copy of a progress message — removed. "
+            "Nothing was cancelled; use /cancel to stop a run."
+            if removed
+            else "out-of-date copy of a progress message — nothing was "
+            "cancelled. Use /cancel to stop a run."
+        ),
+    )
+    return True
 
 
 async def _edit_cancelled_message(
