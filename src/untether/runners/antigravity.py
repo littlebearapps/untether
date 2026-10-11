@@ -1322,8 +1322,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(agy_flag("--mode", WORKSPACE_AGY_MODE))
             # #1037: Workspace runs use Untether's no-shell agent, so the
             # model has no shell tool to open with (a soft-denied shell call
-            # ends the turn). Skipped when the file can't be put in place.
-            if antigravity_agent.ensure_workspace_agent():
+            # ends the turn). Skipped when the file can't be put in place, or
+            # when the project ships an agent of the same name: agy resolves
+            # agents by name and would not be running Untether's.
+            if (
+                not antigravity_agent.project_defines_agent(get_run_base_dir())
+                and antigravity_agent.ensure_workspace_agent()
+            ):
                 args.append(agy_flag("--agent", antigravity_agent.WORKSPACE_AGENT_NAME))
         if isinstance(state, AntigravityStreamState):
             state.effective_mode = mode

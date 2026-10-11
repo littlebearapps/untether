@@ -138,13 +138,19 @@ def test_unwritable_config_dir_runs_without_the_agent(
     ]
 
 
-def test_scan_does_not_report_untethers_own_agent(tmp_path: Path) -> None:
+def test_scan_ignores_the_agent_file_but_not_a_link_beside_it(tmp_path: Path) -> None:
+    """No exemption for the folder: the regular ``agent.md`` isn't a
+    manifest the scan tracks, but a link planted next to it still is."""
     assert agent.ensure_workspace_agent() is True
     other = scan.user_config_dir() / "agents" / "someone-else.md"
     other.write_text("---\nname: someone-else\n---\n")
+    os.symlink(tmp_path, agent.agent_path().parent / "extra")
     out: dict[str, scan.Fingerprint] = {}
     scan._scan_user_level(out, scan._Budget())
-    assert [key.rsplit("/", 1)[-1] for key in out] == ["someone-else.md"]
+    assert sorted(key.split("agents/", 1)[1] for key in out) == [
+        "someone-else.md",
+        "untether-workspace/extra",
+    ]
 
 
 def test_denial_notice_points_at_new_and_keeps_the_rule_hint_for_shell() -> None:
@@ -168,3 +174,76 @@ def test_denial_notice_points_at_new_and_keeps_the_rule_hint_for_shell() -> None
     )
     assert "; add an allow rule such as `command(git status)`" in hook_shell
     assert hook_shell.endswith(", or run it from the chat.")
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    token = set_run_base_dir(proj)
+    monkeypatch.setattr(scan, "user_config_dir", lambda: tmp_path / "agy-config")
+    try:
+        yield proj
+    finally:
+        reset_run_base_dir(token)
+
+
+def test_clean_project_gets_the_agent(project: Path) -> None:
+    (project / ".agents" / "agents").mkdir(parents=True)
+    (project / ".agents" / "agents" / "reviewer.md").write_text("x")
+    (project / ".agents" / "agents.json").write_text('{"agents": ["reviewer"]}')
+    assert _args()[-1] == AGENT_FLAG
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        ".agents/agents/untether-workspace.md",
+        ".agents/agents/Untether-Workspace/agent.md",
+        ".agents/plugins/p/agents/untether-workspace.md",
+        "sub/.agents/agents/untether-workspace.md",
+    ],
+)
+def test_project_agent_of_the_same_name_drops_the_flag(
+    project: Path, planted: str
+) -> None:
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    path = project / planted
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: untether-workspace\ntools:\n  - run_command\n---\n")
+    token = set_run_base_dir(project / "sub") if planted.startswith("sub/") else None
+    try:
+        with structlog.testing.capture_logs() as logs:
+            args = _args()
+    finally:
+        if token is not None:
+            reset_run_base_dir(token)
+    assert args[-1] == "--mode=accept-edits"
+    assert [(e["event"], e["reason"]) for e in logs if e["log_level"] == "warning"] == [
+        ("antigravity.workspace_agent.unavailable", "project_agent")
+    ]
+
+
+def test_agents_manifest_naming_the_agent_drops_the_flag(project: Path) -> None:
+    (project / ".agents").mkdir()
+    (project / ".agents" / "agents.json").write_text(
+        '{"agents": [{"name": "Untether-Workspace", "path": "x.md"}]}'
+    )
+    assert _args()[-1] == "--mode=accept-edits"
+
+
+def test_linked_or_oversized_project_config_drops_the_flag(
+    project: Path, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.symlink(elsewhere, project / ".agents")
+    with structlog.testing.capture_logs() as logs:
+        assert _args()[-1] == "--mode=accept-edits"
+    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
+        "project_unchecked"
+    ]

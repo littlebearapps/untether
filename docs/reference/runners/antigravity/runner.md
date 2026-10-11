@@ -188,6 +188,10 @@ take a tool away from its default agent, but a custom agent's `tools:` list is t
   A changed file is rewritten (`antigravity.workspace_agent.installed`). The file does nothing unless an agy run
   names it.
 - The run then passes `--agent=untether-workspace`. Full access never does.
+- agy picks an agent by name and also loads agents from a project's `.agents/` folders. If the project has a file
+  or folder called `untether-workspace` anywhere under an `.agents/` agy loads (plugins included), an `agents.json`
+  naming it, or an `.agents/` that can't be checked (a symlink, too many entries), Untether doesn't pass `--agent`
+  (`reason=project_agent` / `project_unchecked`), so a repo can't have its own agent run under Untether's name.
 - If the file can't be put in place (unwritable folder, or a symlink anywhere on the path), the run goes ahead
   without `--agent` and logs `antigravity.workspace_agent.unavailable` once per reason. That run behaves as before:
   a shell attempt ends the turn with the blocked notice.
