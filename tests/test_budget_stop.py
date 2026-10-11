@@ -562,3 +562,64 @@ async def test_capped_repeat_that_passes_budget_keeps_stop_line(
     assert any(STOP_LINE in t for t in texts)
     assert not any("more background wake-up" in t for t in texts)
     assert closes == ["budget_stop"]
+
+
+# ── #991: an early-delivery timeout must not skip the close ────────────────
+
+
+class _StallAfterFinalTransport(FakeTransport):
+    """The first answer lands, then the call never returns — the #928 shape
+    (a Telegram retry stalled behind the message that was already sent)."""
+
+    async def send(self, *, channel_id, message, options=None):
+        ref = await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+        if "FIRST-ANSWER" in message.text:
+            await anyio.sleep_forever()
+        return ref
+
+    async def edit(self, *, ref, message, wait=True):
+        edited = await super().edit(ref=ref, message=message, wait=wait)
+        if "FIRST-ANSWER" in message.text:
+            await anyio.sleep_forever()
+        return edited
+
+
+@pytest.mark.anyio
+async def test_991_early_delivery_timeout_still_closes_at_the_limit(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#991: the over-budget first reply is handed to Telegram but the send
+    outlives the early-delivery bound. The bound used to cancel everything
+    queued behind the send, "Stop at limit" included, so the session stayed
+    open and kept spending. The close still runs, exactly once, and the
+    reply is not sent a second time."""
+    import untether.runner_bridge as rb
+    from untether.runners import claude as claude_mod
+
+    _write_config(cfg_path, _PER_RUN)
+    monkeypatch.setattr(rb, "_EARLY_DELIVERY_TIMEOUT_S", 0.2)
+    closes: list[tuple] = []
+
+    async def _close(sid, reason, *, notice=False, only_if_idle=False):
+        closes.append((sid, reason, only_if_idle))
+        return True
+
+    monkeypatch.setattr(claude_mod, "get_live_session", lambda sid: _FakeLive())
+    monkeypatch.setattr(claude_mod, "close_live_session", _close)
+    transport = _StallAfterFinalTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with capture_logs() as logs, anyio.fail_after(10):
+        await handle_message(
+            cfg,
+            runner=_live_script(1.20, None),
+            incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    assert any(e["event"] == "final.early_delivery_timeout" for e in logs)
+    assert closes == [("sess-896", "budget_stop", True)]
+    assert len(_texts_with(transport, "FIRST-ANSWER")) == 1

@@ -5085,6 +5085,8 @@ class RunOutcome:
 
 #: #614/#618: the bound on the shielded early final delivery (#591). 60 s,
 #: not less — a 4-chunk final under group-chat outbox pacing takes 15 s+.
+#: #991: the steps that follow the delivery (``on_delivered``) get the same
+#: bound again, in their own scope.
 _EARLY_DELIVERY_TIMEOUT_S = 60.0
 
 
@@ -5101,6 +5103,7 @@ async def run_runner_with_cancel(
     turn_router: FollowupTurnRouter | None = None,
     deliver_error_early: Callable[[CompletedEvent, RunOutcome], bool] | None = None,
     on_started: Callable[[ResumeToken], None] | None = None,
+    on_delivered: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -5228,6 +5231,7 @@ async def run_runner_with_cancel(
                                 _record_export_event(
                                     evt, outcome.resume, channel_id=channel_id
                                 )
+                                handed_over = False
                                 try:
                                     # #614: shield the delivery — a /cancel
                                     # landing mid-send would otherwise cancel
@@ -5247,6 +5251,7 @@ async def run_runner_with_cancel(
                                         _EARLY_DELIVERY_TIMEOUT_S, shield=True
                                     ) as delivery_scope:
                                         await on_completed(evt, outcome)
+                                    handed_over = True
                                     if delivery_scope.cancelled_caught:
                                         # #928: was silent — a send that
                                         # landed then stalled (e.g. on the
@@ -5260,6 +5265,29 @@ async def run_runner_with_cancel(
                                         "final.early_delivery_failed",
                                         exc_info=True,
                                     )
+                                # #991: what follows the answer runs in its
+                                # own scope, so a delivery that used up its
+                                # bound no longer takes these steps with it.
+                                # Skipped only when the delivery raised (the
+                                # post-return path owns that retry). Shielded
+                                # and bounded like the delivery: a /cancel
+                                # waits for it and is then acted on as usual.
+                                if handed_over and on_delivered is not None:
+                                    try:
+                                        with anyio.move_on_after(
+                                            _EARLY_DELIVERY_TIMEOUT_S, shield=True
+                                        ) as after_scope:
+                                            await on_delivered(evt, outcome)
+                                        if after_scope.cancelled_caught:
+                                            logger.warning(
+                                                "final.post_delivery_timeout",
+                                                timeout_s=_EARLY_DELIVERY_TIMEOUT_S,
+                                            )
+                                    except Exception:  # noqa: BLE001
+                                        logger.warning(
+                                            "final.post_delivery_failed",
+                                            exc_info=True,
+                                        )
                                 continue
                         # A3: Record events for /export
                         _record_export_event(evt, outcome.resume, channel_id=channel_id)
@@ -7821,6 +7849,12 @@ async def handle_message(
         completed: CompletedEvent, run_outcome: RunOutcome
     ) -> None:
         await _deliver_final(completed, run_outcome)
+
+    async def _after_run_delivered(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> None:
+        """What follows the run's early final. #991: its own callback, so a
+        send that outlives the early-delivery bound can't cancel these too."""
         if completed.ok is False:
             # #900: an early error final. A failed run sends no outbox files
             # (the post-return path still surfaces skipped ones), and its
@@ -7829,10 +7863,12 @@ async def handle_message(
         if not _is_live_run():
             await _budget_stop_close()  # #896
             return
-        await _deliver_outbox_now(user_ref.message_id)
+        # #991: the listener first — it never waits on Telegram, so a slow
+        # file send below can't keep the session's notices gated.
         sid = completed.resume or run_outcome.resume
         live_notices["all"] = True
         _subscribe_live_notices(sid)
+        await _deliver_outbox_now(user_ref.message_id)
         # #777: background work outlives the answer — open its status message.
         await _bg_after_turn()
         await _budget_stop_close()  # #896
@@ -8307,6 +8343,7 @@ async def handle_message(
                 turn_router=turn_router,
                 deliver_error_early=_deliver_error_early,
                 on_started=_subscribe_live_notices,
+                on_delivered=_after_run_delivered,
             )
         except Exception as exc:
             error = exc

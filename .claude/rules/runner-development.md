@@ -97,12 +97,15 @@ post-return recovery would act on it. The early check and the post-return path s
 (`_empty_resend_due`, `_auto_continue_due`, `_stream_idle_retry_due`): change a recovery condition there, never in one
 path only, or an error final gets delivered and then recovered (or held and never recovered).
 
-## Final delivery (#928, #948)
+## Final delivery (#928, #948, #991)
 
 - A final counts as **sent once it is handed to the transport**: `delivery["sent"]` is set before `send_result_message`
   and reset only if that call raises. The outbox delivers a queued op even when its waiter is cancelled (the early
   path's 60 s `_EARLY_DELIVERY_TIMEOUT_S` bound), so never gate "sent" on the await completing — that resends the
   final at live-session close (duplicate message + a second `$0` `runner.completed`).
+- What follows the run's early final (outbox files, live-notice gate, background status, "Stop at limit" close) lives
+  in `_after_run_delivered`, passed as `on_delivered` and run in its own shielded, bounded scope (#991). Never append a
+  step to `_on_run_completed`: a send that uses up the delivery bound cancels everything after it in that callback.
 - Before any final / cancelled edit of a progress message, `await edits.stop_repaints()` — never set `_finalizing`
   by hand. A debounced repaint already past its check would otherwise land after (and over) the final.
 
