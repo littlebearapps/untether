@@ -25,6 +25,7 @@ nav = [
   { "How-to" = [
     { "Overview" = "how-to/index.md" },
     { "Switch engines" = "how-to/switch-engines.md" },
+    { "Antigravity CLI" = "how-to/antigravity.md" },
     { "Projects" = "how-to/projects.md" },
     { "Worktrees" = "how-to/worktrees.md" },
     { "Route by chat" = "how-to/route-by-chat.md" },

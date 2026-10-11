@@ -35,6 +35,7 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 - [Schedule tasks](https://github.com/littlebearapps/untether/blob/master/docs/how-to/schedule-tasks.md): Telegram scheduling, cron triggers, and webhook triggers
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md): Automated runs from external events and schedules
 - [Switch engines](https://github.com/littlebearapps/untether/blob/master/docs/how-to/switch-engines.md): Change engines per chat, topic, or message
+- [Use Antigravity CLI](https://github.com/littlebearapps/untether/blob/master/docs/how-to/antigravity.md): Set up and use Google's Antigravity CLI (agy): sign-in routes, Workspace and Full access modes, effort, quota
 - [Route by chat](https://github.com/littlebearapps/untether/blob/master/docs/how-to/route-by-chat.md): Route messages to projects by chat or topic
 - [Verbose progress](https://github.com/littlebearapps/untether/blob/master/docs/how-to/verbose-progress.md): Tool detail display in progress messages
 - [Browse files](https://github.com/littlebearapps/untether/blob/master/docs/how-to/browse-files.md): /browse inline file navigation

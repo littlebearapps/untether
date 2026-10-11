@@ -81,7 +81,7 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-Antigravity CLI (`agy`, 1.3.1 or newer) is Google's successor to Gemini CLI. Untether recommends signing it in with a **Gemini API key** or a **Gemini Enterprise** sign-in: Google's terms don't allow third-party tools to use a Google account sign-in, and Google may suspend the account. Setup steps and the full note are in [Switch engines → Antigravity CLI](../how-to/switch-engines.md#antigravity-cli).
+Antigravity CLI (`agy`, 1.3.1 or newer) is Google's successor to Gemini CLI. Untether recommends signing it in with a **Gemini API key** or a **Gemini Enterprise** sign-in: Google's terms don't allow third-party tools to use a Google account sign-in, and Google may suspend the account. Setup steps and the full note are in [Switch engines → Antigravity CLI](../how-to/switch-engines.md#antigravity-cli); once it's installed, see [Use Antigravity CLI](../how-to/antigravity.md).
 
 ### Gemini CLI ⚠️ deprecated
 

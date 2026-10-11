@@ -62,7 +62,8 @@ Untether shells out to engine CLIs. Install them and make sure they’re on your
 ## Antigravity CLI
 
 Antigravity CLI (`agy`) is Google's successor to Gemini CLI. Untether supports agy 1.3.1 or newer as the
-`antigravity` engine ([#558](https://github.com/littlebearapps/untether/issues/558)).
+`antigravity` engine ([#558](https://github.com/littlebearapps/untether/issues/558)). This section covers install and
+sign-in; for day-to-day use (permission modes, effort, quota, scheduled runs) see [Use Antigravity CLI](antigravity.md).
 
 !!! warning "Read this before using Antigravity with a Google account sign-in"
     Google's [Antigravity terms](https://antigravity.google/terms) say: "Using third party software, tools, or
@@ -117,6 +118,7 @@ Not all features are available on every engine. See the [engine compatibility ma
 
 ## Related
 
+- [Use Antigravity CLI](antigravity.md)
 - [Commands & directives](../reference/commands-and-directives.md)
 - [Config reference](../reference/config.md)
 - [Multi-engine workflows](../tutorials/multi-engine.md) — tutorial on using multiple engines

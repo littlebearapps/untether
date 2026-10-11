@@ -13,7 +13,8 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 
 ## Daily use
 
-- [Switch engines](switch-engines.md) (`/codex`, `/claude`, `/opencode`, `/pi`)
+- [Switch engines](switch-engines.md) (`/codex`, `/claude`, `/opencode`, `/pi`, `/antigravity`)
+- [Use Antigravity CLI](antigravity.md) (Google's `agy`: sign-in, permission modes, effort, quota)
 - [Projects](projects.md) (register repos + run from anywhere)
 - [Worktrees](worktrees.md) (run work on `@branch` without switching your main checkout)
 - [Route by chat](route-by-chat.md) (dedicated chats per project)

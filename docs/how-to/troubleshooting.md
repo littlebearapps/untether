@@ -174,11 +174,11 @@ Both engines are deprecated and no longer supported: they are still included,
 but get no fixes, are excluded from testing, and may be removed in a future
 release — see
 [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
-Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
+Switch to `claude`, `codex`, `opencode`, `pi` or `antigravity` via `/config → Engine & model`.
 
 ## Antigravity CLI
 
-Antigravity (`agy`) runs headless: it can't ask for approval or a sign-in mid-run, so Untether turns each of those cases into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli).
+Antigravity (`agy`) runs headless: it can't ask for approval or a sign-in mid-run, so Untether turns each of those cases into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli), and the user guide is [Use Antigravity CLI](antigravity.md).
 
 ### Antigravity says it isn't signed in
 

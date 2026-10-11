@@ -77,6 +77,7 @@ Step-by-step guides for new users:
 
 ## How-to guides
 
+- [Switch engines](how-to/switch-engines.md), [Use Antigravity CLI](how-to/antigravity.md)
 - [Chat sessions](how-to/chat-sessions.md), [Topics](how-to/topics.md), [Projects](how-to/projects.md), [Worktrees](how-to/worktrees.md)
 - [Plan mode](how-to/plan-mode.md), [Interactive approval](how-to/interactive-approval.md), [Steer follow-ups](how-to/steer-follow-ups.md), [Cost budgets](how-to/cost-budgets.md)
 - [Voice notes](how-to/voice-notes.md), [File transfer](how-to/file-transfer.md), [Export sessions](how-to/export-sessions.md)

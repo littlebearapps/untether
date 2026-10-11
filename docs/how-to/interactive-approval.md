@@ -202,7 +202,7 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
 !!! warning "Workspace is not a sandbox"
     Workspace only limits agy's own tool calls. agy hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers run their own commands in every mode, and a run can write those files for the next run to execute. Untether shows a ⚠️ row when a project carries agy config it doesn't manage, and when a run changes it or another engine's files (such as `.claude/`, `.envrc` or `.github/workflows/`). After agy's config changes, or when Untether can't check it, cron and webhook runs in that project are held until someone sends a message in the chat. This is a warning system with [known limits](../reference/runners/antigravity/runner.md#agy-hooks-plugins-and-mcp-servers), not isolation. Only run Antigravity in projects you trust.
 
-Before you use a Google account sign-in with Antigravity, read the [terms note](switch-engines.md#antigravity-cli).
+Before you use a Google account sign-in with Antigravity, read the [terms note](switch-engines.md#antigravity-cli). For the rest of the engine (first run, effort, quota, scheduled runs), see [Use Antigravity CLI](antigravity.md).
 
 ### Gemini CLI — Approval mode
 
@@ -228,5 +228,6 @@ Both policies persist per chat via `/config` and can be cleared back to the defa
 
 - [Plan mode](plan-mode.md) — control when and how approval requests appear
 - [Inline settings](inline-settings.md) — `/config` menu for toggling approval policies
+- [Use Antigravity CLI](antigravity.md) — Antigravity setup, permission modes and limits
 - [Commands & directives](../reference/commands-and-directives.md) — full command reference
 - [Claude Code runner](../reference/runners/claude/runner.md) — technical details of the control channel

@@ -42,7 +42,7 @@ Untether supports four agent CLIs out of the box:
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
 - **[OpenCode](https://opencode.ai)** — 75+ providers via Models.dev, local model support. Untether supports the OpenCode 1.x CLI (`npm install -g opencode-ai@1`); OpenCode 2.x (`@opencode/cli`) isn't supported yet, and Untether refuses to start a run on it and tells you how to switch back.
 - **[Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)** — multi-provider auth, conversational style.
-- **[Antigravity CLI](https://antigravity.google)** (`agy` 1.3.1 or newer) — Google's successor to Gemini CLI, supported as its own `antigravity` engine from v0.36.1: progress, resume, model and effort, a pre-run permission mode and quota in `/usage`. Approval buttons and plan approval aren't available for it yet. See [Can I use Antigravity CLI with my Google account?](#can-i-use-antigravity-cli-with-my-google-account) before you sign in.
+- **[Antigravity CLI](https://antigravity.google)** (`agy` 1.3.1 or newer) — Google's successor to Gemini CLI, supported as its own `antigravity` engine from v0.36.1: progress, resume, model and effort, a pre-run permission mode and quota in `/usage`. Approval buttons and plan approval aren't available for it yet. Guide: [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/). See [Can I use Antigravity CLI with my Google account?](#can-i-use-antigravity-cli-with-my-google-account) before you sign in.
 
 Two further engines are still included and still load, but are **deprecated and no longer supported** — no bug fixes, no testing, and they may be removed in a future release. Don't start new work on them:
 
@@ -57,7 +57,7 @@ You can, but we recommend a Gemini API key or a Gemini Enterprise sign-in instea
 
 Untether runs Google's own `agy` binary on your machine and never reads or reuses your Google credentials, but it is still third-party software driving the CLI, and Google does block accounts. If you use a Google account sign-in anyway, you accept that risk for that account; Untether shows a one-time notice in each chat that does. This isn't legal advice.
 
-The two recommended routes: set `"modelProvider": "gemini"` in agy's settings file and `GEMINI_API_KEY` in Untether's environment (billed per token by Google), or use `AGY_ADC_AUTH=true` with Google Cloud credentials. Steps are in [Switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli).
+The two recommended routes: set `"modelProvider": "gemini"` in agy's settings file and `GEMINI_API_KEY` in Untether's environment (billed per token by Google), or use `AGY_ADC_AUTH=true` with Google Cloud credentials. Steps are in [Switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli), and day-to-day use is in [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/).
 
 ## Do I need an API key to use Untether?
 

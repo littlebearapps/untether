@@ -8,7 +8,7 @@ Interactive features (approval buttons, plan mode, AskUserQuestion, live session
 - Codex: [Exec JSON cheatsheet](codex/exec-json-cheatsheet.md), [Untether events](codex/untether-events.md)
 - OpenCode: [Runner](opencode/runner.md), [Stream JSON cheatsheet](opencode/stream-json-cheatsheet.md), [Untether events](opencode/untether-events.md)
 - Pi: [Runner](pi/runner.md), [Stream JSON cheatsheet](pi/stream-json-cheatsheet.md), [Untether events](pi/untether-events.md)
-- Antigravity CLI: [Runner](antigravity/runner.md), [Stream JSON cheatsheet](antigravity/stream-json-cheatsheet.md), [Untether events](antigravity/untether-events.md)
+- Antigravity CLI: [User guide](../../how-to/antigravity.md), [Runner](antigravity/runner.md), [Stream JSON cheatsheet](antigravity/stream-json-cheatsheet.md), [Untether events](antigravity/untether-events.md)
 
 ## Engine compatibility
 

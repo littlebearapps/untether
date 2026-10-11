@@ -151,7 +151,7 @@ Want to use a different engine for one message? Prefix your message with `/<engi
 
 This uses Claude Code for just this message. The resume line will show `claude --resume ...`, and replies will automatically use Claude Code.
 
-Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
+Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/antigravity` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
 
 !!! tip "Set a default engine"
     Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.

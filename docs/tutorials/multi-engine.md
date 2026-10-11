@@ -18,7 +18,7 @@ Different engines have different strengths:
 | **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
 | **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
-Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, is supported as its own `antigravity` engine from v0.36.1 — see [Switch engines](../how-to/switch-engines.md#antigravity-cli). See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
+Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, is supported as its own `antigravity` engine from v0.36.1 — see [Use Antigravity CLI](../how-to/antigravity.md) and, for install and sign-in, [Switch engines](../how-to/switch-engines.md#antigravity-cli). See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md#engine-compatibility) for a full feature-by-feature breakdown.
 
