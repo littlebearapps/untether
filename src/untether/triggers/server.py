@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 
 import anyio
@@ -22,9 +23,35 @@ logger = get_logger(__name__)
 
 _SAFE_FILENAME_RE = __import__("re").compile(r"^[a-zA-Z0-9._-]+$")
 
-# #906: rate-limiter key prefix for a webhook's failed-auth bucket. Webhook
-# ids are bare limiter keys, so the prefix keeps the two apart.
-_AUTH_FAILED_KEY_PREFIX = "__auth_failed__:"
+# #906: most addresses the failed-auth limiter tracks at once. Its keys carry
+# the caller's address, so without a cap an attacker picks how big it gets.
+_AUTH_FAILED_MAX_KEYS = 10_000
+
+
+def _client_address(request: web.Request) -> str:
+    """The address a failed-auth lockout is scoped to (#906).
+
+    This is the TCP peer aiohttp saw, never a forwarded header: a header is
+    caller-supplied, so trusting one would let anyone choose their own bucket
+    (or someone else's). Behind a reverse proxy every request therefore shares
+    the proxy's address and the lockout is per webhook again.
+
+    IPv6 peers are grouped by /64 — one subscriber usually holds the whole
+    prefix and could otherwise take a fresh bucket per request. IPv4-mapped
+    addresses (dual-stack sockets) count as their IPv4 address.
+    """
+    remote = request.remote
+    if not remote:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(remote.split("%", 1)[0])
+    except ValueError:
+        return remote
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network((addr, 64), strict=False))
+    return str(addr)
 
 
 def is_loopback_host(host: str) -> bool:
@@ -242,6 +269,14 @@ def build_webhook_app(
         rate=settings.server.rate_limit,
         window=60.0,
     )
+    # #906: failed auth is counted apart from accepted requests, in its own
+    # limiter — its keys include the caller's address, so it is capped, and
+    # filling it must not be able to crowd out the request buckets above.
+    auth_failed_limiter = TokenBucketLimiter(
+        rate=settings.server.rate_limit,
+        window=60.0,
+        max_keys=_AUTH_FAILED_MAX_KEYS,
+    )
     max_body = settings.server.max_body_bytes
 
     # Strong references to in-flight dispatch tasks (#281).  Without this,
@@ -308,34 +343,68 @@ def build_webhook_app(
     async def _process_webhook(
         request: web.Request, webhook: WebhookConfig, path: str
     ) -> web.Response:
-        # #906: failed auth has its own per-webhook bucket. Once it is empty
-        # the webhook answers 429 before any credential is checked — even a
-        # correct one — so guessing can't run past the limit. Checked before
-        # the body is read; logged at debug so a flood can't fill the logs.
-        auth_failed_key = f"{_AUTH_FAILED_KEY_PREFIX}{webhook.id}"
-        if not rate_limiter.available(auth_failed_key):
+        # #906: failed auth spends a bucket of its own, keyed by webhook and
+        # client address, so a caller with bad credentials locks out its own
+        # address and nobody else's. While that bucket is empty the address
+        # gets 429 before any credential is checked — even a correct one —
+        # so guessing can't run past the limit.
+        client = _client_address(request)
+        auth_failed_key = f"{webhook.id}|{client}"
+
+        def _locked_out() -> web.Response | None:
+            # ``auth = "none"`` can't fail auth, so it has nothing to lock out
+            # (and must not be refused because the key table is full).
+            if webhook.auth == "none" or auth_failed_limiter.available(auth_failed_key):
+                return None
+            # Debug: a locked-out flood must not be able to fill the logs.
             logger.debug(
                 "triggers.webhook.auth_locked_out",
                 webhook_id=webhook.id,
                 path=path,
+                remote=client,
             )
             return web.Response(status=429, text="rate limited")
+
+        # Advisory: turn a locked-out address away before reading its body.
+        if (refused := _locked_out()) is not None:
+            return refused
 
         # Size check
         if request.content_length and request.content_length > max_body:
             return web.Response(status=413, text="payload too large")
 
-        raw_body = await request.read()
+        try:
+            raw_body = await request.read()
+        except web.HTTPRequestEntityTooLarge:
+            # #906: a chunked body has no Content-Length for the check above,
+            # so aiohttp enforces ``client_max_size`` here. Without this the
+            # catch-all answered 500 and logged a traceback per request, for
+            # a caller that has not authenticated.
+            return web.Response(status=413, text="payload too large")
         if len(raw_body) > max_body:
             return web.Response(status=413, text="payload too large")
 
-        # Auth
+        # Auth. The check above ran before an await, so any number of parallel
+        # requests may have passed it. This one is authoritative: from here to
+        # the spend below nothing awaits (``verify_auth`` is synchronous), so
+        # no other request can run in between and a burst can't get more
+        # credential checks than the bucket holds.
+        if (refused := _locked_out()) is not None:
+            return refused
         if not verify_auth(webhook, request.headers, raw_body):
-            rate_limiter.allow(auth_failed_key)
-            logger.warning(
+            first = auth_failed_limiter.is_full(auth_failed_key)
+            auth_failed_limiter.allow(auth_failed_key)
+            locked_out = not auth_failed_limiter.available(auth_failed_key)
+            # Warn for an address's first failure since its bucket was last
+            # full and for the one that locks it out; the ones in between are
+            # debug, so a flood can't write a warning per request.
+            log = logger.warning if first or locked_out else logger.debug
+            log(
                 "triggers.webhook.auth_failed",
                 webhook_id=webhook.id,
                 path=path,
+                remote=client,
+                locked_out=locked_out,
             )
             return web.Response(status=401, text="unauthorized")
 

@@ -874,7 +874,9 @@ async def test_906_global_refusal_does_not_spend_the_webhook_token(monkeypatch):
         for _ in range(3):
             assert (await cl.post("/hooks/b", headers=good, json={})).status == 429
 
-    (limiter,) = limiters
+    # Two limiters since the #906 follow-up (requests, and failed auth keyed
+    # by client address); this is the one that counts accepted requests.
+    limiter = next(lim for lim in limiters if lim._max_keys is None)
     # "b" was refused by the global bucket every time, so its own bucket is
     # untouched (never created, or still full).
     tokens, _ = limiter._buckets.get("b", (2.0, 0.0))
@@ -912,3 +914,298 @@ async def test_906_multipart_destination_uses_the_files_deny_list(tmp_path):
         )
         assert resp.status == 400
     assert not (tmp_path / "server.key").exists()
+
+
+# ── #906 follow-up: lockout scoped to the client address, no check/spend race ──
+
+_BAD = {"Authorization": "Bearer wrong"}
+_GOOD = {"Authorization": "Bearer tok_123"}
+
+
+def _remote_from_test_header(monkeypatch) -> None:
+    """Every test client connects from 127.0.0.1; let a request name its own
+    address so tests can play several senders."""
+    import untether.triggers.server as server_mod
+
+    monkeypatch.setattr(
+        server_mod,
+        "_client_address",
+        lambda request: request.headers.get("X-Test-Remote", "127.0.0.1"),
+    )
+
+
+def _spy_limiters(monkeypatch) -> list[Any]:
+    import untether.triggers.server as server_mod
+
+    limiters: list[Any] = []
+
+    class _SpyLimiter(server_mod.TokenBucketLimiter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            limiters.append(self)
+
+    monkeypatch.setattr(server_mod, "TokenBucketLimiter", _SpyLimiter)
+    return limiters
+
+
+@pytest.mark.anyio
+async def test_906_bad_auth_flood_locks_out_only_the_offending_address(monkeypatch):
+    """A per-webhook failed-auth bucket let anyone who could reach the port
+    keep every legitimate sender on 429 with `rate_limit` bad requests a
+    minute."""
+    import asyncio
+
+    _remote_from_test_header(monkeypatch)
+    dispatcher, transport, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(3), dispatcher)
+    attacker = {"X-Test-Remote": "203.0.113.9"}
+    sender = {"X-Test-Remote": "198.51.100.7"}
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (await cl.post("/hooks/a", headers=_BAD | attacker, json={})).status
+            for _ in range(8)
+        ]
+        assert statuses == [401, 401, 401, 429, 429, 429, 429, 429]
+
+        # The legitimate sender, on another address, is not locked out.
+        resp = await cl.post("/hooks/a", headers=_GOOD | sender, json={})
+        assert resp.status == 202
+
+        # The offending address stays locked out even with the right secret,
+        # so it can't keep guessing past the limit.
+        resp = await cl.post("/hooks/a", headers=_GOOD | attacker, json={})
+        assert resp.status == 429
+        await asyncio.sleep(0)
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.anyio
+async def test_906_concurrent_bad_auth_cannot_exceed_the_cap(monkeypatch):
+    """The bucket was checked, then the body awaited, then the token spent —
+    so every request of a parallel burst passed the check before any spent."""
+    import asyncio
+
+    import untether.triggers.server as server_mod
+
+    checks = 0
+    real_verify = server_mod.verify_auth
+
+    def _counting_verify(*args, **kwargs):
+        nonlocal checks
+        checks += 1
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(server_mod, "verify_auth", _counting_verify)
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(3), dispatcher)
+    release = asyncio.Event()
+
+    async def _slow_body():
+        # Headers arrive first, so every handler is past the early check and
+        # parked on the body read before any of them reaches auth.
+        yield b"{"
+        await release.wait()
+        yield b"}"
+
+    async def _release_later():
+        await asyncio.sleep(0.3)
+        release.set()
+
+    async with TestClient(TestServer(app)) as cl:
+        *resps, _ = await asyncio.gather(
+            *[cl.post("/hooks/a", headers=_BAD, data=_slow_body()) for _ in range(10)],
+            _release_later(),
+        )
+    statuses = sorted(r.status for r in resps)
+    assert checks == 3, f"{checks} credential checks for a cap of 3"
+    assert statuses == [401] * 3 + [429] * 7
+
+
+@pytest.mark.anyio
+async def test_906_failed_auth_buckets_stay_bounded(monkeypatch):
+    """Bad auth from many addresses must not grow the limiter without bound,
+    and once the table is full an untracked address is refused, not let
+    through uncounted."""
+    import untether.triggers.server as server_mod
+
+    _remote_from_test_header(monkeypatch)
+    monkeypatch.setattr(server_mod, "_AUTH_FAILED_MAX_KEYS", 5)
+    limiters = _spy_limiters(monkeypatch)
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(3), dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (
+                await cl.post(
+                    "/hooks/a",
+                    headers=_BAD | {"X-Test-Remote": f"203.0.113.{i}"},
+                    json={},
+                )
+            ).status
+            for i in range(40)
+        ]
+        assert statuses[:5] == [401] * 5
+        assert set(statuses[5:]) == {429}
+        auth_limiter = next(lim for lim in limiters if lim._max_keys is not None)
+        assert len(auth_limiter._buckets) == 5
+
+        # Fail closed: with no room to count it, an address the limiter isn't
+        # tracking is refused before its credential is looked at — the right
+        # secret included.
+        newcomer = {"X-Test-Remote": "198.51.100.7"}
+        resp = await cl.post("/hooks/b", headers=_GOOD | newcomer, json={})
+        assert resp.status == 429
+
+        # Once the tracked buckets have refilled they are dropped, and the
+        # newcomer is served again.
+        import time
+
+        long_ago = time.monotonic() - 3600.0
+        for key, (tokens, _) in list(auth_limiter._buckets.items()):
+            auth_limiter._buckets[key] = (tokens, long_ago)
+        auth_limiter._next_prune = 0.0
+        resp = await cl.post("/hooks/b", headers=_GOOD | newcomer, json={})
+        assert resp.status == 202
+        # A request that passes auth leaves no failed-auth bucket behind.
+        assert auth_limiter._buckets == {}
+
+
+@pytest.mark.anyio
+async def test_906_full_failed_auth_table_does_not_refuse_auth_none(monkeypatch):
+    """A webhook with `auth = "none"` can't fail auth, so the failed-auth
+    limiter — full or not — has no say over it."""
+    import untether.triggers.server as server_mod
+
+    _remote_from_test_header(monkeypatch)
+    monkeypatch.setattr(server_mod, "_AUTH_FAILED_MAX_KEYS", 1)
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "webhooks": [
+                {
+                    "id": "locked",
+                    "path": "/hooks/locked",
+                    "auth": "bearer",
+                    "secret": "tok_123",
+                    "action": "notify_only",
+                    "message_template": "x",
+                },
+                {
+                    "id": "open",
+                    "path": "/hooks/open",
+                    "auth": "none",
+                    "action": "notify_only",
+                    "message_template": "x",
+                },
+            ],
+        }
+    )
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        resp = await cl.post(
+            "/hooks/locked", headers=_BAD | {"X-Test-Remote": "203.0.113.9"}, json={}
+        )
+        assert resp.status == 401
+        other = {"X-Test-Remote": "198.51.100.7"}
+        assert (await cl.post("/hooks/locked", headers=other, json={})).status == 429
+        assert (await cl.post("/hooks/open", headers=other, json={})).status == 202
+
+
+@pytest.mark.anyio
+async def test_906_auth_failed_warns_once_per_address_not_per_request(monkeypatch):
+    """Every failed attempt logged a warning, so an unauthenticated caller
+    could write `rate_limit` warning lines a minute for as long as it liked."""
+    from structlog.testing import capture_logs
+
+    _remote_from_test_header(monkeypatch)
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(5), dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        with capture_logs() as logs:
+            for _ in range(12):
+                await cl.post(
+                    "/hooks/a", headers=_BAD | {"X-Test-Remote": "203.0.113.9"}, json={}
+                )
+    warnings = [
+        r
+        for r in logs
+        if r["event"] == "triggers.webhook.auth_failed" and r["log_level"] == "warning"
+    ]
+    # The first failure from the address, and the one that locks it out.
+    assert [w["locked_out"] for w in warnings] == [False, True]
+    assert {w["remote"] for w in warnings} == {"203.0.113.9"}
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("203.0.113.9", "203.0.113.9"),
+        # A dual-stack socket reports IPv4 peers as IPv4-mapped IPv6.
+        ("::ffff:203.0.113.9", "203.0.113.9"),
+        # One IPv6 subscriber holds a whole /64; rotating inside it must not
+        # buy a fresh bucket each time.
+        ("2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+        ("fe80::1%eth0", "fe80::/64"),
+        ("::1", "::/64"),
+        (None, "unknown"),
+        ("", "unknown"),
+        ("not-an-address", "not-an-address"),
+    ],
+)
+def test_906_client_address(remote, expected):
+    from types import SimpleNamespace
+
+    from untether.triggers.server import _client_address
+
+    assert _client_address(SimpleNamespace(remote=remote)) == expected
+
+
+@pytest.mark.anyio
+async def test_906_client_address_ignores_forwarded_headers():
+    """The address is the TCP peer. A forwarded header is caller-supplied
+    and would let anyone pick their own bucket."""
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(_two_hook_settings(2), dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (
+                await cl.post(
+                    "/hooks/a",
+                    headers=_BAD
+                    | {
+                        "X-Forwarded-For": f"203.0.113.{i}",
+                        "X-Real-IP": f"203.0.113.{i}",
+                        "Forwarded": f"for=203.0.113.{i}",
+                    },
+                    json={},
+                )
+            ).status
+            for i in range(5)
+        ]
+    assert statuses == [401, 401, 429, 429, 429]
+
+
+@pytest.mark.anyio
+async def test_906_chunked_oversized_body_is_413_not_500():
+    """A body with no Content-Length skips the size check; aiohttp then
+    raises from `request.read()`, which the catch-all turned into a 500 and an
+    error-level traceback — one per request, from a caller with no
+    credentials."""
+    from structlog.testing import capture_logs
+
+    settings = _make_settings(server={"max_body_bytes": 1024})
+    dispatcher, transport, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+
+    async def _body():
+        for _ in range(8):
+            yield b"x" * 1024
+
+    async with TestClient(TestServer(app)) as cl:
+        with capture_logs() as logs:
+            resp = await cl.post("/hooks/test", headers=_BAD, data=_body())
+        assert resp.status == 413
+    assert [r for r in logs if r["log_level"] in ("warning", "error")] == []
+    assert transport.sent == []

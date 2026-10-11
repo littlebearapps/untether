@@ -17,9 +17,10 @@ and no cron loop runs.
 HTTP POST ─► aiohttp server (port 9876)
   ├─ Route by path ─► WebhookConfig (404 if none)
   ├─ Master pause? ─► 503
-  ├─ Failed-auth bucket for this webhook empty? ─► 429
+  ├─ Failed-auth bucket for this webhook + client address empty? ─► 429
   ├─ Read raw body (size check + cached for auth/multipart)
-  ├─ verify_auth(config, headers, raw_body)  (a failure spends a failed-auth token ─► 401)
+  ├─ Failed-auth bucket checked again, then verify_auth(config, headers, raw_body)
+  │    (a failure spends a failed-auth token ─► 401)
   ├─ rate_limit.allow_all(webhook_id, global)
   ├─ Parse payload (multipart form-data OR JSON)
   ├─ Event filter (optional)
@@ -86,7 +87,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Localhost by default; use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1--65535). |
-| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number caps failed auth attempts per webhook per minute ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
+| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number caps failed auth attempts per webhook and client address per minute — see [Security](#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
 
 ### `[[triggers.webhooks]]`
@@ -678,13 +679,38 @@ the filesystem context.
 - **Rate limiting**: Token-bucket rate limiter enforced per-webhook and globally,
   checked after auth so unauthenticated requests don't consume tokens. A request
   is counted against both buckets or neither.
-- **Failed-auth limit**: each webhook has a separate bucket (`rate_limit` per
-  minute) that failed auth attempts spend. Once it is empty the webhook answers
-  `429` to every request, including one with the right secret, until the bucket
-  refills (one attempt every `60 / rate_limit` seconds). Other webhooks are
-  unaffected ([#906](https://github.com/littlebearapps/untether/issues/906)).
+- **Failed-auth limit**: failed auth attempts spend a separate bucket
+  (`rate_limit` per minute) kept for each webhook and client address. Once an
+  address has emptied its bucket for a webhook, that webhook answers `429` to
+  that address — a request with the right secret included — until the bucket
+  refills (one attempt every `60 / rate_limit` seconds). Other addresses and
+  other webhooks are unaffected, so a caller sending bad credentials locks out
+  only itself ([#906](https://github.com/littlebearapps/untether/issues/906)).
+    - The client address is the address the connection came from. Untether
+      does not read `X-Forwarded-For`, `X-Real-IP` or `Forwarded`: a caller
+      can put anything in those. **Behind a reverse proxy or tunnel every
+      request arrives from the proxy's address, so they all share one bucket
+      per webhook** — bad requests from anyone can then lock the webhook for
+      everyone, at `rate_limit` bad requests a minute. If the webhook is
+      reachable from the internet through a proxy, rate-limit failed requests
+      per client at the proxy.
+    - IPv6 clients are counted by `/64` network, not by single address.
+    - The limit holds for parallel requests too: a burst gets no more
+      credential checks than the bucket has tokens.
+    - A caller with many addresses gets `rate_limit` attempts a minute from
+      each one, so the limit slows guessing rather than preventing it. Use a
+      long random secret.
+    - At most 10,000 addresses are tracked. An address is forgotten once its
+      bucket has refilled. If the table is ever full (a flood of bad requests
+      from 10,000 addresses at once), a request from an address that isn't
+      being tracked gets `429` until there is room; Untether logs
+      `rate_limit.key_table_full` at most once a minute while that lasts.
+    - `triggers.webhook.auth_failed` is logged as a warning for an address's
+      first failure and for the failure that locks it out (`locked_out=true`),
+      with the address in `remote`. Failures in between are debug-level.
 - **Body size limits**: `max_body_bytes` (default 1 MB) prevents memory
-  exhaustion from oversized payloads.
+  exhaustion from oversized payloads. A body sent without a `Content-Length`
+  (chunked) that runs past the limit is a `413` like any other.
 - **Untrusted prefix**: All webhook prompts are prefixed with a marker so agents
   know the content is external.
 - **No secrets in logs**: Auth secrets are not included in structured log output.
@@ -885,7 +911,7 @@ Expected responses:
 | `401 Unauthorized` | Auth verification failed. |
 | `404 Not Found` | No webhook configured for this path. |
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`, or an uploaded file part exceeds `max_file_size_bytes`. |
-| `429 Too Many Requests` | Rate limit exceeded, or too many failed auth attempts on this webhook in the last minute. |
+| `429 Too Many Requests` | Rate limit exceeded, or too many failed auth attempts on this webhook from your address in the last minute (behind a reverse proxy, from any address — see [Security](#security)). |
 | `500 Internal Server Error` | Unexpected error while processing (logged as `triggers.webhook.internal_error`). |
 | `503 triggers paused` | Master [Pause](#pause-and-resume) toggle is active. Includes `Retry-After: 60`. |
 
@@ -977,7 +1003,7 @@ The `triggers.manager.updated` log line lists added/removed crons and webhooks a
 | `src/untether/triggers/settings.py` | Pydantic models: `TriggersSettings`, `WebhookConfig`, `CronConfig`, `CronFetchConfig`, `TriggerServerSettings`. |
 | `src/untether/triggers/auth.py` | Bearer and HMAC-SHA256/SHA1 verification with timing-safe comparison. |
 | `src/untether/triggers/templating.py` | `{{field.path}}` prompt substitution with untrusted prefix. |
-| `src/untether/triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global). |
+| `src/untether/triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global; failed auth per webhook and client address, with a cap on tracked addresses). |
 | `src/untether/triggers/server.py` | aiohttp webhook server (`build_webhook_app`, `run_webhook_server`). |
 | `src/untether/triggers/cron.py` | 5-field cron expression parser and tick-per-minute scheduler. |
 | `src/untether/triggers/fetch.py` | Cron data-fetch step: HTTP GET/POST, file read, response parsing, prompt building. |
