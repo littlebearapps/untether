@@ -119,8 +119,10 @@ def test_never_writes_through_a_link(link: str, tmp_path: Path) -> None:
     assert args[-1] == "--mode=accept-edits"
     assert list(elsewhere.rglob("*")) == []
     warnings = [e for e in logs if e["log_level"] == "warning"]
+    # A linked agent.md is caught one step earlier, by the user-level check.
+    reason = "user_unchecked" if link == "file" else "symlink"
     assert [(e["event"], e["reason"]) for e in warnings] == [
-        ("antigravity.workspace_agent.unavailable", "symlink")
+        ("antigravity.workspace_agent.unavailable", reason)
     ]
 
 
@@ -206,6 +208,8 @@ def test_clean_project_gets_the_agent(project: Path) -> None:
         ".agents/plugins/p/agents/untether-workspace.md",
         ".agents/agents/innocent.md",
         ".agents/plugins/p/plugin.json",
+        ".agents/agents/agent.yaml",
+        ".agents/agents/NOEXT",
         "sub/.agents/agents/untether-workspace.md",
     ],
 )
@@ -307,3 +311,39 @@ def test_entry_budget_stops_before_reading_more(
 
 def test_no_project_never_names_the_agent() -> None:
     assert agent.project_defines_agent(None) is True
+
+
+def test_special_file_in_project_config_drops_the_flag(project: Path) -> None:
+    (project / ".agents").mkdir()
+    os.mkfifo(project / ".agents" / "pipe")
+    with structlog.testing.capture_logs() as logs:
+        assert _args()[-1] == "--mode=accept-edits"
+    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
+        "project_unchecked"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("planted", "reason"),
+    [
+        ("agents/untether-workspace.md", "user_agent"),
+        ("agents/Untether-Workspace/agent.md", "user_agent"),
+        ("agents/untether-workspace/extra.json", "user_unchecked"),
+    ],
+)
+def test_user_level_clash_drops_the_flag(planted: str, reason: str) -> None:
+    assert agent.ensure_workspace_agent() is True
+    path = scan.user_config_dir() / planted
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x")
+    with structlog.testing.capture_logs() as logs:
+        assert _args()[-1] == "--mode=accept-edits"
+    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [reason]
+
+
+def test_other_user_level_agents_are_fine() -> None:
+    other = scan.user_config_dir() / "agents" / "reviewer.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("x")
+    assert _args()[-1] == AGENT_FLAG
+    assert _args()[-1] == AGENT_FLAG
