@@ -104,6 +104,14 @@ def check_effort(value: Any) -> str:
     return value
 
 
+def check_mode(value: Any) -> str:
+    """Only the mode Untether's Workspace runs under; ``plan`` waits for the
+    approval gate, and nothing a user typed ever reaches this flag."""
+    if value != "accept-edits":
+        raise AgyArgvError("mode", "unknown_mode")
+    return value
+
+
 def check_slash_command(value: Any) -> str:
     """``/usage``, ``/config``, ``/effort`` …: one lower-case slash word."""
     if not isinstance(value, str) or _SLASH_COMMAND_RE.match(value) is None:
@@ -115,6 +123,7 @@ _CHECKS = {
     "--model": check_model,
     "--conversation": check_conversation,
     "--effort": check_effort,
+    "--mode": check_mode,
 }
 
 

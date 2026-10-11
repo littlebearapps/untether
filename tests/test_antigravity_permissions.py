@@ -180,7 +180,10 @@ def test_build_args_default_never_bypasses() -> None:
 def test_bypass_flag_only_for_full(mode: str | None) -> None:
     args = _args(EngineRunOptions(permission_mode=mode))
     assert (BYPASS in args) is (mode == "full")
-    assert "--mode" not in args  # rc1 never passes --mode (plan is refused)
+    # Every other run is Workspace = agy's accept-edits mode: without it agy
+    # refuses file writes inside the project. Never both, never plan.
+    assert ("--mode=accept-edits" in args) is (mode != "full")
+    assert [a for a in args if a.startswith("--mode")] in ([], ["--mode=accept-edits"])
     assert "--sandbox" not in args
 
 

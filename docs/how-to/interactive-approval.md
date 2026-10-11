@@ -165,7 +165,7 @@ Toggle via `/config` → **Permission mode**:
 
 | Mode | CLI flag | Behaviour |
 |------|----------|-----------|
-| **Workspace** (default) | (none) | Antigravity edits files in the project (and temp folders); agy blocks its own shell, web and MCP calls. Not a sandbox — see below |
+| **Workspace** (default) | `--mode=accept-edits` | Antigravity edits files in the project (and temp folders); agy blocks its own shell, web and MCP calls. Not a sandbox — see below |
 | **Ask me** | — | Coming in a later 0.36.1 release: asks you in Telegram before shell, web and MCP calls. Needs Untether's approval gate, so it's shown but can't be picked yet |
 | **Plan first** | — | Coming in a later 0.36.1 release: writes a plan and waits for your approval before changing anything |
 | **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |

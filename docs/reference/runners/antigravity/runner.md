@@ -148,7 +148,7 @@ user guide.
 
 | Mode | Value | Flag | What happens |
 |---|---|---|---|
-| **Workspace** (default) | `workspace` | (none) | agy's own `request-review` policy: file edits in the project and temp folders go ahead; shell, web and MCP calls are blocked by agy. Not a sandbox |
+| **Workspace** (default) | `workspace` | `--mode=accept-edits` | agy's own accept-edits mode under its `request-review` policy: file edits in the project and temp folders go ahead; shell, web and MCP calls, and files outside the project, are blocked by agy. Not a sandbox. Without the flag, headless agy refuses every write outside a temp folder (agy 1.3.3) |
 | **Full access** | `full` | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
 | **Ask me** | `ask` | — | Not available yet: refused before agy starts, until Untether's approval gate ships in a later 0.36.1 release |
 | **Plan first** | `plan` | — | Not available yet: refused the same way |

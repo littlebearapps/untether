@@ -118,8 +118,9 @@ In the Antigravity chat the default **Workspace** mode is enough for every row: 
 missing file need no shell. U6 needs a prompt that runs long without a shell command (for example a 1500-word essay),
 because Workspace blocks shell loops.
 
-> **Open at 2026-10-11:** in the first 0.36.1rc1 run, `agy` 1.3.3 blocked file writes inside the project in Workspace
-> mode, so U1 and U4 did not pass there. See "0.36.1rc1 scenarios / results" at the end of this file.
+> **2026-10-11:** in the first 0.36.1rc1 run `agy` blocked file writes inside the project in Workspace mode, so U1
+> and U4 did not pass there. Workspace runs now pass `--mode=accept-edits`; both rows are owed a re-run. See
+> "0.36.1rc1 scenarios / results" at the end of this file.
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
@@ -1525,7 +1526,7 @@ Run on the dev bot by three parallel QA agents (one per set of chats) plus the c
 > **Status: RUN ONCE, INCOMPLETE, NOT GREEN.** A first live run on 2026-10-10 covered most rows and stopped early. It found one blocker: in the default Workspace mode `agy` did not write a file inside the project (rows U1, U4, AG-1, AG-2). No attestation marker exists for 0.36.1rc1 and nothing has been rolled out. A row that was not run, or whose result was not seen, is recorded as such, never as a pass.
 
 - **When and what:** run `qa-20261010T0757Z`, 2026-10-10 18:57–19:34 AEDT, dev bot only (`@untether_dev_bot`), on `feature/558-antigravity` at `46d3d9be`, signed in with a Google account. The session ended before the remaining rows, the cleanup and the log sweep. 26 `agy` turns reached the account; the Gemini 5-hour group went from 0 % to 1 %. The affected and remaining rows are re-run on the branch once the blocker is resolved; the smoke rows are then repeated on the merged `dev` head for 0.36.1rc1, and the marker binds that SHA.
-- **Blocker (Workspace file writes):** with no permission flag, `agy` 1.3.3 in print mode soft-denied `WriteToFile` for a path inside the project (`antigravity.denied_actions actions=['write_file'] … permission_mode=workspace`), and Untether's card called it "a file outside the project". The same write succeeded in Full access, and in a scratch repo under `/tmp`: `agy` treats temp folders as always writable, which is why the earlier probes missed it. Diagnosed on 2026-10-11; the fix is awaiting a maintainer decision, so the Workspace notes above ("file edits, no shell", "Workspace mode is enough for every row") and AG-1/AG-2 stand as written until it lands.
+- **Blocker (Workspace file writes):** with no permission flag, `agy` 1.3.3 in print mode soft-denied `WriteToFile` for a path inside the project (`antigravity.denied_actions actions=['write_file'] … permission_mode=workspace`), and Untether's card called it "a file outside the project". The same write succeeded in Full access, and in a scratch repo under `/tmp`: `agy` treats temp folders as always writable, which is why the earlier probes missed it. Diagnosed on 2026-10-11; the fix is awaiting a maintainer decision, so the Workspace notes above ("file edits, no shell", "Workspace mode is enough for every row") and AG-1/AG-2 stand as written until it lands. **Fixed on the branch 2026-10-11:** Workspace runs pass agy's own `--mode=accept-edits` (project edits allowed; shell, web, MCP and files outside the project still blocked; `init.permission_mode` still `request-review`). U1, U4, AG-1 and AG-2 are owed a re-run after a dev-bot restart, and AG-1's args now end `--mode=accept-edits`.
 - **CLIs:** `agy` 1.3.3 for the whole run (drift suite 10/10 that day; the suite has no file-write check). `agy` updates itself, so record `agy --version` at the start and end of every run. Baseline `preamble.applied preamble_len`: 3338 for Claude, 2574 for Codex, OpenCode, Pi and Antigravity.
 - **Marker:** `~/.untether-dev/integration-test-pass-0.36.1rc1.json`, not written.
 

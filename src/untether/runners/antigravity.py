@@ -464,6 +464,14 @@ def unsupported_version_message(version: str) -> str:
 # ── permission modes (phase 02, D21; 08 §10) ────────────────────────────────
 
 BYPASS_FLAG = "--dangerously-skip-permissions"
+# Workspace = agy's own accept-edits mode. With no flag, print mode
+# soft-denies every file write outside a temp folder, so the project itself
+# is read-only (agy 1.3.3, probed 2026-10-11 in a non-temp repo; the rc1
+# probes all ran under /tmp and missed it). accept-edits allows edits inside
+# the project only: shell, web, MCP and files outside it stay blocked, and
+# ``init.permission_mode`` still reports ``request-review``. A fixed value,
+# never a user's; ``agy_flag`` allows nothing else for this flag.
+WORKSPACE_AGY_MODE = "accept-edits"
 _GATE_MODES = frozenset({"ask", "plan"})
 _GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
 
@@ -1294,10 +1302,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(agy_flag("--effort", effort))
         # Phase 02 (D21): the bypass flag only for an explicit Full access.
         # Ask me / Plan first never get here in rc1 (refused before spawn);
-        # anything else fails closed to Workspace (no flag).
+        # anything else fails closed to Workspace.
         mode = self._effective_mode()
-        if mode == "full":
-            args.append(BYPASS_FLAG)
+        args.append(
+            BYPASS_FLAG if mode == "full" else agy_flag("--mode", WORKSPACE_AGY_MODE)
+        )
         if isinstance(state, AntigravityStreamState):
             state.effective_mode = mode
             state.argv = list(args)

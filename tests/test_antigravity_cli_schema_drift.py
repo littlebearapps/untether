@@ -54,9 +54,10 @@ _TIMEOUT_S = 30
 _PROBE_TIMEOUT_S = 20
 _GATED = os.environ.get("UNTETHER_AGY_DRIFT") == "1"
 _VALID_RE = re.compile(r"\(valid: ([^)]*)\)")
-# Untether's own modes that map onto agy's --mode (09/15 use plan; 02 keeps
-# accept-edits out of rc1, so only plan is required).
-_UNTETHER_AGY_MODES = {"plan"}
+# agy --mode values Untether relies on: accept-edits is what every Workspace
+# run passes (without it agy refuses file writes inside the project); 09/15
+# use plan.
+_UNTETHER_AGY_MODES = {"accept-edits", "plan"}
 _REQUIRED_EFFORTS = {"low", "medium", "high"}
 
 

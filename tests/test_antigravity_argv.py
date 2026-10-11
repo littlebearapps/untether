@@ -70,6 +70,7 @@ _OWN_FLAGS = {
     "--continue",
     agy.BYPASS_FLAG,
 }
+_WORKSPACE_FLAG = "--mode=accept-edits"
 _VALUE_FLAGS = ("--model", "--conversation", "--effort")
 
 
@@ -98,7 +99,7 @@ def _runner(**kwargs: Any) -> AntigravityRunner:
 
 def _assert_no_injected_flag(args: list[str], hostile: str) -> None:
     for token in args:
-        if not token.startswith("-"):
+        if not token.startswith("-") or token == _WORKSPACE_FLAG:
             continue
         name, sep, _ = token.partition("=")
         if sep:
@@ -173,6 +174,13 @@ def test_agy_flag_effort_is_the_cli_vocabulary_only() -> None:
     for bad in ("minimal", "HIGH", "bogus", "high-1"):
         with pytest.raises(AgyArgvError):
             agy_flag("--effort", bad)
+
+
+def test_agy_flag_mode_is_accept_edits_only() -> None:
+    assert agy_flag("--mode", agy.WORKSPACE_AGY_MODE) == _WORKSPACE_FLAG
+    for bad in ("plan", "ACCEPT-EDITS", "accept-edits ", "", None, agy.BYPASS_FLAG):
+        with pytest.raises(AgyArgvError):
+            agy_flag("--mode", bad)
 
 
 @pytest.mark.parametrize(
