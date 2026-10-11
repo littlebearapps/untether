@@ -489,3 +489,79 @@ async def test_effort_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     for i in range(quota.EFFORT_CACHE_MAX + 20):
         await quota.agy_model_efforts(runner, f"model-{i}")
     assert len(quota._EFFORT_CACHE) <= quota.EFFORT_CACHE_MAX
+
+
+# ── AG-8: a model with no default effort level (agy 1.3.3) ──────────────────
+
+_REFUSAL = (
+    'invalid model selection (--model "gemini-3.1-pro" --effort ""): '
+    "--model gemini-3.1-pro requires --effort (available: low, high)"
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (_REFUSAL, ["low", "high"]),
+        ("requires --effort (available: medium)", ["medium"]),
+        ("requires --effort (available: )", None),
+        ("requires --effort (available: LOW; rm -rf)", None),
+        ("unknown model", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_efforts_from_refusal(error: str | None, expected: Any) -> None:
+    assert quota.efforts_from_refusal(error) == expected
+
+
+def test_result_error_is_read_from_the_result_event() -> None:
+    line = json.dumps(
+        {"event": "result", "result": {"status": "ERROR", "error": _REFUSAL}}
+    )
+    out = f"error: noise\n{line}\n".encode()
+    assert quota._result_error(out) == _REFUSAL
+    assert quota._result_error(b"not json\n") is None
+    long = json.dumps({"event": "result", "result": {"error": "x" * 5000}}).encode()
+    assert len(quota._result_error(long) or "") == quota._RESULT_ERROR_CHARS
+
+
+@pytest.mark.anyio
+async def test_effort_probe_reads_levels_from_agys_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/effort --model=<bare id>`` is refused before it runs; the levels
+    in the refusal are used, filtered to our vocabulary, with no WARNING."""
+
+    async def refused(runner: Any, command: str, **kwargs: Any) -> Any:
+        failure = quota.AgySlashError("unparseable", "rc=1")
+        failure.result_error = _REFUSAL.replace("low, high", "low, bogus, high")
+        raise failure
+
+    monkeypatch.setattr(quota, "run_agy_slash", refused)
+    monkeypatch.setattr(quota, "_probe_model_efforts", quota._run_model_efforts)
+    quota.clear_effort_cache()
+    runner = AntigravityRunner(antigravity_cmd="agy")
+    with structlog.testing.capture_logs() as logs:
+        levels = await quota.agy_model_efforts(runner, "gemini-3.1-pro")
+    assert levels == ("low", "high")
+    assert not [e for e in logs if e["log_level"] == "warning"]
+
+
+@pytest.mark.anyio
+async def test_effort_probe_other_failures_still_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refused(runner: Any, command: str, **kwargs: Any) -> Any:
+        failure = quota.AgySlashError("unparseable", "rc=1")
+        failure.result_error = "unknown model"
+        raise failure
+
+    monkeypatch.setattr(quota, "run_agy_slash", refused)
+    monkeypatch.setattr(quota, "_probe_model_efforts", quota._run_model_efforts)
+    quota.clear_effort_cache()
+    runner = AntigravityRunner(antigravity_cmd="agy")
+    with structlog.testing.capture_logs() as logs:
+        assert await quota.agy_model_efforts(runner, "nope") is None
+    (failed,) = [e for e in logs if e["event"] == "antigravity.effort.probe_failed"]
+    assert failed["kind"] == "unparseable"

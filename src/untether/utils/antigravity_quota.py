@@ -27,6 +27,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -64,6 +65,9 @@ class AgySlashError(Exception):
     def __init__(self, kind: str, detail: str | None = None) -> None:
         super().__init__(detail or kind)
         self.kind = kind
+        # agy's own ``result.error`` when the command ended on one. Raw agy
+        # text: parse it, never show or log it as is.
+        self.result_error: str | None = None
 
 
 class AntigravityNotSignedIn(AgySlashError):
@@ -132,6 +136,26 @@ def _command_data(stdout: bytes) -> dict[str, Any] | None:
             if isinstance(data, dict):
                 fallback = data
     return fallback
+
+
+_RESULT_ERROR_CHARS = 512
+
+
+def _result_error(stdout: bytes) -> str | None:
+    """The first ``result.error`` string in agy's output, cut short."""
+    for raw in stdout.decode("utf-8", errors="replace").splitlines():
+        start = raw.find("{")
+        if start < 0:
+            continue
+        try:
+            obj = json.loads(raw[start:])
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("event") == "result":
+            error = (obj.get("result") or {}).get("error")
+            if isinstance(error, str) and error:
+                return error[:_RESULT_ERROR_CHARS]
+    return None
 
 
 async def run_agy_slash(
@@ -212,7 +236,9 @@ async def run_agy_slash(
         raise AntigravityNotSignedIn()
     data = _command_data(bytes(stdout))
     if data is None:
-        raise AgySlashError("unparseable", f"rc={rc}")
+        failure = AgySlashError("unparseable", f"rc={rc}")
+        failure.result_error = _result_error(bytes(stdout))
+        raise failure
     return data
 
 
@@ -672,15 +698,38 @@ def remember_model_efforts(
     _EFFORT_CACHE[key] = levels
 
 
+# agy 1.3.3 refuses ``/effort --model=<id>`` for a model that has no default
+# level, before running the command, and names the levels in the refusal:
+# ``--model gemini-3.1-pro requires --effort (available: low, high)``.
+_EFFORT_REFUSAL_RE = re.compile(r"requires --effort \(available: ([a-z, ]{1,64})\)")
+
+
+def efforts_from_refusal(error: str | None) -> list[str] | None:
+    """The level names in agy's "requires --effort" refusal, or None."""
+    if not error:
+        return None
+    match = _EFFORT_REFUSAL_RE.search(error)
+    if match is None:
+        return None
+    return [name.strip() for name in match.group(1).split(",") if name.strip()]
+
+
 async def _run_model_efforts(
     runner: AntigravityRunner, model: str | None
 ) -> dict[str, Any]:
-    return await run_agy_slash(
-        runner,
-        "/effort",
-        flags=(("--model", model),) if model else (),
-        timeout_s=EFFORT_TIMEOUT_S,
-    )
+    try:
+        return await run_agy_slash(
+            runner,
+            "/effort",
+            flags=(("--model", model),) if model else (),
+            timeout_s=EFFORT_TIMEOUT_S,
+        )
+    except AgySlashError as exc:
+        available = efforts_from_refusal(exc.result_error)
+        if available is None:
+            raise
+        # ``parse_model_efforts`` keeps only names from our own vocabulary.
+        return {"available": available}
 
 
 # Indirection so tests stub the probe (``tests/conftest.py``).
