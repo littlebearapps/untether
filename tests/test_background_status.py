@@ -20,6 +20,7 @@ from untether.background_status import (
     BackgroundStatusManager,
     BackgroundStatusPanel,
     chat_live_background_count,
+    drop_still_running_claims,
     escape_markdown,
     format_bg_elapsed,
     format_done_row,
@@ -890,6 +891,91 @@ async def test_985_stopped_batch_keeps_interim_notes() -> None:
     assert transport.edit_calls[-1]["message"].text.endswith(
         "💬 Sweep two hasn't finished."
     )
+
+
+async def _two_task_ack(ack: str, *, end: str = "completed"):
+    """Tasks A and B; A finishes and its wake-turn ack folds under its row
+    while B still runs; then B ends with ``end``."""
+    transport = FakeTransport()
+    clock = _Clock()
+    a = _bash("ta", "Task A: sleep 40 seconds")
+    b = _bash("tb", "Task B: sleep 90 seconds")
+    panel = await _open_panel(transport, clock, a, b)
+    a.status, a.ended_at = "completed", clock.t + 40
+    assert await panel.fold(ack, task_ids=["ta"])
+    during = transport.edit_calls[-1]["message"].text
+    b.status, b.ended_at = end, clock.t + 90
+    await panel.sync([a, b])
+    assert panel.finalised
+    return during, transport.edit_calls[-1]["message"].text
+
+
+async def test_989_all_done_drops_an_acks_still_running_claim() -> None:
+    """#989: an ack filed under task A said B "is still running" — true when
+    it was written, a contradiction under "all 2 background tasks done"."""
+    ack = (
+        "Task A (sleep 40) finished with exit code 0. "
+        "Task B (sleep 90) is still running."
+    )
+    during, final = await _two_task_ack(ack)
+    assert f"   ↳ {ack}" in during.splitlines()  # true while B runs
+    lines = final.splitlines()
+    assert lines[0] == "✅ all 2 background tasks done"
+    assert "still running" not in final
+    # The attribution and what the ack says about its own task are kept.
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ Task A")))
+    assert lines[row + 1] == "   ↳ Task A (sleep 40) finished with exit code 0."
+
+
+async def test_989_ack_without_a_running_claim_is_unchanged() -> None:
+    ack = "Task A (sleep 40) finished with exit code 0; output saved."
+    _during, final = await _two_task_ack(ack)
+    assert f"   ↳ {ack}" in final.splitlines()
+
+
+async def test_989_stopped_batch_keeps_the_ack_as_written() -> None:
+    """As #985: only an all-done finish supersedes it."""
+    ack = "Task A finished. Task B is still running."
+    _during, final = await _two_task_ack(ack, end="killed")
+    assert f"   ↳ {ack}" in final.splitlines()
+
+
+async def test_989_single_task_ack_is_never_trimmed() -> None:
+    """With one task on the message there is no other task the ack could be
+    stale about (e.g. a server the command left up)."""
+    transport = FakeTransport()
+    clock = _Clock()
+    a = _bash("ta", "start dev server")
+    panel = await _open_panel(transport, clock, a)
+    a.status, a.ended_at = "completed", clock.t + 5
+    ack = "Started it. The server is still running on port 3000."
+    assert await panel.fold(ack, task_ids=["ta"])
+    assert panel.finalised
+    assert f"   ↳ {ack}" in transport.edit_calls[-1]["message"].text.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("ack", "expected"),
+    [
+        ("A is back. B is still running.", "A is back."),
+        ("B hasn't finished yet. A exited 0.", "A exited 0."),
+        ("A passed 42/42, while B is still running.", "A passed 42/42."),
+        ("A passed 42/42 — B is still in progress.", "A passed 42/42."),
+        ("B is still running, but A finished cleanly.", "A finished cleanly."),
+        ("A done; B has not yet completed; logs saved.", "A done; logs saved."),
+        ("Task B is still running.", ""),
+        ("The suite is still failing on test_x.", None),
+        ("A finished with exit code 0.", None),
+    ],
+)
+def test_989_drop_still_running_claims(ack: str, expected: str | None) -> None:
+    assert drop_still_running_claims(ack) == (ack if expected is None else expected)
+
+
+async def test_989_ack_that_was_only_the_claim_leaves_no_line() -> None:
+    _during, final = await _two_task_ack("Task B is still running.")
+    assert "↳" not in final
+    assert any(ln.startswith("✅ Task A") for ln in final.splitlines())
 
 
 async def test_fold_ending_the_last_task_finalises() -> None:

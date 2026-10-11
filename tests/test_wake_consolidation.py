@@ -248,9 +248,16 @@ async def test_813_five_agent_interleaved_readonly_acks_fold(
         row = lines.index(
             next(ln for ln in lines if ln.startswith(f"✅ bg {task_id} ·"))
         )
+        # #989: under "all 5 … done", a1's ack no longer says four are
+        # still running; everything else is shown as written.
+        shown = [
+            "a1 is back." if ack == "a1 is back; four still running." else ack
+            for ack in task_acks
+        ]
         assert lines[row + 1 : row + 1 + len(task_acks)] == [
-            f"   ↳ {ack}" for ack in task_acks
+            f"   ↳ {ack}" for ack in shown
         ], (task_id, lines)
+    assert "still running" not in "\n".join(lines)
     assert not any(ln.startswith("💬") for ln in lines)
 
     decisions = [e for e in logs if e["event"] == "live_turn.fold_decision"]

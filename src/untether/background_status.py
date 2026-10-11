@@ -22,6 +22,7 @@ stays engine-agnostic and tests can use plain objects.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
@@ -170,6 +171,50 @@ def _ack_plain(text: str) -> str:
     except Exception:  # noqa: BLE001 — never lose an ack to the renderer
         logger.warning("background_status.ack_plain_failed", exc_info=True)
         return text
+
+
+# #989: wording by which a wake-turn ack says some task is still going.
+_STILL_RUNNING_RE = re.compile(
+    r"\bstill\s+(?:running|going|executing|working|sleeping|pending"
+    r"|in\s+progress|under\s?way)\b"
+    r"|\b(?:has|have|is|are)(?:n['’]t|\s+not)\s+(?:yet\s+)?"
+    r"(?:finished|completed?|done|ended)\b"
+    r"|\bnot\s+yet\s+(?:finished|completed?|done)\b"
+    r"|\byet\s+to\s+(?:finish|complete|end)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_SPLIT_RE = re.compile(
+    r"\s*;\s*|\s+[—–-]\s+|,?\s+(?:while|but|whereas|though|although)\s+",
+    re.IGNORECASE,
+)
+
+
+def drop_still_running_claims(ack: str) -> str:
+    """#989: ``ack`` without the sentences (or, inside a sentence, the
+    clauses) that say a task is still running / hasn't finished. Everything
+    else is kept word for word; ``""`` when nothing else was said.
+
+    The ack is the model's free text — Claude Code reports each task's
+    status natively, but not which words of an answer are about which task —
+    so this is wording-based and deliberately narrow: an unrecognised
+    phrasing is left as written."""
+    if not _STILL_RUNNING_RE.search(ack):
+        return ack
+    kept: list[str] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(ack):
+        if not _STILL_RUNNING_RE.search(sentence):
+            kept.append(sentence)
+            continue
+        clauses = [
+            clause
+            for clause in _CLAUSE_SPLIT_RE.split(sentence)
+            if clause and not _STILL_RUNNING_RE.search(clause)
+        ]
+        if clauses:
+            rest = "; ".join(clauses)
+            kept.append(rest if rest[-1] in ".!?" else rest + ".")
+    return " ".join(kept)
 
 
 def task_label(task: Any, width: int = DESC_WIDTH) -> str:
@@ -526,8 +571,20 @@ class BackgroundStatusPanel:
     def _tid(self, task: Any) -> str:
         return str(getattr(task, "task_id", "") or id(task))
 
+    def _all_done(self) -> bool:
+        return all(_end_mark(t)[1] == "done" for t in self.tasks.values())
+
     def _ack_lines(self, task: Any) -> list[str]:
-        return [f"   ↳ {ack}" for ack in self.acks.get(self._tid(task), [])]
+        acks = self.acks.get(self._tid(task), [])
+        if self.finalised and len(self.tasks) > 1 and self._all_done():
+            # #989: under "all N background tasks done", an ack written while
+            # another task still ran must not go on saying it is running.
+            # Decided at render from the tasks' own (native) end statuses, so
+            # it holds however the ack got here (folded, or claimed from a
+            # note) and the stored ack is never altered; a stopped or failed
+            # batch keeps it as written (as #985).
+            acks = [a for a in map(drop_still_running_claims, acks) if a]
+        return [f"   ↳ {ack}" for ack in acks]
 
     def _drop_interim_notes(self) -> None:
         """#985: every task is done, so a note written while some still ran
@@ -700,9 +757,7 @@ class BackgroundStatusPanel:
         ):
             self.close_reason = reason
         self.finalised = True
-        if self._interim_notes and all(
-            _end_mark(t)[1] == "done" for t in self.tasks.values()
-        ):
+        if self._interim_notes and self._all_done():
             self._drop_interim_notes()
         await self._edit(self.render())
         self._persist(register=False)
