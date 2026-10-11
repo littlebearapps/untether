@@ -232,12 +232,14 @@ async def _steer(
     run_cwd: Any = None,
     text: str = "also the hostname",
     user_msg_id: int = 42,
+    thread_id: int | None = None,
+    **extra: Any,
 ) -> bool:
     return await maybe_steer(
         cfg,
         chat_id=CHAT,
         user_msg_id=user_msg_id,
-        thread_id=None,
+        thread_id=thread_id,
         topic_thread_id=None,
         prompt_text=text,
         engine=engine,
@@ -248,6 +250,7 @@ async def _steer(
         topic_store=None,
         run_options=run_options,
         run_cwd=run_cwd,
+        **extra,
     )
 
 
@@ -351,6 +354,124 @@ async def test_default_mode_notice_only_once_per_run() -> None:
     running = {MessageRef(channel_id=CHAT, message_id=10): _Busy()}
     await _steer(cfg, engine="codex", token=token, running=running)
     assert len(_texts(cfg)) == 2
+
+
+# ── #990: the busy-run lookup is scoped to the sender's thread ───────────────
+
+_CODEX = ResumeToken(engine="codex", value="thread-1")
+
+
+def _busy_in(thread_id: int | None, *, ref_thread: int | None = None) -> dict:
+    """One busy run started from ``thread_id``; ``ref_thread`` is the thread
+    the progress ref echoes, which is not the scope key (#826)."""
+    task = _Busy()
+    task.thread_id = thread_id  # type: ignore[attr-defined]
+    return {MessageRef(channel_id=CHAT, message_id=9, thread_id=ref_thread): task}
+
+
+def _forum_filter(thread_id: int | None):
+    from untether.telegram.topics import thread_filter_for
+    from untether.telegram.types import TelegramIncomingMessage
+
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=CHAT,
+        message_id=42,
+        text="hi",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+        thread_id=thread_id,
+        chat_type="supergroup",
+        is_forum=True,
+    )
+    return thread_filter_for(msg)
+
+
+@pytest.mark.parametrize("engine_token", [_CODEX, None])
+@pytest.mark.parametrize("general", [None, 1])
+async def test_990_general_ignores_another_topics_busy_run(
+    engine_token: ResumeToken | None, general: int | None
+) -> None:
+    """A default-steer message in General with a busy run only in topic 7
+    simply runs — no "queued instead" notice (every engine)."""
+    cfg = _cfg("steer")
+    ok = await _steer(
+        cfg,
+        engine="codex" if engine_token else "claude",
+        token=engine_token,
+        running=_busy_in(7, ref_thread=7),
+        thread_id=general,
+        thread_filter=_forum_filter(general),
+    )
+    assert ok is False
+    assert _texts(cfg) == []
+
+
+async def test_990_topic_matches_its_own_busy_run() -> None:
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=7),
+        thread_id=7,
+        thread_filter=_forum_filter(7),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+async def test_990_general_matches_generals_busy_run() -> None:
+    """General is its own thread: ``None`` and topic id 1 are the same."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(1),
+        thread_id=None,
+        thread_filter=_forum_filter(None),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+async def test_990_scope_is_the_tasks_thread_not_the_echoed_ref() -> None:
+    """A topic-7 run whose progress ref carries no thread is not topic 8's."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=None),
+        thread_id=8,
+        thread_filter=_forum_filter(8),
+    )
+    assert _texts(cfg) == []
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=None),
+        thread_id=7,
+        thread_filter=_forum_filter(7),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+@pytest.mark.parametrize("thread_id", [None, 31])
+async def test_990_non_forum_chat_stays_chat_wide(thread_id: int | None) -> None:
+    """No thread filter (basic group, or a non-forum supergroup whose thread
+    id is only a reply-chain root): any busy run in the chat counts."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(None),
+        thread_id=thread_id,
+        thread_filter=None,
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
 
 
 async def test_default_mode_silent_when_nothing_running() -> None:

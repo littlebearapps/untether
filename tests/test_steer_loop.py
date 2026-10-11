@@ -115,6 +115,23 @@ async def test_plain_text_goes_through_steer_helper(
     assert len(runner.calls) == 1
 
 
+async def test_990_steer_helper_gets_the_senders_thread_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thread-scoped chats (private, forum) hand the helper their own-thread
+    predicate; a non-forum group stays chat-wide (``None``), as #826 does."""
+    import dataclasses
+
+    calls, _, _ = await _loop(tmp_path, monkeypatch, [_msg("do the thing")])
+    scope = calls[0]["thread_filter"]
+    assert scope is not None
+    assert scope(None) and scope(1) and not scope(7)
+
+    group = dataclasses.replace(_msg("do the thing"), chat_type="group")
+    calls, _, _ = await _loop(tmp_path, monkeypatch, [group])
+    assert calls[0]["thread_filter"] is None
+
+
 async def test_steer_command_with_text_is_a_prompt_with_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

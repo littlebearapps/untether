@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .bridge import TelegramBridgeConfig
     from .chat_prefs import ChatPrefsStore
     from .topic_state import TopicStateStore
+    from .topics import ThreadFilter
 
 logger = get_logger(__name__)
 
@@ -70,16 +71,26 @@ def fallback_notice(reason: FallbackReason, engine: str) -> str:
 
 
 def _active_run_ref(
-    running_tasks: Mapping[MessageRef, Any], chat_id: int, thread_id: int | None
+    running_tasks: Mapping[MessageRef, Any],
+    chat_id: int,
+    thread_filter: ThreadFilter | None,
 ) -> MessageRef | None:
     """The progress ref of a run doing work in this chat/topic, if any (a
-    live session idling between turns doesn't count)."""
+    live session idling between turns doesn't count).
+
+    #990: scoped like ``/new`` and ``/cancel`` (#826) — ``thread_filter``
+    (from :func:`~.topics.thread_filter_for`) is matched against the *task's*
+    thread, never the echoed ``ref.thread_id``, so a forum's General topic
+    never picks up another topic's run. ``None`` = the whole chat.
+    """
     from ..runner_bridge import running_task_is_live_idle
 
     for ref, task in running_tasks.items():
         if ref.channel_id != chat_id:
             continue
-        if thread_id is not None and ref.thread_id not in (None, thread_id):
+        if thread_filter is not None and not thread_filter(
+            getattr(task, "thread_id", None)
+        ):
             continue
         done = getattr(task, "done", None)
         if done is not None and done.is_set():
@@ -140,10 +151,14 @@ async def maybe_steer(
     topic_store: TopicStateStore | None,
     run_options: Callable[[ResumeToken], Awaitable[object]] | None = None,
     run_cwd: Callable[[], Awaitable[Path | None]] | None = None,
+    thread_filter: ThreadFilter | None = None,
 ) -> bool:
     """Steer ``prompt_text`` into the chat's live Claude session if the
     resolved follow-up mode says so. Returns True when it was written (the
-    caller must not also queue it); False → carry on queueing."""
+    caller must not also queue it); False → carry on queueing.
+
+    ``thread_filter`` scopes the "is a run busy here?" check behind the
+    fallback notice to the sender's thread (#990); ``None`` = the whole chat."""
     explicit = normalize_followup_mode(override)
     mode = explicit or await resolve_followup_mode(
         chat_id=chat_id,
@@ -282,7 +297,7 @@ async def maybe_steer(
             reason = "closing" if outcome == "window_closed" else "no_live"
 
     assert reason is not None
-    active = _active_run_ref(running_tasks, chat_id, thread_id)
+    active = _active_run_ref(running_tasks, chat_id, thread_filter)
     logger.info(
         "steer.fallback",
         chat_id=chat_id,
