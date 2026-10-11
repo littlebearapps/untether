@@ -940,7 +940,13 @@ from untether.runner_bridge import (  # noqa: E402
     IncomingMessage,
     handle_message,
 )
-from untether.runners.mock import Emit, Return, ScriptRunner  # noqa: E402
+from untether.runners.mock import (  # noqa: E402
+    Advance,
+    Emit,
+    Return,
+    ScriptRunner,
+    Sleep,
+)
 
 _TOKEN = ResumeToken(engine="claude", value="sess-798")
 
@@ -2282,3 +2288,50 @@ async def test_1015_no_query_turn_deletes_its_progress_message() -> None:
         if c["ref"] not in (run_progress, ref) and "FIRST" not in c["message"].text
     ]
     assert others == [], others
+
+
+async def test_1017_silent_followup_turn_progress_header_ticks(monkeypatch) -> None:
+    """#1017 end to end (handle_message → FollowupTurnRouter →
+    ``_create_turn_progress``): a follow-up turn that thinks for a minute with
+    no tool call has its own progress message repainted by the heartbeat —
+    it used to read ``working · claude · 0s`` until the answer arrived."""
+    from untether import runner_bridge as rb
+    from untether.settings import ProgressSettings
+
+    monkeypatch.setattr(rb, "_TURN_LAZY_PROGRESS_S", 0.01)
+    monkeypatch.setattr(
+        rb,
+        "_load_progress_settings",
+        lambda: ProgressSettings().model_copy(
+            update={"heartbeat_interval": 0.02, "min_render_interval": 0.0}
+        ),
+    )
+    clock = _FakeClock(start=0.0)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN, meta={"model": "opus"})),
+            Emit(_turn("started", 2, reason="followup")),
+            Sleep(0.1),  # the turn's lazy progress message goes up
+            Advance(65.0),  # a minute of silent thinking
+            Sleep(0.2),
+            Emit(_turn("completed", 2, reason="followup", ok=True, answer="SECOND")),
+            Return(answer="FIRST"),
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+        advance=clock.set,
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+        resume_token=None,
+        clock=clock,
+    )
+    run_progress = transport.send_calls[0]["ref"]
+    _, progress = _turn_texts(transport, run_progress, "SECOND")
+    assert "0s" in progress[0], progress
+    assert any("1m" in text for text in progress[1:]), progress

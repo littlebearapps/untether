@@ -38,6 +38,7 @@
 - **fix(antigravity):** the agy version is checked before each run (1.3.1 minimum, with a clear message for an older one) and logged as `agy_version` on `antigravity.session.started` [#976](https://github.com/littlebearapps/untether/issues/976)
 - **fix(config):** `/config` → About probes each engine's real CLI command, so Antigravity's version (`agy`) shows there [#993](https://github.com/littlebearapps/untether/issues/993)
 - **fix(progress):** a run that never started (no process ID and no engine event) is auto-cancelled after three stall warnings again. Untether's own repaints of the progress message counted as engine events, so after the first one the run waited for the ten-warning cap instead; the auto-cancel log line now carries `engine_events` [#994](https://github.com/littlebearapps/untether/issues/994)
+- **fix(progress):** the progress header's elapsed time keeps ticking before the engine's first event. A Claude live-session follow-up that thought for minutes without a tool call showed `working · claude · 0s` until its answer arrived; it now updates every heartbeat interval (30 s by default), as does any engine that is slow to send its first event [#1017](https://github.com/littlebearapps/untether/issues/1017)
 
 ### docs
 

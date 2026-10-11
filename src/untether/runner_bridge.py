@@ -2409,7 +2409,7 @@ class ProgressEdits:
         4. (#777) refresh a live background-task block.
         5. (#954) otherwise, re-render when nothing has for a heartbeat
            interval, so the header's elapsed time keeps moving while the
-           engine generates silently.
+           engine generates silently — before its first event too (#1017).
         """
         stream = self.stream
         engine_state = getattr(stream, "engine_state", None) if stream else None
@@ -2489,12 +2489,14 @@ class ProgressEdits:
         #    would otherwise leave the header's elapsed time frozen. Re-render
         #    once nothing has repainted for a full heartbeat interval, so a
         #    busy run gains no edits and a silent one gains one per interval
-        #    (30 s default) — well inside Telegram's edit budget. Only once
-        #    the engine has produced an event: ``event_seq == 0`` is the
-        #    ``no_pid_no_events`` auto-cancel's "never started" signal.
+        #    (30 s default) — well inside Telegram's edit budget.
+        #    #1017: no engine event is needed first. A live follow-up turn
+        #    has its own ``ProgressEdits`` and a tool-free one emits nothing
+        #    until its answer, so it read ``0s`` throughout. (The gate that
+        #    was here protected ``no_pid_no_events``, which now counts engine
+        #    events itself — #994.)
         if (
-            self.event_seq > 0
-            and not self._finalizing
+            not self._finalizing
             and not self._is_live_session_idle()
             and now - self._last_render_at >= self._heartbeat_interval
         ):

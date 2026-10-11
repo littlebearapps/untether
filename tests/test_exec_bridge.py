@@ -3011,6 +3011,7 @@ async def test_994_no_pid_no_events_auto_cancel_survives_render_bumps() -> None:
     clock = _FakeClock(start=100.0)
     edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
     edits._stall_check_interval = 0.01
+    edits._heartbeat_interval = 0.01  # the header tick fires on every tick
     edits._STALL_THRESHOLD_SECONDS = 0.05
     edits._stall_repeat_seconds = 0.01
     edits._STALL_MAX_WARNINGS_NO_PID = 2
@@ -7606,10 +7607,14 @@ def test_954_heartbeat_ticks_header_during_silent_generation() -> None:
     clock = _FakeClock(start=100.0)
     edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
     edits._heartbeat_interval = 30.0
-    edits._heartbeat_tick()  # never rendered, but no engine event yet either
-    assert edits.event_seq == 0
-    edits.event_seq = before = 1  # the engine's first event...
-    edits._last_render_at = 95.0  # ...rendered 5 s ago
+    # #1017: no engine event yet — the header ticks all the same. That is a
+    # repaint, not an engine event (#994: ``no_pid_no_events`` keys on
+    # ``engine_event_count``).
+    edits._heartbeat_tick()
+    assert edits.event_seq == 1
+    assert edits.engine_event_count == 0
+    before = edits.event_seq
+    edits._last_render_at = 95.0  # rendered 5 s ago
     edits._heartbeat_tick()
     assert edits.event_seq == before  # rendered recently — nothing to refresh
     clock.set(125.0)
@@ -7655,6 +7660,36 @@ async def test_954_silent_run_header_elapsed_advances() -> None:
         tg.cancel_scope.cancel()
     texts = [c["message"].text for c in transport.edit_calls]
     assert texts == ["working 5s", "working 65s"]
+
+
+@pytest.mark.anyio
+async def test_1017_silent_followup_turn_header_elapsed_advances() -> None:
+    """#1017: a live follow-up turn's own ``ProgressEdits`` (fresh, so no
+    engine event yet; the turn is open) repaints its elapsed time from the
+    heartbeat instead of sitting at ``0s`` until the answer arrives."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock, engine="claude")
+    edits._heartbeat_interval = 30.0
+    edits.pid = 4242
+    edits.stream = _make_stream(
+        last_event_type="user",
+        engine_state=_make_engine_state(
+            live_mode=True, completed_turns=1, turn_open=True
+        ),
+    )
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits._run_loop, tg)
+        clock.set(30.0)
+        edits._heartbeat_tick()
+        await anyio.sleep(0.02)
+        clock.set(60.0)
+        edits._heartbeat_tick()
+        await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert texts == ["working 30s", "working 60s"]
+    assert edits.engine_event_count == 0
 
 
 @pytest.mark.anyio
