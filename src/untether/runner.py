@@ -160,7 +160,10 @@ def _rc_label(rc: int) -> str:
     return f"rc={rc}"
 
 
-_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+# #1033: any scheme, any case (``wss://``, ``HTTPS://``), the same shape as
+# ``utils/antigravity_redact._SCHEME_URL_RE``. Applied before the path
+# patterns in ``_sanitise_stderr``.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.-]{1,20}://[^\s\"'<>]*", re.IGNORECASE)
 
 # #208: ordered list of absolute-path patterns. More specific roots first so
 # they're not partially eaten by the generic fallback. Stop chars exclude `:`
@@ -462,10 +465,15 @@ def _classify_jsonl_event(raw: Any) -> str:
 
 
 def _sanitise_stderr(text: str) -> str:
-    """Redact absolute paths and URLs from stderr before exposing to users."""
+    """Redact URLs and absolute paths from stderr before exposing to users.
+
+    URLs go first (#1033): the generic path pattern otherwise eats a URL's
+    ``//host/path``, the URL pattern no longer matches, and the query string
+    (tokens, OAuth codes) survives as ``https:[path]?token=…``.
+    """
+    text = _URL_RE.sub("[url]", text)
     for pattern in _PATH_PATTERNS:
         text = pattern.sub("[path]", text)
-    text = _URL_RE.sub("[url]", text)
     return text
 
 

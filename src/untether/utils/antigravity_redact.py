@@ -22,8 +22,8 @@ conservative and never relies on spotting the URL:
 4. absolute paths, via the shared sanitiser
 
 The shared ``runner._sanitise_stderr`` is deliberately not used on its own
-for agy: it redacts paths before URLs, so its generic path pattern eats
-``//host/path`` and the query string survives.
+for agy: it redacts scheme URLs before paths (#1033) but nothing else in the
+list above.
 """
 
 from __future__ import annotations

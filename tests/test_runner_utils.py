@@ -862,7 +862,7 @@ class TestSignalErrorHints:
 
 
 class TestStderrSanitisation:
-    """_sanitise_stderr redacts absolute paths and URLs."""
+    """_sanitise_stderr redacts URLs, then absolute paths."""
 
     def test_redacts_absolute_path(self) -> None:
         from untether.runner import _sanitise_stderr
@@ -875,9 +875,7 @@ class TestStderrSanitisation:
         from untether.runner import _sanitise_stderr
 
         result = _sanitise_stderr("See https://api.example.com/v2/status for details")
-        # The path regex may consume parts of the URL first, but either way
-        # the sensitive domain/path is redacted
-        assert "api.example.com" not in result
+        assert result == "See [url] for details"
 
     def test_preserves_normal_text(self) -> None:
         from untether.runner import _sanitise_stderr
@@ -963,6 +961,66 @@ class TestStderrSanitisation:
 
         text = "Use option /x to enable verbose mode"
         assert _sanitise_stderr(text) == text
+
+    # #1033: paths used to be redacted before URLs, so the generic path
+    # pattern ate ``//host/path`` and left ``https:[path]?token=…`` behind.
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param(
+                "GET https://api.example.com/v1/items?token=S3CRET&sig=S3CRET failed",
+                "GET [url] failed",
+                id="query-string",
+            ),
+            pytest.param(
+                "Open https://accounts.example.com/o/oauth2/auth?code=S3CRET"
+                "&state=S3CRET#frag to sign in",
+                "Open [url] to sign in",
+                id="oauth-callback",
+            ),
+            pytest.param(
+                "fatal: unable to access "
+                "'https://bob:S3CRET@git.example.com/org/repo.git/': 403",
+                "fatal: unable to access '[url]': 403",
+                id="userinfo",
+            ),
+            pytest.param(
+                "wrote /home/user/proj/out.log after POST "
+                "https://hooks.example.com/services/T0/B0?key=S3CRET (500)",
+                "wrote [path] after POST [url] (500)",
+                id="url-beside-path",
+            ),
+            pytest.param(
+                "dial WSS://stream.example.com/v2/socket?access_token=S3CRET",
+                "dial [url]",
+                id="other-scheme-upper-case",
+            ),
+            pytest.param(
+                "see https://example.com?api_key=S3CRET",
+                "see [url]",
+                id="query-without-path",
+            ),
+            pytest.param(
+                "Error at /home/user/project/src/main.py:42",
+                "Error at [path]:42",
+                id="plain-path-unchanged",
+            ),
+        ],
+    )
+    def test_redacts_whole_urls_before_paths(self, text: str, expected: str) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr(text)
+        assert result == expected
+        assert "S3CRET" not in result
+        assert "example.com" not in result
+
+    def test_stderr_excerpt_redacts_url_query_string(self) -> None:
+        # #1033: the excerpt every runner puts on an error card.
+        result = _stderr_excerpt(
+            ["Error: POST https://api.example.com/v1/auth?token=S3CRET returned 401"]
+        )
+        assert result == "Error: POST [url] returned 401"
 
 
 class _GatedContinueRunner(ResumeTokenMixin, BaseRunner):

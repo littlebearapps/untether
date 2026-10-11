@@ -470,9 +470,10 @@ async def test_mode_rejected_and_print_timeout_warnings_logged(
 
 
 # ── URL redaction (follow-up to 8ac5db5c) ───────────────────────────────────
-# The shared ``_sanitise_stderr`` redacts paths before URLs, so its generic
-# path pattern eats ``//host/path`` and a URL's query string survives
-# (``https:[path]?code=…``). Everything agy surfaces redacts whole URLs first.
+# The shared ``_sanitise_stderr`` used to redact paths before URLs, so its
+# generic path pattern ate ``//host/path`` and a URL's query string survived
+# (``https:[path]?code=…``; fixed for every engine in #1033). Everything agy
+# surfaces redacts whole URLs first.
 
 _LEAKY_URL = (
     "https://accounts.google.com/o/oauth2/auth?client_id=x&code=SECRETCODE"
