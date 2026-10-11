@@ -117,64 +117,92 @@ def ensure_workspace_agent() -> bool:
     return True
 
 
-_MAX_WALK_ENTRIES = 5000
-_MAX_MANIFEST_BYTES = 256 * 1024
+_MAX_WALK_ENTRIES = 2000
+_MAX_WALK_DEPTH = 8
+_MAX_FILE_BYTES = 256 * 1024
+_MAX_TOTAL_BYTES = 2 * 1024 * 1024
 _NAME_FOLDED = WORKSPACE_AGENT_NAME.casefold()
+_NAME_BYTES = WORKSPACE_AGENT_NAME.encode()
+# Where agy reads an agent's name from: a Markdown front matter or a JSON
+# manifest (``agents.json``, a plugin's manifest).
+_DEFINITION_SUFFIXES = (".md", ".json")
+
+
+class _Unchecked(Exception):
+    """The project's ``.agents/`` couldn't be checked in full."""
 
 
 def project_defines_agent(cwd: Path | None) -> bool:
     """True when the project may carry its own agent called
-    ``untether-workspace`` (#1037): a file or folder of that name anywhere
-    under an ``.agents/`` agy loads for *cwd* (plugins included), or an
-    ``agents.json`` that mentions it. Links are never followed. Anything
-    that can't be checked counts as a match, so the flag is dropped."""
+    ``untether-workspace`` (#1037): under any ``.agents/`` agy loads for
+    *cwd* (plugins included), an entry of that name, or a ``.md`` / ``.json``
+    file that mentions it (the name lives in the front matter, not the file
+    name).
+
+    Fails closed: a link anywhere under ``.agents/``, an unreadable entry, or
+    a tree past the entry, depth or byte bounds counts as a match, so the
+    flag is dropped. The bounds are enforced entry by entry, before anything
+    more is listed or read. With no project there is nothing to run in."""
     if cwd is None:
-        return False
+        return True
     try:
         root = antigravity_scan.find_project_root(cwd)
         parents = antigravity_scan._agents_parents(cwd, root)
     except OSError:
         _warn("project_unchecked", cwd)
         return True
-    budget = _MAX_WALK_ENTRIES
+    budget = {"entries": _MAX_WALK_ENTRIES, "bytes": _MAX_TOTAL_BYTES}
     for parent in parents:
         top = parent / ".agents"
-        if not os.path.lexists(top):
-            continue
-        reason = None
-        if top.is_symlink():
-            reason = "project_unchecked"
-        else:
-            try:
-                for folder, dirs, files in os.walk(top, followlinks=False):
-                    budget -= len(dirs) + len(files) + 1
-                    if budget < 0:
-                        reason = "project_unchecked"
-                        break
-                    names = {name.casefold() for name in (*dirs, *files)}
-                    if _NAME_FOLDED in names or f"{_NAME_FOLDED}.md" in names:
-                        reason = "project_agent"
-                        break
-                    if "agents.json" in names and _manifest_names_agent(
-                        Path(folder), files
-                    ):
-                        reason = "project_agent"
-                        break
-            except OSError:
-                reason = "project_unchecked"
-        if reason is not None:
-            _warn(reason, top)
+        try:
+            if not os.path.lexists(top):
+                continue
+            if top.is_symlink() or not top.is_dir():
+                raise _Unchecked
+            found = _tree_names_agent(top, budget, depth=0)
+        except (_Unchecked, OSError):
+            _warn("project_unchecked", top)
+            return True
+        if found:
+            _warn("project_agent", top)
             return True
     return False
 
 
-def _manifest_names_agent(folder: Path, files: list[str]) -> bool:
-    for name in files:
-        if name.casefold() != "agents.json":
-            continue
-        path = folder / name
-        if path.is_symlink() or path.stat().st_size > _MAX_MANIFEST_BYTES:
-            return True
-        if _NAME_FOLDED.encode() in path.read_bytes().lower():
-            return True
-    return False
+def _tree_names_agent(folder: Path, budget: dict[str, int], *, depth: int) -> bool:
+    if depth > _MAX_WALK_DEPTH:
+        raise _Unchecked
+    subfolders: list[Path] = []
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            budget["entries"] -= 1
+            if budget["entries"] < 0:
+                raise _Unchecked
+            if entry.is_symlink():
+                raise _Unchecked
+            folded = entry.name.casefold()
+            if folded in (_NAME_FOLDED, f"{_NAME_FOLDED}.md"):
+                return True
+            if entry.is_dir(follow_symlinks=False):
+                subfolders.append(Path(entry.path))
+            elif folded.endswith(_DEFINITION_SUFFIXES):
+                if not entry.is_file(follow_symlinks=False):
+                    raise _Unchecked
+                if _file_names_agent(entry.path, budget):
+                    return True
+    return any(_tree_names_agent(sub, budget, depth=depth + 1) for sub in subfolders)
+
+
+def _file_names_agent(path: str, budget: dict[str, int]) -> bool:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(_MAX_FILE_BYTES + 1)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+    budget["bytes"] -= len(data)
+    if len(data) > _MAX_FILE_BYTES or budget["bytes"] < 0:
+        raise _Unchecked
+    return _NAME_BYTES in data.lower()

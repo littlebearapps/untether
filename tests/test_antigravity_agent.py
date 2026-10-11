@@ -144,7 +144,7 @@ def test_scan_ignores_the_agent_file_but_not_a_link_beside_it(tmp_path: Path) ->
     assert agent.ensure_workspace_agent() is True
     other = scan.user_config_dir() / "agents" / "someone-else.md"
     other.write_text("---\nname: someone-else\n---\n")
-    os.symlink(tmp_path, agent.agent_path().parent / "extra")
+    os.symlink("/usr", agent.agent_path().parent / "extra")  # outside $HOME
     out: dict[str, scan.Fingerprint] = {}
     scan._scan_user_level(out, scan._Budget())
     assert sorted(key.split("agents/", 1)[1] for key in out) == [
@@ -176,7 +176,7 @@ def test_denial_notice_points_at_new_and_keeps_the_rule_hint_for_shell() -> None
     assert hook_shell.endswith(", or run it from the chat.")
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
@@ -204,6 +204,8 @@ def test_clean_project_gets_the_agent(project: Path) -> None:
         ".agents/agents/untether-workspace.md",
         ".agents/agents/Untether-Workspace/agent.md",
         ".agents/plugins/p/agents/untether-workspace.md",
+        ".agents/agents/innocent.md",
+        ".agents/plugins/p/plugin.json",
         "sub/.agents/agents/untether-workspace.md",
     ],
 )
@@ -247,3 +249,61 @@ def test_linked_or_oversized_project_config_drops_the_flag(
     assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
         "project_unchecked"
     ]
+
+
+@pytest.mark.parametrize("kind", ["linked_dir", "linked_file", "deep", "many", "big"])
+def test_unverifiable_project_config_drops_the_flag(
+    project: Path, tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a link below ``.agents/`` (it could lead to a planted
+    agent), or a tree past the bounds, is never treated as clean."""
+    agents = project / ".agents" / "agents"
+    agents.mkdir(parents=True)
+    hidden = tmp_path / "hidden"
+    hidden.mkdir()
+    (hidden / "x.md").write_text("---\nname: untether-workspace\n---\n")
+    if kind == "linked_dir":
+        os.symlink(hidden, agents / "more")
+    elif kind == "linked_file":
+        os.symlink(hidden / "x.md", agents / "x.md")
+    elif kind == "deep":
+        deep = agents
+        for i in range(agent._MAX_WALK_DEPTH + 1):
+            deep = deep / f"d{i}"
+        deep.mkdir(parents=True)
+    elif kind == "many":
+        monkeypatch.setattr(agent, "_MAX_WALK_ENTRIES", 5)
+        for i in range(6):
+            (agents / f"f{i}.txt").write_text("x")
+    else:
+        (agents / "notes.md").write_text("x" * (agent._MAX_FILE_BYTES + 1))
+    with structlog.testing.capture_logs() as logs:
+        assert _args()[-1] == "--mode=accept-edits"
+    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
+        "project_unchecked"
+    ]
+
+
+def test_entry_budget_stops_before_reading_more(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound applies entry by entry: past it nothing else is opened."""
+    agents = project / ".agents" / "agents"
+    agents.mkdir(parents=True)
+    for i in range(20):
+        (agents / f"f{i}.md").write_text("x")
+    monkeypatch.setattr(agent, "_MAX_WALK_ENTRIES", 3)
+    opened: list[str] = []
+    real = agent._file_names_agent
+
+    def counting(path: str, budget: dict[str, int]) -> bool:
+        opened.append(path)
+        return real(path, budget)
+
+    monkeypatch.setattr(agent, "_file_names_agent", counting)
+    assert agent.project_defines_agent(project) is True
+    assert len(opened) <= 3
+
+
+def test_no_project_never_names_the_agent() -> None:
+    assert agent.project_defines_agent(None) is True

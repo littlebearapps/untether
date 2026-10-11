@@ -224,7 +224,7 @@ For a cron, set `permission_mode = "full"` on the cron itself; webhook runs neve
 
 Untether couldn't write its no-shell agent file, `~/.gemini/config/agents/untether-workspace/agent.md`, or that path is a symlink. The run still goes ahead in Workspace, but on agy's default agent, which tends to open with a shell command that agy then blocks. Check that `~/.gemini/config/agents`, its `untether-workspace` folder and `agent.md` are real paths (none of them a symlink) and that the Untether user can write there. Untether tries again on every Workspace run, so no restart is needed, but the warning is logged only once per cause until Untether restarts. Don't edit the file: Untether overwrites changes.
 
-With `reason=project_agent`, the project itself has an agent called `untether-workspace` under one of its `.agents/` folders (or names it in an `agents.json`). agy picks agents by name, so Untether won't pass `--agent` there. Rename or remove the project's copy. `reason=project_unchecked` means the project's `.agents/` is a symlink or too large to check.
+With `reason=project_agent`, the project itself has an agent called `untether-workspace` under one of its `.agents/` folders, or a `.md` or `.json` file there mentions that name. agy picks agents by name, so Untether won't pass `--agent` there. Rename or remove the project's copy. `reason=project_unchecked` means the project's `.agents/` holds a symlink or is too large to check, so Untether plays safe.
 
 ### "Ask me needs Untether's approval gate"
 
