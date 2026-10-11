@@ -39,6 +39,16 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - **Schemas** (`src/untether/schemas/`) — msgspec structs for JSONL; **Triggers** (`src/untether/triggers/`) — cron/webhooks
 - Config: `untether.toml` (with `watch_config = true` most sections hot-reload — off by default; `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` need a restart, as does turning `[triggers] enabled` on)
 
+## Engine work is native-first (CRITICAL)
+
+Every fix, update, enhancement or new feature for a supported engine (Claude Code, Codex, OpenCode, Pi, Antigravity)
+and for any engine added later **must use what the engine ships natively** — CLI flags, config, hooks, and its
+protocol's events and mid-session requests (the engine's SDK docs describe these). Build custom Untether functionality
+**only** when the engine doesn't provide the feature *on Untether's surface* (headless, no TypeScript-only or
+experimental APIs, the user's own login, durable enough for the job), and record the gap in the engine's register.
+Check the installed version's docs before designing, never memory. Taking an engine's SDK package as a dependency is
+Nathan's call. Full rule: `.claude/rules/runner-development.md` → "Native-first".
+
 ## Deprecated engines (Gemini CLI, AMP)
 
 Both still ship and load but are strictly deprecated and no longer supported — no removal is scheduled, though a future

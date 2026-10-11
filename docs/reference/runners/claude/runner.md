@@ -935,6 +935,38 @@ The preview is appended to the `warning_text` in the progress message. Only appl
 [4]: https://code.claude.com/docs/en/quickstart "Quickstart - Claude Code Docs"
 [5]: https://platform.claude.com/docs/en/agent-sdk/quickstart "Quickstart - Claude Docs"
 
+## Native vs custom register
+
+The record required by `.claude/rules/runner-development.md` → "Native-first". Audited 2026-10-11 against CLI 2.1.296
+and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-check a row before relying on it.
+
+**Custom where a native equivalent exists (migrate when touched, each needs an issue and a dev-bot run):**
+
+| Untether feature | Custom today | Native | Catch |
+|---|---|---|---|
+| `max_cost_per_run` | checked after a result is delivered | `--max-budget-usd` → result `error_max_budget_usd` | client-side estimate, can overshoot; spend restored on resume isn't counted |
+| Preamble | prepended to the user prompt | `--append-system-prompt[-file]` | fixed at process start |
+| `% ctx` | derived from `usage` + `context_windows.json` | `get_context_usage` request | makes token-counting API calls |
+| `/cancel` of a running turn | SIGINT / SIGTERM | `interrupt` request (session survives) | the interrupted turn's messages must be drained |
+| `/model` on a live session | close and resume | `set_model` request | — |
+| Steer / queue | own steer window, no `priority` sent | user-message `priority` (`now` / `next` / `later`) | documented for TypeScript only |
+| `/export` | Untether's recorded events | the CLI's session transcript | no export API |
+| Stopping one background task | not offered | `stop_task` request | — |
+
+**Custom because native fails a "works on Untether's surface" test:**
+
+| Untether feature | Why native doesn't count |
+|---|---|
+| `/usage` (OAuth usage endpoint + credentials file) | on-demand `usage_report` is TypeScript-only and experimental; `rate_limit_event` fires on status change only. Existing exception to the "no undocumented endpoints" tier — don't extend it |
+| Loop mode owning the schedule | `CronCreate` / `ScheduleWakeup` fire only while the process is alive and idle, with no catch-up |
+| Outbox file delivery | `SendUserFile` needs a Remote Control client or cloud session |
+
+**No native equivalent:** stall and liveness watchdogs, diff previews, Pause & Outline, approval reminders, daily
+budget, empty-resume quarantine and auto-continue (upstream-bug workarounds), wake-ack consolidation.
+
+Adopting the `claude-agent-sdk` Python package in place of the hand-written control channel is deferred (Nathan,
+2026-10-11).
+
 ## See also
 
 - [Error Reference](../../errors.md) — actionable hints for common engine errors

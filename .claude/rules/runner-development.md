@@ -4,9 +4,69 @@ paths:
   - "src/untether/runner.py"
   - "src/untether/runner_bridge.py"
   - "src/untether/schemas/**"
+  - "docs/reference/runners/**"
 ---
 
 # Runner Development Rules
+
+## Native-first (STRICT — every supported and future engine)
+
+Applies to every fix, update, enhancement and new feature for Claude Code, Codex, OpenCode, Pi, Antigravity and any
+engine added later. Not Gemini CLI / AMP: they get no feature work at all (see "Deprecated engines" below).
+
+**Build on what the engine ships natively; Untether maps, passes through and renders it.** Custom Untether
+functionality for an engine is allowed **only** when the engine does not provide that tool or feature. "Native is
+harder to wire up" and "we already built it for another engine" are not exceptions.
+
+### What counts as native (in order of preference)
+
+1. Documented CLI flags, config/settings keys, env vars and hooks.
+2. Documented protocol surface: stream events and their fields, `system/init` capabilities, and **mid-session
+   requests** (Claude: `interrupt`, `set_model`, `set_permission_mode`, `stop_task`, `get_context_usage`, MCP
+   status/reconnect). The engine's SDK reference is the documentation for these — read it even though Untether talks to
+   the CLI directly.
+3. Never, for new work: undocumented HTTP endpoints, reading the engine's credential or state files, or process
+   signals where a native request does the same job.
+
+Taking an engine's SDK **package** as a dependency (e.g. `claude-agent-sdk`) is an architecture decision for Nathan,
+not something this rule requires or permits on its own. Until then, "use the SDK feature" means "use the CLI/protocol
+feature the SDK wraps".
+
+### Native only counts if it works on Untether's surface
+
+A feature is native **for us** only when all of these hold; otherwise treat it as missing or partial and say which
+test failed:
+
+- available in headless / stream-json mode (not TUI-, Remote-Control- or cloud-only);
+- available without a language binding Untether doesn't use (TypeScript-only SDK features don't count), and not
+  marked experimental;
+- works with the user's own logged-in CLI (subscription auth), not API-key only;
+- meets the feature's real requirement — e.g. survives process exit and restarts, works unattended. Session-scoped
+  scheduling that dies with the process is not a native replacement for a durable loop.
+
+### Procedure
+
+1. **Check before designing**, against the *installed* version (never memory — the CLIs self-update): `--help`, the
+   CLI and SDK references, the changelog, and `docs/reference/runners/<engine>/`. Check requests and message fields,
+   not just flags — the 2026-10 Claude audit found the gaps there, not in argv.
+2. **Native exists → use it.** No parallel Untether state for something the engine already tracks or enforces
+   (budgets, context usage, model, permission mode, sessions, queueing/priority of follow-ups), no deriving a value
+   the engine will report, no instructions prepended to the user prompt when a system-prompt option exists.
+3. **Read the catch first.** Native often differs in semantics (an estimate that can overshoot, a value fixed at
+   process start, an extra API call). If the difference breaks the feature, that is "partial": use the native part,
+   fill only the remainder, and write the difference down.
+4. **Native missing or partial → custom, recorded.** Add a row to the engine's register in
+   `docs/reference/runners/<engine>/` (what was checked, engine version, date, which test above failed) and point a
+   code comment at the issue. A workaround for an upstream bug is custom code too: record the upstream issue and the
+   condition for retiring it.
+5. **Detect, don't assume.** Gate a native feature on `system/init` capabilities or a cached `--help` probe, not a
+   version comparison, and keep the custom path only as the fallback for CLIs that lack it.
+6. **Existing custom code.** When a change touches it, re-check the register. Migrate in the same change only when it
+   is small and in scope; otherwise file an issue and leave the code. Never swap a working custom path for a native
+   one without a live dev-bot run — the docs are not proof (precedent for retiring: the ExitPlanMode cooldown, #570).
+
+Untether's own cross-engine surface (Telegram UX, progress, triggers, daily budget, watchdogs) is not "custom engine
+functionality", but it must be fed from native data wherever the engine exposes it.
 
 ## 3-event contract
 
@@ -92,6 +152,8 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 
 ## Adding a new engine
 
+0. Apply "Native-first" above: inventory the engine's native features (flags, config, hooks, protocol, SDK) in
+   `docs/reference/runners/myengine/` first, and list any gap that needs custom code
 1. Create `src/untether/runners/myengine.py` extending `JsonlSubprocessRunner`
 2. Create `src/untether/schemas/myengine.py` with msgspec structs
 3. Override: `command()`, `build_args()`, `translate()`, `new_state()`
