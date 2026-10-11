@@ -6729,11 +6729,13 @@ def _register_task(
     task_id = event.task_id or ""
     task = state.tasks.get(task_id)
     created = task is None
+    revived = False
     if task is None:
         task = ClaudeTask(task_id=task_id)
         state.tasks[task_id] = task
     elif task.ended_at is not None and source == "task_started":
         _revive_task(state, task, source)
+        revived = True
     if event.task_type is not None:
         task.task_type = event.task_type
     if event.tool_use_id is not None:
@@ -6748,8 +6750,8 @@ def _register_task(
         task.owned_by_subagent = event.owned_by_subagent
     if task.holds_session:
         state.background_observed = True
-    if created or source == "task_started":
-        log = logger.info if task.is_backgrounded else logger.debug
+    log = logger.info if task.is_backgrounded else logger.debug
+    if created:
         log(
             "claude.task.registered",
             task_id=task_id,
@@ -6757,6 +6759,23 @@ def _register_task(
             is_backgrounded=task.is_backgrounded,
             owned_by_subagent=task.owned_by_subagent,
             subagent_type=task.subagent_type,
+            description=(task.description or "")[:80],
+            source=source,
+        )
+    elif source == "task_started" and not revived:
+        # #1003: the CLI's own ``task_id`` already has its registration line
+        # (the ``background_tasks_changed`` snapshot lands a moment before
+        # ``task_started``). This is the same task gaining what a snapshot
+        # entry can't say — never a second ``registered``, so counts by
+        # event name are one per task. A resumed id logs ``revived`` instead.
+        log(
+            "claude.task.confirmed",
+            task_id=task_id,
+            task_type=task.task_type,
+            is_backgrounded=task.is_backgrounded,
+            owned_by_subagent=task.owned_by_subagent,
+            subagent_type=task.subagent_type,
+            tool_use_id=task.tool_use_id,
             description=(task.description or "")[:80],
             source=source,
         )
