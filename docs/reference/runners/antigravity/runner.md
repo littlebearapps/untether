@@ -188,14 +188,14 @@ take a tool away from its default agent, but a custom agent's `tools:` list is t
   A changed file is rewritten (`antigravity.workspace_agent.installed`). The file does nothing unless an agy run
   names it.
 - The run then passes `--agent=untether-workspace`. Full access never does.
-- agy picks an agent by name and also loads agents from a project's `.agents/` folders. If the project has a file
-  or folder called `untether-workspace` anywhere under an `.agents/` agy loads (plugins included), or any file
-  there that mentions the name (an agent's name lives in its front matter or a manifest, not its file name),
-  Untether doesn't pass `--agent` (`reason=project_agent`), so a repo can't have its own agent run under Untether's
-  name. The check fails closed (`reason=project_unchecked`): any symlink or special file under `.agents/`, an
-  unreadable entry, or a tree past 2,000 entries, 8 levels, 256 KB per file or 2 MB in total also drops the flag.
-  The user-level agent folder is checked by entry name only (nothing under `~/.gemini` is opened): a second
-  `untether-workspace` there (`reason=user_agent`), or anything beside Untether's `agent.md` in its folder
+- agy picks an agent by name and also loads agents from a project's `.agents/` folders, so a repo could ship its
+  own `untether-workspace`. Untether doesn't try to recognise one, since that would mean reading agent files the way
+  agy does. The rule is structural: if any `.agents/` agy loads for the run has an `agents`, `agents.json`, `plugins`
+  or `plugins.json` entry (whatever is in it), Untether doesn't pass `--agent` (`reason=project_agents`), and that
+  project runs Workspace on agy's default agent as before. Rules, skills, hooks and MCP config don't count. It fails
+  closed (`reason=project_unchecked`) when `.agents` is a symlink, isn't a folder, can't be listed or has more than
+  2,000 entries. The user-level agent folder is checked by entry name only (nothing under `~/.gemini` is opened): a
+  second `untether-workspace` there (`reason=user_agent`), or anything beside Untether's `agent.md` in its folder
   (`reason=user_unchecked`), drops the flag too. Not covered: a user-level agent or plugin that declares the name
   inside a differently named file; that is the user's own configuration, not a project's.
 - If the file can't be put in place (unwritable folder, or a symlink anywhere on the path), the run goes ahead

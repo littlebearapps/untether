@@ -193,10 +193,13 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         reset_run_base_dir(token)
 
 
-def test_clean_project_gets_the_agent(project: Path) -> None:
-    (project / ".agents" / "agents").mkdir(parents=True)
-    (project / ".agents" / "agents" / "reviewer.md").write_text("x")
-    (project / ".agents" / "agents.json").write_text('{"agents": ["reviewer"]}')
+def test_project_without_agent_sources_gets_the_agent(project: Path) -> None:
+    """Rules, skills, hooks and MCP config can't define an agent."""
+    for name in ("rules", "skills"):
+        (project / ".agents" / name).mkdir(parents=True)
+        (project / ".agents" / name / "untether-workspace.md").write_text("x")
+    (project / ".agents" / "mcp_config.json").write_text("{}")
+    (project / ".agents" / "notes.md").write_text("name: untether-workspace")
     assert _args()[-1] == AGENT_FLAG
 
 
@@ -204,23 +207,24 @@ def test_clean_project_gets_the_agent(project: Path) -> None:
     "planted",
     [
         ".agents/agents/untether-workspace.md",
-        ".agents/agents/Untether-Workspace/agent.md",
-        ".agents/plugins/p/agents/untether-workspace.md",
         ".agents/agents/innocent.md",
-        ".agents/plugins/p/plugin.json",
-        ".agents/agents/agent.yaml",
-        ".agents/agents/NOEXT",
-        "sub/.agents/agents/untether-workspace.md",
+        ".agents/Agents/x.md",
+        ".agents/agents.json",
+        ".agents/plugins/p/agents/a.md",
+        ".agents/plugins.json",
+        "sub/.agents/agents/a.md",
     ],
 )
-def test_project_agent_of_the_same_name_drops_the_flag(
+def test_project_that_can_supply_agents_drops_the_flag(
     project: Path, planted: str
 ) -> None:
+    """Structural: what the files say is never read, so an escaped or
+    oddly encoded ``name:`` can't slip a same-named agent past the check."""
     from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
     path = project / planted
     path.parent.mkdir(parents=True)
-    path.write_text("---\nname: untether-workspace\ntools:\n  - run_command\n---\n")
+    path.write_text('---\nname: "untether\\x2dworkspace"\ntools: [run_command]\n---\n')
     token = set_run_base_dir(project / "sub") if planted.startswith("sub/") else None
     try:
         with structlog.testing.capture_logs() as logs:
@@ -230,97 +234,42 @@ def test_project_agent_of_the_same_name_drops_the_flag(
             reset_run_base_dir(token)
     assert args[-1] == "--mode=accept-edits"
     assert [(e["event"], e["reason"]) for e in logs if e["log_level"] == "warning"] == [
-        ("antigravity.workspace_agent.unavailable", "project_agent")
+        ("antigravity.workspace_agent.unavailable", "project_agents")
     ]
 
 
-def test_agents_manifest_naming_the_agent_drops_the_flag(project: Path) -> None:
+def test_empty_or_linked_agent_source_still_drops_the_flag(
+    project: Path, tmp_path: Path
+) -> None:
     (project / ".agents").mkdir()
-    (project / ".agents" / "agents.json").write_text(
-        '{"agents": [{"name": "Untether-Workspace", "path": "x.md"}]}'
-    )
+    os.symlink(tmp_path / "nowhere", project / ".agents" / "plugins")
     assert _args()[-1] == "--mode=accept-edits"
 
 
-def test_linked_or_oversized_project_config_drops_the_flag(
-    project: Path, tmp_path: Path
-) -> None:
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    os.symlink(elsewhere, project / ".agents")
-    with structlog.testing.capture_logs() as logs:
-        assert _args()[-1] == "--mode=accept-edits"
-    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
-        "project_unchecked"
-    ]
-
-
-@pytest.mark.parametrize("kind", ["linked_dir", "linked_file", "deep", "many", "big"])
+@pytest.mark.parametrize("kind", ["linked", "file", "many"])
 def test_unverifiable_project_config_drops_the_flag(
     project: Path, tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail closed: a link below ``.agents/`` (it could lead to a planted
-    agent), or a tree past the bounds, is never treated as clean."""
-    agents = project / ".agents" / "agents"
-    agents.mkdir(parents=True)
-    hidden = tmp_path / "hidden"
-    hidden.mkdir()
-    (hidden / "x.md").write_text("---\nname: untether-workspace\n---\n")
-    if kind == "linked_dir":
-        os.symlink(hidden, agents / "more")
-    elif kind == "linked_file":
-        os.symlink(hidden / "x.md", agents / "x.md")
-    elif kind == "deep":
-        deep = agents
-        for i in range(agent._MAX_WALK_DEPTH + 1):
-            deep = deep / f"d{i}"
-        deep.mkdir(parents=True)
-    elif kind == "many":
-        monkeypatch.setattr(agent, "_MAX_WALK_ENTRIES", 5)
-        for i in range(6):
-            (agents / f"f{i}.txt").write_text("x")
+    if kind == "linked":
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(elsewhere, project / ".agents")
+    elif kind == "file":
+        (project / ".agents").write_text("x")
     else:
-        (agents / "notes.md").write_text("x" * (agent._MAX_FILE_BYTES + 1))
+        monkeypatch.setattr(agent, "_MAX_ENTRIES", 3)
+        (project / ".agents").mkdir()
+        for i in range(5):
+            (project / ".agents" / f"f{i}.txt").write_text("x")
     with structlog.testing.capture_logs() as logs:
         assert _args()[-1] == "--mode=accept-edits"
     assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
         "project_unchecked"
     ]
-
-
-def test_entry_budget_stops_before_reading_more(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The bound applies entry by entry: past it nothing else is opened."""
-    agents = project / ".agents" / "agents"
-    agents.mkdir(parents=True)
-    for i in range(20):
-        (agents / f"f{i}.md").write_text("x")
-    monkeypatch.setattr(agent, "_MAX_WALK_ENTRIES", 3)
-    opened: list[str] = []
-    real = agent._file_names_agent
-
-    def counting(path: str, budget: dict[str, int]) -> bool:
-        opened.append(path)
-        return real(path, budget)
-
-    monkeypatch.setattr(agent, "_file_names_agent", counting)
-    assert agent.project_defines_agent(project) is True
-    assert len(opened) <= 3
 
 
 def test_no_project_never_names_the_agent() -> None:
     assert agent.project_defines_agent(None) is True
-
-
-def test_special_file_in_project_config_drops_the_flag(project: Path) -> None:
-    (project / ".agents").mkdir()
-    os.mkfifo(project / ".agents" / "pipe")
-    with structlog.testing.capture_logs() as logs:
-        assert _args()[-1] == "--mode=accept-edits"
-    assert [e["reason"] for e in logs if e["log_level"] == "warning"] == [
-        "project_unchecked"
-    ]
 
 
 @pytest.mark.parametrize(

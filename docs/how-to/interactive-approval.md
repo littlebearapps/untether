@@ -184,7 +184,7 @@ This is a pre-run policy: headless agy can't stop to ask, so there are no Approv
 - Web fetches, MCP tools and subagents aren't available either.
 - Reads and writes outside the project are still blocked by agy, with the notice below.
 
-**The managed agent file.** Untether writes `~/.gemini/config/agents/untether-workspace/agent.md` (agy's user-level custom-agent folder) and passes `--agent=untether-workspace` on Workspace runs. Untether rewrites the file if it is changed, so don't edit it. It does nothing for your own interactive `agy` unless you pick that agent there. If Untether can't write the file, or the path is a symlink, the run goes ahead without the agent and the log has a `antigravity.workspace_agent.unavailable` warning; see [Troubleshooting](troubleshooting.md#antigravity-workspace-agent-file-unavailable). Full access never passes `--agent`.
+**The managed agent file.** Untether writes `~/.gemini/config/agents/untether-workspace/agent.md` (agy's user-level custom-agent folder) and passes `--agent=untether-workspace` on Workspace runs. Untether rewrites the file if it is changed, so don't edit it. It does nothing for your own interactive `agy` unless you pick that agent there. If Untether can't write the file, the path is a symlink, or the project defines agy agents or plugins of its own (under `.agents/`), the run goes ahead without the agent and the log has a `antigravity.workspace_agent.unavailable` warning; see [Troubleshooting](troubleshooting.md#antigravity-workspace-agent-file-unavailable). Full access never passes `--agent`.
 
 **When agy blocks a tool.** A read or write outside the project isn't carried out. The progress message shows a ⚠️ Blocked row, the turn stops there, and the final reply ends with how to allow it:
 

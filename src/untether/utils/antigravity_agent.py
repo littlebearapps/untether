@@ -16,8 +16,9 @@ and ``--agent`` is passed only when the file on disk is exactly that text.
 
 agy picks an agent by name and also loads agents from the project's
 ``.agents/`` folders, so a repo could ship its own ``untether-workspace``.
-``project_defines_agent`` looks for one and the run then goes without
-``--agent`` rather than risk running the project's copy under our name.
+Untether doesn't try to recognise one (that would mean parsing agent files
+the way agy does): ``project_defines_agent`` asks only whether the project
+can supply agents at all, and if so the run goes without ``--agent``.
 
 agy keeps a conversation on the agent it started with and ignores
 ``--agent`` on a resume, so a chat switched to Full access keeps the
@@ -117,32 +118,32 @@ def ensure_workspace_agent() -> bool:
     return True
 
 
-_MAX_WALK_ENTRIES = 2000
-_MAX_WALK_DEPTH = 8
-_MAX_FILE_BYTES = 256 * 1024
-_MAX_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_ENTRIES = 2000
 _NAME_FOLDED = WORKSPACE_AGENT_NAME.casefold()
-_NAME_BYTES = WORKSPACE_AGENT_NAME.encode()
+# The entries of a project's ``.agents/`` through which agy can load an
+# agent definition: custom agents, and plugins (which bundle agents).
+_AGENT_SOURCES = frozenset({"agents", "agents.json", "plugins", "plugins.json"})
 
 
 class _Unchecked(Exception):
-    """The project's ``.agents/`` couldn't be checked in full."""
+    """A folder couldn't be checked in full."""
 
 
 def project_defines_agent(cwd: Path | None) -> bool:
-    """True when the project may carry its own agent called
-    ``untether-workspace`` (#1037): under any ``.agents/`` agy loads for
-    *cwd* (plugins included), an entry of that name, or any file that
-    mentions it (the name lives in the front matter or a manifest, not the
-    file name, and agy's set of manifest formats isn't ours to guess). The
-    user-level agent folder is checked by entry name only (D33: nothing
-    under ``~/.gemini`` is opened): a second ``untether-workspace`` there,
-    or anything beside our ``agent.md``, also drops the flag.
+    """True when ``--agent`` might not resolve to Untether's own file (#1037).
 
-    Fails closed: a link or a non-regular file anywhere under ``.agents/``,
-    an unreadable entry, or a tree past the entry, depth or byte bounds
-    counts as a match, so the flag is dropped. The bounds are enforced entry by entry, before anything
-    more is listed or read. With no project there is nothing to run in."""
+    Structural, never content-based, so there is no agent file for Untether
+    to read differently from agy: any ``.agents/`` agy loads for *cwd* that
+    has an ``agents``, ``agents.json``, ``plugins`` or ``plugins.json`` entry
+    (of any kind, empty or not) counts, whatever is inside. Such a project
+    runs Workspace on agy's default agent, as before the no-shell agent.
+
+    The user-level agent folder is checked by entry name only (D33: nothing
+    under ``~/.gemini`` is opened): a second ``untether-workspace`` there, or
+    anything beside our ``agent.md``, also counts.
+
+    Fails closed: an ``.agents`` that is a link or not a folder, one that
+    can't be listed or has too many entries, and no project at all."""
     if cwd is None:
         return True
     try:
@@ -151,9 +152,9 @@ def project_defines_agent(cwd: Path | None) -> bool:
     except OSError:
         _warn("project_unchecked", cwd)
         return True
-    budget = {"entries": _MAX_WALK_ENTRIES, "bytes": _MAX_TOTAL_BYTES}
+    budget = _MAX_ENTRIES
     try:
-        user_clash = _user_level_clash(budget)
+        user_clash, budget = _user_level_clash(budget)
     except (_Unchecked, OSError):
         _warn("user_unchecked", agent_path())
         return True
@@ -167,75 +168,41 @@ def project_defines_agent(cwd: Path | None) -> bool:
                 continue
             if top.is_symlink() or not top.is_dir():
                 raise _Unchecked
-            found = _tree_names_agent(top, budget, depth=0)
+            with os.scandir(top) as entries:
+                for entry in entries:
+                    budget -= 1
+                    if budget < 0:
+                        raise _Unchecked
+                    if entry.name.casefold() in _AGENT_SOURCES:
+                        _warn("project_agents", top)
+                        return True
         except (_Unchecked, OSError):
             _warn("project_unchecked", top)
-            return True
-        if found:
-            _warn("project_agent", top)
             return True
     return False
 
 
-def _tree_names_agent(folder: Path, budget: dict[str, int], *, depth: int) -> bool:
-    if depth > _MAX_WALK_DEPTH:
-        raise _Unchecked
-    subfolders: list[Path] = []
-    with os.scandir(folder) as entries:
-        for entry in entries:
-            budget["entries"] -= 1
-            if budget["entries"] < 0:
-                raise _Unchecked
-            if entry.is_symlink():
-                raise _Unchecked
-            folded = entry.name.casefold()
-            if folded in (_NAME_FOLDED, f"{_NAME_FOLDED}.md"):
-                return True
-            if entry.is_dir(follow_symlinks=False):
-                subfolders.append(Path(entry.path))
-            elif not entry.is_file(follow_symlinks=False):
-                raise _Unchecked  # FIFO, socket, device: not ours to read
-            elif _file_names_agent(entry.path, budget):
-                return True
-    return any(_tree_names_agent(sub, budget, depth=depth + 1) for sub in subfolders)
-
-
-def _file_names_agent(path: str, budget: dict[str, int]) -> bool:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        with os.fdopen(fd, "rb") as handle:
-            data = handle.read(_MAX_FILE_BYTES + 1)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.close(fd)
-        raise
-    budget["bytes"] -= len(data)
-    if len(data) > _MAX_FILE_BYTES or budget["bytes"] < 0:
-        raise _Unchecked
-    return _NAME_BYTES in data.lower()
-
-
-def _user_level_clash(budget: dict[str, int]) -> bool:
+def _user_level_clash(budget: int) -> tuple[bool, int]:
     """Entry names only. True for another ``untether-workspace`` in agy's
     user-level agent folder; ``_Unchecked`` when our own folder holds
     anything but a regular ``agent.md``."""
     ours = agent_path()
     agents = ours.parent.parent
     if not os.path.lexists(agents):
-        return False
+        return False, budget
     with os.scandir(agents) as entries:
         for entry in entries:
-            budget["entries"] -= 1
-            if budget["entries"] < 0:
+            budget -= 1
+            if budget < 0:
                 raise _Unchecked
             folded = entry.name.casefold()
             if folded == f"{_NAME_FOLDED}.md":
-                return True
+                return True, budget
             if folded == _NAME_FOLDED and entry.name != WORKSPACE_AGENT_NAME:
-                return True
+                return True, budget
     if os.path.lexists(ours.parent):
         with os.scandir(ours.parent) as entries:
             for entry in entries:
                 if entry.name != ours.name or not entry.is_file(follow_symlinks=False):
                     raise _Unchecked
-    return False
+    return False, budget
