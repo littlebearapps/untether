@@ -27,29 +27,46 @@ _SAFE_FILENAME_RE = __import__("re").compile(r"^[a-zA-Z0-9._-]+$")
 # the caller's address, so without a cap an attacker picks how big it gets.
 _AUTH_FAILED_MAX_KEYS = 10_000
 
+# #906: peers whose address says nothing about who sent the request. Loopback
+# is a reverse proxy or tunnel on this host (the default deployment: bind
+# 127.0.0.1, proxy in front) or a local process; "unknown" is a connection
+# with no peer address. Everyone behind such a peer shares one failed-auth
+# bucket, so emptying it must never refuse a correct credential.
+_LOOPBACK_PEER = "loopback"
+_UNKNOWN_PEER = "unknown"
+_SHARED_PEERS = frozenset({_LOOPBACK_PEER, _UNKNOWN_PEER})
+
+# RFC 6052 well-known NAT64 prefix: the IPv4 sender is the low 32 bits.
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+
 
 def _client_address(request: web.Request) -> str:
-    """The address a failed-auth lockout is scoped to (#906).
+    """The address a failed-auth bucket is scoped to (#906).
 
     This is the TCP peer aiohttp saw, never a forwarded header: a header is
     caller-supplied, so trusting one would let anyone choose their own bucket
-    (or someone else's). Behind a reverse proxy every request therefore shares
-    the proxy's address and the lockout is per webhook again.
+    (or someone else's). Behind a reverse proxy every request therefore
+    carries the proxy's address.
 
-    IPv6 peers are grouped by /64 — one subscriber usually holds the whole
-    prefix and could otherwise take a fresh bucket per request. IPv4-mapped
-    addresses (dual-stack sockets) count as their IPv4 address.
+    Every loopback address is reported as ``"loopback"`` and a missing peer
+    as ``"unknown"`` (see ``_SHARED_PEERS``). IPv6 peers are grouped by /64 —
+    one subscriber usually holds the whole prefix and could otherwise take a
+    fresh bucket per request — except behind the well-known NAT64 prefix,
+    where a /64 would be every IPv4 sender at once. IPv4-mapped addresses
+    (dual-stack sockets) count as their IPv4 address.
     """
     remote = request.remote
     if not remote:
-        return "unknown"
+        return _UNKNOWN_PEER
     try:
         addr = ipaddress.ip_address(remote.split("%", 1)[0])
     except ValueError:
         return remote
-    if isinstance(addr, ipaddress.IPv6Address):
-        if addr.ipv4_mapped is not None:
-            return str(addr.ipv4_mapped)
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    if addr.is_loopback:
+        return _LOOPBACK_PEER
+    if isinstance(addr, ipaddress.IPv6Address) and addr not in _NAT64_WELL_KNOWN:
         return str(ipaddress.ip_network((addr, 64), strict=False))
     return str(addr)
 
@@ -277,6 +294,13 @@ def build_webhook_app(
         window=60.0,
         max_keys=_AUTH_FAILED_MAX_KEYS,
     )
+    # #906: at most ``rate_limit`` ``auth_failed`` warnings a minute for each
+    # webhook, whatever the number of addresses they come from. Keyed by
+    # webhook id only, so it needs no cap.
+    auth_warn_limiter = TokenBucketLimiter(
+        rate=settings.server.rate_limit,
+        window=60.0,
+    )
     max_body = settings.server.max_body_bytes
 
     # Strong references to in-flight dispatch tasks (#281).  Without this,
@@ -344,17 +368,34 @@ def build_webhook_app(
         request: web.Request, webhook: WebhookConfig, path: str
     ) -> web.Response:
         # #906: failed auth spends a bucket of its own, keyed by webhook and
-        # client address, so a caller with bad credentials locks out its own
-        # address and nobody else's. While that bucket is empty the address
-        # gets 429 before any credential is checked — even a correct one —
-        # so guessing can't run past the limit.
+        # client address. A caller that empties its bucket is locked out: that
+        # address gets 429 before any credential is checked — even a correct
+        # one — so one address can't keep guessing past the limit, and it
+        # locks out nobody else.
+        #
+        # That only holds while an address means one caller. A loopback peer
+        # is a reverse proxy (or a local process) carrying everyone's
+        # requests, so there the bucket is shared, and an empty one must not
+        # refuse a correct credential — anyone could then shut the webhook to
+        # its real senders with a few bad requests a minute. The same goes
+        # for an address the full key table has no room to track: it has done
+        # nothing itself. In both cases the credential is still checked;
+        # only a failed attempt is refused (429 instead of 401).
         client = _client_address(request)
         auth_failed_key = f"{webhook.id}|{client}"
+        # ``auth = "none"`` can't fail auth, so it has nothing to budget.
+        budgeted = webhook.auth != "none"
+
+        def _has_budget() -> bool:
+            return not budgeted or auth_failed_limiter.available(auth_failed_key)
 
         def _locked_out() -> web.Response | None:
-            # ``auth = "none"`` can't fail auth, so it has nothing to lock out
-            # (and must not be refused because the key table is full).
-            if webhook.auth == "none" or auth_failed_limiter.available(auth_failed_key):
+            """429 when this address has emptied a bucket that is its own."""
+            if (
+                client in _SHARED_PEERS
+                or not auth_failed_limiter.tracked(auth_failed_key)
+                or _has_budget()
+            ):
                 return None
             # Debug: a locked-out flood must not be able to fill the logs.
             logger.debug(
@@ -385,26 +426,38 @@ def build_webhook_app(
             return web.Response(status=413, text="payload too large")
 
         # Auth. The check above ran before an await, so any number of parallel
-        # requests may have passed it. This one is authoritative: from here to
+        # requests may have passed it. These are authoritative: from here to
         # the spend below nothing awaits (``verify_auth`` is synchronous), so
-        # no other request can run in between and a burst can't get more
-        # credential checks than the bucket holds.
+        # no other request can run in between, a burst can't get more 401s
+        # than the bucket holds, and each request gets one credential check.
         if (refused := _locked_out()) is not None:
             return refused
+        has_budget = _has_budget()
         if not verify_auth(webhook, request.headers, raw_body):
-            first = auth_failed_limiter.is_full(auth_failed_key)
+            if not has_budget:
+                # A shared or untracked peer over the budget. Debug, like the
+                # lockout: a flood must not be able to fill the logs.
+                logger.debug(
+                    "triggers.webhook.auth_failed_over_limit",
+                    webhook_id=webhook.id,
+                    path=path,
+                    remote=client,
+                )
+                return web.Response(status=429, text="rate limited")
             auth_failed_limiter.allow(auth_failed_key)
-            locked_out = not auth_failed_limiter.available(auth_failed_key)
-            # Warn for an address's first failure since its bucket was last
-            # full and for the one that locks it out; the ones in between are
-            # debug, so a flood can't write a warning per request.
-            log = logger.warning if first or locked_out else logger.debug
+            out_of_budget = not auth_failed_limiter.available(auth_failed_key)
+            # A warning per failure, up to ``rate_limit`` a minute for the
+            # webhook; past that, debug. Slow guessing stays visible and a
+            # flood from any number of addresses can't write a line each.
+            log = (
+                logger.warning if auth_warn_limiter.allow(webhook.id) else logger.debug
+            )
             log(
                 "triggers.webhook.auth_failed",
                 webhook_id=webhook.id,
                 path=path,
                 remote=client,
-                locked_out=locked_out,
+                locked_out=out_of_budget and client not in _SHARED_PEERS,
             )
             return web.Response(status=401, text="unauthorized")
 

@@ -23,8 +23,10 @@ class TokenBucketLimiter:
     ``max_keys`` caps how many buckets are tracked, for limiters whose keys a
     caller can choose (#906). A bucket that has refilled to full says the same
     thing as no bucket at all, so those are dropped to make room; if the table
-    is still full, a key that isn't tracked is refused (fail closed) rather
-    than let through uncounted. ``None`` means no cap.
+    is still full, a key that isn't tracked has no tokens (``allow`` and
+    ``available`` refuse it) rather than being let through uncounted. A
+    caller that must tell "no room" from "spent its own tokens" asks
+    ``tracked``. ``None`` means no cap.
     """
 
     def __init__(
@@ -68,9 +70,11 @@ class TokenBucketLimiter:
         now = time.monotonic()
         return self._has_room((key,), now) and self._tokens(key, now) >= 1.0
 
-    def is_full(self, key: str) -> bool:
-        """Whether *key*'s bucket is untouched or has refilled completely."""
-        return self._tokens(key, time.monotonic()) >= self._rate
+    def tracked(self, key: str) -> bool:
+        """Whether *key* has a bucket of its own, i.e. has spent a token that
+        hasn't been pruned. An untracked key that ``available`` refuses was
+        refused because the table is full, not for anything it did (#906)."""
+        return key in self._buckets
 
     def allow_all(self, *keys: str) -> bool:
         """Spend one token from every key, or from none of them (#906).

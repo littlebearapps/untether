@@ -383,7 +383,9 @@ See the [Triggers reference — Trigger visibility](../reference/triggers/trigge
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.
 - All secret comparisons use timing-safe comparison.
 - Rate limiting prevents abuse (token-bucket, per-webhook and global).
-- Failed auth attempts are limited per webhook and client address (`rate_limit` a minute). An address that goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected. Untether uses the address the connection came from and ignores `X-Forwarded-For`, so behind a reverse proxy or tunnel every sender shares one limit per webhook: rate-limit failed requests per client at the proxy as well. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
+- Use a long random secret (for example `openssl rand -hex 32`). Untether requires a secret but does not enforce a minimum length.
+- Failed auth attempts are budgeted per webhook and client address (`rate_limit` a minute). A sender that connects directly and goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected.
+- Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy. Untether ignores `X-Forwarded-For`. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
 - Webhook prompts are prefixed with an untrusted-payload marker.
 
 ## Related

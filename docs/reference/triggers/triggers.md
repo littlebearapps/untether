@@ -18,9 +18,10 @@ HTTP POST ─► aiohttp server (port 9876)
   ├─ Route by path ─► WebhookConfig (404 if none)
   ├─ Master pause? ─► 503
   ├─ Failed-auth bucket for this webhook + client address empty? ─► 429
+  │    (not for a loopback peer, e.g. a reverse proxy on this host)
   ├─ Read raw body (size check + cached for auth/multipart)
   ├─ Failed-auth bucket checked again, then verify_auth(config, headers, raw_body)
-  │    (a failure spends a failed-auth token ─► 401)
+  │    (a failure spends a failed-auth token ─► 401; no token left ─► 429)
   ├─ rate_limit.allow_all(webhook_id, global)
   ├─ Parse payload (multipart form-data OR JSON)
   ├─ Event filter (optional)
@@ -87,7 +88,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Localhost by default; use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1--65535). |
-| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number caps failed auth attempts per webhook and client address per minute — see [Security](#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
+| `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number is the failed-auth budget per webhook and client address per minute — see [Security](#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
 
 ### `[[triggers.webhooks]]`
@@ -120,7 +121,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.36.0 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
-| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
+| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. Untether only checks that it isn't empty — there is no minimum length, so make it long and random (for example `openssl rand -hex 32`). |
 | `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
 | `event_filter` | string\|null | `null` | Only process requests matching this event type header. |
 | `accept_multipart` | bool | `false` | Accept `multipart/form-data` uploads (see [Multipart file uploads](#multipart-file-uploads)). |
@@ -680,34 +681,61 @@ the filesystem context.
   checked after auth so unauthenticated requests don't consume tokens. A request
   is counted against both buckets or neither.
 - **Failed-auth limit**: failed auth attempts spend a separate bucket
-  (`rate_limit` per minute) kept for each webhook and client address. Once an
-  address has emptied its bucket for a webhook, that webhook answers `429` to
-  that address — a request with the right secret included — until the bucket
-  refills (one attempt every `60 / rate_limit` seconds). Other addresses and
-  other webhooks are unaffected, so a caller sending bad credentials locks out
-  only itself ([#906](https://github.com/littlebearapps/untether/issues/906)).
+  (`rate_limit` per minute) kept for each webhook and client address
+  ([#906](https://github.com/littlebearapps/untether/issues/906)). What an empty bucket does depends on where the connection
+  came from:
+    - **A sender connecting directly** (any non-loopback address): once an
+      address has emptied its bucket for a webhook, that webhook answers `429`
+      to that address — a request with the right secret included — until the
+      bucket refills (one attempt every `60 / rate_limit` seconds). Other
+      addresses and other webhooks are unaffected.
+    - **A loopback connection** (`127.0.0.0/8`, `::1` — a reverse proxy or
+      tunnel on the same host, which is the default setup, or a local
+      process): every sender arrives from the same address, so Untether never
+      locks it out. The credential is always checked and a correct one is
+      always accepted. A failed attempt gets `401` while the bucket has
+      tokens and `429` once it is empty. **This does not cap guessing** — an
+      attacker still gets an answer to every guess, exactly as before this
+      limit existed. Behind a proxy, what protects a webhook is a long random
+      secret and a rate limit at the proxy.
     - The client address is the address the connection came from. Untether
       does not read `X-Forwarded-For`, `X-Real-IP` or `Forwarded`: a caller
-      can put anything in those. **Behind a reverse proxy or tunnel every
-      request arrives from the proxy's address, so they all share one bucket
-      per webhook** — bad requests from anyone can then lock the webhook for
-      everyone, at `rate_limit` bad requests a minute. If the webhook is
-      reachable from the internet through a proxy, rate-limit failed requests
-      per client at the proxy.
-    - IPv6 clients are counted by `/64` network, not by single address.
-    - The limit holds for parallel requests too: a burst gets no more
-      credential checks than the bucket has tokens.
+      can put anything in those, and there is no setting to trust a proxy's.
+    - IPv6 clients are counted by `/64` network, not by single address
+      (addresses under the NAT64 prefix `64:ff9b::/96` are counted singly).
+    - For a directly connected address the limit holds for parallel requests
+      too: a burst gets no more credential checks than the bucket has tokens.
     - A caller with many addresses gets `rate_limit` attempts a minute from
-      each one, so the limit slows guessing rather than preventing it. Use a
-      long random secret.
+      each one, so even for direct senders the limit slows guessing rather
+      than preventing it.
     - At most 10,000 addresses are tracked. An address is forgotten once its
-      bucket has refilled. If the table is ever full (a flood of bad requests
-      from 10,000 addresses at once), a request from an address that isn't
-      being tracked gets `429` until there is room; Untether logs
-      `rate_limit.key_table_full` at most once a minute while that lasts.
-    - `triggers.webhook.auth_failed` is logged as a warning for an address's
-      first failure and for the failure that locks it out (`locked_out=true`),
-      with the address in `remote`. Failures in between are debug-level.
+      bucket has refilled. If the table is ever full, an address that isn't
+      being tracked is treated like a loopback one until there is room: its
+      correct credential is accepted and its failed attempts get `429`.
+      Untether logs `rate_limit.key_table_full` at most once a minute while
+      that lasts.
+    - `triggers.webhook.auth_failed` is logged as a warning for each failed
+      attempt, up to `rate_limit` warnings a minute per webhook, with the
+      address in `remote` (`loopback` for a loopback peer) and
+      `locked_out=true` on the failure that locks an address out. Past that,
+      failures are debug-level, as are `triggers.webhook.auth_locked_out` and
+      `triggers.webhook.auth_failed_over_limit` (the `429` answers).
+    - **Use a long random secret.** Untether requires a secret but does not
+      enforce a minimum length. Generate at least 32 random bytes (for
+      example `openssl rand -hex 32`); with that, the number of guesses an
+      attacker gets does not matter.
+    - **Known limitations.** Untether treats each non-loopback address as one
+      sender, which is wrong whenever senders share an address — and there
+      bad requests from one can get the others a `429` with the right secret,
+      at `rate_limit` bad requests a minute:
+        - a reverse proxy or load balancer that reaches Untether on a
+          non-loopback address (a container network such as `172.17.0.1`,
+          another host on a private network). Fixing this needs a
+          trusted-proxy setting, which Untether does not have yet. Until
+          then, run the proxy on the same host and bind Untether to
+          `127.0.0.1`, or rate-limit failed requests per client at the proxy;
+        - senders behind one NAT, or a service that delivers webhooks for
+          many customers from the same addresses.
 - **Body size limits**: `max_body_bytes` (default 1 MB) prevents memory
   exhaustion from oversized payloads. A body sent without a `Content-Length`
   (chunked) that runs past the limit is a `413` like any other.
@@ -911,7 +939,7 @@ Expected responses:
 | `401 Unauthorized` | Auth verification failed. |
 | `404 Not Found` | No webhook configured for this path. |
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`, or an uploaded file part exceeds `max_file_size_bytes`. |
-| `429 Too Many Requests` | Rate limit exceeded, or too many failed auth attempts on this webhook from your address in the last minute (behind a reverse proxy, from any address — see [Security](#security)). |
+| `429 Too Many Requests` | Rate limit exceeded, or too many failed auth attempts on this webhook from your address in the last minute. Through a reverse proxy on the same host, only a request with wrong credentials gets this — see [Security](#security). |
 | `500 Internal Server Error` | Unexpected error while processing (logged as `triggers.webhook.internal_error`). |
 | `503 triggers paused` | Master [Pause](#pause-and-resume) toggle is active. Includes `Retry-After: 60`. |
 

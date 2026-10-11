@@ -784,7 +784,7 @@ routing details.
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1–65535). |
-| `rate_limit` | int (≥ 1) | `60` | Max requests per minute (global + per-webhook). |
+| `rate_limit` | int (≥ 1) | `60` | Max requests per minute (global + per-webhook). Also the failed-auth budget per webhook and client address per minute; a loopback peer (a reverse proxy on the same host) is never locked out by it — see [Triggers reference — Security](triggers/triggers.md#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1024–10485760). |
 
 ### `[[triggers.webhooks]]`
@@ -797,7 +797,7 @@ routing details.
 | `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat. Falls back to the transport default `chat_id`, even when `project` is set (the project's bound chat is not used; a warning is logged when they differ). |
 | `auth` | string | `"bearer"` | `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
-| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
+| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. No minimum length is enforced — use a long random value. |
 | `action` | `"agent_run"`\|`"file_write"`\|`"http_forward"`\|`"notify_only"` | `"agent_run"` | What the webhook does. Non-agent actions use `file_path` + `on_conflict`, `forward_url` + `forward_headers` + `forward_method`, or `message_template`, plus `notify_on_success` / `notify_on_failure` — see the [Triggers reference](triggers/triggers.md). |
 | `prompt_template` | string\|null | `null` | Prompt with `{{field.path}}` substitutions. Required when `action = "agent_run"`. |
 | `event_filter` | string\|null | `null` | Only process matching event type headers. |

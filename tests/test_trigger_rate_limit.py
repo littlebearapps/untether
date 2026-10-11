@@ -79,6 +79,17 @@ class TestTokenBucketLimiter:
         # Keys that are already tracked keep working.
         assert limiter.allow("a") is True
 
+    def test_tracked_tells_no_room_from_spent(self):
+        # #906: both "b" (spent its token) and "c" (no room) are refused; only
+        # "b" was refused for something it did.
+        limiter = TokenBucketLimiter(rate=1, window=60.0, max_keys=2)
+        limiter.allow("a")
+        limiter.allow("b")
+        assert limiter.available("b") is False
+        assert limiter.available("c") is False
+        assert limiter.tracked("b") is True
+        assert limiter.tracked("c") is False
+
     def test_refilled_buckets_are_pruned_to_make_room(self):
         limiter = TokenBucketLimiter(rate=3, window=60.0, max_keys=2)
         limiter.allow("a")
