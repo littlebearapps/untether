@@ -331,56 +331,49 @@ async def _send_startup(cfg: TelegramBridgeConfig) -> None:
         logger.info("startup.sent", chat_id=cfg.chat_id)
 
 
-async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -> None:
-    """#318 follow-up: broadcast restart-required warning to project chats + admin DMs.
+def _reload_notice_targets(
+    cfg: TelegramBridgeConfig,
+    running_tasks: Mapping[MessageRef, object] | None,
+    *,
+    restart_pending: bool,
+) -> list[tuple[int, int | None]]:
+    """Who gets the reload notice, as ``(chat_id, thread_id)`` pairs (#1030).
 
-    PR #336 wired the warning to ``cfg.chat_id`` alone; in project-routed
-    deployments that value is the placeholder sentinel and every send
-    fails with "chat not found". This helper instead targets every active
-    project chat plus any ``allowed_user_ids`` admin DM, falling back to
-    ``cfg.chat_id`` only when no routed targets exist. Per-chat failures
-    are logged and skipped so one bad chat can't mask the warning from
-    the rest.
+    The reported diff only ever covers global keys, so no chat is "affected"
+    by it. A hot-reload confirmation goes to the ``allowed_user_ids`` admin
+    DMs (``cfg.chat_id`` when there are none) plus every chat with a run in
+    flight: that keeps the "No restart needed" cue in front of the agent
+    that made the edit (#547/#548) without posting in idle project chats.
+
+    A pending restart affects every chat, so it keeps the #318 audience:
+    every project chat plus the admin DMs, with ``cfg.chat_id`` only when
+    neither exists (in project-routed deployments it is a placeholder).
+
+    A busy chat is addressed in the thread (topic) its run started in, and
+    that send stands in for the chat's plain one, so no chat is told twice.
     """
-    from ..service_manager import restart_hint
+    from ..runner_bridge import running_task_is_live_idle
 
-    keys_text = ", ".join(f"`{k}`" for k in keys)
-    # #927: name the running unit/label (generic wording when undetected).
-    text = (
-        "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
-        f"Setting {keys_text} changed — restart required to take effect.\n"
-        f"To apply: {restart_hint()}."
-    )
-    targets: set[int] = set()
-    targets.update(cfg.runtime.project_chat_ids())
-    targets.update(cfg.allowed_user_ids or ())
-    if not targets:
-        targets.add(cfg.chat_id)
-    sent_count = 0
-    for chat_id in sorted(targets):
-        try:
-            sent = await cfg.exec_cfg.transport.send(
-                channel_id=chat_id,
-                message=RenderedMessage(
-                    text=text,
-                    extra={"parse_mode": "Markdown"},
-                ),
-                options=SendOptions(notify=True),
-            )
-            if sent is not None:
-                sent_count += 1
-        except Exception as exc:  # noqa: BLE001 — logged then continue
-            logger.warning(
-                "config.reload.restart_notify.failed",
-                chat_id=chat_id,
-                error=str(exc),
-            )
-    logger.info(
-        "config.reload.restart_notify.sent",
-        keys=keys,
-        targets=sorted(targets),
-        sent_count=sent_count,
-    )
+    chats: set[int] = set(cfg.allowed_user_ids or ())
+    if restart_pending:
+        chats.update(cfg.runtime.project_chat_ids())
+    if not chats:
+        chats.add(cfg.chat_id)
+    targets: set[tuple[int, int | None]] = set()
+    busy: set[int] = set()
+    for ref, task in (running_tasks or {}).items():
+        done = getattr(task, "done", None)
+        if done is not None and done.is_set():
+            continue
+        # #776: a live session idling between turns has no run in flight.
+        if running_task_is_live_idle(task):
+            continue
+        chat_id = cast(int, ref.channel_id)
+        busy.add(chat_id)
+        # #826: the task's thread, never the echoed ``ref.thread_id``.
+        targets.add((chat_id, getattr(task, "thread_id", None)))
+    targets.update((chat_id, None) for chat_id in chats - busy)
+    return sorted(targets, key=lambda target: (target[0], target[1] or 0))
 
 
 async def _notify_reload_applied(
@@ -389,18 +382,18 @@ async def _notify_reload_applied(
     path: Path,
     hot_keys: list[str],
     restart_keys: list[str],
+    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
-    """#547 axis 2 / #548: broadcast a hot-reload confirmation message so
-    agents and users see "did my edit work?" answered in-chat (instead of
-    having to switch to ``journalctl``). The headline framing ("No restart
-    needed.") flips the trained-in agent reflex to ``systemctl restart``
-    after editing config.
+    """#547 axis 2 / #548: send a reload confirmation so agents and users
+    see "did my edit work?" answered in-chat (instead of having to switch to
+    ``journalctl``). The headline framing ("No restart needed.") flips the
+    trained-in agent reflex to ``systemctl restart`` after editing config.
 
-    Reuses the same broadcast pattern as ``_notify_restart_required``: send
-    to every active project chat + admin DMs, falling back to
-    ``cfg.chat_id`` if no routed targets exist. Per-chat failures are
-    logged and skipped — one bad chat can't mask the affirmation from
-    the rest.
+    This is the only reload notice: a restart-only key is reported here too
+    ("Restart required" / "Partial reload"), once per chat (#1030), and it
+    pings. Recipients come from :func:`_reload_notice_targets`. Per-chat
+    failures are logged and skipped — one bad chat can't mask the notice
+    from the rest.
     """
     if not hot_keys and not restart_keys:
         return
@@ -409,13 +402,11 @@ async def _notify_reload_applied(
     text = format_reload_notification(
         path=path, hot_keys=hot_keys, restart_keys=restart_keys
     )
-    targets: set[int] = set()
-    targets.update(cfg.runtime.project_chat_ids())
-    targets.update(cfg.allowed_user_ids or ())
-    if not targets:
-        targets.add(cfg.chat_id)
+    targets = _reload_notice_targets(
+        cfg, running_tasks, restart_pending=bool(restart_keys)
+    )
     sent_count = 0
-    for chat_id in sorted(targets):
+    for chat_id, thread_id in targets:
         try:
             sent = await cfg.exec_cfg.transport.send(
                 channel_id=chat_id,
@@ -423,7 +414,8 @@ async def _notify_reload_applied(
                     text=text,
                     extra={"parse_mode": "Markdown"},
                 ),
-                options=SendOptions(notify=False),  # non-disruptive
+                # A pending restart needs action; a confirmation doesn't.
+                options=SendOptions(notify=bool(restart_keys), thread_id=thread_id),
             )
             if sent is not None:
                 sent_count += 1
@@ -431,13 +423,14 @@ async def _notify_reload_applied(
             logger.warning(
                 "config.reload.applied_notify.failed",
                 chat_id=chat_id,
+                thread_id=thread_id,
                 error=str(exc),
             )
     logger.info(
         "config.reload.applied_notify.sent",
         hot_keys=hot_keys,
         restart_keys=restart_keys,
-        targets=sorted(targets),
+        targets=[list(target) for target in targets],
         sent_count=sent_count,
     )
 
@@ -2006,7 +1999,7 @@ async def run_main_loop(
                 refresh_topics_scope()
                 await set_command_menu(cfg)
                 # #547 axis 2 / #548: accumulate the keys that actually
-                # changed in this reload so the broadcast at the end of
+                # changed in this reload so the notice at the end of
                 # handle_reload can tell the user (and any agent reading
                 # in next-turn context) whether a restart is required.
                 _reload_hot_keys: list[str] = []
@@ -2032,14 +2025,8 @@ async def run_main_loop(
                                 keys=restart_keys,
                                 restart_required=True,
                             )
-                            # #318 (follow-up): PR #336 sent to cfg.chat_id,
-                            # but in project-routed deployments that is the
-                            # placeholder sentinel and every send fails with
-                            # "chat not found". Broadcast to every project
-                            # chat plus admin DMs so the warning actually
-                            # reaches whoever's driving the bot. Per-chat
-                            # failures are logged and skipped.
-                            await _notify_restart_required(cfg, restart_keys)
+                            # #1030: the Telegram warning is the reload
+                            # notice sent at the end of this handler.
                         if hot_keys:
                             cfg.update_from(reload.settings.transports.telegram)
                             state.forward_coalesce_s = max(
@@ -2118,13 +2105,15 @@ async def run_main_loop(
                         _reload_restart_keys.append("triggers.enabled")
                     state.triggers_enabled = triggers_enabled_now
 
-                # #547 axis 2 / #548: broadcast the affirmative
+                # #547 axis 2 / #548: send the affirmative
                 # "Hot-reloaded — No restart needed." (or, if any
                 # restart-only key was edited, the matching
                 # "Restart required" / "Partial reload" message). The
                 # headline framing flips the trained-in agent reflex to
                 # ``systemctl restart`` after editing config; agents read
-                # this message in next-turn context and adapt.
+                # this message in next-turn context and adapt. #1030: to
+                # the admin DMs and the chats with a run in flight, not
+                # every project chat (a pending restart still goes wide).
                 if _reload_hot_keys or _reload_restart_keys:
                     try:
                         await _notify_reload_applied(
@@ -2132,6 +2121,7 @@ async def run_main_loop(
                             path=reload.config_path,
                             hot_keys=_reload_hot_keys,
                             restart_keys=_reload_restart_keys,
+                            running_tasks=state.running_tasks,
                         )
                     except Exception:  # noqa: BLE001 — never break reload
                         logger.warning(

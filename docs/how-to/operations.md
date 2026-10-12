@@ -224,7 +224,9 @@ Untether re-reads `untether.toml` only when its contents (or the `UNTETHER__*` e
 - the top-level `transport`
 - `watch_config` itself (the watcher starts with the process)
 
-When a reload touches a restart-only key, Untether posts a `⚠️ Restart required` notice naming the keys. The notice names the service that is actually running — for example `systemctl --user restart untether-dev`, or `launchctl kickstart -k gui/<uid>/<label>` on macOS — or falls back to generic wording when it can't detect one, and suggests `/restart` as an alternative ([#927](https://github.com/littlebearapps/untether/issues/927)).
+A reload that changes a `[transports.telegram]` key is confirmed in Telegram with a silent `♻️ Hot-reloaded … No restart needed` notice. It goes to the `allowed_user_ids` admin DMs (the main `chat_id` when there are none) and to any chat with a run in progress, in that run's topic, so an agent that edited the config sees it. Idle project chats are left alone ([#1030](https://github.com/littlebearapps/untether/issues/1030)).
+
+When a reload touches a restart-only key, Untether posts one `⚠️ Restart required` notice naming the keys to every project chat and admin DM. The notice names the service that is actually running — for example `systemctl --user restart untether-dev`, or `launchctl kickstart -k gui/<uid>/<label>` on macOS — or falls back to generic wording when it can't detect one, and suggests `/restart` as an alternative ([#927](https://github.com/littlebearapps/untether/issues/927)).
 
 ## Process management
 

@@ -6234,8 +6234,13 @@ async def _894_run_with_reload(
     monkeypatch: pytest.MonkeyPatch,
     cfg: TelegramBridgeConfig,
     toml_after_reload: str,
+    *,
+    reloaded_telegram: dict[str, Any] | None = None,
 ) -> None:
-    """Start the loop, rewrite untether.toml, fire one reload, then stop."""
+    """Start the loop, rewrite untether.toml, fire one reload, then stop.
+
+    ``reloaded_telegram`` overrides ``[transports.telegram]`` keys in the
+    reloaded settings only, so the reload sees them as changed."""
     from untether.config_watch import ConfigReload
     from untether.runtime_loader import RuntimeSpec
     from untether.settings import TelegramTransportSettings, UntetherSettings
@@ -6243,7 +6248,10 @@ async def _894_run_with_reload(
     tg_settings = {"bot_token": "tok", "chat_id": 123, "allow_any_user": True}
     transport_config = TelegramTransportSettings.model_validate(tg_settings)
     new_settings = UntetherSettings.model_validate(
-        {"transport": "telegram", "transports": {"telegram": tg_settings}}
+        {
+            "transport": "telegram",
+            "transports": {"telegram": {**tg_settings, **(reloaded_telegram or {})}},
+        }
     )
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
     spec = RuntimeSpec(
@@ -6307,6 +6315,49 @@ async def test_894_reload_enabling_triggers_flags_restart_required(
     # The newly enabled project-only cron is also flagged (#894 part 2).
     fallback = [e for e in logs if e["event"] == "trigger.cron.chat_fallback"]
     assert [e["cron_id"] for e in fallback] == ["probe"]
+
+
+@pytest.mark.anyio
+async def test_1030_restart_only_key_is_announced_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart-only key used to be announced twice per chat (the #318
+    warning, then the #548 reload notice). It is one message now."""
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        "[triggers]\nenabled = false\n",
+        reloaded_telegram={"message_overflow": "trim"},
+    )
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    notices = [
+        c for c in transport.send_calls if "message_overflow" in c["message"].text
+    ]
+    # No allowed users here, so the pending restart goes to the project chat.
+    assert [c["channel_id"] for c in notices] == [-100555]
+    assert "Restart required" in notices[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_1030_hot_reload_notice_skips_idle_project_chats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        "[triggers]\nenabled = false\n",
+        reloaded_telegram={"show_resume_line": False},
+    )
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    notices = [
+        c for c in transport.send_calls if "show_resume_line" in c["message"].text
+    ]
+    assert [c["channel_id"] for c in notices] == [cfg.chat_id]
+    assert "No restart needed" in notices[0]["message"].text
 
 
 @pytest.mark.anyio

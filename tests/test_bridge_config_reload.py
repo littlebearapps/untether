@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
+from untether.config import ProjectsConfig
+from untether.runner_bridge import RunningTask
 from untether.settings import (
     TelegramFilesSettings,
     TelegramTopicsSettings,
     TelegramTransportSettings,
 )
 from untether.telegram.bridge import TelegramBridgeConfig
-from untether.telegram.loop import _notify_restart_required
+from untether.telegram.loop import _notify_reload_applied
+from untether.transport import MessageRef
+from untether.transport_runtime import TransportRuntime
 
 
 def _settings(**overrides) -> TelegramTransportSettings:
@@ -247,16 +254,150 @@ class TestRestartRequiredFields:
         )
 
 
-# ── #318 follow-up: broadcast to project chats + admin DMs ───────────
+# ── #1030: who gets the reload notice ─────────────────────────────────
+
+_TOML = Path("/tmp/untether.toml")
 
 
-class TestNotifyRestartRequired:
-    """PR #336 sent the warning to cfg.chat_id; in project-routed deployments
-    that's the placeholder sentinel and every send fails. This batch of tests
-    locks in the broader broadcast behaviour so the fix doesn't regress."""
+def _with_project_chats(cfg: TelegramBridgeConfig, *chat_ids: int) -> None:
+    projects = ProjectsConfig(
+        projects={}, chat_map={chat_id: f"p{n}" for n, chat_id in enumerate(chat_ids)}
+    )
+    cfg.runtime = TransportRuntime(router=cfg.runtime._router, projects=projects)
+
+
+def _run(
+    chat_id: int, *, message_id: int = 1, thread_id: int | None = None
+) -> dict[MessageRef, RunningTask]:
+    ref = MessageRef(channel_id=chat_id, message_id=message_id)
+    return {ref: RunningTask(thread_id=thread_id)}
+
+
+def _targets(transport: FakeTransport) -> list[tuple[int, int | None]]:
+    return sorted(
+        (
+            (call["channel_id"], call["options"].thread_id)
+            for call in transport.send_calls
+        ),
+        key=lambda target: (target[0], target[1] or 0),
+    )
+
+
+class TestNotifyReloadApplied:
+    """#1030: a hot-reload confirmation is not a broadcast. It goes to the
+    owner DMs plus the chats with a run in flight; only a pending restart
+    (#318) still reaches every project chat, as one message."""
 
     @pytest.mark.anyio
-    async def test_sends_to_allowed_user_ids(self, monkeypatch):
+    async def test_hot_reload_skips_idle_project_chats(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555, 777)
+        _with_project_chats(cfg, -100, -200)
+        await _notify_reload_applied(
+            cfg, path=_TOML, hot_keys=["voice_transcription_api_key"], restart_keys=[]
+        )
+        assert _targets(transport) == [(555, None), (777, None)]
+        for call in transport.send_calls:
+            assert "No restart needed" in call["message"].text
+            assert call["options"].notify is False
+            assert call["message"].extra.get("parse_mode") == "Markdown"
+
+    @pytest.mark.anyio
+    async def test_hot_reload_falls_back_to_chat_id_without_allowed_users(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = ()
+        _with_project_chats(cfg, -100)
+        await _notify_reload_applied(
+            cfg, path=_TOML, hot_keys=["show_resume_line"], restart_keys=[]
+        )
+        assert _targets(transport) == [(cfg.chat_id, None)]
+
+    @pytest.mark.anyio
+    async def test_hot_reload_reaches_a_chat_with_a_run_in_flight(self):
+        """#547/#548: the agent that made the edit still sees the cue."""
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100, -200)
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=["show_resume_line"],
+            restart_keys=[],
+            running_tasks=_run(-200),
+        )
+        assert _targets(transport) == [(-200, None), (555, None)]
+
+    @pytest.mark.anyio
+    async def test_busy_owner_dm_gets_one_notice(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=["show_resume_line"],
+            restart_keys=[],
+            running_tasks=_run(555),
+        )
+        assert _targets(transport) == [(555, None)]
+
+    @pytest.mark.anyio
+    async def test_busy_topic_gets_the_notice_in_its_thread(self):
+        """A forum run is addressed by the task's thread (#826), once per
+        topic, and never doubled into the chat's General topic."""
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100)
+        running = {
+            **_run(-100, message_id=1, thread_id=37),
+            **_run(-100, message_id=2, thread_id=37),
+            **_run(-100, message_id=3, thread_id=41),
+        }
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=["show_resume_line"],
+            restart_keys=[],
+            running_tasks=running,
+        )
+        assert _targets(transport) == [(-100, 37), (-100, 41), (555, None)]
+
+    @pytest.mark.anyio
+    async def test_finished_and_idle_live_runs_are_not_busy(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        finished = RunningTask()
+        finished.done.set()
+        idle = RunningTask()
+        idle.edits = SimpleNamespace(  # type: ignore[assignment]
+            stream=SimpleNamespace(
+                engine_state=SimpleNamespace(
+                    live_mode=True, completed_turns=1, turn_open=False
+                )
+            )
+        )
+        running = {
+            MessageRef(channel_id=-100, message_id=1): finished,
+            MessageRef(channel_id=-200, message_id=2): idle,
+        }
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=["show_resume_line"],
+            restart_keys=[],
+            running_tasks=running,
+        )
+        assert _targets(transport) == [(555, None)]
+
+    @pytest.mark.anyio
+    async def test_restart_required_reaches_project_chats_and_admins(self, monkeypatch):
+        """#318 follow-up: a pending restart affects every chat, so it keeps
+        the wide audience, and it pings (#927 names the running unit)."""
         from untether import service_manager
 
         monkeypatch.setattr(
@@ -266,50 +407,57 @@ class TestNotifyRestartRequired:
         )
         transport = FakeTransport()
         cfg = make_cfg(transport)
-        cfg.allowed_user_ids = (555, 777)
-        await _notify_restart_required(cfg, ["session_mode"])
-        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
-        assert chat_ids == [555, 777]
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100, -200)
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=[],
+            restart_keys=["session_mode", "topics"],
+            running_tasks=_run(-100, thread_id=37),
+        )
+        # One message per chat: the busy topic stands in for its chat.
+        assert _targets(transport) == [(-200, None), (-100, 37), (555, None)]
         for call in transport.send_calls:
-            assert "`session_mode`" in call["message"].text
-            assert "restart required" in call["message"].text
-            assert "To apply: run `systemctl --user restart untether-dev`" in (
-                call["message"].text
-            )
+            text = call["message"].text
+            assert "Restart required" in text
+            assert "`session_mode`" in text
+            assert "`topics`" in text
+            assert "run `systemctl --user restart untether-dev`" in text
+            assert call["options"].notify is True
 
     @pytest.mark.anyio
-    async def test_restart_notice_generic_when_undetected(self, monkeypatch):
-        """#927: no detectable unit → generic wording, never the default
-        unit name (wrong on multi-instance hosts and on macOS)."""
-        from untether import service_manager
-
-        monkeypatch.setattr(service_manager, "restart_command", lambda: None)
+    async def test_partial_reload_uses_the_restart_audience(self):
         transport = FakeTransport()
         cfg = make_cfg(transport)
-        cfg.allowed_user_ids = (1,)
-        await _notify_restart_required(cfg, ["session_mode"])
-        text = transport.send_calls[0]["message"].text
-        assert "restart Untether's service" in text
-        assert "systemctl" not in text
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100)
+        await _notify_reload_applied(
+            cfg,
+            path=_TOML,
+            hot_keys=["show_resume_line"],
+            restart_keys=["message_overflow"],
+        )
+        assert _targets(transport) == [(-100, None), (555, None)]
+        assert "Partial reload" in transport.send_calls[0]["message"].text
 
     @pytest.mark.anyio
-    async def test_falls_back_to_transport_chat_id_when_no_targets(self):
+    async def test_restart_required_falls_back_to_chat_id_when_no_targets(self):
         transport = FakeTransport()
         cfg = make_cfg(transport)
         cfg.allowed_user_ids = ()
-        await _notify_restart_required(cfg, ["bot_token"])
-        chat_ids = [call["channel_id"] for call in transport.send_calls]
-        assert chat_ids == [cfg.chat_id]
+        await _notify_reload_applied(
+            cfg, path=_TOML, hot_keys=[], restart_keys=["bot_token"]
+        )
+        assert _targets(transport) == [(cfg.chat_id, None)]
 
     @pytest.mark.anyio
-    async def test_message_lists_all_changed_keys(self):
+    async def test_no_changed_keys_sends_nothing(self):
         transport = FakeTransport()
         cfg = make_cfg(transport)
-        cfg.allowed_user_ids = (1,)
-        await _notify_restart_required(cfg, ["session_mode", "topics"])
-        call = transport.send_calls[0]
-        assert "`session_mode`" in call["message"].text
-        assert "`topics`" in call["message"].text
+        cfg.allowed_user_ids = (555,)
+        await _notify_reload_applied(cfg, path=_TOML, hot_keys=[], restart_keys=[])
+        assert transport.send_calls == []
 
     @pytest.mark.anyio
     async def test_continues_past_send_failures(self):
@@ -323,15 +471,11 @@ class TestNotifyRestartRequired:
         cfg = make_cfg(transport)
         cfg.allowed_user_ids = (1, 2, 3)
         # Must not raise — per-chat failures are logged and skipped.
-        await _notify_restart_required(cfg, ["session_mode"])
-        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
-        assert chat_ids == [2, 3]
-
-    @pytest.mark.anyio
-    async def test_markdown_parse_mode_set(self):
-        transport = FakeTransport()
-        cfg = make_cfg(transport)
-        cfg.allowed_user_ids = (1,)
-        await _notify_restart_required(cfg, ["session_mode"])
-        msg = transport.send_calls[0]["message"]
-        assert msg.extra.get("parse_mode") == "Markdown"
+        with capture_logs() as logs:
+            await _notify_reload_applied(
+                cfg, path=_TOML, hot_keys=["show_resume_line"], restart_keys=[]
+            )
+        assert _targets(transport) == [(2, None), (3, None)]
+        sent = [e for e in logs if e["event"] == "config.reload.applied_notify.sent"]
+        assert sent[0]["sent_count"] == 2
+        assert sent[0]["targets"] == [[1, None], [2, None], [3, None]]

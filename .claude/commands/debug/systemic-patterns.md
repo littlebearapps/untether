@@ -37,7 +37,7 @@ For each pattern:
 ### 5. Restart-required config key edited silently
 - **Sig**: `restart_required=true` log line emitted but service was not restarted; user-visible behaviour is stale
 - **Class**: config-hot-reload
-- **Canonical**: `RESTART_REQUIRED_FIELDS` on `TelegramTransportSettings` (`settings.py`); `_notify_restart_required` (`telegram/loop.py`) broadcasts to project chats + admin DMs (#318 follow-up)
+- **Canonical**: `RESTART_REQUIRED_FIELDS` on `TelegramTransportSettings` (`settings.py`); `_notify_reload_applied` (`telegram/loop.py`) sends the one restart notice to project chats + admin DMs (#318 follow-up; #1030 folded the separate `_notify_restart_required` send into it, and a hot-reload-only notice goes to admin DMs + busy chats only)
 - **Posture**: regression-watch — broadcast must reach the user.
 
 ### 6. Agent self-restart during active run (`feedback_agent_self_restart_pattern`)
