@@ -2,7 +2,8 @@
 
 How `AntigravityRunner.translate()` (`src/untether/runners/antigravity.py`) turns agy's stream into Untether's
 three-event contract: one `StartedEvent`, any number of `ActionEvent`s, exactly one `CompletedEvent`. Line shapes
-are in the [stream-json cheatsheet](stream-json-cheatsheet.md). Checked against agy 1.3.2.
+are in the [stream-json cheatsheet](stream-json-cheatsheet.md). Checked against agy 1.3.2;
+the subagent, timer and background rows against 1.3.3.
 
 ## Mapping
 
@@ -16,11 +17,12 @@ are in the [stream-json cheatsheet](stream-json-cheatsheet.md). Checked against 
 | `step_update` `tool`, `DONE`, with output | `ActionEvent` completed, `ok=True`, with a 500-character output preview |
 | `step_update` `tool`, `DONE`, no output, for a tool agy can block | Held back. Closed `ok=True` when a later step arrives; turned into a ⚠️ Blocked row if `result.denied_actions` names its family |
 | `step_update` `tool`, `ERROR` | `ActionEvent` completed, `ok=False`, with `tool_info.error.message` (a hook refusal lands here) |
-| `step_update` `subagent`, `ACTIVE` / `DONE` / `ERROR` | `ActionEvent` of kind `subagent`, started / completed |
+| `step_update` `tool` `invoke_subagent`, `ACTIVE` (agy 1.3.3) | `ActionEvent` of kind `subagent` started, titled `<type>: <role>` (`+N` for more) from `parameters.Subagents[]` |
+| `step_update` `subagent`, `ACTIVE` / `DONE` / `ERROR` | `ActionEvent` of kind `subagent`, started (1.3.1 sends this type at `ACTIVE` too) / completed |
 | `step_update` `agent_response` | No event. `text_delta` is collected per step as the fallback answer |
 | `step_update` `finish` (or any type) closing a step that opened as a tool | `ActionEvent` completed |
-| `step_update` `user_input`, `system_message`, `checkpoint`, `unknown`, anything newer | Ignored. A `user_input` injected mid-run is not a new run |
-| a background-capable tool `ACTIVE` for more than 5 s | `ActionEvent` updated, title `⏳ background: <command>` (once, on the next line agy prints) |
+| `step_update` `user_input`, `system_message`, `checkpoint`, `unknown`, anything newer | No event. A `user_input` injected mid-run is not a new run. A `system_message` updates the background task map (below) |
+| a `run_command` that counts as background, or a `schedule` / `manage_task` step `ACTIVE` for more than 5 s | `ActionEvent` updated, title `⏳ background: <command>` (once, on the next line agy prints) |
 | `result` `SUCCESS` | Open rows are closed, then `CompletedEvent(ok=True)`. Answer is `result.response`, or the collected text when that is empty |
 | `result` with `denied_actions` | A `⚠️ Blocked: <what> (<agy name>) — <title>` row per denial, and a closing paragraph on the answer |
 | `result` `ERROR` + `interrupted` | `CompletedEvent(ok=False)`, resumable, "Antigravity was interrupted …" |
@@ -57,6 +59,27 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | `config_unchecked` | Unattended run, and that config couldn't be checked |
 | `agy_always_proceed` | Workspace run, and agy's own settings report a `toolPermission` other than `request-review` / `strict` |
 
+## Background task map
+
+Besides events, `translate()` keeps `AntigravityStreamState.tasks`, the map the bridge renders as the
+`⏳ background (N)` block ([#978](https://github.com/littlebearapps/untether/issues/978)). It emits no event of its
+own: the block is re-read whenever the progress message is drawn. Each entry is an `EngineBackgroundTask`
+(`src/untether/background_tasks.py`).
+
+| agy line | Task map |
+|---|---|
+| `tool` `run_command`, `ACTIVE` | `cmd:<step>` added, listed from the moment it counts as background: `IsDaemon` / `WaitMsBeforeAsync` from the parameters if present, a later `tool` / `subagent` / `agent_response` step while it is still open, else 5 s |
+| `tool` `schedule`, `ACTIVE` | `timer:<step>` added and listed at once (`timer (<DurationSeconds>s)`) |
+| `tool` `invoke_subagent` `ACTIVE`, or `subagent` `ACTIVE` / `DONE` | `sub:<step>:<n>` per subagent, listed at once as `<role> (<type>)`. `DONE` only adds the child's conversation id: the children are still working |
+| the `run_command` / `schedule` step `DONE` / `ERROR` | Removed if it never counted as background; otherwise `completed` / `failed`, and one `system_message` is expected for it |
+| `invoke_subagent` step `ERROR` | Its subagents → `failed` |
+| `system_message` `DONE` | Spends an expected notice if there is one; otherwise the oldest running subagent → `completed` |
+| any `tool` step `ACTIVE` | Expected notices are dropped |
+| `result`, or the run ending without one | Everything still running → `ended` (never `failed`: a daemon command is still running by design) |
+
+Only `run_command`, `schedule` and `manage_task` steps count for the background wait (`awaiting_background`); a
+subagent row never does.
+
 ## Tool vocabulary
 
 | agy tool | Shown as |
@@ -70,7 +93,7 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | `grep_search` | `grep` |
 | `search_web` | `websearch` |
 | `read_url_content` | `webfetch` |
-| `invoke_subagent` | `agent` (a subagent row) |
+| `invoke_subagent` | a subagent row titled `<type>: <role>` |
 | `ask_question` | `askuserquestion` |
 | `call_mcp_tool` | `mcp: <server>/<tool>` |
 | `browser_*` | `browser: <action>` |

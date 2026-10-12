@@ -1256,6 +1256,7 @@ def test_background_row_retitled_after_five_seconds(
         _feed(runner, state, lines[:4])
         assert _feed(runner, state, [other]) == []  # younger than 5 s: untouched
         state.bg_steps[2] = time.monotonic() - 6.0
+        state.tasks["cmd:2"].background_from -= 6.0  # #978: one shared deadline
         (updated,) = _feed(runner, state, [other])
         assert isinstance(updated, ActionEvent) and updated.phase == "updated"
         assert updated.action.id == "step-2"

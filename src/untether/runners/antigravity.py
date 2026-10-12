@@ -46,6 +46,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
+from ..background_tasks import EngineBackgroundTask
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
@@ -343,10 +344,15 @@ _BACKGROUND_TOOLS = frozenset({"run_command", "schedule", "manage_task"})
 # most 30 min (1.2.9); past that + 60 s grace the wait is no longer expected
 # and ordinary liveness / stall handling resumes.
 _AGY_BACKGROUND_CAP_S = 1860.0
-# D33: the stream carries no ``WaitMsBeforeAsync``, so a background-capable
-# step ACTIVE for longer than this is shown as a background row.
+# D33 / P-B6 (#978): agy picks ``WaitMsBeforeAsync`` per ``run_command`` call
+# (5000, 10000 and 0 seen on 1.3.3) but the 1.3.3 stream carries only
+# ``CommandLine``. Where the parameters do carry it, that value decides when
+# the command counts as background; otherwise it does after this long.
 _BACKGROUND_TITLE_AFTER_S = 5.0
+_ASYNC_WAIT_MAX_MS = 600_000
 _BACKGROUND_TITLE_CHARS = 120
+# Finished entries are dropped from the task map beyond this many.
+_TASKS_MAX = 64
 # Descendant PIDs handed to the #590 teardown sweep: bounded, and each one
 # pinned by its /proc start time so a recycled PID is never signalled.
 _ORPHAN_SNAPSHOT_MAX = 256
@@ -706,6 +712,10 @@ def _antigravity_tool_kind_and_title(
         tool = tool_input.get("ToolName") or tool_input.get("tool_name")
         label = "/".join(str(p) for p in (server, tool) if p)
         return "tool", f"mcp: {label}" if label else "mcp tool"
+    if tool_name == "invoke_subagent":
+        # agy 1.3.3: the spawn is a ``tool`` step while ACTIVE; its roles are
+        # in the parameters (P-B1).
+        return "subagent", _subagent_title(_subagent_specs(tool_input, None))
     normalised = _TOOL_NAME_MAP.get(tool_name, tool_name.lower())
     params = dict(tool_input)
     if (
@@ -728,17 +738,60 @@ def _antigravity_tool_kind_and_title(
     )
 
 
-def _subagent_title(info: dict[str, Any] | None) -> str:
-    subagents = info.get("subagents") if isinstance(info, dict) else None
-    first = subagents[0] if isinstance(subagents, list) and subagents else None
-    if isinstance(first, dict):
-        role = first.get("role")
-        type_name = first.get("type_name")
-        if role and type_name:
-            return f"{type_name}: {role}"
-        if role or type_name:
-            return str(role or type_name)
-    return "subagent"
+# One subagent of an ``invoke_subagent`` step: (role, type, child conversation id).
+_SubagentSpec = tuple[str | None, str | None, str | None]
+
+
+def _subagent_specs(params: Any, info: Any) -> list[_SubagentSpec]:
+    """The subagents one ``invoke_subagent`` step names: from
+    ``subagent_info.subagents[]`` when the step has it (DONE on 1.3.3, ACTIVE
+    too on 1.3.1), else from the ACTIVE ``tool_info.parameters.Subagents[]``."""
+    for holder, key, names in (
+        (info, "subagents", ("role", "type_name", "conversation_id")),
+        (params, "Subagents", ("Role", "TypeName", "ConversationId")),
+    ):
+        entries = holder.get(key) if isinstance(holder, dict) else None
+        if not isinstance(entries, list) or not entries:
+            continue
+        specs: list[_SubagentSpec] = []
+        for entry in entries:
+            role, type_name, child = (
+                value if isinstance(value, str) and value else None
+                for value in (
+                    entry.get(name) if isinstance(entry, dict) else None
+                    for name in names
+                )
+            )
+            specs.append((role, type_name, child))
+        return specs
+    return []
+
+
+def _subagent_title(specs: list[_SubagentSpec]) -> str:
+    if not specs:
+        return "subagent"
+    role, type_name, _ = specs[0]
+    if role and type_name:
+        title = f"{type_name}: {role}"
+    else:
+        title = role or type_name or "subagent"
+    return f"{title} +{len(specs) - 1}" if len(specs) > 1 else title
+
+
+def _async_wait_s(params: dict[str, Any]) -> float:
+    """Seconds a ``run_command`` may stay ACTIVE before it counts as
+    background: agy's own per-call values when the stream carries them
+    (``IsDaemon`` → at once, ``WaitMsBeforeAsync``), else the default."""
+    if params.get("IsDaemon") is True:
+        return 0.0
+    raw = params.get("WaitMsBeforeAsync")
+    if (
+        isinstance(raw, int | float)
+        and not isinstance(raw, bool)
+        and 0 <= raw <= _ASYNC_WAIT_MAX_MS
+    ):
+        return raw / 1000.0
+    return _BACKGROUND_TITLE_AFTER_S
 
 
 def _error_text(error: Any) -> str | None:
@@ -764,8 +817,18 @@ def _error_text(error: Any) -> str | None:
 @dataclass(slots=True)
 class AntigravityStreamState:
     """Per-run state. Exposed as ``stream.engine_state`` (08 §2), so attribute
-    names must not collide with the Claude probes the bridge duck-types
-    (``tasks``, ``live_mode``, ``completed_turns`` …)."""
+    names must not collide with the Claude live-session probes the bridge
+    duck-types (``live_mode``, ``completed_turns``, ``turn_open``,
+    ``result_received_at``, ``live_wakeups`` …).
+
+    ``tasks`` is the one deliberate exception (#978): it is the neutral
+    background-task map (``background_tasks.BackgroundTaskView``) that
+    ``runner_bridge._bg_tasks`` renders as the ``⏳ background`` block. Its
+    other readers were checked for that: ``running_task_is_idle_after_result``
+    needs ``live_mode`` first and reads ``holds_session`` (always False
+    here); the orphan-approval lookup is keyed by a Claude agent id; and the
+    post-result status message opens only for live tasks, which the end of a
+    run never leaves."""
 
     factory: EventFactory
     note_seq: int = 0
@@ -787,6 +850,15 @@ class AntigravityStreamState:
     orphan_pid_starttimes: dict[int, int] = field(default_factory=dict)
     # Background steps already retitled ``⏳ background: …`` (once each).
     bg_retitled: set[int] = field(default_factory=set)
+    # #978: the rows of the ``⏳ background`` block, built from the stream
+    # only — ``cmd:<step>`` (run_command), ``timer:<step>`` (schedule),
+    # ``sub:<step>:<n>`` (one per subagent of an invoke_subagent step).
+    # Display only: ``bg_steps`` stays the busy probe (D33: a subagent can't
+    # mark a run busy).
+    tasks: dict[str, EngineBackgroundTask] = field(default_factory=dict)
+    # ``system_message`` steps still expected for a finished background
+    # command / timer; those are not a subagent finishing.
+    bg_notices_owed: int = 0
     agy_pid: int | None = None
     # Phase 05: the ``--effort`` level actually passed (footer), and the one
     # ⚠️ row to show when a stored level was dropped for this model.
@@ -1844,12 +1916,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         step_type = su.step_type
         st = su.state
         terminal = st in {"DONE", "ERROR"}
+        if idx is not None and step_type in {"tool", "subagent", "agent_response"}:
+            self._note_overtaken(state, idx)
 
         if step_type == "tool":
             out.extend(self._translate_tool(su, state, action_id))
             return out
         if step_type == "subagent":
-            title = _subagent_title(su.subagent_info)
+            specs = _subagent_specs(None, su.subagent_info)
+            title = _subagent_title(specs)
+            if idx is not None:
+                self._track_subagents(state, idx, specs, failed=st == "ERROR")
             if not terminal:
                 action = Action(
                     id=action_id,
@@ -1887,8 +1964,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             action = state.pending_actions.pop(action_id)
             if idx is not None:
                 state.bg_steps.pop(idx, None)
+                self._task_step_ended(state, idx, ok=st == "DONE")
             out.append(self._complete(action, state, ok=st == "DONE"))
             return out
+        if step_type == "system_message" and terminal:
+            self._note_system_message(state)
         # user_input (incl. a hook-injected one: not a new run), system_message,
         # checkpoint, unknown, finish, anything newer.
         logger.debug("antigravity.step.ignored", step_type=step_type, state=st)
@@ -1920,6 +2000,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 self._collect_descendants(state)
             if action_id in state.pending_actions:
                 return []
+            if idx is not None:
+                self._track_tool_started(state, idx, tool_name, params)
             action = Action(id=action_id, kind=kind, title=title, detail=detail)
             state.pending_actions[action_id] = action
             return [
@@ -1929,6 +2011,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
         if idx is not None:
             state.bg_steps.pop(idx, None)
+            self._task_step_ended(state, idx, ok=su.state == "DONE")
+            if su.state == "ERROR":
+                self._track_subagents(state, idx, [], failed=True)
         if tool_name == "run_command":
             # By DONE the background child exists (ACTIVE can precede it).
             self._collect_descendants(state)
@@ -2000,20 +2085,189 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         except Exception:  # noqa: BLE001 — diagnostics must not break a run
             logger.debug("antigravity.descendants.scan_failed", exc_info=True)
 
+    # -- #978: the background task map (stream only) --------------------------
+
+    @staticmethod
+    def _add_task(state: AntigravityStreamState, task: EngineBackgroundTask) -> None:
+        if task.task_id in state.tasks:
+            return
+        if len(state.tasks) >= _TASKS_MAX:
+            for tid in [t for t, old in state.tasks.items() if old.status != "running"]:
+                del state.tasks[tid]
+        state.tasks[task.task_id] = task
+
+    def _track_tool_started(
+        self,
+        state: AntigravityStreamState,
+        idx: int,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> None:
+        """A tool step went ACTIVE: the model has moved on, so a completion
+        notice still expected for an earlier task isn't coming; then register
+        what this step may leave running."""
+        state.bg_notices_owed = 0
+        now = state.bg_steps.get(idx) or time.monotonic()
+        if tool_name == "run_command":
+            # Registered now, listed only from ``background_from``: agy prints
+            # nothing while it holds its answer for an async command (A1), so
+            # no later line could add the row.
+            self._add_task(
+                state,
+                EngineBackgroundTask(
+                    task_id=f"cmd:{idx}",
+                    task_type="local_bash",
+                    description=_strip_cr(str(params.get("CommandLine") or "command")),
+                    started_at=now,
+                    background_from=now + _async_wait_s(params),
+                ),
+            )
+        elif tool_name == "schedule":
+            # P-B2: ACTIVE for the timer's whole life, answer held.
+            seconds = params.get("DurationSeconds")
+            timed = isinstance(seconds, int | float) and not isinstance(seconds, bool)
+            self._add_task(
+                state,
+                EngineBackgroundTask(
+                    task_id=f"timer:{idx}",
+                    task_type="schedule",
+                    description=f"timer ({int(seconds)}s)" if timed else "timer",
+                    started_at=now,
+                ),
+            )
+            logger.info("antigravity.background.started", task_id=f"timer:{idx}")
+        elif tool_name == "invoke_subagent":
+            self._track_subagents(state, idx, _subagent_specs(params, None))
+
+    def _track_subagents(
+        self,
+        state: AntigravityStreamState,
+        idx: int,
+        specs: list[_SubagentSpec],
+        *,
+        failed: bool = False,
+    ) -> None:
+        """One row per subagent of an ``invoke_subagent`` step. The spawn
+        step is DONE in well under a second while the children work on, so
+        only a failed spawn ends them here; each child's end is a parent
+        ``system_message`` (``_note_system_message``)."""
+        now = time.monotonic()
+        for n, (role, type_name, child) in enumerate(specs):
+            key = f"sub:{idx}:{n}"
+            task = state.tasks.get(key)
+            if task is None and not failed:
+                label = f"{role} ({type_name})" if role and type_name else None
+                task = EngineBackgroundTask(
+                    task_id=key,
+                    task_type="local_agent",
+                    description=label or role or type_name or "subagent",
+                    started_at=now,
+                )
+                self._add_task(state, task)
+                logger.info("antigravity.background.started", task_id=key)
+            if task is not None and child:
+                task.ref = child
+        if failed:
+            prefix = f"sub:{idx}:"
+            for key, task in state.tasks.items():
+                if key.startswith(prefix) and task.status == "running":
+                    task.status = "failed"
+                    task.ended_at = now
+
+    @staticmethod
+    def _note_overtaken(state: AntigravityStreamState, idx: int) -> None:
+        """The model went on (a later tool, subagent or reply step) while a
+        ``run_command`` is still ACTIVE: agy runs tool calls one at a time
+        (P-H15), so that command went async (P-B4's daemon) — list it now
+        rather than at its deadline."""
+        for step in state.bg_steps:
+            if step >= idx:
+                continue
+            task = state.tasks.get(f"cmd:{step}")
+            if task is not None and not task.is_backgrounded:
+                task.background_from = None
+
+    @staticmethod
+    def _task_step_ended(state: AntigravityStreamState, idx: int, *, ok: bool) -> None:
+        """The ``run_command`` / ``schedule`` step *idx* reached DONE / ERROR."""
+        for key in (f"cmd:{idx}", f"timer:{idx}"):
+            task = state.tasks.get(key)
+            if task is None or task.status != "running":
+                continue
+            if not task.is_backgrounded:
+                del state.tasks[key]  # finished in the foreground: never a row
+                continue
+            task.status = "completed" if ok else "failed"
+            task.ended_at = time.monotonic()
+            state.bg_notices_owed += 1
+            logger.info(
+                "antigravity.background.finished",
+                task_id=key,
+                status=task.status,
+                elapsed_s=round(task.ended_at - task.started_at, 1),
+            )
+
+    @staticmethod
+    def _note_system_message(state: AntigravityStreamState) -> None:
+        """agy tells the parent about finished background work with one
+        ``system_message`` step each, with no content in the stream (P-B1;
+        the child's id is only in agy's transcript file, which Untether does
+        not read). One owed to a command / timer that just ended is spent on
+        it; otherwise it is a subagent finishing, and with nothing to say
+        which, the oldest running one — first in, first out."""
+        if state.bg_notices_owed > 0:
+            state.bg_notices_owed -= 1
+            return
+        for key, task in state.tasks.items():
+            if task.task_type == "local_agent" and task.status == "running":
+                task.status = "completed"
+                task.ended_at = time.monotonic()
+                logger.info(
+                    "antigravity.background.finished",
+                    task_id=key,
+                    status="completed",
+                    elapsed_s=round(task.ended_at - task.started_at, 1),
+                    attribution="fifo",
+                )
+                return
+
+    @staticmethod
+    def _end_tasks(state: AntigravityStreamState, *, ok: bool) -> None:
+        """The run is over: nothing is listed as running after it. A
+        ``run_command`` still ACTIVE at a successful result is a daemon task
+        agy leaves behind (P-B4) or upstream #1044 — ended, not failed."""
+        now = time.monotonic()
+        left = [key for key, task in state.tasks.items() if task.status == "running"]
+        for key in left:
+            state.tasks[key].status = "ended"
+            state.tasks[key].ended_at = now
+        state.bg_notices_owed = 0
+        outlived = [key for key in left if key.startswith("cmd:")]
+        if ok and outlived:
+            logger.info("antigravity.background.outlived", tasks=outlived)
+
     @staticmethod
     def _background_title_updates(
         state: AntigravityStreamState,
     ) -> list[UntetherEvent]:
-        """08 §6: retitle a background-capable step that has been ACTIVE for
-        more than 5 s as ``⏳ background: <command>``, once, when another
-        stdout line arrives (no timers in the translator). The row closes
-        under its original title."""
+        """08 §6: retitle a background-capable step as ``⏳ background:
+        <command>`` once it counts as background (a ``run_command`` when its
+        task does, #978; the others after 5 s), once, when another stdout
+        line arrives (no timers in the translator). The row closes under its
+        original title."""
         if not state.bg_steps:
             return []
         now = time.monotonic()
         out: list[UntetherEvent] = []
         for idx, since in state.bg_steps.items():
-            if idx in state.bg_retitled or now - since <= _BACKGROUND_TITLE_AFTER_S:
+            if idx in state.bg_retitled:
+                continue
+            task = state.tasks.get(f"cmd:{idx}")
+            if task is not None:
+                due = task.is_backgrounded
+            else:
+                due = now - since > _BACKGROUND_TITLE_AFTER_S
+            if not due:
                 continue
             action = state.pending_actions.get(f"step-{idx}")
             if action is None:
@@ -2070,6 +2324,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         state.pending_actions.clear()
         state.bg_steps.clear()
+        self._end_tasks(state, ok=ok)
         return out
 
     def _answer(self, state: AntigravityStreamState, response: str | None) -> str:

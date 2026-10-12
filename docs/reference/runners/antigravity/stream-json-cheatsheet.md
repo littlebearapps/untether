@@ -1,8 +1,8 @@
 # Antigravity CLI stream-json cheatsheet
 
 `agy --output-format stream-json` writes one JSON object per line to stdout. Every line has an `event` field:
-`init`, `step_update`, `result` or `command_result`. The examples below are real lines from agy 1.3.1 and 1.3.2,
-with paths shortened and the tool list cut.
+`init`, `step_update`, `result` or `command_result`. The examples below are real lines from agy 1.3.1, 1.3.2
+and 1.3.3, with paths and ids shortened and the tool list cut.
 
 !!! note "Things that differ from what you might expect"
     - There is **no `error` event**. Failures arrive as a `result` with `status: "ERROR"`, or as a non-zero exit
@@ -92,6 +92,30 @@ A tool refused by a **hook** is different: its step ends `ERROR` with `tool_info
 
 The `DONE` line adds each subagent's own `conversation_id` and a `log_uri`. The subagent's steps are not in the
 parent stream.
+
+That is agy 1.3.1. On 1.3.3 the spawn is a `tool` step while `ACTIVE` and becomes a `subagent` step only at
+`DONE`, about 0.3 s later, while the subagents are still working:
+
+```json
+{"event":"step_update","step_update":{"conversation_id":"0000…","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"invoke_subagent","tool_info":{"name":"invoke_subagent","parameters":{"Subagents":[{"Model":"inherit","Prompt":"Read notes.txt …","Role":"Alpha","TypeName":"research","Workspace":"inherit"},{"Model":"inherit","Prompt":"Read hello.py …","Role":"Beta","TypeName":"research","Workspace":"inherit"}]}}}}
+{"event":"step_update","step_update":{"conversation_id":"0000…","step_index":2,"state":"DONE","step_type":"subagent","tool_name":"invoke_subagent","duration_seconds":0.27,"subagent_info":{"subagents":[{"type_name":"research","role":"Alpha","initial_prompt":"…","conversation_id":"…","log_uri":"file://…/transcript.jsonl","workspace_uris":["file:///work/proj"]},{"type_name":"research","role":"Beta","initial_prompt":"…","conversation_id":"…"}]}}}
+```
+
+Each subagent finishing is one `system_message` step in the parent stream, with nothing to say which one:
+
+```json
+{"event":"step_update","step_update":{"conversation_id":"0000…","step_index":4,"state":"DONE","step_type":"system_message","duration_seconds":0.0004}}
+```
+
+### Background commands, timers and daemons
+
+- A background `run_command` stays `ACTIVE` until the command ends, and agy prints nothing else meanwhile (it
+  holds the model's reply). Its `parameters` carry only `CommandLine`; `WaitMsBeforeAsync` and `IsDaemon` are
+  not in the stream.
+- A `schedule` step (`parameters`: `DurationSeconds`, `Prompt`) stays `ACTIVE` for the timer's whole life.
+- When either finishes, its `DONE` line is followed by the held reply and a `system_message` step.
+- A daemon `run_command` never reaches `DONE`: the next `agent_response` and the `result` arrive while it is still
+  `ACTIVE`, and the process is still running after agy exits (1.3.3).
 
 ### `finish`
 

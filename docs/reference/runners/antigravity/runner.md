@@ -339,23 +339,61 @@ Run `agy models` on the host for the model list. Untether never reads agy's sett
 
 ## Background commands
 
-agy sends one answer per run and holds it until background commands finish (up to 30 minutes). While it waits:
+agy sends one answer per run and holds it until background commands and timers finish (up to 30 minutes). While
+it waits:
 
-- a shell command that has been running for more than 5 seconds is retitled `⏳ background: <command>`;
+- the progress message lists what is still running in a `⏳ background (N)` block (see below);
+- a shell command that counts as background is also retitled `⏳ background: <command>` on the next line agy
+  prints;
 - where a stall warning would otherwise appear, the progress message shows `⏳ Antigravity is waiting for 1 background task
   (N min) — agy holds its answer until they finish (up to 30 min).` The run is not auto-cancelled for it
   (`subprocess.background_wait` in the logs, stall reason `background_waiting`);
 - when the run ends or is cancelled, Untether also stops the child processes it saw agy start.
 
-This release treats every running shell command as possible background work, so a foreground command that hangs
-delays ordinary stall warnings for up to 31 minutes. Tasks that agy leaves running as daemons after its answer
-aren't tracked.
+Every running shell command is treated as possible background work, so a foreground command that hangs delays
+ordinary stall warnings for up to 31 minutes.
+
+### Background tasks and subagents in the status panel
+
+From 0.36.1rc2 ([#978](https://github.com/littlebearapps/untether/issues/978)) the same `⏳ background (N)` block
+that Claude runs use shows agy's work, one row each with its elapsed time, and `/ping` counts them:
+
+| Row | From | Shown | Ends |
+|---|---|---|---|
+| `🐚 <command>` | a `run_command` step | once the command counts as background (next paragraph) | when its step ends |
+| `🐚 timer (20s)` | a `schedule` step | at once: agy keeps the step open for the timer's whole life | when the timer fires |
+| `🤖 <role> (<type>)` | each subagent of an `invoke_subagent` step | at once | when agy reports a subagent has finished |
+
+Everything comes from the lines agy prints. Untether does not read agy's own transcript or task files.
+
+**When a command counts as background.** agy decides per command how long to wait before letting it run on in the
+background, but agy 1.3.3 doesn't print that value. A command is listed when the model carries on while it is still
+running (certain), or after it has run for 5 seconds (a guess). So a normal blocking command that takes longer
+than 5 seconds is shown as a background row until it ends. This affects the display only. If a future agy prints
+the value (`WaitMsBeforeAsync`, `IsDaemon`), Untether uses it instead of the 5 seconds.
+
+**Which subagent finished.** agy tells the parent conversation that a subagent has finished without saying
+which one. With several running, Untether marks them finished in the order they were started, so two rows can be
+swapped for a moment; the count is right. A subagent that failed is shown as finished (agy doesn't report the
+difference). Subagent rows never delay a stall warning.
+
+**Where rows appear.** The [Workspace agent](#the-workspace-agent) has no shell, timer or subagent tool, so in
+practice rows appear in Full access.
+
+**Daemon tasks outlive the run.** When agy starts a command as a daemon task (a dev server, say), it sends its
+answer straight away and leaves the command running after it exits (agy 1.3.3). Its row disappears when the answer
+arrives; the process does not. Untether's end-of-run clean-up stops only the child processes it saw agy start,
+which may or may not include a daemon, so don't rely on it either way: check for the process yourself and stop it
+when you're done. There is no setting for this yet.
+
+Turn the block off with `[progress] show_background_tasks = false`.
 
 ## Known gaps
 
 - **No approval buttons, plan gate, question buttons, steering or live sessions yet.** Ask me and Plan first
   arrive in a later 0.36.1 release.
-- **Subagents** appear as one row; their own steps and output aren't shown.
+- **Subagents** appear as one action row for the spawn and one status-panel row each; their own steps, output,
+  token use and failures aren't shown (agy doesn't put them in the parent's stream).
 - **Images.** A Telegram photo reaches agy as a saved file path, not as image input.
 - **Long turns can end `CANCELED`** upstream; retry or split the task.
 - **Quota and MCP start-up hangs.** A used-up quota on a Google sign-in is stopped by the stderr match above. An
@@ -372,6 +410,10 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Workspace has no shell tool ([#1037](https://github.com/littlebearapps/untether/issues/1037)) | A custom agent's `tools:` list, chosen with `--agent`; its body is the system prompt | No per-run system prompt (no flag, env var or stream-json field). `permissions.allow` rules are global settings only, prefix-matched, and chained commands still match, so they are not a safe read-only list. An agent's `commandExecutionPolicy: sandbox` doesn't stop the soft-denial. `--add-dir` pointing at a folder with the agent moves agy's workspace there. A workspace `.agents/agents/` file works but writes into the user's repo (rejected, D20) |
 | The agent file on disk | — (custom: Untether writes one file under `~/.gemini/config/agents/`) | agy has no way to pass an agent definition per run; a plugin is the other documented place and arrives with the approval gate |
 | Telling the user to send `/new` after Workspace → Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses |
+| Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
+| When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 stream carries only `CommandLine` (the per-call value, 5000 / 10000 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. Checked 2026-10-12. Retire when the stream prints the value or the approval gate's hook supplies it |
+| Which subagent a completion belongs to | — (**custom**: first started, first finished) | The parent stream's `system_message` step has no content. The child's id is in agy's transcript file (`sender=`), which Untether doesn't read (rule 3: no engine state files). Checked 2026-10-12, agy 1.3.3. Retire when the stream names the child or the gate's hook reports it |
+| Telling a timer's or command's completion notice from a subagent's | — (**custom**: one `system_message` is expected after each finished background command or timer, and dropped when the next tool starts) | Same content-less `system_message`. Checked 2026-10-12, agy 1.3.3. Retires with the row above |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
 lets `--agent` change on a resume.
@@ -394,7 +436,9 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.credits.low`, `antigravity.conversation.missing`, `antigravity.permission_mode.mismatch`,
 `antigravity.workspace_config_present` / `_changed` / `.unattended_refused`, `antigravity.config_check.fetched` /
 `.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`,
-`antigravity.argv.invalid_value`, `antigravity.workspace_agent.installed` / `.unavailable`.
+`antigravity.argv.invalid_value`, `antigravity.workspace_agent.installed` / `.unavailable`,
+`antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
+(a command still running when the answer arrived).
 
 ## See also
 
