@@ -448,6 +448,35 @@ def test_effort_errors_get_effort_hint_not_model_hint() -> None:
         assert "effort level isn't available" in hint, error
 
 
+# #1046: agy 1.3.3's refusal of a model with no default effort level and no
+# ``--effort`` (dev bot, 2026-10-12, ``/model set gemini-3.8-flash``).
+_NEEDS_EFFORT = (
+    'invalid model selection (--model \\"gemini-3.8-flash\\" --effort \\"\\"): '
+    "--model gemini-3.8-flash requires --effort (available: low, medium, high)"
+)
+
+
+@pytest.mark.anyio
+async def test_model_that_needs_an_effort_level_is_not_called_unrecognised(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stderr = _NEEDS_EFFORT.replace('\\"', '"')
+    _script(
+        tmp_path,
+        monkeypatch,
+        f"out:{_result('ERROR', _NEEDS_EFFORT)}\nerr:error: {stderr}\nrc:1\n",
+    )
+    events = await _run()
+    error = _done(events).error or ""
+    assert "requires --effort (available: low, medium, high)" in error
+    hint = get_error_hint(error) or ""
+    assert hint.startswith("That model needs an effort level")
+    assert "low, medium, high" in hint
+    assert "`/reasoning set <level>`" in hint
+    assert "Effort" in hint
+    assert "doesn't recognise" not in hint
+
+
 @pytest.mark.anyio
 async def test_mode_rejected_and_print_timeout_warnings_logged(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

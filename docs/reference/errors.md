@@ -68,6 +68,7 @@ Every Antigravity model or effort rejection starts with `invalid model selection
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
+| `requires --effort` | That model needs an effort level — agy offers low, medium, high. Set one with `/reasoning set <level>` or in /config → Effort, then send your message again. The levels are the ones agy's refusal names, shown only when they are all levels Untether knows ([#1046](https://github.com/littlebearapps/untether/issues/1046)). | Antigravity |
 | `" effort (available:` / `invalid --effort` / `conflicts with --effort` | That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix. | Antigravity |
 | `invalid model selection` | Antigravity doesn't recognise that model. Run `agy models` on the host for the list, or `/model clear`. | Antigravity |
 | `model_not_found` | Model not available. Check the model name in `/config`. | All |

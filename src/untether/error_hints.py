@@ -477,9 +477,34 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+# #1046: agy refuses a model that has no default effort level when no
+# ``--effort`` is passed, and names the levels it takes:
+# ``--model gemini-3.8-flash requires --effort (available: low, medium, high)``.
+# The id is valid, so this must outrank "invalid model selection" (the same
+# refusal's prefix). The levels come from agy's text: named only when every
+# one is a level Untether knows, otherwise the hint drops the list.
+_NEEDS_EFFORT_PATTERN = "requires --effort"
+
+
+def _needs_effort_hint(error_message: str) -> str:
+    from .utils.antigravity_quota import EFFORT_VOCABULARY, efforts_from_refusal
+
+    levels = efforts_from_refusal(error_message)
+    offers = ""
+    if levels and all(level in EFFORT_VOCABULARY for level in levels):
+        offers = f" \N{EM DASH} agy offers {', '.join(levels)}"
+    return (
+        f"That model needs an effort level{offers}. Set one with"
+        " `/reasoning set <level>` or in /config \N{RIGHTWARDS ARROW} Effort,"
+        " then send your message again."
+    )
+
+
 def get_error_hint(error_message: str) -> str | None:
     """Return an actionable hint for a known error pattern, or None."""
     lower = error_message.lower()
+    if _NEEDS_EFFORT_PATTERN in lower:
+        return _needs_effort_hint(error_message)
     for pattern, hint in _HINT_PATTERNS:
         if pattern in lower:
             return hint
