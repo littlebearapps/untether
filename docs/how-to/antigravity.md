@@ -184,16 +184,28 @@ If a saved level isn't one the model accepts, the run drops it and shows
 `⚠️ Effort <level> isn't available for <model>, so agy used its default`. See
 [Antigravity effort](model-reasoning.md#antigravity-effort).
 
+**Context use.** With a model set for the chat, the first line of a progress message and answer can end with
+`~3% ctx`: the tokens the model last read, as a share of the context window Google publishes for that model. It
+is an estimate. agy doesn't report a window, and it compacts a conversation on its own schedule without saying so,
+so a low figure doesn't mean compaction is far off. With no model set (agy's default), or a model Untether has no
+published figure for, no percentage is shown. Details:
+[Context use](../reference/runners/antigravity/runner.md#context-use-n-ctx).
+
 <!-- TODO: capture screenshot: antigravity-effort-limited — /config → Effort page for a model with limited levels (a Gemini Pro id showing Low and High only) -->
 <!-- <img src="../assets/screenshots/antigravity-effort-limited.jpg" alt="Effort page for an Antigravity model that offers Low and High only" width="360" loading="lazy" /> -->
 
 ## Usage and quota
 
 Send `/usage` in an Antigravity chat to see agy's quota groups (for example a 5-hour and a weekly limit per model
-group, each with a bar, the percentage used and the reset time), then the last session's token totals. Checking
-costs no tokens.
+group, each with a bar, the percentage used and the reset time), your remaining AI credits, then the last
+session's token totals. Checking costs no tokens.
 
-- Footers show tokens for the run; there is no dollar cost and no quota footer.
+- Footers show tokens for the run; there is no dollar cost.
+- A quota line can follow an answer. Turn it on in `/config` → **Cost & usage** → **Subscription usage** to see
+  `⚡ Gemini Models 5h: 12% | wk: 3%` after each run; with it off, a line appears only once a limit reaches 70 %.
+  The line is taken from your last `/usage`, for up to 15 minutes, so it never slows an answer down. Send `/usage`
+  again for current numbers.
+- `/stats auth` shows which sign-in route agy is set to use, once an Antigravity run has happened.
 - `[cost_budget]` limits count dollars, so they never trip for Antigravity.
 - When a quota is used up, the run ends with `This Antigravity quota is used up. /usage shows when each group
   resets`, and Untether doesn't retry.
@@ -248,6 +260,8 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 - `/steer` and live sessions: each message is its own agy run.
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: a subagent shows as one row.
+- `/export` after a restart: the export comes from Untether's own memory of the session, so it is empty once
+  Untether restarts and never includes turns run in a terminal.
 
 The full comparison with other engines is in the
 [engine compatibility matrix](../reference/runners/index.md).

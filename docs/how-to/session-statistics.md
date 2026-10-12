@@ -59,7 +59,7 @@ opencode: ✅ 2 provider(s)
 pi: ❌ no credentials
 ```
 
-This checks each engine's credential files or auth status commands without starting a run. Claude shows the `authMethod` its `claude auth status` reports; an engine whose status can't be read shows `❓ status unavailable`. On `/stats`, each engine line ends with a `(N triggered, M manual)` breakdown when either count is non-zero (cron, webhook and `/at` runs count as triggered).
+This checks each engine's credential files or auth status commands without starting a run. Claude shows the `authMethod` its `claude auth status` reports; an engine whose status can't be read shows `❓ status unavailable`. Antigravity shows the sign-in route agy is set to use (`antigravity: ℹ️ set to use Google sign-in`) once an Antigravity run has happened since Untether started; it doesn't start agy or test the sign-in. On `/stats`, each engine line ends with a `(N triggered, M manual)` breakdown when either count is non-zero (cron, webhook and `/at` runs count as triggered).
 
 ## How data is collected
 

@@ -15,11 +15,15 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+
+if TYPE_CHECKING:
+    from ...runners.antigravity import AntigravityRunner
 
 logger = get_logger(__name__)
 
@@ -446,13 +450,33 @@ async def _antigravity_debug_lines(cmd: str) -> list[str]:
     return lines
 
 
+async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
+    """``AI credits: N remaining`` from the zero-token ``agy -p /credits``
+    (#979; cached 300 s). Asked only once the quota itself was read. A
+    failure is one short line with the error kind — never agy's raw text and
+    never a failed ``/usage``; a signed-out agy or an answer with no balance
+    gives no line."""
+    from ...utils import antigravity_quota as agy_quota
+
+    try:
+        credits = await agy_quota.get_credits(runner)
+    except agy_quota.AntigravityNotSignedIn:
+        return None
+    except agy_quota.AgySlashError as exc:
+        return f"AI credits: couldn't read ({html.escape(exc.kind[:40])})."
+    except Exception as exc:  # noqa: BLE001 — logged by the cache
+        return f"AI credits: couldn't read ({html.escape(type(exc).__name__)})."
+    return agy_quota.format_credits_html(credits)
+
+
 async def _antigravity_usage_reply(
     ctx: CommandContext, debug_mode: bool
 ) -> CommandResult:
     """``/usage`` for Antigravity (#558): agy's own quota groups from the
-    zero-token ``agy -p /usage`` (cached 60 s, on demand only), then the #417
-    last-session token block. Every agy string is escaped; errors show a
-    short kind, never agy's raw text (R10)."""
+    zero-token ``agy -p /usage`` (cached 60 s, on demand only) and its
+    AI-credits balance (#979), then the #417 last-session token block. Every
+    agy string is escaped; errors show a short kind, never agy's raw text
+    (R10)."""
     from ...runners.antigravity import AUTH_TEXT, AntigravityRunner
     from ...utils import antigravity_quota as agy_quota
 
@@ -493,6 +517,9 @@ async def _antigravity_usage_reply(
             )
         else:
             lines.extend(agy_quota.format_quota_html(snapshot.groups))
+            credits_line = await _antigravity_credits_line(runner)
+            if credits_line:
+                lines.append(credits_line)
             lines.append("<i>From agy /usage (no quota spent).</i>")
 
     channel_id = getattr(ctx.message, "channel_id", None)
@@ -532,8 +559,7 @@ class UsageCommand:
         current_engine = await resolve_effective_engine(ctx)
         if current_engine == _AGY_ENGINE:
             # #558: agy's own quota, on demand — never Claude's usage cache
-            # or lock, and not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES (that
-            # set also shows the /config subscription-footer toggle).
+            # or lock.
             return await _antigravity_usage_reply(ctx, debug_mode)
         if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
             # #417: token totals for the chat's last session instead of a

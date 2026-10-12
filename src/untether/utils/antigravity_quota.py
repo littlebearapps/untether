@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -384,6 +385,18 @@ def auth_route(config: AgyConfig | None, environ: Any = None) -> str:
     return "oauth"
 
 
+def peek_auth_route(environ: Any = None) -> str | None:
+    """The auth route from the freshest unexpired ``-p /config`` answer a
+    run already cached, or None when there is none (#979, ``/stats auth``).
+    Never starts agy. It says which route agy is set to use, not whether the
+    sign-in still works."""
+    now = time.monotonic()
+    fresh = [hit for hit in _CONFIG_CACHE.values() if now - hit[0] < CONFIG_TTL_S]
+    if not fresh:
+        return None
+    return auth_route(max(fresh, key=lambda hit: hit[0])[1], environ)
+
+
 # ── `/usage` quota (phase 04, D5) ───────────────────────────────────────────
 # Parser and formatter ported from PR #766 (Manuel Naranjo), minus its
 # cross-group "worst bucket" (audit R5: the groups are separate pools) and
@@ -542,27 +555,44 @@ def _redact(text: str) -> str:
     return _sanitise_stderr(_URL_RE.sub("[url]", text))
 
 
-class _QuotaCache:
-    """Private 60 s cache for ``agy -p /usage``. Its own lazily created lock
-    — never Claude's ``usage_cache`` lock, so a slow agy can't hold up
-    Claude's footer. Failures are not cached (a fresh sign-in shows at once)."""
+class _SlashCache[T]:
+    """Private cache for one zero-token ``agy -p /<command>`` answer
+    (``/usage``: 60 s, ``/credits``: 300 s). Each instance has its own
+    lazily created lock — never Claude's ``usage_cache`` lock, so a slow agy
+    can't hold up Claude's footer. Failures are not cached (a fresh sign-in
+    shows at once)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        command: str,
+        parse: Callable[[Any], T],
+        ttl_s: float,
+        event: str,
+        log_fields: Callable[[T], dict[str, Any]],
+    ) -> None:
+        self._command = command
+        self._parse = parse
+        self._ttl_s = ttl_s
+        self._event = event
+        self._log_fields = log_fields
         self.reset()
 
     def reset(self) -> None:
         self._lock: anyio.Lock | None = None
-        self._value: tuple[str, float, list[QuotaGroup]] | None = None
+        self._value: tuple[str, float, T] | None = None
         self.last_success_wall: float | None = None
         self.last_error_kind: str | None = None
 
-    def _fresh(self, cmd: str) -> QuotaSnapshot | None:
-        if self._value is None or self._value[0] != cmd:
+    def peek(self, cmd: str | None, max_age_s: float) -> tuple[T, float] | None:
+        """``(value, age)`` when one no older than *max_age_s* is held for
+        *cmd* (None: any agy). Never fetches."""
+        if self._value is None or (cmd is not None and self._value[0] != cmd):
             return None
         age = time.monotonic() - self._value[1]
-        if age >= QUOTA_TTL_S:
+        if age >= max_age_s:
             return None
-        return QuotaSnapshot(groups=self._value[2], age_s=age)
+        return self._value[2], age
 
     def stats(self) -> QuotaCacheStats:
         age = time.monotonic() - self._value[1] if self._value is not None else None
@@ -572,24 +602,26 @@ class _QuotaCache:
             last_error_kind=self.last_error_kind,
         )
 
-    async def get_or_fetch(self, runner: AntigravityRunner) -> QuotaSnapshot:
+    async def get_or_fetch(self, runner: AntigravityRunner) -> tuple[T, float]:
         cmd = runner.command()
-        hit = self._fresh(cmd)
+        hit = self.peek(cmd, self._ttl_s)
         if hit is not None:
             return hit
         if self._lock is None:
             self._lock = anyio.Lock()
         async with self._lock:
-            hit = self._fresh(cmd)
+            hit = self.peek(cmd, self._ttl_s)
             if hit is not None:
                 return hit
             start = time.monotonic()
             try:
-                data = await run_agy_slash(runner, "/usage", timeout_s=QUOTA_TIMEOUT_S)
+                data = await run_agy_slash(
+                    runner, self._command, timeout_s=QUOTA_TIMEOUT_S
+                )
             except AgySlashError as exc:
                 self.last_error_kind = exc.kind
                 logger.warning(
-                    "antigravity.quota.failed",
+                    f"{self._event}.failed",
                     kind=exc.kind,
                     detail=_redact(str(exc)[:200]),
                 )
@@ -597,32 +629,47 @@ class _QuotaCache:
             except Exception as exc:
                 self.last_error_kind = exc.__class__.__name__
                 logger.warning(
-                    "antigravity.quota.failed",
+                    f"{self._event}.failed",
                     kind="error",
                     error_type=exc.__class__.__name__,
                 )
                 raise
-            groups = parse_quota(data)
+            value = self._parse(data)
             now = time.monotonic()
-            self._value = (cmd, now, groups)
+            self._value = (cmd, now, value)
             self.last_success_wall = time.time()
             self.last_error_kind = None
             logger.info(
-                "antigravity.quota.fetched",
+                f"{self._event}.fetched",
                 duration_ms=int((now - start) * 1000),
-                groups=len(groups),
+                **self._log_fields(value),
             )
-            return QuotaSnapshot(groups=groups, age_s=0.0)
+            return value, 0.0
 
 
-_QUOTA_CACHE = _QuotaCache()
+_QUOTA_CACHE: _SlashCache[list[QuotaGroup]] = _SlashCache(
+    command="/usage",
+    parse=parse_quota,
+    ttl_s=QUOTA_TTL_S,
+    event="antigravity.quota",
+    log_fields=lambda groups: {"groups": len(groups)},
+)
 
 
 async def get_quota(runner: AntigravityRunner) -> QuotaSnapshot:
     """agy's quota groups, from the 60 s cache or one ``-p /usage`` probe.
     Only ``/usage`` calls this. Raises ``AgySlashError`` /
     ``AntigravityNotSignedIn``."""
-    return await _QUOTA_CACHE.get_or_fetch(runner)
+    groups, age_s = await _QUOTA_CACHE.get_or_fetch(runner)
+    return QuotaSnapshot(groups=groups, age_s=age_s)
+
+
+def peek_quota(cmd: str | None, *, max_age_s: float) -> QuotaSnapshot | None:
+    """What ``/usage`` last cached for *cmd* (None: any agy), if no older
+    than *max_age_s*. Never starts agy: the run footer reads this (#979,
+    REVIEW M8)."""
+    hit = _QUOTA_CACHE.peek(cmd, max_age_s)
+    return None if hit is None else QuotaSnapshot(groups=hit[0], age_s=hit[1])
 
 
 def quota_cache_stats() -> QuotaCacheStats:
@@ -631,6 +678,130 @@ def quota_cache_stats() -> QuotaCacheStats:
 
 def reset_quota_cache() -> None:
     _QUOTA_CACHE.reset()
+    _CREDITS_CACHE.reset()
+
+
+# ── run footer (#979): a line built from what `/usage` cached ───────────────
+
+# The footer never fetches; a cached quota older than this is not shown.
+FOOTER_MAX_AGE_S = 900.0
+_FOOTER_WARN_PCT = 70  # Claude's footer thresholds (runner_bridge)
+_FOOTER_CRITICAL_PCT = 90
+_FOOTER_NAME_CHARS = 40
+_FOOTER_WINDOW_LABELS = {"5h": "5h", "weekly": "wk"}
+
+
+def _footer_text(value: str) -> str:
+    """One short plain line of an agy-provided name. Backticks go too: the
+    final's own resume line is the only code span a reply may be routed by."""
+    return " ".join(value.replace("`", "").split())[:_FOOTER_NAME_CHARS]
+
+
+def _footer_label(bucket: QuotaBucket) -> str:
+    return _FOOTER_WINDOW_LABELS.get(bucket.window) or _footer_text(
+        bucket.window or bucket.name or "limit"
+    )
+
+
+def format_quota_footer(
+    snapshot: QuotaSnapshot, *, always_show: bool, now: datetime | None = None
+) -> list[str]:
+    """Plain-text footer lines for a final, one per quota group (the groups
+    are separate pools, audit R5).
+
+    *always_show*: a compact ``⚡ <group> 5h: N% | wk: N%`` line per group.
+    Otherwise only groups with a limit at 70 % or more, with Claude's
+    icons (⚡ / ⚠️ from 90 % / 🛑 at 100 %). A snapshot older than a minute
+    says how old it is."""
+    current = now or datetime.now(UTC)
+    age = f" · {int(snapshot.age_s // 60)}m ago" if snapshot.age_s >= 60 else ""
+    lines: list[str] = []
+    for group in snapshot.groups:
+        if not group.buckets:
+            continue
+        name = _footer_text(group.name) or "Quota"
+        worst = max(group.buckets, key=lambda b: b.utilisation)
+        if not always_show and worst.utilisation < _FOOTER_WARN_PCT:
+            continue
+        if not always_show and worst.utilisation >= 100:
+            reset = (
+                f" \u2014 resets in {_time_until(worst.resets_at, current)}"
+                if worst.resets_at
+                else ""
+            )
+            lines.append(
+                f"\U0001f6d1 {name} {_footer_label(worst)} limit hit{reset}{age}"
+            )
+            continue
+        icon = "\u26a1"
+        if not always_show and worst.utilisation >= _FOOTER_CRITICAL_PCT:
+            icon = "\u26a0\ufe0f"
+        parts = [
+            f"{_footer_label(b)}: {b.utilisation:.0f}%"
+            + (
+                f" ({_time_until(b.resets_at, current)})"
+                if b.resets_at and b.utilisation >= 50
+                else ""
+            )
+            for b in group.buckets
+        ]
+        lines.append(f"{icon} {name} {' | '.join(parts)}{age}")
+    return lines
+
+
+# ── AI credits (#979): `-p /credits`, 0 tokens ──────────────────────────────
+# `command.data` is `{"remaining_credits": 2500, "upgrade_uri": "https://…"}`
+# on agy 1.3.1 to 1.3.3 (probes/1.3.3/z-credits.jsonl).
+
+CREDITS_TTL_S = 300.0
+_UPGRADE_URI_RE = re.compile(r"https://antigravity\.google/[A-Za-z0-9._~/?=&%-]{0,200}")
+
+
+@dataclass(frozen=True, slots=True)
+class AgyCredits:
+    remaining: int | None
+    upgrade_uri: str | None  # only ever an https://antigravity.google/ link
+
+
+def parse_credits(data: Any) -> AgyCredits:
+    """agy ``/credits`` ``command.data`` → balance and upgrade link. A
+    balance that is not a non-negative integer is None; a link that is not a
+    plain ``https://antigravity.google/…`` URL is dropped."""
+    raw = data if isinstance(data, dict) else {}
+    remaining = raw.get("remaining_credits")
+    if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
+        remaining = None
+    uri = raw.get("upgrade_uri")
+    if not isinstance(uri, str) or _UPGRADE_URI_RE.fullmatch(uri) is None:
+        uri = None
+    return AgyCredits(remaining=remaining, upgrade_uri=uri)
+
+
+def format_credits_html(credits: AgyCredits) -> str | None:
+    """``AI credits: 2,500 remaining · get more`` (Telegram HTML), or None
+    when agy gave no usable balance."""
+    if credits.remaining is None:
+        return None
+    line = f"AI credits: {credits.remaining:,} remaining"
+    if credits.upgrade_uri:
+        line += f' · <a href="{html.escape(credits.upgrade_uri)}">get more</a>'
+    return line
+
+
+_CREDITS_CACHE: _SlashCache[AgyCredits] = _SlashCache(
+    command="/credits",
+    parse=parse_credits,
+    ttl_s=CREDITS_TTL_S,
+    event="antigravity.credits",
+    log_fields=lambda credits: {"has_balance": credits.remaining is not None},
+)
+
+
+async def get_credits(runner: AntigravityRunner) -> AgyCredits:
+    """agy's AI-credits balance, from the 300 s cache or one ``-p /credits``
+    probe. Only ``/usage`` calls this. Raises ``AgySlashError`` /
+    ``AntigravityNotSignedIn``."""
+    return (await _CREDITS_CACHE.get_or_fetch(runner))[0]
 
 
 # ── per-model effort levels (phase 05, D29) ─────────────────────────────────

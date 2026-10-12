@@ -2,7 +2,7 @@
 
 Keep tabs on your Claude Code subscription from anywhere — Untether surfaces usage directly in [Telegram](https://telegram.org). This guide covers checking usage on demand and enabling automatic usage footers after every run.
 
-In an Antigravity chat, `/usage` shows agy's own quota groups — see [Cost budgets → Antigravity](cost-budgets.md#antigravity). In Codex, OpenCode and other chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
+In an Antigravity chat, `/usage` shows agy's own quota groups and AI credits — see [Cost budgets → Antigravity](cost-budgets.md#antigravity). The footer switch below also works for Antigravity, where the line shows what your last `/usage` fetched (up to 15 minutes old) — see [Use Antigravity CLI → Usage and quota](antigravity.md#usage-and-quota). In Codex, OpenCode and other chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
 
 ## Check usage with /usage
 

@@ -388,7 +388,91 @@ stderr lines are logged at DEBUG only.
   separate pools and are shown separately.
 - The quota is fetched only when you send `/usage`, with a zero-token `agy -p /usage`, cached for 60 seconds. Runs
   never fetch it. `/usage debug` adds cache age, the last error kind, the CLI path and the agy version.
+- Under the quota groups `/usage` shows `AI credits: 2,500 remaining` from a zero-token `agy -p /credits`, cached
+  for 5 minutes, with agy's own top-up link when that link is an `https://antigravity.google/` address ([#979](https://github.com/littlebearapps/untether/issues/979)).
+  It is asked only after the quota was read. If it can't be read, that is one line
+  (`AI credits: couldn't read (timeout).`) and the rest of `/usage` still shows; a signed-out agy or an answer
+  without a balance shows no credits line.
 - Cost budgets (`[cost_budget]`) count dollars, so they never trip for Antigravity.
+
+### Quota line under an answer
+
+An Antigravity final can end with a quota line, on the same switch as Claude's: `[footer]
+show_subscription_usage` or `/config` → **Cost & usage** → **Subscription usage** ([#979](https://github.com/littlebearapps/untether/issues/979)).
+
+- With the switch on, each quota group gets a line such as `⚡ Gemini Models 5h: 12% | wk: 3%`. A limit at 50 % or
+  more also shows the time to its reset.
+- With it off, a group shows only once one of its limits is at 70 % or more: `⚡` from 70 %, `⚠️` from 90 %, and
+  `🛑 Gemini Models 5h limit hit — resets in 1h 14m` at 100 %. Either limit of a group can trigger it.
+- **The line never starts agy.** It is built from what your last `/usage` fetched, and only while that is under 15
+  minutes old; a figure more than a minute old says so (`· 9m ago`). With nothing recent there is no line, so send
+  `/usage` to see current numbers. A run never waits on a quota check.
+
+`/stats auth` adds a line for Antigravity, for example `antigravity: ℹ️ set to use Google sign-in` (or `a Gemini
+API key`, or `Enterprise ADC`). It is the route agy is set to use, read from the `agy -p /config` answer a run
+already cached. It does not start agy and does not test the sign-in, and it is missing until an Antigravity run
+has happened since Untether last started (the answer is kept for an hour).
+
+## Context use (`~N% ctx`)
+
+The header of an Antigravity progress message and final can end with `~N% ctx`, for example
+`done · antigravity · 1m 36s · step 10 · ~3% ctx` ([#979](https://github.com/littlebearapps/untether/issues/979)). It uses the same header path and the same switch as
+Claude's figure (`[progress] show_context_usage`). The `~` is there because it is not a number agy reports.
+
+**What the figure is.** The tokens the model read on its latest call, divided by the context window Google
+publishes for that model:
+
+- *Tokens read*: `input_tokens` + `cache_read_tokens` of the turn's most recent finished model call (the `usage` on
+  an `agent_response` step). Untether does not use the `usage` on `result` for this. That one adds up every model
+  call of the turn and, on a resumed conversation, the earlier turns as well: one probe turn made five calls of
+  7,902 to 9,501 input tokens and reported 42,593; the next turn on the same conversation ended on a call of 11,290
+  and reported 84,958.
+- *Window*: a small table in Untether, because agy reports no window (see the register below). It holds only
+  figures read from Google's own model pages on 2026-10-12:
+
+| agy model id (any effort suffix) | Window used | Where the figure is from |
+|---|---|---|
+| `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash` | 1,048,576 | Gemini API model pages (input token limit) |
+| `gemini-3.1-pro` | 1,048,576 | The page for the API model `gemini-3.1-pro-preview`. That agy's `gemini-3.1-pro` is that model is assumed from the name |
+| `claude-opus-5-5`, `claude-sonnet-5-5` | 1,000,000 | Google Cloud's pages for its hosted Claude models |
+| `gpt-oss-120b` | 131,072 | Google Cloud's page for its hosted `gpt-oss-120b` |
+
+**When it is shown.**
+
+| Situation | Header |
+|---|---|
+| The chat has a model set (`/model set <id>` or `[antigravity] model`), and it is in the table | `~N% ctx` |
+| No model is set, so agy uses its own default | No percentage. agy names the model in its output only when Untether passed `--model`, and Untether shows nothing rather than assume which model ran |
+| The model isn't in the table | No percentage. Untether never guesses a window or falls back to a default |
+| A resumed conversation, model set | `~N% ctx`, from the latest call, so it covers the earlier turns too |
+| agy older than 1.3.2 | No percentage (it doesn't name the model) |
+| `[progress] show_context_usage = false` | No percentage |
+
+**Read it with these limits in mind.**
+
+- It is measured against the model's **published** window. No Google page states the window Antigravity itself
+  gives a conversation.
+- agy compacts a conversation on its own schedule and doesn't say when. Its binary carries a checkpoint setting
+  around 256,000 tokens, which is not verified. On a 1,048,576 window that would be about 24 %, so the figure may
+  never get high, and a low figure does not mean compaction is far off. Untether does not model compaction and
+  shows no compaction row for Antigravity; after one, the figure simply drops.
+- A trivial Workspace turn reads about 7,000 tokens, so most chats on a Gemini model show `~1% ctx`.
+- A subagent's own calls aren't in the parent's output, so they aren't counted.
+- The cache-read part comes from one agy 1.3.1 capture (7,312 input + 8,127 cached, between calls of 14,580 and
+  15,860). Every 1.3.3 capture so far reports 0 cached tokens.
+
+## `/export`
+
+`/export` works in an Antigravity chat as it does for every engine: it renders what Untether itself saw of the
+session (the commands, file changes and answers), kept in memory for the 20 most recently active sessions.
+
+- **It is empty after Untether restarts**, and it never includes turns you ran in a terminal. See
+  [Export sessions](../../../how-to/export-sessions.md).
+- Untether does not read agy's own transcript, which is
+  `~/.gemini/antigravity-cli/brain/<conversation id>/.system_generated/logs/transcript_full.jsonl` (not
+  `transcript.jsonl`, as agy's hook docs and [#979](https://github.com/littlebearapps/untether/issues/979)'s first description say). An export built from that file would
+  survive a restart; it was left out for now because it means reading a private agy file that also holds whole
+  file contents.
 
 ## Effort
 
@@ -468,6 +552,10 @@ Turn the block off with `[progress] show_background_tasks = false`.
 - **Long turns can end `CANCELED`** upstream; retry or split the task.
 - **Quota and MCP start-up hangs.** A used-up quota on a Google sign-in is stopped by the stderr match above. An
   MCP server that hangs at start-up is left to the ordinary stall warnings and watchdog.
+- **Context use is an estimate, and only with a model set.** See [Context use](#context-use-n-ctx). There is no
+  compaction row: agy doesn't report compaction.
+- **`/export` is lost on restart** and has no terminal turns (see [`/export`](#export)).
+- **The quota line under an answer is only as fresh as your last `/usage`** (at most 15 minutes).
 
 ## Native vs custom register
 
@@ -485,6 +573,12 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Which subagent a completion belongs to | — (**custom**: first started, first finished) | The parent stream's `system_message` step has no content. The child's id is in agy's transcript file (`sender=`), which Untether doesn't read (rule 3: no engine state files). Checked 2026-10-12, agy 1.3.3. Retire when the stream names the child or the gate's hook reports it |
 | `/continue` resumes only this project's conversation ([#1039](https://github.com/littlebearapps/untether/issues/1039)) | — (**custom**: reads one agy file, `~/.gemini/antigravity-cli/cache/last_conversations.json`, for the exact run directory and passes the native `--conversation=<id>`) | `--continue` is native but fails the "meets the feature's real requirement" test: it also resumes a conversation from a parent or child directory (probe P-L5, one run each way), and `--help` lists no flag, setting or env var that limits it to the current directory. Reading an engine state file is the exception recorded in decision D33, limited to this file. An id listed under more than one path is refused, because agy also records the directory a conversation was resumed from. Checked 2026-10-12, agy 1.3.3. Retire when agy scopes `--continue` to the current directory or adds a flag for it |
 | Telling a timer's or command's completion notice from a subagent's | — (**custom**: one `system_message` is expected after each finished background command or timer, and dropped when the next tool starts) | Same content-less `system_message`. Checked 2026-10-12, agy 1.3.3. Retires with the row above |
+| Context window for `~N% ctx` ([#979](https://github.com/littlebearapps/untether/issues/979)) | — (**custom**: a seeded table, `utils/antigravity_context.py`, of the input limits on Google's own model pages; an unknown model gets no percentage) | Fails "available in headless / stream-json mode". `contextWindow` in `-p /config` is a user setting, not a readout: empty with no `--model` and with each of five models tried. No key in 14 run streams names a window, a limit or a maximum. `/context` is refused in print mode ("it opens the interactive context breakdown"). The binary has a status-line payload (`context_window.context_window_size`) and `ContextWindowMetadata.max_context_tokens`; neither reaches print mode. `agy models` and `-p /model` list no window. The `gemini-3.1-pro` row assumes agy's id is the API model `gemini-3.1-pro-preview`. Checked 2026-10-12, agy 1.3.3. **Retire when agy reports a window in the stream** |
+| Tokens in context for `~N% ctx` | `step_update.usage` on the latest finished `agent_response` step: `input_tokens` + `cache_read_tokens` | `result.usage` is a running sum over every model call and every earlier turn, so it is not the context size. agy has no context-usage request and no compaction signal, so the figure is not corrected for compaction. Checked 2026-10-12, agy 1.3.3 (`step_update.usage` was seen on 1.3.1 and 1.3.3) |
+| Which model a run used, for `~N% ctx` | `init.model` only | It is present only when `--model` is passed (it echoes the flag); with no flag nothing in the stream names the model, so no percentage is shown. `-p /model` answers with the default model for 0 tokens but is a second process answering for the account, not for the run, and a hook payload's `modelName` needs the approval gate; neither is used. The id Untether would pass is not used either: it is not proof of what agy ran. Checked 2026-10-12, agy 1.3.3 |
+| AI credits on `/usage` ([#979](https://github.com/littlebearapps/untether/issues/979)) | `agy -p /credits` (0 tokens; `remaining_credits`, `upgrade_uri`) | Nothing custom. Checked 2026-10-12, agy 1.3.3. Not checked on an API-key sign-in |
+| Quota line under an answer | The cached answer of `agy -p /usage` | Partly custom: agy has no push or cheap in-stream quota value (`/usage` is refused inside a stream-json session), and a probe before each final would delay it, so the line only reads what `/usage` cached (15 min at most). Checked 2026-10-12, agy 1.3.3. Revisit if the stream starts carrying quota |
+| `/export` | — (**custom**: Untether's in-memory record of the events it saw) | agy writes `transcript_full.jsonl` under `brain/<id>/` but has no export command or flag for it, and reading it is rule 3 (an engine state file, holding whole file contents). Not read. Checked 2026-10-12, agy 1.3.3 |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
 lets `--agent` change on a resume.
@@ -510,7 +604,10 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.argv.invalid_value`, `antigravity.continue.resolved` / `.refused` (`reason`) / `.lookup_failed`,
 `antigravity.workspace_agent.installed` / `.unavailable`,
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
-(a command still running when the answer arrived).
+(a command still running when the answer arrived), `antigravity.quota.fetched` / `.failed`,
+`antigravity.credits.fetched` / `.failed`, `antigravity.context.window_miss` (DEBUG, once per run: the model has
+no known window) / `.over_window` (WARN: more tokens than the table's window, shown as 100 %). `runner.completed`
+carries `context_pct` when a percentage was shown.
 
 ## See also
 

@@ -408,6 +408,13 @@ def _agy_usage_data() -> dict:
     return json.loads(first[4:])["command"]["data"]
 
 
+def _agy_credits_data() -> dict:
+    import json
+
+    first = (_AGY_FIXTURES / "credits.script").read_text().splitlines()[0]
+    return json.loads(first[4:])["command"]["data"]
+
+
 def _agy_runner(cmd: str = "/opt/agy/bin/agy"):
     from untether.runners.antigravity import AntigravityRunner
 
@@ -422,6 +429,8 @@ def agy_slash(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     async def fake(runner, command, **kwargs):
         calls.append(command)
+        if command == "/credits":
+            return _agy_credits_data()
         return _agy_usage_data()
 
     monkeypatch.setattr(antigravity_quota, "run_agy_slash", fake)
@@ -455,9 +464,78 @@ class TestUsageAntigravity:
         assert "Session total:" in text and "2 runs" in text
         assert "Last run:" in text and "14k in" in text
         assert "Quota and plan limits are not available" not in text
-        # a second /usage inside 60 s is served from the cache
+        # #979: the AI-credits line sits under the quota groups
+        assert "AI credits: 2,500 remaining" in text
+        assert text.index("AI credits:") > text.index("Claude and GPT models")
+        assert text.index("AI credits:") < text.index("From agy /usage")
+        # a second /usage inside 60 s is served from the caches
         await _usage_reply("antigravity", runner=_agy_runner())
-        assert agy_slash == ["/usage"]
+        assert agy_slash == ["/usage", "/credits"]
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_credits_line(self, export_history, agy_slash):
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert (
+            "AI credits: 2,500 remaining · "
+            '<a href="https://antigravity.google/g1-upgrade">get more</a>'
+        ) in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("failure", "expected"),
+        [
+            (
+                lambda q: q.AgySlashError("timeout"),
+                "AI credits: couldn't read (timeout).",
+            ),
+            (
+                lambda q: RuntimeError("secret <path> /home/nathan/token"),
+                "AI credits: couldn't read (RuntimeError).",
+            ),
+            (lambda q: {"remaining_credits": "<b>lots</b>"}, None),
+            (lambda q: q.AntigravityNotSignedIn(), None),
+        ],
+    )
+    async def test_usage_antigravity_credits_failure_is_one_line(
+        self, export_history, monkeypatch, failure, expected
+    ):
+        """A failed credits read is one escaped line (or none), never a
+        failed /usage: the quota groups still show."""
+        from untether.utils import antigravity_quota
+
+        async def fake(runner, command, **kwargs):
+            if command != "/credits":
+                return _agy_usage_data()
+            outcome = failure(antigravity_quota)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(antigravity_quota, "run_agy_slash", fake)
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert "<b>Gemini Models</b>" in text
+        assert "<i>From agy /usage (no quota spent).</i>" in text
+        credit_lines = [ln for ln in text.splitlines() if "AI credits" in ln]
+        assert credit_lines == ([expected] if expected else [])
+        assert "/home/nathan" not in text and "<path>" not in text
+        assert "<b>lots</b>" not in text
+
+    @pytest.mark.anyio
+    async def test_usage_antigravity_no_credits_probe_when_quota_fails(
+        self, export_history, monkeypatch
+    ):
+        from untether.utils import antigravity_quota
+
+        calls: list[str] = []
+
+        async def fake(runner, command, **kwargs):
+            calls.append(command)
+            raise antigravity_quota.AgySlashError("timeout")
+
+        monkeypatch.setattr(antigravity_quota, "run_agy_slash", fake)
+        text = await _usage_reply("antigravity", runner=_agy_runner())
+        assert "AI credits" not in text
+        assert calls == ["/usage"]
 
     @pytest.mark.anyio
     async def test_usage_antigravity_without_a_session(self, export_history, agy_slash):
@@ -548,13 +626,17 @@ class TestUsageAntigravity:
         assert "&lt;here&gt;" in text
         assert agy_slash == []
 
-    def test_antigravity_not_in_subscription_usage_engines(self):
+    def test_antigravity_in_subscription_usage_engines(self):
+        from untether.runner_bridge import SUBSCRIPTION_FOOTERS
         from untether.telegram.engine_overrides import (
             SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
         )
 
-        # rc1: no /config subscription-footer toggle for agy (phase 11 owns it)
-        assert "antigravity" not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
+        # #979: the /config subscription-footer toggle shows for agy now
+        # that the footer dispatch has an entry for it — one never without
+        # the other.
+        assert {"claude", "antigravity"} == SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
+        assert set(SUBSCRIPTION_FOOTERS) == SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
 
 
 class TestPlanModeEngineGate:

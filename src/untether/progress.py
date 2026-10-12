@@ -37,9 +37,12 @@ class ProgressState:
     meta_line: str | None = None
     # #777: pre-result background-task block (markdown), set by the bridge.
     background: str | None = None
-    # #819: context-window use in percent (Claude), from ``telemetry``
-    # ActionEvents. None when unknown or just after a compaction.
+    # #819: context-window use in percent, from ``telemetry`` ActionEvents.
+    # None when unknown or just after a compaction.
     context_pct: int | None = None
+    # #979: the value is measured against a published window the engine
+    # does not report itself (Antigravity) — shown as ``~N% ctx``.
+    context_estimated: bool = False
 
 
 class ProgressTracker:
@@ -62,6 +65,8 @@ class ProgressTracker:
         self._seq = 0
         # #819: latest context-window use (percent), header-only.
         self.context_pct: int | None = None
+        # #979: True only when the engine marked the value as an estimate.
+        self.context_estimated = False
 
     def note_event(self, event: UntetherEvent) -> bool:
         match event:
@@ -131,9 +136,11 @@ class ProgressTracker:
             or not 0 <= value <= 100
         ):
             return False
-        if value == self.context_pct:
+        estimated = detail.get("context_estimated") is True
+        if value == self.context_pct and estimated == self.context_estimated:
             return False
         self.context_pct = value
+        self.context_estimated = estimated
         return True
 
     def action_detail(self, action_id: str) -> dict[str, Any] | None:
@@ -212,4 +219,5 @@ class ProgressTracker:
             context_line=context_line,
             meta_line=meta_line,
             context_pct=self.context_pct,
+            context_estimated=self.context_estimated,
         )

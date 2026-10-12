@@ -110,6 +110,13 @@ async def _check_engine_auth(cli: str, args: list[str]) -> str | None:
         return None
 
 
+_AGY_AUTH_ROUTES = {
+    "oauth": "Google sign-in",
+    "api_key": "a Gemini API key",
+    "adc": "Enterprise ADC",
+}
+
+
 async def get_auth_status() -> list[str]:
     """Get auth status for all known engines."""
     lines: list[str] = []
@@ -178,6 +185,15 @@ async def get_auth_status() -> list[str]:
                 lines.append("<b>pi</b>: \u2753 unknown")
         else:
             lines.append("<b>pi</b>: \u274c no credentials")
+
+    # Antigravity (#979): the route agy is set to use, from the `-p /config`
+    # answer a run already cached. Never starts agy; no line when nothing is
+    # cached. It is not a check that the sign-in still works.
+    from ...utils.antigravity_quota import peek_auth_route
+
+    route = _AGY_AUTH_ROUTES.get(peek_auth_route() or "")
+    if route:
+        lines.append(f"<b>antigravity</b>: \u2139\ufe0f set to use {route}")
 
     return lines
 

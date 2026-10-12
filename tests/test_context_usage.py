@@ -832,6 +832,102 @@ def test_formatter_show_context_usage_false_hides_segment() -> None:
     assert "ctx" not in final
 
 
+# ── #979: an engine-estimated value (``~N% ctx``) on the same path ──────────
+
+
+def _estimated(pct: int | None, flag: Any = True) -> ActionEvent:
+    return ActionEvent(
+        engine="antigravity",
+        action=Action(
+            id="antigravity.context",
+            kind="telemetry",
+            title="context",
+            detail={"context_pct": pct, "context_estimated": flag},
+        ),
+        phase="updated",
+    )
+
+
+def test_format_header_estimated_prefix() -> None:
+    assert (
+        format_header(
+            96.0,
+            10,
+            label="done",
+            engine="antigravity",
+            context_pct=62,
+            context_estimated=True,
+        )
+        == "done · antigravity · 1m 36s · step 10 · ~62% ctx"
+    )
+    assert (
+        format_header(
+            5.0, None, label="working", engine="antigravity", context_estimated=True
+        )
+        == "working · antigravity · 5s"
+    )
+
+
+def test_claude_header_unchanged_without_flag() -> None:
+    """Claude's value is the CLI's own: no ``~``, byte for byte as before."""
+    assert (
+        format_header(96.0, 10, label="done", engine="claude", context_pct=62)
+        == format_header(
+            96.0,
+            10,
+            label="done",
+            engine="claude",
+            context_pct=62,
+            context_estimated=False,
+        )
+        == "done · claude · 1m 36s · step 10 · 62% ctx"
+    )
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(_telemetry(62))
+    assert tracker.context_estimated is False
+    assert tracker.snapshot().context_estimated is False
+    progress, final, _ = _rendered(True, 62)
+    assert "~" not in progress and "~" not in final
+
+
+def test_progress_state_tracks_estimated_flag() -> None:
+    tracker = ProgressTracker(engine="antigravity")
+    assert tracker.note_event(_estimated(3)) is True
+    assert tracker.context_pct == 3
+    assert tracker.context_estimated is True
+    assert tracker.note_event(_estimated(3)) is False  # nothing changed
+    state = tracker.snapshot()
+    assert state.context_estimated is True
+    formatter = MarkdownFormatter()
+    assert (
+        formatter.render_progress_parts(state, elapsed_s=12.0).header
+        == "working · antigravity · 12s · ~3% ctx"
+    )
+    assert (
+        formatter.render_final_parts(
+            state, elapsed_s=12.0, status="done", answer="ok"
+        ).header
+        == "done · antigravity · 12s · ~3% ctx"
+    )
+    hidden = MarkdownFormatter(show_context_usage=False)
+    assert "ctx" not in hidden.render_progress_parts(state, elapsed_s=12.0).header
+
+
+@pytest.mark.parametrize("flag", [None, False, "true", 1])
+def test_tracker_estimated_flag_must_be_exactly_true(flag: Any) -> None:
+    tracker = ProgressTracker(engine="antigravity")
+    tracker.note_event(_estimated(3, flag))
+    assert tracker.context_pct == 3
+    assert tracker.context_estimated is False
+
+
+def test_tracker_rerenders_when_only_the_flag_changes() -> None:
+    tracker = ProgressTracker(engine="antigravity")
+    tracker.note_event(_estimated(3, False))
+    assert tracker.note_event(_estimated(3, True)) is True
+    assert tracker.context_estimated is True
+
+
 def test_refresh_from_reads_show_context_usage() -> None:
     from untether.settings import ProgressSettings
 

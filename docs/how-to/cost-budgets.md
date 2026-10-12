@@ -130,7 +130,7 @@ The `/usage` command reads your Claude Code OAuth credentials to fetch live data
 
 ### Antigravity
 
-In an Antigravity chat `/usage` asks agy for its own quota groups, then shows the last session's tokens. Each group is a separate pool with its own limits. Untether fetches this only when you send `/usage` (it costs no tokens, and the answer is reused for 60 seconds); `/usage debug` adds cache age, the last error and the agy version. Antigravity reports tokens but no dollar cost, so `[cost_budget]` limits never trip for it.
+In an Antigravity chat `/usage` asks agy for its own quota groups and your remaining AI credits, then shows the last session's tokens. Each group is a separate pool with its own limits. Untether fetches this only when you send `/usage` (it costs no tokens, and the answer is reused for 60 seconds); `/usage debug` adds cache age, the last error and the agy version. Antigravity reports tokens but no dollar cost, so `[cost_budget]` limits never trip for it.
 
 !!! untether "Untether"
     📊 **Antigravity quota**<br>
@@ -140,6 +140,7 @@ In an Antigravity chat `/usage` asks agy for its own quota groups, then shows th
     **Claude and GPT models**<br>
     • 5-hour: ░░░░░░░░░░ 0% used<br>
     • Weekly: ░░░░░░░░░░ 0% used<br>
+    AI credits: 2,500 remaining · [get more](https://antigravity.google/g1-upgrade)<br>
     *From agy /usage (no quota spent).*<br>
     <br>
     **Last session in this chat**<br>

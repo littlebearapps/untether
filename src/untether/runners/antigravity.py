@@ -67,7 +67,7 @@ from ..runner import (
     _session_label,
 )
 from ..schemas import antigravity as agy_schema
-from ..utils import antigravity_quota, antigravity_scan
+from ..utils import antigravity_context, antigravity_quota, antigravity_scan
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
@@ -383,8 +383,10 @@ _ORPHAN_SNAPSHOT_MAX = 256
 _DESCENDANT_SCAN_MAX = 1024
 # Phase 05 (D29): a model id that already names its effort
 # (``gemini-3.8-flash-high``); agy refuses a different ``--effort`` with it.
-_EFFORT_SUFFIX_RE = re.compile(r"-(low|medium|high|xhigh|max)$")
+_EFFORT_SUFFIX_RE = antigravity_context.EFFORT_SUFFIX_RE
 _MODEL_ROW_CHARS = 80
+# #979: the ``telemetry`` action behind the header's ``~N% ctx``.
+_CONTEXT_ACTION_ID = "antigravity.context"
 
 _OUTPUT_PREVIEW_CHARS = 500
 _ERROR_MESSAGE_CHARS = 300
@@ -910,7 +912,16 @@ class AntigravityStreamState:
     session_id: str | None = None  # init / step / result; never ""
     expected_resume: str | None = None  # resume.value when resuming by id
     conversation_missing: bool = False  # G8: init id != the resumed id
-    init_model: str | None = None  # init.model (agy ≥ 1.3.2)
+    # init.model: agy ≥ 1.3.2, and only when ``--model`` was passed (it
+    # echoes the flag). Nothing else in the stream names the model.
+    init_model: str | None = None
+    # #979: input side of the latest model call (``agent_response`` usage:
+    # input + cache-read tokens), the ``(pct, window)`` last sent to the
+    # header, and the once-per-run log latches.
+    ctx_used: int | None = None
+    ctx_emitted: tuple[int, int] | None = None
+    ctx_miss_logged: bool = False
+    ctx_over_warned: bool = False
     text_by_step: dict[int, str] = field(default_factory=dict)
     pending_actions: dict[str, Action] = field(default_factory=dict)
     # DONE + empty output + deniable family → verdict unknown until a later
@@ -2189,6 +2200,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 state.text_by_step[idx] = (
                     state.text_by_step.get(idx, "") + su.text_delta
                 )
+            if st == "DONE":
+                out.extend(self._note_context(su.usage, state))
             return out
         # A tool step that turns into another type on completion (the
         # ``finish`` tool with --json-schema goes ACTIVE as ``tool``, DONE as
@@ -2206,6 +2219,81 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # checkpoint, unknown, finish, anything newer.
         logger.debug("antigravity.step.ignored", step_type=step_type, state=st)
         return out
+
+    # -- context use (#979) ---------------------------------------------------
+
+    @staticmethod
+    def _context_value(
+        state: AntigravityStreamState,
+    ) -> tuple[int, int, str] | None:
+        """``(pct, window, model)`` for the latest model call, or None.
+
+        The model is agy's own ``init.model`` only — never the id Untether
+        would pass or the configured default, which are not proof of what
+        agy ran. The window is the published one from
+        ``utils/antigravity_context.py`` (agy reports none); a model that is
+        not in that table has no percentage."""
+        used = state.ctx_used
+        model = state.init_model
+        if used is None or not model:
+            return None
+        window = antigravity_context.context_window_for(model)
+        if window is None:
+            if not state.ctx_miss_logged:
+                state.ctx_miss_logged = True
+                logger.debug(
+                    "antigravity.context.window_miss",
+                    model=model[:_MODEL_ROW_CHARS],
+                )
+            return None
+        if used > window and not state.ctx_over_warned:
+            state.ctx_over_warned = True
+            logger.warning(
+                "antigravity.context.over_window",
+                session_id=state.session_id,
+                model=model[:_MODEL_ROW_CHARS],
+                used=used,
+                context_window=window,
+            )
+        return antigravity_context.context_pct(used, window), window, model
+
+    def _note_context(
+        self, usage: agy_schema.StepUsage | None, state: AntigravityStreamState
+    ) -> list[UntetherEvent]:
+        """A finished model call's usage is the new context value: its
+        ``input_tokens`` plus ``cache_read_tokens`` (agy reports cache reads
+        apart from the input). ``result.usage`` is never used for this — it
+        sums every call of the turn and, on a resume, the earlier turns.
+
+        Emits the ``telemetry`` action the shared header path reads (#819),
+        only when the shown value changed."""
+        if usage is None or not _is_count(usage.input_tokens):
+            return []
+        used = usage.input_tokens
+        if _is_count(usage.cache_read_tokens):
+            used += usage.cache_read_tokens
+        state.ctx_used = used
+        value = self._context_value(state)
+        if value is None:
+            return []
+        pct, window, model = value
+        if state.ctx_emitted == (pct, window):
+            return []
+        state.ctx_emitted = (pct, window)
+        return [
+            state.factory.action_updated(
+                action_id=_CONTEXT_ACTION_ID,
+                kind="telemetry",
+                title="context",
+                detail={
+                    "context_pct": pct,
+                    "context_used": used,
+                    "context_window": window,
+                    "model": model,
+                    "context_estimated": True,
+                },
+            )
+        ]
 
     def _translate_tool(
         self,
@@ -2795,13 +2883,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         return OAUTH_NOTICE_TEXT
 
-    @staticmethod
     def _usage(
-        res: agy_schema.ResultPayload, state: AntigravityStreamState
+        self, res: agy_schema.ResultPayload, state: AntigravityStreamState
     ) -> dict[str, Any]:
         """Flat per-run usage. agy's ``usage`` is session-cumulative (04 turns
         it into a per-run delta); ``num_turns`` / ``duration_seconds`` are
-        cumulative too and never reported (08 §8, #952)."""
+        cumulative too and never reported (08 §8, #952). ``context`` (#979)
+        is the latest model call's context value, for the
+        ``runner.completed`` log."""
         usage: dict[str, Any] = {}
         stats = res.usage
         if stats is not None:
@@ -2817,6 +2906,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             }
         if state.t_spawn:
             usage["duration_ms"] = int((time.monotonic() - state.t_spawn) * 1000)
+        context = self._context_value(state)
+        if context is not None:
+            pct, window, model = context
+            usage["context"] = {
+                "pct": pct,
+                "used": state.ctx_used,
+                "window": window,
+                "model": model,
+                "estimated": True,
+            }
         return usage
 
     @staticmethod
@@ -2947,6 +3046,10 @@ def _step_of(action_id: str) -> int:
         return int(action_id.removeprefix("step-"))
     except ValueError:
         return -1
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _recheck_warning(

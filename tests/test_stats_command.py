@@ -315,3 +315,67 @@ async def test_stats_auth_no_engines() -> None:
     ):
         result = await cmd.handle(FakeCtx())
     assert "No engines found" in result.text
+
+
+# ── #979: Antigravity's auth route on /stats auth ───────────────────────────
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("route", "label"),
+    [
+        ("oauth", "Google sign-in"),
+        ("api_key", "a Gemini API key"),
+        ("adc", "Enterprise ADC"),
+    ],
+)
+async def test_stats_antigravity_auth_line_from_cached_config(
+    monkeypatch: pytest.MonkeyPatch, route: str, label: str
+) -> None:
+    """The line comes from the ``-p /config`` answer a run already cached:
+    ``/stats auth`` never starts agy."""
+    from untether.telegram.commands import stats
+    from untether.utils import antigravity_quota
+
+    async def boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("/stats auth must never spawn agy")
+
+    monkeypatch.setattr(antigravity_quota, "run_agy_slash", boom)
+    monkeypatch.setattr(antigravity_quota, "agy_config", boom)
+    monkeypatch.setattr(antigravity_quota, "peek_auth_route", lambda: route)
+    monkeypatch.setattr(stats.shutil, "which", lambda cli: None)
+    assert await stats.get_auth_status() == [
+        f"<b>antigravity</b>: \u2139\ufe0f set to use {label}"
+    ]
+
+
+@pytest.mark.anyio
+async def test_stats_antigravity_auth_line_omitted_when_nothing_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.telegram.commands import stats
+
+    monkeypatch.setattr(stats.shutil, "which", lambda cli: None)
+    assert await stats.get_auth_status() == []
+
+
+@pytest.mark.anyio
+async def test_stats_claude_auth_line_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.telegram.commands import stats
+    from untether.utils import antigravity_quota
+
+    async def fake_check(cli: str, args: list[str]) -> str | None:
+        if cli == "claude":
+            return '{"loggedIn": true, "authMethod": "claude.ai"}'
+        return None
+
+    monkeypatch.setattr(stats, "_check_engine_auth", fake_check)
+    monkeypatch.setattr(stats.shutil, "which", lambda cli: None)
+    assert await stats.get_auth_status() == ["<b>claude</b>: \u2705 claude.ai"]
+    monkeypatch.setattr(antigravity_quota, "peek_auth_route", lambda: "oauth")
+    assert await stats.get_auth_status() == [
+        "<b>claude</b>: \u2705 claude.ai",
+        "<b>antigravity</b>: \u2139\ufe0f set to use Google sign-in",
+    ]

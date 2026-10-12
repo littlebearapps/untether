@@ -58,11 +58,14 @@ def format_header(
     label: str,
     engine: str,
     context_pct: int | None = None,
+    context_estimated: bool = False,
 ) -> str:
     """``label · engine · elapsed[ · step N][ · N% ctx]``.
 
-    #819: ``context_pct`` (Claude's context-window use) is appended last, with
-    no emoji, and omitted when unknown.
+    #819: ``context_pct`` (context-window use) is appended last, with no
+    emoji, and omitted when unknown. #979: ``context_estimated`` marks a
+    value measured against a published window the engine does not report
+    (Antigravity) — shown as ``~N% ctx``.
     """
     elapsed = format_elapsed(elapsed_s)
     parts = [label, engine]
@@ -70,7 +73,7 @@ def format_header(
     if item is not None:
         parts.append(f"step {item}")
     if context_pct is not None:
-        parts.append(f"{context_pct}% ctx")
+        parts.append(f"{'~' if context_estimated else ''}{context_pct}% ctx")
     return HEADER_SEP.join(parts)
 
 
@@ -659,6 +662,7 @@ class MarkdownFormatter:
             label=label,
             engine=state.engine,
             context_pct=self._context_pct(state),
+            context_estimated=state.context_estimated,
         )
         body = self._assemble_body(self._format_actions(state, now=now))
         if state.background:
@@ -683,6 +687,7 @@ class MarkdownFormatter:
             label=status,
             engine=state.engine,
             context_pct=self._context_pct(state),
+            context_estimated=state.context_estimated,
         )
         answer = (answer or "").strip()
         body = answer if answer else None

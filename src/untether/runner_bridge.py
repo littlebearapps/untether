@@ -1140,6 +1140,78 @@ async def _maybe_append_usage_footer(
         return msg
 
 
+async def _maybe_append_antigravity_quota_footer(
+    msg: RenderedMessage,
+    *,
+    always_show: bool = False,
+    runner: Any = None,
+) -> RenderedMessage:
+    """Antigravity's quota footer (#979): built from what ``/usage`` last
+    cached for this agy, if that is under 15 min old. It never starts agy —
+    a final must not wait on a quota probe (REVIEW M8) — so with nothing
+    cached the message is returned unchanged.
+
+    Same rule as Claude's: *always_show* adds a compact line per quota
+    group, otherwise only groups at 70 % or more of a limit are shown."""
+    try:
+        from .utils import antigravity_quota
+
+        command = getattr(runner, "command", None)
+        cmd = command() if callable(command) else None
+        snapshot = antigravity_quota.peek_quota(
+            cmd if isinstance(cmd, str) else None,
+            max_age_s=antigravity_quota.FOOTER_MAX_AGE_S,
+        )
+        if snapshot is None:
+            return msg
+        for line in antigravity_quota.format_quota_footer(
+            snapshot, always_show=always_show
+        ):
+            msg = _insert_footer_line(msg, f"\n{line}")
+        return msg
+    except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
+        logger.debug("usage_footer.failed", exc_info=True)
+        return msg
+
+
+# #979: engine → its subscription-usage footer. The keys are
+# ``SUBSCRIPTION_USAGE_SUPPORTED_ENGINES`` (which also shows the /config
+# toggle). Each entry looks its function up when called, so Claude's is the
+# same call as before the dispatch: ``_maybe_append_usage_footer(msg,
+# always_show=…)``.
+SUBSCRIPTION_FOOTERS: dict[str, Callable[..., Awaitable[RenderedMessage]]] = {
+    "claude": lambda msg, *, always_show, runner: _maybe_append_usage_footer(
+        msg, always_show=always_show
+    ),
+    "antigravity": lambda msg, *, always_show, runner: (
+        _maybe_append_antigravity_quota_footer(
+            msg, always_show=always_show, runner=runner
+        )
+    ),
+}
+
+
+async def _append_subscription_footer(
+    runner: Any, msg: RenderedMessage, footer_cfg: Any = None
+) -> RenderedMessage:
+    """Append the engine's subscription-usage footer, if it has one.
+
+    ``[footer] show_subscription_usage`` (then the chat's override) picks
+    the always-on compact line; without it only the warnings show."""
+    footer = SUBSCRIPTION_FOOTERS.get(runner.engine)
+    if footer is None:
+        return msg
+    if footer_cfg is None:
+        footer_cfg = _load_footer_settings()
+    from .runners.run_options import get_run_options
+
+    run_opts = get_run_options()
+    show_sub = footer_cfg.show_subscription_usage
+    if run_opts and run_opts.show_subscription_usage is not None:
+        show_sub = run_opts.show_subscription_usage
+    return await footer(msg, always_show=show_sub, runner=runner)
+
+
 def _apply_cost_delta(
     engine: str,
     session_id: str | None,
@@ -7438,17 +7510,10 @@ async def handle_message(
                 final_rendered, _unattended_footer(unattended)
             )
 
-        # Append usage footer for Claude Code engine runs
-        if runner.engine == "claude":
-            _show_sub = footer_cfg.show_subscription_usage
-            if (
-                _footer_run_opts
-                and _footer_run_opts.show_subscription_usage is not None
-            ):
-                _show_sub = _footer_run_opts.show_subscription_usage
-            final_rendered = await _maybe_append_usage_footer(
-                final_rendered, always_show=_show_sub
-            )
+        # Append the engine's subscription-usage footer (Claude, Antigravity)
+        final_rendered = await _append_subscription_footer(
+            runner, final_rendered, footer_cfg
+        )
 
         logger.debug(
             "handle.final.rendered",
@@ -8465,18 +8530,8 @@ async def handle_message(
                 answer=err_body,
             )
 
-            # Append usage footer for Claude Code engine runs (even on error)
-            if runner.engine == "claude":
-                footer_cfg = _load_footer_settings()
-                from .runners.run_options import get_run_options
-
-                _err_run_opts = get_run_options()
-                _show_sub = footer_cfg.show_subscription_usage
-                if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
-                    _show_sub = _err_run_opts.show_subscription_usage
-                final_rendered = await _maybe_append_usage_footer(
-                    final_rendered, always_show=_show_sub
-                )
+            # Append the engine's subscription-usage footer (even on error)
+            final_rendered = await _append_subscription_footer(runner, final_rendered)
 
             logger.debug(
                 "handle.error.rendered",

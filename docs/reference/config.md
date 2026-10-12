@@ -249,9 +249,9 @@ Controls what appears in the message footer after a run completes.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `show_api_cost` | bool | `true` | Show the API cost/tokens line (💰). |
-| `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude Code engine only. |
+| `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude Code and Antigravity. |
 
-When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude Code run. Threshold-based warnings (≥70%) appear regardless of this setting.
+When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude Code run. Threshold-based warnings (≥70%) appear regardless of this setting. An Antigravity run gets a line per quota group (`⚡ Gemini Models 5h: 12% | wk: 3%`), built only from what your last `/usage` fetched in the past 15 minutes; a run never fetches the quota itself ([#979](https://github.com/littlebearapps/untether/issues/979)).
 
 ## `preamble`
 
@@ -293,7 +293,7 @@ Controls progress message rendering during agent runs.
 | `group_chat_rps` | float (> 0, ≤ 10) | `0.333` (20/min) | Outgoing message rate limit per group chat (requests per second). Read once at startup — restart to apply. |
 | `heartbeat_interval` | float (5–120) | `30.0` | Heartbeat tick that re-renders progress messages so long-running tools surface an elapsed-time tail (e.g. `▸ npm run build · 3m 47s`; the tail repeats nothing the title already shows, [#986](https://github.com/littlebearapps/untether/issues/986)) without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). It also repaints once nothing else has for a full interval, so the header's elapsed time keeps moving while an engine generates silently ([#954](https://github.com/littlebearapps/untether/issues/954)). |
 | `show_background_tasks` | bool | `true` | Claude only. Show live background tasks (background agents, background Bash, Monitors): a `⏳ background (N)` block in the progress message, then one silent status message after the answer, edited in place and finalised when the tasks end ([#777](https://github.com/littlebearapps/untether/issues/777)). |
-| `show_context_usage` | bool | `true` | Claude only. End the progress, final and live-turn header line with the context-window use, e.g. `done · claude · 1m 36s · step 10 · 62% ctx`. Omitted until the model's window is known (the first result on a model after a restart), and after a compaction until the next response ([#819](https://github.com/littlebearapps/untether/issues/819)). |
+| `show_context_usage` | bool | `true` | Claude and Antigravity. End the progress, final and live-turn header line with the context-window use, e.g. `done · claude · 1m 36s · step 10 · 62% ctx`. Antigravity's is an estimate against the model's published window, shown as `~N% ctx` and only when the chat has a model set that Untether has a published figure for ([#979](https://github.com/littlebearapps/untether/issues/979); [details](runners/antigravity/runner.md#context-use-n-ctx)). For Claude: Omitted until the model's window is known (the first result on a model after a restart), and after a compaction until the next response ([#819](https://github.com/littlebearapps/untether/issues/819)). |
 | `background_tasks_max_rows` | int (1–20) | `5` | Row cap for the background block and status message; extra tasks collapse into `+N more`. |
 | `consolidate_wake_turns` | bool | `true` | Claude only. A background-task wake turn that runs no tools, raises no approval or question and answers in ≤300 characters is folded into that status message (an edit — no new message, no push) instead of arriving as its own `🔔` message. Tool use, a longer answer, an error, or the turn that finishes the last task (the report) still arrive as normal pushed messages. `false` restores one message per wake turn ([#785](https://github.com/littlebearapps/untether/issues/785)). Needs `show_background_tasks`. |
 

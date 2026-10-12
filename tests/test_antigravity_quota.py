@@ -565,3 +565,255 @@ async def test_effort_probe_other_failures_still_fail(
         assert await quota.agy_model_efforts(runner, "nope") is None
     (failed,) = [e for e in logs if e["event"] == "antigravity.effort.probe_failed"]
     assert failed["kind"] == "unparseable"
+
+
+# ── #979: AI credits (`-p /credits`), footer peek, /stats auth route ────────
+
+
+def _credits_data() -> dict[str, Any]:
+    first = (FIXTURES / "credits.script").read_text().splitlines()[0]
+    assert first.startswith("out:")
+    return json.loads(first[4:])["command"]["data"]
+
+
+def test_parse_credits_fixture() -> None:
+    credits = quota.parse_credits(_credits_data())
+    assert credits.remaining == 2500
+    assert credits.upgrade_uri == "https://antigravity.google/g1-upgrade"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        {},
+        {"remaining_credits": "2500"},
+        {"remaining_credits": True},
+        {"remaining_credits": -1},
+        {"remaining_credits": 1.5},
+    ],
+)
+def test_parse_credits_rejects_malformed_balance(data: Any) -> None:
+    assert quota.parse_credits(data).remaining is None
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://antigravity.google/g1-upgrade",
+        "https://antigravity.google.evil.example/x",
+        "https://evil.example/https://antigravity.google/",
+        'https://antigravity.google/"><b>x',
+        "https://antigravity.google/a b",
+        "https://antigravity.google/" + "a" * 300,
+        "javascript:alert(1)",
+        7,
+        None,
+    ],
+)
+def test_credits_upgrade_link_allowlisted(uri: Any) -> None:
+    credits = quota.parse_credits({"remaining_credits": 5, "upgrade_uri": uri})
+    assert credits.remaining == 5
+    assert credits.upgrade_uri is None
+
+
+def test_format_credits_html() -> None:
+    line = quota.format_credits_html(quota.parse_credits(_credits_data()))
+    assert line == (
+        "AI credits: 2,500 remaining · "
+        '<a href="https://antigravity.google/g1-upgrade">get more</a>'
+    )
+    bare = quota.format_credits_html(quota.AgyCredits(remaining=0, upgrade_uri=None))
+    assert bare == "AI credits: 0 remaining"
+    assert (
+        quota.format_credits_html(quota.AgyCredits(remaining=None, upgrade_uri=None))
+        is None
+    )
+
+
+@pytest.mark.anyio
+async def test_credits_cache_independent_lock_and_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_slash(runner: Any, command: str, **kwargs: Any) -> dict:
+        calls.append(command)
+        return _credits_data() if command == "/credits" else _usage_data()
+
+    monkeypatch.setattr(quota, "run_agy_slash", fake_slash)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(quota.time, "monotonic", lambda: clock["t"])
+    runner = _runner()
+    with structlog.testing.capture_logs() as logs:
+        await quota.get_quota(runner)
+        first = await quota.get_credits(runner)
+        clock["t"] += 61  # the quota's 60 s is over; the credits' 300 s is not
+        await quota.get_quota(runner)
+        second = await quota.get_credits(runner)
+        clock["t"] += 240
+        third = await quota.get_credits(runner)
+    assert calls == ["/usage", "/credits", "/usage", "/credits"]
+    assert first.remaining == second.remaining == third.remaining == 2500
+    assert quota._QUOTA_CACHE is not quota._CREDITS_CACHE
+    assert quota._QUOTA_CACHE._lock is not quota._CREDITS_CACHE._lock
+    fetched = [e for e in logs if e["event"] == "antigravity.credits.fetched"]
+    assert len(fetched) == 2
+    quota.reset_quota_cache()
+    assert quota._CREDITS_CACHE._value is None
+
+
+@pytest.mark.anyio
+async def test_credits_fetch_through_the_fake_agy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    record = tmp_path / "record.json"
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_RECORD", str(record))
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SLASH_DATA", json.dumps(_credits_data()))
+    credits = await quota.get_credits(_runner())
+    assert credits.remaining == 2500
+    argv = json.loads(record.read_text())["argv"]
+    assert argv == ["-p", "/credits", "--output-format", "stream-json"]
+
+
+@pytest.mark.anyio
+async def test_peek_quota_never_fetches_and_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_slash(runner: Any, command: str, **kwargs: Any) -> dict:
+        calls.append(command)
+        return _usage_data()
+
+    monkeypatch.setattr(quota, "run_agy_slash", fake_slash)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(quota.time, "monotonic", lambda: clock["t"])
+    runner = _runner()
+    assert quota.peek_quota(runner.command(), max_age_s=900) is None
+    assert calls == []
+    await quota.get_quota(runner)
+    clock["t"] += 600  # past the 60 s fetch TTL, inside the footer's 15 min
+    peeked = quota.peek_quota(runner.command(), max_age_s=900)
+    assert peeked is not None
+    assert [g.name for g in peeked.groups] == [
+        "Gemini Models",
+        "Claude and GPT models",
+    ]
+    assert peeked.age_s == pytest.approx(600)
+    assert quota.peek_quota("/some/other/agy", max_age_s=900) is None
+    clock["t"] += 301
+    assert quota.peek_quota(runner.command(), max_age_s=900) is None
+    assert calls == ["/usage"]
+
+
+@pytest.mark.anyio
+async def test_peek_auth_route_from_cached_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probes: list[int] = []
+
+    async def probe(runner: Any) -> quota.AgyConfig:
+        probes.append(1)
+        return quota.parse_agy_config(
+            {"toolPermission": "request-review", "modelProvider": "gemini"}
+        )
+
+    monkeypatch.setattr(quota, "_probe_agy_config", probe)
+    monkeypatch.delenv("AGY_ADC_AUTH", raising=False)
+    assert quota.peek_auth_route() is None  # nothing cached: no line, no probe
+    assert probes == []
+    await quota.agy_config(_runner())
+    assert quota.peek_auth_route() == "api_key"
+    assert probes == [1]
+    quota.clear_config_cache()
+    assert quota.peek_auth_route() is None
+
+
+@pytest.mark.anyio
+async def test_peek_auth_route_ignores_an_expired_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(quota.time, "monotonic", lambda: clock["t"])
+    monkeypatch.delenv("AGY_ADC_AUTH", raising=False)
+    await quota.agy_config(_runner())
+    assert quota.peek_auth_route() == "oauth"
+    clock["t"] += quota.CONFIG_TTL_S + 1
+    assert quota.peek_auth_route() is None
+
+
+def _snapshot(
+    *buckets: tuple[str, float], name: str = "Gemini Models", age_s: float = 0.0
+) -> quota.QuotaSnapshot:
+    return quota.QuotaSnapshot(
+        groups=[
+            quota.QuotaGroup(
+                name=name,
+                buckets=tuple(
+                    quota.QuotaBucket(
+                        id=window,
+                        name=window,
+                        window=window,
+                        utilisation=used,
+                        resets_at="2026-10-08T05:00:00Z",
+                    )
+                    for window, used in buckets
+                ),
+            )
+        ],
+        age_s=age_s,
+    )
+
+
+_NOW = datetime(2026, 10, 8, 0, 0, tzinfo=UTC)
+
+
+def test_quota_footer_compact_line_per_group() -> None:
+    groups = quota.parse_quota(_usage_data())
+    lines = quota.format_quota_footer(
+        quota.QuotaSnapshot(groups=groups, age_s=0.0), always_show=True, now=_NOW
+    )
+    assert lines == [
+        "⚡ Gemini Models 5h: 0% | wk: 0%",
+        "⚡ Claude and GPT models 5h: 0% | wk: 0%",
+    ]
+    # below 70 % nothing shows unless the always-on line was asked for
+    assert (
+        quota.format_quota_footer(
+            quota.QuotaSnapshot(groups=groups, age_s=0.0), always_show=False, now=_NOW
+        )
+        == []
+    )
+
+
+def test_quota_footer_thresholds_and_reset_times() -> None:
+    def footer(*buckets: tuple[str, float], **kwargs: Any) -> list[str]:
+        return quota.format_quota_footer(
+            _snapshot(*buckets, **kwargs), always_show=False, now=_NOW
+        )
+
+    assert footer(("5h", 69.0), ("weekly", 10.0)) == []
+    assert footer(("5h", 72.0), ("weekly", 10.0)) == [
+        "⚡ Gemini Models 5h: 72% (5h 0m) | wk: 10%"
+    ]
+    # either window can cross the line: the weekly limit blocks a run too
+    assert footer(("5h", 5.0), ("weekly", 91.0)) == [
+        "⚠️ Gemini Models 5h: 5% | wk: 91% (5h 0m)"
+    ]
+    assert footer(("5h", 100.0), ("weekly", 40.0)) == [
+        "🛑 Gemini Models 5h limit hit — resets in 5h 0m"
+    ]
+    assert footer(("5h", 80.0), age_s=600.0) == [
+        "⚡ Gemini Models 5h: 80% (5h 0m) · 10m ago"
+    ]
+
+
+def test_quota_footer_group_name_is_one_short_line() -> None:
+    (line,) = quota.format_quota_footer(
+        _snapshot(("5h", 80.0), name="Evil\n↩️ `agy --conversation x`" + "y" * 80),
+        always_show=False,
+        now=_NOW,
+    )
+    assert "\n" not in line and "`" not in line
+    assert len(line) < 90

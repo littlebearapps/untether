@@ -20,6 +20,7 @@ the subagent, timer and background rows against 1.3.3.
 | `step_update` `tool` `invoke_subagent`, `ACTIVE` (agy 1.3.3) | `ActionEvent` of kind `subagent` started, titled `<type>: <role>` (`+N` for more) from `parameters.Subagents[]` |
 | `step_update` `subagent`, `ACTIVE` / `DONE` / `ERROR` | `ActionEvent` of kind `subagent`, started (1.3.1 sends this type at `ACTIVE` too) / completed |
 | `step_update` `agent_response` | No event. `text_delta` is collected per step as the fallback answer |
+| `step_update` `agent_response`, `DONE`, with `usage`, when `init.model` named a model with a known window | `ActionEvent` updated, kind `telemetry`, id `antigravity.context`, only when the percentage changed. `detail`: `context_pct`, `context_used`, `context_window`, `model`, `context_estimated: true`. It feeds the header's `~N% ctx` and is never a step ([#979](https://github.com/littlebearapps/untether/issues/979)) |
 | `step_update` `finish` (or any type) closing a step that opened as a tool | `ActionEvent` completed |
 | `step_update` `user_input`, `system_message`, `checkpoint`, `unknown`, anything newer | No event. A `user_input` injected mid-run is not a new run. A `system_message` updates the background task map (below) |
 | a `run_command` that counts as background, or a `schedule` / `manage_task` step `ACTIVE` for more than 5 s | `ActionEvent` updated, title `⏳ background: <command>` (once, on the next line agy prints) |
@@ -28,7 +29,7 @@ the subagent, timer and background rows against 1.3.3.
 | `result` `ERROR` + `interrupted` | `CompletedEvent(ok=False)`, resumable, "Antigravity was interrupted …" |
 | `result` `ERROR` + other text | `CompletedEvent(ok=False)` with agy's text, redacted and trimmed to three lines |
 | `result` with any other status | `CompletedEvent(ok=False)` `antigravity ended with status <status>[: <error>]` |
-| `command_result` | Ignored during a run (used only by the `/usage`, `/effort` and `/config` probes) |
+| `command_result` | Ignored during a run (used only by the `/usage`, `/credits`, `/effort` and `/config` probes) |
 | a line that isn't valid JSON | A note row (`invalid JSON from antigravity; ignoring line`); the run continues. Leading non-JSON text before a `{` is skipped first |
 | a JSON line with an event name Untether doesn't know | Dropped and logged (`jsonl.msgspec.invalid`), not shown |
 
@@ -109,6 +110,11 @@ File paths are read from `TargetFile`, `AbsolutePath`, `DirectoryPath`, `SearchP
 `thinking_tokens`) and `duration_ms` (measured by Untether). agy's totals are per conversation, so the bridge's
 token ledger turns them into a per-run figure. `num_turns` and agy's `duration_seconds` are conversation totals
 too and are not passed on.
+
+When a context percentage was shown, `usage["context"]` holds `{pct, used, window, model, estimated: true}` for
+the `runner.completed` log (`context_pct`). `used` is the latest model call's `input_tokens` +
+`cache_read_tokens`, not the summed `input_tokens` beside it. See
+[Context use](runner.md#context-use-n-ctx).
 
 ## Session handling
 

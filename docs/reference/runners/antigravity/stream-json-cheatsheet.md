@@ -29,7 +29,8 @@ Untether starts agy with `--input-format stream-json` and writes one line to std
 - `conversation_id` is the resume id (a UUID).
 - `init.permission_mode` is the policy agy is running under: `request-review` (default), `strict`,
   `proceed-in-sandbox` or `always-proceed` (what `--dangerously-skip-permissions` reports).
-- `init.model` is present from agy 1.3.2.
+- `init.model` is present from agy 1.3.2, **only when `--model` was passed**: it echoes the flag (for example
+  `gemini-3.8-flash-low`). With no `--model`, no line of the stream names the model.
 - `init.tools` is a long list of tool names; don't rely on its contents.
 - `init.json_schema` echoes a `--json-schema` argument (Untether doesn't pass one).
 
@@ -149,6 +150,17 @@ Signed out (no `init`, exit 1):
 ```json
 {"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"authentication failed or timed out","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
 ```
+
+`result.usage` is a **running sum**, not a context size: it adds every model call of the turn and, on a resumed
+conversation, the earlier turns too (a five-call turn of 7,902 to 9,501 input tokens reports 42,593). Each model
+call's own figures are on its `agent_response` step:
+
+```json
+{"event":"step_update","step_update":{"conversation_id":"90ca…","step_index":9,"state":"DONE","step_type":"agent_response","text_delta":"\n","duration_seconds":2.3,"usage":{"input_tokens":9501,"output_tokens":221,"thinking_tokens":81,"cache_read_tokens":0,"total_tokens":9722}}}
+```
+
+`cache_read_tokens` is reported apart from `input_tokens` (`total_tokens` is input + output). No field anywhere
+in the stream names a context window, a limit or a maximum.
 
 Other fields: `structured_output` and `json_schema` (with `--json-schema`). `error` is usually a string, but
 Untether accepts any JSON value there so a structured error never loses the result. Statuses other than `SUCCESS`

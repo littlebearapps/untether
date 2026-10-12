@@ -274,7 +274,8 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
         table[("rs", engine)] = frozenset(
             {_u("model-reasoning", "set-reasoning-level")}
         )
-    for engine in ("claude", "opencode", "gemini"):
+    # antigravity: its subscription-usage footer toggle ships with #979.
+    for engine in ("claude", "opencode", "gemini", "antigravity"):
         table[("cu", engine)] = frozenset({_u("cost-budgets")})
     return table
 
