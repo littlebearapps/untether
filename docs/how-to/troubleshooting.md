@@ -807,6 +807,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `outline_cleanup.delete_failed` | WARNING | Stale plan outline message couldn't be deleted |
 | `handle.engine_resolved` | INFO | Engine and CWD successfully resolved for a run |
 | `file_transfer.saved` | INFO | File uploaded and written to disk |
+| `file_transfer.reused` | INFO | An upload was byte-for-byte identical to a file already saved, so nothing was written ([#1031](https://github.com/littlebearapps/untether/issues/1031)) |
 | `file_transfer.denied` | WARNING | File transfer refused for this user (not allowlisted, not a group admin) |
 | `file_transfer.path_denied` | INFO | Path refused by a deny glob or hidden-path rule (WARNING when a symlink was involved) |
 | `browse.path_denied` | INFO | `/browse` refused a hidden or deny-globbed path |
@@ -823,6 +824,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `opencode.version.unsupported` | ERROR | The installed OpenCode CLI is 2.x; the run was refused before starting ([#970](https://github.com/littlebearapps/untether/issues/970)) |
 | `session.auto_clear_skipped` | INFO | A resumed Codex/OpenCode/Pi run failed for a reason other than the resume, so the saved session was kept (`reason=not_resume_failure`, [#952](https://github.com/littlebearapps/untether/issues/952)) |
 | `final.early_delivery_timeout` | WARNING | A live session's first answer took over 60 s to hand to Telegram ([#928](https://github.com/littlebearapps/untether/issues/928)) |
+| `final.post_delivery_timeout` | WARNING | The steps after a live session's early answer (outbox files, background status message, closing notices, Stop at limit) ran past their own 60 s limit ([#991](https://github.com/littlebearapps/untether/issues/991)) |
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
 
@@ -865,10 +867,11 @@ Loop mode (`/config → 🔁 Loop mode`) decides whether Claude can schedule rep
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Claude says scheduling is off, or points you to Loop mode or `/at` | Loop mode is off (the default), so Untether declined Claude's `CronCreate` | `/config → 🔁 Loop mode → 🔁 On`, then ask again; for a one-off delay use `/at <delay> <prompt>` |
-| Loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
+| `⏰ Loop finished — it reached its limit of 20 runs`, or the loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default). The notice is new in v0.36.1; earlier versions stopped silently ([#1004](https://github.com/littlebearapps/untether/issues/1004)) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
 | `⏰ Self-paced wake-up limit reached` and the session closed | A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) hit `[loop] max_iterations` in a row, in either Loop mode | Send a message to carry on (it resets the count), or raise `max_iterations` |
 | A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.36.0, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
-| Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
+| `⏰ Loop finished — it reached its time limit of 4 hours` or `… it expired 7 days after it was created` | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
+| `⏰ Scheduled run cancelled — …` | A one-off run Claude scheduled was dropped at a `[loop]` cap before it ran | Ask Claude to schedule it again, or use `/at <delay> <prompt>` |
 | Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
 | Loop kept firing after `/cancel` | Before v0.36.0 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.36.0 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |

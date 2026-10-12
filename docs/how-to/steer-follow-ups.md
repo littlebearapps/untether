@@ -61,6 +61,8 @@ The message is queued as normal and Untether tells you why:
 | `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
 
+In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)).
+
 With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` tells you too, with two exceptions: while Claude is waiting on a question (`AskUserQuestion`) the text is queued without a note, and if your model or mode changed since the session started, the queued run posts its own notice when it restarts the session with the new settings.
 
 ## When a follow-up didn't run

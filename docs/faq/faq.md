@@ -150,7 +150,7 @@ Cost tracking is most accurate for Claude (full USD reporting via API metadata) 
 
 ## Does /loop work via Untether?
 
-Yes, with **Loop mode** on (`/config → 🔁 Loop mode`). Untether then runs Claude's `/loop` schedules itself: it declines Claude Code's own scheduled task and fires each iteration when due with `claude --resume`, capped by `[loop]` `max_iterations`, `max_total_duration_hours` and `expiry_days`. A loop never runs uncapped inside an open session, and never comes back when the session is resumed.
+Yes, with **Loop mode** on (`/config → 🔁 Loop mode`). Untether then runs Claude's `/loop` schedules itself: it declines Claude Code's own scheduled task and fires each iteration when due with `claude --resume`, capped by `[loop]` `max_iterations`, `max_total_duration_hours` and `expiry_days`. A loop never runs uncapped inside an open session, and never comes back when the session is resumed. When a loop ends at one of those caps, Untether says so in the chat (`⏰ Loop finished — it reached its limit of 20 runs. Send /loop again to start another.`).
 
 With Loop mode off (the default), Claude can't create recurring or timed tasks: it tells you scheduling is off and points you to Loop mode, or to `/at <delay> <prompt>` for a one-off. In v0.35.4 and earlier, such a task kept firing while the session was open and came back each time you resumed it. Self-paced waits (`ScheduleWakeup`, a dynamic `/loop`) still work in both modes: Untether keeps the session open after its reply while a wake-up is pending (ScheduleWakeup's own limit is one hour), and each one arrives as a `⏰ Scheduled wake-up` message. A chain of them stops after `max_iterations` wake-ups.
 

@@ -73,7 +73,7 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
 - Phrase as: ends with `?`, OR starts with How / What / Why / When /
   Where / Can / Do / Does / Is / Are / Should / Will.
 - Aim for ≥7 H2 Q/A pairs (the issue's acceptance criterion). Currently
-  ships with 20. Don't drop below 7 without coordinating with the
+  ships with 22. Don't drop below 7 without coordinating with the
   marketing site.
 
 ### Answer style

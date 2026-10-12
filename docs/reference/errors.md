@@ -75,6 +75,8 @@ Every Antigravity model or effort rejection starts with `invalid model selection
 | `model not available` | Model not available. Check the model name in `/config`. | All |
 | `does not exist` | The requested resource was not found. Check your model or configuration. | All |
 
+A model id or session id that could be read as a command-line flag is refused before the engine starts, on every engine ([#1034](https://github.com/littlebearapps/untether/issues/1034)): `🛑 That model id isn't valid, so nothing was started.` means the chat's, cron's or config's model id starts with a dash or contains spaces or control characters — fix it with `/model set <id>` or `/model clear`. `🛑 That session id isn't valid, so nothing was started.` means the resume line you replied to doesn't hold a real session id — send `/new`. Antigravity has its own wording for both (see [Antigravity messages](#antigravity-messages)).
+
 ## Context length
 
 | Pattern | Hint | Engines |

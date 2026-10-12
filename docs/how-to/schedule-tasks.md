@@ -56,6 +56,8 @@ Every loop has caps in case it runs longer than expected (configurable under `[l
 - 4 hours (`max_total_duration_hours`) — wall-clock cap (NOT a cost cap)
 - 7 days (`expiry_days`) — auto-expire 7 days after creation (matches upstream)
 
+When a loop ends at one of these caps, Untether posts one silent line in the chat or topic, for example `⏰ Loop finished — it reached its limit of 20 runs. Send /loop again to start another.` A one-off scheduled run dropped at a cap before it ran is worded `⏰ Scheduled run cancelled — …` instead. Loops you cancel yourself end without a notice ([#1004](https://github.com/littlebearapps/untether/issues/1004)).
+
 These bound loop duration regardless of cost. They are *not* a substitute for setting a budget — see "Cost considerations" below.
 
 ### Self-paced wake-ups

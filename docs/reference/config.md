@@ -46,12 +46,15 @@ to retry. A symlinked config is followed when the link is re-pointed; if the new
 target lives in a different directory, restart Untether so later in-place edits
 of that file are seen.
 
-Editing a field marked 🔄 (**restart-required**) posts a warning to the project
-chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
-effect.", followed by a "To apply:" line naming the service that's actually
-running, [#927](https://github.com/littlebearapps/untether/issues/927)) and logs
-`config.reload.transport_config_changed`. Other Telegram
-transport changes apply without a message and log
+Editing a field marked 🔄 (**restart-required**) posts one `⚠️ Restart required`
+notice to the project chats and admin DMs. It lists the keys and names the
+service that's actually running in its "To apply" line
+([#927](https://github.com/littlebearapps/untether/issues/927)), and the reload logs
+`config.reload.transport_config_changed`. Other Telegram transport changes are
+confirmed with a silent `♻️ Hot-reloaded … No restart needed` notice, sent only to
+the `allowed_user_ids` admin DMs (the main `chat_id` when there are none) and to
+chats with a run in progress
+([#1030](https://github.com/littlebearapps/untether/issues/1030)), and log
 `config.reload.transport_config_hot_reloaded`.
 
 Separately from the watcher, the per-run settings (`[footer]`, `[progress]`,

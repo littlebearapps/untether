@@ -44,7 +44,10 @@ systemctl --user restart untether
 Nothing to change in your config.
 
 - **New engine: Antigravity CLI.** Install `agy` (1.3.1 or newer), choose a sign-in route and select it with `/agent set antigravity`. Read the terms note in [Switch engines](switch-engines.md#antigravity-cli) before using a Google account sign-in. ([#558](https://github.com/littlebearapps/untether/issues/558))
-- **Codex, OpenCode and Pi get a shorter built-in preamble.** It no longer tells them to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; it asks them to raise questions in their final reply instead. Claude's preamble and any custom `[preamble] text` are unchanged. See [Agent preamble](preamble.md). ([#558](https://github.com/littlebearapps/untether/issues/558))
+- **Codex, OpenCode and Pi get a shorter built-in preamble.** It no longer tells them to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; it asks them to raise questions in their final reply instead. Claude's preamble and any custom `[preamble] text` are unchanged. See [Agent preamble](preamble.md). ([#1035](https://github.com/littlebearapps/untether/issues/1035))
+- **Webhook and cron triggers are stricter (security).** A webhook `file_write` path, a multipart upload destination and a cron `file_read` fetch are checked against the full default deny list, so a templated path that used to reach `.env.local`, `*.key`, `id_rsa`, `.netrc`, `.npmrc` or `.pypirc` is now refused. Repeated failed auth on a webhook gets `429` for that sender until the limit refills. See [Webhooks and cron → Security notes](webhooks-and-cron.md#security-notes). ([#906](https://github.com/littlebearapps/untether/issues/906))
+- **Model ids that look like a flag are refused.** A model id that starts with a dash or contains spaces or control characters is rejected by `/model set`, and is a config error when it is set as `model` under `[claude]`, `[opencode]` or `[pi]`. Real model ids are unaffected. ([#1034](https://github.com/littlebearapps/untether/issues/1034))
+- **The hot-reload confirmation is quieter.** `♻️ Hot-reloaded … No restart needed` now goes only to the admin DMs and to chats with a run in progress; a restart-only key still notifies every project chat, as one message. ([#1030](https://github.com/littlebearapps/untether/issues/1030))
 
 ## Upgrading to v0.36.0
 
