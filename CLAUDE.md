@@ -55,9 +55,10 @@ Both still ship and load but are strictly deprecated and no longer supported —
 release may drop them (Gemini: upstream EOL for individual accounts, hangs under Untether until the watchdog cancels;
 AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner, `xfail`/`skip` the test — do NOT fix the
 runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier. Antigravity
-CLI (`antigravity`, #558) is its own engine from v0.36.1 and must never reuse the `gemini` id: rc1 runs it with a pre-run
-permission mode (Workspace by default, never bypass unless Full access is chosen); approval buttons and plan approval come
-via hooks in rc3. Every value that reaches `agy`'s argv goes through `utils/antigravity_argv.py` (`--flag=value` only).
+CLI (`antigravity`, #558) is its own engine from v0.36.1 and must never reuse the `gemini` id: it runs with a pre-run
+permission mode (Workspace by default, never bypass unless Full access is chosen); rc3 added background rows, `/continue`
+by exact directory, credits/quota/`~N% ctx` and security fixes; approval buttons and plan approval come via hooks in a
+later rc, and warm/live agy sessions are deferred (#977 shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through `utils/antigravity_argv.py` (`--flag=value` only).
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 

@@ -266,7 +266,13 @@ agy sends one answer per run and holds it until background commands it started h
 
 **Symptoms:** a cron or webhook run replies `agy's workspace config changed since someone last ran Antigravity in this chat's project (…)`, or `Untether couldn't check agy's hooks, plugins and MCP servers …`.
 
-agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. The message names the files: check them on the host first if you didn't change them, because the next message sent in that chat runs with the changed config. That run shows a ⚠️ row listing the files, and the schedule works again from the next fire. An `/at` or `/loop` run doesn't release the hold. If the check itself can't finish, the row says why (for example too many files under `.agents/`, or a config file that isn't plain JSON).
+agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. The message names the files: check them on the host first if you didn't change them, because the next message sent in that chat runs with the changed config. That run shows a ⚠️ row listing the files, and the schedule works again from the next fire. An `/at` or `/loop` run doesn't release the hold. If the check itself can't finish, the message says why (for example too many files under `.agents/`, a config file that isn't plain JSON, an agent file whose front matter Untether can't read with certainty, or a hook command that is itself a variable). Scheduled runs then stay held until a check succeeds; a message sent in the chat still runs and shows a ⚠️ row, but doesn't release them. After upgrading to v0.36.1 you may see the "config changed" message once for a project whose agy config Untether now follows more fully; see [Upgrading to v0.36.1](update.md#upgrading-to-v0361).
+
+### A scheduled Antigravity run says it couldn't read agy's tool-permission setting
+
+**Symptoms:** a cron or webhook run replies `Untether couldn't read agy's tool-permission setting before this run (…), so this scheduled run is held.` In a run you started from the chat, the message is `Untether couldn't confirm agy's tool-permission setting: …`.
+
+Before a Workspace run Untether asks agy for its own tool-permission setting (`agy -p /config`) and checks it again in agy's first event. A scheduled run is held when the first check fails or gives no value; a run from the chat goes ahead with a ⚠️ row on one check and is stopped only when both are missing. Nothing needs changing for a one-off: the next fire checks again (a failed check is remembered for five minutes). If it keeps happening, run `agy -p /config` on the host to see why it fails, and check for an Untether update. Full access runs aren't affected.
 
 ### Antigravity won't run Workspace because agy's own settings allow every tool
 
@@ -811,7 +817,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `file_transfer.saved` | INFO | File uploaded and written to disk |
 | `file_transfer.reused` | INFO | An upload was byte-for-byte identical to a file already saved, so nothing was written ([#1031](https://github.com/littlebearapps/untether/issues/1031)) |
 | `file_transfer.denied` | WARNING | File transfer refused for this user (not allowlisted, not a group admin) |
-| `command.admin_required` | WARNING | A `/config` change in a group was refused: the sender isn't a group admin (`reason=not_admin`), Telegram couldn't confirm their role (`lookup_failed`) or the sender is unknown (`no_sender`). Carries `chat_id` and `sender_id` ([#1042](https://github.com/littlebearapps/untether/issues/1042)) |
+| `command.admin_required` | WARNING | A settings change in a group (`/config`, `/planmode` or `/verbose`) was refused: the sender isn't a group admin (`reason=not_admin`), Telegram couldn't confirm their role (`lookup_failed`) or the sender is unknown (`no_sender`). Carries `chat_id` and `sender_id` ([#1042](https://github.com/littlebearapps/untether/issues/1042)) |
 | `file_transfer.path_denied` | INFO | Path refused by a deny glob or hidden-path rule (WARNING when a symlink was involved) |
 | `browse.path_denied` | INFO | `/browse` refused a hidden or deny-globbed path |
 | `claude.permission_mode.mismatch` | WARNING | Claude Code started in a different permission mode from the one requested |

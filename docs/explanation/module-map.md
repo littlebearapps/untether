@@ -24,6 +24,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `error_hints.py` | Maps engine error text to the actionable hints shown in Telegram. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
 | `live_followup.py` | Writes a queued follow-up into a still-running Claude session (live sessions) instead of resuming a new process. |
+| `live_sessions.py` | Engine-neutral seam for live sessions: the bridge, scheduler and steer code ask it for an engine's backend instead of importing the Claude runner. Claude is the only backend today ([#977](https://github.com/littlebearapps/untether/issues/977)). |
 | `session_costs.py` | Per-session cost and token ledger, so a resumed session's running totals are recorded per run. |
 | `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
 | `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
@@ -45,7 +46,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `progress.py` | Progress tracking: reduces untether events into progress snapshots. |
 | `markdown.py` | Markdown formatting for progress/final messages; includes helpers like elapsed formatting. |
-| `background_status.py` | Live background-task block and status message for Claude live sessions. |
+| `background_status.py` | Live background-task block and status message for Claude live sessions; the block also renders Antigravity's background rows. |
+| `background_tasks.py` | The shape a background task must have for that block (`BackgroundTaskView`), and a plain implementation for engines without Claude's native task events ([#978](https://github.com/littlebearapps/untether/issues/978)). |
 | `presenter.py` | Presenter protocol: converts `ProgressState` into transport-specific messages. |
 | `transport.py` | Transport protocol: send/edit/delete abstractions and message reference types. |
 
@@ -129,8 +131,10 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `utils/env_policy.py` | Engine subprocess environment allowlist (`[security] env_extra_allow` / `env_extra_prefix_allow`). |
 | `utils/env_audit.py` | Checks a running engine's real environment against that allowlist. |
 | `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the quota footer. |
+| `utils/antigravity_continue.py` | Finds the Antigravity conversation `/continue` may resume: the one agy last ran from the exact project directory ([#1039](https://github.com/littlebearapps/untether/issues/1039)). |
+| `utils/antigravity_context.py` | Published context windows per Antigravity model, used for the estimated `~N% ctx` in the header ([#979](https://github.com/littlebearapps/untether/issues/979)). |
 | `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation; atomic JSON writes for state files. |
-| `utils/paths.py` | Path/command relativisation helpers. |
+| `utils/paths.py` | Path/command relativisation helpers, and the per-run context variables (base directory, thread, sender, trigger source). |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |
 | `utils/proc_diag.py` | Process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children). |

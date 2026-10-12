@@ -35,9 +35,9 @@ Interactive features (approval buttons, plan mode, AskUserQuestion, live session
 | **Subscription usage** | ✅ | — | — | — | ~¹¹ | — | — |
 | **Reasoning/effort levels** | ✅ | ✅ | — | — | ✅ | — | — |
 | **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — | — |
-| **Live sessions & background tasks** | ✅ | — | — | — | —¹² | — | — |
+| **Live sessions & background tasks** | ✅ | — | — | — | ~¹² | — | — |
 | **Steer follow-ups** | ✅ | — | — | — | — | — | — |
-| **Context % in status line** | ✅ | — | — | — | — | — | — |
+| **Context % in status line** | ✅ | — | — | — | ~¹³ | — | — |
 | **Context compaction** | ✅ | — | —⁹ | ✅ | — | — | — |
 | **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | ✅ | —⁶ |
 
@@ -51,8 +51,9 @@ Interactive features (approval buttons, plan mode, AskUserQuestion, live session
 ⁸ `opencode run` auto-rejects any tool your OpenCode permission rules set to `ask` (it never auto-approves) and denies OpenCode's question and plan tools. Set rules to `allow` for tools you want run unattended.
 ⁹ OpenCode compacts long sessions itself, but `opencode run` doesn't report it, so Untether can't show it.
 ¹⁰ `/config` → Permission mode picks Workspace (default: `--mode=accept-edits` with Untether's no-shell agent, `--agent=untether-workspace` — file tools only, so no shell, web or MCP calls and no deleting or renaming files; not a sandbox) or Full access (`--dangerously-skip-permissions`). A pre-run policy, not mid-run approval: a blocked tool (such as a file outside the project) shows a ⚠️ row. After switching a chat from Workspace to Full access, send `/new`: agy keeps a conversation on the agent it started with. Ask me and Plan first (approval buttons and a plan gate) arrive in a later 0.36.1 release. Read the [terms note](antigravity/runner.md) before using a Google account sign-in.
-¹¹ `/usage` shows agy's quota groups on demand; there is no quota footer.
-¹² No live sessions or background-task panel. While agy holds its answer for a background command, the progress message shows ⏳ instead of a stall warning.
+¹¹ `/usage` shows agy's quota groups and remaining AI credits on demand. With `[footer] show_subscription_usage` on, a quota line follows each answer (with it off, only once a limit reaches 70 %), built only from what the last `/usage` fetched in the past 15 minutes; a run never fetches the quota itself ([#979](https://github.com/littlebearapps/untether/issues/979)).
+¹² No live sessions: each message is its own `agy` run. Background commands, timers and subagents are listed in the `⏳ background (N)` block of the progress message, from agy's stream only ([#978](https://github.com/littlebearapps/untether/issues/978)); there is no status message after the answer, and a daemon command can outlive the run. While agy holds its answer for a background command, the progress message shows ⏳ instead of a stall warning.
+¹³ An estimate, shown as `~N% ctx`: the tokens of the latest model call against the window Google publishes for the model. Only when the chat has a model set that Untether has a published figure for; agy reports neither a window nor compaction ([#979](https://github.com/littlebearapps/untether/issues/979); [details](antigravity/runner.md#context-use-n-ctx)).
 
 Reasoning levels: Claude `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` needs Claude Code v2.1.114+); Codex `low`, `medium`, `high`, `xhigh`; Antigravity `low`, `medium`, `high`, narrowed to what the chat's model accepts.
 OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning ([#970](https://github.com/littlebearapps/untether/issues/970)).

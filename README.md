@@ -81,7 +81,7 @@ Every command is listed in the [commands reference](https://littlebearapps.com/h
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@1` | 75+ providers via Models.dev, local models (**1.x only** — 2.x is refused before it starts) |
 | [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
-| [Antigravity CLI](https://antigravity.google)⁴ | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google's Gemini models, per-model effort, quota groups in `/usage` (agy 1.3.1+) |
+| [Antigravity CLI](https://antigravity.google)⁴ | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google's Gemini models, per-model effort, quota groups and credits in `/usage` (agy 1.3.1+) |
 
 Use your existing Claude or ChatGPT subscription — no extra API keys needed unless you want API billing. Switch engines per message (`/codex …`) or per chat (`/agent set claude`) — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/).
 
@@ -95,12 +95,12 @@ Use your existing Claude or ChatGPT subscription — no extra API keys needed un
 | Reasoning / effort levels | ✅ | ✅ | — | — | ✅⁵ |
 | Pre-run approval policy (`/config`) | ✅ | ✅ | — | — | ✅⁴ |
 | Interactive approvals, plan mode, ask mode, diff preview | ✅ | — | —³ | — | —⁴ |
-| Live sessions, background tasks, `/steer` | ✅ | — | — | — | — |
+| Live sessions, background tasks, `/steer` | ✅ | — | — | — | ~⁷ |
 | Context % in status line, subscription usage | ✅ | — | — | — | ~⁶ |
 | Context compaction shown | ✅ | — | — | ✅ | — |
 | Device re-auth (`/auth codex`) | — | ✅ | — | — | — |
 
-¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use. ⁴ Antigravity runs with a pre-run permission mode: **Workspace** (default — reads and edits files in the project; no shell, web or MCP tools, so no commands and no deleting or renaming files; not a sandbox) or **Full access**. **After switching a chat from Workspace to Full access, send `/new`** — agy keeps a conversation on the tools it started with. Approval buttons and a plan gate arrive in a later 0.36.1 release. Guide: [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/). ⁵ The levels offered depend on the model. ⁶ `/usage` shows agy's quota groups; no context % or quota footer.
+¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use. ⁴ Antigravity runs with a pre-run permission mode: **Workspace** (default — reads and edits files in the project; no shell, web or MCP tools, so no commands and no deleting or renaming files; not a sandbox) or **Full access**. **After switching a chat from Workspace to Full access, send `/new`** — agy keeps a conversation on the tools it started with. Approval buttons and a plan gate arrive in a later 0.36.1 release. Guide: [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/). ⁵ The levels offered depend on the model. ⁶ `/usage` shows agy's quota groups and AI credits, and an optional quota line can follow each answer (built from your last `/usage`). Context % is an estimate (`~N% ctx`), shown only when the chat has a model set. ⁷ Background commands, timers and subagents are listed in the `⏳ background` block while a run is going; no live sessions or `/steer`.
 
 > ⚠️ **Antigravity and Google account sign-ins.** Google's [Antigravity terms](https://antigravity.google/terms) say that using third-party software to access the service with an Antigravity sign-in is a breach that may lead to suspension of your Antigravity and/or Gemini CLI accounts. Untether runs Google's own `agy` binary and never reads your Google credentials, but it is still third-party software driving the CLI. **We recommend a Gemini API key or an Enterprise sign-in** — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli). If you use a Google account sign-in anyway, you accept that risk for that account.
 

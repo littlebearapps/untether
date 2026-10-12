@@ -417,8 +417,8 @@ show_subscription_usage` or `/config` → **Cost & usage** → **Subscription us
 
 `/stats auth` adds a line for Antigravity, for example `antigravity: ℹ️ set to use Google sign-in` (or `a Gemini
 API key`, or `Enterprise ADC`). It is the route agy is set to use, read from the `agy -p /config` answer a run
-already cached. It does not start agy and does not test the sign-in, and it is missing until an Antigravity run
-has happened since Untether last started (the answer is kept for an hour).
+already cached. It does not start agy and does not test the sign-in, and it is there only while that answer is
+cached: for an hour after a run fetched it, so not straight after a restart.
 
 ## Context use (`~N% ctx`)
 
@@ -516,7 +516,7 @@ ordinary stall warnings for up to 31 minutes.
 
 ### Background tasks and subagents in the status panel
 
-From 0.36.1rc2 ([#978](https://github.com/littlebearapps/untether/issues/978)) the same `⏳ background (N)` block
+Since 0.36.1 ([#978](https://github.com/littlebearapps/untether/issues/978)) the same `⏳ background (N)` block
 that Claude runs use shows agy's work, one row each with its elapsed time, and `/ping` counts them:
 
 | Row | From | Shown | Ends |
