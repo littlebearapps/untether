@@ -41,7 +41,7 @@ systemctl --user restart untether
 
 ## Upgrading to v0.36.1
 
-Nothing to change in your config.
+Most installs need no config change. The two exceptions are a webhook or cron trigger that targets a secret-style file name, and a `model` value that looks like a flag; both are covered below.
 
 - **New engine: Antigravity CLI.** Install `agy` (1.3.1 or newer), choose a sign-in route and select it with `/agent set antigravity`. Read the terms note in [Switch engines](switch-engines.md#antigravity-cli) before using a Google account sign-in. ([#558](https://github.com/littlebearapps/untether/issues/558))
 - **Codex, OpenCode and Pi get a shorter built-in preamble.** It no longer tells them to use Claude's `ExitPlanMode` and `AskUserQuestion` tools; it asks them to raise questions in their final reply instead. Claude's preamble and any custom `[preamble] text` are unchanged. See [Agent preamble](preamble.md). ([#1035](https://github.com/littlebearapps/untether/issues/1035))
