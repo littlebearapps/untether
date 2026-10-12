@@ -7,6 +7,7 @@ from typing import Literal
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...transport import ChannelId
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -27,6 +28,17 @@ class VerboseCommand:
 
     id = "verbose"
     description = "Toggle verbose progress mode on/off"
+
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: changing the chat's verbosity needs a group admin.
+
+        `/verbose` writes the setting `/config vb:*` writes, so it takes the
+        same gate (run by the dispatch before ``handle``). Every form changes
+        it — an unrecognised argument toggles, like the bare command — so
+        there is no read-only form to leave open.
+        """
+        return SETTINGS_ADMIN_GATE
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         chat_id = ctx.message.channel_id

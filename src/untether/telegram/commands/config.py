@@ -23,7 +23,7 @@ from ._permission_mode_text import (
     cli_name_suffix,
     mode_display,
 )
-from .overrides import AdminGate
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -2584,11 +2584,7 @@ _DYNAMIC_ACTION_PAGES: frozenset[str] = frozenset({"ag"})
 # action at all.
 _OPEN_ACTIONS: dict[str, frozenset[str]] = {}
 
-CONFIG_ADMIN_GATE = AdminGate(
-    missing_sender="cannot verify sender for settings changes.",
-    failed_member="failed to verify settings permissions.",
-    denied="changing settings is restricted to group admins.",
-)
+CONFIG_ADMIN_GATE = SETTINGS_ADMIN_GATE
 
 
 def parse_config_args(args_text: str) -> tuple[str | None, str | None]:

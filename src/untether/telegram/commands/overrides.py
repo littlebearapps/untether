@@ -78,6 +78,15 @@ class AdminGate:
     denied: str
 
 
+# The one refusal wording for a chat-settings change: `/config` actions and
+# the text commands that write the same settings (`/planmode`, `/verbose`).
+SETTINGS_ADMIN_GATE = AdminGate(
+    missing_sender="cannot verify sender for settings changes.",
+    failed_member="failed to verify settings permissions.",
+    denied="changing settings is restricted to group admins.",
+)
+
+
 async def check_admin_or_private(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,

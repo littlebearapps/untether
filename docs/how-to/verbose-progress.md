@@ -176,6 +176,8 @@ A wake turn still arrives as its own message when it runs a tool (up to three `R
 
 The `/verbose` toggle overrides the global config for the current chat. This override persists until you clear it or restart Untether.
 
+In a group, `/verbose` needs a group admin or the creator in every form, the same as the Verbose page in `/config`. See [Admin-only commands](group-chat.md#admin-only-commands).
+
 ## Clear override
 
 Remove the per-chat setting to revert to the global config value:

@@ -12,6 +12,7 @@ from ._permission_mode_text import (
     cli_name_suffix,
     mode_display,
 )
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,20 @@ class PlanModeCommand:
 
     id = "planmode"
     description = "Set Claude Code permission mode: on/plan-auto/auto/off"
+
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: changing the chat's permission mode needs a group admin.
+
+        `/planmode` writes the setting `/config pm:*` writes, so it takes the
+        same gate (run by the dispatch before ``handle``). A mode name,
+        ``clear`` and the bare toggle change it; ``show`` and anything that
+        only gets the usage reply do not.
+        """
+        args = args_text.strip().lower()
+        if args == "" or args == "clear" or args in PERMISSION_MODES:
+            return SETTINGS_ADMIN_GATE
+        return None
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
