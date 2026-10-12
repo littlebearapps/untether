@@ -332,8 +332,9 @@ def _config_cache_key(runner: AntigravityRunner) -> tuple[Any, ...]:
 
 async def agy_config(runner: AntigravityRunner) -> AgyConfig | None:
     """agy's own permission settings, cached per (agy version, settings
-    file stat) for an hour. ``None`` when the check failed: callers fail
-    open (the ``init.permission_mode`` cross-check still applies)."""
+    file stat) for an hour. ``None`` when the check failed. An attended
+    Workspace run then goes on only as long as ``init.permission_mode``
+    reports a safe value, and an unattended one is held (#1044)."""
     key = _config_cache_key(runner)
     hit, value = _cached(key)
     if hit:

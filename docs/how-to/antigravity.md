@@ -210,7 +210,8 @@ Cron and webhook runs work with Antigravity, with two rules that differ from cha
 - **They never inherit Full access.** A cron gets it only from its own `permission_mode = "full"`. A webhook run
   never does. Otherwise the run is Workspace, whatever the chat or `untether.toml` says.
 - **They are held when the project's agy config changed** since someone last ran Antigravity in that chat (next
-  section). Send any message in the chat to review it; the schedule runs again after that.
+  section). The next message someone sends in the chat runs with the changed config and shows what changed in
+  a ⚠️ row; the schedule runs again after that. An `/at` or `/loop` run doesn't release it.
 
 ```toml
 [[triggers.crons]]

@@ -51,13 +51,14 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | Reason (`prespawn_blocked`) | When |
 |---|---|
 | RAM / concurrency guard | Same pre-spawn guard as every engine |
-| `no_project` | No project directory, or it is `/`, the home directory or the bot's own directory |
+| `no_project` | No project directory, or it is `/`, the home directory or the bot's own directory, or its path can't be resolved |
 | `invalid_argument` | The model id or the conversation id being resumed isn't a valid value (it could be read by agy as a flag). The bad id is not kept as the resume token |
 | `gate_missing` | The mode is Ask me or Plan first |
 | `unsupported_version` | agy is older than 1.3.1 |
 | `config_changed` | Unattended run, and the project's agy config differs from what an attended run last showed |
 | `config_unchecked` | Unattended run, and that config couldn't be checked |
 | `agy_always_proceed` | Workspace run, and agy's own settings report a `toolPermission` other than `request-review` / `strict` |
+| `tool_permission_unknown` | Unattended Workspace run, and the `agy -p /config` check failed or returned no `toolPermission` ([#1044](https://github.com/littlebearapps/untether/issues/1044)) |
 
 ## Background task map
 

@@ -23,6 +23,15 @@ _run_sender_id: ContextVar[int | None] = ContextVar(
     "untether_run_sender_id", default=None
 )
 
+# #1044: ``RunContext.trigger_source`` of the run (``cron:…`` / ``webhook:…``
+# / ``at:…`` / ``loop:…``), None when a person's message started it. Wider
+# than "unattended" (``context.unattended_trigger``), which leaves ``at:`` and
+# ``loop:`` out: a runner reads this to tell whether somebody is looking at
+# the chat right now, not whether the run may wait for a tap.
+_run_trigger_source: ContextVar[str | None] = ContextVar(
+    "untether_run_trigger_source", default=None
+)
+
 
 def get_run_base_dir() -> Path | None:
     return _run_base_dir.get()
@@ -70,6 +79,18 @@ def set_run_sender_id(sender_id: int | None) -> Token[int | None]:
 
 def reset_run_sender_id(token: Token[int | None]) -> None:
     _run_sender_id.reset(token)
+
+
+def get_run_trigger_source() -> str | None:
+    return _run_trigger_source.get()
+
+
+def set_run_trigger_source(source: str | None) -> Token[str | None]:
+    return _run_trigger_source.set(source)
+
+
+def reset_run_trigger_source(token: Token[str | None]) -> None:
+    _run_trigger_source.reset(token)
 
 
 def relativize_path(value: str, *, base_dir: Path | None = None) -> str:

@@ -75,7 +75,11 @@ from ..utils.antigravity_state import (
     NoticeStore,
     SeenConfigStore,
 )
-from ..utils.paths import get_run_base_dir, get_run_channel_id
+from ..utils.paths import (
+    get_run_base_dir,
+    get_run_channel_id,
+    get_run_trigger_source,
+)
 from .run_options import ANTIGRAVITY_PERMISSION_MODES, get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -507,6 +511,10 @@ _GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
 # invents — fails closed: the label would otherwise promise "no shell".
 _WORKSPACE_TOOL_PERMISSIONS = frozenset({"request-review", "strict"})
 CONFIG_UNCHECKED_BLOCK = "config_unchecked"
+# #1044: neither the ``-p /config`` check nor ``init`` gave a usable value.
+TOOL_PERMISSION_UNKNOWN_BLOCK = "tool_permission_unknown"
+_CHECK_FAILED = "the check failed"
+_NO_VALUE = "it returned no toolPermission value"
 
 
 def permission_override_message(value: str) -> str:
@@ -518,6 +526,47 @@ def permission_override_message(value: str) -> str:
 
 
 ALWAYS_PROCEED_TEXT = permission_override_message("always-proceed")
+
+# #1044. Two checks read agy's tool-permission value: ``agy -p /config``
+# before the run and ``init.permission_mode`` in the stream. Either may be
+# unavailable on its own (attended runs go on, with a ⚠️ row); both together
+# stop a Workspace run, and an unattended one is held on the first alone.
+PERMISSION_UNCONFIRMED_TEXT = (
+    "Untether couldn't confirm agy's tool-permission setting: the check "
+    "before the run didn't give one and agy didn't report one when it "
+    "started. Workspace mode won't run without it — try again in a few "
+    "minutes, or pick Full access in /config. If it keeps happening, agy may "
+    "have changed; check for an Untether update."
+)
+
+
+def permission_unknown_held_message(reason: str) -> str:
+    return (
+        "Untether couldn't read agy's tool-permission setting before this run "
+        f"({reason}), so this scheduled run is held. Nothing needs changing: "
+        "Untether checks again on the next run, and the schedule works once "
+        "the check succeeds."
+    )
+
+
+def permission_precheck_unknown_row(reason: str, reported: str) -> str:
+    row = (
+        "⚠️ Untether couldn't read agy's tool-permission setting before this "
+        f"run ({reason}). agy reported {reported} when it started, so the run "
+        "continues."
+    )
+    if reason == _CHECK_FAILED:
+        row += " agy's allow rules and outside-project access weren't checked."
+    return row
+
+
+def permission_unreported_row(checked: str) -> str:
+    return (
+        "⚠️ agy didn't report its permission mode when it started, so this "
+        "run relies on the check Untether made before it (toolPermission: "
+        f"{checked})."
+    )
+
 
 _UNKNOWN_MODE_WARNED: set[str] = set()
 _UNATTENDED_DOWNGRADE_WARNED: set[tuple[str, str]] = set()
@@ -638,17 +687,20 @@ def _paths_text(paths: list[str], limit: int = 5) -> str:
 def config_changed_message(paths: list[str]) -> str:
     return (
         "agy's workspace config changed since someone last ran Antigravity in "
-        f"this chat's project ({_paths_text(paths)}). Send any message in the "
-        "chat to review it; the schedule runs again after that."
+        f"this chat's project ({_paths_text(paths)}), so this scheduled run is "
+        "held. The next message someone sends in the chat will run with the "
+        "changed config and show what changed in a ⚠️ row; the schedule runs "
+        "again after that. Check those files first if you didn't change them."
     )
 
 
 def config_unchecked_message(reason: str) -> str:
     return (
         "Untether couldn't check agy's hooks, plugins and MCP servers in this "
-        f"chat's project ({reason}), so this scheduled run is held. Send any "
-        "message in the chat to look at the project, or trim its .agents/ "
-        "folder."
+        f"chat's project ({reason}), so scheduled runs are held until a check "
+        "succeeds. A message sent in the chat still runs, with a ⚠️ row saying "
+        "the config wasn't checked; trimming the project's .agents/ folder "
+        "usually lets the check finish."
     )
 
 
@@ -687,6 +739,9 @@ class _RunPrecheck:
     config_rows: list[tuple[str, str]] = field(default_factory=list)
     label_suffix: str = ""
     auth_route: str = "oauth"
+    # #1044 (Workspace only): why the check before the run gave no usable
+    # ``toolPermission``; None when it gave one (``config.tool_permission``).
+    permission_unknown: str | None = None
 
 
 # Set by ``run_impl`` right before it delegates to the base ``run_impl``,
@@ -899,6 +954,18 @@ class AntigravityStreamState:
     # D22.7: init reported always-proceed without our bypass flag → the run
     # was stopped; every later line is ignored.
     permission_refused: bool = False
+    # #1044: what the check before the run found — the reason it gave no
+    # usable value, or the value itself. Both None only when a test drives
+    # ``translate`` without ``run_impl`` (nothing is asserted then).
+    permission_unknown: str | None = None
+    permission_prechecked: str | None = None
+    # True once ``init`` (or the first step of a stream with no ``init``)
+    # has been checked; the ⚠️ row owed when one of the two checks was missing.
+    permission_checked: bool = False
+    permission_note: str | None = None
+    # ``RunContext.trigger_source``: None when a person's message started the
+    # run. Only then does the run record changed agy config as seen.
+    trigger_source: str | None = None
     # Phase 03 (D27): a stderr line stopped agy (``auth`` / ``account_blocked``
     # / ``quota`` / ``credits`` / ``conversation_gone``); it decides the final
     # text whatever agy's result says.
@@ -1048,11 +1115,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if base is None:
             reason = "no_project"
         else:
-            with contextlib.suppress(OSError):
+            try:
                 resolved = base.resolve()
                 forbidden = {Path("/"), Path.home().resolve(), Path.cwd().resolve()}
                 if resolved in forbidden:
                     reason = "forbidden_dir"
+            except OSError:
+                # #1044: a directory that can't be compared can't be cleared.
+                reason = "unresolved_dir"
         if reason is None:
             return None
         logger.warning(
@@ -1312,22 +1382,39 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         config = await antigravity_quota.agy_config(self)
         pre.config = config
         pre.auth_route = antigravity_quota.auth_route(config)
-        if config is None:
-            return None, pre
-        if (
-            mode == "workspace"
-            and config.tool_permission
-            and config.tool_permission not in _WORKSPACE_TOOL_PERMISSIONS
-        ):
+        tool_permission = config.tool_permission if config is not None else None
+        if mode == "workspace" and not tool_permission:
+            # #1044: no usable value. An attended run goes on — ``init``
+            # still has to report a safe one (``_check_reported_mode``) —
+            # but nobody reads an unattended run's ⚠️ row, so that is held,
+            # like an unfinished planted-config scan above.
+            pre.permission_unknown = _CHECK_FAILED if config is None else _NO_VALUE
+            if trigger is not None:
+                logger.error(
+                    "antigravity.permission_mode.unverified",
+                    source="config",
+                    requested=mode,
+                    reason=pre.permission_unknown,
+                    trigger=trigger,
+                )
+                return (
+                    EventFactory(ENGINE).completed_error(
+                        error=permission_unknown_held_message(pre.permission_unknown),
+                        resume=resume,
+                        usage={PRESPAWN_BLOCKED_KEY: TOOL_PERMISSION_UNKNOWN_BLOCK},
+                    ),
+                    None,
+                )
+        elif mode == "workspace" and tool_permission not in _WORKSPACE_TOOL_PERMISSIONS:
             logger.error(
                 "antigravity.permission_mode.mismatch",
                 source="config",
                 requested=mode,
-                reported=config.tool_permission,
+                reported=tool_permission,
             )
             return (
                 EventFactory(ENGINE).completed_error(
-                    error=permission_override_message(config.tool_permission),
+                    error=permission_override_message(str(tool_permission)),
                     resume=resume,
                     usage={PRESPAWN_BLOCKED_KEY: ALWAYS_PROCEED_BLOCK},
                 ),
@@ -1567,6 +1654,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             mode_label=label,
             unattended=options.unattended_trigger if options is not None else None,
             precheck=precheck,
+            permission_unknown=(
+                precheck.permission_unknown if precheck is not None else None
+            ),
+            permission_prechecked=(
+                precheck.config.tool_permission
+                if precheck is not None and precheck.config is not None
+                else None
+            ),
+            trigger_source=get_run_trigger_source(),
         )
 
     def start_run(
@@ -1814,6 +1910,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case agy_schema.StepUpdate(step_update=su):
                 if su is None:
                     return []
+                if not state.permission_checked:
+                    # #1044: a step with no ``init`` before it.
+                    refused = self._check_reported_mode(
+                        state, None, resume, source="no_init"
+                    )
+                    if refused is not None:
+                        return refused
                 out: list[UntetherEvent] = []
                 if su.conversation_id and state.session_id is None:
                     out.extend(self._adopt_session(state, su.conversation_id))
@@ -1861,38 +1964,73 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AntigravityStreamState,
         reported: str | None,
         resume: ResumeToken | None,
+        *,
+        source: str = "init",
     ) -> list[UntetherEvent] | None:
         """D22.7: agy's ``toolPermission: always-proceed`` setting stands in
         for the bypass flag. Without our flag, anything but agy's default or
         a stricter policy (fail closed: ``proceed-in-sandbox``, a value a
         newer agy invents) stops the run before any tool (``init`` comes
-        ≈ 2.7 s before the first model output). A missing value can't be
-        checked here; the ``-p /config`` check covers that host."""
-        bypass = state.effective_mode == "full"
-        if (
-            not bypass
-            and reported is not None
-            and reported not in _WORKSPACE_TOOL_PERMISSIONS
-        ):
-            state.permission_refused = True
+        ≈ 2.7 s before the first model output).
+
+        #1044: a missing value (a renamed field, or ``source="no_init"`` — a
+        step with no ``init`` before it) is covered by the ``-p /config``
+        check before the run. When that gave no usable value either, nothing
+        has confirmed the setting and the run stops; when only one of the
+        two is missing the run goes on with a ⚠️ row."""
+        state.permission_checked = True
+        state.permission_note = None
+        if state.effective_mode == "full":
+            if reported == "request-review":
+                _warn_bypass_unreported()
+            return None
+        if reported is not None and reported not in _WORKSPACE_TOOL_PERMISSIONS:
             logger.error(
                 "antigravity.permission_mode.mismatch",
                 source="init",
                 requested=state.effective_mode,
                 reported=reported,
             )
-            if state.agy_pid is not None:
-                with contextlib.suppress(OSError):
-                    os.kill(state.agy_pid, signal.SIGTERM)
-            keep = resume if resume is not None and not resume.is_continue else None
-            return [
-                state.factory.completed_error(
-                    error=permission_override_message(reported), resume=keep
-                )
-            ]
-        if bypass and reported == "request-review":
-            _warn_bypass_unreported()
+            return self._refuse_in_stream(
+                state, resume, permission_override_message(reported)
+            )
+        if reported is None and state.permission_unknown is not None:
+            logger.error(
+                "antigravity.permission_mode.unverified",
+                source=source,
+                requested=state.effective_mode,
+                reason=state.permission_unknown,
+            )
+            return self._refuse_in_stream(state, resume, PERMISSION_UNCONFIRMED_TEXT)
+        if reported is None and state.permission_prechecked:
+            state.permission_note = permission_unreported_row(
+                state.permission_prechecked
+            )
+        elif reported is not None and state.permission_unknown is not None:
+            source = "config"
+            state.permission_note = permission_precheck_unknown_row(
+                state.permission_unknown, reported
+            )
+        if state.permission_note is not None:
+            logger.warning(
+                "antigravity.permission_mode.unconfirmed",
+                source=source,
+                requested=state.effective_mode,
+                reported=reported,
+                reason=state.permission_unknown,
+            )
         return None
+
+    def _refuse_in_stream(
+        self, state: AntigravityStreamState, resume: ResumeToken | None, error: str
+    ) -> list[UntetherEvent]:
+        """Stop agy and end the run; every later line is ignored."""
+        state.permission_refused = True
+        if state.agy_pid is not None:
+            with contextlib.suppress(OSError):
+                os.kill(state.agy_pid, signal.SIGTERM)
+        keep = resume if resume is not None and not resume.is_continue else None
+        return [state.factory.completed_error(error=error, resume=keep)]
 
     def _warning_row(
         self,
@@ -1913,6 +2051,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             )
             state.effort_note = None
+        if state.permission_note is not None:
+            out.append(
+                self._warning_row(
+                    state, "antigravity.permission.unconfirmed", state.permission_note
+                )
+            )
+            state.permission_note = None
         pre = state.precheck
         if pre is None:
             return out
@@ -1928,13 +2073,21 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if pre.first_sight and scan is not None:
             pre.first_sight = False
             paths = sorted(scan.agy)
+            # #1044: only a person's message acknowledges the config. An
+            # ``/at`` or loop re-fire (``trigger_source`` set) still runs and
+            # shows the row, but held crons stay held until someone has
+            # been in the chat to see it.
+            recorded = state.trigger_source is None and state.unattended is None
             logger.warning(
                 "antigravity.workspace_config_present",
                 paths=paths[:20],
                 digest=scan.agy_digest[:12],
                 permission_mode=state.effective_mode,
+                recorded=recorded,
+                trigger=state.trigger_source,
             )
-            self._seen().set(scan.root, scan.agy_digest)
+            if recorded:
+                self._seen().set(scan.root, scan.agy_digest)
             out.append(
                 self._warning_row(
                     state,

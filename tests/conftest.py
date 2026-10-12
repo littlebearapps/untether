@@ -322,15 +322,17 @@ def _no_agy_version_probe(
 
     monkeypatch.setattr(antigravity_runner, "_probe_agy_version", lambda path: None)
     antigravity_runner._VERSION_CACHE.clear()
-    # Phase 02: the cached `-p /config` check reports "failed" (the run fails
-    # open) unless a test opts in, and the planted-config scan never looks at
-    # the host's real ~/.gemini/config.
+    # Phase 02: the cached `-p /config` check never asks the host's agy. It
+    # reports a healthy host — agy's defaults, as `agy -p /config` prints
+    # them — since #1044 made a failed check visible (a ⚠️ row; unattended
+    # Workspace runs held). A test of the failure stubs its own. The
+    # planted-config scan never looks at the host's real ~/.gemini/config.
     from untether.utils import antigravity_quota, antigravity_scan
 
-    async def _no_config_probe(runner: object) -> object:
-        raise antigravity_quota.AgySlashError("stubbed_in_tests")
+    async def _default_config_probe(runner: object) -> object:
+        return antigravity_quota.parse_agy_config({"toolPermission": "request-review"})
 
-    monkeypatch.setattr(antigravity_quota, "_probe_agy_config", _no_config_probe)
+    monkeypatch.setattr(antigravity_quota, "_probe_agy_config", _default_config_probe)
 
     # Phase 05: the /config Effort page never asks the host's agy either.
     async def _no_effort_probe(runner: object, model: object) -> object:

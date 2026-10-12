@@ -264,7 +264,7 @@ agy sends one answer per run and holds it until background commands it started h
 
 **Symptoms:** a cron or webhook run replies `agy's workspace config changed since someone last ran Antigravity in this chat's project (…)`, or `Untether couldn't check agy's hooks, plugins and MCP servers …`.
 
-agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. Send any message in that chat: the run shows a ⚠️ row listing the files. Review them, and the schedule works again from the next fire. If the check itself can't finish, the row says why (for example too many files under `.agents/`, or a config file that isn't plain JSON).
+agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. The message names the files: check them on the host first if you didn't change them, because the next message sent in that chat runs with the changed config. That run shows a ⚠️ row listing the files, and the schedule works again from the next fire. An `/at` or `/loop` run doesn't release the hold. If the check itself can't finish, the row says why (for example too many files under `.agents/`, or a config file that isn't plain JSON).
 
 ### Antigravity won't run Workspace because agy's own settings allow every tool
 

@@ -197,7 +197,20 @@ Rules the runner enforces:
   than `request-review` or `strict`, the run is refused: `agy's own settings change its permission checks
   (toolPermission: always-proceed), so Untether won't run Workspace mode — set it back to request-review or pick
   Full access in /config.` The same check runs on the `permission_mode` agy reports in its first event, and stops
-  agy before any tool. If the settings check itself fails, the run goes ahead and the second check still applies.
+  agy before any tool.
+- **One check may be missing, never both** ([#1044](https://github.com/littlebearapps/untether/issues/1044)). Either check can come back empty: `agy -p /config` can fail
+  or time out (a failure is cached for five minutes) or return no `toolPermission`, and agy's first event can lack
+  `permission_mode` or be missing altogether.
+    - *One missing, someone in the chat:* the run goes ahead on the other check and shows a ⚠️ row saying which one
+      was missing (`antigravity.permission_mode.unconfirmed`).
+    - *Both missing:* nothing has confirmed the setting, so agy is stopped at its first event (or at its first step
+      when there is no first event): `Untether couldn't confirm agy's tool-permission setting: …`
+      (`antigravity.permission_mode.unverified`).
+    - *Cron or webhook run:* held before agy starts when the `agy -p /config` check alone gave no value
+      (`Untether couldn't read agy's tool-permission setting before this run (…), so this scheduled run is held.`),
+      because nobody is there to read a ⚠️ row. The next fire checks again. `/at` and `/loop` runs follow the
+      attended rule.
+    - Full access is unaffected: it doesn't depend on the setting.
 - **Widened settings are shown.** `permissions.allow` rules or `allowNonWorkspaceAccess` in agy's settings add a
   ⚠️ row (once per project and settings change), and the footer label becomes
   `workspace (agy allows files outside the project)`.
@@ -264,10 +277,15 @@ for this, as a tripwire and not a sandbox:
 - **First sight.** The first attended run in a project that carries such config shows `⚠️ This project has agy
   hooks, plugins or MCP servers that Untether doesn't manage (…). They run their own commands in every mode,
   including Workspace. Review them if you didn't add them.` The state is remembered per project in
-  `antigravity_seen_config.json` beside `untether.toml`.
+  `antigravity_seen_config.json` beside `untether.toml`. Only a run started by a person's message records the
+  config as seen. An `/at` or `/loop` re-fire still runs and shows the row, every time, but records nothing, so
+  it can't release held crons while nobody is watching ([#1044](https://github.com/littlebearapps/untether/issues/1044)).
 - **Changed since someone looked.** A cron or webhook run is refused while the config differs from what an
   attended run last showed: `agy's workspace config changed since someone last ran Antigravity in this chat's
-  project (…). Send any message in the chat to review it; the schedule runs again after that.`
+  project (…), so this scheduled run is held. The next message someone sends in the chat will run with the
+  changed config and show what changed in a ⚠️ row; the schedule runs again after that. Check those files first
+  if you didn't change them.` There is no preview: that next message runs agy, and so the changed hooks, before
+  the row appears. Read the listed files on the host first if the change is unexpected.
 - **Couldn't check.** If the check can't finish (too many files, unreadable files, links leading outside the
   project and home directory, a config file that isn't strict JSON, a custom agent whose front matter Untether
   can't read with certainty, a command or command path built from a variable), every attended run shows a ⚠️ row

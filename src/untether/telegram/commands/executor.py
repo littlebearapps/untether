@@ -34,10 +34,12 @@ from ...utils.paths import (
     reset_run_channel_id,
     reset_run_sender_id,
     reset_run_thread_id,
+    reset_run_trigger_source,
     set_run_base_dir,
     set_run_channel_id,
     set_run_sender_id,
     set_run_thread_id,
+    set_run_trigger_source,
 )
 from ..approval_originator import message_sender
 from ..bridge import send_plain
@@ -327,6 +329,11 @@ async def _run_engine(
         # #388: the user whose message started the run (None for cron,
         # webhook, /at and loop fires) — pending approvals record it.
         run_sender_token = set_run_sender_id(message_sender(chat_id, user_msg_id))
+        # #1044: what started the run (None = a person's message), so a
+        # runner can tell an /at or loop re-fire from someone in the chat.
+        run_trigger_token = set_run_trigger_source(
+            context.trigger_source if context is not None else None
+        )
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -375,6 +382,7 @@ async def _run_engine(
             reset_run_channel_id(run_channel_token)
             reset_run_thread_id(run_thread_token)
             reset_run_sender_id(run_sender_token)
+            reset_run_trigger_source(run_trigger_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",

@@ -1416,6 +1416,67 @@ async def test_388_run_engine_sets_run_sender_from_triggering_message() -> None:
     assert get_run_sender_id() is None
 
 
+class _TriggerRecordingRunner(ScriptRunner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen_triggers: list[str | None] = []
+
+    async def run(self, prompt, resume):  # type: ignore[override]
+        from untether.utils.paths import get_run_trigger_source
+
+        self.seen_triggers.append(get_run_trigger_source())
+        async for event in super().run(prompt, resume):
+            yield event
+
+
+@pytest.mark.anyio
+async def test_1044_run_engine_sets_run_trigger_source() -> None:
+    """#1044: a runner can tell a person's message (None) from a run a
+    dispatcher started — cron, webhook, ``/at`` or a loop re-fire. Reset
+    after the run."""
+    from untether.utils.paths import get_run_trigger_source
+
+    contexts = [
+        None,
+        RunContext(project=None),
+        RunContext(trigger_source="at:1f2e3d"),
+        RunContext(trigger_source="loop:ut_loop_ab12cd34"),
+        RunContext(trigger_source="cron:nightly"),
+    ]
+    runner = _TriggerRecordingRunner(
+        [Return(answer="ok") for _ in contexts],
+        engine=CODEX_ENGINE,
+        resume_value="r-1044",
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=_CaptureTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+
+    for context in contexts:
+        await _run_engine(
+            exec_cfg=exec_cfg,
+            runtime=runtime,
+            running_tasks={},
+            chat_id=123,
+            user_msg_id=1,
+            text="hello",
+            resume_token=None,
+            context=context,
+        )
+
+    assert runner.seen_triggers == [
+        None,
+        None,
+        "at:1f2e3d",
+        "loop:ut_loop_ab12cd34",
+        "cron:nightly",
+    ]
+    assert get_run_trigger_source() is None
+
+
 @pytest.mark.anyio
 async def test_924_run_engine_passes_outbox_since_and_registers_scope(
     tmp_path: Path, monkeypatch
