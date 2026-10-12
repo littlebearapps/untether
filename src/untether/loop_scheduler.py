@@ -1135,6 +1135,13 @@ def _expiry_notice(entry: _LoopEntry, reason: str) -> str:
             f"\N{ALARM CLOCK} Scheduled wake-up cancelled — it {cause}. "
             "Reply to continue."
         )
+    if not entry.recurring:
+        # A one-shot dropped at a cap never ran, so "Loop finished" would
+        # misreport it.
+        return (
+            f"\N{ALARM CLOCK} Scheduled run cancelled — it {cause}. "
+            "Ask again to reschedule it."
+        )
     return (
         f"\N{ALARM CLOCK} Loop finished — it {cause}. "
         "Send /loop again to start another."

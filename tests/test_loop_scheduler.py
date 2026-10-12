@@ -1689,6 +1689,27 @@ class TestExpiryNotice:
             finally:
                 tg.cancel_scope.cancel()
 
+    async def test_one_shot_dropped_at_a_cap_is_not_called_a_loop(self):
+        """A one-shot scheduled past the duration cap never runs, so its
+        notice must not say a loop finished."""
+        recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, transport, 1)
+            try:
+                entry = self._cron(372, max_total_duration_hours=4)
+                entry.recurring = False
+                entry.created_at_wallclock -= 5 * 3600
+                await loop_scheduler._fire(entry.token)
+                await anyio.wait_all_tasks_blocked()
+                assert recorder.calls == []
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Scheduled run cancelled — it reached its "
+                    "time limit of 4 hours. Ask again to reschedule it."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
     async def test_cap_reached_at_next_fire_notifies_once(self):
         recorder = RunJobRecorder()
         transport = FakeTransport()
