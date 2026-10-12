@@ -155,7 +155,10 @@ directory and passes `--conversation=<id>`.
   record of recent conversations …` and agy isn't started. It never falls back to `--continue`.
 
 A refusal is logged as `antigravity.continue.refused` with a `reason`; none of them changes the chat's saved
-session. To resume a particular conversation instead, reply to its resume line.
+session. It arrives as a plain reply in place of the progress message, with no `error · antigravity` header and no
+quota line, and the run's `session.summary.no_events` is logged at INFO with `prespawn_blocked=continue_unresolved`
+rather than as a WARNING ([#1047](https://github.com/littlebearapps/untether/issues/1047)). To resume a particular
+conversation instead, reply to its resume line.
 
 agy's file can still list a conversation that has since been deleted. Untether then stops agy as it does for any
 unknown id (below) and replies `The conversation Antigravity had recorded for this project no longer exists, so

@@ -5528,12 +5528,26 @@ async def run_runner_with_cancel(
         **_hook_summary_fields(edits.stream),
     )
     if event_count == 0 and not outcome.cancelled:
-        logger.warning(
-            "session.summary.no_events",
-            session_id=outcome.resume.value if outcome.resume else None,
-            engine=runner.engine,
-            duration_seconds=round(duration, 1),
+        # #1047: a refusal answered before anything was meant to start has
+        # no events by design — INFO, with the reason, not a WARNING.
+        plain_block = _plain_prespawn_refusal(
+            outcome.completed.usage if outcome.completed else None
         )
+        if plain_block is not None:
+            logger.info(
+                "session.summary.no_events",
+                session_id=outcome.resume.value if outcome.resume else None,
+                engine=runner.engine,
+                duration_seconds=round(duration, 1),
+                prespawn_blocked=plain_block,
+            )
+        else:
+            logger.warning(
+                "session.summary.no_events",
+                session_id=outcome.resume.value if outcome.resume else None,
+                engine=runner.engine,
+                duration_seconds=round(duration, 1),
+            )
 
     return outcome
 
@@ -6493,6 +6507,21 @@ _SESSION_CLEARED_NOTICE = (
     " be resumed, so it was cleared \N{EM DASH} your next message starts a new"
     " session."
 )
+# #1047: pre-spawn refusals (``usage[PRESPAWN_BLOCKED_KEY]``) that are
+# answered with their own text alone, in place of the progress card: no
+# error header, code block or footers, and ``session.summary.no_events`` at
+# INFO, since nothing was meant to start. Antigravity's ``/continue`` with no
+# conversation of this project's own to resume (#1039) is an answer, not a
+# failure. The other pre-spawn refusals (RAM, concurrency, OpenCode 2.x,
+# Antigravity's other blocks) still render as an error card.
+_PLAIN_PRESPAWN_BLOCKS = frozenset({"continue_unresolved"})
+
+
+def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
+    """The pre-spawn block reason when the refusal is a plain reply, else
+    None (#1047)."""
+    reason = prespawn_blocked_reason(usage)
+    return reason if reason in _PLAIN_PRESPAWN_BLOCKS else None
 
 
 def _resume_failure_clears_session(
@@ -7192,7 +7221,16 @@ async def handle_message(
                     resume=resume_token.value,
                 )
 
-        if run_ok is False and run_error:
+        # #1047: a refusal that is an answer, not a failure — its text alone.
+        plain_refusal = (
+            turn is None
+            and run_ok is False
+            and bool(run_error)
+            and _plain_prespawn_refusal(completed.usage) is not None
+        )
+        if plain_refusal:
+            final_answer = str(run_error)
+        elif run_ok is False and run_error:
             raw_error = str(run_error)
             # #887: the hint depends on why the session ended and on whether
             # the run had any turns, not just on the error text.
@@ -7527,10 +7565,17 @@ async def handle_message(
                 final_rendered, _unattended_footer(unattended)
             )
 
-        # Append the engine's subscription-usage footer (Claude, Antigravity)
-        final_rendered = await _append_subscription_footer(
-            runner, final_rendered, footer_cfg
-        )
+        if plain_refusal:
+            # #1047: the refusal's own text replaces the card — no header,
+            # resume line or footers (nothing ran), and no Cancel button.
+            final_rendered = RenderedMessage(
+                text=final_answer, extra={"reply_markup": {"inline_keyboard": []}}
+            )
+        else:
+            # Append the engine's subscription-usage footer (Claude, Antigravity)
+            final_rendered = await _append_subscription_footer(
+                runner, final_rendered, footer_cfg
+            )
 
         logger.debug(
             "handle.final.rendered",

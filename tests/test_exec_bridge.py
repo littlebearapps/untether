@@ -1541,6 +1541,78 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "blocked"),
+    [
+        (CODEX_ENGINE, "concurrency"),
+        ("claude", "ram"),
+        ("opencode", "unsupported_version"),
+        ("antigravity", "no_project"),
+        ("antigravity", "invalid_argument"),
+    ],
+)
+async def test_1047_other_prespawn_blocks_keep_the_error_card(
+    engine: str, blocked: str
+) -> None:
+    """#1047 made only Antigravity's ``/continue`` refusal a plain reply;
+    every other pre-spawn block still renders as an error card and warns."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="🛑 refused", usage={"prespawn_blocked": blocked})],
+        engine=engine,
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    final = transport.send_calls[-1]["message"].text
+    assert final.startswith(f"error · {engine}")
+    assert "```\n🛑 refused\n```" in final
+    (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
+    assert summary["log_level"] == "warning"
+    assert "prespawn_blocked" not in summary
+
+
+@pytest.mark.anyio
+async def test_1047_continue_refusal_is_plain_on_the_bridge() -> None:
+    """The bridge side of #1047, engine-neutral: the reason alone decides."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="No conversation yet.",
+                usage={"prespawn_blocked": "continue_unresolved"},
+            )
+        ],
+        engine="antigravity",
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    progress, final = transport.send_calls
+    assert final["message"].text == "No conversation yet."
+    assert final["options"].replace == progress["ref"]
+    (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
+    assert summary["log_level"] == "info"
+    assert summary["prespawn_blocked"] == "continue_unresolved"
+
+
+@pytest.mark.anyio
 async def test_on_resume_failed_not_called_when_not_resumed() -> None:
     """Callback does not fire for new sessions (resume_token=None)."""
     transport = FakeTransport()

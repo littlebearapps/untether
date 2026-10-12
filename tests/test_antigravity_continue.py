@@ -513,3 +513,122 @@ async def test_resume_by_id_to_a_deleted_conversation_still_clears(
     assert "That Antigravity conversation no longer exists" in final
     assert "couldn't be resumed, so it was cleared" in final
     assert [e for e in logs if e["event"] == "session.auto_cleared"]
+
+
+# -- #1047: a refused /continue is a plain reply -------------------------------
+
+
+async def _seed_quota_footer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cache a ``/usage`` quota for the fake agy and switch the quota line
+    on, so any Antigravity final that gets the footer shows it."""
+    from untether.settings import FooterSettings
+    from untether.utils import antigravity_quota
+
+    async def seed(runner: Any, command: str, **kwargs: Any) -> dict[str, Any]:
+        bucket = {"window": "5h", "remaining_fraction": 0.5, "reset_time": None}
+        return {"groups": [{"name": "Gemini Models", "buckets": [bucket]}]}
+
+    monkeypatch.setattr(antigravity_quota, "run_agy_slash", seed)
+    await antigravity_quota.get_quota(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_footer_settings",
+        lambda: FooterSettings(show_api_cost=False, show_subscription_usage=True),
+    )
+
+
+async def _continue_in_chat(
+    base: Path, *, final_notify: bool = True
+) -> tuple[FakeTransport, list[Any]]:
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=final_notify
+    )
+    token = set_run_base_dir(base)
+    try:
+        with structlog.testing.capture_logs() as logs, anyio.fail_after(30):
+            await handle_message(
+                cfg,
+                runner=AntigravityRunner(antigravity_cmd=str(FAKE_AGY)),
+                incoming=IncomingMessage(
+                    channel_id=4243, message_id=10, text="carry on"
+                ),
+                resume_token=ResumeToken(engine=ENGINE, value="", is_continue=True),
+                running_tasks={},
+            )
+    finally:
+        reset_run_base_dir(token)
+    return transport, logs
+
+
+def _cache_for(case: str, cache: Path, tree: dict[str, Path]) -> str:
+    if case == "no_entry":
+        _write(cache, {str(tree["outer"]): CONV})
+        return agy.NO_CONVERSATION_TEXT
+    if case == "shared_id":
+        _write(cache, {str(tree["proj"]): CONV, str(tree["child"]): CONV})
+        return agy.CONTINUE_SHARED_TEXT
+    cache.write_bytes(b"not json")
+    return agy.CONTINUE_UNREADABLE_TEXT
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", ["no_entry", "shared_id", "unreadable"])
+async def test_refused_continue_is_a_plain_reply(
+    cache: Path,
+    record: Path,
+    tree: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """The refusal text alone replaces the progress card: no error header,
+    no code block, no quota line, and no WARNING for a run that was never
+    started."""
+    text = _cache_for(case, cache, tree)
+    await _seed_quota_footer(monkeypatch)
+
+    transport, logs = await _continue_in_chat(tree["proj"])
+
+    assert not record.exists(), "agy was started"
+    progress, final = transport.send_calls
+    assert final["message"].text == text
+    assert final["options"].replace == progress["ref"]
+    assert final["message"].extra.get("reply_markup") == {"inline_keyboard": []}
+    assert transport.edit_calls == []
+    warnings = [e for e in logs if e["log_level"] in {"warning", "error"}]
+    assert [e["event"] for e in warnings] == ["antigravity.continue.refused"]
+    (summary,) = [e for e in logs if e["event"] == "session.summary.no_events"]
+    assert summary["log_level"] == "info"
+    assert summary["prespawn_blocked"] == agy.CONTINUE_BLOCK
+
+
+@pytest.mark.anyio
+async def test_refused_continue_without_final_notify_edits_the_card(
+    cache: Path, record: Path, tree: dict[str, Path]
+) -> None:
+    """With final notifications off the final is an edit of the progress
+    card: the same plain text, and the card's Cancel button is cleared."""
+    transport, _ = await _continue_in_chat(tree["proj"], final_notify=False)
+    assert not record.exists(), "agy was started"
+    (progress,) = transport.send_calls
+    final = transport.edit_calls[-1]
+    assert final["ref"] == progress["ref"]
+    assert final["message"].text == agy.NO_CONVERSATION_TEXT
+    assert final["message"].extra.get("reply_markup") == {"inline_keyboard": []}
+
+
+@pytest.mark.anyio
+async def test_a_continue_that_ran_and_failed_keeps_the_error_card(
+    cache: Path, tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: agy was started (the recorded conversation was deleted), so
+    the run failed for real and keeps the error card and its quota line."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "unknown_conversation")
+    _write(cache, {str(tree["proj"]): GONE})
+    await _seed_quota_footer(monkeypatch)
+
+    transport, _ = await _continue_in_chat(tree["proj"])
+
+    final = transport.send_calls[-1]["message"].text
+    assert final.startswith("error · antigravity")
+    assert "nothing was resumed" in final
+    assert "Gemini Models" in final
