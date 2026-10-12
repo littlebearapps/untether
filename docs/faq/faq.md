@@ -36,7 +36,7 @@ Already have a bot token? Answer **yes** when the wizard asks whether you have o
 
 ## Which AI coding agents does Untether support?
 
-Untether supports four agent CLIs out of the box:
+Untether supports five agent CLIs out of the box:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — complex refactors, architecture, long context. Most interactive features (plan mode, ask mode, diff preview, the Pause & Outline plan gate) are Claude-specific.
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
