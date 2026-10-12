@@ -6904,7 +6904,8 @@ async def handle_message(
 
     # ── #777 live background-task status ──────────────────────────────────
     def _bg_tasks() -> list[Any]:
-        # The run's own native task map (Claude); empty for other engines.
+        # The run's own native task map (Claude, and Antigravity since #978);
+        # empty for engines whose state has none.
         tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
         return list(tasks.values()) if isinstance(tasks, dict) else []
 

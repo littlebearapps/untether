@@ -1162,8 +1162,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 forbidden = {Path("/"), Path.home().resolve(), Path.cwd().resolve()}
                 if resolved in forbidden:
                     reason = "forbidden_dir"
-            except OSError:
+            except (OSError, RuntimeError):
                 # #1044: a directory that can't be compared can't be cleared.
+                # Python 3.12's ``resolve()`` raises RuntimeError for a
+                # symlink loop (OSError from 3.13).
                 reason = "unresolved_dir"
         if reason is None:
             return None
@@ -1432,7 +1434,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # like an unfinished planted-config scan above.
             pre.permission_unknown = _CHECK_FAILED if config is None else _NO_VALUE
             if trigger is not None:
-                logger.error(
+                # WARNING, like the scan hold above: one failed probe on a
+                # frequent cron is not an error report. The in-stream refusal
+                # when ``init`` can't confirm it either stays at ERROR.
+                logger.warning(
                     "antigravity.permission_mode.unverified",
                     source="config",
                     requested=mode,

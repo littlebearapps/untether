@@ -1945,6 +1945,8 @@ async def test_unattended_workspace_run_held_when_precheck_unknown(
     assert not record.exists()
     (log,) = [e for e in logs if e["event"] == "antigravity.permission_mode.unverified"]
     assert log["trigger"] == trigger and log["source"] == "config"
+    # Held, not broken: a WARNING, so the error-report watcher stays quiet.
+    assert log["log_level"] == "warning"
     # The check works again → the schedule runs.
     agy_config["value"] = _config()
     events = await _run(runner, EngineRunOptions(unattended_trigger=trigger))
@@ -2128,9 +2130,14 @@ def test_hold_messages_say_what_the_next_message_does() -> None:
 # ── #1044: the no-project check fails closed on a path it can't resolve ─────
 
 
+# RuntimeError: what Python 3.12's ``Path.resolve()`` raises for a symlink loop.
+@pytest.mark.parametrize("exc_type", [OSError, RuntimeError])
 @pytest.mark.anyio
 async def test_unresolvable_project_dir_refused(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    exc_type: type[Exception],
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     record = tmp_path / "record.json"
     monkeypatch.setenv("UNTETHER_FAKE_AGY_RECORD", str(record))
@@ -2138,7 +2145,7 @@ async def test_unresolvable_project_dir_refused(
 
     def resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
         if self == project:
-            raise OSError("too many levels of symbolic links")
+            raise exc_type("too many levels of symbolic links")
         return real_resolve(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "resolve", resolve)
