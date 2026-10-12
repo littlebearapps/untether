@@ -129,7 +129,8 @@ def _help(tmp_path: Path) -> str:
 
 def _untether_flags() -> set[str]:
     """Every flag the runner's own ``build_args`` emits (Workspace, Full
-    access, ``--conversation`` and ``--continue`` runs)."""
+    access and ``--conversation`` runs; ``/continue`` is one of those since
+    #1039)."""
     runner = AntigravityRunner(antigravity_cmd="agy", model="probe-model")
     flags: set[str] = set()
     for mode in ("workspace", "full"):
@@ -137,7 +138,6 @@ def _untether_flags() -> set[str]:
             for resume in (
                 None,
                 ResumeToken(engine="antigravity", value="0" * 36),
-                ResumeToken(engine="antigravity", value="", is_continue=True),
             ):
                 args = runner.build_args("p", resume, state=None)
                 # Values are joined (``--model=x``): compare the flag name.

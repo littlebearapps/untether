@@ -342,6 +342,13 @@ def _no_agy_version_probe(
     antigravity_quota.clear_effort_cache()
     empty_config_dir = tmp_path_factory.mktemp("agy-user-config")
     monkeypatch.setattr(antigravity_scan, "user_config_dir", lambda: empty_config_dir)
+    # #1039: /continue never reads the host's real last-conversations file.
+    from untether.utils import antigravity_continue
+
+    no_cache = empty_config_dir / "cache" / "last_conversations.json"
+    monkeypatch.setattr(
+        antigravity_continue, "last_conversations_path", lambda: no_cache
+    )
     yield
     antigravity_runner._VERSION_CACHE.clear()
     antigravity_quota.clear_config_cache()

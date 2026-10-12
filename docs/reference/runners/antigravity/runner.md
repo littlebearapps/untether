@@ -91,7 +91,7 @@ One `agy` process per message:
 
 ```text
 agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
-    [--conversation=<id> | --continue] [--model=<model>] [--effort=<level>]
+    [--conversation=<id>] [--model=<model>] [--effort=<level>]
     (--mode=accept-edits --agent=untether-workspace | --dangerously-skip-permissions)
 ```
 
@@ -126,9 +126,36 @@ Final messages end with the resume line:
 ```
 
 That line is what you copy into a terminal. Replying to it (or chat mode) resumes the conversation; Untether
-itself passes the id to agy in the joined form `--conversation=<id>`. `/continue` uses `agy --continue`, which picks
-the most recent conversation for the project directory. agy also considers a parent or child directory's
-conversations there, so run `/continue` from the directory you used in the terminal.
+itself passes the id to agy in the joined form `--conversation=<id>`.
+
+### `/continue`
+
+`/continue` resumes the conversation agy last ran from **this project's own directory**, including one you started
+in a terminal there. Untether doesn't pass agy's `--continue`: on agy 1.3.3 that flag also resumes a conversation
+from a parent or a child directory, and Untether's projects are often nested
+([#1039](https://github.com/littlebearapps/untether/issues/1039)). It reads the one file where agy records the last
+conversation per directory, `~/.gemini/antigravity-cli/cache/last_conversations.json`, takes the entry for the run
+directory and passes `--conversation=<id>`.
+
+- **The path must match exactly.** The run directory is resolved to its real path (absolute, symlinks resolved, no
+  trailing slash) and compared with agy's entries as written. A parent, child or sibling directory never matches,
+  and letter case is never folded. An entry agy recorded under a symlinked spelling of the directory doesn't match
+  either; start the conversation from the real path.
+- **No entry, no run.** Untether replies `No Antigravity conversation for this project yet — send a normal message
+  to start one.` and agy isn't started.
+- **A conversation listed under two directories isn't resumed.** After a cross-directory resume agy writes the
+  other directory into that file too, so an entry means "last run from here", not "started here". When this
+  directory's conversation id also appears under any other path, Untether can't tell which project it belongs to
+  and replies `Antigravity's most recent conversation in this folder has also been run from another folder …`.
+  This is what an earlier 0.36.1 pre-release `/continue`, or `agy --continue` in a terminal, can leave behind. It
+  clears once either directory has a newer conversation of its own. If the other directory's entry is replaced
+  first, the leftover entry is no longer detectable and is resumed as this directory's last conversation.
+- **The file is treated as untrusted.** If it is unreadable, not a regular file, over 1 MiB, not JSON, not an
+  object of strings, or the entry isn't a conversation id, Untether replies `Untether couldn't read Antigravity's
+  record of recent conversations …` and agy isn't started. It never falls back to `--continue`.
+
+A refusal is logged as `antigravity.continue.refused` with a `reason`; none of them changes the chat's saved
+session. To resume a particular conversation instead, reply to its resume line.
 
 If the conversation id is unknown, agy prints a warning and silently starts a new conversation. Untether stops agy
 before your message runs somewhere you didn't pick, and replies: `That Antigravity conversation no longer exists …
@@ -438,6 +465,7 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
 | When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 stream carries only `CommandLine` (the per-call value, 5000 / 10000 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. Checked 2026-10-12. Retire when the stream prints the value or the approval gate's hook supplies it |
 | Which subagent a completion belongs to | — (**custom**: first started, first finished) | The parent stream's `system_message` step has no content. The child's id is in agy's transcript file (`sender=`), which Untether doesn't read (rule 3: no engine state files). Checked 2026-10-12, agy 1.3.3. Retire when the stream names the child or the gate's hook reports it |
+| `/continue` resumes only this project's conversation ([#1039](https://github.com/littlebearapps/untether/issues/1039)) | — (**custom**: reads one agy file, `~/.gemini/antigravity-cli/cache/last_conversations.json`, for the exact run directory and passes the native `--conversation=<id>`) | `--continue` is native but fails the "meets the feature's real requirement" test: it also resumes a conversation from a parent or child directory (probe P-L5, one run each way), and `--help` lists no flag, setting or env var that limits it to the current directory. Reading an engine state file is the exception recorded in decision D33, limited to this file. An id listed under more than one path is refused, because agy also records the directory a conversation was resumed from. Checked 2026-10-12, agy 1.3.3. Retire when agy scopes `--continue` to the current directory or adds a flag for it |
 | Telling a timer's or command's completion notice from a subagent's | — (**custom**: one `system_message` is expected after each finished background command or timer, and dropped when the next tool starts) | Same content-less `system_message`. Checked 2026-10-12, agy 1.3.3. Retires with the row above |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
@@ -461,7 +489,8 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.credits.low`, `antigravity.conversation.missing`, `antigravity.permission_mode.mismatch`,
 `antigravity.workspace_config_present` / `_changed` / `.unattended_refused`, `antigravity.config_check.fetched` /
 `.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`,
-`antigravity.argv.invalid_value`, `antigravity.workspace_agent.installed` / `.unavailable`,
+`antigravity.argv.invalid_value`, `antigravity.continue.resolved` / `.refused` (`reason`) / `.lookup_failed`,
+`antigravity.workspace_agent.installed` / `.unavailable`,
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
 (a command still running when the answer arrived).
 

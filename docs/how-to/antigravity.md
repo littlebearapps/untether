@@ -91,8 +91,9 @@ When agy finishes, the final message carries the answer, a footer and the resume
   dollars, so there is no cost figure.
 - **The resume line** is what you copy into a terminal to carry on there.
 - **To continue in Telegram**, just send another message in chat mode, or reply to the message. `/continue` picks
-  up the most recent conversation for the project directory, including one you started in a terminal; see
-  [Cross-environment resume](cross-environment-resume.md).
+  up the most recent conversation run from this project's own directory, including one you started in a terminal
+  there. It never picks up a conversation from a parent or child folder: if this folder has none, Untether says so
+  and starts nothing. See [Cross-environment resume](cross-environment-resume.md).
 
 agy sends one answer per run. If it started a background command, it holds the answer until that finishes (up to 30
 minutes) and the progress message shows `⏳ Antigravity is waiting for 1 background task …`. That isn't a stall.

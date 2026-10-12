@@ -119,15 +119,27 @@ async def test_run_resume_end_to_end(
 async def test_run_continue_end_to_end(
     project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # #1039: the id comes from agy's last-conversations file for this exact
+    # directory; agy's own `--continue` is never passed (refusals and the
+    # parent/child cases: tests/test_antigravity_continue.py).
+    from untether.utils import antigravity_continue
+
+    conversation = "5bcf649b-0dfc-44b4-b691-2f3314724abf"
+    cache = antigravity_continue.last_conversations_path()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({os.path.realpath(project): conversation}))
     _scenario(monkeypatch, "continue_workspace")
     resume = ResumeToken(engine=ENGINE, value="", is_continue=True)
-    events = await _run("quote it", resume)
+    try:
+        events = await _run("quote it", resume)
+    finally:
+        cache.unlink()
     done = _assert_contract(events)
-    assert events[0].resume.value == "5bcf649b-0dfc-44b4-b691-2f3314724abf"
+    assert events[0].resume.value == conversation
     assert done.resume == events[0].resume
     argv = json.loads(record.read_text())["argv"]
-    assert "--continue" in argv
-    assert not any(a.startswith("--conversation") for a in argv)
+    assert f"--conversation={conversation}" in argv
+    assert "--continue" not in argv
 
 
 @pytest.mark.anyio

@@ -256,11 +256,11 @@ def test_build_args_never_emits_the_two_token_form() -> None:
     for value in (cid, "gemini-3.8-flash", "high"):
         assert value not in args
     _assert_no_injected_flag(args, "")
-    # /continue still has no value at all.
+    # #1039: a /continue token is resolved to an id before this; an
+    # unresolved one is refused, never passed on as agy's own flag.
     cont = ResumeToken(engine=ENGINE, value="", is_continue=True)
-    args = runner.build_args("p", cont, state=runner.new_state("p", cont))
-    assert "--continue" in args
-    assert not any(a.startswith("--conversation") for a in args)
+    with pytest.raises(argv_mod.AgyArgvError):
+        runner.build_args("p", cont, state=runner.new_state("p", cont))
 
 
 # ── the run is refused before spawn ─────────────────────────────────────────

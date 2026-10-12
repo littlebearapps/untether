@@ -135,6 +135,26 @@ NO_PROJECT_TEXT = (
     "can edit files there."
 )
 NO_PROJECT_BLOCK = "no_project"
+# /continue (#1039): agy's own ``--continue`` also resumes a parent or child
+# directory's conversation, so Untether looks this directory up itself
+# (``utils/antigravity_continue.py``) and refuses when there is nothing it
+# can trust.
+NO_CONVERSATION_TEXT = (
+    "No Antigravity conversation for this project yet — send a normal message "
+    "to start one."
+)
+CONTINUE_SHARED_TEXT = (
+    "Antigravity's most recent conversation in this folder has also been run "
+    "from another folder, so Untether can't tell which project it belongs to "
+    "and didn't resume it. Send a normal message instead, or reply to a "
+    "resume line to carry on a particular conversation."
+)
+CONTINUE_UNREADABLE_TEXT = (
+    "Untether couldn't read Antigravity's record of recent conversations, so "
+    "/continue didn't resume anything. Send a normal message instead, or "
+    "reply to a resume line to carry on a particular conversation."
+)
+CONTINUE_BLOCK = "continue_unresolved"
 INVALID_ARGUMENT_BLOCK = "invalid_argument"
 # A model or conversation id that agy could read as a flag
 # (``utils/antigravity_argv.py``): refused before anything spawns.
@@ -971,6 +991,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if refusal is not None:
             yield refusal
             return
+        if resume is not None and resume.is_continue:
+            # #1039: from here on the run is an ordinary resume by id.
+            resume, continue_block = await self._resolve_continue()
+            if continue_block is not None:
+                yield continue_block
+                return
         argv_block = self._invalid_argument_refusal(resume)
         if argv_block is not None:
             yield argv_block
@@ -1038,6 +1064,58 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             error=NO_PROJECT_TEXT,
             resume=resume,
             usage={PRESPAWN_BLOCKED_KEY: NO_PROJECT_BLOCK},
+        )
+
+    async def _resolve_continue(
+        self,
+    ) -> tuple[ResumeToken | None, UntetherEvent | None]:
+        """``/continue`` → this directory's own conversation, or a refusal.
+
+        #1039: agy's ``--continue`` also resumes a conversation from a parent
+        or child directory and has no flag to stop that, so the id comes from
+        agy's last-conversations file for the exact run directory (custom:
+        see the register in ``docs/reference/runners/antigravity/runner.md``).
+        Never falls back to ``--continue``.
+        """
+        from ..utils import antigravity_continue
+
+        base = get_run_base_dir()
+        reason = "no_run_dir"
+        if base is not None:
+            try:
+                # Off the event loop: one small, bounded file read.
+                found = await anyio.to_thread.run_sync(
+                    antigravity_continue.lookup_conversation, base
+                )
+            except Exception as exc:  # noqa: BLE001 - never spawn on a surprise
+                logger.warning(
+                    "antigravity.continue.lookup_failed",
+                    error_type=type(exc).__name__,
+                )
+                reason = "lookup_failed"
+            else:
+                if found.conversation_id is not None:
+                    logger.info("antigravity.continue.resolved", base=str(base))
+                    return (
+                        ResumeToken(engine=ENGINE, value=found.conversation_id),
+                        None,
+                    )
+                reason = found.reason
+        if reason in antigravity_continue.MISSING_REASONS:
+            text = NO_CONVERSATION_TEXT
+        elif reason == antigravity_continue.SHARED_ID:
+            text = CONTINUE_SHARED_TEXT
+        else:
+            text = CONTINUE_UNREADABLE_TEXT
+        logger.warning(
+            "antigravity.continue.refused",
+            reason=reason,
+            base=str(base) if base is not None else None,
+        )
+        return None, EventFactory(ENGINE).completed_error(
+            error=text,
+            resume=None,
+            usage={PRESPAWN_BLOCKED_KEY: CONTINUE_BLOCK},
         )
 
     def _invalid_argument_refusal(
@@ -1361,7 +1439,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # ``AgyArgvError`` on a bad value; ``run_impl`` refused that run
         # before getting here.
         from ..utils import antigravity_agent
-        from ..utils.antigravity_argv import agy_flag
+        from ..utils.antigravity_argv import AgyArgvError, agy_flag
 
         args = [
             "--input-format",
@@ -1373,11 +1451,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             "--disable-slash-commands",
         ]
         if resume is not None:
-            # #817: a /continue token has value "" — check it first.
+            # #1039: agy's own continue flag also resumes a parent or child
+            # directory's conversation, so it is never passed. ``run_impl``
+            # swaps a /continue token (value "", #817) for this directory's
+            # conversation id before getting here.
             if resume.is_continue:
-                args.append("--continue")
-            else:
-                args.append(agy_flag("--conversation", resume.value))
+                raise AgyArgvError("conversation", "unresolved_continue")
+            args.append(agy_flag("--conversation", resume.value))
         model = self._model()
         if model:
             args.append(agy_flag("--model", model))

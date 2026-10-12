@@ -188,10 +188,14 @@ def test_build_args_resume_uses_conversation() -> None:
 
 
 def test_build_args_continue_checked_before_value() -> None:
-    args = _args(ResumeToken(engine=ENGINE, value="", is_continue=True))
-    assert "--continue" in args
-    assert not any(a.startswith("--conversation") for a in args)
-    assert "" not in args
+    # #817: a /continue token has value "" and must never become
+    # `--conversation=`. #1039: nor agy's own continue flag, which crosses
+    # into parent and child directories — `run_impl` resolves the id first
+    # (tests/test_antigravity_continue.py).
+    from untether.utils.antigravity_argv import AgyArgvError
+
+    with pytest.raises(AgyArgvError):
+        _args(ResumeToken(engine=ENGINE, value="", is_continue=True))
 
 
 def test_build_args_model_from_run_options_overrides_config() -> None:
