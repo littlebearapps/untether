@@ -120,6 +120,8 @@ the `runner.completed` log (`context_pct`). `used` is the latest model call's `i
 
 - Resume line: `` `agy --conversation <id>` ``; ids shorter than 8 characters are never parsed as one.
 - A failed resume clears the chat's saved session only for the "conversation no longer exists" reply. Sign-in,
-  quota and other errors keep it.
+  quota and other errors keep it. So does a `/continue` that finds a deleted conversation: the reply is "The
+  conversation Antigravity had recorded for this project no longer exists, so nothing was resumed", with no resume
+  token.
 - Antigravity is not a turn-counting engine, and its child processes don't earn the long stall threshold except
   through the background wait described in the [runner reference](runner.md#background-commands).

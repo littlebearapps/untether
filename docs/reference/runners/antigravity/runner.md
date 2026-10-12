@@ -157,9 +157,16 @@ directory and passes `--conversation=<id>`.
 A refusal is logged as `antigravity.continue.refused` with a `reason`; none of them changes the chat's saved
 session. To resume a particular conversation instead, reply to its resume line.
 
+agy's file can still list a conversation that has since been deleted. Untether then stops agy as it does for any
+unknown id (below) and replies `The conversation Antigravity had recorded for this project no longer exists, so
+nothing was resumed. …`. The id came from agy's record, not from the chat, so the chat's saved session is kept and
+the reply carries no resume line. The same holds for every engine: a failed `/continue` never clears the chat's
+saved session.
+
 If the conversation id is unknown, agy prints a warning and silently starts a new conversation. Untether stops agy
 before your message runs somewhere you didn't pick, and replies: `That Antigravity conversation no longer exists …
-send your message again to start a new one.` The chat's saved session is cleared.
+send your message again to start a new one.` The chat's saved session is cleared, unless the id came from
+`/continue` (above).
 
 ### A project is required
 

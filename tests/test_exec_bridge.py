@@ -1570,7 +1570,11 @@ async def test_on_resume_failed_not_called_when_not_resumed() -> None:
 
 
 async def _run_failed_resume_952(
-    engine: str, error: str, usage: dict[str, Any] | None = None
+    engine: str,
+    error: str,
+    usage: dict[str, Any] | None = None,
+    *,
+    is_continue: bool = False,
 ) -> tuple[list[ResumeToken], list[str], list[dict[str, Any]]]:
     transport = FakeTransport()
     runner = ScriptRunner(
@@ -1591,7 +1595,11 @@ async def _run_failed_resume_952(
             cfg,
             runner=runner,
             incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
-            resume_token=ResumeToken(engine=engine, value="healthy-session"),
+            resume_token=(
+                ResumeToken(engine=engine, value="", is_continue=True)
+                if is_continue
+                else ResumeToken(engine=engine, value="healthy-session")
+            ),
             on_resume_failed=on_resume_failed,
         )
     texts = [c["message"].text for c in transport.send_calls] + [
@@ -1666,6 +1674,34 @@ async def test_952_reported_turns_win_over_error_text() -> None:
         "codex", "no rollout found", usage={"num_turns": 2}
     )
     assert cleared == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error", "usage"),
+    [
+        ("antigravity", "Antigravity conversation not found", None),
+        ("codex", "thread/resume failed: no rollout found for thread id x", None),
+        ("opencode", 'NotFoundError data: {message: "Session not found: ses_x"}', None),
+        ("pi", "pi failed (rc=1).\nNo session found matching 'zzzz'", None),
+        ("claude", "No conversation found to continue", None),
+        ("claude", "claude failed (rc=1).", {"num_turns": 0}),
+    ],
+)
+async def test_1039_failed_continue_keeps_the_saved_session(
+    engine: str, error: str, usage: dict[str, Any] | None
+) -> None:
+    """#1039: a /continue token names no session, so its failure never clears
+    the chat's saved one (the callback clears by engine) or says it did."""
+    cleared, texts, logs = await _run_failed_resume_952(
+        engine, error, usage, is_continue=True
+    )
+
+    assert cleared == []
+    skipped = [r for r in logs if r.get("event") == "session.auto_clear_skipped"]
+    assert skipped and skipped[0]["reason"] == "continue_token"
+    assert not [r for r in logs if r.get("event") == "session.auto_cleared"]
+    assert not any("couldn't be resumed" in t for t in texts)
 
 
 # ---------------------------------------------------------------------------

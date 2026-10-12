@@ -153,6 +153,15 @@ CONTINUE_SHARED_TEXT = (
     "and didn't resume it. Send a normal message instead, or reply to a "
     "resume line to carry on a particular conversation."
 )
+# The id came from agy's own record, never from the chat, so this neither
+# matches ``runner_bridge._RESUME_FAILURE_RE`` nor claims a session was
+# cleared: the chat's saved conversation is a different one and is kept.
+CONTINUE_GONE_TEXT = (
+    "The conversation Antigravity had recorded for this project no longer "
+    "exists, so nothing was resumed. Send a normal message to carry on from "
+    "this chat's own conversation or start a new one, or reply to a resume "
+    "line to pick a particular conversation."
+)
 CONTINUE_UNREADABLE_TEXT = (
     "Untether couldn't read Antigravity's record of recent conversations, so "
     "/continue didn't resume anything. Send a normal message instead, or "
@@ -751,6 +760,24 @@ class _RunPrecheck:
 _PRECHECK: contextvars.ContextVar[_RunPrecheck | None] = contextvars.ContextVar(
     "untether_agy_precheck", default=None
 )
+# #1039: same hand-off — whether this run's conversation id was looked up for
+# /continue (``AntigravityStreamState.from_continue``).
+_FROM_CONTINUE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "untether_agy_from_continue", default=False
+)
+
+
+def _conversation_gone_text(state: AntigravityStreamState) -> str:
+    return CONTINUE_GONE_TEXT if state.from_continue else CONVERSATION_GONE_TEXT
+
+
+def _gone_resume(state: AntigravityStreamState) -> ResumeToken | None:
+    """The token on a "conversation no longer exists" reply: the id the chat
+    asked for, or none when /continue looked it up (no resume line for an id
+    the chat never named)."""
+    if state.from_continue or not state.expected_resume:
+        return None
+    return ResumeToken(engine=ENGINE, value=state.expected_resume)
 
 
 # ── one-time notices ────────────────────────────────────────────────────────
@@ -912,6 +939,8 @@ class AntigravityStreamState:
     session_id: str | None = None  # init / step / result; never ""
     expected_resume: str | None = None  # resume.value when resuming by id
     conversation_missing: bool = False  # G8: init id != the resumed id
+    # #1039: the id was looked up for /continue, not named by the chat.
+    from_continue: bool = False
     # init.model: agy ≥ 1.3.2, and only when ``--model`` was passed (it
     # echoes the flag). Nothing else in the stream names the model.
     init_model: str | None = None
@@ -1069,7 +1098,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if refusal is not None:
             yield refusal
             return
-        if resume is not None and resume.is_continue:
+        from_continue = resume is not None and resume.is_continue
+        if from_continue:
             # #1039: from here on the run is an ordinary resume by id.
             resume, continue_block = await self._resolve_continue()
             if continue_block is not None:
@@ -1093,6 +1123,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return
         # Consumed by ``new_state`` inside the base run_impl (same task).
         _PRECHECK.set(precheck)
+        _FROM_CONTINUE.set(from_continue)
         _log_tos_notice_once()
         # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True).
         async with contextlib.aclosing(
@@ -1651,6 +1682,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         precheck = _PRECHECK.get()
         _PRECHECK.set(None)
+        from_continue = _FROM_CONTINUE.get()
+        _FROM_CONTINUE.set(False)
         options = get_run_options()
         mode = self._effective_mode()
         label = _mode_label(mode)
@@ -1660,6 +1693,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return AntigravityStreamState(
             factory=EventFactory(ENGINE),
             expected_resume=expected or None,
+            from_continue=from_continue,
             resumed=resume is not None,
             effective_mode=mode,
             mode_label=label,
@@ -1801,6 +1835,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     elapsed_ms=self._kill_elapsed_ms(state),
                     session_id=state.session_id,
                 )
+            if kind == "conversation_gone":
+                return _conversation_gone_text(state)
             return _KILL_TEXT[kind]
         if error and "authentication failed or timed out" in error.lower():
             logger.error("antigravity.auth.failed", session_id=state.session_id)
@@ -1819,9 +1855,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         out = self._settle_open_actions(state, ok=False, message=state.kill_reason)
         if state.kill_reason == "conversation_gone" and state.expected_resume:
             state.conversation_missing = True
-            token: ResumeToken | None = ResumeToken(
-                engine=ENGINE, value=state.expected_resume
-            )
+            token: ResumeToken | None = _gone_resume(state)
             answer = ""
         else:
             token = self._resume_for_completed(state, resume)
@@ -2141,8 +2175,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # agy answers SIGTERM with an "interrupted" result (rc 1).
             with contextlib.suppress(OSError):
                 os.kill(state.agy_pid, signal.SIGTERM)
-        old = ResumeToken(engine=ENGINE, value=state.expected_resume)
-        return [state.factory.completed_error(error=CONVERSATION_GONE_TEXT, resume=old)]
+        return [
+            state.factory.completed_error(
+                error=_conversation_gone_text(state), resume=_gone_resume(state)
+            )
+        ]
 
     def _translate_step(
         self, su: agy_schema.StepUpdatePayload, state: AntigravityStreamState

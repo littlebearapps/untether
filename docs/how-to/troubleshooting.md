@@ -234,6 +234,8 @@ Ask me and Plan first aren't available yet. Pick Workspace or Full access in `/c
 
 agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session. Send your message again to start fresh.
 
+After `/continue` the message is `The conversation Antigravity had recorded for this project no longer exists, so nothing was resumed.` instead: agy's record of this project's last conversation pointed at one that has been deleted. Nothing is cleared, so a normal message carries on from the chat's own conversation (or starts a new one).
+
 ### "That model id isn't valid for Antigravity"
 
 **Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash).`

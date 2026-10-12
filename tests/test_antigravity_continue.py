@@ -14,11 +14,20 @@ import os
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 import structlog.testing
 
+from tests.telegram_fakes import FakeTransport
+from untether.markdown import MarkdownPresenter
 from untether.model import CompletedEvent, ResumeToken, StartedEvent
 from untether.runner import PRESPAWN_BLOCKED_KEY
+from untether.runner_bridge import (
+    _RESUME_FAILURE_RE,
+    ExecBridgeConfig,
+    IncomingMessage,
+    handle_message,
+)
 from untether.runners import antigravity as agy
 from untether.runners.antigravity import AntigravityRunner
 from untether.utils import antigravity_continue as cont
@@ -387,3 +396,120 @@ def test_build_args_never_emits_a_bare_continue() -> None:
     assert err.value.reason == "unresolved_continue"
     # Nothing in the runner can put the flag into an argv.
     assert '"--continue"' not in inspect.getsource(agy)
+
+
+# -- /continue finds a conversation agy has since deleted --------------------
+
+# The id the ``unknown_conversation`` capture's stderr warning names.
+GONE = "00000000-1111-2222-3333-444444444444"
+SAVED = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+@pytest.mark.anyio
+async def test_continue_to_a_deleted_conversation_says_nothing_was_resumed(
+    cache: Path, tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "unknown_conversation")
+    _write(cache, {str(tree["proj"]): GONE})
+    events = await _continue(tree["proj"])
+    (done,) = events
+    assert isinstance(done, CompletedEvent) and done.ok is False
+    assert done.error == agy.CONTINUE_GONE_TEXT
+    # No resume line for the dead id, and nothing the bridge reads as "the
+    # chat's saved session failed".
+    assert done.resume is None
+    assert not _RESUME_FAILURE_RE.search(done.error or "")
+
+
+def test_continue_gone_text_claims_nothing_was_cleared() -> None:
+    text = agy.CONTINUE_GONE_TEXT
+    assert text.startswith(
+        "The conversation Antigravity had recorded for this project no longer"
+        " exists, so nothing was resumed."
+    )
+    assert "cleared" not in text
+    assert "last_conversations" not in text and ".gemini" not in text
+    assert text != agy.CONVERSATION_GONE_TEXT
+
+
+async def _bridge_run(
+    base: Path, resume: ResumeToken
+) -> tuple[dict[str, str], list[ResumeToken], list[str], list[Any]]:
+    """One run through ``handle_message`` in a chat whose saved Antigravity
+    session is ``SAVED``. ``on_resume_failed`` clears by engine, as the
+    Telegram loop's does."""
+    saved = {ENGINE: SAVED}
+    failed: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        failed.append(token)
+        saved.pop(token.engine, None)
+
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    token = set_run_base_dir(base)
+    try:
+        with structlog.testing.capture_logs() as logs, anyio.fail_after(30):
+            await handle_message(
+                cfg,
+                runner=AntigravityRunner(antigravity_cmd=str(FAKE_AGY)),
+                incoming=IncomingMessage(
+                    channel_id=4243, message_id=10, text="carry on"
+                ),
+                resume_token=resume,
+                running_tasks={},
+                on_resume_failed=on_resume_failed,
+            )
+    finally:
+        reset_run_base_dir(token)
+    texts = [call["message"].text for call in transport.send_calls]
+    texts += [call["message"].text for call in transport.edit_calls]
+    return saved, failed, texts, logs
+
+
+@pytest.mark.anyio
+async def test_continue_to_a_deleted_conversation_keeps_the_saved_session(
+    cache: Path, tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chat's saved conversation is healthy; agy's file lists another one
+    for this directory, which was deleted. /continue must leave the saved one
+    alone and must not say anything was cleared."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "unknown_conversation")
+    _write(cache, {str(tree["proj"]): GONE})
+
+    saved, failed, texts, logs = await _bridge_run(
+        tree["proj"], ResumeToken(engine=ENGINE, value="", is_continue=True)
+    )
+
+    assert saved == {ENGINE: SAVED}
+    assert failed == []
+    final = "\n".join(texts)
+    assert "no longer exists" in final and "nothing was resumed" in final
+    assert "was cleared" not in final
+    assert "couldn't be resumed" not in final
+    assert GONE not in final
+    assert not [e for e in logs if e["event"] == "session.auto_cleared"]
+    (skipped,) = [e for e in logs if e["event"] == "session.auto_clear_skipped"]
+    assert skipped["reason"] == "continue_token"
+
+
+@pytest.mark.anyio
+async def test_resume_by_id_to_a_deleted_conversation_still_clears(
+    cache: Path, tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unchanged: a resume that names the conversation (the saved session or
+    a reply to its resume line) clears it and says so."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "unknown_conversation")
+
+    saved, failed, texts, logs = await _bridge_run(
+        tree["proj"], ResumeToken(engine=ENGINE, value=GONE)
+    )
+
+    assert saved == {}
+    assert failed == [ResumeToken(engine=ENGINE, value=GONE)]
+    final = "\n".join(texts)
+    assert "That Antigravity conversation no longer exists" in final
+    assert "couldn't be resumed, so it was cleared" in final
+    assert [e for e in logs if e["event"] == "session.auto_cleared"]

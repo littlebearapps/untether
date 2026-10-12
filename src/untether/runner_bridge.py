@@ -7151,6 +7151,22 @@ async def handle_message(
             and run_ok is False
             and resume_token is not None
             and on_resume_failed is not None
+            and resume_token.is_continue
+        ):
+            # #1039: a /continue token names no session — the engine (or, for
+            # Antigravity, its last-conversations file) picked one. Its
+            # failure says nothing about the chat's saved session, which
+            # ``on_resume_failed`` would clear by engine.
+            logger.info(
+                "session.auto_clear_skipped",
+                reason="continue_token",
+                engine=resume_token.engine,
+            )
+        elif (
+            turn is None
+            and run_ok is False
+            and resume_token is not None
+            and on_resume_failed is not None
         ):
             if _resume_failure_clears_session(
                 resume_token.engine, completed.usage, run_error

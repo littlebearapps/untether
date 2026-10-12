@@ -115,6 +115,8 @@ A failed resumed run clears the chat's saved session only through `_resume_failu
 `num_turns` decides (0 → clear); with none, only the turn-count engines in `_TURN_COUNT_ENGINES` (Claude, AMP) clear,
 and every other engine clears only when the error matches `_RESUME_FAILURE_RE` (the CLI's own "session not found"
 wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x) never clears.
+Neither does a failed `/continue` (`resume_token.is_continue`, #1039): the token names no session, and the callback
+clears by engine, so it would wipe a saved session the run never touched.
 Never treat a missing `num_turns` as 0 again: Codex/OpenCode/Pi never report turns, so a bad model id or missing
 API key would wipe a healthy session.
 
