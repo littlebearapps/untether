@@ -3603,14 +3603,20 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("already_saved", [False, True])
 async def test_run_main_loop_prompt_upload_uses_caption_directives(
     tmp_path: Path,
+    already_saved: bool,
 ) -> None:
     payload = b"hello"
     proj_dir = tmp_path / "proj"
     other_dir = tmp_path / "other"
     proj_dir.mkdir()
     other_dir.mkdir()
+    if already_saved:
+        # #1031: an identical earlier upload is reused, not copied to `_1`.
+        (other_dir / "incoming").mkdir()
+        (other_dir / "incoming" / "hello.txt").write_bytes(payload)
 
     class _UploadBot(FakeBot):
         async def get_file(self, file_id: str) -> File | None:
@@ -3678,11 +3684,18 @@ async def test_run_main_loop_prompt_upload_uses_caption_directives(
                 raw={"file_id": "doc-1"},
             ),
         )
+        # Keep polling until the run starts: the identical-file comparison
+        # runs in a worker thread, which a finite poller's shutdown would
+        # otherwise race.
+        with anyio.move_on_after(5):
+            while not runner.calls:
+                await anyio.sleep(0.01)
 
     await run_main_loop(cfg, poller)
 
     saved_path = other_dir / "incoming" / "hello.txt"
     assert saved_path.read_bytes() == payload
+    assert [item.name for item in saved_path.parent.iterdir()] == ["hello.txt"]
     assert runner.calls
     prompt_text, _ = runner.calls[0]
     assert "do thing" in prompt_text

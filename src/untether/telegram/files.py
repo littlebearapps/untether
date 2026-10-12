@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
+import re
 import shlex
 import stat
 import tempfile
@@ -26,12 +28,14 @@ __all__ = [
     "default_upload_path",
     "deny_reason",
     "file_usage",
+    "find_identical_file",
     "format_bytes",
     "normalize_relative_path",
     "parse_file_command",
     "parse_file_prompt",
     "resolve_path_within_root",
     "split_command_args",
+    "upload_name_siblings",
     "write_bytes_atomic",
     "zip_directory",
 ]
@@ -358,6 +362,88 @@ def deduplicate_target(target: Path) -> Path:
             )
             return candidate
     raise FileExistsError(f"no available deduplicated path for {target}")
+
+
+def upload_name_siblings(target: Path) -> list[Path]:
+    """*target* followed by its existing ``_1`` … ``_999`` siblings, in order (#1031).
+
+    The names :func:`deduplicate_target` hands out for *target*, matched by
+    name in *target*'s own directory only. Nothing is opened or followed
+    here; :func:`find_identical_file` decides which entries may be read.
+    """
+    pattern = re.compile(
+        rf"{re.escape(target.stem)}_([1-9][0-9]{{0,2}}){re.escape(target.suffix)}"
+    )
+    numbered: list[tuple[int, Path]] = []
+    try:
+        with os.scandir(target.parent) as entries:
+            for entry in entries:
+                match = pattern.fullmatch(entry.name)
+                if match is not None:
+                    numbered.append((int(match.group(1)), target.parent / entry.name))
+    except OSError:
+        return [target]
+    return [target, *(path for _, path in sorted(numbered))]
+
+
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _sha256_of_regular_file(path: Path, size: int) -> str | None:
+    """sha256 of *path* when it is a regular file of exactly *size* bytes.
+
+    ``None`` for anything else: a symlink (never followed — ``lstat`` first,
+    then ``O_NOFOLLOW`` in case it was swapped in between), a directory, FIFO
+    or device, a different size, or an unreadable file. Reads in chunks and
+    never more than *size* + 1 bytes, so a file that grows mid-read costs
+    neither memory nor time.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            return None
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                return None
+            digest = hashlib.sha256()
+            remaining = size
+            while remaining > 0:
+                chunk = handle.read(min(_HASH_CHUNK_BYTES, remaining))
+                if not chunk:
+                    return None
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if handle.read(1):
+                return None
+            return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def find_identical_file(candidates: Sequence[Path], payload: bytes) -> Path | None:
+    """First of *candidates* whose bytes equal *payload*, else ``None`` (#1031).
+
+    Size first, then sha256, so a candidate is only read when it is likely
+    identical. Only regular files count; a symlink is skipped, not followed.
+    Blocking — call it from a worker thread.
+    """
+    size = len(payload)
+    expected: str | None = None
+    for candidate in candidates:
+        digest = _sha256_of_regular_file(candidate, size)
+        if digest is None:
+            continue
+        if expected is None:
+            expected = hashlib.sha256(payload).hexdigest()
+        if digest == expected:
+            return candidate
+    return None
 
 
 def write_bytes_atomic(path: Path, payload: bytes) -> None:

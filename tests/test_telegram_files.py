@@ -140,6 +140,129 @@ def test_deduplicate_target_no_extension(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #1031 — reuse an identical upload instead of saving another `_N` copy
+# ---------------------------------------------------------------------------
+
+
+def test_upload_name_siblings_orders_original_then_numbered(tmp_path: Path) -> None:
+    for name in (
+        "file.jpg",
+        "file_10.jpg",
+        "file_2.jpg",
+        "file_1.jpg",
+        "file_01.jpg",  # never produced by deduplicate_target
+        "file_1000.jpg",  # past the `_999` ceiling
+        "file_1.png",
+        "file_x.jpg",
+        "other_1.jpg",
+    ):
+        (tmp_path / name).write_bytes(b"x")
+    (tmp_path / "file_3.jpg").mkdir()
+
+    result = tg_files.upload_name_siblings(tmp_path / "file.jpg")
+
+    # Names only; whether each one is a regular file is checked on read.
+    assert [item.name for item in result] == [
+        "file.jpg",
+        "file_1.jpg",
+        "file_2.jpg",
+        "file_3.jpg",
+        "file_10.jpg",
+    ]
+    assert all(item.parent == tmp_path for item in result)
+
+
+def test_upload_name_siblings_escapes_regex_chars(tmp_path: Path) -> None:
+    (tmp_path / "a+b (1).txt").write_bytes(b"x")
+    (tmp_path / "a+b (1)_1.txt").write_bytes(b"x")
+    (tmp_path / "aab (1)_1.txt").write_bytes(b"x")
+
+    result = tg_files.upload_name_siblings(tmp_path / "a+b (1).txt")
+
+    assert [item.name for item in result] == ["a+b (1).txt", "a+b (1)_1.txt"]
+
+
+def test_upload_name_siblings_missing_dir(tmp_path: Path) -> None:
+    target = tmp_path / "missing" / "file.jpg"
+    assert tg_files.upload_name_siblings(target) == [target]
+
+
+def test_find_identical_file_matches_first_identical(tmp_path: Path) -> None:
+    payload = b"same bytes"
+    (tmp_path / "a.txt").write_bytes(b"different!")  # same size, other bytes
+    (tmp_path / "a_1.txt").write_bytes(b"short")
+    (tmp_path / "a_2.txt").write_bytes(payload)
+    (tmp_path / "a_3.txt").write_bytes(payload)
+    candidates = [tmp_path / n for n in ("a.txt", "a_1.txt", "a_2.txt", "a_3.txt")]
+
+    assert tg_files.find_identical_file(candidates, payload) == tmp_path / "a_2.txt"
+
+
+def test_find_identical_file_none_when_no_match(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_bytes(b"different!")
+    candidates = [tmp_path / "a.txt", tmp_path / "missing.txt", tmp_path]
+
+    assert tg_files.find_identical_file(candidates, b"same bytes") is None
+
+
+def test_find_identical_file_empty_payload(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_bytes(b"")
+    assert tg_files.find_identical_file([tmp_path / "a.txt"], b"") == tmp_path / "a.txt"
+
+
+def test_find_identical_file_spans_chunks(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(tg_files, "_HASH_CHUNK_BYTES", 4)
+    payload = b"0123456789"
+    (tmp_path / "a.txt").write_bytes(b"0123456780")
+    (tmp_path / "a_1.txt").write_bytes(payload)
+    candidates = [tmp_path / "a.txt", tmp_path / "a_1.txt"]
+
+    assert tg_files.find_identical_file(candidates, payload) == tmp_path / "a_1.txt"
+
+
+def test_find_identical_file_only_hashes_on_size_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "a.txt").write_bytes(b"a much longer file than the payload")
+    opened: list[str] = []
+    real_open = tg_files.os.open
+
+    def _spy(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(tg_files.os, "open", _spy)
+
+    assert tg_files.find_identical_file([tmp_path / "a.txt"], b"payload") is None
+    assert opened == []
+
+
+def test_find_identical_file_never_follows_symlink(tmp_path: Path) -> None:
+    payload = b"secret bytes"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(payload)
+    root = tmp_path / "root"
+    root.mkdir()
+    _symlink(root / "a.txt", outside / "secret.txt")
+    _symlink(root / "a_1.txt", Path("a_2.txt"))  # in-root link, still skipped
+    (root / "a_2.txt").write_bytes(payload)
+    candidates = [root / "a.txt", root / "a_1.txt", root / "a_2.txt"]
+
+    assert tg_files.find_identical_file(candidates, payload) == root / "a_2.txt"
+    assert tg_files.find_identical_file(candidates[:2], payload) is None
+
+
+@pytest.mark.skipif(not hasattr(tg_files.os, "mkfifo"), reason="needs mkfifo")
+def test_find_identical_file_skips_fifo(tmp_path: Path) -> None:
+    fifo = tmp_path / "a.txt"
+    tg_files.os.mkfifo(fifo)
+
+    # Must return without blocking on a FIFO that has no writer.
+    assert tg_files.find_identical_file([fifo], b"") is None
+
+
+# ---------------------------------------------------------------------------
 # #831 / #389 group A — recursive deny-glob matching
 # ---------------------------------------------------------------------------
 
