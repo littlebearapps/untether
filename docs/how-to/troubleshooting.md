@@ -809,6 +809,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `file_transfer.saved` | INFO | File uploaded and written to disk |
 | `file_transfer.reused` | INFO | An upload was byte-for-byte identical to a file already saved, so nothing was written ([#1031](https://github.com/littlebearapps/untether/issues/1031)) |
 | `file_transfer.denied` | WARNING | File transfer refused for this user (not allowlisted, not a group admin) |
+| `command.admin_required` | WARNING | A `/config` change in a group was refused: the sender isn't a group admin (`reason=not_admin`), Telegram couldn't confirm their role (`lookup_failed`) or the sender is unknown (`no_sender`). Carries `chat_id` and `sender_id` ([#1042](https://github.com/littlebearapps/untether/issues/1042)) |
 | `file_transfer.path_denied` | INFO | Path refused by a deny glob or hidden-path rule (WARNING when a symlink was involved) |
 | `browse.path_denied` | INFO | `/browse` refused a hidden or deny-globbed path |
 | `claude.permission_mode.mismatch` | WARNING | Claude Code started in a different permission mode from the one requested |

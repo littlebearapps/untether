@@ -40,7 +40,7 @@ If the steer arrives after Claude's last tool call (it is already writing its an
 followup_mode = "steer"
 ```
 
-Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default. In a group, only admins can change the default with a bare `/steer` or `/queue`; anyone allowed to use the bot can still send `/steer <text>` or `/queue <text>`.
+Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default. In a group, only admins can change the default, whether with a bare `/steer` or `/queue` or in `/config`; anyone allowed to use the bot can still send `/steer <text>` or `/queue <text>`.
 
 Voice notes follow the default: a transcribed voice note sent to a steer chat is steered.
 

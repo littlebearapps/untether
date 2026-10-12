@@ -165,6 +165,94 @@ def _release_early_claim(backend: object, owner: str | None) -> None:
         logger.debug("callback.release_claim_failed", exc_info=True)
 
 
+# #1042: shown when a backend's own ``admin_gate`` hook fails — the gate
+# fails closed rather than letting the change through unchecked.
+_ADMIN_GATE_UNAVAILABLE = "failed to verify permissions for this change."
+
+
+async def _admin_gate_refusal(
+    cfg: TelegramBridgeConfig,
+    backend: object,
+    *,
+    command_id: str,
+    args_text: str,
+    chat_id: int,
+    sender_id: int | None,
+    is_private: bool,
+    source: str,
+) -> str | None:
+    """Refusal text when this invocation needs a group admin, else ``None``.
+
+    #1042: a backend that changes chat or host settings exposes
+    ``admin_gate(args_text)``, returning an ``AdminGate`` for an invocation
+    that changes something and ``None`` for one that only reads or navigates.
+    Both entry paths — a typed command and a button tap — call this before the
+    backend runs, so the two cannot drift apart. The check is the one the
+    settings text commands use (``check_admin_or_private_ids``): private chats
+    pass, a group needs ``creator`` / ``administrator``, and an unknown sender,
+    a failed member lookup or a failing hook is refused.
+    """
+    hook = getattr(backend, "admin_gate", None)
+    if hook is None:
+        return None
+    from .overrides import PermissionDecision, check_admin_or_private_ids
+
+    failed_text = _ADMIN_GATE_UNAVAILABLE
+    try:
+        gate = hook(args_text)
+        if gate is None:
+            return None
+        failed_text = gate.failed_member
+        decision = await check_admin_or_private_ids(
+            cfg,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            is_private=is_private,
+            missing_sender=gate.missing_sender,
+            failed_member=gate.failed_member,
+            denied=gate.denied,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed, never fail open
+        logger.warning(
+            "command.admin_check_failed",
+            command=command_id,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            source=source,
+            error_type=exc.__class__.__name__,
+        )
+        decision = PermissionDecision(
+            allowed=False, error_text=failed_text, reason="lookup_failed"
+        )
+    if decision.allowed:
+        return None
+    logger.warning(
+        "command.admin_required",
+        command=command_id,
+        chat_id=chat_id,
+        sender_id=sender_id,
+        source=source,
+        reason=decision.reason,
+    )
+    return decision.error_text or _ADMIN_GATE_UNAVAILABLE
+
+
+def _callback_is_private(msg: TelegramCallbackQuery) -> bool:
+    """Whether a button tap came from a private chat.
+
+    Mirrors ``TelegramIncomingMessage.is_private``: the chat type Telegram
+    reported when there is one, else the id's sign (only users have positive
+    chat ids).
+    """
+    raw = msg.raw if isinstance(msg.raw, dict) else {}
+    message = raw.get("message")
+    chat = message.get("chat") if isinstance(message, dict) else None
+    chat_type = chat.get("type") if isinstance(chat, dict) else None
+    if isinstance(chat_type, str):
+        return chat_type == "private"
+    return msg.chat_id > 0
+
+
 async def _dispatch_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -241,6 +329,21 @@ async def _dispatch_command(
             reply_to=message_ref,
             notify=True,
         )
+        return
+    # #1042: a settings change in a group needs an admin, as the settings
+    # text commands do. Same gate as the button path below.
+    refusal = await _admin_gate_refusal(
+        cfg,
+        backend,
+        command_id=command_id,
+        args_text=args_text,
+        chat_id=chat_id,
+        sender_id=msg.sender_id,
+        is_private=msg.is_private,
+        source="command",
+    )
+    if refusal is not None:
+        await executor.send(refusal, reply_to=message_ref, notify=True)
         return
     ctx = CommandContext(
         command=command_id,
@@ -452,6 +555,22 @@ async def _dispatch_callback(
             plugin_config = cfg.runtime.plugin_config(command_id)
         except ConfigError as exc:
             await _answer_callback(user_safe_error(exc, fallback="plugin config error"))
+            return
+        # #1042: a settings change in a group needs an admin. Checked before
+        # the early answer, whose toast announces the change as done; a
+        # refused tap is answered with the refusal and nothing runs.
+        refusal = await _admin_gate_refusal(
+            cfg,
+            backend,
+            command_id=command_id,
+            args_text=args_text,
+            chat_id=chat_id,
+            sender_id=msg.sender_id,
+            is_private=_callback_is_private(msg),
+            source="callback",
+        )
+        if refusal is not None:
+            await _answer_callback(refusal)
             return
         # Early callback answering: clear the Telegram spinner immediately.
         # #247: the early-answer branch MUST run before backend.handle() so

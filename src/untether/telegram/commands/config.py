@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -23,6 +23,7 @@ from ._permission_mode_text import (
     cli_name_suffix,
     mode_display,
 )
+from .overrides import AdminGate
 
 logger = get_logger(__name__)
 
@@ -674,7 +675,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             current, permission_mode=mode_value if mode_value != "auto" else None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.approval_policy.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -686,6 +692,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             logger.info(
                 "config.antigravity_permission_mode.unavailable",
                 chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
                 mode=action,
             )
             return
@@ -693,7 +700,10 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         updated = with_override(current, permission_mode=mode_value)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info(
-            "config.antigravity_permission_mode.set", chat_id=chat_id, mode=action
+            "config.antigravity_permission_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
         )
         await _page_home(ctx)
         return
@@ -703,7 +713,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=_PM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.planmode.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.planmode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -712,7 +727,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=_GEMINI_AM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_mode.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.approval_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -720,7 +740,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_mode.set", chat_id=chat_id, mode="ro")
+        logger.info(
+            "config.approval_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="ro",
+        )
         await _page_home(ctx)
         return
 
@@ -729,7 +754,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.permission_mode.cleared", chat_id=chat_id, engine=engine)
+        logger.info(
+            "config.permission_mode.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=engine,
+        )
         await _page_home(ctx)
         return
 
@@ -980,7 +1010,12 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
             new_value = None
         updated = with_override(current, loop_enabled=new_value)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.loop.set", chat_id=chat_id, value=new_value)
+        logger.info(
+            "config.loop.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=new_value,
+        )
         await _page_home(ctx)
         return
 
@@ -1056,17 +1091,29 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
     if action == "on":
         _VERBOSE_OVERRIDES[chat_id] = "verbose"
-        logger.info("config.verbose.set", chat_id=chat_id, verbosity="verbose")
+        logger.info(
+            "config.verbose.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            verbosity="verbose",
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         _VERBOSE_OVERRIDES[chat_id] = "compact"
-        logger.info("config.verbose.set", chat_id=chat_id, verbosity="compact")
+        logger.info(
+            "config.verbose.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            verbosity="compact",
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         _VERBOSE_OVERRIDES.pop(chat_id, None)
-        logger.info("config.verbose.cleared", chat_id=chat_id)
+        logger.info(
+            "config.verbose.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1136,18 +1183,27 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         if current and current.model:
             updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
-            logger.info("config.model.cleared", chat_id=chat_id)
+            logger.info(
+                "config.model.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+            )
         await _page_engine(ctx)
         return
 
     if action == "clr":
         await prefs.clear_default_engine(chat_id)
-        logger.info("config.engine.cleared", chat_id=chat_id)
+        logger.info(
+            "config.engine.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
     elif action and action in available:
         await prefs.set_default_engine(chat_id, action)
-        logger.info("config.engine.set", chat_id=chat_id, engine=action)
+        logger.info(
+            "config.engine.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=action,
+        )
         await _page_home(ctx)
         return
 
@@ -1237,17 +1293,29 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
 
     if action == "all":
         await prefs.clear_listen_mode(chat_id)
-        logger.info("config.listen.set", chat_id=chat_id, mode="all")
+        logger.info(
+            "config.listen.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="all",
+        )
         await _page_home(ctx)
         return
     elif action == "men":
         await prefs.set_listen_mode(chat_id, "mentions")
-        logger.info("config.listen.set", chat_id=chat_id, mode="mentions")
+        logger.info(
+            "config.listen.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="mentions",
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         await prefs.clear_listen_mode(chat_id)
-        logger.info("config.listen.cleared", chat_id=chat_id)
+        logger.info(
+            "config.listen.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1323,12 +1391,19 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
     if action in {"q", "s"}:
         mode = "steer" if action == "s" else "queue"
         await prefs.set_followup_mode(chat_id, mode)
-        logger.info("config.followup.set", chat_id=chat_id, mode=mode)
+        logger.info(
+            "config.followup.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=mode,
+        )
         await _page_home(ctx)
         return
     if action == "clr":
         await prefs.clear_followup_mode(chat_id)
-        logger.info("config.followup.cleared", chat_id=chat_id)
+        logger.info(
+            "config.followup.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1404,7 +1479,12 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             current = await prefs.get_engine_override(chat_id, current_engine)
             updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
-            logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
+            logger.info(
+                "config.model.cleared",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                engine=current_engine,
+            )
         await _page_engine(ctx)
         return
 
@@ -1518,6 +1598,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             logger.warning(
                 "config.reasoning.unsupported_level",
                 chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
                 engine=current_engine,
                 reasoning_level=level,
                 allowed=sorted(allowed),
@@ -1530,6 +1611,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         logger.info(
             "config.reasoning.set",
             chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
             engine=current_engine,
             reasoning_level=level,
         )
@@ -1539,7 +1621,12 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         current = await prefs.get_engine_override(chat_id, current_engine)
         updated = with_override(current, reasoning=None)
         await prefs.set_engine_override(chat_id, current_engine, updated)
-        logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
+        logger.info(
+            "config.reasoning.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=current_engine,
+        )
         await _page_home(ctx)
         return
 
@@ -1685,21 +1772,35 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=True)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
+        logger.info(
+            "config.ask_questions.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=True,
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=False)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
+        logger.info(
+            "config.ask_questions.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=False,
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.cleared", chat_id=chat_id)
+        logger.info(
+            "config.ask_questions.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+        )
         await _page_home(ctx)
         return
 
@@ -1773,21 +1874,35 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=True)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
+        logger.info(
+            "config.diff_preview.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=True,
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=False)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
+        logger.info(
+            "config.diff_preview.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=False,
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.cleared", chat_id=chat_id)
+        logger.info(
+            "config.diff_preview.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+        )
         await _page_home(ctx)
         return
 
@@ -1884,16 +1999,36 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
         if prefix == "ac" and has_api_cost:
             ac_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.api_cost.set", chat_id=chat_id, value=ac_val)
+            logger.info(
+                "config.api_cost.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=ac_val,
+            )
         elif prefix == "su" and has_sub_usage:
             su_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.subscription_usage.set", chat_id=chat_id, value=su_val)
+            logger.info(
+                "config.subscription_usage.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=su_val,
+            )
         elif prefix == "bg":
             bg_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.budget_enabled.set", chat_id=chat_id, value=bg_val)
+            logger.info(
+                "config.budget_enabled.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=bg_val,
+            )
         elif prefix == "bc":
             bc_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.budget_auto_cancel.set", chat_id=chat_id, value=bc_val)
+            logger.info(
+                "config.budget_auto_cancel.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=bc_val,
+            )
 
         updated = with_override(
             current,
@@ -2071,7 +2206,12 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         new_val = {"on": True, "off": False, "clr": None}[action]
         updated = with_override(current, show_resume_line=new_val)
         await prefs.set_engine_override(chat_id, current_engine, updated)
-        logger.info("config.resume_line.set", chat_id=chat_id, value=new_val)
+        logger.info(
+            "config.resume_line.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=new_val,
+        )
         await _page_home(ctx)
         return
 
@@ -2226,6 +2366,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
         logger.info(
             "config.triggers.paused",
             chat_id=chat_id_int,
+            sender_id=ctx.message.sender_id,
             crons=cron_count,
             webhooks=webhook_count,
         )
@@ -2233,6 +2374,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
         logger.info(
             "config.triggers.resumed",
             chat_id=chat_id_int,
+            sender_id=ctx.message.sender_id,
             crons=cron_count,
             webhooks=webhook_count,
         )
@@ -2376,6 +2518,103 @@ _PAGES: dict[str, object] = {
     "loop": _page_loop,
 }
 
+# ---------------------------------------------------------------------------
+# Who may change settings (#1042)
+# ---------------------------------------------------------------------------
+#
+# In a group, the text commands that change a chat's settings (`/model set`,
+# `/reasoning set`, `/agent set`, `/listen`, bare `/steer` / `/queue`) need a
+# Telegram admin. `/config` changes the same settings and more, so every
+# action that changes something goes through the same admin-or-private check.
+# Opening the menu, moving between pages and reading a page stay open to any
+# allowlisted member.
+#
+# This is the one classification both entry paths consult — a button tap and a
+# typed `/config <page>:<action>` — via ``ConfigCommand.admin_gate``, which the
+# dispatch calls before the backend runs (and before a tap's early toast).
+#
+# Rule: an action on a page is a change unless it is listed in
+# ``_OPEN_ACTIONS``. The explicit ``_MUTATING_ACTIONS`` table exists so that
+# ``tests/test_config_admin_gate.py`` can prove every action a page handler
+# branches on has been looked at; an action added to a handler without an
+# entry here fails that test, and is refused to non-admins in the meantime.
+
+ConfigActionKind = Literal["open", "mutating"]
+
+_ON_OFF_CLR = frozenset({"on", "off", "clr"})
+
+_MUTATING_ACTIONS: dict[str, frozenset[str]] = {
+    # Permission / approval mode for every engine, incl. Antigravity Full
+    # access (`agf`). The "· soon" Antigravity modes store nothing today but
+    # are gated with the rest so they are already covered when they ship.
+    "pm": frozenset(
+        {
+            *_PM_MODES,
+            *_CODEX_PM_MODES,
+            *_GEMINI_AM_MODES,
+            *agy_mode.ANTIGRAVITY_PM_ACTIONS,
+            "ro",
+            "clr",
+        }
+    ),
+    "vb": _ON_OFF_CLR,
+    "tr": frozenset({"all", "men", "clr"}),
+    "fu": frozenset({"q", "s", "clr"}),
+    # Pause / resume stops or restarts every cron and webhook on the host,
+    # not only this chat's.
+    "tg": frozenset({"pause", "resume"}),
+    "md": frozenset({"clr"}),
+    "rs": frozenset({*_RS_ACTIONS, "clr"}),
+    "aq": _ON_OFF_CLR,
+    "dp": _ON_OFF_CLR,
+    # API cost, subscription usage, budget, Stop at limit.
+    "cu": frozenset(
+        f"{prefix}_{act}" for prefix in ("ac", "su", "bg", "bc") for act in _ON_OFF_CLR
+    ),
+    "rl": _ON_OFF_CLR,
+    "ab": frozenset(),
+    "loop": _ON_OFF_CLR,
+}
+
+# Pages whose action is a runtime value (Engine & model: an engine id, plus
+# `clr` / `md_clr`), so every action on them is a change.
+_DYNAMIC_ACTION_PAGES: frozenset[str] = frozenset({"ag"})
+
+# Actions that only read or navigate. None today: a page is opened with no
+# action at all.
+_OPEN_ACTIONS: dict[str, frozenset[str]] = {}
+
+CONFIG_ADMIN_GATE = AdminGate(
+    missing_sender="cannot verify sender for settings changes.",
+    failed_member="failed to verify settings permissions.",
+    denied="changing settings is restricted to group admins.",
+)
+
+
+def parse_config_args(args_text: str) -> tuple[str | None, str | None]:
+    """Split `/config` args (typed or callback data) into ``(page, action)``.
+
+    ``""`` → ``(None, None)`` (home); ``"pm"`` and ``"pm:"`` → ``("pm", None)``;
+    ``"pm:on"`` → ``("pm", "on")``. Used by both ``handle`` and
+    ``classify_config_action`` so the gate judges exactly what runs.
+    """
+    args = args_text.strip()
+    if not args:
+        return None, None
+    page, _, action = args.partition(":")
+    return page, action or None
+
+
+def classify_config_action(args_text: str) -> ConfigActionKind:
+    """Whether a `/config` invocation changes a setting or only shows a page."""
+    page, action = parse_config_args(args_text)
+    if action is None or page not in _PAGES:
+        # Home, a page with no action, or an unknown page (which renders home).
+        return "open"
+    if action in _OPEN_ACTIONS.get(page, frozenset()):
+        return "open"
+    return "mutating"
+
 
 class ConfigCommand:
     """Inline settings menu with navigable sub-pages."""
@@ -2490,16 +2729,23 @@ class ConfigCommand:
             return f"Engine: {action}"
         return None
 
-    async def handle(self, ctx: CommandContext) -> CommandResult | None:
-        args = ctx.args_text.strip()
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: a settings change needs a group admin; navigation does not.
 
-        if not args or args == "home":
+        The dispatch calls this for taps and typed actions alike and runs the
+        admin-or-private check when it returns a gate.
+        """
+        if classify_config_action(args_text) == "mutating":
+            return CONFIG_ADMIN_GATE
+        return None
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        page, action = parse_config_args(ctx.args_text)
+
+        if page is None or page == "home":
             await _page_home(ctx)
             return None
-
-        parts = args.split(":", 1)
-        page = parts[0]
-        action = parts[1] if len(parts) > 1 else None
 
         handler = _PAGES.get(page)
         if handler is None:

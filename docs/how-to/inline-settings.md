@@ -10,6 +10,8 @@ Send `/config` in any chat:
 /config
 ```
 
+In a group chat, anyone allowed to use the bot can open the menu and read it, but only a group admin or the creator can change a setting. Other members see `changing settings is restricted to group admins.` and nothing changes. See [Group chat](group-chat.md#the-config-menu-in-a-group).
+
 The home page shows current values grouped under **Agent controls**, **Display** and **Routing**, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
 
 ```
