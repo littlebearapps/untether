@@ -38,7 +38,7 @@ import signal
 import subprocess
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -46,12 +46,15 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
+from ..background_status import escape_markdown
 from ..background_tasks import EngineBackgroundTask
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
+from ..markdown import HARD_BREAK
 from ..model import (
     Action,
+    ActionEvent,
     ActionKind,
     CompletedEvent,
     EngineId,
@@ -1125,6 +1128,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         _PRECHECK.set(precheck)
         _FROM_CONTINUE.set(from_continue)
         _log_tos_notice_once()
+        # #1045: the ⚠️ rows shown on the progress message, for the final.
+        warnings: list[str] = []
         # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True).
         async with contextlib.aclosing(
             JsonlSubprocessRunner.run_impl(self, prompt, resume)
@@ -1146,7 +1151,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     if rows is None:
                         rows = [_recheck_warning("the check timed out")]
                     for row in rows:
+                        _note_warning(warnings, row)
                         yield row
+                if isinstance(evt, CompletedEvent):
+                    evt = _with_warning_block(evt, warnings)
+                else:
+                    _note_warning(warnings, evt)
                 yield evt
 
     def _no_project_refusal(self, resume: ResumeToken | None) -> UntetherEvent | None:
@@ -3137,6 +3147,46 @@ def _append_paragraph(answer: str, paragraph: str) -> str:
     if not answer.strip():
         return paragraph
     return f"{answer.rstrip()}\n\n{paragraph}"
+
+
+# ── #1045: ⚠️ rows in the final answer ──────────────────────────────────────
+
+
+def _note_warning(titles: list[str], evt: UntetherEvent) -> None:
+    """Keep a ⚠️ row's text (``_warning_event``'s shape) for the final.
+
+    Left out: a ``⚠️ Blocked`` row, which the denial paragraph already says
+    in the answer (#1037), and the base runner's ✗ notes (``ok=False``:
+    stderr, AGY_ERROR, bad JSON), whose text the error final carries."""
+    if not isinstance(evt, ActionEvent) or evt.phase != "completed":
+        return
+    action = evt.action
+    if action.kind != "warning" or evt.ok is not True or evt.level != "warning":
+        return
+    if action.detail.get("denied"):
+        return
+    title = str(action.title or "").strip()
+    if title and title not in titles:
+        titles.append(title)
+
+
+def final_warning_block(titles: list[str]) -> str | None:
+    """One line per distinct row, escaped: the rows carry project paths."""
+    lines = list(dict.fromkeys(t for t in titles if t))
+    if not lines:
+        return None
+    return HARD_BREAK.join(escape_markdown(line) for line in lines)
+
+
+def _with_warning_block(evt: CompletedEvent, titles: list[str]) -> CompletedEvent:
+    """The progress message carrying the rows is replaced by the final, so
+    the final repeats them after the answer, like the denial paragraph and
+    the OAuth notice (#1045). A person's run records new config as seen, so
+    that person has to have been shown it."""
+    block = final_warning_block(titles)
+    if block is None:
+        return evt
+    return replace(evt, answer=_append_paragraph(evt.answer, block))
 
 
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:

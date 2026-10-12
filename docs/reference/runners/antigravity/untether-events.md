@@ -26,6 +26,7 @@ the subagent, timer and background rows against 1.3.3.
 | a `run_command` that counts as background, or a `schedule` / `manage_task` step `ACTIVE` for more than 5 s | `ActionEvent` updated, title `⏳ background: <command>` (once, on the next line agy prints) |
 | `result` `SUCCESS` | Open rows are closed, then `CompletedEvent(ok=True)`. Answer is `result.response`, or the collected text when that is empty |
 | `result` with `denied_actions` | A `⚠️ Blocked: <what> (<agy name>) — <title>` row per denial, and a closing paragraph on the answer |
+| Any `CompletedEvent` after ⚠️ rows | The answer gets those rows appended after it, once each, one per line (the post-run config re-check's rows included), because the final replaces the progress message that showed them ([#1045](https://github.com/littlebearapps/untether/issues/1045)). `⚠️ Blocked` rows are left out: the closing paragraph already explains them |
 | `result` `ERROR` + `interrupted` | `CompletedEvent(ok=False)`, resumable, "Antigravity was interrupted …" |
 | `result` `ERROR` + other text | `CompletedEvent(ok=False)` with agy's text, redacted and trimmed to three lines |
 | `result` with any other status | `CompletedEvent(ok=False)` `antigravity ended with status <status>[: <error>]` |

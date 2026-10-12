@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 import structlog.testing
 
@@ -2157,3 +2158,307 @@ async def test_unresolvable_project_dir_refused(
     assert not record.exists()
     (log,) = [e for e in logs if e["event"] == "antigravity.no_project_dir"]
     assert log["reason"] == "unresolved_dir"
+
+
+# ── #1045: the ⚠️ rows reach the delivered final ────────────────────────────
+#
+# The rows above live on the progress message, which the final answer
+# replaces. Through ``handle_message`` with the real runner and fake agy, the
+# delivered final carries each distinct row once, after the answer.
+
+PRESENT = "This project has agy hooks, plugins or MCP servers that Untether"
+
+
+def _final_script(
+    tmp_path: Path,
+    *,
+    name: str = "ok",
+    result: dict[str, Any] | None = None,
+    drop_mode: bool | None = None,
+    hold_after_init: float = 0.0,
+) -> Path:
+    """*name*'s capture with no gaps (except an optional hold after
+    ``init``), its ``result`` edited and/or its ``init`` mode dropped."""
+    out: list[str] = []
+    for line in (FIXTURES / f"{name}.script").read_text().splitlines():
+        if line.startswith("sleep:"):
+            continue
+        if line.startswith("out:"):
+            payload: str | None = line[4:]
+            if drop_mode is not None:
+                payload = _edit_init(payload, drop_mode=drop_mode)
+                if payload is None:
+                    continue
+            obj = json.loads(payload)
+            if result and obj.get("event") == "result":
+                obj["result"].update(result)
+                payload = json.dumps(obj, separators=(",", ":"))
+            out.append("out:" + payload)
+            if hold_after_init and obj.get("event") == "init":
+                out.append(f"sleep:{hold_after_init}")
+            continue
+        out.append(line)
+    script = tmp_path / f"final_{name}.script"
+    script.write_text("\n".join(out) + "\n")
+    return script
+
+
+async def _bridge(
+    runner: AntigravityRunner,
+    *,
+    presenter: Any = None,
+    options: EngineRunOptions | None = None,
+) -> Any:
+    from tests.telegram_fakes import FakeTransport
+    from untether.runner_bridge import ExecBridgeConfig, IncomingMessage, handle_message
+    from untether.telegram.bridge import TelegramPresenter
+
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=presenter or TelegramPresenter(),
+        final_notify=True,
+    )
+    with apply_run_options(options), anyio.fail_after(30):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=4242, message_id=10, text="Reply with exactly: OK"
+            ),
+            resume_token=None,
+            running_tasks={},
+        )
+    return transport
+
+
+def _final_texts(transport: Any) -> list[str]:
+    """The delivered final: its text plus any split follow-up chunks."""
+    final = transport.send_calls[-1]["message"]
+    return [final.text, *(f.text for f in final.extra.get("followups", []))]
+
+
+@pytest.mark.anyio
+async def test_config_present_row_reaches_the_final(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live finding: a planted agent, a 4 s run, no ⚠️ anywhere."""
+    from untether import runner_bridge
+    from untether.settings import ProgressSettings
+
+    monkeypatch.setattr(
+        runner_bridge,
+        "_load_progress_settings",
+        lambda: ProgressSettings(min_render_interval=0),
+    )
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(_final_script(tmp_path, hold_after_init=0.6)),
+    )
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_TIME_SCALE", "1")
+    _write(project / ".agents" / "agents" / "x" / "agent.md", "# x\n")
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    # Still a row on the progress message while the run streams.
+    progress = [c["message"].text for c in transport.edit_calls]
+    assert any(PRESENT in t for t in progress), progress
+    (final,) = _final_texts(transport)
+    assert final.count(PRESENT) == 1, final
+    assert ".agents/agents/x/agent.md" in final
+    # After the answer, before the footer.
+    assert final.index("OK") < final.index(PRESENT)
+    assert "Review them if you didn't add them." in final
+
+
+@pytest.mark.parametrize("drop_mode", [True, False], ids=["no_field", "no_init"])
+@pytest.mark.anyio
+async def test_permission_unreported_row_reaches_the_final(
+    drop_mode: bool,
+    project: Path,
+    tmp_path: Path,
+    gemini_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(_final_script(tmp_path, drop_mode=drop_mode)),
+    )
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    assert final.count("⚠️ agy didn't report its permission mode") == 1, final
+    assert "toolPermission: request-review" in final
+
+
+@pytest.mark.anyio
+async def test_permission_precheck_unknown_row_reaches_the_final(
+    project: Path,
+    gemini_home: Path,
+    agy_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    agy_config["value"] = None
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    assert final.count("⚠️ Untether couldn't read agy's tool-permission") == 1
+    assert "the check failed" in final and "so the run continues" in final
+
+
+@pytest.mark.anyio
+async def test_several_rows_each_on_their_own_line_in_the_final(
+    project: Path,
+    gemini_home: Path,
+    agy_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    agy_config["value"] = _config(
+        allowNonWorkspaceAccess=True, permissions={"allow": ["command(ls)"]}
+    )
+    _write(project / ".agents" / "hooks.json", '{"x": 1}')
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    rows = [ln for ln in final.splitlines() if ln.startswith("⚠️")]
+    assert len(rows) == 3, final
+    assert PRESENT in rows[0]
+    assert "files outside the project" in rows[1]
+    assert "1 command pattern(s)" in rows[2]
+
+
+@pytest.mark.anyio
+async def test_config_changed_during_run_reaches_the_final(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-check after the result: its row comes before the final event."""
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(_hold_script(tmp_path, write=".agents/hooks.json")),
+    )
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    assert final.count("⚠️ Antigravity changed .agents/hooks.json") == 1, final
+    assert "Review it before sending another message." in final
+
+
+@pytest.mark.anyio
+async def test_final_without_warning_rows_is_unchanged(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    assert _completed(await _run(runner)).answer == "OK\n"
+    (final,) = _final_texts(await _bridge(runner))
+    assert "⚠️" not in final
+
+
+@pytest.mark.anyio
+async def test_blocked_rows_keep_their_own_paragraph_only(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1037's ``⚠️ Blocked`` row already reaches the reply as the denial
+    paragraph (appended to the answer); it isn't repeated in the block."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "tools_denied")
+    _write(project / ".agents" / "hooks.json", '{"x": 1}')
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    assert "⚠️ Blocked" not in final
+    assert final.count("⚠️ Antigravity was blocked from using a shell command") == 1
+    assert final.count(PRESENT) == 1
+    # The denial paragraph (the answer's) comes first, then the block.
+    assert final.index("was blocked") < final.index(PRESENT)
+
+
+@pytest.mark.anyio
+async def test_warning_block_once_in_a_split_final(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.telegram.bridge import TelegramPresenter
+
+    long_answer = "\n\n".join(f"Paragraph {i}: " + "word " * 120 for i in range(20))
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(_final_script(tmp_path, result={"response": long_answer})),
+    )
+    _write(project / ".agents" / "hooks.json", '{"x": 1}')
+    transport = await _bridge(
+        AntigravityRunner(antigravity_cmd=str(FAKE_AGY)),
+        presenter=TelegramPresenter(message_overflow="split"),
+    )
+    texts = _final_texts(transport)
+    assert len(texts) > 1
+    assert sum(t.count(PRESENT) for t in texts) == 1, texts
+    # In the last chunk, after the answer's last paragraph.
+    assert PRESENT in texts[-1]
+    assert texts[-1].index("Paragraph 19") < texts[-1].index(PRESENT)
+
+
+@pytest.mark.anyio
+async def test_warning_block_in_an_error_final(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(
+            _final_script(
+                tmp_path,
+                result={"status": "ERROR", "error": "model overloaded"},
+            )
+        ),
+    )
+    _write(project / ".agents" / "hooks.json", '{"x": 1}')
+    transport = await _bridge(AntigravityRunner(antigravity_cmd=str(FAKE_AGY)))
+    (final,) = _final_texts(transport)
+    assert final.count(PRESENT) == 1, final
+    assert "model overloaded" in final
+
+
+@pytest.mark.anyio
+async def test_cancelled_run_keeps_the_row_once(
+    project: Path, tmp_path: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run has no final answer: the cancelled render is the
+    progress message, rows included (unchanged), and nothing is added."""
+    from tests.telegram_fakes import FakeTransport
+    from untether.runner_bridge import ExecBridgeConfig, IncomingMessage, handle_message
+    from untether.telegram.bridge import TelegramPresenter
+
+    monkeypatch.setenv(
+        "UNTETHER_FAKE_AGY_SCRIPT",
+        str(_final_script(tmp_path, hold_after_init=30)),
+    )
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_TIME_SCALE", "1")
+    _write(project / ".agents" / "hooks.json", '{"x": 1}')
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=TelegramPresenter(), final_notify=True
+    )
+    running_tasks: dict[Any, Any] = {}
+
+    async def run() -> None:
+        await handle_message(
+            cfg,
+            runner=AntigravityRunner(antigravity_cmd=str(FAKE_AGY)),
+            incoming=IncomingMessage(channel_id=4242, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    with anyio.fail_after(30):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            while not running_tasks:
+                await anyio.sleep(0.01)
+            task = running_tasks[next(iter(running_tasks))]
+            await task.resume_ready.wait()
+            await anyio.sleep(0.3)
+            task.cancel_requested.set()
+    last = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last.lower()
+    assert last.count(PRESENT) == 1, last
+
+
+def test_final_warning_block_dedupes_and_escapes() -> None:
+    block = agy.final_warning_block(
+        ["⚠️ one *two* [x](y)", "⚠️ second row", "⚠️ one *two* [x](y)"]
+    )
+    assert block == "⚠️ one \\*two\\* \\[x\\]\\(y\\)  \n⚠️ second row"
+    assert agy.final_warning_block([]) is None
