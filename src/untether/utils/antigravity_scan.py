@@ -11,7 +11,13 @@ asks agy itself what it loaded, is the stronger control):
 - Only *literal* script paths in commands are followed. Code reached
   indirectly — ``python -m pkg``, ``npm run x`` / ``package.json``,
   ``make``, a ``cd`` before a relative path, ``PATH`` lookups, network
-  fetches (``npx pkg``) — isn't tracked.
+  fetches (``npx pkg``), a variable passed as an argument (``sh $X``) —
+  isn't tracked. Only a command *word* that is itself dynamic (``$RUNNER``,
+  ``$(…)``) is "not checked" (#1043).
+- What agy loads is inferred, never asked of agy: whether it reads a
+  project-level ``settings.json``, how it resolves a bare folder name, which
+  ``.git`` it stops at and which YAML its front-matter reader accepts are
+  assumptions, each taken towards more coverage or "not checked" (#1043).
 - User-level config under ``~/.gemini`` is stat only (D33: never read): the
   scripts its manifests name aren't followed, and an edit within one
   timestamp tick of the last scan is invisible on coarse-timestamp
@@ -45,26 +51,32 @@ every attended run, unattended runs refused, nothing recorded as seen.
 
 What's tracked (agy set)
 ------------------------
-- every file under every ``.agents/`` from the cwd up to the project root
-  (the nearest ancestor holding ``.git``; with no ``.git``, every ancestor
-  below ``$HOME``), except the instruction trees above, hashed in full;
+- every file under every ``.agents/`` from the cwd up to the *outermost* git
+  checkout above it (a ``.git`` folder or ``gitdir:`` file; with none, every
+  ancestor below ``$HOME``), except the instruction trees above, hashed in
+  full. The project root (``ScanResult.root``) is the nearest checkout;
 - every file a reference manifest (``hooks.json``, ``mcp_config.json``,
-  ``plugin.json``, the 1.2.16 ``*.json`` manifests, the front matter of
-  custom agents ``agents/*.md``; names compared case-insensitively) names by
-  literal path — as a shell would read it (JSON-decoded, then shell words)
-  and as a literal argv entry (the whole string) — at *every* one of the
-  manifest's folder, the run's cwd and the project root where it exists (a
-  decoy in one can't hide the file agy loads from another): hashed when
-  this user controls it (owns or can write it or any folder above it),
-  ignored when it's a system file (``/usr/bin/python3``);
+  ``plugin.json``, ``settings.json``, the 1.2.16 ``*.json`` manifests, the
+  front matter of custom agents — any ``.md`` below an ``agents`` folder,
+  so both ``agents/x.md`` and ``agents/<name>/agent.md``; names compared
+  case-insensitively) names by literal path — as a shell would read it
+  (JSON-decoded, then shell words) and as a literal argv entry (the whole
+  string) — at *every* one of the manifest's folder, the run's cwd, the
+  project root and the outermost checkout where it exists (a decoy in one
+  can't hide the file agy loads from another): hashed when this user
+  controls it (owns or can write it or any folder above it), ignored when
+  it's a system file (``/usr/bin/python3``);
 - what a custom agent's ``plugins:`` / ``hooks:`` / ``agents:`` front matter
-  or a path-only string in a declarative manifest (``plugin.json``, the
+  or a path string in a declarative manifest (``plugin.json``, the
   ``*.json`` lists) points at: a folder is walked like ``.agents/``, a
-  ``.json`` / ``.md`` file is parsed as a manifest in turn. A folder passed
-  to a hook or MCP command (``--root ./data``) is an argument, not config,
-  and isn't walked;
+  ``.json`` / ``.md`` file is parsed as a manifest in turn. A bare name
+  (``"tools"``) is tried at every base only directly under a path key or in
+  ``plugins.json`` / ``agents.json``, otherwise beside its manifest only
+  (see ``_manifest_paths``). A folder passed to a hook or MCP command
+  (``--root ./data``) is an argument, not config, and isn't walked;
 - agy's user-level manifests under ``~/.gemini/config/`` — stat only —
-  excluding ``plugins/untether-gate/``.
+  excluding ``plugins/untether-gate/`` and Untether's own Workspace agent
+  file (``_MANAGED_AGENT``).
 
 "Not checked" whenever: a budget (entries, bytes, wall clock) runs out; a
 link under ``.agents/`` (or in ``~/.gemini/config``) leads outside both the
@@ -72,14 +84,21 @@ project and ``$HOME``; a FIFO, device or socket sits where agy loads files;
 an entry or folder can't be stat'd, listed or read; a file changes identity
 while read; a reference manifest is too large, not strict JSON (comments,
 trailing commas, BOM, duplicate keys, NaN), in another format agy might read
-(``hooks.yaml``, ``mcp_config.jsonc`` …), or names a path through a variable,
-command substitution or glob; an agent file whose front matter agy might
-delimit differently (BOM, indented or late ``---``, unusual line breaks); a
+(``hooks.yaml``, ``mcp_config.jsonc`` …), or names a path — or the command
+itself — through a variable, command substitution or glob; an agent file
+whose front matter agy might delimit differently (BOM, indented or late
+``---``, unusual line breaks) or whose path keys this line reader can't
+place (quoted, nested, flow mapping, anchor, alias, tag); a
 referenced folder that holds the project itself; a cwd so deep that the
 project root is out of reach.
 
 The cross-engine set (project root only, stat only) never refuses (REVIEW-2
 M4); it only feeds the post-run ⚠️ row.
+
+Changing what is tracked changes digests: there is no digest version, so a
+project whose set gains an entry after an upgrade differs from the stored
+digest like any other change — unattended runs are held until an attended
+run shows the first-sight row. That is intended; never re-baseline silently.
 
 The 13 §8 gate precheck reuses this helper; keep it free of runner imports.
 """
@@ -118,6 +137,12 @@ _CHUNK_BYTES = 256 * 1024
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
 _GATE_PLUGIN = "plugins/untether-gate/"
+# Untether's own Workspace agent (``utils/antigravity_agent.py``), relative
+# to ``~/.gemini/config``. That exact regular file is left out of the digest:
+# Untether rewrites it to its own text before every run that names it, so
+# tracking it would hold a cron on each install or upgrade. Nothing else in
+# or beside that folder is exempt (#1043).
+_MANAGED_AGENT = "agents/untether-workspace/agent.md"
 _AGENTS_DIR = ".agents"
 # Instruction trees directly under .agents/ (exact names: anything else is
 # hashed — failing towards more coverage on case-insensitive filesystems).
@@ -126,7 +151,9 @@ _TOP_MANIFESTS = frozenset(
     {"mcp_config.json", "skills.json", "rules.json", "plugins.json", "agents.json"}
 )
 # Manifests whose strings may name a script agy runs (casefolded).
-_REFERENCE_MANIFESTS = _TOP_MANIFESTS | {"hooks.json", "plugin.json"}
+# ``settings.json``: whether agy reads a project-level one is unverified, so
+# it is read as if it does (#1043).
+_REFERENCE_MANIFESTS = _TOP_MANIFESTS | {"hooks.json", "plugin.json", "settings.json"}
 # Other formats of the same manifests agy might also read: never assume.
 _ALT_MANIFEST = re.compile(
     r"^(hooks|mcp_config|plugin|plugins|agents|skills|rules|settings)"
@@ -148,6 +175,9 @@ _CROSS_ENGINE_FILES = (
     "CLAUDE.md",
     "AGENTS.md",
     "GEMINI.md",
+    # core.hooksPath, core.fsmonitor, aliases, filters (#1043). A worktree or
+    # submodule keeps its config outside the checkout: not covered.
+    ".git/config",
 )
 _CROSS_ENGINE_TREES = (".claude", ".github/workflows", ".husky", ".git/hooks")
 
@@ -225,8 +255,35 @@ def _below_home(path: Path, home: Path) -> bool:
     return path != home and path not in home.parents
 
 
+def _git_marker(directory: Path) -> bool:
+    """*directory* is the top of a git checkout: its ``.git`` is a folder,
+    or a ``gitdir:`` file (worktrees, submodules). An empty or unrelated
+    file named ``.git`` isn't one (#1043). Never blocks on a FIFO."""
+    marker = os.path.join(directory, ".git")
+    try:
+        st = os.stat(marker)
+    except OSError:
+        return False
+    if stat.S_ISDIR(st.st_mode):
+        return True
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    try:
+        fd = os.open(marker, flags)
+    except OSError:
+        return False
+    try:
+        return os.read(fd, 64).startswith(b"gitdir:")
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
-    """Nearest ancestor of *cwd* (inclusive) holding ``.git``; *cwd* if none.
+    """Nearest ancestor of *cwd* (inclusive) that is a git checkout
+    (``_git_marker``); *cwd* if none.
 
     Never returns ``$HOME`` or anything above it (a dotfiles repo in ``$HOME``
     must not pull ``~/.claude`` into every project's scan).
@@ -237,7 +294,7 @@ def find_project_root(cwd: Path, *, home: Path | None = None) -> Path:
     for _ in range(MAX_ANCESTOR_LEVELS + 1):
         if not _below_home(current, home):
             break
-        if (current / ".git").exists():
+        if _git_marker(current):
             return current
         if current.parent == current:
             break
@@ -253,7 +310,7 @@ def _root_search_exhausted(cwd: Path, *, home: Path | None = None) -> bool:
     for _ in range(MAX_ANCESTOR_LEVELS + 1):
         if (
             not _below_home(current, home)
-            or (current / ".git").exists()
+            or _git_marker(current)
             or current.parent == current
         ):
             return False
@@ -261,21 +318,30 @@ def _root_search_exhausted(cwd: Path, *, home: Path | None = None) -> bool:
     return True
 
 
-def _agents_parents(cwd: Path, root: Path) -> list[Path]:
-    """Directories whose ``.agents/`` agy may load: cwd → root, and — when
-    no ``.git`` bounds the walk — every further ancestor below ``$HOME``."""
+def _agents_parents(cwd: Path) -> list[Path]:
+    """Directories whose ``.agents/`` agy may load: cwd → the *outermost*
+    git checkout above it (within the ancestor cap), and — when no checkout
+    bounds the walk — every ancestor below ``$HOME``.
+
+    The outermost, not the nearest: which ``.git`` agy stops at is its own
+    business, and anything that can write in the project can create one in
+    a sub-folder (a folder or a ``gitdir:`` file as easily as an empty
+    file). A nested checkout therefore never drops the ``.agents/`` of the
+    repository around it (#1043)."""
     home = Path.home().resolve()
     current = cwd.resolve()
-    git_bounded = (root / ".git").exists()
     out: list[Path] = []
+    bound = 0
     for _ in range(MAX_ANCESTOR_LEVELS + 1):
         if not _below_home(current, home):
             break
         out.append(current)
-        if (git_bounded and current == root) or current.parent == current:
+        if _git_marker(current):
+            bound = len(out)
+        if current.parent == current:
             break
         current = current.parent
-    return out
+    return out[:bound] if bound else out
 
 
 def _is_user_manifest(rel: str) -> bool:
@@ -288,15 +354,24 @@ def _is_user_manifest(rel: str) -> bool:
         return True
     if folded in _TOP_MANIFESTS:
         return True
-    parts = folded.split("/")
-    return len(parts) == 2 and parts[0] == "agents" and name.endswith(".md")
+    # Flat (``agents/x.md``) and nested (``agents/<name>/agent.md``) agents.
+    return folded.startswith("agents/") and name.endswith(".md")
 
 
-def _is_reference_manifest(path: Path) -> bool:
+def _is_reference_manifest(path: Path, base: Path) -> bool:
+    """*path* (walked from *base*) may name scripts or folders agy loads: a
+    JSON manifest, or a custom agent — any ``.md`` at any depth below an
+    ``agents`` folder (``agents/x.md``, ``agents/<name>/agent.md``)."""
     name = _fold(path.name)
-    return name in _REFERENCE_MANIFESTS or (
-        name.endswith(".md") and _fold(path.parent.name) == "agents"
-    )
+    if name in _REFERENCE_MANIFESTS:
+        return True
+    if not name.endswith(".md"):
+        return False
+    try:
+        folders = path.relative_to(base).parts[:-1]
+    except ValueError:
+        folders = (path.parent.name,)
+    return "agents" in {_fold(part) for part in (base.name, *folders)}
 
 
 class _Budget:
@@ -541,11 +616,22 @@ def _reject_constant(value: str) -> Any:
     raise ValueError(f"non-standard constant {value}")
 
 
-def _strict_json_strings(data: bytes) -> list[str] | None:
-    """Every key and string value of a strict-JSON document, decoded (so
-    ``\\/`` and ``\\u`` escapes resolve as agy sees them), or None when the
-    document isn't strict JSON (BOM, comments, trailing commas, duplicate
-    keys, NaN/Infinity, bad UTF-8)."""
+@dataclass(frozen=True, slots=True)
+class _Manifest:
+    """What a reference manifest says, as far as the scan reads it."""
+
+    # Every key and string value (JSON) or front-matter line (agent).
+    strings: list[str]
+    # JSON only — (key, value): a string held directly by a key, or in a
+    # list directly under it; the key is folded, ``""`` at the top level.
+    keyed: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _strict_json(data: bytes) -> _Manifest | None:
+    """A strict-JSON document's strings, decoded (so ``\\/`` and ``\\u``
+    escapes resolve as agy sees them), or None when the document isn't
+    strict JSON (BOM, comments, trailing commas, duplicate keys,
+    NaN/Infinity, bad UTF-8)."""
     try:
         text = data.decode("utf-8")  # strict; a BOM survives and fails below
         doc = json.loads(
@@ -555,20 +641,22 @@ def _strict_json_strings(data: bytes) -> list[str] | None:
         )
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
-    out: list[str] = []
+    out = _Manifest(strings=[])
 
-    def walk(value: Any) -> None:
+    def walk(value: Any, key: str, direct: bool) -> None:
         if isinstance(value, str):
-            out.append(value)
+            out.strings.append(value)
+            if direct:
+                out.keyed.append((key, value))
         elif isinstance(value, dict):
-            for key, item in value.items():
-                out.append(key)
-                walk(item)
+            for name, item in value.items():
+                out.strings.append(name)
+                walk(item, _fold(name), True)
         elif isinstance(value, list):
             for item in value:
-                walk(item)
+                walk(item, key, direct and not isinstance(item, list))
 
-    walk(doc)
+    walk(doc, "", True)
     return out
 
 
@@ -581,6 +669,8 @@ _PATH_KEYS = frozenset({"plugins", "hooks", "agents", "mcp"})
 _FRONT_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:(.*)$")
 # Manifests whose strings are commands and their arguments, not paths.
 _COMMAND_MANIFESTS = frozenset({"hooks.json", "mcp_config.json"})
+# Manifests that are nothing but a list of folders to load.
+_LISTING_MANIFESTS = frozenset({"plugins.json", "agents.json"})
 
 
 def _front_matter(data: bytes) -> list[str] | None:
@@ -608,12 +698,37 @@ def _front_matter(data: bytes) -> list[str] | None:
     return body
 
 
-def _front_matter_paths(lines: list[str]) -> list[str]:
+# A path key named anywhere on a line the reader below can't place.
+_PATH_WORD = re.compile(r"(?i)(?<![\w-])(?:plugins|hooks|agents|mcp)(?![\w-])")
+# ... or used as a mapping key somewhere other than column 0.
+_PATH_KEY_NESTED = re.compile(
+    r"(?i)(?<![\w-])[\"']?(?:plugins|hooks|agents|mcp)[\"']?\s*:(?:\s|$)"
+)
+# A value that starts with a YAML anchor, alias, tag or flow mapping.
+_YAML_INDICATOR = re.compile(
+    r"^\s*(?:-\s+)*(?:[\"']?[\w.-]+[\"']?\s*:\s+)?\[?\s*[&*!{]"
+)
+_YAML_COMMENT = re.compile(r"(?:^|\s)#")
+_FRONT_COMMAND = re.compile(r"(?i)^\s*(?:-\s+)*[\"']?command[\"']?\s*:\s*(.*)$")
+
+
+def _front_matter_paths(lines: list[str]) -> tuple[list[str], list[str], bool]:
     """Values under the path keys of a custom agent's front matter (scalar,
-    flow list or block list)."""
+    flow list or block list), the hook commands written there, and whether
+    the front matter is *ambiguous*: this is a line reader, not a YAML
+    parser, so a path key it can't place (quoted, inside a flow mapping,
+    nested under another key, an explicit ``? key``) or a value it can't
+    read (anchor, alias, tag, flow mapping, a comment beside quotes) makes
+    the scan "not checked" instead of quietly reading it as nothing (#1043).
+    """
     out: list[str] = []
+    commands: list[str] = []
+    ambiguous = False
     current: str | None = None
     for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue  # YAML skips these inside a block list too
         match = _FRONT_KEY.match(line)
         if match is not None:
             current = _fold(match.group(1))
@@ -622,28 +737,66 @@ def _front_matter_paths(lines: list[str]) -> list[str]:
             value = line
         else:
             current = None
+            ambiguous = ambiguous or bool(_PATH_WORD.search(line))
             continue
         if current not in _PATH_KEYS:
+            ambiguous = ambiguous or bool(_PATH_KEY_NESTED.search(value))
             continue
+        comment = _YAML_COMMENT.search(value)
+        if comment is not None:
+            if '"' in value or "'" in value:
+                ambiguous = True  # can't tell a comment from quoted text
+            value = value[: comment.start()]
+        if _YAML_INDICATOR.match(value):
+            ambiguous = True
+        command = _FRONT_COMMAND.match(value)
+        if command is not None:
+            commands.append(command.group(1).strip())
         for part in value.strip().strip("[]").split(","):
             part = part.strip().lstrip("-").strip().strip("\"'")
             if part:
                 out.append(part)
                 out.append(part.rsplit(": ", 1)[-1].strip().strip("\"'"))
-    return out
+    return out, commands, ambiguous
 
 
-def _manifest_paths(manifest: Path, strings: list[str], *, is_md: bool) -> list[str]:
-    """Strings of *manifest* that may name a folder or manifest agy loads."""
-    if is_md:
-        return _front_matter_paths(strings)
-    if _fold(manifest.name) in _COMMAND_MANIFESTS:
-        return []
-    return [
-        value
-        for value in strings
-        if "/" in value or _fold(value).endswith((".json", ".md"))
-    ]
+def _manifest_paths(manifest: Path, parsed: _Manifest) -> tuple[list[str], list[str]]:
+    """Strings of a JSON *manifest* that may name a folder or manifest agy
+    loads: those to try at every base, and bare names to try beside the
+    manifest only.
+
+    A bare name (``"tools"``) is tried at every base only where the manifest
+    plainly lists config — directly under a ``plugins`` / ``hooks`` /
+    ``agents`` / ``mcp`` key, or anywhere in ``plugins.json`` /
+    ``agents.json``. Any other bare string (a plugin's ``name``, a keyword)
+    would otherwise pull a same-named project folder (``docs/``) into the
+    digest and hold the crons on every edit there (#1043)."""
+    name = _fold(manifest.name)
+    if name in _COMMAND_MANIFESTS:
+        return [], []
+    listing = name in _LISTING_MANIFESTS
+    everywhere: list[str] = []
+    beside: list[str] = []
+    for value in parsed.strings:
+        if "/" in value or _fold(value).endswith((".json", ".md")):
+            everywhere.append(value)
+        elif _bare_name(value):
+            beside.append(value)
+    for key, value in parsed.keyed:
+        if _bare_name(value) and (listing or key in _PATH_KEYS):
+            everywhere.append(value)
+    return everywhere, beside
+
+
+def _bare_name(value: str) -> bool:
+    """A single path component that could be a folder's name."""
+    return (
+        0 < len(value) <= 255
+        and "/" not in value
+        and "\n" not in value
+        and not value.startswith("~")
+        and value not in {".", ".."}
+    )
 
 
 _HOME_VAR = re.compile(r"\$(?:HOME|\{HOME\})(?=/)")
@@ -669,6 +822,15 @@ def _words(value: str) -> tuple[list[str], bool]:
         _GLOB.search(w) and ("/" in w or _SCRIPT_SUFFIX.search(w)) for w in words
     )
     return words, dynamic
+
+
+def _dynamic_command(command: str) -> bool:
+    """The command word itself is built at run time (``$RUNNER``,
+    ``$(cat cmd)``, backticks): nothing the scan could follow (#1043).
+    ``$HOME/…`` is resolved; a variable further along (``echo $USER``) is an
+    argument, and stays the documented "indirect code" limitation."""
+    word = _HOME_VAR.sub("~", command).lstrip().lstrip("\"'")
+    return word[:1] in {"$", "`"}
 
 
 def _references(
@@ -744,8 +906,9 @@ def _scan_agents(
     seen: set[str] = set()
     pending: deque[tuple[Path, bytes]] = deque()
 
-    def track(path: Path, key: str, contain: tuple[str, ...]) -> bool:
-        """Fingerprint one walked file; False once the budget is gone."""
+    def track(path: Path, key: str, contain: tuple[str, ...], base: Path) -> bool:
+        """Fingerprint one file walked from *base*; False once the budget
+        is gone."""
         if not budget.take():
             return False
         if _ALT_MANIFEST.match(_fold(path.name)):
@@ -755,7 +918,7 @@ def _scan_agents(
             budget,
             read=True,
             contain=contain,
-            collect=_is_reference_manifest(path),
+            collect=_is_reference_manifest(path, base),
             exclude=no_follow,
         )
         if budget.exceeded:
@@ -766,7 +929,8 @@ def _scan_agents(
                 pending.append((path, data))
         return True
 
-    for parent in _agents_parents(cwd, root):
+    parents = _agents_parents(cwd)
+    for parent in parents:
         agents = parent / _AGENTS_DIR
         if not os.path.lexists(agents):
             continue
@@ -788,20 +952,30 @@ def _scan_agents(
             skip_top=_INSTRUCTION_TREES,
             exclude=no_follow,
         ):
-            if not track(path, os.path.relpath(path, root), here):
+            if not track(path, os.path.relpath(path, root), here, agents):
                 return
 
-    def follow_path(word: str, manifest: Path) -> bool:
-        """Walk the folder, or queue the manifest, that *word* names."""
-        roots = ("",) if os.path.isabs(word) else (str(manifest.parent), *bases)
+    def follow_path(word: str, manifest: Path, *, everywhere: bool = True) -> bool:
+        """Walk the folder, or queue the manifest, that *word* names — at
+        the manifest's folder, and (*everywhere*) the run's cwd and the
+        project root."""
+        if os.path.isabs(word):
+            roots: tuple[str, ...] = ("",)
+        else:
+            roots = (str(manifest.parent), *(bases if everywhere else ()))
+        # A bare name is usually prose: like a bare word in a command, it
+        # costs an entry only when something by that name is really there.
+        pathish = "/" in word
         for base in roots:
-            if not budget.take():
+            if not (budget.take() if pathish else budget.alive()):
                 return False
             try:
                 real = os.path.realpath(os.path.join(base, word))
                 st = os.stat(real)
             except (OSError, ValueError):
                 continue
+            if not pathish and not budget.take():
+                return False
             if _contained(real, no_follow) or not _user_controlled(real):
                 continue  # ~/.gemini is stat only (user-level set); system files
             if stat.S_ISDIR(st.st_mode):
@@ -817,7 +991,7 @@ def _scan_agents(
                     exclude=no_follow,
                 ):
                     key = _display(str(path), root_real, home_real)
-                    if not track(path, key, follow):
+                    if not track(path, key, follow, Path(real)):
                         return False
             elif (
                 stat.S_ISREG(st.st_mode)
@@ -835,7 +1009,13 @@ def _scan_agents(
                     pending.append((Path(real), data))
         return True
 
-    bases = (cwd_real, root_real)
+    # Where a relative name may resolve: the run's cwd, the project root, and
+    # the outermost checkout whose .agents/ is loaded (a nested ``.git`` moves
+    # the root, never the place a repo-level hook's ``./script`` lives).
+    outer_real = root_real
+    if parents and _git_marker(parents[-1]):
+        outer_real = os.path.realpath(parents[-1])
+    bases = tuple(dict.fromkeys((cwd_real, root_real, outer_real)))
     parsed: set[str] = set()
     while pending:
         manifest, data = pending.popleft()
@@ -844,11 +1024,28 @@ def _scan_agents(
             continue
         parsed.add(manifest_real)
         is_md = _fold(manifest.name).endswith(".md")
-        strings = _front_matter(data) if is_md else _strict_json_strings(data)
-        if strings is None:
-            budget.flag(AMBIGUOUS)
-            continue
-        for real in _references(strings, manifest, bases, budget):
+        everywhere: list[str]
+        beside: list[str] = []
+        if is_md:
+            lines = _front_matter(data)
+            if lines is None:
+                budget.flag(AMBIGUOUS)
+                continue
+            content = _Manifest(strings=lines)
+            everywhere, commands, ambiguous = _front_matter_paths(lines)
+            if ambiguous:
+                budget.flag(AMBIGUOUS)
+        else:
+            loaded = _strict_json(data)
+            if loaded is None:
+                budget.flag(AMBIGUOUS)
+                continue
+            content = loaded
+            everywhere, beside = _manifest_paths(manifest, content)
+            commands = [value for key, value in content.keyed if key == "command"]
+        if any(_dynamic_command(command) for command in commands):
+            budget.flag(VARIABLE_PATH)
+        for real in _references(content.strings, manifest, bases, budget):
             if budget.exceeded:
                 return
             key = _display(real, root_real, home_real)
@@ -862,11 +1059,22 @@ def _scan_agents(
                 out[key] = fp
         if budget.exceeded:
             return
-        for word in sorted(set(_manifest_paths(manifest, strings, is_md=is_md))):
+        wide = set(everywhere)
+        for word in sorted(wide | set(beside)):
             if not word or "\0" in word or _SHELL_DYNAMIC.search(word):
                 continue
-            if not follow_path(os.path.expanduser(word), manifest):
+            if not follow_path(
+                os.path.expanduser(word), manifest, everywhere=word in wide
+            ):
                 return
+
+
+def _plain_file(path: Path) -> bool:
+    """A regular file that isn't a link (lstat only)."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
@@ -881,6 +1089,8 @@ def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
         rel = path.relative_to(user_dir).as_posix()
         if rel.startswith(_GATE_PLUGIN):
             continue
+        if rel == _MANAGED_AGENT and _plain_file(path):
+            continue  # Untether's own agent, see _MANAGED_AGENT
         if not _is_user_manifest(rel) and not path.is_symlink():
             continue
         if not budget.take():

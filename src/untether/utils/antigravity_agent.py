@@ -147,8 +147,7 @@ def project_defines_agent(cwd: Path | None) -> bool:
     if cwd is None:
         return True
     try:
-        root = antigravity_scan.find_project_root(cwd)
-        parents = antigravity_scan._agents_parents(cwd, root)
+        parents = antigravity_scan._agents_parents(cwd)
     except OSError:
         _warn("project_unchecked", cwd)
         return True

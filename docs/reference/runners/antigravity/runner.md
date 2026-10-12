@@ -242,27 +242,52 @@ for this, as a tripwire and not a sandbox:
   attended run last showed: `agy's workspace config changed since someone last ran Antigravity in this chat's
   project (…). Send any message in the chat to review it; the schedule runs again after that.`
 - **Couldn't check.** If the check can't finish (too many files, unreadable files, links leading outside the
-  project and home directory, a config file that isn't strict JSON, a command path built from a variable), every
-  attended run shows a ⚠️ row and scheduled runs are held until a check succeeds.
+  project and home directory, a config file that isn't strict JSON, a custom agent whose front matter Untether
+  can't read with certainty, a command or command path built from a variable), every attended run shows a ⚠️ row
+  and scheduled runs are held until a check succeeds.
 - **Changed during the run.** After the run Untether checks again and adds `⚠️ Antigravity changed … — agy (or
   another engine) will load it on the next run. Review it before sending another message.` This also covers files
-  other engines act on: `.claude/`, `.mcp.json`, `.envrc`, `.github/workflows/`, `.git/hooks/`, `.husky/`,
-  `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`. That part only warns;
-  it never refuses a run.
+  other engines act on: `.claude/`, `.mcp.json`, `.envrc`, `.github/workflows/`, `.git/hooks/`, `.git/config`,
+  `.husky/`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`. That part
+  only warns; it never refuses a run. `.git/config` is there for `core.hooksPath`, `core.fsmonitor`, aliases and
+  filters; ordinary git commands that write it (adding a remote, setting a branch's upstream) raise the same row.
 
-What is tracked: every file under each `.agents/` folder from the working directory up to the project root (except
-the `skills/` and `rules/` instruction folders), the scripts those manifests name by a literal path (wherever the
-name exists: beside the manifest, in the working directory or at the project root), the plugin folders and manifests
-a custom agent's `plugins:`, `hooks:` or `agents:` front matter points at, and agy's user-level manifests under
-`~/.gemini/config/` (by file size and timestamps only; Untether doesn't read them).
+What is tracked ([#1043](https://github.com/littlebearapps/untether/issues/1043)):
+
+- Every file under each `.agents/` folder from the working directory up to the outermost git checkout above it
+  (except the `skills/` and `rules/` instruction folders). A `.git` in a sub-folder, whether a folder, a worktree or
+  submodule `gitdir:` file, or a stray file, never drops the `.agents/` of the repository around it. The project
+  root itself is the nearest folder whose `.git` is a folder or a `gitdir:` file.
+- The scripts those manifests name by a literal path, wherever the name exists: beside the manifest, in the working
+  directory, at the project root or at the outermost checkout. `.agents/settings.json` is read the same way.
+- Custom agents in both layouts, `agents/<name>.md` and `agents/<name>/agent.md` (any `.md` below an `agents`
+  folder): the plugin folders and manifests their `plugins:`, `hooks:` or `agents:` front matter points at.
+- Folders a JSON manifest names. A bare name such as `"tools"` is followed like `"./tools"` when it sits directly
+  under a `plugins`, `hooks`, `agents` or `mcp` key, or anywhere in `plugins.json` / `agents.json`; any other bare
+  string is looked up beside its own manifest only, so a plugin called `docs` doesn't pull the project's `docs/`
+  folder into the check.
+- agy's user-level manifests under `~/.gemini/config/`, including agents in both layouts, by file size and
+  timestamps only (Untether doesn't read them). The one exception is Untether's own
+  `agents/untether-workspace/agent.md`: that exact file is left out, because Untether rewrites it to its own text
+  before every run that selects it. Anything else in or beside that folder, or a link in its place, is tracked.
 
 Known limits:
 
 - Only scripts named by a literal path are followed. Code reached indirectly (a package manager script, a module
-  name, a `PATH` lookup, a download) isn't tracked, and a folder passed to a hook or MCP command as an argument
-  isn't walked.
+  name, a `PATH` lookup, a download, a variable passed as an argument such as `sh $SCRIPT`) isn't tracked, and a
+  folder passed to a hook or MCP command as an argument isn't walked. A command that is itself a variable or a
+  substitution (`$RUNNER`, `` `cat cmd` ``) makes the check fail instead.
+- Agent front matter is read line by line, not with a YAML parser. Plain `key: value` lines, block lists, comments
+  and block scalars are followed. A `plugins`, `hooks`, `agents` or `mcp` key that is quoted, nested under another
+  key or inside a flow mapping, and a value using an anchor, alias or tag, make the check fail ("couldn't check")
+  instead of being read as nothing. Which of these shapes agy itself accepts is not verified.
+- What agy loads is inferred from its documentation and probes, not asked of agy: whether it reads a project-level
+  `settings.json`, how it resolves a bare name, and which `.git` it stops at are assumptions, each taken in the
+  direction of checking more.
 - User-level config is checked by timestamp, not content, and agy's own `settings.json` isn't part of the check
   because agy rewrites it itself. Both sit outside the project.
+- The after-run check of other engines' files looks at the project root only, and for a worktree or submodule the
+  real `hooks/` and `config` live outside the checkout and aren't watched.
 - Instruction files (`AGENTS.md`, `.agents/skills/`, `.agents/rules/`) steer the model but run nothing by
   themselves, so they don't hold scheduled runs. Root-level ones are in the after-run check.
 - A process still writing after the check can change files before agy reads them; the after-run check reports it.
