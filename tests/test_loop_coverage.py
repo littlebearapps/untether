@@ -1203,6 +1203,70 @@ class TestQueuedWaitNote:
 
         assert _queued_wait_note(self._token(engine="codex")) is None
 
+    @pytest.mark.parametrize(
+        ("accepting", "bg_count", "expected"),
+        [
+            (
+                True,
+                2,
+                "⏳ Queued — sent as soon as Claude's current turn ends "
+                "(background tasks keep running).",
+            ),
+            (True, 0, "⏳ Queued — sent as soon as Claude's current turn ends."),
+            (
+                False,
+                2,
+                "⏳ Queued behind the previous run's 2 background tasks — "
+                "starts when they finish, with context carried over. "
+                "/cancel to drop it.",
+            ),
+            (
+                False,
+                1,
+                "⏳ Queued behind the previous run's 1 background task — "
+                "starts when they finish, with context carried over. "
+                "/cancel to drop it.",
+            ),
+            (
+                False,
+                0,
+                "⏳ Queued — the previous run is still finishing up. Starts "
+                "when it completes, with context carried over. "
+                "/cancel to drop it.",
+            ),
+        ],
+    )
+    def test_queued_note_claude_strings_unchanged(
+        self, monkeypatch, accepting: bool, bg_count: int, expected: str
+    ) -> None:
+        """#977: the note is built through the live-session seam; every
+        Claude wording stays exactly what users saw before."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info",
+            lambda sid: (True, bg_count),
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.is_session_accepting", lambda sid: accepting
+        )
+        assert _queued_wait_note(self._token()) == expected
+
+    def test_queued_note_engine_without_backend_never_asks_claude(
+        self, monkeypatch
+    ) -> None:
+        """#977: an engine with no live-session backend gets no note, and
+        Claude's registry is not consulted for its session id."""
+        from untether.telegram.loop import _queued_wait_note
+
+        def _boom(sid: str):
+            raise AssertionError("Claude registry consulted for another engine")
+
+        monkeypatch.setattr("untether.runners.claude.session_linger_info", _boom)
+        monkeypatch.setattr("untether.runners.claude.is_session_accepting", _boom)
+        for engine in ("codex", "opencode", "pi", "antigravity"):
+            assert _queued_wait_note(self._token(engine=engine)) is None
+
     def test_no_live_owner_returns_none(self, monkeypatch) -> None:
         from untether.telegram.loop import _queued_wait_note
 

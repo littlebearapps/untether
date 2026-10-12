@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..live_sessions import live_backend
 from ..logging import get_logger
 from ..model import ResumeToken
 from ..transport import MessageRef, RenderedMessage, SendOptions
@@ -177,26 +178,26 @@ async def maybe_steer(
     target_engine = resume_token.engine if resume_token is not None else engine
     reason: FallbackReason | None = None
     session_id: str | None = None
-    if target_engine != "claude":
+    # #977: steering needs a live-session backend that can write mid-turn.
+    backend = live_backend(target_engine)
+    if backend is None or not backend.supports_steer:
         reason = "engine"
     elif resume_token is None or resume_token.is_continue or not resume_token.value:
         reason = "no_live"
     else:
         session_id = resume_token.value
 
-    if session_id is not None:
-        from ..runners.claude import (
-            get_live_session,
-            get_pending_ask_request,
-            steer_into_session,
-        )
+    if session_id is not None and backend is not None:
+        # Pending questions are the Claude control channel's registry, not
+        # live-session state (#960 makes that one engine-neutral).
+        from ..runners.claude import get_pending_ask_request
 
         if get_pending_ask_request(channel_id=chat_id) is not None:
             # The CLI is blocked on the question; an answer, not a steer, is
             # what it needs. Plain text already answered it upstream.
             logger.info("steer.skipped", chat_id=chat_id, reason="ask_pending")
             return False
-        live = get_live_session(session_id)
+        live = backend.get(session_id)
         if live is None:
             reason = "no_live"
         else:
@@ -244,6 +245,7 @@ async def maybe_steer(
                 ),
                 placeholder=None,
                 in_flight=True,
+                engine=backend.engine,
             )
             kwargs: dict[str, Any] = {"command_uuid": command_uuid}
             if has_options:
@@ -252,7 +254,7 @@ async def maybe_steer(
                 kwargs["cwd"] = cwd  # #996
             outcome: str | None = None
             try:
-                outcome = await steer_into_session(session_id, prompt_text, **kwargs)
+                outcome = await backend.steer(session_id, prompt_text, **kwargs)
             finally:
                 # Exactly once on every exit: only a written line keeps its
                 # anchor; any fallback (or exception) drops it.

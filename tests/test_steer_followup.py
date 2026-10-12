@@ -343,6 +343,40 @@ async def test_non_claude_engine_falls_back(explicit: bool) -> None:
     assert "codex" in _texts(cfg)[0]
 
 
+async def test_live_backend_without_steer_falls_back_with_engine_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#977: the gate is the backend's ``supports_steer``, not the engine
+    name — a live-session engine that cannot take a mid-turn line queues,
+    and nothing is asked of its (or Claude's) registry."""
+    from untether import live_sessions
+
+    class _NoSteerLive:
+        engine = "warm"
+        supports_steer = False
+
+        def get(self, session_id: str):
+            raise AssertionError("registry consulted for a no-steer backend")
+
+    def _boom(*args: Any, **kwargs: Any):
+        raise AssertionError("Claude consulted for another engine")
+
+    monkeypatch.setitem(live_sessions._BACKENDS, "warm", _NoSteerLive())
+    monkeypatch.setattr(claude_mod, "get_pending_ask_request", _boom)
+    monkeypatch.setattr(claude_mod, "get_live_session", _boom)
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    ok = await _steer(
+        cfg,
+        engine="warm",
+        token=ResumeToken(engine="warm", value="thread-1"),
+        override="steer",
+        running=running,
+    )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("engine", "warm")]
+
+
 async def test_default_mode_notice_only_once_per_run() -> None:
     cfg = _cfg("steer")
     running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}

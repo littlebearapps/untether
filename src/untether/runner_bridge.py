@@ -32,6 +32,7 @@ from .context import RunContext
 from .error_hints import SESSION_NOT_LOADED_HINT as _SESSION_NOT_LOADED_HINT
 from .error_hints import get_error_hint as _get_error_hint
 from .events import EventFactory
+from .live_sessions import live_backend
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import (
@@ -5340,25 +5341,30 @@ async def run_runner_with_cancel(
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
-                if task.resume is not None and task.resume.engine == "claude":
+                # #977: the engine's live-session backend (None: the engine
+                # keeps no process live, so there is nothing to close).
+                live = (
+                    live_backend(task.resume.engine)
+                    if task.resume is not None
+                    else None
+                )
+                if task.resume is not None and live is not None and live.supports_steer:
                     # #775: no steer may land in a run being cancelled — it
                     # would be killed with the process. Later messages fall
                     # back to the queue path (and --resume).
-                    from .runners.claude import close_steer_window
-
-                    await close_steer_window(task.resume.value, "cancel")
+                    await live.close_steer_window(task.resume.value, "cancel")
                 # #776: /cancel (or /new) on a live session that is only
                 # holding between turns closes its stdin — the CLI stops its
                 # background tasks and exits cleanly (no SIGTERM, nothing
                 # quarantined). An active turn is still killed as before.
-                if running_task_is_live_idle(task) and task.resume is not None:
-                    from .runners.claude import close_live_session
-
-                    if await close_live_session(
-                        task.resume.value, "cancel", notice=True
-                    ):
-                        with anyio.move_on_after(20):
-                            await runner_finished.wait()
+                if (
+                    running_task_is_live_idle(task)
+                    and task.resume is not None
+                    and live is not None
+                    and await live.close(task.resume.value, "cancel", notice=True)
+                ):
+                    with anyio.move_on_after(20):
+                        await runner_finished.wait()
                 tg.cancel_scope.cancel()
 
             async def thread_pid() -> None:
@@ -5598,11 +5604,10 @@ async def close_idle_live_sessions(
     for _ref, task in unique_running_tasks(running_tasks):
         if not running_task_is_live_idle(task) or task.resume is None:
             continue
-        if task.resume.engine != "claude":
+        live = live_backend(task.resume.engine)
+        if live is None:
             continue
-        from .runners.claude import close_live_session
-
-        if await close_live_session(task.resume.value, reason, notice=True):
+        if await live.close(task.resume.value, reason, notice=True):
             closed += 1
     return closed
 
@@ -5620,6 +5625,8 @@ class _InFlightFollowup:
     session_id: str
     settled: anyio.Event = field(default_factory=anyio.Event)
     written: bool | None = None
+    # #977: the engine whose live session the writer is writing into.
+    engine: str = "claude"
 
 
 # #921: anchors whose write into the live session is still being decided
@@ -5641,10 +5648,13 @@ def register_followup_anchor(
     reply_to: MessageRef,
     placeholder: MessageRef | None,
     in_flight: bool = False,
+    engine: str = "claude",
 ) -> None:
+    """``engine`` is the writer's live-session backend (#977); it names the
+    log namespace and the registry the run-end settle-wait reports on."""
     _FOLLOWUP_ANCHORS[command_uuid] = (session_id, reply_to, placeholder)
     if in_flight:
-        _FOLLOWUP_IN_FLIGHT[command_uuid] = _InFlightFollowup(session_id)
+        _FOLLOWUP_IN_FLIGHT[command_uuid] = _InFlightFollowup(session_id, engine=engine)
 
 
 def settle_followup_anchor(command_uuid: str, *, written: bool) -> None:
@@ -5677,20 +5687,22 @@ async def _await_in_flight_followups(session_id: str) -> None:
         for _, flight in pending:
             await flight.settled.wait()
     for uuid, flight in pending:
+        live = live_backend(flight.engine)
+        ns = f"{live.log_ns if live is not None else flight.engine}.live_session"
         if not flight.settled.is_set():
-            from .runners.claude import get_live_session
-
             # Expected when a newer process owns the session id (#816): the
             # writer is waiting on *that* process, whose router takes it.
             logger.info(
-                "claude.live_session.followup_settle_timeout",
+                f"{ns}.followup_settle_timeout",
                 session_id=session_id,
                 command_uuid=uuid,
-                live_owner_present=get_live_session(session_id) is not None,
+                live_owner_present=(
+                    live is not None and live.get(session_id) is not None
+                ),
             )
         elif not flight.written:
             logger.info(
-                "claude.live_session.followup_requeued",
+                f"{ns}.followup_requeued",
                 session_id=session_id,
                 command_uuid=uuid,
             )
@@ -6529,18 +6541,15 @@ async def handle_message(
     #
     # The wait is condition-based and bounded: it returns the moment the prior
     # owner deregisters, and on timeout we quarantine and go fresh rather than
-    # racing. Claude-only — no other engine has the limbo behaviour, and
-    # `wait_for_session_handoff` is Claude's registry.
-    if resume_token is not None and runner.engine == "claude":
+    # racing. Only for an engine with a live-session backend (#977; Claude
+    # today) — no other engine has the limbo behaviour or a registry of
+    # session owners to wait on.
+    _live = live_backend(runner.engine)
+    if resume_token is not None and _live is not None:
         _ac_cfg = _load_auto_continue_settings()
         if getattr(_ac_cfg, "serialize_session_owner", True):
             try:
-                from untether.runners.claude import (
-                    session_live_bg_count,
-                    wait_for_session_handoff,
-                )
-
-                _handoff = await wait_for_session_handoff(
+                _handoff = await _live.wait_for_handoff(
                     resume_token.value,
                     getattr(_ac_cfg, "session_handoff_timeout_s", 30.0),
                 )
@@ -6552,7 +6561,7 @@ async def handle_message(
                 # condition-based (resolves the instant the owner exits) and
                 # bounded by ``session_handoff_bg_timeout_s``.
                 if _handoff == "timed_out":
-                    _bg_count = session_live_bg_count(resume_token.value)
+                    _bg_count = _live.live_bg_count(resume_token.value)
                     _bg_budget = float(
                         getattr(_ac_cfg, "session_handoff_bg_timeout_s", 600.0)
                     )
@@ -6580,7 +6589,7 @@ async def handle_message(
                                 ),
                                 options=SendOptions(thread_id=incoming.thread_id),
                             )
-                        _handoff = await wait_for_session_handoff(
+                        _handoff = await _live.wait_for_handoff(
                             resume_token.value, _bg_budget
                         )
             except Exception:  # noqa: BLE001 — never block message handling
@@ -7640,13 +7649,12 @@ async def handle_message(
     live_notices: dict[str, bool] = {"subscribed": False, "all": False}
 
     def _subscribe_live_notices(sid: ResumeToken | None) -> None:
-        if live_notices["subscribed"] or sid is None or runner.engine != "claude":
+        if live_notices["subscribed"] or sid is None:
             return
-        from .runners.claude import add_live_session_listener
-
-        live_notices["subscribed"] = add_live_session_listener(
-            sid.value, _on_live_notice
-        )
+        live = live_backend(runner.engine)
+        if live is None:
+            return
+        live_notices["subscribed"] = live.add_listener(sid.value, _on_live_notice)
 
     async def _on_live_died(payload: dict[str, Any]) -> None:
         """#1001: the idle live session's process died without a close by

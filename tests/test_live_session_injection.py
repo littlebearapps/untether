@@ -1226,3 +1226,160 @@ async def test_996_steer_into_idle_session_in_other_cwd_falls_back(
         "sid-inj", "also", command_uuid="u998", cwd=tmp_path / "proj-b"
     )
     assert out == "steered"
+
+
+# ── #977: the live-session seam keeps Claude's log names and close calls ─────
+
+
+async def test_inject_live_followup_logs_use_engine_namespace(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every decision ``inject_live_followup`` takes is logged under the
+    backend's namespace (``claude.live_session.*``) with the fields it had
+    before the seam, and each close reaches Claude with the same arguments."""
+    from untether import budget_gate
+    from untether.runners.run_options import EngineRunOptions
+
+    closes: list[tuple[str, str, dict[str, Any]]] = []
+    injected: list[tuple[str, str, dict[str, Any]]] = []
+    inject_result = True
+
+    async def close(sid: str, reason: str, **kwargs: Any) -> bool:
+        closes.append((sid, reason, kwargs))
+        return True
+
+    async def inject(sid: str, text: str, **kwargs: Any) -> bool:
+        injected.append((sid, text, kwargs))
+        return inject_result
+
+    async def same(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions()
+
+    async def unknown(job: ThreadJob) -> EngineRunOptions:
+        raise RuntimeError("no options")
+
+    async def step(**kwargs: Any) -> tuple[bool, list[dict[str, Any]]]:
+        with capture_logs() as logs:
+            ok = await inject_live_followup(_job("sid-inj"), **kwargs)
+        mine = [e for e in logs if e["event"].startswith("claude.live_session.")]
+        for event in mine:
+            event.pop("exc_info", None)
+            # The events stay on this module's logger (no code moved).
+            assert event.pop("logger_name") == "untether.live_followup"
+        return ok, mine
+
+    job_fields = {"session_id": "sid-inj", "chat_id": 123}
+
+    # No live process, then one that is closing: skipped, at DEBUG.
+    assert await step() == (
+        False,
+        [
+            {
+                "event": "claude.live_session.inject_skipped",
+                "log_level": "debug",
+                "session_id": "sid-inj",
+                "live": False,
+                "closing": False,
+            }
+        ],
+    )
+    live, _pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions()
+    live.closing = True
+    ok, events = await step()
+    assert (ok, events[0]["live"], events[0]["closing"]) == (False, True, True)
+    live.closing = False
+
+    monkeypatch.setattr(claude_mod, "close_live_session", close)
+    monkeypatch.setattr(claude_mod, "inject_when_idle", inject)
+    idle_only = {"notice": True, "only_if_idle": True}
+
+    # #383: a failed plan re-arm closes without a notice.
+    live.state.plan_rearm_failed = True
+    assert await step(options_for=same) == (
+        False,
+        [
+            {
+                "event": "claude.live_session.plan_rearm_failed_closed",
+                "log_level": "info",
+                "session_id": "sid-inj",
+                "closed": True,
+            }
+        ],
+    )
+    assert closes.pop() == (
+        "sid-inj",
+        "plan_rearm_failed",
+        {"notice": False, "only_if_idle": True},
+    )
+    live.state.plan_rearm_failed = False
+
+    # Unresolvable options: nothing is closed or written.
+    ok, events = await step(options_for=unknown)
+    assert (ok, [(e["event"], e["log_level"]) for e in events]) == (
+        False,
+        [("claude.live_session.options_resolve_failed", "warning")],
+    )
+
+    # Changed options.
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="plan")
+    assert await step(options_for=same) == (
+        False,
+        [
+            {
+                "event": "claude.live_session.options_changed",
+                "log_level": "info",
+                "session_id": "sid-inj",
+                "closed": True,
+            }
+        ],
+    )
+    assert closes.pop() == ("sid-inj", "options_changed", idle_only)
+    live.state.spawn_run_options = EngineRunOptions()
+
+    # #896: past the daily budget the session is closed, not written to.
+    monkeypatch.setattr(budget_gate, "daily_gate", lambda options: object())
+    assert await step(options_for=same) == (
+        False,
+        [
+            {
+                "event": "claude.live_session.budget_refused",
+                "log_level": "info",
+                **job_fields,
+                "closed": True,
+            }
+        ],
+    )
+    assert closes.pop() == ("sid-inj", budget_gate.BUDGET_STOP_REASON, idle_only)
+    monkeypatch.setattr(budget_gate, "daily_gate", lambda options: None)
+    assert closes == []
+    assert injected == []
+
+    # The write itself: refused by the session, then accepted.
+    inject_result = False
+    assert await step(options_for=same) == (
+        False,
+        [
+            {
+                "event": "claude.live_session.inject_unavailable",
+                "log_level": "info",
+                **job_fields,
+                "user_msg_id": 20,
+            }
+        ],
+    )
+    inject_result = True
+    ok, events = await step(options_for=same)
+    (event,) = events
+    command_uuid = event.pop("command_uuid")
+    assert ok is True
+    assert event == {
+        "event": "claude.live_session.injected",
+        "log_level": "info",
+        **job_fields,
+        "user_msg_id": 20,
+        "source": "scheduler",
+    }
+    assert [(sid, text) for sid, text, _ in injected] == [("sid-inj", "again")] * 2
+    assert injected[-1][2] == {"command_uuid": command_uuid}
+    assert closes == []

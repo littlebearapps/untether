@@ -403,6 +403,105 @@ def test_838_idle_live_sessions_in_log_and_message(
     assert claude_runner.idle_live_session_count() == 0
 
 
+def _838_blocked_codex_spawn(live_runs: int):
+    """One Codex pre-spawn check with ``live_runs`` engine processes counted."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.codex import CodexRunner
+    from untether.utils import subprocess as sp
+
+    codex = CodexRunner(codex_cmd="codex", extra_args=[])
+    sp._incr_live_engine_subprocesses(live_runs)
+    try:
+        with capture_logs() as logs:
+            result = codex._check_prespawn_ram_guard(resume=None)
+    finally:
+        sp._incr_live_engine_subprocesses(-live_runs)
+    blocked = [
+        r for r in logs if r["event"] == "subprocess.prespawn.concurrency_blocked"
+    ]
+    return result, blocked
+
+
+def _838_idle_claude_session(monkeypatch: pytest.MonkeyPatch, sid: str) -> None:
+    state = ClaudeStreamState()
+    state.completed_turns = 1
+    state.turn_open = False
+    session = claude_runner.LiveSession(session_id=sid, state=state, stdin=None)
+    assert session.idle
+    monkeypatch.setitem(claude_runner._LIVE_SESSIONS, sid, session)
+
+
+def test_prespawn_message_claude_text_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """#977: the idle count comes through the live-session seam; the whole
+    message and the log line stay exactly as #838 shipped them."""
+    _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=2)
+    _838_idle_claude_session(monkeypatch, "idle-977-a")
+    _838_idle_claude_session(monkeypatch, "idle-977-b")
+
+    result, blocked = _838_blocked_codex_spawn(2)
+
+    assert result is not None
+    assert result.error == (
+        "🛑 Too many engine runs in flight (2/2) (including 2 idle Claude "
+        "session(s) kept open for background work — they close on their own). "
+        "Wait for one to finish, or /cancel an active run."
+    )
+    assert result.usage == {"prespawn_blocked": "concurrency"}
+    assert len(blocked) == 1
+    assert blocked[0] == {
+        "event": "subprocess.prespawn.concurrency_blocked",
+        "log_level": "error",
+        "logger_name": "untether.runners.codex",
+        "engine": "codex",
+        "live_runs": 2,
+        "max_runs": 2,
+        "idle_live_sessions": 2,
+    }
+
+
+def test_prespawn_message_without_idle_sessions_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=1)
+
+    result, blocked = _838_blocked_codex_spawn(1)
+
+    assert result is not None
+    assert result.error == (
+        "🛑 Too many engine runs in flight (1/1). Wait for one to finish, or "
+        "/cancel an active run."
+    )
+    assert "idle_live_sessions" not in blocked[0]
+
+
+def test_prespawn_message_mixed_engines_generic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """#977: once another engine holds idle live sessions too, the message
+    stops calling them Claude's. No such backend ships yet."""
+    from untether import live_sessions
+
+    class _OtherLive:
+        engine = "other"
+
+        def idle_count(self) -> int:
+            return 2
+
+    _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=3)
+    _838_idle_claude_session(monkeypatch, "idle-977-c")
+    monkeypatch.setitem(live_sessions._BACKENDS, "other", _OtherLive())
+
+    result, blocked = _838_blocked_codex_spawn(3)
+
+    assert result is not None
+    assert "(including 3 idle live session(s) kept open" in (result.error or "")
+    assert "Claude" not in (result.error or "")
+    assert blocked[0]["idle_live_sessions"] == 3
+
+
 # ---------------------------------------------------------------------------
 # #478 / #205 — claude runner.start log must NOT carry prompt content at INFO
 # ---------------------------------------------------------------------------

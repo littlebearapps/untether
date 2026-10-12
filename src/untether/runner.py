@@ -18,6 +18,7 @@ from weakref import WeakValueDictionary
 
 import anyio
 
+from .live_sessions import idle_live_session_counts
 from .logging import get_logger, log_pipeline
 from .model import (
     Action,
@@ -135,18 +136,13 @@ def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
 def _idle_claude_live_session_count() -> int:
     """Idle Claude live sessions (#776) currently holding a process (#838).
 
-    Engine-agnostic: the guard runs for every engine, and a Codex block can
-    be caused by idle Claude sessions. Imported lazily (claude.py imports
-    this module); any failure counts as zero — diagnostics must never block.
+    Claude's share of :func:`untether.live_sessions.idle_live_session_counts`
+    (#977), which resolves the runner lazily (claude.py imports this module)
+    and counts any failure as zero — diagnostics must never block. The
+    pre-spawn guard reads the per-engine counts itself; this accessor is kept
+    for the golden-replay harness's registry snapshot.
     """
-    try:
-        from .runners.claude import idle_live_session_count
-    except ImportError:  # pragma: no cover — claude runner always ships
-        return 0
-    try:
-        return idle_live_session_count()
-    except Exception:  # noqa: BLE001
-        return 0
+    return idle_live_session_counts().get("claude", 0)
 
 
 def _rc_label(rc: int) -> str:
@@ -1561,11 +1557,13 @@ class JsonlSubprocessRunner(BaseRunner):
         from .utils.subprocess import live_engine_subprocess_count
 
         live_runs = live_engine_subprocess_count()
-        # #838: idle Claude live sessions (#776) stay inside manage_subprocess
-        # and so count toward ``live_runs`` — on purpose (they still hold
-        # their MCP children's RAM). Name them on the logs and the message so
-        # a block while "nothing is running" explains itself, on any engine.
-        idle_live = _idle_claude_live_session_count()
+        # #838: idle live sessions (#776) stay inside manage_subprocess and so
+        # count toward ``live_runs`` — on purpose (they still hold their MCP
+        # children's RAM). Name them on the logs and the message so a block
+        # while "nothing is running" explains itself, on any engine. #977:
+        # counted per engine through the live-session seam.
+        idle_by_engine = idle_live_session_counts()
+        idle_live = sum(idle_by_engine.values())
         ctx: dict[str, Any] = {"idle_live_sessions": idle_live} if idle_live else {}
         if max_runs > 0 and live_runs >= max_runs:
             logger.error(
@@ -1577,8 +1575,12 @@ class JsonlSubprocessRunner(BaseRunner):
             )
             idle_clause = ""
             if idle_live:
+                # Named "Claude" while every idle session is Claude's.
+                idle_kind = (
+                    "Claude" if idle_by_engine.get("claude", 0) == idle_live else "live"
+                )
                 idle_clause = (
-                    f" (including {idle_live} idle Claude session(s) kept open "
+                    f" (including {idle_live} idle {idle_kind} session(s) kept open "
                     f"for background work — they close on their own)"
                 )
             return CompletedEvent(

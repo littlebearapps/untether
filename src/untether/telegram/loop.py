@@ -17,6 +17,7 @@ from ..config_watch import watch_config as watch_config_changes
 from ..context import RunContext, attended_context, unattended_trigger
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
+from ..live_sessions import live_backend
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..progress import ProgressTracker
@@ -1592,9 +1593,10 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     (finishing background work under the liveness-aware ceiling, #646/#647)
     previously sat on a bare "queued" progress message for the whole hold —
     observed at 5m36s, permitted up to 30 min — with nothing telling the
-    user why, or that /cancel was available. Returns ``None`` for non-Claude
-    engines, unknown sessions, and normal mid-run queues (where the active
-    progress message above already explains itself).
+    user why, or that /cancel was available. Returns ``None`` for engines
+    with no live-session backend (#977 — only Claude has one), unknown
+    sessions, and normal mid-run queues (where the active progress message
+    above already explains itself).
 
     #781: with live sessions (#776) a follow-up to a session that is live
     and accepting input is written into that same process as soon as its
@@ -1606,13 +1608,12 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     scheduler hands the job to the injector it is no longer in the
     cancellable queue.
     """
-    if resume_token.engine != "claude":
+    backend = live_backend(resume_token.engine)
+    if backend is None:
         return None
     try:
-        from ..runners.claude import is_session_accepting, session_linger_info
-
-        info = session_linger_info(resume_token.value)
-        live = info is not None and is_session_accepting(resume_token.value)
+        info = backend.linger_info(resume_token.value)
+        live = info is not None and backend.is_accepting(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1625,10 +1626,12 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     if live:
         if bg_count > 0:
             return (
-                "⏳ Queued — sent as soon as Claude's current turn ends "
-                "(background tasks keep running)."
+                f"⏳ Queued — sent as soon as {backend.display_name}'s current "
+                f"turn ends (background tasks keep running)."
             )
-        return "⏳ Queued — sent as soon as Claude's current turn ends."
+        return (
+            f"⏳ Queued — sent as soon as {backend.display_name}'s current turn ends."
+        )
     if bg_count > 0:
         plural = "s" if bg_count != 1 else ""
         return (
