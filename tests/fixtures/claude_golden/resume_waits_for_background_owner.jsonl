@@ -1,0 +1,18 @@
+{"_do":"config","permission_mode":"plan","prompt":"start the watcher","auto_continue":{"session_handoff_timeout_s":0.3}}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_bg_1","name":"Bash","input":{"command":"sleep 300","run_in_background":true}}]}}
+{"type":"control_request","request_id":"req-bash-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"sleep 300","run_in_background":true},"tool_use_id":"toolu_bg_1"},"_stdin":1}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bg_1","content":"Command running in background with ID: b1"}]}}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"bg"}]}
+{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_bg_1","description":"bg b1","is_backgrounded":true,"task_type":"local_bash"}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"Watcher started."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":2,"result":"Watcher started.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"followup","text":"use the other model","msg_id":20,"options":{"model":"claude-other"},"_eof":true}
+{"_do":"message","text":"use the other model","msg_id":20,"resume":true,"_telegram":"still finishing"}
+{"_do":"exit","rc":0,"then_accept":true,"_stdin":2}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_03","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"Resumed."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":1,"result":"Resumed.","total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"drain"}
+{"_do":"eof"}
+{"_do":"exit","rc":0}

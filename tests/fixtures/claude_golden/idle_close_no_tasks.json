@@ -1,0 +1,334 @@
+{
+ "config": {
+  "permission_mode": "plan",
+  "prompt": "say hello",
+  "watchdog": {
+   "post_result_limbo_grace": 0.3
+  }
+ },
+ "scenario": "idle_close_no_tasks",
+ "steps": [
+  {
+   "logs": [
+    "debug progress.sent +[channel_id,logger_name,message_id]",
+    "debug runner.start_prompt engine=\"claude\" +[logger_name,prompt_preview]",
+    "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
+    "info claude.post_result_idle.task_started session_id=null +[logger_name,poll_interval_s,timeout_s]",
+    "info handle.incoming +[channel_id,logger_name,resume,text,user_msg_id]",
+    "info preamble.applied source=\"default\" +[logger_name,preamble_len]",
+    "info runner.start engine=\"claude\" +[args,logger_name,prompt_len,resume]",
+    "info subprocess.spawn +[args,cmd,logger_name,pid,use_control_channel]",
+    "info subprocess.stdin.payload_sent +[logger_name,payload_len,pid]"
+   ],
+   "registry": {
+    "active_runners": [],
+    "answered_ask_flows": {},
+    "ask_flows": {},
+    "cancelled_during_write": [],
+    "discuss_approved": [],
+    "discuss_carry": [],
+    "discuss_feedback_refs": {},
+    "handled": [],
+    "idle_live_session_count": 0,
+    "inflight": {},
+    "live_sessions": {},
+    "outline_pending": [],
+    "pending_ask": {},
+    "plan_exit_approved": [],
+    "request_to_channel": {},
+    "request_to_input": {},
+    "request_to_originator": {},
+    "request_to_session": {},
+    "request_to_tool_name": {},
+    "session_bg_state": [],
+    "session_stdin": [],
+    "states": {}
+   },
+   "result": [
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "plan",
+    "--permission-prompt-tool",
+    "stdio"
+   ],
+   "stdin": [
+    {
+     "request": {
+      "hooks": {
+       "PreToolUse": [
+        {
+         "hookCallbackIds": [
+          "ut_loop_cron_create"
+         ],
+         "matcher": "CronCreate",
+         "timeout": 30
+        },
+        {
+         "hookCallbackIds": [
+          "ut_loop_cron_delete"
+         ],
+         "matcher": "CronDelete",
+         "timeout": 30
+        }
+       ]
+      },
+      "subtype": "initialize"
+     },
+     "request_id": "init_<id>",
+     "type": "control_request"
+    },
+    {
+     "message": {
+      "content": "[Untether] You are running via Untether, a Telegram bridge for coding agents. The user is interacting through Telegram on a mobile device.\n\nKey constraints:\n- The user can ONLY see your final assistant text messages\n- Tool calls, thinking blocks, file contents, and terminal output are invisible\n- Keep the user informed by writing clear status updates as visible text\n- If hooks fire at session end, your final response MUST still contain the user's requested content. Hook concerns are secondary — briefly note them AFTER the main content, never instead of it.\n\nConfiguration changes (`untether.toml`):\n- Untether hot-reloads its `untether.toml` (default `~/.untether/untether.toml`) automatically — edits take effect within ~1 second of saving.\n- Do NOT restart the Untether service after editing config (`systemctl --user restart untether`, an `untether-*` instance unit, or `launchctl kickstart … untether`). The restart is unnecessary, and because it shuts down the very session issuing the command, the graceful drain will time out (120s) and your final answer to the user will be silently dropped.\n- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`, turning on `[triggers] enabled`) are flagged at reload time — if you didn't see such a warning, no restart is needed.\n\nPlan-mode requirements (when you call `ExitPlanMode`):\n- Your `plan` parameter MUST be a concise 3–5 bullet summary of your findings, decisions, or proposed changes — never just a file path. Keep it short: the plan is shown to the user for approval, not as the final deliverable.\n- After `ExitPlanMode` is approved, your next assistant message — which becomes the user's final Telegram message — should be a brief CLI-style summary: 3–7 bullets or 1–2 short paragraphs covering key findings, recommendations, decisions made, and next steps. Aim for ~500–1500 characters total. Do NOT re-paste the full plan content — the user has already seen it during approval. Brevity is the goal; do not just write \"Plan approved\" either.\n\nEvery response that completes work MUST end with a structured summary (keep each section brief — headline bullets, not full content; aim for ~500–1500 characters total across the whole summary):\n  ## Summary\n  ### Completed\n  - [What was done — short bullets with file paths/line numbers]\n  - [Key decisions made and why — one line each]\n  ### Plan/Document Created (if applicable)\n  - [Path AND a 3–5 bullet headline summary — the user has already seen the plan during approval, so this is a pointer + headline, not a re-paste of the full content]\n  ### Files for Review (if applicable)\n  - To send files to the user, write them to `.untether-outbox/`\n  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n  - Files are delivered as Telegram documents when the run completes\n  - Only files written or copied into it during this run are sent — older leftovers are moved aside. To resend an older file, copy it in again.\n  - The user can also request any project file with `/file get <path>`\n  ### Next Steps\n  - [Remaining work, if any]\n  ### Decisions Needed (if any)\n  - [Blocking questions — state your recommended option clearly]\n\nWhen you need clarification from the user, use AskUserQuestion with clear options. The user will see interactive buttons to choose from.\n\n---\n\nsay hello",
+      "role": "user"
+     },
+     "parent_tool_use_id": null,
+     "session_id": "",
+     "type": "user"
+    }
+   ],
+   "step": "do:accept",
+   "telegram": [
+    {
+     "chat": 123,
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "notify": false,
+     "op": "send",
+     "reply_to": 10,
+     "text": "starting · claude · <t>"
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "meta": {
+      "cwd": "/work/project",
+      "model": "claude-golden-1",
+      "permissionMode": "plan",
+      "pid": "<pid>",
+      "tools": [
+       "Bash",
+       "Read",
+       "Edit",
+       "Write",
+       "Glob",
+       "Grep"
+      ]
+     },
+     "resume": {
+      "engine": "claude",
+      "is_continue": false,
+      "value": "golden-session-1"
+     },
+     "title": "claude-golden-1",
+     "type": "started"
+    }
+   ],
+   "logs": [
+    "debug claude.hook.cli_baseline +[baselined,children,cli_pid,logger_name,pid]",
+    "debug claude_runner.registered session_id=\"golden-session-1\" +[logger_name]",
+    "debug export.session.new session_id=\"golden-session-1\" +[channel_id,logger_name]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug runner.started.seen reason=\"first_seen\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
+    "debug session_lock.acquired engine=\"claude\" session_id=\"golden-session-1\" +[logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info claude.permission_mode.changed from=null session_id=\"golden-session-1\" source=\"init\" to=\"plan\" turn=1 +[logger_name]",
+    "info session_stdin.registered session_id=\"golden-session-1\" +[logger_name,pid]"
+   ],
+   "registry": {
+    "active_runners": [
+     "golden-session-1"
+    ],
+    "live_sessions": {
+     "golden-session-1": {
+      "accepting": true,
+      "accepting_steer": true,
+      "close_reason": null,
+      "closing": false,
+      "idle": false,
+      "listeners": 1
+     }
+    },
+    "session_bg_state": [
+     "golden-session-1"
+    ],
+    "session_stdin": [
+     "golden-session-1"
+    ],
+    "states": {
+     "golden-session-1": {
+      "auto_approve_queue": [],
+      "auto_deny_queue": [],
+      "awaiting_injected": {},
+      "awaiting_user_approval": false,
+      "completed_turns": 0,
+      "control_action_for_tool": {},
+      "control_registered": [],
+      "control_request_snapshot": [],
+      "effective_permission_mode": "plan",
+      "exitplanmode_plans": {},
+      "live_close_reason": null,
+      "live_mode": true,
+      "pending_control_requests": [],
+      "plan_rearm_failed": false,
+      "plan_rearm_pending": false,
+      "prompting_mode": false,
+      "request_to_action": {},
+      "turn": 1,
+      "turn_open": true
+     }
+    }
+   },
+   "step": "emit:system/init",
+   "telegram": [
+    {
+     "entities": [
+      "code@53+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t>\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+    }
+   ]
+  },
+  {
+   "step": "emit:assistant/text"
+  },
+  {
+   "events": [
+    {
+     "meta": {
+      "complete": "✓ turn complete",
+      "pid": "<pid>"
+     },
+     "resume": {
+      "engine": "claude",
+      "is_continue": false,
+      "value": "golden-session-1"
+     },
+     "type": "started"
+    },
+    {
+     "answer": "Hello.",
+     "ok": true,
+     "resume": {
+      "engine": "claude",
+      "is_continue": false,
+      "value": "golden-session-1"
+     },
+     "type": "completed",
+     "usage": {
+      "duration_api_ms": 900,
+      "duration_ms": 1000,
+      "num_turns": 1,
+      "subtype": "success",
+      "total_cost_usd": 0.01,
+      "usage": {
+       "input_tokens": 10,
+       "output_tokens": 5
+      }
+     }
+    }
+   ],
+   "logs": [
+    "debug claude_runner.registered session_id=\"golden-session-1\" +[logger_name]",
+    "debug cost_tracker.recorded +[cost,daily_total,logger_name]",
+    "debug handle.final.rendered status=\"done\" +[logger_name,rendered]",
+    "debug runner.completed.seen ok=true +[emit,has_answer,jsonl_seq,logger_name,pid]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug runner.started.seen reason=\"unknown\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
+    "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
+    "debug usage_footer.failed +[exc_info,logger_name]",
+    "info claude.live_session.stdin_closed reason=\"idle_no_tasks\" session_id=\"golden-session-1\" turn=1 turn_idle=true +[age_s,last_progress_age_s,live_tasks,logger_name]",
+    "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"new_session\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
+    "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
+   ],
+   "registry": {
+    "live_sessions": {
+     "golden-session-1": {
+      "accepting": false,
+      "accepting_steer": false,
+      "close_reason": "idle_no_tasks",
+      "closing": true,
+      "idle": true
+     }
+    },
+    "states": {
+     "golden-session-1": {
+      "completed_turns": 1,
+      "live_close_reason": "idle_no_tasks",
+      "turn_open": false
+     }
+    }
+   },
+   "step": "emit:result/success",
+   "telegram": [
+    {
+     "chat": 123,
+     "entities": [
+      "code@105+32"
+     ],
+     "id": 2,
+     "keyboard": [],
+     "notify": true,
+     "op": "send",
+     "replace": 1,
+     "reply_to": 10,
+     "text": "done · claude · <t>\n\nHello.\n\n🏷 claude-golden-1 · plan · ✓ turn complete\n💰$0.01 · 1 tn · 1.0s · 10/5\n\n↩️ claude --resume golden-session-1"
+    }
+   ]
+  },
+  {
+   "result": "⏳ Queued — the previous run is still finishing up. Starts when it completes, with context carried over. /cancel to drop it.",
+   "step": "do:queued_note"
+  },
+  {
+   "logs": [
+    "debug claude.live_session.inject_skipped closing=true live=true session_id=\"golden-session-1\" +[logger_name]"
+   ],
+   "result": false,
+   "step": "do:followup text=too late"
+  },
+  {
+   "logs": [
+    "debug session_lock.released engine=\"claude\" +[logger_name]",
+    "info claude.live_session.closed close_reason=\"idle_no_tasks\" quarantined=false session_id=\"golden-session-1\" +[logger_name,tasks]",
+    "info claude.live_session.lifecycle_exited close_reason=\"idle_no_tasks\" reason=\"exited_after_close\" session_id=\"golden-session-1\" +[logger_name]",
+    "info claude.post_result_idle.task_exited reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
+    "info claude_runner.session_cleanup cleaned=[\"active_runners\", \"session_stdin\", \"session_bg_state\", \"live_session\"] session_id=\"golden-session-1\" +[logger_name]",
+    "info session.summary cancelled=false engine=\"claude\" ok=true session_id=\"golden-session-1\" +[approval_surfaces,duration_seconds,event_count,followup_turns,hooks_started,last_event_type,liveness_stalls,logger_name,model,model_display,no_query_results,peak_idle_seconds,peak_live_idle_seconds,saw_result,stall_suppressions,stall_warnings,unanswerable_control_requests]",
+    "info subprocess.exit rc=0 +[logger_name,pid]"
+   ],
+   "registry": {
+    "active_runners": [],
+    "live_sessions": {
+     "golden-session-1": "<removed>"
+    },
+    "session_bg_state": [],
+    "session_stdin": [],
+    "states": {
+     "golden-session-1": "<removed>"
+    }
+   },
+   "step": "do:exit rc=0"
+  },
+  {
+   "step": "end"
+  }
+ ]
+}
