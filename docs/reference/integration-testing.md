@@ -1624,3 +1624,99 @@ So the row is split. AG-12a (required) proves the user-visible half in 2 minutes
 | AG-12e | Antigravity | PASS | `antigravity.argv.invalid_value field=model reason=leading_dash` and `reason=unsupported_character`, masked previews, no `runner.start`; after `/model clear` the run worked with footer `workspace` |
 | Upgrade path | dev | PASS (run 5) | The dev bot ran the whole evening with no `[engines.antigravity]` table and no config error. The stored `accept-edits` half was not run **Run 5:** with `accept-edits` stored as the test chat's Antigravity mode in the chat-prefs state file, the next message logged `antigravity.permission_mode.unknown value=accept-edits` once and ran as Workspace (`--mode=accept-edits --agent=untether-workspace`); state file restored from its backup, `/config` shows `workspace (default)` again |
 | Logs | dev | NOT RUN | Partial check only: no `subprocess.liveness_stall`, no `subprocess.stderr.hook_error`, no Traceback, no `agy --input-format` process after the run. The full sweep is owed |
+
+## 0.36.1rc3 scenarios (Antigravity sessions and security fixes)
+
+0.36.1rc3 adds Antigravity's background rows ([#978](https://github.com/littlebearapps/untether/issues/978)) and context, credits and auth reporting ([#979](https://github.com/littlebearapps/untether/issues/979)), and fixes the webhook and cron triggers ([#906](https://github.com/littlebearapps/untether/issues/906)), the group-admin gate for settings ([#1042](https://github.com/littlebearapps/untether/issues/1042)), the planted-config layouts ([#1043](https://github.com/littlebearapps/untether/issues/1043)), the tool-permission confirmation ([#1044](https://github.com/littlebearapps/untether/issues/1044)) and the ⚠️ rows missing from the final answer ([#1045](https://github.com/littlebearapps/untether/issues/1045)). It also moves Claude's live session behind an engine-neutral seam with no intended behaviour change ([#960](https://github.com/littlebearapps/untether/issues/960)), so the Claude rows below are regression checks. AG rows continue the 0.36.1rc1 numbering; `R3-` rows are the rest of this rc.
+
+### Before the run
+
+- Everything under "0.36.1rc1 scenarios / results → Before the run" still applies (test project, Antigravity chat, `[engines.antigravity]` table, drift suite, `/usage` budget check, log tail).
+- Back up the dev config before any row that edits it and restore it afterwards. Restart the dev bot only from a terminal, never from inside a bot session.
+- **Trigger port:** the dev and staging instances both default `[triggers.server] port` to 9876, and only one process can listen on it. Before turning `[triggers] enabled` on in the dev config, set the dev instance's `port` to a free local port other than staging's. Turning triggers on, or changing the port, needs a dev restart.
+- AG-13, AG-14 and AG-16 need **Full access** or a cron where they say so; set it with `/config` → Permission mode and Clear override at the end of each row.
+- Extra log tail for these rows: `journalctl --user -u untether-dev -f -o cat | grep -E "antigravity\.(background|quota|credits|config_check|permission_mode|workspace_config)|subprocess\.orphans_reaped|triggers\.|command\.admin_required|config\..*sender_id|claude\.live_session|cancel\."`.
+
+### #978 — Antigravity background rows
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-13a background command | Full access. ``Start `sleep 90` in the background, reply STARTED straight away, then tell me when it has finished.`` Send `/ping` while it runs and again after the final | The progress message shows `⏳ background (1)` with a `🐚 sleep 90 · <elapsed>` row whose elapsed time advances. `/ping` during the run includes `⏳ background: 1 task running`; after the final it has no background line. One final carrying both replies | `antigravity.background.started task_id=cmd:<n>`; no `subprocess.liveness_stall`; one `runner.completed ok=True` |
+| AG-13b two subagents | Full access. `Start two subagents in parallel: one lists the files in this project, the other counts the lines in hello.py. Reply with both results.` | Two `🤖 <role> (<type>)` rows in the background block while they work, both ticked off by the final | `antigravity.background.started task_id=sub:<n>:0` and `…:1`; two `antigravity.background.finished … attribution=fifo` (agy doesn't say which subagent finished, so they are ticked off in start order) |
+| AG-13c timer | Full access. `Set a 60-second timer, then reply TIMER DONE.` | A `🐚 timer (60s)` row with its elapsed time; the final arrives after about 60 s | `antigravity.background.started task_id=timer:<n>` |
+| AG-13d daemon outlives the answer | Full access. ``Start `sleep 241` as a background daemon (nohup … &) and reply STARTED immediately.`` Afterwards run `pgrep -fa "sleep 241"` on the host | The final arrives within seconds, not after 241 s | `antigravity.background.outlived tasks=['cmd:<n>']`, then Untether's end-of-run clean-up `subprocess.orphans_reaped pids=[…]` naming the sleep, and `pgrep` finds nothing. If the sleep survives it left agy's process group: record it (the CHANGELOG warns a daemon can outlive agy) and kill it by hand |
+
+### #979 — context, credits and auth reporting
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-14a estimated context | `/model set gemini-3.8-flash`, `/reasoning set low`, then `Reply with exactly: OK` | The first line of the progress message and of the final ends `~N% ctx` (with the tilde); the footer shows the model and `low` | `runner.start` args contain `--model=gemini-3.8-flash` and `--effort=low` |
+| AG-14b no model, no figure | `/model clear`, `/reasoning clear`, `Reply with exactly: OK` | No `% ctx` on either first line | — |
+| AG-14c credits and cache | `/usage`, then `/usage` again within 60 s | Both show the quota groups and an `AI credits: <n> remaining` line (with agy's own top-up link when it gives one) | One `antigravity.quota.fetched` and one `antigravity.credits.fetched` for the first `/usage` only; the second is served from the caches |
+| AG-14d subscription footer | `/config` → Cost & usage → Subscription usage **on**; `/usage`; `Reply with exactly: OK`. Then switch it **off** and send the prompt again | On: a `⚡ Gemini Models 5h: N% \| wk: N%` line under the answer. Off: no quota line (unless a group is at 70 % or more) | No quota fetch during either run |
+| AG-14e sign-in route | After an Antigravity run: `/stats auth` | An `antigravity: ℹ️ set to use …` line naming Google sign-in, a Gemini API key or Enterprise ADC | No `agy` process started by the command |
+| AG-14f export | `/export` after AG-14a | A transcript file with the turns this Untether process saw | — |
+| AG-14g Claude unchanged | In the Claude chat: `Reply with exactly: OK` | Any `% ctx` on the first line has **no** tilde | — |
+
+### #1043 — planted-config layouts
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-15a nested agent | In the test project, write `.agents/agents/helper/agent.md` with front matter `name: helper` and `plugins: vendor/plug`, then `vendor/plug/hooks.json` holding one `Stop` hook that runs `sh ./run.sh`, and `vendor/plug/run.sh` containing `echo 1` (a script outside `.agents/`). Send `Reply with exactly: OK` | The `⚠️ This project has agy hooks, plugins or MCP servers that Untether doesn't manage (…)` row, naming the agent file, in the final (AG-17) | `antigravity.workspace_config_present … digest=<A> recorded=True`; `runner.start` args have `--mode=accept-edits` and **no** `--agent` (the project defines its own agents) |
+| AG-15b change the script | Change `run.sh` to `echo 2`; send `Reply with exactly: OK` | The row again | `antigravity.workspace_config_present … digest=<B>` with B ≠ A |
+| AG-15c remove | Delete `.agents/` and `vendor/`; send `Reply with exactly: OK` | No ⚠️ row | Args end `--agent=untether-workspace` again |
+
+### #1044 — tool-permission confirmation
+
+Write a wrapper script outside the project that exits 1 when its arguments include `/config` and otherwise runs the real `agy` by its full path with all arguments (so `--version` and normal runs still work). Set `cmd = "<that script>"` under `[engines.antigravity]` (hot-reload).
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-16a attended run continues | Workspace, `/new`, `Reply with exactly: OK` | The run completes with `OK` and the row `⚠️ Untether couldn't read agy's tool-permission setting before this run (the check failed). agy reported request-review when it started, so the run continues. agy's allow rules and outside-project access weren't checked.`, in the final (AG-17) | `antigravity.config_check.failed`; `antigravity.permission_mode.unconfirmed source=config` (WARNING) |
+| AG-16b cron held | Same state: a one-minute test cron for the project, no `permission_mode` | The cron's card: `Untether couldn't read agy's tool-permission setting before this run (the check failed), so this scheduled run is held. …`; nothing runs | `antigravity.permission_mode.unverified source=config trigger=cron:<id>` (WARNING); no `runner.start` for the cron |
+| AG-16c restore | Remove `cmd` and the cron; send `Reply with exactly: OK` | No ⚠️ row | No `permission_mode.unconfirmed` |
+
+The other #1044 row (`⚠️ agy didn't report its permission mode …`) needs an `agy` that leaves `permission_mode` out of its first event, which can't be arranged live; it is covered by unit tests.
+
+### #1045 — ⚠️ rows in the final answer
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-17 rows reach the final | Check the finals of AG-15a, AG-15b and AG-16a, which are short runs whose progress message is replaced | Each ⚠️ row is in the **final** message, once, on its own line after the answer and before the footer; it also showed on the progress message while the run worked. With AG-15a's config still in place, a long answer (the U3 prompt) carries the row once, in its last message. AG-3's outside write still shows the `⚠️ Antigravity was blocked …` paragraph once, with no separate `⚠️ Blocked` line in the final | The `antigravity.workspace_config_present` / `permission_mode.unconfirmed` lines of those rows; no extra log line |
+
+### #906 — webhook and cron triggers
+
+Setup (dev config, then a dev restart): `[triggers] enabled = true`; `[triggers.server]` with the port from "Before the run" and `rate_limit = 5`; and one webhook `it-906` with `path = "/hooks/it-906"`, `auth = "bearer"`, a long random `secret`, `action = "file_write"`, `file_path = "<a scratch folder>/{{name}}"`, `notify_on_success = true`, `notify_on_failure = true` and `chat_id` set to a test chat. Send requests with `curl` to `http://127.0.0.1:<port>/hooks/it-906` and print the status (`-s -o /dev/null -w '%{http_code}'`). Remove the webhook and restore the server settings afterwards.
+
+| ID | Steps | Expected | Expected log signature |
+|---|---|---|---|
+| R3-906a deny list | POST `{"name": ".env.local"}` with the right secret; then `{"name": "notes.txt"}` | Both `202`. The chat gets `❌ webhook:it-906 (file_write): file_write rejected: path matches deny glob '**/.env.*'` and no `.env.local` is written; then `✅ webhook:it-906 (file_write): …` and `notes.txt` exists | `triggers.action.file_write.denied deny_glob=**/.env.*`, then `triggers.action.file_write.ok` |
+| R3-906b failed-auth budget from loopback | Within one minute: 8 POSTs with a wrong secret, then 1 with the right secret | The wrong-secret requests get `401` five times, then `429`; the right secret still gets `202` | Five `triggers.webhook.auth_failed remote=loopback locked_out=False` WARNINGs; the over-budget refusals are debug only. No `triggers.webhook.rate_limited` for the accepted request |
+| R3-906c oversize chunked body | Send about 2 MB from stdin with `-H 'Transfer-Encoding: chunked' --data-binary @-` | `413` | No `triggers.webhook.internal_error`, no Traceback |
+| R3-906d non-ASCII token | `-H 'Authorization: Bearer tökén'` | `401`, not `500` | `triggers.webhook.auth_failed`; no Traceback |
+
+### #1042 — group admin gate for settings
+
+Run in a group test chat where the tester is an admin.
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| R3-1042a menu tap | `/config`, change one setting with a button (for example Verbose), then change it back | The change applies as before | The matching `config.*` line carries `sender_id=<tester's id>`; no `command.admin_required` |
+| R3-1042b typed action | `/config vb:on`, then `/config vb:off` | Applies | `config.*` with `sender_id` |
+| R3-1042c `/planmode` and `/verbose` | `/planmode show`, then (Claude chat) `/planmode on` and `/planmode off`; `/verbose on` and `/verbose off` | `/planmode show` answers as before; the changes apply for an admin | No `command.admin_required` |
+| R3-1042d non-admin (optional) | Needs a second Telegram account that is a member but not an admin: tap a `/config` setting, type `/config vb:on`, `/planmode on`, `/verbose on`; then `/planmode show` and open `/config` | Each change is answered `changing settings is restricted to group admins.` and nothing changes; `/planmode show` and opening `/config` still work | `command.admin_required … reason=…` (WARNING) once per refused change |
+
+### Claude seam regression (#960)
+
+Run in the Claude chat. The B-LIVE, RC12 and RC13 rows named here give the full recipes.
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| R3-SEAM-1 idle follow-up | `Reply with exactly: one`, then within 60 s `Reply with exactly: two` | Both answered; the second in the same session within seconds (RC13-7) | One `subprocess.spawn` for both; `claude.live_session.user_message_written` for the follow-up |
+| R3-SEAM-2 mid-turn steer | `Run for i in $(seq 1 40); do sleep 1; done in the foreground, then say DONE`; while it runs, `/steer also tell me the hostname` | `↪️ Steered into the current run.` and one final answering both (RC13-5a) | `claude.live_session.steered mid_turn=True` |
+| R3-SEAM-3 queued note | RC12-7: start a 60 s background task, end the turn, send a follow-up at once | `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).`, then an answer in the same session | No second `subprocess.spawn` |
+| R3-SEAM-4 background wake | B-LIVE-1 | The turn's final, then a new `🔔 Background task finished — …` message | `claude.turn.started reason=task_finished` |
+| R3-SEAM-5 `/cancel` on an idle session | After a plain reply, within 60 s, `/cancel`; then ask a question | The cancel reply says it `closed the idle session`; the question resumes the same session with a real answer | `cancel.idle_session_closed`; `claude.live_session.stdin_closed reason=cancel`; no `runner.empty_result` |
+| R3-SEAM-6 `/continue` | `/new`, then `/continue reply with the word continued` | Resumes the project's most recent Claude session and replies `continued` | `runner.start` args contain `--continue` |
+
+**Required for 0.36.1rc3:** the Minor tiers as for rc1 (Tier 7, Tier 1 on all five supported engines, Tier 2 C1/C2/C4), AG-1–AG-12f as a regression pass, AG-13a–AG-17, R3-906a–d, R3-1042a–c (d when a second account is available) and R3-SEAM-1–6, then the log sweep: every WARNING or ERROR is one a row provokes on purpose.
