@@ -1630,6 +1630,250 @@ class TestExpireWakeupsForSession:
                 tg.cancel_scope.cancel()
 
 
+# ── #1004: a loop that ends at a cap says so ────────────────────────────
+
+
+class TestExpiryNotice:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @staticmethod
+    def _cron(chat_id: int, **kwargs: Any) -> loop_scheduler._LoopEntry:
+        token = loop_scheduler.register_pending_cron(
+            session_id=kwargs.pop("session_id", "sess-cap"),
+            tool_use_id=kwargs.pop("tool_use_id", "tu-cap"),
+            cron_expression="*/5 * * * *",
+            prompt="check deploy",
+            recurring=True,
+            chat_id=chat_id,
+            **kwargs,
+        )
+        return loop_scheduler._PENDING_BY_TOKEN[token]
+
+    @staticmethod
+    def _notices(transport: FakeTransport) -> list[str]:
+        return [text for _, text, _ in transport.sent if "/loop · iter" not in text]
+
+    async def test_max_iterations_notice_follows_the_last_answer(self):
+        """The run's answer is out before the notice: ``_RUN_JOB`` is awaited
+        to completion before the entry expires."""
+        transport = FakeTransport()
+
+        async def run_job(chat_id, *_args, **_kwargs):
+            await anyio.sleep(0.05)
+            await transport.send(
+                channel_id=chat_id, message=type("M", (), {"text": "ANSWER"})()
+            )
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, run_job, transport, 1)
+            try:
+                entry = self._cron(370, thread_id=7, max_iterations=1)
+                await loop_scheduler._fire(entry.token)
+                await anyio.wait_all_tasks_blocked()
+                texts = [text for _, text, _ in transport.sent]
+                assert texts[0].endswith("/loop · iter 1/1")
+                assert texts[1] == "ANSWER"
+                assert texts[2] == (
+                    "\N{ALARM CLOCK} Loop finished — it reached its limit of "
+                    "1 run. Send /loop again to start another."
+                )
+                assert len(texts) == 3
+                channel_id, _, options = transport.sent[2]
+                assert channel_id == 370
+                assert options.notify is False
+                assert options.thread_id == 7
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_cap_reached_at_next_fire_notifies_once(self):
+        recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, transport, 1)
+            try:
+                entry = self._cron(371, max_iterations=3)
+                entry.iteration_count = 3
+                await loop_scheduler._fire(entry.token)
+                # A second expiry of the same entry adds nothing.
+                loop_scheduler._expire(entry, reason="max_iterations")
+                await anyio.wait_all_tasks_blocked()
+                assert recorder.calls == []
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Loop finished — it reached its limit of "
+                    "3 runs. Send /loop again to start another."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_duration_cap_notice(self):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                entry = self._cron(372, max_total_duration_hours=4)
+                entry.created_at_wallclock = time.time() - 4 * 3600 - 1
+                await loop_scheduler._fire(entry.token)
+                await anyio.wait_all_tasks_blocked()
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Loop finished — it reached its time limit "
+                    "of 4 hours. Send /loop again to start another."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_expiry_notice(self):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                entry = self._cron(373, expiry_days=7)
+                entry.created_at_wallclock -= 7 * 86_400
+                entry.expires_at_wallclock -= 7 * 86_400
+                await loop_scheduler._fire(entry.token)
+                await anyio.wait_all_tasks_blocked()
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Loop finished — it expired 7 days after "
+                    "it was created. Send /loop again to start another."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_unparseable_cron_notice(self, monkeypatch):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                entry = self._cron(374)
+                monkeypatch.setattr(loop_scheduler, "_next_cron_fire", lambda _e: None)
+                loop_scheduler._rearm_or_expire(entry)
+                await anyio.wait_all_tasks_blocked()
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Loop finished — it has a schedule that "
+                    "could not be read. Send /loop again to start another."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_wakeup_past_a_cap_gets_the_wakeup_wording(self):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="sess-w",
+                    tool_use_id="tu-w",
+                    delay_seconds=600.0,
+                    prompt="wake",
+                    chat_id=375,
+                    max_total_duration_hours=1,
+                )
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                entry.created_at_wallclock = time.time() - 3601
+                await loop_scheduler._fire(token)
+                await anyio.wait_all_tasks_blocked()
+                assert self._notices(transport) == [
+                    "\N{ALARM CLOCK} Scheduled wake-up cancelled — it reached "
+                    "its time limit of 1 hour. Reply to continue."
+                ]
+            finally:
+                tg.cancel_scope.cancel()
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["user_cancel", "do_not_resume", "cli_fired_live", "one_shot_complete"],
+    )
+    async def test_silent_reasons_post_nothing(self, reason: str):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                entry = self._cron(376)
+                loop_scheduler._expire(entry, reason=reason)
+                await anyio.wait_all_tasks_blocked()
+                assert entry.cancelled is True
+                assert transport.sent == []
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_user_cancel_posts_nothing(self):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                self._cron(377)
+                assert loop_scheduler.cancel_pending_for_chat(377) == 1
+                await anyio.wait_all_tasks_blocked()
+                assert transport.sent == []
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_wake_cap_close_posts_no_second_notice(self):
+        """The bridge already announces a wake cap; the entries it expires
+        stay silent — and so does a later fire of one of them."""
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="sess-wc",
+                    tool_use_id="tu-wc",
+                    delay_seconds=600.0,
+                    prompt="wake",
+                    chat_id=378,
+                )
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                assert loop_scheduler.expire_wakeups_for_session("sess-wc") == 1
+                # Over a cap too, but already expired: nothing more to say.
+                entry.created_at_wallclock = 0.0
+                await loop_scheduler._fire(token)
+                loop_scheduler._expire(entry, reason="max_total_duration")
+                await anyio.wait_all_tasks_blocked()
+                assert transport.sent == []
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_send_failure_is_logged_and_swallowed(self):
+        from structlog.testing import capture_logs
+
+        class BrokenTransport(FakeTransport):
+            async def send(self, **_):
+                raise RuntimeError("telegram down")
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, BrokenTransport(), 1)
+            try:
+                entry = self._cron(379, max_iterations=2)
+                with capture_logs() as logs:
+                    loop_scheduler._expire(entry, reason="max_iterations")
+                    await anyio.wait_all_tasks_blocked()
+                failed = [e for e in logs if e["event"] == "loop.expiry_notice_failed"]
+                assert len(failed) == 1
+                assert failed[0]["token"] == entry.token
+                assert failed[0]["reason"] == "max_iterations"
+                assert failed[0]["error_type"] == "RuntimeError"
+                assert entry.token not in loop_scheduler._PENDING_BY_TOKEN
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_expire_after_uninstall_posts_nothing(self):
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, transport, 1)
+            try:
+                entry = self._cron(380)
+                loop_scheduler.uninstall()
+                entry.cancelled = False
+                loop_scheduler._expire(entry, reason="max_iterations")
+                await anyio.wait_all_tasks_blocked()
+                assert transport.sent == []
+            finally:
+                tg.cancel_scope.cancel()
+
+
 # ── #925 review: CronDelete ownership ───────────────────────────────────
 
 

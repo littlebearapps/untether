@@ -1097,6 +1097,69 @@ def _expire(entry: _LoopEntry, *, reason: str) -> None:
         reason=reason,
         iterations_completed=entry.iteration_count,
     )
+    # #1004: the fire path awaits ``_RUN_JOB`` before it expires an entry, so
+    # the last iteration's answer is already out when this is scheduled.
+    if reason in _EXPIRY_NOTICE_CAUSES and _TASK_GROUP is not None:
+        _TASK_GROUP.start_soon(_send_expiry_notice, entry, reason)
+
+
+# #1004: expiry reasons the chat is told about, as the clause that follows
+# "it". Every other reason stays silent: the user stopped the loop
+# (``user_cancel``, ``do_not_resume``), it ran as planned
+# (``one_shot_complete``, ``cli_fired_live``) or the bridge already announced
+# it (``wake_cap``).
+_EXPIRY_NOTICE_CAUSES: dict[str, str] = {
+    "max_iterations": "reached its limit of {runs}",
+    "max_total_duration": "reached its time limit of {hours}",
+    "expired_7d": "expired {days} after it was created",
+    "cron_unparseable": "has a schedule that could not be read",
+}
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _expiry_notice(entry: _LoopEntry, reason: str) -> str:
+    """One line naming the cap that ended ``entry`` and how to carry on."""
+    cause = _EXPIRY_NOTICE_CAUSES[reason].format(
+        runs=_plural(entry.max_iterations, "run"),
+        hours=_plural(entry.max_total_duration_hours, "hour"),
+        days=_plural(
+            round((entry.expires_at_wallclock - entry.created_at_wallclock) / 86_400),
+            "day",
+        ),
+    )
+    if entry.kind == "wakeup":
+        return (
+            f"\N{ALARM CLOCK} Scheduled wake-up cancelled — it {cause}. "
+            "Reply to continue."
+        )
+    return (
+        f"\N{ALARM CLOCK} Loop finished — it {cause}. "
+        "Send /loop again to start another."
+    )
+
+
+async def _send_expiry_notice(entry: _LoopEntry, reason: str) -> None:
+    """#1004: tell the chat its loop ended at a cap. Never raises."""
+    if _TRANSPORT is None:
+        return
+    try:
+        await _TRANSPORT.send(
+            channel_id=_as_channel_id(entry.chat_id),
+            message=RenderedMessage(text=_expiry_notice(entry, reason)),
+            options=SendOptions(notify=False, thread_id=entry.thread_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "loop.expiry_notice_failed",
+            token=entry.token,
+            chat_id=entry.chat_id,
+            reason=reason,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
 
 
 def _is_session_alive_safe(session_id: str) -> bool:

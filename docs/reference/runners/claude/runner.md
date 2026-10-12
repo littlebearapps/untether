@@ -970,7 +970,11 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 | Outbox file delivery | `SendUserFile` needs a Remote Control client or cloud session |
 
 **No native equivalent:** the live-session lifetime cap (`live_session_max_s`; CLI 2.1.296 has no session-lifetime or idle-exit flag in `--help` — only closing stdin ends a stream-json session; re-checked 2026-10-11 for #887), stall and liveness watchdogs, diff previews, Pause & Outline, approval reminders, daily
-budget, empty-resume quarantine and auto-continue (upstream-bug workarounds), wake-ack consolidation.
+budget, empty-resume quarantine and auto-continue (upstream-bug workarounds), wake-ack consolidation, the notice when a
+loop ends at a `[loop]` cap ([#1004](https://github.com/littlebearapps/untether/issues/1004): the iteration and duration
+caps are Untether's own, and in a Loop-on chat the CLI holds no job to expire. Its own 7-day expiry is silent on the
+stream anyway — CLI 2.1.296 writes a debug line and the `tengu_scheduled_task_expired` telemetry event, no
+stream-json event or hook; nothing in `--help`; re-checked 2026-10-12 against the binary and the scheduled-tasks docs).
 
 Adopting the `claude-agent-sdk` Python package in place of the hand-written control channel is deferred (Nathan,
 2026-10-11).
