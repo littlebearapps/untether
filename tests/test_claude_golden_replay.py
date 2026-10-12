@@ -133,6 +133,13 @@ SENDER_ID = 7001
 STEP_TIMEOUT_S = float(os.environ.get("UNTETHER_GOLDEN_STEP_TIMEOUT", "20"))
 POLL_S = 0.02  # the runner's live-session poll interval in a replay
 QUIET_S = 0.05
+REPLAY_TIMEOUT_S = 120.0  # one whole replay
+# How long the runner waits for the CLI to exit after closing its stdin
+# before it signals it. In a replay the CLI exits when the script says so
+# (``exit``), so this wall-clock timer must never be what ends a session:
+# it outlasts the whole replay. A grace that did expire would still be
+# recorded (``claude.live_session.close_grace_expired``) and fail the diff.
+CLOSE_GRACE_S = 2 * REPLAY_TIMEOUT_S
 
 # sha256 of every file in tests/fixtures/claude_golden/. Pinned so a snapshot
 # cannot be regenerated without a second, reviewable diff in this file.
@@ -839,7 +846,11 @@ class _Replay:
         runner.golden_lines = self.lines  # type: ignore[attr-defined]
         # Slots-dataclass timing knobs: set on the instance.
         runner._live_poll_s = POLL_S
-        runner._live_close_grace_s = 2.0
+        # Not a replay-sized grace: the steps between a close and the
+        # scripted exit settle in wall-clock time, and on a slow host (CI,
+        # Python 3.14 under coverage) a 2 s grace expired between them, so
+        # the runner SIGINTed the puppet and the next emit hit a broken pipe.
+        runner._live_close_grace_s = CLOSE_GRACE_S
         self.runner = runner
 
     # -- waiting -------------------------------------------------------------
@@ -1215,7 +1226,7 @@ class _Replay:
         async with listener, anyio.create_task_group() as tg:
             tg.start_soon(self._serve, listener, tg)
             try:
-                with anyio.fail_after(120):
+                with anyio.fail_after(REPLAY_TIMEOUT_S):
                     self._start_message(
                         tg, self.config.get("prompt", "go"), USER_MSG_ID, None
                     )
