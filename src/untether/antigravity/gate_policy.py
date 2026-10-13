@@ -1323,13 +1323,20 @@ def _grant_key(args: Any) -> tuple[Any, ...] | None:
     if not isinstance(command, str) or not command.strip(_GRANT_TRIM):
         return None
     cwd = args.get("Cwd")
-    rest = tuple(
-        sorted(
-            (key, json.dumps(value, sort_keys=True, default=repr))
-            for key, value in args.items()
-            if key not in _DESCRIPTIVE_KEYS and key not in {"CommandLine", "Cwd"}
+    try:
+        # One unambiguous encoding per JSON value (``true`` / ``1`` / ``"1"``
+        # differ; non-ASCII escaped): anything that isn't plain JSON — no
+        # ``repr`` fallback that two values could share, no NaN — can't be
+        # granted (security review 3 M2).
+        rest = tuple(
+            sorted(
+                (key, json.dumps(value, sort_keys=True, allow_nan=False))
+                for key, value in args.items()
+                if key not in _DESCRIPTIVE_KEYS and key not in {"CommandLine", "Cwd"}
+            )
         )
-    )
+    except (TypeError, ValueError, RecursionError):
+        return None
     # Only ASCII spaces and line feeds at the ends are trimmed (security
     # review 3 M2): Python's ``strip()`` also removes Unicode spaces (U+3000)
     # and the U+001C to U+001F separators, so U+3000 + ``npm test`` + U+001F

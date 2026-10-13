@@ -1163,6 +1163,21 @@ def test_always_allow_doesnt_strip_unicode_spaces_or_separators() -> None:
     assert gate_policy.granted(1, CID, {"CommandLine": " npm test\n"})
 
 
+def test_grant_key_encoding_is_unambiguous() -> None:
+    """M2: argument values are encoded as strict JSON — ``true``, ``1`` and
+    ``"1"`` are different calls, and a value that isn't plain JSON (or is
+    NaN) can't be granted at all (no ``repr`` fallback to collide on)."""
+    base = {"CommandLine": "make", "Cwd": "/p"}
+    keys = {
+        gate_policy._grant_key({**base, "IsDaemon": value})
+        for value in (True, 1, "1", 1.5, None, [1], {"a": 1})
+    }
+    assert len(keys) == 7
+    assert gate_policy._grant_key({**base, "WaitMsBeforeAsync": float("nan")}) is None
+    assert gate_policy._grant_key({**base, "IsDaemon": object()}) is None
+    assert not gate_policy.grant(1, CID, {**base, "IsDaemon": {1, 2}})
+
+
 @pytest.mark.parametrize(
     "command",
     ["npm　test", "npm test\x1f", "npm test", "npm test​", "a\x1bb"],
