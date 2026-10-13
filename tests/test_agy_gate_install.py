@@ -252,7 +252,7 @@ async def test_config_gt_page_read_only_shows_cli_commands(tmp_path: Path) -> No
     for cmd in ("untether agy-gate install", "untether agy-gate uninstall"):
         assert cmd in text
     # No install / uninstall buttons exist: only Re-check and Back.
-    assert data == ["config:gt:rc", "config:pm"]
+    assert data == ["config:gt:rc", "config:home"]
     assert classify_config_action("gt:rc") == "open"
     assert not gate_plugin.plugin_dir().exists()
 

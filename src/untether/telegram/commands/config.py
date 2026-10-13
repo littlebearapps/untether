@@ -1983,7 +1983,7 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
     buttons = [
         [
             {"text": "🔄 Re-check", "callback_data": "config:gt:rc"},
-            {"text": "← Back", "callback_data": "config:pm"},
+            {"text": "← Back", "callback_data": "config:home"},
         ]
     ]
     await _respond(ctx, "\n".join(lines), buttons)
