@@ -124,6 +124,11 @@ class AntigravityPlanCommand:
         channel_id = ctx.message.channel_id
         owner = ctx.callback_query_id or f"agy-plan-{id(ctx)}"
         reason, plan = antigravity_plan.claim(request_id, channel_id, owner)
+        card_ref = MessageRef(
+            channel_id=channel_id,
+            message_id=ctx.message.message_id,
+            thread_id=ctx.message.thread_id,
+        )
         if reason != "ok" or plan is None:
             logger.info(
                 "antigravity.plan.tap_refused",
@@ -132,13 +137,13 @@ class AntigravityPlanCommand:
                 reason=reason,
                 channel_id=channel_id,
             )
+            if reason != "claimed" and await self._retire_card(
+                ctx, card_ref, plan, reason
+            ):
+                # #1074: the card now says why and has no buttons; the toast
+                # said so too, so nothing more is posted.
+                return None
             return CommandResult(text=_refusal_text(reason), notify=False)
-
-        card_ref = MessageRef(
-            channel_id=channel_id,
-            message_id=ctx.message.message_id,
-            thread_id=ctx.message.thread_id,
-        )
 
         if action == "approve":
             enqueue = getattr(ctx.executor, "enqueue_resume", None)
@@ -193,21 +198,47 @@ class AntigravityPlanCommand:
         )
         return None
 
-    @staticmethod
+    @classmethod
+    async def _retire_card(
+        cls,
+        ctx: CommandContext,
+        ref: MessageRef,
+        plan: antigravity_plan.PendingPlan | None,
+        reason: str,
+    ) -> bool:
+        """#1074: a tap on a card that can't be answered (replaced by a newer
+        plan, expired, already answered) takes its buttons off, so it can't
+        be tapped again. A tap still being acted on (``claimed``) is left to
+        the tap that holds it."""
+        if plan is None:  # expired, restarted, or another chat's card
+            text = _EXPIRED_TEXT
+        else:
+            if reason == "superseded":
+                antigravity_plan.mark_retired(plan.request_id)
+            text = antigravity_plan.card_text(plan.name, plan.status)
+        return await cls._edit_text(ctx, ref, text)
+
+    @classmethod
     async def _edit_card(
-        ctx: CommandContext, ref: MessageRef, name: str, decision: str
+        cls, ctx: CommandContext, ref: MessageRef, name: str, decision: str
     ) -> None:
         """The card shows the decision and loses its buttons."""
+        await cls._edit_text(ctx, ref, antigravity_plan.card_text(name, decision))
+
+    @staticmethod
+    async def _edit_text(ctx: CommandContext, ref: MessageRef, text: str) -> bool:
         try:
-            await ctx.executor.edit(
+            edited = await ctx.executor.edit(
                 ref,
                 RenderedMessage(
-                    text=antigravity_plan.card_text(name, decision),
+                    text=text,
                     extra={"entities": [], "reply_markup": {"inline_keyboard": []}},
                 ),
             )
         except Exception:  # noqa: BLE001 — the decision stands either way
             logger.debug("antigravity.plan.card_edit_failed", exc_info=True)
+            return False
+        return edited is not None
 
 
 BACKEND: CommandBackend = AntigravityPlanCommand()

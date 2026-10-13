@@ -458,3 +458,19 @@ def test_every_agy_argv_site_goes_through_the_validator() -> None:
             if pattern.search(line) and path.name != "antigravity_argv.py":
                 offenders.append(f"{path.name}:{number}: {stripped}")
     assert offenders == []
+
+
+def test_1075_safe_preview_drops_url_secrets() -> None:
+    """The preview mangles ``=``/``&`` so the log redactor can't see a query;
+    a URL's query, fragment and userinfo must never reach it."""
+    preview = argv_mod.safe_preview(
+        "https://ex.io/?state=qwertyuiop12345678&code=abcdefgh87654321"
+    )
+    assert "qwertyuiop" not in preview and "abcdefgh" not in preview
+    assert preview.startswith("https???ex.io?")
+    assert preview.endswith("…")
+    frag = argv_mod.safe_preview("https://ex.io/cb#access_token=sekritsekrit")
+    assert "sekrit" not in frag
+    userinfo = argv_mod.safe_preview("https://alice:hunter2pass@ex.io/x")
+    assert "hunter2" not in userinfo and "alice" not in userinfo
+    assert argv_mod.safe_preview("gemini-3.8-flash") == "gemini-3.8-flash"

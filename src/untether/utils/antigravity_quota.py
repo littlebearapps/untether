@@ -873,6 +873,8 @@ def remember_model_efforts(
 # agy 1.3.3 refuses ``/effort --model=<id>`` for a model that has no default
 # level, before running the command, and names the levels in the refusal:
 # ``--model gemini-3.1-pro requires --effort (available: low, high)``.
+# agy 1.3.4 answers instead, at the model's default level (probed 2026-10-13);
+# the refusal is still read for older agy.
 _EFFORT_REFUSAL_RE = re.compile(r"requires --effort \(available: ([a-z, ]{1,64})\)")
 
 

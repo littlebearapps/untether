@@ -12,7 +12,7 @@ call from your phone, use Claude Code for that work.
 
 You need:
 
-- **agy 1.3.1 or newer** on the machine that runs Untether (tested on 1.3.3). An older agy is refused before
+- **agy 1.3.1 or newer** on the machine that runs Untether (tested on 1.3.4). An older agy is refused before
   anything starts. agy updates itself; `agy update` forces it.
 - **agy signed in** on that machine. Untether never signs in for you.
 - **A project** for the chat. Antigravity edits files where it runs, so Untether won't run it in a chat with no

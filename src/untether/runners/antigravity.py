@@ -69,6 +69,7 @@ from ..model import (
 )
 from ..runner import (
     PRESPAWN_BLOCKED_KEY,
+    RETIRED_CARDS_KEY,
     REVIEW_CARD_KEY,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
@@ -276,6 +277,19 @@ _DENIED_LABEL: dict[str, str] = {
     "read_file": "file outside the project",
     "write_file": "file outside the project",
 }
+# #1073: in Plan first a refused write is plan mode itself (agy denies every
+# file change but the plan, inside the project too: the rc4 QA run's copy to
+# ``.untether-outbox/``). A refused read is still outside the project (the
+# QA ``ListDir`` was the project's parent); in-project reads go ahead.
+_PLAN_WRITE_LABEL = "file change"
+_OUTSIDE_LABEL = "file outside the project"
+
+
+def _denied_label(action: str, mode: str | None) -> str:
+    if mode == "plan" and action == "write_file":
+        return _PLAN_WRITE_LABEL
+    return _DENIED_LABEL.get(action, "tool")
+
 
 # ── stderr kill classes (phase 03, D27) ─────────────────────────────────────
 
@@ -408,7 +422,7 @@ _AGY_BACKGROUND_CAP_S = 1860.0
 # ``CommandLine``. Where the parameters do carry it, that value decides when
 # the command counts as background; otherwise it does after this long.
 _BACKGROUND_TITLE_AFTER_S = 5.0
-# #1062: agy 1.3.3 ends a step it killed (``manage_task``) DONE with
+# #1062: agy (1.3.3, 1.3.4) ends a step it killed (``manage_task``) DONE with
 # ``tool_info.error.message`` "context canceled", and names the task it
 # kills as ``<conversation id>/task-<step index>``.
 _CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.IGNORECASE)
@@ -456,7 +470,7 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
 # The newest agy the fixtures and drift notes were checked against.
-PROBED_CLI_VERSION = "1.3.3"
+PROBED_CLI_VERSION = "1.3.4"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -844,10 +858,7 @@ def denial_paragraph(
         return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
     if mode == "plan":
         # #981: a plan turn may only read and write its plan.
-        text = (
-            f"{what} — Plan first doesn't let it change anything until you "
-            "approve a plan."
-        )
+        text = _plan_denial_text(labels)
         if kept_shell and trigger is None:
             # #1060: it reached for a shell the no-shell agent doesn't have.
             text += (
@@ -884,6 +895,24 @@ def denial_paragraph(
     # A conversation that started in Workspace keeps its no-shell agent.
     return (
         f"{head} To allow it: /config → Permission mode → Full access, then /new{rule}."
+    )
+
+
+def _plan_denial_text(labels: list[str]) -> str:
+    """#1073: a Plan first denial names what plan mode refused — a file
+    change anywhere (the plan is the only write), a file outside the project
+    (as in Workspace) — rather than calling every file one outside."""
+    others = [label for label in labels if label != _PLAN_WRITE_LABEL]
+    parts = ["changing a file"] if _PLAN_WRITE_LABEL in labels else []
+    if others:
+        parts.append(f"using a {_join_labels(others)}")
+    what = "⚠️ Antigravity was blocked from " + " and from ".join(parts)
+    if _PLAN_WRITE_LABEL in labels:
+        return f"{what} — Plan first doesn't change files until you approve the plan."
+    if others == [_OUTSIDE_LABEL]:
+        return f"{what} — Plan first works only with the project's own files."
+    return (
+        f"{what} — Plan first doesn't let it change anything until you approve a plan."
     )
 
 
@@ -1185,6 +1214,10 @@ class AntigravityStreamState:
     # ``system_message`` steps still expected for a finished background
     # command / timer; those are not a subagent finishing.
     bg_notices_owed: int = 0
+    # #1062: a command / timer step that ended cancelled before it counted
+    # as background, held (not listed) in case a ``manage_task`` kill names
+    # it next.
+    cancelled_steps: dict[str, EngineBackgroundTask] = field(default_factory=dict)
     agy_pid: int | None = None
     # Phase 05: the ``--effort`` level actually passed (footer), and the one
     # ⚠️ row to show when a stored level was dropped for this model.
@@ -1233,6 +1266,8 @@ class AntigravityStreamState:
     # plan an Approve resumed this run for (its file name).
     plan_writes: list[str] = field(default_factory=list)
     approved_plan: str | None = None
+    # #1074: plan cards this run's plan turn replaced (request ids).
+    superseded_cards: list[str] = field(default_factory=list)
     # #980/#981: this run's gate (``antigravity/gate_server.GateRun``) when
     # Untether's agy plugin is installed and ``-p /hooks`` lists it; None
     # otherwise (no marker env reaches agy, nothing changes).
@@ -2194,6 +2229,20 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             from ..utils import antigravity_plan
 
             prompt = antigravity_plan.escape_slash(prompt)
+        if isinstance(state, AntigravityStreamState):
+            from ..utils import antigravity_agent
+
+            note = antigravity_agent.scheduled_run_note(
+                state.unattended, state.effective_mode
+            )
+            if note is not None:
+                # #1055: the model can't otherwise tell a cron from a chat.
+                prompt = f"{note}\n\n{prompt}"
+                logger.info(
+                    "antigravity.prompt.scheduled_note",
+                    trigger=state.unattended,
+                    permission_mode=state.effective_mode,
+                )
         line = {"event": "user", "message": {"content": prompt}}
         return (json.dumps(line, ensure_ascii=False) + "\n").encode()
 
@@ -2282,7 +2331,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         options = get_run_options()
         mode = self._effective_mode()
         label = _mode_label(mode)
-        approved = self._plan_bookkeeping(mode, prompt, expected)
+        approved, superseded = self._plan_bookkeeping(mode, prompt, expected)
         if approved is not None:
             label += " · plan approved"
         if precheck is not None:
@@ -2319,30 +2368,33 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ),
             trigger_source=get_run_trigger_source(),
             approved_plan=approved,
+            superseded_cards=superseded,
         )
 
     @staticmethod
     def _plan_bookkeeping(
         mode: str, prompt: str, conversation_id: str | None
-    ) -> str | None:
+    ) -> tuple[str | None, list[str]]:
         """#981, at the start of a run on a known conversation: a new plan
-        turn retires the conversation's older plan cards; the run an Approve
-        queued (Workspace, Untether's approve prompt) takes the approval and
-        returns the plan's file name for the footer and the final."""
+        turn retires the conversation's older plan cards (their ids, for the
+        bridge to take their buttons off, #1074); the run an Approve queued
+        (Workspace, Untether's approve prompt) takes the approval and returns
+        the plan's file name for the footer and the final."""
         if conversation_id is None:
-            return None
+            return None, []
         from ..utils import antigravity_plan
 
         if mode == "plan":
-            if antigravity_plan.supersede(conversation_id):
+            superseded = antigravity_plan.supersede(conversation_id)
+            if superseded:
                 logger.info("antigravity.plan.superseded", session_id=conversation_id)
-            return None
+            return None, superseded
         if mode != "workspace" or not prompt.rstrip().endswith(
             antigravity_plan.APPROVE_PROMPT
         ):
-            return None
+            return None, []
         plan = antigravity_plan.take_approved(conversation_id)
-        return plan.name if plan is not None else None
+        return (plan.name if plan is not None else None), []
 
     def start_run(
         self,
@@ -3274,27 +3326,41 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     @staticmethod
     def _task_killed(state: AntigravityStreamState, task_id: Any) -> None:
         """#1062: agy's ``manage_task`` kill names the task as
-        ``<conversation>/task-<step>``. A command or timer still listed as
-        running ends as stopped; one its own step already closed keeps that
-        status (the step's DONE carries the kill on 1.3.3)."""
+        ``<conversation>/task-<step>``. Only a task in the background can be
+        killed, so a command or timer still running ends as stopped and is
+        listed even if its wait hadn't passed; one its own cancelled DONE
+        already closed keeps that status — or is listed now, if that DONE
+        came before the background threshold (the kill's own DONE arrives
+        with it, so a fast kill beats the 5 s default; rc4 QA on 1.3.4).
+        agy sends a ``system_message`` for the kill (1.3.3 and 1.3.4), so
+        one notice is owed."""
         match = _KILLED_TASK_RE.search(task_id) if isinstance(task_id, str) else None
         if match is None:
             return
         step = match.group(1)
         for key in (f"cmd:{step}", f"timer:{step}"):
             task = state.tasks.get(key)
-            if task is None or task.status != "running":
+            if task is None:
+                task = state.cancelled_steps.pop(key, None)
+                if task is None:
+                    continue
+                task.background_from = None
+                AntigravityRunner._add_task(state, task)
+            elif task.status == "stopped":
+                state.bg_notices_owed += 1
                 continue
-            if not task.is_backgrounded:
-                del state.tasks[key]
+            elif task.status != "running":
                 continue
-            task.status = "stopped"
-            task.ended_at = time.monotonic()
+            else:
+                task.background_from = None
+                task.status = "stopped"
+                task.ended_at = time.monotonic()
+            state.bg_notices_owed += 1
             logger.info(
                 "antigravity.background.finished",
                 task_id=key,
                 status="stopped",
-                elapsed_s=round(task.ended_at - task.started_at, 1),
+                elapsed_s=round((task.ended_at or 0.0) - task.started_at, 1),
                 source="manage_task",
             )
 
@@ -3362,11 +3428,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 continue
             if not task.is_backgrounded:
                 del state.tasks[key]  # finished in the foreground: never a row
+                if status == "stopped" and len(state.cancelled_steps) < _TASKS_MAX:
+                    # #1062: unless a ``manage_task`` kill names it next.
+                    task.status = status
+                    task.ended_at = time.monotonic()
+                    state.cancelled_steps[key] = task
                 continue
             task.status = status
             task.ended_at = time.monotonic()
             if status != "stopped":
-                # A killed task gets no completion notice (agy 1.3.3).
+                # A kill's notice is owed by the kill (``_task_killed``).
                 state.bg_notices_owed += 1
             logger.info(
                 "antigravity.background.finished",
@@ -3410,6 +3481,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.tasks[key].status = "ended"
             state.tasks[key].ended_at = now
         state.bg_notices_owed = 0
+        state.cancelled_steps.clear()
         outlived = [key for key in left if key.startswith("cmd:")]
         if ok and outlived:
             logger.info("antigravity.background.outlived", tasks=outlived)
@@ -3575,9 +3647,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             session_id=state.session_id,
             request_id=pending.request_id,
         )
+        state.superseded_cards.extend(pending.extra.get("superseded", ()))
         usage = {
             **usage,
             REVIEW_CARD_KEY: {
+                "id": pending.request_id,
                 "text": antigravity_plan.card_text(plan.name),
                 "buttons": antigravity_plan.keyboard(pending.request_id),
             },
@@ -3669,6 +3743,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             answer = _prepend_paragraph(
                 answer, antigravity_plan.approved_header(state.approved_plan)
             )
+        if state.superseded_cards:
+            usage = _with_retired_cards(usage, state.superseded_cards)
         factory = state.factory
         if status == "SUCCESS":
             out.append(
@@ -3721,7 +3797,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         for item in denied:
             action = item.action or "unknown"
             display = item.display_name or action
-            label = _DENIED_LABEL.get(action, "tool")
+            label = _denied_label(action, state.effective_mode)
             family = _DENIED_FAMILY.get(action, frozenset())
             hits = [
                 action_id
@@ -4038,6 +4114,15 @@ def _add_run_tokens(totals: dict[str, int], usage: agy_schema.StepUsage | None) 
     ):
         if _is_count(value):
             totals[key] = totals.get(key, 0) + value
+
+
+def _with_retired_cards(usage: dict[str, Any], ids: list[str]) -> dict[str, Any]:
+    """#1074: the replaced plan cards still showing buttons, for the bridge
+    to edit (``usage[RETIRED_CARDS_KEY]``)."""
+    from ..utils import antigravity_plan
+
+    retired = antigravity_plan.retire(ids)
+    return {**usage, RETIRED_CARDS_KEY: retired} if retired else usage
 
 
 def _task_end_status(failed: bool, err: agy_schema.ToolError | None) -> str:

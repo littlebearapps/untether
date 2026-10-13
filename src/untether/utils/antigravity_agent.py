@@ -76,6 +76,59 @@ When you need the user's choice, ask with `ask_question`. If no answer comes bac
 - Answer simple questions directly without exploring the project first.
 """
 
+# #1055: agy has no per-run system prompt and nothing in a run tells the
+# model it was started by a cron or webhook, so with only the agent file's
+# two routes it always gave the chat's (/config → Full access → /new),
+# which a scheduled run never takes (2/2 live cron fires, rc4 QA). An
+# unattended Workspace run's prompt therefore starts with this line.
+_SCHEDULED_HEAD = (
+    "[Untether] This is a scheduled {kind} run, not a chat: nobody is "
+    "reading along, and the chat's /config settings don't apply to it. It "
+    "runs in Workspace mode, so it can't run shell commands, delete files or "
+    "fetch URLs."
+)
+_SCHEDULED_CRON = (
+    " If the task needs any of that, do the part you can and say that this "
+    'cron needs `permission_mode = "full"` on its own entry in untether.toml '
+    "(not a chat setting)."
+)
+_SCHEDULED_WEBHOOK = (
+    " If the task needs any of that, do the part you can and say that a "
+    "webhook run never gets Full access, so that part has to be done from the "
+    "chat in Full access."
+)
+
+
+# #980: a trigger whose own ``permission_mode`` is ``ask`` runs Ask me with
+# nobody to approve: the gate refuses everything off its safe list at once.
+# Said up front so the model doesn't spend the run on refused calls.
+_SCHEDULED_ASK = (
+    "[Untether] This is a scheduled {kind} run, not a chat: nobody is "
+    "reading along to approve anything. It runs in Ask me mode, so it can "
+    "read and edit files in this project, but shell commands, web, MCP "
+    "tools, subagents and files outside the project are refused. If the "
+    "task needs any of that, do the part you can and say what was left."
+)
+
+
+def scheduled_run_note(trigger: str | None, mode: str | None) -> str | None:
+    """#1055: the line an unattended Workspace (or trigger-level Ask me,
+    #980) run's prompt starts with, or None (a chat run, Full access, Plan
+    first)."""
+    if not trigger or not trigger.startswith(("cron:", "webhook:")):
+        return None
+    kind = "cron" if trigger.startswith("cron:") else "webhook"
+    if mode == "ask":
+        return _SCHEDULED_ASK.format(kind=kind)
+    if mode != "workspace":
+        return None
+    if trigger.startswith("cron:"):
+        return _SCHEDULED_HEAD.format(kind="cron") + _SCHEDULED_CRON
+    if trigger.startswith("webhook:"):
+        return _SCHEDULED_HEAD.format(kind="webhook") + _SCHEDULED_WEBHOOK
+    return None
+
+
 _warned: set[str] = set()
 
 

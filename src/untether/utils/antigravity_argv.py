@@ -49,17 +49,27 @@ class AgyArgvError(ValueError):
         self.reason = reason
 
 
+_URL_SECRET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@")
+
+
 def safe_preview(value: Any) -> str:
     """A short, inert form of a rejected value for a log line: at most
     ``PREVIEW_CHARS`` characters, anything outside ``[A-Za-z0-9._-]`` and
-    every leading dash → ``?`` (so it never reads as a flag either)."""
+    every leading dash → ``?`` (so it never reads as a flag either). A URL's
+    userinfo, query and fragment are dropped first (#1075)."""
     if not isinstance(value, str):
         return f"<{type(value).__name__}>"
+    # #1075: a URL's userinfo, query and fragment can carry a secret, and the
+    # substitution below turns ``=``/``&`` into ``?`` so the log redactor no
+    # longer recognises them — drop them before anything else.
+    full = value
+    value = _URL_SECRET_RE.sub(r"\1", value)
+    value = re.split(r"[?#]", value, maxsplit=1)[0]
     cut = value[:PREVIEW_CHARS]
     preview = _PREVIEW_UNSAFE_RE.sub("?", cut)
     body = preview.lstrip("-")
     preview = "?" * (len(preview) - len(body)) + body
-    return preview + ("…" if len(value) > PREVIEW_CHARS else "")
+    return preview + ("…" if len(full) > len(cut) else "")
 
 
 def _reason(value: Any) -> str | None:

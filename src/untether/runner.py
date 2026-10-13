@@ -148,6 +148,44 @@ def review_card(usage: dict[str, Any] | None) -> dict[str, Any] | None:
     return card
 
 
+# #1074: a card may carry ``"id"`` (the engine's own card id). The transport
+# reports where it posted that card (``note_review_card_ref``), so a later
+# run can retire it: ``usage[RETIRED_CARDS_KEY]`` lists ``{"id", "text"}``
+# for cards that can no longer be answered, and the bridge edits each one to
+# its ``text`` with no buttons.
+RETIRED_CARDS_KEY = "retired_cards"
+_REVIEW_CARD_REFS: dict[str, Any] = {}
+_REVIEW_CARD_REFS_MAX = 256
+
+
+def note_review_card_ref(card_id: str, ref: Any) -> None:
+    _REVIEW_CARD_REFS.pop(card_id, None)
+    _REVIEW_CARD_REFS[card_id] = ref
+    while len(_REVIEW_CARD_REFS) > _REVIEW_CARD_REFS_MAX:
+        _REVIEW_CARD_REFS.pop(next(iter(_REVIEW_CARD_REFS)))
+
+
+def pop_review_card_ref(card_id: str) -> Any:
+    return _REVIEW_CARD_REFS.pop(card_id, None)
+
+
+def retired_cards(usage: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """The well-formed ``(id, text)`` pairs on ``usage`` (#1074)."""
+    if not isinstance(usage, dict):
+        return []
+    items = usage.get(RETIRED_CARDS_KEY)
+    if not isinstance(items, list):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        card_id, text = item.get("id"), item.get("text")
+        if isinstance(card_id, str) and card_id and isinstance(text, str) and text:
+            out.append((card_id, text))
+    return out
+
+
 def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
     """The guard-block reason marked on ``usage`` (#838), or None."""
     if not isinstance(usage, dict):

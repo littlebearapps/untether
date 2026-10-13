@@ -226,10 +226,15 @@ Pick **Plan first** in `/config` → **Permission mode** (or send `/planmode on`
 
 Good to know:
 
-- Only the newest card for a conversation can be approved, and a card can be answered once. Cards expire after 24
-  hours or when Untether restarts; send a message to get a fresh plan.
+- Only the newest card for a conversation can be approved, and a card can be answered once. When a newer plan
+  replaces a card, the old card loses its buttons and says `Replaced by a newer plan — use the latest card.` Cards
+  expire after 24 hours or when Untether restarts; tapping an expired card takes its buttons off. Send a message to
+  get a fresh plan.
 - If Antigravity answers without writing a plan, there is nothing to approve: the answer ends with a note saying
   so. Reply to keep planning.
+- If Antigravity tries to change a file while planning (copying the plan into the project, say), agy blocks it:
+  the step shows `⚠️ Blocked: file change` and the answer ends `Plan first doesn't change files until you approve
+  the plan.` A file outside the project is blocked as in Workspace.
 - Cron and webhook runs in Plan first post the plan and change nothing — nobody is there to approve it. The footer
   says `🔒 unattended … denied plan approval`. Give the cron `permission_mode = "workspace"` if it should make the
   change.
