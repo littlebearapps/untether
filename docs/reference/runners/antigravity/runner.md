@@ -262,28 +262,40 @@ hook payloads, agy 1.3.3 / 1.3.4); anything else asks.
 **What runs without asking** (`antigravity/gate_policy.py`, the safe list; exact tool names): `command_status`,
 `list_permissions`, `wait`, `wait_5_seconds`, `finish` (when they name no path); `view_file`, `list_dir`,
 `find_by_name`, `grep_search` when every path they name is inside the project or the conversation's own artifact
-folder (none: agy searches its workspace); and `write_to_file`, `replace_file_content`, `multi_replace_file_content`
+folder (none: agy searches its workspace) and, for the two searches, no value starts with `-` (security review 3 M4:
+it could reach a search program as a flag); and `write_to_file`, `replace_file_content`, `multi_replace_file_content`
 when every path argument (`TargetFile` and any other `…Path` / `…File` / `…Dir` key, realpath'd — the nearest
 existing parent for a new file, so a symlink out of the project resolves outside it) is inside the project or the
 artifact folder (`~/.gemini/antigravity-cli/brain/<conversation id>/`, a UUID-shaped id, the folder itself under
-agy's `brain/`), the payload's `workspacePaths[0]` is the project, the file isn't protected, and no
-part of the path below the project folder is a symlink (it could be repointed before agy acts). Reads follow the same
-link rule. An existing target must be a regular file with a single name (no hard link) — or, for a read, a folder.
+agy's `brain/`, equal to the payload's `artifactDirectoryPath` when it names one; edits only to top-level `*.md` /
+`*.md.metadata.json` and `scratch/`, never `.system_generated/`), the payload's `workspacePaths[0]` is the project,
+the file isn't protected, and no part of the path below the project folder is a symlink (it could be repointed
+before agy acts). A folder below the project holding its own `.git` (submodule, nested repo, git worktree) and every
+configured project's `@branch` worktree root (`worktrees_dir`, from the live config) count as **outside** the project
+(security review 3 H1). Reads follow the same link rule. An existing target must be a regular file with a single name
+(no hard link) — or, for a read, a folder. Plain absolute paths exclude lone surrogates and U+FFFD (Go reads an
+unpaired surrogate as U+FFFD).
 Shell commands are never parsed: every `run_command` asks. **The safe list is best effort** against a model that
 can make links: the check runs when the hook fires and agy acts a moment later, so a shell command you approve (or a
 daemon it started) can change what a later "in-project" path means. Approving a shell command is approving that. A
 non-string path, a NUL byte, arguments that aren't an object, or any error while checking asks. A subagent reporting back to its parent
-(`send_message` to a conversation of this run) is internal and runs too.
+(`send_message` to a conversation of this run, with only agy's `Recipient` and `Message` fields) is internal and runs
+too.
 
 **What asks:** everything else — `run_command`, `send_command_input`, `manage_task`, `schedule`, `run_workflow`,
 `notebook_execution`, `read_url_content`, `search_web`, `call_mcp_tool`, MCP resources, every browser tool,
 `invoke_subagent` and the other agent tools, `generate_image`, `sed_file` and `notebook_edit` (path argument not yet
 probed), any tool this version doesn't know, any call from a conversation that isn't this run's or a known
-subagent's, and edits that are outside the project, protected (`.agents/`, `.git/` anywhere, `.gemini/`,
-`.untether-outbox/`, `.claude/`, `.husky/`, `.github/workflows/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`,
-`.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and Untether's default file deny globs: `.env*`,
-`*.pem`, `*.key`, SSH keys, `.netrc`, `.npmrc`, `.pypirc`) or in Untether's own package, venv or plugin folder. With
-the chat's **Diff preview** set to on, in-project edits ask too.
+subagent's, and edits that are outside the project, protected or in Untether's own files. **Protected**, matched
+case-folded at any depth (`_PROTECTED_DIR_NAMES` / `_PROTECTED_DIR_PAIRS` / `_PROTECTED_FILE_NAMES`): folders
+`.agents/`, `.gemini/`, `.claude/`, `.codex/`, `.opencode/`, `.pi/`, `.cursor/`, `.git/`, `.husky/`, `.lefthook/`,
+`.vscode/`, `.devcontainer/`, `.github/workflows/`, `.github/actions/`; files `.mcp.json`, `opencode.json`,
+`opencode.jsonc`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `GEMINI.md`,
+`.pre-commit-config.yaml`, `lefthook.yml` / `.yaml` (and `.lefthook.*`, `lefthook-local.*`), `.envrc`, `mise.toml`,
+`.mise.toml`, `mise.local.toml`; the configured `files.outbox_dir` (from the project root); and Untether's default
+file deny globs (`.env*`, `*.pem`, `*.key`, SSH keys, `.netrc`, `.npmrc`, `.pypirc`). **Untether's own files**:
+its package, venv, `sys.base_prefix`, the plugin folder, and this instance's config file and its folder. With the
+chat's **Diff preview** set to on, in-project edits ask too.
 
 **The card** is registered in the engine-neutral registry (`kind="tool"`, the `ia:` callback prefix) and posted as a
 ⚠️ row with buttons: `Permission Request [agy] - <what>` (`shell command`, `write a file (outside this project)`,
@@ -296,16 +308,29 @@ the chat's **Diff preview** set to on, in-project edits ask too.
   approved once keeps running after the turn).
 - `replace_file_content` / `multi_replace_file_content`: `📝 path` and `-` / `+` lines (the first two chunks, then
   `…N more chunks`); `write_to_file`: `+` lines and `(overwrites an existing file)`.
-- `invoke_subagent`: each subagent's role and prompt; each one's own tool calls come back as their own cards (P-H8),
-  labelled `from subagent: <role>`.
-- anything else: up to three `key = value` pairs (secret-looking keys masked) and how many were left out.
+- `invoke_subagent`: each subagent's role and its prompt in full (and any other field of the spec); each one's own
+  tool calls come back as their own cards (P-H8), labelled `from subagent: <role>`.
+- anything else (security review 3 M1): **every** argument but `toolAction` / `toolSummary`, each in full — inline
+  code when short and single-line, otherwise a fenced block (past 1,500 characters its start and end with
+  `⚠️ long value (N characters): … aren't shown`), within a 3,000-character card budget after which a ⚠️ line names
+  every argument left out. The tool's own arguments come first (`_TOOL_KEYS`, agy 1.3.4's schemas from hook payloads:
+  `read_url_content` `Url`; `schedule` `Prompt`, `CronExpression`, `DurationSeconds` …; `define_subagent`
+  `system_prompt`, the `enable_*` switches …; `_PRIMARY_KEYS` where the schema is unknown: `open_browser_url` `Url`,
+  `send_command_input` `Input`, `call_mcp_tool` `ServerName` / `ToolName`), then any argument that tool's schema
+  doesn't have, each marked `⚠️ •` under a `⚠️ arguments agy's <tool> doesn't have: …` line. A value whose key looks
+  like a secret (`token`, `secret`, `password`, `apikey` …) is shown as `•••` with "hidden: its name looks like a
+  secret — Deny unless you expected one here". `define_subagent` adds `⚠️ the new subagent gets …` for each
+  `enable_*` switch that is on.
 - every string from the call is shown with control and invisible format characters (bidi overrides, zero-width
   spaces) as `⟨U+XXXX⟩`, and file paths can't carry a line break into the card.
-- every argument that changes what runs and isn't already in the preview is listed (`• BypassSandbox = True`); an edit
-  whose path resolves elsewhere says `→ resolves to …`; a `Cwd` that isn't a plain absolute path is flagged. agy's
-  descriptive fields (`Description`, `Instruction`, `toolSummary` …) are never shown as what runs.
+- every argument that changes what runs and isn't already in the preview is listed in full (`• BypassSandbox =
+  \`true\``), one that isn't among that tool's known argument names first and marked ⚠️; an edit whose path resolves
+  elsewhere says `→ resolves to …`; a `Cwd` that isn't a plain absolute path is flagged. agy's descriptive fields
+  (`Description`, `Instruction`, `toolSummary` …) are never shown as what runs on a command or edit card.
 - **Always allow** is offered only for a shell command shown in full, with no extra arguments and a plain absolute
-  `Cwd` (or none).
+  `Cwd` (or none), and neither holding a control, format, private-use, unassigned or surrogate character or any
+  space but the ASCII one (tabs and line feeds are fine). Grants compare the command trimmed of ASCII spaces and line
+  feeds only (security review 3 M2: Python's `strip()` also drops U+3000 and U+001C–U+001F).
 - agy's own one-line summary last, escaped: `agy says: …` (model text, never in place of the arguments).
 
 Buttons: **✅ Approve**, **❌ Deny** and, for a shell command, **✅ Always allow this command here** (exact
@@ -559,11 +584,15 @@ to prove the hooks run. Nothing else under `~/.gemini` is written. agy leaves an
 
 ```
 PreToolUse (matcher "*", timeout wait + 60), PreInvocation (15 s), Stop (15 s):
-[ -n "$UNTETHER_AGY_GATE" ] || exit 0; exec "$UNTETHER_AGY_GATE_PY" -I -m untether.antigravity.gate_hook <Event>
+[ -n "$UNTETHER_AGY_GATE" ] || exit 0; [ -x "$UNTETHER_AGY_GATE_PY" ] || <missing>; exec "$UNTETHER_AGY_GATE_PY" -I -m untether.antigravity.gate_hook <Event>
 ```
 
-The shell guard means your own agy sessions (no marker) never start Python. The interpreter comes from the env of the
-Untether instance that started agy, so instances sharing a `HOME` each run their own code.
+`<missing>` is `{ printf '%s' '{"decision": "deny", "reason": "The Untether gate interpreter … was blocked. …"}'; exit 0; }`
+for `PreToolUse` and `exit 0` for the other two (plugin version 2, security review 3 M3; version 1 had no
+interpreter check, so an install from 0.36.1rc1–rc3 reads as "not current" and must be redone with
+`untether agy-gate install`). The shell guard means your own agy sessions (no marker) never start Python. The
+interpreter comes from the env of the Untether instance that started agy, so instances sharing a `HOME` each run
+their own code.
 
 ### Per run
 
@@ -584,9 +613,14 @@ Untether instance that started agy, so instances sharing a `HOME` each run their
    never logged — `token_len` only), `UNTETHER_AGY_GATE_PY`, `UNTETHER_AGY_GATE_DEADLINE_S`. Any `UNTETHER_AGY_GATE*`
    in Untether's own environment is dropped first, and the zero-token `-p` probes never carry them.
 4. **Each hook call** connects, sends one line `{v, token, event, pid, ppid, payload}`, reads one line back. The
-   server checks the token (constant time) and, on Linux, `SO_PEERCRED` uid. `PreToolUse` fails **closed**: no
-   socket, a bad reply or a timeout prints a `deny`; `ask` / `force_ask` / `permissionOverrides` / `overwrite` are
-   never printed. `PreInvocation` and `Stop` fail open (`{}`).
+   server checks the token (constant time) and, on Linux, the peer (`SO_PEERCRED`): same uid, the request's `pid`
+   equal to the peer's, a descendant of the agy pid this run spawned (set when agy's stdout is read; an Ask me run
+   refuses every connection before that), and `/proc/<pid>/cmdline` exactly `[<Untether's interpreter>, -I, -m,
+   untether.antigravity.gate_hook, <the event it sends>]` with that interpreter as `/proc/<pid>/exe` (security
+   review 3 L1; `antigravity.gate.peer_refused why=lineage|command|interpreter|pid|no_agy_pid`). A refused peer gets
+   no reply. `PreToolUse` fails **closed**: no socket, a bad reply or a timeout prints a `deny`; `ask` / `force_ask` /
+   `permissionOverrides` / `overwrite` are never printed. `PreInvocation` and `Stop` fail open (`{}`). In Ask me an
+   `ask_question` Untether can't read is denied (security review 3 L4), never left without a decision.
 
 ### Questions
 
@@ -625,9 +659,10 @@ approvals aren't running for this agy run …" or "… stopped responding during
 `Stop` with `fullyIdle: false` changes the `⏳ background` block's last line to say agy has finished its turn and is
 waiting for background work (#1061).
 
-Same-uid caveat (documented, not fixed): agy's tool processes inherit its env, so a command the user already allowed
-could read the socket path and token and connect. It can only *ask* (a spoofed question card or a drained steer
-queue), never grant itself a tool. See [Security](../../../how-to/security.md#antigravity-telegram-questions-and-steer).
+Same-uid caveat (narrowed, not closed): agy's tool processes inherit its env (agy 1.3.4 can't keep variables from
+them) and are agy's direct children, so a command the user already allowed could read the socket path and token and
+exec the hook's own command line to pass the peer check. It can only *ask* (a spoofed question or approval card, a
+drained steer queue, a pre-claimed step number, a used-up card budget), never grant itself a tool. See [Security](../../../how-to/security.md#antigravity-telegram-questions-and-steer).
 
 ## Errors
 
@@ -887,6 +922,9 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Steer into a running turn ([#981](https://github.com/littlebearapps/untether/issues/981)) | `PreInvocation` hook `injectSteps[].userMessage` | Partly **custom** (the queue and the socket). agy's own "Queued Messages: send immediately" is a global TUI setting (`queuedMessages` in `-p /config`), not per run, and its effect on stream-json input is unprobed; stdin `control_request` is refused (rc 2). Checked 2026-10-12, agy 1.3.3 |
 | Ask me approvals ([#980](https://github.com/littlebearapps/untether/issues/980)) | `--dangerously-skip-permissions` plus a `PreToolUse` hook answering `allow` / `deny` (`deny` reason shown to the model and not retried, E2); agy's default agent | Partly **custom**: the safe list, path rules, approval card, "always allow" grants and unattended policy are Untether's. agy has no headless approval prompt, and a hook `allow` can't grant a tool in agy's default mode (E1), so the gate needs the bypass flag; `ask` / `force_ask` are auto-approved under bypass, so they are never returned (D22.3). `permissionOverrides` is unprobed for persistence (P-H11) and never emitted. Checked 2026-10-13, agy 1.3.4 (live: approve, deny, timeout, always-allow, unattended deny, a subagent's call) |
 | User-level MCP servers in scope for Ask me | `agy mcp list` ("No MCP servers configured.") | The planted-config scan only stats `~/.gemini/config/mcp_config.json` (D33); an existing file says nothing about servers (lba-1 has an empty one). `-p /mcp` is refused in print mode, and `agy mcp list` doesn't list a project's `.agents/mcp_config.json` (that stays with the scan). Checked 2026-10-13, agy 1.3.4 |
+| A hook that fails blocks the tool (security review 3 M3) | Native: agy 1.3.4 under `--dangerously-skip-permissions` blocks the tool (`TOOL_ERROR`, "JSON hook … failed" / "failed to unmarshal result from hook") for a `PreToolUse` hook that exits 1, 2 or 127, is SIGKILLed, or prints non-JSON or truncated JSON; only empty output with exit 0 is "no decision" | Partly **custom** on top: the plugin's shell guard prints a `deny` itself when `UNTETHER_AGY_GATE_PY` isn't executable, so the guarantee doesn't rest on that agy behaviour alone. Probed 2026-10-13, agy 1.3.4, through the installed plugin's own command with a stand-in interpreter (`probes/1.3.4/`). Re-probe on an agy minor upgrade (`gate_canary.py` notes it) |
+| Keeping the run's token from the commands agy runs (security review 3 L1) | — (**gap**) | agy 1.3.4 has no flag or setting to drop variables from a tool's environment (`--help`, `--sandbox` only restricts the terminal). Probed 2026-10-13: a `run_command` is a direct child of agy and sees the `UNTETHER_AGY_GATE*` variables, exactly as a hook does. Untether instead checks the connecting process (below agy's pid, the hook's exact command line); the residual is in [Security](../../../how-to/security.md#antigravity-telegram-questions-and-steer) |
+| Search arguments as flags (security review 3 M4) | Native: agy 1.3.4 runs `git grep --untracked --no-recurse-submodules --fixed-strings -l -- <Query> <Includes…>` in a git repo and searches itself elsewhere; `find_by_name` searches itself. A `Query` of `--pre=<script>`, an `Includes` of `--pre=…`, a `Pattern` / `Excludes` of `--exec=…` ran nothing | Untether still refuses the safe list to any `grep_search` / `find_by_name` value starting with `-` (another version or backend could read it as a flag). Probed 2026-10-13, agy 1.3.4 (argv-logging `git` / `rg` / `find` shims on `PATH`; the Workspace agent — the default agent offers neither tool to the model in print mode) |
 | Installing the gate's hooks | `agy plugin validate` / `install` / `uninstall` (R3-1) | A hand-dropped folder is loaded but not listed by `agy plugin list` and can't be enabled or disabled (P-H0) |
 | Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
 | When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 and 1.3.4 streams carry only `CommandLine` (the per-call value, 5000 / 10000 / 500 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. A `manage_task` kill naming the task also counts. Checked 2026-10-12, re-checked 2026-10-13 on agy 1.3.4. Retire when the stream prints the value or the approval gate's hook supplies it |

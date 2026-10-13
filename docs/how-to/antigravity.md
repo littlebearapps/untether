@@ -164,13 +164,17 @@ approval buttons. agy runs with all its tools, and Untether's agy plugin holds e
 - **Runs on its own:** reading, listing and searching files inside the project; creating and editing files there
   (and agy's own notes for the conversation).
 - **Asks you first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents, timers, files
-  outside the project, and protected files inside it (`.agents/`, `.git/`, `.claude/`, `.github/workflows/`,
-  `.env` files, keys, `CLAUDE.md`, `AGENTS.md` and similar files other tools run or read as instructions). So does
-  any tool agy adds that Untether doesn't know yet.
+  outside the project, and protected files inside it at any depth (`.agents/`, `.git/`, `.claude/`, `.codex/`,
+  `.opencode/`, `.vscode/`, `.github/workflows/`, `.husky/`, `.env` files, `.envrc`, keys, `CLAUDE.md`, `AGENTS.md`
+  and similar files other tools run or read as instructions). A nested checkout (a folder with its own `.git`, such
+  as a submodule) and Untether's own `@branch` worktrees in `.worktrees/` count as outside the project. So does
+  any tool agy adds that Untether doesn't know yet, and a search whose text starts with `-`.
 
 The card shows what would run: `$ git status` with its folder for a shell command (and a warning when it would start
 a daemon that keeps running after the turn), the lines added and removed for an edit, each subagent's task for a
-subagent. agy's own one-line description comes last as `agy says: …`. Tap **✅ Approve** or **❌ Deny**; for a shell
+subagent, and every argument of any other tool in full — the tool's own first (a web page's address), with ⚠️ on
+anything agy's tool doesn't have, on a value hidden because its name looks like a secret, and on anything too long
+to show whole. agy's own one-line description comes last as `agy says: …`. Tap **✅ Approve** or **❌ Deny**; for a shell
 command, **✅ Always allow this command here** lets that exact command (in that folder) run without asking for the
 rest of the conversation. A Deny, or no answer within 15 minutes, blocks the tool and agy is told not to retry it;
 the row reads `blocked: denied in Telegram`. A subagent's own tool calls ask too, labelled with the subagent's role.
@@ -183,8 +187,8 @@ reads **🔒 Ask me — set up** and opens the plugin's status page. Untether ch
 **refuses the run** (nothing starts) when:
 
 - the plugin isn't installed, is disabled (`agy plugin disable`), was edited, or agy doesn't load it for the project;
-- the project contains Untether's own code (for example a checkout of Untether itself), which agy could edit to
-  switch approvals off;
+- the project contains Untether's own code or config (for example a checkout of Untether itself, or the folder
+  holding `untether.toml`), which agy could edit to switch approvals off;
 - agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage (in the project's `.agents/`
   folder or your own `~/.gemini/config/`). They run their own commands without asking, so Ask me can't promise to
   ask. An empty `mcp_config.json` is fine: Untether asks agy (`agy mcp list`) whether any server is configured.
@@ -273,6 +277,12 @@ questions… proceed with reasonable defaults").
 **If the plugin folder was changed** after install, attended runs show a ⚠️ row and run without questions or
 steer, and scheduled runs are held, because its hooks run their own commands in every agy session on the host.
 Run `untether agy-gate status`, then `untether agy-gate install --force` if you didn't change it.
+
+**After upgrading Untether, run `untether agy-gate install` again** whenever the new version changes the plugin's
+files — 0.36.1rc4 does (its hooks now block a tool themselves when Untether's Python can't start). Until you do,
+`untether agy-gate status` says the files aren't the ones this Untether version installs, Ask me is refused
+("the plugin is from another Untether version — run `untether agy-gate install` on the host to update it"), attended runs show `⚠️ Untether's agy plugin (untether-gate) is from another Untether version …` and run
+without questions or steer, and scheduled agy runs are held.
 
 ## Models and effort
 
