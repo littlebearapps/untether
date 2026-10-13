@@ -1899,6 +1899,10 @@ class JsonlSubprocessRunner(BaseRunner):
             # Each collected PID's /proc start time, so the sweep refuses a
             # recycled PID (#590 hardening).
             orphan_pid_starttimes=getattr(state, "orphan_pid_starttimes", None),
+            # #1062: a cancelled run never reaches the ``subprocess.exit``
+            # line below, so the teardown logs the exit of the process it
+            # stopped. (Claude's runner spawns on its own path.)
+            log_teardown_exit=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

@@ -81,7 +81,8 @@ async def test_manage_subprocess_logs_exit_when_torn_down() -> None:
     with structlog.testing.capture_logs() as logs:
         with anyio.CancelScope() as scope:
             async with subprocess_utils.manage_subprocess(
-                [sys.executable, "-c", "import time; time.sleep(30)"]
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                log_teardown_exit=True,
             ) as proc:
                 scope.cancel()
                 await anyio.sleep(5)
@@ -99,9 +100,25 @@ async def test_manage_subprocess_logs_no_teardown_exit_after_a_clean_exit() -> N
 
     with structlog.testing.capture_logs() as logs:
         async with subprocess_utils.manage_subprocess(
-            [sys.executable, "-c", "pass"]
+            [sys.executable, "-c", "pass"], log_teardown_exit=True
         ) as proc:
             await proc.wait()
+    assert [e for e in logs if e["event"] == "subprocess.exit"] == []
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_teardown_exit_log_is_opt_in() -> None:
+    """Callers that log their own exit (Claude's runner) are unchanged."""
+    import anyio
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        with anyio.CancelScope() as scope:
+            async with subprocess_utils.manage_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(30)"]
+            ):
+                scope.cancel()
+                await anyio.sleep(5)
     assert [e for e in logs if e["event"] == "subprocess.exit"] == []
 
 
