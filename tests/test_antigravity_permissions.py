@@ -660,6 +660,54 @@ async def test_cross_engine_file_change_warns_but_never_refuses(
 
 
 @pytest.mark.anyio
+async def test_claude_worktrees_never_cost_a_recheck_row(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1051: Claude Code's ``.claude/worktrees/`` (full checkouts) used to
+    run the cross-engine budget out, so every run ended with a "couldn't
+    re-check" row. Anything else that size under ``.claude/`` still does."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    monkeypatch.setattr(scan, "MAX_FILES", 40)
+    (project / ".git").mkdir()
+    _write(project / ".claude" / "agents" / "x.md", "# x")
+    for i in range(60):
+        _write(project / ".claude" / "worktrees" / "agent-1" / "src" / f"{i}.py", "1")
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    with structlog.testing.capture_logs() as logs:
+        for options in (None, EngineRunOptions(unattended_trigger="cron:x")):
+            events = await _run(runner, options)
+            assert _completed(events).ok is True
+            assert _warning_rows(events) == []
+    assert not [
+        e for e in logs if e["event"] == "antigravity.workspace_config.unchecked"
+    ]
+    for i in range(60):
+        _write(project / ".claude" / "skills" / "big" / f"{i}.md", "1")
+    rows = _warning_rows(await _run(runner))
+    assert [r.action.id for r in rows] == ["antigravity.config.recheck"]
+    assert f"({scan.TOO_MANY})" in rows[0].action.title
+
+
+@pytest.mark.anyio
+async def test_front_matter_row_names_the_real_reason(
+    project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1057: a quoted front-matter key reads as an agent-file problem, not
+    "not strict JSON", and the reason isn't bracketed twice."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    (project / ".git").mkdir()
+    _write(project / ".agents" / "agents" / "a.md", '---\n"plugins": ./p\n---\n')
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY))
+    titles = [r.action.title for r in _warning_rows(await _run(runner))]
+    assert titles, "expected the not-checked rows"
+    for title in titles:
+        assert scan.FRONT_MATTER in title
+        assert "JSON" not in title and "))" not in title
+    (done,) = await _run(runner, EngineRunOptions(unattended_trigger="cron:x"))
+    assert scan.FRONT_MATTER in (done.error or "")
+
+
+@pytest.mark.anyio
 async def test_first_sight_warning_row_once_per_digest(
     project: Path, gemini_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1337,7 +1385,7 @@ def test_alternate_manifest_format_is_unchecked(
     name: str, tmp_path: Path, gemini_home: Path
 ) -> None:
     _write(tmp_path / ".agents" / name, "Stop: sh a.sh")
-    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.OTHER_FORMAT
 
 
 def test_manifest_names_compared_case_insensitively(
@@ -1791,7 +1839,7 @@ def test_front_matter_agy_might_read_differently_is_unchecked(
     (tmp_path / ".git").mkdir()
     _agent(tmp_path, front)
     _write(tmp_path / "scripts" / "h.sh", "echo 1")
-    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.AMBIGUOUS
+    assert scan.scan_workspace_config(tmp_path).unchecked_reason == scan.FRONT_MATTER
 
 
 def test_agent_without_front_matter_is_fine(tmp_path: Path, gemini_home: Path) -> None:
