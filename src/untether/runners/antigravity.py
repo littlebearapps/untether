@@ -403,6 +403,9 @@ _DESCENDANT_SCAN_MAX = 1024
 # (``gemini-3.8-flash-high``); agy refuses a different ``--effort`` with it.
 _EFFORT_SUFFIX_RE = antigravity_context.EFFORT_SUFFIX_RE
 _MODEL_ROW_CHARS = 80
+# #1058: the started title (``/export``'s "Model:") when no model was passed
+# and ``init`` named none (agy names its model only when ``--model`` is set).
+DEFAULT_MODEL_TITLE = "agy default"
 # #979: the ``telemetry`` action behind the header's ``~N% ctx``.
 _CONTEXT_ACTION_ID = "antigravity.context"
 
@@ -1077,7 +1080,6 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     default_permission_mode: str | None = None
     # untether.toml; the small state files live beside chat_prefs.json.
     config_path: Path | None = None
-    session_title: str = "antigravity"
     logger = logger
     _EXPOSE_ENGINE_STATE = True
     _seen_store: SeenConfigStore | None = field(default=None, init=False, repr=False)
@@ -2022,10 +2024,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             agy_version=state.agy_version,
         )
         token = ResumeToken(engine=ENGINE, value=cid)
+        meta = self._meta(state)
+        # #1058: the title is /export's "Model:" line — the model agy ran
+        # (``--model`` / ``init.model``), never the engine id. With neither,
+        # agy picked its own default and the stream doesn't say which.
+        title = str(meta.get("model") or DEFAULT_MODEL_TITLE)
         return [
-            state.factory.started(
-                token, title=self.session_title, meta=self._meta(state)
-            ),
+            state.factory.started(token, title=title, meta=meta),
             *self._startup_rows(state),
         ]
 

@@ -256,13 +256,41 @@ def test_translate_ok_fixture() -> None:
     assert events[0].resume == ResumeToken(
         engine=ENGINE, value="90ca6744-e8d4-46d4-b5fc-64a30ae2fa6d"
     )
-    assert events[0].title == "antigravity"
+    # #1058: no --model and no init.model (1.3.1): agy chose its default.
+    assert events[0].title == "agy default"
     done = _completed(events)
     assert events[-1] is done
     assert done.ok is True
     assert done.answer == "OK\n"
     assert done.resume == events[0].resume
     assert state.session_id == "90ca6744-e8d4-46d4-b5fc-64a30ae2fa6d"
+
+
+def test_started_title_is_the_model_agy_ran() -> None:
+    """#1058: ``/export``'s "Model:" line is the started title — the model
+    from ``init.model`` (agy echoes ``--model``) or the one Untether passed,
+    and never the engine id."""
+    events, _ = _replay("context_model_flag")
+    assert events[0].title == "gemini-3.8-flash-low"
+    with apply_run_options(EngineRunOptions(model="gemini-3.8-flash")):
+        events, _ = _replay("ok")
+    assert events[0].title == "gemini-3.8-flash"
+
+
+def test_export_header_names_the_model_not_the_engine() -> None:
+    from untether.runner_bridge import _record_export_event
+    from untether.telegram.commands import export
+
+    with apply_run_options(EngineRunOptions(model="gemini-3.8-flash")):
+        events, _ = _replay("ok")
+    sid = events[0].resume.value
+    for evt in events:
+        _record_export_event(evt, None, channel_id=1058)
+    _, recorded, usage = export._SESSION_HISTORY.pop((1058, sid))
+    text = export._format_export_markdown(sid, recorded, usage)
+    assert "## Session Started (antigravity)" in text
+    assert "Model: gemini-3.8-flash\n" in text
+    assert "Model: antigravity" not in text
 
 
 def test_translate_resume_after_interrupt_session_matches() -> None:
