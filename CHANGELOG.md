@@ -51,8 +51,8 @@
 - **fix(antigravity):** Ask me display fixes [#1080](https://github.com/littlebearapps/untether/issues/1080)
   - a command or subagent waiting on its approval card is no longer listed under `⏳ background`; its time counts from the approval
   - an approval card's lines (the command, `from subagent:`, `agy says:`) stay on separate lines in the progress message
-  - an extra argument under a diff reads `⚙️ Append = False` instead of `- Append = False`, which looked like a removed line
-  - the "Ask me isn't ready" reply shows its commands as code instead of with literal backticks
+  - an extra argument under a diff reads `⚙️ Append = false` instead of `- Append = False`, which looked like a removed line
+  - the "Ask me isn't ready" reply shows its commands as code instead of with literal backticks, and a subagent's task on a card is shown as code, so its own backticks and `**bold**` read as the model wrote them instead of formatting the card or showing stray escapes
   - `/config` → Permission mode no longer says Antigravity can't stop mid-run to ask you
   - the "Ask me isn't available in this project" reply lists each file once
   - the permission-mode toasts say a switch within Ask me / Full access (or Workspace / Plan first) needs no `/new`
