@@ -647,6 +647,8 @@ class IaControlCommand(ClaudeControlCommand):
 
     id = "ia"
     description = "Handle engine-neutral approval buttons"
+    # #1068: buttons only — never in the command menu, typed use is refused.
+    callback_only = True
 
 
 IA_BACKEND: CommandBackend = IaControlCommand()

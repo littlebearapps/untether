@@ -20,7 +20,7 @@ from untether.telegram.commands.dispatch import CALLBACK_ONLY_TEXT, _dispatch_co
 from untether.telegram.types import TelegramIncomingMessage
 from untether.transport_runtime import TransportRuntime
 
-CALLBACK_ONLY_IDS = ("agy_plan", "aq", "claude_control")
+CALLBACK_ONLY_IDS = ("agy_plan", "aq", "claude_control", "ia")
 
 
 def _runtime() -> TransportRuntime:
