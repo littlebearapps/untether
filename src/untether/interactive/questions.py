@@ -16,7 +16,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .registry import _REQUEST_TO_SESSION
+from .registry import (
+    _REQUEST_TO_INPUT,
+    _REQUEST_TO_SESSION,
+    Decision,
+    answer_control_request,
+)
 
 # A1: Pending AskUserQuestion requests: request_id -> (channel_id, question text)
 # When Claude Code asks a question, the user can reply via Telegram text.
@@ -103,6 +108,52 @@ def get_pending_ask_request(
             continue
         return request_id, question
     return None
+
+
+async def answer_ask_question(request_id: str, answer: str) -> bool:
+    """Answer a pending AskUserQuestion by denying with the user's response.
+
+    The deny message contains the user's answer so Claude Code reads it and
+    continues with that information. ``Decision.answer`` carries the raw
+    answer for an engine that words its own reply.
+    """
+    _PENDING_ASK_REQUESTS.pop(request_id, None)
+    deny_message = (
+        f"The user answered your question via Telegram:\n\n"
+        f'"{answer}"\n\n'
+        f"Use this answer and continue. Do not call AskUserQuestion again "
+        f"for this same question."
+    )
+    return await answer_control_request(
+        request_id,
+        Decision(
+            approved=False,
+            action="answer",
+            deny_message=deny_message,
+            answer=answer,
+        ),
+    )
+
+
+async def answer_ask_question_with_options(request_id: str) -> bool:
+    """Send a structured answer for an AskUserQuestion flow with collected answers.
+
+    Approves the request with updatedInput containing the answers dict.
+    """
+    flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
+    _PENDING_ASK_REQUESTS.pop(request_id, None)
+    if flow is None:
+        return False
+    _record_answered_ask_flow(request_id, flow.channel_id)
+
+    # Update the stored input to include answers
+    stored_input = _REQUEST_TO_INPUT.get(request_id)
+    if stored_input is not None:
+        stored_input["answers"] = flow.answers
+
+    return await answer_control_request(
+        request_id, Decision(approved=True, action="answer", answers=flow.answers)
+    )
 
 
 def _record_answered_ask_flow(

@@ -33,6 +33,7 @@ from ..backends import EngineBackend, EngineConfig
 from ..background_status import CONTINUED_SUFFIX, format_tokens
 from ..config import ConfigError
 from ..events import EventFactory
+from ..interactive.preview import format_diff_preview
 
 # #960: AskUserQuestion state lives in ``interactive.questions``.
 from ..interactive.questions import (
@@ -43,6 +44,8 @@ from ..interactive.questions import (
     ANSWERED_ASK_FLOW_TTL_S,  # noqa: F401 — re-exported
     AskQuestionState,
     _record_answered_ask_flow,
+    answer_ask_question,  # noqa: F401 — re-exported
+    answer_ask_question_with_options,  # noqa: F401 — re-exported
     format_question_message,  # noqa: F401 — re-exported
     get_ask_question_flow,  # noqa: F401 — re-exported
     get_ask_question_flow_by_id,  # noqa: F401 — re-exported
@@ -57,37 +60,45 @@ from ..interactive.questions import (
 # #960: the control-request registry lives in ``interactive.registry``;
 # these are the same objects, re-exported for existing importers.
 from ..interactive.registry import (
-    _CANCELLED_DURING_WRITE,
+    _CANCELLED_DURING_WRITE,  # noqa: F401 — re-exported
     _DIRECT_CLAIM_SEQ,  # noqa: F401 — re-exported
     _HANDLED_REQUESTS,
     _HANDLED_REQUESTS_MAX,  # noqa: F401 — re-exported
     _INFLIGHT_CONTROL_RESPONSES,
-    _REQUEST_TO_CHANNEL,
+    _REQUEST_TO_CHANNEL,  # noqa: F401 — re-exported
     _REQUEST_TO_CHANNEL_MAX,  # noqa: F401 — re-exported
     _REQUEST_TO_INPUT,
-    _REQUEST_TO_ORIGINATOR,
+    _REQUEST_TO_ORIGINATOR,  # noqa: F401 — re-exported
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _TERMINAL_CONTROL_OUTCOMES,  # noqa: F401 — re-exported
     CONTROL_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_CALLBACK_PREFIX,
     ControlLookup,  # noqa: F401 — re-exported
     ControlRequestSnapshot,
-    ControlRequestStatus,
-    ControlSendResult,
+    ControlRequestStatus,  # noqa: F401 — re-exported
+    ControlSendResult,  # noqa: F401 — re-exported
+    Decision,
     HandledControl,  # noqa: F401 — re-exported
     InflightClaim,  # noqa: F401 — re-exported
     _bind_request_channel,
+    answer_control_request,
     bind_request_channel,  # noqa: F401 — re-exported
-    claim_control_request,
+    claim_control_request,  # noqa: F401 — re-exported
     classify_control_request,  # noqa: F401 — re-exported
     control_request_origin,  # noqa: F401 — re-exported
     control_request_originator,  # noqa: F401 — re-exported
+    drop_session,
     mark_request_handled,
-    new_control_claim_owner,
+    new_control_claim_owner,  # noqa: F401 — re-exported
     release_control_claims,  # noqa: F401 — re-exported
+    respond_to_control_request,  # noqa: F401 — re-exported
+    set_default_responder,
+    withdraw,
 )
+from ..interactive.unattended import unattended_deny_message
 from ..logging import get_logger
-from ..markdown import _short_model_name, backtick_fence, inline_code
+from ..markdown import _short_model_name, inline_code
 from ..model import (
     TURN_COMPLETE_MARKER,
     Action,
@@ -116,7 +127,7 @@ from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
 from ..utils.env_audit import audit_proc_env
 from ..utils.json_state import atomic_write_json
-from ..utils.paths import get_run_base_dir, get_run_channel_id
+from ..utils.paths import get_run_base_dir
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -145,6 +156,9 @@ from .run_options import (
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
+
+# Pre-#960 name of ``interactive.preview.format_diff_preview``.
+_format_diff_preview = format_diff_preview
 
 ENGINE: EngineId = "claude"
 DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Edit", "Write"]
@@ -3642,34 +3656,6 @@ def _unattended_autonomous_deny_reason(
     return None
 
 
-def _unattended_deny_message(trigger: str, tool: str, reason: str) -> str:
-    kind = "webhook" if trigger.startswith("webhook:") else "scheduled"
-    head = f"Untether: this is an unattended {kind} run ({trigger}) — "
-    if tool == "ExitPlanMode":
-        return (
-            head + "nobody can approve a plan. Do not call ExitPlanMode again. "
-            "Finish by giving the complete plan as your final answer."
-        )
-    if tool == "AskUserQuestion":
-        return (
-            head + "nobody can answer questions. Proceed with reasonable "
-            "defaults and state your assumptions."
-        )
-    if reason == "diff_preview":
-        what = f"nobody can review this change, so {tool} was denied"
-    elif reason == "plan_mode":
-        what = (
-            f"it runs in plan mode and nobody can approve a plan, so {tool} was denied"
-        )
-    else:
-        what = f"nobody is available to approve {tool}, so it was denied"
-    return (
-        head + what + ". Continue only with actions that don't need approval; "
-        "if the task can't be finished without it, stop and report what you "
-        "would have done and why it needs approval."
-    )
-
-
 def _unattended_deny(
     state: ClaudeStreamState,
     factory: EventFactory,
@@ -3689,7 +3675,7 @@ def _unattended_deny(
         tool = getattr(request, "tool_name", "") or "unknown"
     else:
         tool = type(request).__name__.replace("Control", "").replace("Request", "")
-    message = _unattended_deny_message(trigger, tool, reason)
+    message = unattended_deny_message(trigger, tool, reason)
     if tool == "ExitPlanMode":
         _drop_exitplanmode_plan(
             state,
@@ -6810,81 +6796,6 @@ def _tool_result_event(
     )
 
 
-def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
-    """Format a compact diff preview for Edit/Write tool approval messages."""
-    max_preview_lines = 8
-    max_line_len = 60
-
-    def _truncate(text: str, max_len: int) -> str:
-        if len(text) > max_len:
-            return text[: max_len - 1] + "…"
-        return text
-
-    def _fenced(lines: list[str], info: str = "diff") -> str:
-        # The approval text is rendered as Markdown: bare ``+ x`` lines
-        # became ``- x`` list items (an added line shown as removed) and the
-        # lines ran together. A fenced block keeps them verbatim; the fence
-        # outruns any backtick run in the content so it can't close early.
-        body = "\n".join(lines)
-        fence = backtick_fence(body, minimum=3)
-        return f"{fence}{info}\n{body}\n{fence}"
-
-    if tool_name == "Edit":
-        file_path = tool_input.get("file_path", "")
-        old_string = tool_input.get("old_string", "")
-        new_string = tool_input.get("new_string", "")
-        if not old_string and not new_string:
-            return ""
-        lines: list[str] = []
-        if file_path:
-            from ..utils.paths import relativize_path
-
-            lines.append(f"📝 {relativize_path(file_path)}")
-        old_lines = old_string.splitlines()
-        new_lines = new_string.splitlines()
-        # Show removed/added lines
-        half = max_preview_lines // 2
-        lines.extend(f"- {_truncate(line, max_line_len)}" for line in old_lines[:half])
-        if len(old_lines) > half:
-            lines.append(f"  …({len(old_lines) - half} more removed)")
-        lines.extend(f"+ {_truncate(line, max_line_len)}" for line in new_lines[:half])
-        if len(new_lines) > half:
-            lines.append(f"  …({len(new_lines) - half} more added)")
-        return _fenced(lines)
-
-    if tool_name == "Write":
-        file_path = tool_input.get("file_path", "")
-        content = tool_input.get("content", "")
-        if not content:
-            return ""
-        lines = []
-        if file_path:
-            from ..utils.paths import relativize_path
-
-            lines.append(f"📝 {relativize_path(file_path)}")
-        content_lines = content.splitlines()
-        line_count = len(content_lines)
-        for line in content_lines[:max_preview_lines]:
-            lines.append(f"+ {_truncate(line, max_line_len)}")
-        if line_count > max_preview_lines:
-            lines.append(f"  …({line_count - max_preview_lines} more lines)")
-        return _fenced(lines)
-
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if not command:
-            return ""
-        shown = _truncate(command.strip("\n"), 200)
-        # #871: the command the user approves must survive Markdown: a
-        # single line becomes a backtick-safe code span; a multi-line
-        # command (heredoc, script) keeps its lines in a fenced block.
-        if len(shown.splitlines()) > 1:
-            return f"$\n{_fenced(shown.splitlines(), info='sh')}"
-        return f"$ {inline_code(shown)}"
-
-    return ""
-
-
 # #438: classify Stream idle timeout failures so the user sees actionable
 # context instead of just "API Error: Stream idle timeout - partial response
 # received". Two distinct upstream Anthropic API failure modes:
@@ -7409,22 +7320,12 @@ def _handle_control_cancel(
     if flow is not None:
         _record_answered_ask_flow(rid, flow.channel_id, outcome="cancelled")
 
-    if inflight:
-        # A tap is writing its answer right now: ``write_control_response``
-        # still reads ``_REQUEST_TO_*``, so leave them to the writer and let
-        # it record the ``cancelled`` outcome (#685 respond path).
-        _CANCELLED_DURING_WRITE.add(rid)
-    else:
-        if still_registered:
-            del _REQUEST_TO_SESSION[rid]
-        _REQUEST_TO_INPUT.pop(rid, None)
-        _REQUEST_TO_TOOL_NAME.pop(rid, None)
-        mark_request_handled(
-            rid,
-            action="cancelled",
-            outcome="cancelled",
-            channel_id=get_run_channel_id(),
-        )
+    # #960: registry-side retirement. With a tap writing its answer right
+    # now (``inflight``) the id is parked for that writer, which still reads
+    # ``_REQUEST_TO_*`` and records the ``cancelled`` outcome (#685 respond
+    # path); otherwise it is deregistered (only if it is ours) and recorded
+    # ``cancelled`` in the run's chat.
+    withdraw(rid, deregister=still_registered)
 
     completed = _complete_control_action(
         state,
@@ -9429,7 +9330,7 @@ def _translate_claude_event_base(
                 # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)
                 run_opts = get_run_options()
                 if run_opts is None or run_opts.diff_preview is not False:
-                    diff_preview = _format_diff_preview(tool_name, tool_input)
+                    diff_preview = format_diff_preview(tool_name, tool_input)
             elif isinstance(request, claude_schema.ControlSetPermissionModeRequest):
                 mode = getattr(request, "mode", "unknown")
                 details = f"mode: {mode}"
@@ -12993,121 +12894,35 @@ BACKEND = EngineBackend(
 )
 
 
-async def respond_to_control_request(
-    request_id: str,
-    approved: bool,
-    *,
-    action: str,
-    channel_id: int | None = None,
-    deny_message: str | None = None,
-    rejects_plan: bool = True,
-    claim_owner: str | None = None,
-) -> ControlSendResult:
-    """Answer a control request, reporting what actually happened (#685).
+class ClaudeResponder:
+    """Claude's :class:`~untether.interactive.registry.Responder` (#960).
 
-    Writes **nothing** unless the request is ``PENDING`` and this caller holds
-    (or can take) its in-flight claim. ``claim_owner`` is the callback query id
-    whose early toast already reserved the claim; without it a unique owner
-    is used. The claim is released in ``finally``.
-
-    Args:
-        request_id: The control request ID
-        approved: Whether to approve (True) or deny (False) the request
-        action: What the tap did (approve / deny / discuss / chat / auto …),
-            recorded so a later tap can say it
-        channel_id: The chat the tap came from (scopes the handled record)
-        deny_message: Custom denial message (used when approved=False)
-        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
-            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
-        claim_owner: The dispatcher's callback query id, if it reserved the
-            claim before the early answer
+    Writes the decision as a ``control_response`` on the session's stdin
+    through the runner that owns it; the registry does the claim, the
+    handled record and the cancelled-during-write check around it. It is the
+    registry's default responder, so every request Claude registers (none
+    passes a responder) routes here.
     """
-    owner = claim_owner if claim_owner is not None else new_control_claim_owner()
-    lookup = claim_control_request(
-        request_id, action=action, owner=owner, channel_id=channel_id
-    )
-    if lookup.status is not ControlRequestStatus.PENDING:
-        if lookup.status is ControlRequestStatus.NOT_FOUND:
-            logger.warning(
-                "control_response.request_not_found",
-                request_id=request_id,
-                reason=lookup.reason,
-            )
-        else:
-            # Duplicate callback (a double tap, or Telegram long-polling
-            # delivering the same update twice) — nothing is written.
-            logger.debug(
-                "control_response.already_handled",
-                request_id=request_id,
-                status=str(lookup.status),
-            )
-        return ControlSendResult(
-            status=lookup.status,
-            sent=False,
-            prior=lookup.prior,
-            reason=lookup.reason,
-        )
-    # #822: read before write_control_response pops it.
-    tool_name = _REQUEST_TO_TOOL_NAME.get(request_id)
-    try:
-        session_id = _REQUEST_TO_SESSION[request_id]
-        if session_id not in _ACTIVE_RUNNERS:
-            logger.warning(
-                "control_response.no_active_session",
-                session_id=session_id,
-                request_id=request_id,
-            )
-            # Clean up stale mappings
-            _REQUEST_TO_SESSION.pop(request_id, None)
-            _REQUEST_TO_INPUT.pop(request_id, None)
-            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-            return ControlSendResult(
-                status=ControlRequestStatus.PENDING,
-                sent=False,
-                session_id=session_id,
-                reason="no_active_session",
-                tool_name=tool_name,
-            )
 
-        runner, _ = _ACTIVE_RUNNERS[session_id]
-        success = await runner.write_control_response(
-            request_id, approved, deny_message=deny_message, rejects_plan=rejects_plan
+    engine = ENGINE
+    callback_prefix = DEFAULT_CALLBACK_PREFIX
+
+    def is_alive(self, session_key: str) -> bool:
+        return session_key in _ACTIVE_RUNNERS
+
+    async def respond(
+        self, request_id: str, session_key: str, decision: Decision
+    ) -> bool:
+        runner, _ = _ACTIVE_RUNNERS[session_key]
+        return await runner.write_control_response(
+            request_id,
+            decision.approved,
+            deny_message=decision.deny_message,
+            rejects_plan=decision.rejects_plan,
         )
 
-        # Clean up the mapping after use. ``pop``, not ``del``: the claim
-        # makes a concurrent delete impossible, but it is cheap insurance.
-        _REQUEST_TO_SESSION.pop(request_id, None)
-        if request_id in _CANCELLED_DURING_WRITE:
-            # #684: the CLI withdrew the request while we were writing; it
-            # ignores our answer, so say so rather than "approved".
-            mark_request_handled(
-                request_id,
-                action="cancelled",
-                outcome="cancelled",
-                channel_id=channel_id,
-            )
-            return ControlSendResult(
-                status=ControlRequestStatus.CANCELLED,
-                sent=success,
-                session_id=session_id,
-                prior=_HANDLED_REQUESTS.get(request_id),
-                tool_name=tool_name,
-            )
-        # A written *or* attempted write marks it handled (a closed pipe
-        # means the session is gone either way).
-        mark_request_handled(request_id, action=action, channel_id=channel_id)
-        return ControlSendResult(
-            status=ControlRequestStatus.PENDING,
-            sent=success,
-            session_id=session_id,
-            reason=None if success else "write_failed",
-            tool_name=tool_name,
-        )
-    finally:
-        _CANCELLED_DURING_WRITE.discard(request_id)
-        claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
-        if claim is not None and claim.owner == owner:
-            del _INFLIGHT_CONTROL_RESPONSES[request_id]
+
+set_default_responder(ClaudeResponder())
 
 
 # Phase 2: Public API for sending control responses
@@ -13121,10 +12936,11 @@ async def send_claude_control_response(
 ) -> bool:
     """Send a control response to an active Claude Code session.
 
-    Thin bool wrapper over :func:`respond_to_control_request`, kept for the
-    AskUserQuestion callers (#685). A caller that needs to tell *sent* from
-    *already handled* from *not found* must call that function instead.
-    ``action`` is recorded on the handled record (default: approve / deny).
+    Thin bool wrapper over the registry's ``answer_control_request`` (#960),
+    kept for existing callers (#685). A caller that needs to tell *sent* from
+    *already handled* from *not found* must call
+    :func:`respond_to_control_request` instead. ``action`` is recorded on the
+    handled record (default: approve / deny).
 
     Returns:
         True if the response was written, or the request was already answered
@@ -13133,18 +12949,14 @@ async def send_claude_control_response(
         (cancelled: a text reply to a withdrawn question must fall through to
         a normal prompt, not be swallowed).
     """
-    result = await respond_to_control_request(
+    return await answer_control_request(
         request_id,
-        approved,
-        action=action or ("approve" if approved else "deny"),
-        deny_message=deny_message,
-        rejects_plan=rejects_plan,
-    )
-    if result.status is ControlRequestStatus.CANCELLED:
-        return False  # #684: even when written — the CLI ignored it
-    return result.sent or result.status in (
-        ControlRequestStatus.IN_FLIGHT,
-        ControlRequestStatus.ALREADY_HANDLED,
+        Decision(
+            approved=approved,
+            action=action or ("approve" if approved else "deny"),
+            deny_message=deny_message,
+            rejects_plan=rejects_plan,
+        ),
     )
 
 
@@ -13204,68 +13016,15 @@ def _cleanup_session_registries(
     if session_id in _OUTLINE_PENDING:
         cleaned.append("outline_pending")
     _OUTLINE_PENDING.discard(session_id)
-    # Clean up discuss feedback ref (post-outline edit-instead-of-send tracking)
-    from ..telegram.commands.claude_control import _DISCUSS_FEEDBACK_REFS
-
-    if _DISCUSS_FEEDBACK_REFS.pop(session_id, None) is not None:
-        cleaned.append("discuss_feedback_ref")
-    stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
-    if stale:
-        cleaned.append(f"requests({len(stale)})")
-    for k in stale:
-        del _REQUEST_TO_SESSION[k]
-        _REQUEST_TO_CHANNEL.pop(k, None)  # #388
-        _REQUEST_TO_ORIGINATOR.pop(k, None)
-        # #685: a claim on a request whose session is gone can never
-        # complete — drop it so the id doesn't read "in flight" for ever.
-        _INFLIGHT_CONTROL_RESPONSES.pop(k, None)
-        _CANCELLED_DURING_WRITE.discard(k)  # #684
-        # Also clean up any pending ask requests and flows for stale requests
-        _PENDING_ASK_REQUESTS.pop(k, None)
-        _ASK_QUESTION_FLOWS.pop(k, None)
+    # #960: the session's pending requests, chat bindings, claims and
+    # question state — and, via the callback ``telegram.commands.
+    # claude_control`` registers, its discuss feedback ref — are the
+    # engine-neutral registry's to drop.
+    cleaned.extend(drop_session(session_id))
     logger.info(
         "claude_runner.session_cleanup",
         session_id=session_id,
         cleaned=cleaned,
-    )
-
-
-async def answer_ask_question(request_id: str, answer: str) -> bool:
-    """Answer a pending AskUserQuestion by denying with the user's response.
-
-    The deny message contains the user's answer so Claude Code reads it and
-    continues with that information.
-    """
-    _PENDING_ASK_REQUESTS.pop(request_id, None)
-    deny_message = (
-        f"The user answered your question via Telegram:\n\n"
-        f'"{answer}"\n\n'
-        f"Use this answer and continue. Do not call AskUserQuestion again "
-        f"for this same question."
-    )
-    return await send_claude_control_response(
-        request_id, approved=False, deny_message=deny_message, action="answer"
-    )
-
-
-async def answer_ask_question_with_options(request_id: str) -> bool:
-    """Send a structured answer for an AskUserQuestion flow with collected answers.
-
-    Approves the request with updatedInput containing the answers dict.
-    """
-    flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
-    _PENDING_ASK_REQUESTS.pop(request_id, None)
-    if flow is None:
-        return False
-    _record_answered_ask_flow(request_id, flow.channel_id)
-
-    # Update the stored input to include answers
-    stored_input = _REQUEST_TO_INPUT.get(request_id)
-    if stored_input is not None:
-        stored_input["answers"] = flow.answers
-
-    return await send_claude_control_response(
-        request_id, approved=True, action="answer"
     )
 
 

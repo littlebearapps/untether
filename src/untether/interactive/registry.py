@@ -18,9 +18,10 @@ from __future__ import annotations
 import itertools
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 from ..logging import get_logger
 from ..utils.paths import get_run_channel_id, get_run_sender_id
@@ -129,6 +130,75 @@ _DIRECT_CLAIM_SEQ = itertools.count(1)
 # ``outcome="cancelled"``. Bounded: the writer always discards its id, and
 # session cleanup drops any leftover.
 _CANCELLED_DURING_WRITE: set[str] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """The user's answer to a control request, as handed to a responder.
+
+    ``action``: approve | deny | discuss | chat | answer | auto | … (recorded
+    on the handled record). ``deny_message`` is the text an engine shows the
+    model on a denial. ``rejects_plan`` (#793): a Claude ExitPlanMode denial
+    that rejects the plan rather than pausing it; other engines ignore it.
+    ``answer`` / ``answers``: a typed answer / the option answers of a
+    question, for an engine that words its own reply to the model.
+    """
+
+    approved: bool
+    action: str
+    deny_message: str | None = None
+    rejects_plan: bool = True
+    answer: str | None = None
+    answers: dict[str, str] | None = None
+
+
+class Responder(Protocol):
+    """How one engine delivers a :class:`Decision` (#960).
+
+    ``callback_prefix`` is the command id its buttons carry
+    (``claude_control`` for Claude). ``is_alive`` says whether the session can
+    still take an answer; ``respond`` delivers it and returns whether it was
+    written (``False``: the session went away under the write). Everything
+    else — the claim, the handled record, the cancelled-during-write check —
+    is the registry's.
+    """
+
+    engine: str
+    callback_prefix: str
+
+    def is_alive(self, session_key: str) -> bool: ...
+
+    async def respond(
+        self, request_id: str, session_key: str, decision: Decision
+    ) -> bool: ...
+
+
+DEFAULT_CALLBACK_PREFIX = "claude_control"
+
+# request_id -> the responder of an engine that registered it with one
+# (:func:`register`). A request without an entry is answered by the default
+# responder (Claude's, set by ``runners.claude`` at import), so every Claude
+# registration path — and a test that writes ``_REQUEST_TO_SESSION``
+# directly — routes exactly as before. Claude never adds entries here.
+_REQUEST_TO_RESPONDER: dict[str, Responder] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestMeta:
+    kind: str
+    tool_name: str
+    registered_at: float
+
+
+# Registration metadata for requests with an explicit responder (the
+# engine-neutral :func:`snapshot`); Claude keeps its own on the stream state.
+_REQUEST_META: dict[str, _RequestMeta] = {}
+
+_DEFAULT_RESPONDER: list[Responder] = []
+
+# Callbacks run by :func:`drop_session` before it drops the session's
+# requests; each returns a label for the cleanup log, or None.
+_SESSION_DROPPED_CALLBACKS: list[Callable[[str], str | None]] = []
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,3 +459,407 @@ def release_control_claims(owner: str | None) -> None:
 def new_control_claim_owner() -> str:
     """A unique claim owner for a caller without a callback query id (#685)."""
     return f"direct:{next(_DIRECT_CLAIM_SEQ)}"
+
+
+# ── responders (#960) ───────────────────────────────────────────────────────
+
+
+def set_default_responder(responder: Responder) -> None:
+    """Install the responder for requests registered without one (Claude's,
+    set when ``runners.claude`` is imported)."""
+    _DEFAULT_RESPONDER[:] = [responder]
+
+
+def responder_for(request_id: str) -> Responder | None:
+    """The responder that answers *request_id*: the one it was registered
+    with, else the default, else None (no engine has installed one)."""
+    responder = _REQUEST_TO_RESPONDER.get(request_id)
+    if responder is not None:
+        return responder
+    return _DEFAULT_RESPONDER[0] if _DEFAULT_RESPONDER else None
+
+
+def session_alive(session_key: str, *, request_id: str | None = None) -> bool:
+    """Whether *session_key* can still take an answer, asked of the
+    responder of *request_id* (the default responder without one)."""
+    if request_id is not None:
+        responder = responder_for(request_id)
+    else:
+        responder = _DEFAULT_RESPONDER[0] if _DEFAULT_RESPONDER else None
+    return responder is not None and responder.is_alive(session_key)
+
+
+def callback_prefix(request_id: str) -> str:
+    """The command id *request_id*'s buttons carry (``claude_control`` for
+    Claude and for any request registered without a responder)."""
+    responder = _REQUEST_TO_RESPONDER.get(request_id)
+    if responder is None:
+        return DEFAULT_CALLBACK_PREFIX
+    return responder.callback_prefix
+
+
+def _forget(request_id: str) -> None:
+    """Drop the per-request data of a request that is no longer pending."""
+    _REQUEST_TO_INPUT.pop(request_id, None)
+    _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+    _REQUEST_TO_RESPONDER.pop(request_id, None)
+    _REQUEST_META.pop(request_id, None)
+
+
+def register(
+    request_id: str,
+    *,
+    session_key: str,
+    responder: Responder | None = None,
+    tool_name: str | None = None,
+    tool_input: dict[str, Any] | None = None,
+    kind: str = "tool",
+) -> None:
+    """Register *request_id* as awaiting a user answer for *session_key*.
+
+    One call does what every registration site must (#388): the pending
+    entry, then the chat binding and the run's originator
+    (:func:`bind_request_channel`), then — when ``tool_name`` is given — the
+    tool input (``{}`` when ``tool_input`` is None) and tool name that a
+    responder and the deny wording read. ``responder`` is the engine that
+    answers it; None means the default (Claude). ``kind`` (``tool`` | ``ask``
+    | ``plan``) is kept for :func:`snapshot` on requests with a responder.
+    """
+    _REQUEST_TO_SESSION[request_id] = session_key
+    bind_request_channel(request_id)
+    _REQUEST_TO_RESPONDER.pop(request_id, None)
+    _REQUEST_META.pop(request_id, None)
+    if responder is not None:
+        _REQUEST_TO_RESPONDER[request_id] = responder
+        _REQUEST_META[request_id] = _RequestMeta(
+            kind=kind, tool_name=tool_name or "", registered_at=time.monotonic()
+        )
+    if tool_name is not None:
+        _REQUEST_TO_INPUT[request_id] = tool_input if tool_input is not None else {}
+        _REQUEST_TO_TOOL_NAME[request_id] = tool_name
+
+
+async def respond(
+    request_id: str,
+    decision: Decision,
+    *,
+    channel_id: int | None = None,
+    claim_owner: str | None = None,
+) -> ControlSendResult:
+    """Answer a control request, reporting what actually happened (#685).
+
+    Writes **nothing** unless the request is ``PENDING`` and this caller holds
+    (or can take) its in-flight claim. ``claim_owner`` is the callback query id
+    whose early toast already reserved the claim; without it a unique owner
+    is used. The claim is released in ``finally``. The request's responder
+    (:func:`responder_for`) delivers the decision; the claim, the handled
+    record and the cancelled-during-write check (#684) are engine-neutral.
+
+    Args:
+        request_id: The control request ID
+        decision: What the user decided; ``decision.action`` (approve / deny /
+            discuss / chat / auto …) is recorded so a later tap can say it
+        channel_id: The chat the tap came from (scopes the handled record)
+        claim_owner: The dispatcher's callback query id, if it reserved the
+            claim before the early answer
+    """
+    action = decision.action
+    owner = claim_owner if claim_owner is not None else new_control_claim_owner()
+    lookup = claim_control_request(
+        request_id, action=action, owner=owner, channel_id=channel_id
+    )
+    if lookup.status is not ControlRequestStatus.PENDING:
+        if lookup.status is ControlRequestStatus.NOT_FOUND:
+            logger.warning(
+                "control_response.request_not_found",
+                request_id=request_id,
+                reason=lookup.reason,
+            )
+        else:
+            # Duplicate callback (a double tap, or Telegram long-polling
+            # delivering the same update twice) — nothing is written.
+            logger.debug(
+                "control_response.already_handled",
+                request_id=request_id,
+                status=str(lookup.status),
+            )
+        return ControlSendResult(
+            status=lookup.status,
+            sent=False,
+            prior=lookup.prior,
+            reason=lookup.reason,
+        )
+    # #822: read before write_control_response pops it.
+    tool_name = _REQUEST_TO_TOOL_NAME.get(request_id)
+    try:
+        session_id = _REQUEST_TO_SESSION[request_id]
+        responder = responder_for(request_id)
+        if responder is None or not responder.is_alive(session_id):
+            logger.warning(
+                "control_response.no_active_session",
+                session_id=session_id,
+                request_id=request_id,
+            )
+            # Clean up stale mappings
+            _REQUEST_TO_SESSION.pop(request_id, None)
+            _forget(request_id)
+            return ControlSendResult(
+                status=ControlRequestStatus.PENDING,
+                sent=False,
+                session_id=session_id,
+                reason="no_active_session",
+                tool_name=tool_name,
+            )
+
+        success = await responder.respond(request_id, session_id, decision)
+
+        # Clean up the mapping after use. ``pop``, not ``del``: the claim
+        # makes a concurrent delete impossible, but it is cheap insurance.
+        _REQUEST_TO_SESSION.pop(request_id, None)
+        _REQUEST_TO_RESPONDER.pop(request_id, None)
+        _REQUEST_META.pop(request_id, None)
+        if request_id in _CANCELLED_DURING_WRITE:
+            # #684: the CLI withdrew the request while we were writing; it
+            # ignores our answer, so say so rather than "approved".
+            mark_request_handled(
+                request_id,
+                action="cancelled",
+                outcome="cancelled",
+                channel_id=channel_id,
+            )
+            return ControlSendResult(
+                status=ControlRequestStatus.CANCELLED,
+                sent=success,
+                session_id=session_id,
+                prior=_HANDLED_REQUESTS.get(request_id),
+                tool_name=tool_name,
+            )
+        # A written *or* attempted write marks it handled (a closed pipe
+        # means the session is gone either way).
+        mark_request_handled(request_id, action=action, channel_id=channel_id)
+        return ControlSendResult(
+            status=ControlRequestStatus.PENDING,
+            sent=success,
+            session_id=session_id,
+            reason=None if success else "write_failed",
+            tool_name=tool_name,
+        )
+    finally:
+        _CANCELLED_DURING_WRITE.discard(request_id)
+        claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
+        if claim is not None and claim.owner == owner:
+            del _INFLIGHT_CONTROL_RESPONSES[request_id]
+
+
+async def respond_to_control_request(
+    request_id: str,
+    approved: bool,
+    *,
+    action: str,
+    channel_id: int | None = None,
+    deny_message: str | None = None,
+    rejects_plan: bool = True,
+    claim_owner: str | None = None,
+) -> ControlSendResult:
+    """:func:`respond` with the decision spelled out (#685).
+
+    Args:
+        request_id: The control request ID
+        approved: Whether to approve (True) or deny (False) the request
+        action: What the tap did (approve / deny / discuss / chat / auto …),
+            recorded so a later tap can say it
+        channel_id: The chat the tap came from (scopes the handled record)
+        deny_message: Custom denial message (used when approved=False)
+        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
+            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
+        claim_owner: The dispatcher's callback query id, if it reserved the
+            claim before the early answer
+    """
+    return await respond(
+        request_id,
+        Decision(
+            approved=approved,
+            action=action,
+            deny_message=deny_message,
+            rejects_plan=rejects_plan,
+        ),
+        channel_id=channel_id,
+        claim_owner=claim_owner,
+    )
+
+
+async def answer_control_request(request_id: str, decision: Decision) -> bool:
+    """Answer a control request without a tap's claim or chat (#685).
+
+    Returns:
+        True if the response was written, or the request was already answered
+        (in flight / handled — a benign duplicate). False if it is unknown,
+        its session is gone, the write failed, or the engine withdrew it
+        (cancelled: a text reply to a withdrawn question must fall through to
+        a normal prompt, not be swallowed).
+    """
+    result = await respond(request_id, decision)
+    if result.status is ControlRequestStatus.CANCELLED:
+        return False  # #684: even when written — the CLI ignored it
+    return result.sent or result.status in (
+        ControlRequestStatus.IN_FLIGHT,
+        ControlRequestStatus.ALREADY_HANDLED,
+    )
+
+
+def expire(
+    request_id: str, *, action: str = "timeout", channel_id: int | None = None
+) -> bool:
+    """Retire a pending request nobody answered in time (#960).
+
+    For an engine with its own deadline (Claude's 5-min sweep stays in its
+    runner). A tap writing its answer right now wins: nothing is retired and
+    False is returned, as for an id that is not pending. Otherwise the
+    request, its question state and per-request data are dropped and the id
+    is recorded ``expired`` (terminal: a later tap reads "This request has
+    expired"), and True is returned.
+    """
+    if request_id in _INFLIGHT_CONTROL_RESPONSES:
+        return False
+    if _REQUEST_TO_SESSION.pop(request_id, None) is None:
+        return False
+    _forget(request_id)
+    _drop_question_state(request_id)
+    mark_request_handled(
+        request_id, action=action, outcome="expired", channel_id=channel_id
+    )
+    return True
+
+
+def withdraw(
+    request_id: str, *, deregister: bool = True, channel_id: int | None = None
+) -> bool:
+    """The engine no longer needs an answer to *request_id* (#684, #960).
+
+    Claude's ``control_cancel_request``, or an engine's hook connection
+    closing before a decision. Pending question state is dropped (a late
+    option tap reads "No longer needed"). If a tap is writing its answer
+    right now, the id is parked in ``_CANCELLED_DURING_WRITE`` for that
+    writer to record and True is returned. Otherwise the request is retired
+    — deregistered when ``deregister`` (Claude passes False when the id is
+    not registered to its own session) — and recorded ``cancelled`` (in
+    *channel_id*, default the run's chat); returns False.
+    """
+    _drop_question_state(request_id)
+    if request_id in _INFLIGHT_CONTROL_RESPONSES:
+        # A tap is writing its answer right now: the writer still reads the
+        # ``_REQUEST_TO_*`` entries, so leave them to it and let it record
+        # the ``cancelled`` outcome (#685 respond path).
+        _CANCELLED_DURING_WRITE.add(request_id)
+        return True
+    if deregister:
+        _REQUEST_TO_SESSION.pop(request_id, None)
+        _REQUEST_TO_RESPONDER.pop(request_id, None)
+        _REQUEST_META.pop(request_id, None)
+    _REQUEST_TO_INPUT.pop(request_id, None)
+    _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+    mark_request_handled(
+        request_id,
+        action="cancelled",
+        outcome="cancelled",
+        channel_id=get_run_channel_id() if channel_id is None else channel_id,
+    )
+    return False
+
+
+def _drop_question_state(request_id: str) -> None:
+    """Retire a question's pending entry and flow; a flow is remembered as
+    ``cancelled`` so a late option tap reads "No longer needed" (#684)."""
+    from .questions import (
+        _ASK_QUESTION_FLOWS,
+        _PENDING_ASK_REQUESTS,
+        _record_answered_ask_flow,
+    )
+
+    _PENDING_ASK_REQUESTS.pop(request_id, None)
+    flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
+    if flow is not None:
+        _record_answered_ask_flow(request_id, flow.channel_id, outcome="cancelled")
+
+
+def on_session_dropped(callback: Callable[[str], str | None]) -> None:
+    """Run *callback(session_key)* on every :func:`drop_session`, before the
+    session's requests are dropped. It returns a label for the cleanup log
+    (e.g. ``discuss_feedback_ref``) or None. Registering twice is a no-op."""
+    if callback not in _SESSION_DROPPED_CALLBACKS:
+        _SESSION_DROPPED_CALLBACKS.append(callback)
+
+
+def drop_session(session_key: str) -> list[str]:
+    """Drop everything still registered for *session_key* (run end, cancel).
+
+    Runs the :func:`on_session_dropped` callbacks, then removes every pending
+    request of the session with its chat binding, originator, in-flight
+    claim, cancelled-during-write mark and question state (and, for a
+    request registered with its own responder, its input and tool name).
+    Idempotent. Returns the labels for the cleanup log, in that order.
+    """
+    from .questions import _ASK_QUESTION_FLOWS, _PENDING_ASK_REQUESTS
+
+    labels = [callback(session_key) for callback in tuple(_SESSION_DROPPED_CALLBACKS)]
+    cleaned = [label for label in labels if label is not None]
+    stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_key]
+    if stale:
+        cleaned.append(f"requests({len(stale)})")
+    for k in stale:
+        del _REQUEST_TO_SESSION[k]
+        _REQUEST_TO_CHANNEL.pop(k, None)  # #388
+        _REQUEST_TO_ORIGINATOR.pop(k, None)
+        # #685: a claim on a request whose session is gone can never
+        # complete — drop it so the id doesn't read "in flight" for ever.
+        _INFLIGHT_CONTROL_RESPONSES.pop(k, None)
+        _CANCELLED_DURING_WRITE.discard(k)  # #684
+        _REQUEST_META.pop(k, None)
+        if _REQUEST_TO_RESPONDER.pop(k, None) is not None:
+            # Only for a request with its own responder: Claude's session
+            # cleanup has always left the input / tool-name entries alone.
+            _REQUEST_TO_INPUT.pop(k, None)
+            _REQUEST_TO_TOOL_NAME.pop(k, None)
+        # Also clean up any pending ask requests and flows for stale requests
+        _PENDING_ASK_REQUESTS.pop(k, None)
+        _ASK_QUESTION_FLOWS.pop(k, None)
+    return cleaned
+
+
+def snapshot(
+    session_key: str,
+    *,
+    now: float | None = None,
+    input_details: Callable[[dict[str, Any] | None], str] | None = None,
+) -> list[ControlRequestSnapshot]:
+    """The session's pending requests that were registered with a responder,
+    with their age — the #684 ``control_request_snapshot`` contract for an
+    engine state (Claude builds its own from its stream state).
+    ``input_details`` formats a request's tool input for a title."""
+    from .questions import _PENDING_ASK_REQUESTS
+
+    now = time.monotonic() if now is None else now
+    snaps: list[ControlRequestSnapshot] = []
+    for rid, owner in list(_REQUEST_TO_SESSION.items()):
+        if owner != session_key:
+            continue
+        meta = _REQUEST_META.get(rid)
+        responder = _REQUEST_TO_RESPONDER.get(rid)
+        if meta is None or responder is None:
+            continue
+        details = ""
+        if input_details is not None:
+            details = input_details(_REQUEST_TO_INPUT.get(rid))
+        snaps.append(
+            ControlRequestSnapshot(
+                request_id=rid,
+                session_id=session_key,
+                age_s=max(0.0, now - meta.registered_at),
+                tool_name=_REQUEST_TO_TOOL_NAME.get(rid, meta.tool_name),
+                kind=meta.kind,
+                answerable_by_text=rid in _PENDING_ASK_REQUESTS,
+                writer_ok=responder.is_alive(session_key),
+                input_details=details,
+            )
+        )
+    return snaps
