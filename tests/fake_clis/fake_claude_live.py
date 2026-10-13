@@ -11,7 +11,8 @@ live background tasks (``task_updated{killed}`` + ``task_notification
 ``docs/findings/2026-09-27-claude-live-session-probes.md``).
 
 Scenario via ``FAKE_CLAUDE_SCENARIO``; timing via ``FAKE_CLAUDE_WAKE_S``
-(default 0.3 s) and ``FAKE_CLAUDE_RESULT_DELAY_S`` (``followup`` only: delay
+(default 0.3 s) and ``FAKE_CLAUDE_RESULT_DELAY_S`` (``followup`` and
+``async_hook_slow_turn`` only: delay
 before the first result, default 0). Test-only.
 """
 
@@ -1836,6 +1837,27 @@ def scenario_async_hook_success(first: dict) -> None:
     serve_followups()
 
 
+def scenario_async_hook_slow_turn(first: dict) -> None:
+    """#1072: a turn that outlives the session time limit (``RESULT_DELAY_S``)
+    and ends with an async Stop hook still running ``WAKE_S`` after its
+    result. The deferred ``abs_cap`` close must wait for the hook."""
+    init()
+    hook_started("h-ups-1", "UserPromptSubmit")
+    hook_response("h-ups-1", "UserPromptSubmit")
+    text("DONE")
+    if RESULT_DELAY_S > 0:
+        time.sleep(RESULT_DELAY_S)
+    spawn_hook("h-stop", WAKE_S)
+    hook_started("h-stop", "Stop")
+    result("DONE")
+    got = wait_idle_or_eof(WAKE_S)
+    if got is None:
+        _eof_with_pending_rewake()
+    wait_hook("h-stop")
+    hook_response("h-stop", "Stop", outcome="success", exit_code=0)
+    serve_followups()
+
+
 def scenario_async_hook_post_result_response(first: dict) -> None:
     """Live regression (CLI 2.1.285): plain ``async: true`` hooks (e.g.
     ``moshi-hook claude-hook``) on UserPromptSubmit + Stop next to sync
@@ -2687,6 +2709,7 @@ _SCENARIOS = {
     "bg_agent_async_rewake_idle": scenario_bg_agent_async_rewake_idle,
     "agent_wake_no_query_tail": scenario_agent_wake_no_query_tail,
     "async_hook_success": scenario_async_hook_success,
+    "async_hook_slow_turn": scenario_async_hook_slow_turn,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,
     "async_hook_live_mix_running": scenario_async_hook_live_mix_running,

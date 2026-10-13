@@ -527,6 +527,9 @@ class LiveSession:
     # #887: the absolute cap was reached while a turn was running; the close
     # is deferred to the turn boundary (logged once).
     abs_cap_deferred: bool = False
+    # #1072: the deferred close is waiting for the finishing turn's async
+    # hooks (logged once).
+    abs_cap_hooks_waiting: bool = False
     # #829: the tasks named when stdin was closed, and whether the
     # lifecycle has emitted its ``"closed"`` notice (once).
     close_tasks: list[str] = field(default_factory=list)
@@ -10823,13 +10826,38 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     # closed between turns, where it stays resumable.
                     turn_open = not live.idle or _awaiting_injected(state)
                     over_s = now - live.spawned_at - abs_cap_s
-                    if not turn_open or over_s >= self._abs_cap_turn_grace_s:
+                    # #1072: the turn the close waited for has ended, but its
+                    # async hooks (``Stop`` …) are still running — give them
+                    # their normal hold (``has_pending_async_hooks``: released
+                    # once no hook process is left, bounded by
+                    # ``async_hook_max_hold_s``) instead of killing them.
+                    finishing_hooks = (
+                        live.abs_cap_deferred and not turn_open and hooks_pending
+                    )
+                    if over_s >= self._abs_cap_turn_grace_s or not (
+                        turn_open or finishing_hooks
+                    ):
                         await close_live_session(
                             sid,
                             "abs_cap",
                             notice=live_work or turn_open,
                             only_if_idle=not turn_open,
                         )
+                        continue
+                    if finishing_hooks:
+                        if not live.abs_cap_hooks_waiting:
+                            live.abs_cap_hooks_waiting = True
+                            run_logger.info(
+                                "claude.live_session.abs_cap_hooks_wait",
+                                session_id=sid,
+                                turn=state.turn,
+                                hook_names=[
+                                    h.label
+                                    for h in state.pending_hooks.values()
+                                    if not _hook_never_holds(h.event)
+                                ],
+                                max_hold_s=state.async_hook_max_hold_s,
+                            )
                         continue
                     if not live.abs_cap_deferred:
                         live.abs_cap_deferred = True

@@ -5984,6 +5984,12 @@ def _run_error_hint(
     return hint
 
 
+# #1072: how long an ``abs_cap`` closing notice (between turns) waits for the
+# finishing turn's final to be handed to the transport.
+_CLOSING_NOTICE_FINAL_WAIT_S = 10.0
+_CLOSING_NOTICE_POLL_S = 0.05
+
+
 def _live_closing_notice(
     reason: str,
     tasks: list[str],
@@ -6560,6 +6566,15 @@ _SESSION_CLEARED_NOTICE = (
     "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16} The saved session couldn't"
     " be resumed, so it was cleared \N{EM DASH} your next message starts a new"
     " session."
+)
+# #1070: the hint for a failed resume of a session that isn't the chat's
+# saved one (a stale resume line — #1052 keeps the saved session). Replaces
+# the generic "could not be loaded … Send /new" advice, which would throw a
+# healthy saved session away.
+_STALE_RESUME_HINT = (
+    "The session that resume line names couldn't be loaded \N{EM DASH} it may"
+    " have been archived or expired. This chat's saved session isn't affected:"
+    " send your next message without the resume line to carry on."
 )
 # #1047: pre-spawn refusals (``usage[PRESPAWN_BLOCKED_KEY]``) that are
 # answered with their own text alone, in place of the progress card: no
@@ -7219,6 +7234,7 @@ async def handle_message(
         # engine, so the saved session is fine — keep it.
         _blocked = prespawn_blocked_reason(completed.usage)
         _session_auto_cleared = False
+        _stale_resume_kept = False
         if (
             turn is None
             and run_ok is False
@@ -7265,6 +7281,7 @@ async def handle_message(
                     # the chat's saved session alone, so no notice either.
                     cleared = await on_resume_failed(resume_token)
                     if cleared is False:
+                        _stale_resume_kept = True
                         logger.info(
                             "session.auto_clear_skipped",
                             reason="not_saved_session",
@@ -7303,14 +7320,18 @@ async def handle_message(
             raw_error = str(run_error)
             # #887: the hint depends on why the session ended and on whether
             # the run had any turns, not just on the error text.
-            hint = _run_error_hint(
-                raw_error,
-                usage=completed.usage,
-                close_reason=getattr(
-                    getattr(edits.stream, "engine_state", None),
-                    "live_close_reason",
-                    None,
-                ),
+            hint = (
+                _STALE_RESUME_HINT
+                if _stale_resume_kept
+                else _run_error_hint(
+                    raw_error,
+                    usage=completed.usage,
+                    close_reason=getattr(
+                        getattr(edits.stream, "engine_state", None),
+                        "live_close_reason",
+                        None,
+                    ),
+                )
             )
             if final_answer.strip():
                 # Deduplicate: if the answer already starts with the error's
@@ -7517,6 +7538,11 @@ async def handle_message(
         resume_value = acct.resume_value
         run_usage = acct.run_usage
         sync_resume_token(t_tracker, final_resume)
+        if _stale_resume_kept:
+            # #1070: the footer must not offer the session that just failed
+            # to load — replying to it would fail again. With no resume line
+            # a reply carries on in the chat's saved session.
+            t_tracker.resume = None
 
         # Post-outline guidance: if the session was outline-pending (user
         # clicked "Pause & Outline Plan" but Claude Code ended the run
@@ -7901,6 +7927,23 @@ async def handle_message(
         except Exception:  # noqa: BLE001
             logger.warning("live_session.notice_failed", exc_info=True)
 
+    async def _await_final_handed_off() -> None:
+        """#1072: a session closed at its time limit right after a turn
+        ended announces it only after that turn's final is handed to the
+        transport — the close follows the result within a poll, while the
+        final is still being rendered. Bounded; a final that never comes
+        (held for a recovery) just lets the notice through."""
+        # Polled: the hand-off is two flags set on different paths (the
+        # first turn's early final, a follow-up turn's router delivery).
+        for _ in range(int(_CLOSING_NOTICE_FINAL_WAIT_S / _CLOSING_NOTICE_POLL_S)):
+            if final_delivery["sent"] and turn_router.current is None:
+                return
+            await anyio.sleep(_CLOSING_NOTICE_POLL_S)
+        logger.info(
+            "live_session.notice_final_wait_expired",
+            wait_s=_CLOSING_NOTICE_FINAL_WAIT_S,
+        )
+
     async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
         if not live_notices["all"] and payload.get("reason") != "abs_cap":
             return  # #887: before the first result only the time limit speaks
@@ -7984,6 +8027,8 @@ async def handle_message(
         )
         if tasks or cap_mid_turn:
             closing_named_tasks["reason"] = str(payload.get("reason"))
+        if payload.get("reason") == "abs_cap" and not cap_mid_turn:
+            await _await_final_handed_off()
         try:
             await cfg.transport.send(
                 channel_id=incoming.channel_id,

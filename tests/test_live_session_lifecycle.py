@@ -1373,6 +1373,45 @@ async def test_887_abs_cap_waits_for_the_running_turn_to_end(
     assert notices[0][1]["quarantined"] is False
 
 
+async def test_1072_deferred_abs_cap_waits_for_the_turns_async_stop_hook(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#1072: the cap is reached during a 1 s turn whose async Stop hook runs
+    1.2 s past the result. The deferred close waits for the hook (its normal
+    hold) instead of killing it — nothing killed, no hook notice, a clean
+    close at the turn boundary."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, live_session_max_s=0.5)
+    _progress_env(result_delay_s=1.0)
+    notices: list[tuple[str, dict]] = []
+    subscribed = False
+
+    async def subscribe(evt: Any) -> None:
+        nonlocal subscribed
+        if not subscribed:
+            subscribed = True
+            add_live_session_listener(SID, lambda kind, p: notices.append((kind, p)))
+
+    with capture_logs() as logs:
+        runner, events = await _run(
+            "async_hook_slow_turn", on_event=subscribe, wake_s=1.2
+        )
+    assert isinstance(events[-1], CompletedEvent) and events[-1].answer == "DONE"
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert [c["reason"] for c in closes] == ["abs_cap"]
+    assert closes[0]["turn_idle"] is True
+    assert closes[0]["age_s"] >= 2.0  # result (~1 s) + the hook (1.2 s)
+    waits = _events(logs, "claude.live_session.abs_cap_hooks_wait")
+    assert len(waits) == 1 and waits[0]["hook_names"] == ["Stop"]
+    assert len(_events(logs, "claude.live_session.abs_cap_deferred")) == 1
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert _engine_state(runner).pending_hooks == {}
+    assert runner.current_stream.proc_returncode == 0
+    assert not quarantine.is_quarantined("claude", SID)
+    assert "closing" not in [k for k, _ in notices]
+
+
 async def test_887_abs_cap_closes_a_turn_that_outlives_the_grace_with_a_notice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

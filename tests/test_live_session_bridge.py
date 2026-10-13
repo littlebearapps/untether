@@ -2335,3 +2335,133 @@ async def test_1017_silent_followup_turn_progress_header_ticks(monkeypatch) -> N
     _, progress = _turn_texts(transport, run_progress, "SECOND")
     assert "0s" in progress[0], progress
     assert any("1m" in text for text in progress[1:]), progress
+
+
+async def test_1072_abs_cap_closing_notice_follows_the_turns_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1072: the session reached its time limit and closes right after a
+    turn's result (between turns, with a background task to name). The
+    lifecycle's ``closing`` notice can fire while that turn's final is still
+    being rendered; it must reach the chat after the final, not before."""
+    from untether import runner_bridge as rb
+    from untether.markdown import MarkdownPresenter
+    from untether.runners.mock import Return, ScriptRunner, Wait
+    from untether.transport import MessageRef, RenderedMessage, SendOptions
+
+    texts: list[str] = []
+
+    class _Transport:
+        def __init__(self) -> None:
+            self._next = 1
+
+        async def send(
+            self,
+            *,
+            channel_id: int | str,
+            message: RenderedMessage,
+            options: SendOptions | None = None,
+        ) -> MessageRef:
+            texts.append(message.text)
+            self._next += 1
+            return MessageRef(channel_id=channel_id, message_id=self._next)
+
+        async def edit(
+            self, *, ref: MessageRef, message: RenderedMessage, wait: bool = True
+        ) -> MessageRef:
+            texts.append(message.text)
+            return ref
+
+        async def delete(self, *, ref: MessageRef) -> bool:
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    listeners: list = []
+    subscribed = anyio.Event()
+
+    class _Live:
+        def add_listener(self, sid: str, cb) -> bool:
+            listeners.append(cb)
+            subscribed.set()
+            return True
+
+    monkeypatch.setattr(rb, "live_backend", lambda engine: _Live())
+    finish = anyio.Event()
+    runner = ScriptRunner(
+        [Wait(finish), Return(answer="THE FINAL ANSWER")], engine="codex"
+    )
+    cfg = rb.ExecBridgeConfig(
+        transport=_Transport(), presenter=MarkdownPresenter(), final_notify=True
+    )
+    payload = {"reason": "abs_cap", "tasks": ["bg job"], "mid_turn": False}
+
+    async def _run() -> None:
+        await rb.handle_message(
+            cfg,
+            runner=runner,
+            incoming=rb.IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=None,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_run)
+        with anyio.fail_after(5):
+            await subscribed.wait()
+        # The lifecycle closes while the final hasn't been handed over yet.
+        tg.start_soon(listeners[0], "closing", payload)
+        await anyio.sleep(0.2)
+        finish.set()
+
+    final_at = next(i for i, t in enumerate(texts) if "THE FINAL ANSWER" in t)
+    notice_at = next(i for i, t in enumerate(texts) if "Closing session" in t)
+    assert final_at < notice_at
+
+
+async def test_1072_mid_turn_cap_notice_is_not_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn cut short at the cap has no final yet: its notice is sent at
+    once (the wait is only for a close between turns)."""
+    from untether import runner_bridge as rb
+    from untether.markdown import MarkdownPresenter
+    from untether.runners.mock import Return, ScriptRunner, Wait
+
+    listeners: list = []
+    subscribed = anyio.Event()
+
+    class _Live:
+        def add_listener(self, sid: str, cb) -> bool:
+            listeners.append(cb)
+            subscribed.set()
+            return True
+
+    monkeypatch.setattr(rb, "live_backend", lambda engine: _Live())
+    finish = anyio.Event()
+    transport = FakeTransport()
+    runner = ScriptRunner([Wait(finish), Return(answer="LATE")], engine="codex")
+    cfg = rb.ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    async def _run() -> None:
+        await rb.handle_message(
+            cfg,
+            runner=runner,
+            incoming=rb.IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=None,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_run)
+        with anyio.fail_after(5):
+            await subscribed.wait()
+        with anyio.fail_after(1):
+            await listeners[0](
+                "closing",
+                {"reason": "abs_cap", "tasks": [], "mid_turn": True, "max_s": 600.0},
+            )
+        sent = [c["message"].text for c in transport.send_calls]
+        assert any("Closing session" in t for t in sent)
+        finish.set()

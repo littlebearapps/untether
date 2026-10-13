@@ -165,6 +165,9 @@ def _record_answered_ask_flow(
     for rid, (_ch, ts, _outcome) in list(_ANSWERED_ASK_FLOWS.items()):
         if now - ts > ANSWERED_ASK_FLOW_TTL_S:
             del _ANSWERED_ASK_FLOWS[rid]
+    # Re-recording moves the entry to the end, so insertion order stays
+    # oldest → newest (the size cap below evicts from the front).
+    _ANSWERED_ASK_FLOWS.pop(request_id, None)
     _ANSWERED_ASK_FLOWS[request_id] = (channel_id, now, outcome)
     while len(_ANSWERED_ASK_FLOWS) > _ANSWERED_ASK_FLOWS_MAX:
         _ANSWERED_ASK_FLOWS.pop(next(iter(_ANSWERED_ASK_FLOWS)))
@@ -188,17 +191,21 @@ def recently_resolved_ask_flow(
     """Like :func:`recently_answered_ask_flow`, with the outcome (#684).
 
     Returns ``(request_id, outcome)`` — ``answered`` or ``cancelled`` (the
-    CLI withdrew the question) — or None.
+    CLI withdrew the question) — or None. The **newest** resolution in the
+    chat wins (#1071: it used to return the oldest one still in the TTL, so
+    a late tap was logged against, and toasted for, an earlier question).
     """
     now = time.monotonic()
+    newest: tuple[float, str, str] | None = None
     for rid, (ch, ts, outcome) in list(_ANSWERED_ASK_FLOWS.items()):
         if now - ts > ANSWERED_ASK_FLOW_TTL_S:
             del _ANSWERED_ASK_FLOWS[rid]
             continue
         if channel_id is not None and ch != channel_id:
             continue
-        return rid, outcome
-    return None
+        if newest is None or ts >= newest[0]:
+            newest = (ts, rid, outcome)
+    return None if newest is None else (newest[1], newest[2])
 
 
 def get_ask_question_flow(
