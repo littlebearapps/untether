@@ -69,40 +69,57 @@ def _parse_cli_version(output: str) -> str | None:
     return text
 
 
+# #1067: `opencode --version` alone takes ~3.5 s on lba-1, and the probes run
+# side by side (#951), so the old 5 s bound dropped OpenCode from /config →
+# About. Twice the slowest seen, and a hung CLI only delays the About view.
+_CLI_VERSION_TIMEOUT_S = 10.0
+
+
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
         # #202: cmd is EngineBackend.cli_cmd (e.g. "claude", "agy") or the
         # engine id (#993), a fixed table of entrypoints from pyproject.toml.
-        # No shell, fixed argv, 5-second timeout (#951: the probes now run
-        # side by side, so Node start-up is slower than the ~2-3 s serial).
+        # No shell, fixed argv, bounded by ``_CLI_VERSION_TIMEOUT_S``.
         result = subprocess.run(  # nosec B603
             [cmd, "--version"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=_CLI_VERSION_TIMEOUT_S,
         )
         if result.returncode == 0:
             # #951: Pi prints its version to stderr.
             return _parse_cli_version(result.stdout) or _parse_cli_version(
                 result.stderr or ""
             )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+        logger.debug("cli_version.probe_failed", cmd=cmd, rc=result.returncode)
+    except subprocess.TimeoutExpired:
+        logger.debug(
+            "cli_version.probe_timeout", cmd=cmd, timeout_s=_CLI_VERSION_TIMEOUT_S
+        )
+    except (FileNotFoundError, OSError) as exc:
+        logger.debug(
+            "cli_version.probe_failed", cmd=cmd, error_type=exc.__class__.__name__
+        )
     return None
 
 
 # #951: engine versions only change on an upgrade, so /config → About reuses
-# a probe for a few minutes instead of spawning every CLI on each tap.
+# a probe for a few minutes instead of spawning every CLI on each tap. A
+# failed probe (timeout, missing CLI) is retried after a short while instead
+# (#1067: a slow first probe used to hide the version for the full 5 min).
 _CLI_VERSION_TTL_S = 300.0
+_CLI_VERSION_FAILED_TTL_S = 30.0
 _CLI_VERSION_CACHE: dict[str, tuple[float, str | None]] = {}
 
 
 async def _cli_version(cmd: str) -> str | None:
     cached = _CLI_VERSION_CACHE.get(cmd)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < _CLI_VERSION_TTL_S:
-        return cached[1]
+    if cached is not None:
+        ttl = _CLI_VERSION_TTL_S if cached[1] is not None else _CLI_VERSION_FAILED_TTL_S
+        if now - cached[0] < ttl:
+            return cached[1]
     # A worker thread, so the ~2-3 s Node start-up never blocks the event loop.
     version = await anyio.to_thread.run_sync(_detect_cli_version, cmd)
     _CLI_VERSION_CACHE[cmd] = (now, version)

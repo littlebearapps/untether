@@ -558,6 +558,42 @@ async def test_handle_message_error_preserves_resume_token() -> None:
     assert "codex resume" in last_edit.lower()
 
 
+@pytest.mark.anyio
+async def test_1065_runner_failure_card_is_sanitised() -> None:
+    """#1065: a runner exception quoting a typed resume value (a URL with a
+    query string) or a path reaches the card only through the shared stderr
+    sanitiser (#1033)."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Raise(
+                RuntimeError(
+                    "codex emitted session id 01a133b2 but expected "
+                    "https://example.invalid/cb?token=SECRETX&state=STATEY "
+                    "(see /home/alice/.codex/log.txt)"
+                )
+            )
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="019b66fc-64c2-7a71-81cd-081c504cfeb2",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="do something"),
+        resume_token=None,
+    )
+
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "emitted session id 01a133b2 but expected [url]" in last_edit
+    for leaked in ("SECRETX", "STATEY", "example.invalid", "/home/alice"):
+        assert leaked not in last_edit
+
+
 # ---------------------------------------------------------------------------
 # ProgressEdits ephemeral notification cleanup tests
 # ---------------------------------------------------------------------------

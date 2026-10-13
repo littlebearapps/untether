@@ -223,3 +223,17 @@ def test_trigger_overrides_set_trigger_permission_mode_only_when_cron_sets_it():
     assert out is not None
     assert out.permission_mode == "workspace"
     assert out.trigger_permission_mode == "workspace"
+
+
+def test_981_untriggered_fixed_mode_is_not_logged_as_a_cron():
+    """An approved Antigravity plan resumes with a fixed Workspace mode and no
+    trigger; its override line must not claim a cron set it."""
+    from structlog.testing import capture_logs
+
+    ro = EngineRunOptions(permission_mode="plan")
+    ctx = RunContext(permission_mode="workspace")
+    with capture_logs() as logs:
+        out = _apply_trigger_overrides(ro, ctx, engine="antigravity")
+    assert out is not None and out.permission_mode == "workspace"
+    assert [rec["event"] for rec in logs] == ["run.permission_mode_override"]
+    assert logs[0]["trigger_source"] is None

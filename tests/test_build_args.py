@@ -16,6 +16,8 @@ from untether.model import ResumeToken
 from untether.runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from untether.runners.run_options import EngineRunOptions as RunOptions
 
+_CODEX_THREAD = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b"
+
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
@@ -642,10 +644,11 @@ class TestCodexBuildArgs:
     def test_resume(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        token = ResumeToken(engine="codex", value="thread123")
+        # #1065: Codex resumes by thread UUID only.
+        token = ResumeToken(engine="codex", value=_CODEX_THREAD)
         args = runner.build_args("hello", token, state=state)
         assert "resume" in args
-        assert "thread123" in args
+        assert _CODEX_THREAD in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -706,8 +709,8 @@ class TestCodexBuildArgs:
         assert "untrusted" not in args
 
     def test_permission_mode_safe_resume_sandbox_before_resume(self) -> None:
-        args = self._safe_args(ResumeToken(engine="codex", value="abc"))
-        assert args[-5:] == ["--sandbox", "read-only", "resume", "abc", "-"]
+        args = self._safe_args(ResumeToken(engine="codex", value=_CODEX_THREAD))
+        assert args[-5:] == ["--sandbox", "read-only", "resume", _CODEX_THREAD, "-"]
 
     def test_permission_mode_safe_continue(self) -> None:
         args = self._safe_args(ResumeToken(engine="codex", value="", is_continue=True))
@@ -1104,12 +1107,14 @@ class TestPiBuildArgs:
 
     def test_resume(self) -> None:
         runner = self._runner()
-        token = ResumeToken(engine="pi", value="/path/to/session.jsonl")
+        # #1064: the id Untether saves after a Pi run (a session path must
+        # sit under Pi's sessions directory — see tests/test_engine_argv.py).
+        token = ResumeToken(engine="pi", value="019e81c8")
         state = runner.new_state("hello", token)
         args = runner.build_args("hello", token, state=state)
         assert "--session" in args
         idx = args.index("--session")
-        assert args[idx + 1] == "/path/to/session.jsonl"
+        assert args[idx + 1] == "019e81c8"
 
     def test_continue(self) -> None:
         runner = self._runner()

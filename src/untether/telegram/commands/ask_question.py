@@ -79,6 +79,8 @@ class AskQuestionCommand:
     id = "aq"
     description = "Handle AskUserQuestion option buttons"
     answer_early = True
+    # #1068: button taps only — not in the command menu.
+    callback_only = True
 
     @staticmethod
     def early_answer_toast(

@@ -574,3 +574,28 @@ def test_interactive_package_imports_no_runner_or_telegram() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == ""
+
+
+def test_recently_resolved_ask_flow_returns_the_newest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1071: a late tap is matched to the chat's newest resolved question,
+    not the oldest one still inside the TTL (live: a tap on B7 logged B4)."""
+    clock = [1000.0]
+    monkeypatch.setattr(questions.time, "monotonic", lambda: clock[0])
+    questions._record_answered_ask_flow("q-old", CHAT_A, outcome="cancelled")
+    clock[0] += 5
+    questions._record_answered_ask_flow("q-other-chat", CHAT_B)
+    clock[0] += 5
+    questions._record_answered_ask_flow("q-new", CHAT_A)
+    assert questions.recently_resolved_ask_flow(CHAT_A) == ("q-new", "answered")
+    assert questions.recently_answered_ask_flow(CHAT_A) == "q-new"
+    assert questions.recently_resolved_ask_flow(CHAT_B) == ("q-other-chat", "answered")
+    assert questions.recently_resolved_ask_flow() == ("q-new", "answered")
+    # Re-recording an older id makes it the newest.
+    clock[0] += 5
+    questions._record_answered_ask_flow("q-old", CHAT_A, outcome="cancelled")
+    assert questions.recently_resolved_ask_flow(CHAT_A) == ("q-old", "cancelled")
+    # Past the TTL nothing is returned and the entries are pruned.
+    clock[0] += questions.ANSWERED_ASK_FLOW_TTL_S + 1
+    assert questions.recently_resolved_ask_flow(CHAT_A) is None

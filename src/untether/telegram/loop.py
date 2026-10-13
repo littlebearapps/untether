@@ -273,11 +273,14 @@ def _apply_trigger_overrides(
         # the same options the run is spawned with.
         new_options = drop_unsupported_reasoning(engine, new_options)
     if log:
+        # A run Untether starts itself with a fixed mode (an approved
+        # Antigravity plan, #981) carries no trigger; don't log it as a cron.
+        prefix = "trigger.cron" if context.trigger_source is not None else "run"
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None
             if previous != value:
                 logger.info(
-                    f"trigger.cron.{name}_override",
+                    f"{prefix}.{name}_override",
                     trigger_source=context.trigger_source,
                     engine=engine,
                     **{f"chat_{name}": previous, f"trigger_{name}": value},

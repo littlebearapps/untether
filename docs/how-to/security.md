@@ -146,6 +146,16 @@ Still allowed, and documented: Codex `-s read-only|workspace-write` (the way to 
 
 Treat write access to `untether.toml`, the engines' config directories or the service environment as equivalent to choosing the permission mode.
 
+## Resume lines and model ids
+
+A resume line typed or pasted in chat (`codex resume <id>`, `pi --session <id>`), `/model set`, `[engine] model` and a cron's `model` all end up on the engine's command line. Untether checks each value before the engine starts and refuses a bad one with a plain message, keeping the chat's saved session:
+
+- **Every engine:** a model id or session id can't start with a dash or contain control characters, so it can never be read as a flag (`claude --resume --dangerously-skip-permissions`) ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
+- **Pi:** only a Pi session id (what Untether saves after a run, and what `pi --session <id>` looks up) or a `.jsonl` file inside Pi's sessions folder (`~/.pi/agent/sessions/`, or under `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`). Pi opens or creates a session file at any path it is given, so anything else (`/tmp/x.jsonl`, a relative path, a URL) is refused ([#1064](https://github.com/littlebearapps/untether/issues/1064)).
+- **Codex:** only a thread id (a UUID). `codex exec resume` starts a new thread for a value it can't find, such as a thread name or a URL, so those are refused rather than left as orphaned threads ([#1065](https://github.com/littlebearapps/untether/issues/1065)).
+
+The refusal and its `runner.argv.invalid_value` log line never repeat the raw value; the log carries a short, inert preview. Error messages from a failed run have URLs and paths masked, and the log masks URL query values (`token=`, `state=`, `code=`…).
+
 ## Permission-mode safety checks (Claude)
 
 - **Prompting modes prompt.** In `acceptEdits` (`/planmode off`), `default` and `manual`, Untether no longer pre-approves `Bash`, `Read`, `Edit` and `Write` or silently approves other tools: anything Claude Code would ask about becomes an Approve / Deny message ([#749](https://github.com/littlebearapps/untether/issues/749)).

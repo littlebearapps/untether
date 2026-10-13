@@ -278,3 +278,46 @@ async def test_failed_continue_still_clears_nothing(
     assert not any(CLEARED_TEXT in t for t in texts)
     (skip,) = [e for e in logs if e["event"] == "session.auto_clear_skipped"]
     assert skip["reason"] == "continue_token"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        *RESUME_FAILURES,
+        # The live repro: Claude's 0-turn resume failure, whose generic hint
+        # said "Send /new to start a fresh session." (#228).
+        ("claude", "claude failed (rc=1).\nerror_during_execution"),
+    ],
+)
+async def test_stale_resume_card_keeps_the_saved_session_in_view(
+    tmp_path: Path, engine: str, error: str
+) -> None:
+    """#1070: the stale resume line's error card says the named session
+    couldn't be loaded and the saved one isn't affected (no /new advice), and
+    its footer no longer offers the stale id as a resume target."""
+    _store, texts, _logs = await _failed_resume(
+        tmp_path, engine, error, ResumeToken(engine=engine, value=STALE)
+    )
+    final = texts[-1]
+    assert "saved session isn't affected" in final
+    assert "Send /new" not in final
+    assert STALE not in final
+
+
+@pytest.mark.anyio
+async def test_failed_resume_of_the_saved_session_keeps_its_hint(
+    tmp_path: Path,
+) -> None:
+    """Unchanged: when the saved session itself fails to load it is cleared,
+    and the generic #228 hint and the cleared notice stay."""
+    _store, texts, _logs = await _failed_resume(
+        tmp_path,
+        "claude",
+        "claude failed (rc=1).\nerror_during_execution",
+        ResumeToken(engine="claude", value=SAVED),
+    )
+    final = texts[-1]
+    assert "could not be loaded" in final
+    assert CLEARED_TEXT in final
+    assert "saved session isn't affected" not in final

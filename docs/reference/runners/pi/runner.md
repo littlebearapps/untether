@@ -109,7 +109,14 @@ pi [extra_args] --print --mode json [--provider <provider>] [--model <model>] --
 
 The model and session token stay separate tokens: Pi's own parser (0.78.0) has no `--model=` / `--session=` form and takes the next token as the value unconditionally. Untether still refuses a dash-leading value or one with control characters before spawning ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 
-When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat; `/continue` passes `--continue` instead of `--session`. The subprocess gets an allowlisted environment (plus `NO_COLOR=1` and `CI=1`), not Untether's full environment.
+When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat; `/continue` passes `--continue` instead of `--session`.
+
+Pi 0.78.0 (`resolveSessionPath`) treats a `--session` value containing `/` or `\`, or ending in `.jsonl`, as a session **file**: it opens it, or creates it, relative to the run's cwd. Anything else is a session id or id prefix, looked up among existing sessions (never written). So Untether accepts only ([#1064](https://github.com/littlebearapps/untether/issues/1064), `check_pi_resume`):
+
+- a session id in Pi's own grammar (`[A-Za-z0-9]`, then `[A-Za-z0-9._-]`, ending alphanumeric) — what Untether saves after a run (the id's first segment) and what a resume line normally carries;
+- an absolute or `~/` path to a `.jsonl` file whose real path (symlinks resolved) is inside `<PI_CODING_AGENT_DIR or ~/.pi/agent>/sessions/` or `PI_CODING_AGENT_SESSION_DIR` — what Untether hands a new run.
+
+Everything else (`/tmp/x.jsonl`, a relative path, a URL) is refused before spawning with the plain invalid-session message, and the chat's saved session is kept. A custom `sessionDir` in Pi's own `settings.json` isn't read: a session file there resumes by id, not by path. The subprocess gets an allowlisted environment (plus `NO_COLOR=1` and `CI=1`), not Untether's full environment.
 
 #### Event translation
 

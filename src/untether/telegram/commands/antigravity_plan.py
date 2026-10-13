@@ -79,6 +79,8 @@ class AntigravityPlanCommand:
     id = "agy_plan"
     description = "Answer an Antigravity plan card"
     answer_early = True
+    # #1068: button taps only — not in the command menu.
+    callback_only = True
 
     @staticmethod
     def early_answer_toast(

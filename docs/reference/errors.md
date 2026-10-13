@@ -76,7 +76,7 @@ Every Antigravity model or effort rejection starts with `invalid model selection
 | `model not available` | Model not available. Check the model name in `/config`. | All |
 | `does not exist` | The requested resource was not found. Check your model or configuration. | All |
 
-A model id or session id that could be read as a command-line flag is refused before the engine starts, on every engine ([#1034](https://github.com/littlebearapps/untether/issues/1034)): `🛑 That model id isn't valid, so nothing was started.` means the chat's, cron's or config's model id starts with a dash or contains spaces or control characters — fix it with `/model set <id>` or `/model clear`. `🛑 That session id isn't valid, so nothing was started.` means the resume line you replied to doesn't hold a real session id — send `/new`. Antigravity has its own wording for both (see [Antigravity messages](#antigravity-messages)).
+A model id or session id that could be read as a command-line flag is refused before the engine starts, on every engine ([#1034](https://github.com/littlebearapps/untether/issues/1034)): `🛑 That model id isn't valid, so nothing was started.` means the chat's, cron's or config's model id starts with a dash or contains spaces or control characters — fix it with `/model set <id>` or `/model clear`. `🛑 That session id isn't valid, so nothing was started. This chat's saved session isn't affected.` means the resume line you sent or replied to doesn't hold a real session id for that engine — a Pi resume also has to be a Pi session id or a file in Pi's sessions folder, and a Codex resume a thread id ([#1064](https://github.com/littlebearapps/untether/issues/1064), [#1065](https://github.com/littlebearapps/untether/issues/1065)). The chat's own session is kept: send your message without the resume line to carry on, or `/new` for a fresh one ([#1069](https://github.com/littlebearapps/untether/issues/1069)). Antigravity has its own wording for both (see [Antigravity messages](#antigravity-messages)).
 
 ## Context length
 
@@ -151,7 +151,7 @@ These are checked before the generic `invalid_request_error` pattern, because th
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. Shown only when the run had no turns; a run that did work before failing gets no hint, and a session Untether closed at its time limit says so instead ([#887](https://github.com/littlebearapps/untether/issues/887)). | Claude |
+| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. Shown only when the run had no turns; a run that did work before failing gets no hint, and a session Untether closed at its time limit says so instead ([#887](https://github.com/littlebearapps/untether/issues/887)). When the failed session was named by a resume line and isn't the chat's saved one, the hint says the saved session isn't affected instead, on every engine, and the card carries no resume line for the failed session ([#1070](https://github.com/littlebearapps/untether/issues/1070)). | Claude |
 | `finished without a result event` | The engine exited before producing a final answer. Try sending a new message to resume. | All |
 | `finished but no session_id` | The engine crashed during startup. Check that the CLI is installed and working. | All |
 

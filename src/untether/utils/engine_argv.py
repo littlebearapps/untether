@@ -19,7 +19,10 @@ could add a flag to a run. Two defences:
    starts with ``-`` or carries whitespace / control characters. Every runner
    calls them in ``build_args`` (raising ``EngineArgvError``), and
    ``JsonlSubprocessRunner`` turns the same check into one plain refusal
-   before anything spawns.
+   before anything spawns. A runner narrows the resume check to what its CLI
+   really accepts through ``check_resume_value``: Pi only takes its own
+   session ids or ``.jsonl`` files under its sessions directory (#1064),
+   Codex only a thread UUID (#1065).
 2. ``joined`` emits ``--flag=value`` for the CLIs that parse it, so the value
    can never be re-read as a flag even if a check is loosened later.
 
@@ -62,9 +65,11 @@ INVALID_MODEL_TEXT = (
     "start with a dash or contain spaces or control characters. Set one with "
     "/model set, or go back to the default with /model clear."
 )
+# #1069: the refusal keeps the chat's saved session (``PRESPAWN_BLOCKED_KEY``),
+# so the text says so instead of pointing at /new.
 INVALID_RESUME_TEXT = (
-    "🛑 That session id isn't valid, so nothing was started. Send /new to "
-    "start a fresh session."
+    "🛑 That session id isn't valid, so nothing was started. This chat's "
+    "saved session isn't affected."
 )
 
 _REASON_TEXT = {
@@ -74,6 +79,8 @@ _REASON_TEXT = {
     "leading_dash": "must not start with a dash",
     "whitespace_or_control": "must not contain spaces or control characters",
     "control": "must not contain control characters",
+    # #1064 / #1065: the engine-specific narrowing (``Runner.check_resume_value``).
+    "not_a_session": "is not one of the engine's session ids or session files",
 }
 
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 
-from ...commands import CommandContext, CommandResult, get_command
+from ...commands import CommandContext, CommandResult, get_command, is_callback_only
 from ...config import ConfigError
 from ...context import RunContext
 from ...logging import get_logger
@@ -24,6 +24,12 @@ if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
+
+# #1068: the reply to a typed button-only command (``/agy_plan``, ``/aq``…).
+CALLBACK_ONLY_TEXT = (
+    "That command only works through the buttons on Untether's messages, "
+    "so there's nothing to do here."
+)
 
 # #418: Telegram caps a document caption at 1024 characters (UTF-16 units).
 _CAPTION_MAX = 1024
@@ -320,6 +326,12 @@ async def _dispatch_command(
             command=command_id,
             chat_id=chat_id,
         )
+        return
+    if is_callback_only(backend):
+        # #1068: e.g. `/agy_plan` typed (or tapped in an old command menu).
+        # Its handler expects button data, so never run it on typed text.
+        logger.debug("command.callback_only_typed", command=command_id, chat_id=chat_id)
+        await executor.send(CALLBACK_ONLY_TEXT, reply_to=message_ref, notify=False)
         return
     try:
         plugin_config = cfg.runtime.plugin_config(command_id)

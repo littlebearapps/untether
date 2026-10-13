@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from ..events import EventFactory
 from ..logging import get_logger
 from ..model import ActionPhase, EngineId, ResumeToken, UntetherEvent
 from ..runner import (
+    _URL_RE,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
@@ -22,7 +24,7 @@ from ..runner import (
 )
 from ..schemas import codex as codex_schema
 from ..utils import engine_argv
-from ..utils.paths import relativize_command
+from ..utils.paths import relativize_command, relativize_path
 from .extra_args_guard import (
     SECURITY_DOC_REF,
     BlockedArg,
@@ -50,6 +52,20 @@ __all__ = [
 ]
 
 _RESUME_RE = re.compile(r"(?im)^\s*`?codex\s+resume\s+(?P<token>[^`\s]+)`?\s*$")
+# #1065: a Codex thread id (``thread.started.thread_id``, a UUID). `codex exec
+# resume` (0.162.1) also takes a thread *name*, but an unknown name silently
+# starts a new thread instead of failing, and Untether's session tracking
+# keys on the UUID the run reports — so a name never resumed under Untether
+# (it failed the "emitted session id … but expected …" check) and is refused
+# before spawning instead. Recorded in docs/reference/runners/codex/.
+_CODEX_THREAD_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# #1066: an absolute path inside a Codex warning's text (``user
+# (/home/<user>/.codex/config.toml): `project` is ignored.``). Not preceded
+# by a word character, ``~`` or ``.`` (so ``~/x``, ``a/b`` and ``./x`` are
+# left alone); stops at the punctuation that wraps a path in prose.
+_WARNING_PATH_RE = re.compile(r"(?<![\w~.])/[^\s'\"`<>()\[\]{},;:]+")
 _RECONNECTING_RE = re.compile(
     r"^Reconnecting\.{3}\s*(?P<attempt>\d+)/(?P<max>\d+)\s*$",
     re.IGNORECASE,
@@ -497,6 +513,7 @@ def _translate_item_event(
         case codex_schema.ErrorItem(id=action_id, message=message):
             if phase != "completed":
                 return []
+            message = _warning_display_text(message)
             # #987: a non-fatal warning (e.g. an ignored config key), not a
             # failed step — ok=True with a leading ⚠️ renders the ⚠️ as the
             # row's status instead of ✗ (#868).
@@ -681,6 +698,32 @@ def _translate_item_event(
     return []
 
 
+def _warning_display_text(message: str) -> str:
+    """#1066: a Codex warning as shown in Telegram — no home or host paths.
+
+    A path inside the run's project becomes relative, one under the home
+    directory becomes ``~/…`` (so ``~/.codex/config.toml`` still tells the
+    user which file to fix), any other absolute path ``[path]``, and URLs
+    ``[url]`` — the same treatment engine stderr gets (``_sanitise_stderr``,
+    #208 / #1033), kept readable for a row the user acts on.
+    """
+    text = _URL_RE.sub("[url]", message)
+    home = os.path.expanduser("~")
+
+    def _replace(match: re.Match[str]) -> str:
+        path = match.group(0)
+        if path.count("/") < 2:
+            return path  # ``/help``-style words, not a filesystem path
+        relative = relativize_path(path)
+        if relative != path:
+            return relative
+        if home not in ("", "/") and (path == home or path.startswith(f"{home}/")):
+            return f"~{path[len(home) :]}"
+        return "[path]"
+
+    return _WARNING_PATH_RE.sub(_replace, text)
+
+
 def translate_codex_event(
     event: codex_schema.ThreadEvent,
     *,
@@ -741,6 +784,14 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def command(self) -> str:
         return self.codex_cmd
 
+    def check_resume_value(self, value: Any) -> str:
+        """#1065: only a thread UUID — anything else would start an orphan
+        thread (see ``_CODEX_THREAD_ID_RE``)."""
+        engine_argv.check_resume(value)
+        if _CODEX_THREAD_ID_RE.fullmatch(value) is None:
+            raise engine_argv.EngineArgvError("resume", "not_a_session")
+        return value
+
     def build_args(
         self,
         prompt: str,
@@ -788,7 +839,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # #1034: the session id is positional, so there is no joined
                 # form — clap (0.160.1) reads a dash-leading one as an option
                 # of `exec resume`. Validation is the whole defence here.
-                args.extend(["resume", engine_argv.check_resume(resume.value), "-"])
+                args.extend(["resume", self.check_resume_value(resume.value), "-"])
         else:
             args.append("-")
         if isinstance(state, CodexRunState):
