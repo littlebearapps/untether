@@ -334,17 +334,47 @@ class TopicStateStore(JsonStateStore[_TopicState]):
             )
 
     async def clear_engine_session(
-        self, chat_id: int, thread_id: int, engine: str
-    ) -> None:
-        """Clear the saved session for a specific engine in a topic thread."""
+        self,
+        chat_id: int,
+        thread_id: int,
+        engine: str,
+        *,
+        resume: str | None = None,
+    ) -> bool:
+        """Clear the saved session for a specific engine in a topic thread.
+
+        With ``resume``, clear only when that is the saved session (#1052).
+        Returns whether a session was removed.
+        """
         async with self._lock:
             self._reload_locked_if_needed()
             thread = self._get_thread_locked(chat_id, thread_id)
             if thread is None:
-                return
-            removed = thread.sessions.pop(engine, None)
-            if removed is not None:
-                self._save_locked()
+                return False
+            saved = thread.sessions.get(engine)
+            if saved is None:
+                return False
+            if resume is not None and saved.resume != resume:
+                logger.info(
+                    "topic_state.session.clear_skipped",
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    engine=engine,
+                    reason="not_saved_session",
+                    resume=resume,
+                    saved=saved.resume,
+                )
+                return False
+            thread.sessions.pop(engine, None)
+            self._save_locked()
+            logger.info(
+                "topic_state.session.cleared",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                engine=engine,
+                resume=saved.resume,
+            )
+            return True
 
     async def delete_thread(self, chat_id: int, thread_id: int) -> None:
         async with self._lock:
