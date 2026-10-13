@@ -59,6 +59,46 @@ def test_agent_file_lists_file_tools_only() -> None:
     assert "/new" in agent.AGENT_MD and "Full access" in agent.AGENT_MD
 
 
+# The rc3 text (#1037), as installed on hosts before #1055.
+_RC3_ADVICE = (
+    "Tell the user that this needs Full access: /config, then Permission mode, "
+    "then Full access, and then /new, because a conversation that started in "
+    "Workspace mode stays in it."
+)
+
+
+def test_agent_advice_covers_cron_and_webhook_runs() -> None:
+    """#1055: a cron or webhook run never takes Full access from the chat,
+    so chat-only advice sent its reader to the wrong switch."""
+    advice = agent.AGENT_MD.split("# Working without a shell", 1)[1]
+    assert _RC3_ADVICE not in advice
+    assert "In a chat: /config, then Permission mode, then Full access" in advice
+    assert '`permission_mode = "full"` on the cron itself' in advice
+    assert "a webhook never does" in advice
+    # Still a short agent: four bullets, no essay.
+    assert advice.count("\n- ") == 4 and len(advice) < 1000
+
+
+def test_upgrade_rewrites_the_old_agent_without_a_hold(project: Path) -> None:
+    """An rc3 copy on disk is replaced on the next Workspace run, and neither
+    copy is ever in the planted-config digest (#1043's exact-path exemption)."""
+    (project / ".agents").mkdir()
+    (project / ".agents" / "hooks.json").write_text('{"Stop": []}')
+    path = agent.agent_path()
+    path.parent.mkdir(parents=True)
+    old = agent.AGENT_MD.split("# Working without a shell", 1)[0] + (
+        "# Working without a shell\n- " + _RC3_ADVICE + "\n"
+    )
+    path.write_text(old)
+    before = scan.scan_workspace_config(project)
+    assert before.unchecked_reason is None
+    assert _args()[-1] == AGENT_FLAG
+    assert path.read_text() == agent.AGENT_MD
+    after = scan.scan_workspace_config(project)
+    assert after.agy_digest == before.agy_digest
+    assert not any("untether-workspace" in key for key in after.agy)
+
+
 @pytest.mark.parametrize("mode", [None, "workspace", "ask", "plan", "bogus"])
 def test_workspace_runs_name_the_agent(mode: str | None) -> None:
     args = _args(EngineRunOptions(permission_mode=mode))

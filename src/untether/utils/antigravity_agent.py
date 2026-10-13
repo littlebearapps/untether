@@ -23,6 +23,9 @@ can supply agents at all, and if so the run goes without ``--agent``.
 agy keeps a conversation on the agent it started with and ignores
 ``--agent`` on a resume, so a chat switched to Full access keeps the
 no-shell toolset until ``/new``. The agent's own text and ``/config`` say so.
+The text also covers cron and webhook runs, which never take Full access
+from the chat (#1055): there is one file and no per-run system prompt, so
+it gives both routes rather than chat-only advice.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ You are a coding agent working in the user's project. This conversation runs in 
 # Working without a shell
 - To look around, use `list_dir`, `find_by_name`, `grep_search` and `view_file`.
 - To create, copy or change a file, use `write_to_file`, `replace_file_content` or `multi_replace_file_content`.
-- If a request needs something you cannot do here (running a command, deleting or renaming a file, fetching a URL), do the part you can, then say plainly what was left. Tell the user that this needs Full access: /config, then Permission mode, then Full access, and then /new, because a conversation that started in Workspace mode stays in it.
+- If a request needs something you cannot do here (running a command, deleting or renaming a file, fetching a URL), do the part you can, then say plainly what was left and that it needs Full access. In a chat: /config, then Permission mode, then Full access, and then /new, because a conversation that started in Workspace mode stays in it. Scheduled and webhook runs don't follow the chat's setting: a cron gets Full access only from `permission_mode = "full"` on the cron itself, and a webhook never does, so it has to be done from the chat.
 - Answer simple questions directly without exploring the project first.
 """
 
