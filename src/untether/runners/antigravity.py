@@ -1962,6 +1962,20 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             from ..utils import antigravity_plan
 
             prompt = antigravity_plan.escape_slash(prompt)
+        if isinstance(state, AntigravityStreamState):
+            from ..utils import antigravity_agent
+
+            note = antigravity_agent.scheduled_run_note(
+                state.unattended, state.effective_mode
+            )
+            if note is not None:
+                # #1055: the model can't otherwise tell a cron from a chat.
+                prompt = f"{note}\n\n{prompt}"
+                logger.info(
+                    "antigravity.prompt.scheduled_note",
+                    trigger=state.unattended,
+                    permission_mode=state.effective_mode,
+                )
         line = {"event": "user", "message": {"content": prompt}}
         return (json.dumps(line, ensure_ascii=False) + "\n").encode()
 

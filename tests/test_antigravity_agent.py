@@ -84,6 +84,54 @@ def test_agent_advice_covers_cron_and_webhook_runs() -> None:
     assert advice.count("\n- ") == 4 and len(advice) < 1000
 
 
+def _sent_prompt(options: EngineRunOptions | None) -> str:
+    import json
+
+    runner = AntigravityRunner()
+    with apply_run_options(options):
+        state = runner.new_state("run ls -la", None)
+        runner.build_args("run ls -la", None, state=state)
+        raw = runner.stdin_payload("run ls -la", None, state=state)
+    assert raw is not None
+    return json.loads(raw)["message"]["content"]
+
+
+def test_unattended_workspace_prompt_says_it_is_scheduled() -> None:
+    """#1055 (rc4 QA, 2/2 cron fires): with only the agent file's two routes
+    the model always gave the chat's, as nothing told it the run was a cron.
+    An unattended Workspace run's prompt now starts with a line naming the
+    trigger and its own route; chat, Full access and Plan first runs don't."""
+    with structlog.testing.capture_logs() as logs:
+        cron = _sent_prompt(EngineRunOptions(unattended_trigger="cron:nightly"))
+    assert cron.startswith("[Untether] This is a scheduled cron run, not a chat")
+    assert '`permission_mode = "full"` on its own entry in untether.toml' in cron
+    assert cron.endswith("\n\nrun ls -la")
+    (log,) = [e for e in logs if e["event"] == "antigravity.prompt.scheduled_note"]
+    assert log["trigger"] == "cron:nightly" and log["permission_mode"] == "workspace"
+
+    hook = _sent_prompt(EngineRunOptions(unattended_trigger="webhook:gh"))
+    assert hook.startswith("[Untether] This is a scheduled webhook run")
+    assert "never gets Full access" in hook and "permission_mode" not in hook
+
+    # A cron that inherits the chat's Full access is downgraded: still noted.
+    inherited = _sent_prompt(
+        EngineRunOptions(permission_mode="full", unattended_trigger="cron:x")
+    )
+    assert inherited.startswith("[Untether] This is a scheduled cron run")
+
+    for options in (
+        None,
+        EngineRunOptions(permission_mode="workspace"),
+        EngineRunOptions(
+            permission_mode="full",
+            trigger_permission_mode="full",
+            unattended_trigger="cron:x",
+        ),
+        EngineRunOptions(permission_mode="plan", unattended_trigger="cron:x"),
+    ):
+        assert _sent_prompt(options) == "run ls -la", options
+
+
 def test_upgrade_rewrites_the_old_agent_without_a_hold(project: Path) -> None:
     """An rc3 copy on disk is replaced on the next Workspace run, and neither
     copy is ever in the planted-config digest (#1043's exact-path exemption)."""
