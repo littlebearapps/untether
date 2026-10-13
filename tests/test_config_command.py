@@ -1094,6 +1094,7 @@ class TestAntigravityPermissionPage:
             "Full access",
             "Ask me · soon",
             "Plan first",
+            "🔐 Telegram approvals",  # #980: the read-only gate status page
             "Clear override",
             "← Back",
         ]
@@ -1102,6 +1103,7 @@ class TestAntigravityPermissionPage:
             "config:pm:agf",
             "config:pm:aga",
             "config:pm:agp",
+            "config:gt",
             "config:pm:agc",
             "config:home",
         ]
@@ -2776,7 +2778,37 @@ class TestAskQuestions:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code" in msg.text
+        assert "Available for Claude Code" in msg.text
+        assert "untether agy-gate install" in msg.text  # #980
+
+    @pytest.mark.anyio
+    async def test_ask_questions_page_for_antigravity_with_gate(
+        self, tmp_path, monkeypatch
+    ):
+        """#980: Ask mode is capability-driven — Antigravity gets the page
+        (and the home rows) once Untether's agy plugin is installed."""
+        from untether.antigravity import gate_plugin
+
+        def ctx_for(args: str) -> MagicMock:
+            return _make_ctx(
+                args_text=args,
+                text=f"config:{args}" if args else "/config",
+                config_path=tmp_path / "prefs.json",
+                engine_ids=("codex", "claude", "antigravity"),
+                default_engine="antigravity",
+            )
+
+        ctx = ctx_for("aq")
+        await ConfigCommand().handle(ctx)
+        assert "Available for Claude Code" in _last_edit_msg(ctx).text
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        ctx = ctx_for("aq")
+        await ConfigCommand().handle(ctx)
+        assert "config:aq:on" in _buttons_data(_last_edit_msg(ctx))
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        data = _buttons_data(_last_send_msg(home))
+        assert {"config:aq", "config:gt", "config:fu"} <= set(data)
 
     @pytest.mark.anyio
     async def test_ask_questions_no_config_path(self):
