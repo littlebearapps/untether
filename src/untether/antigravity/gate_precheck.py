@@ -347,6 +347,9 @@ async def _run_mcp_list(runner: AntigravityRunner) -> str | None:
 
     from ..utils.subprocess import manage_subprocess
 
+    if runner._check_prespawn_ram_guard(None) is not None:
+        # #838: no spawn under memory pressure; unknown counts as "has some".
+        return None
     env = runner.env(state=None)
     if env is not None:
         env = {k: v for k, v in env.items() if not k.startswith("UNTETHER_AGY_GATE")}
