@@ -188,6 +188,7 @@ async def test_client_methods_build_params_and_decode() -> None:
 
     doc_call = next(call for call in client.calls if call[0] == "sendDocument")
     assert doc_call[2]["caption"] == "doc"
+    assert doc_call[2]["disable_content_type_detection"] is True
     assert doc_call[3]["document"][0] == "file.txt"
 
     edit_call = next(call for call in client.calls if call[0] == "editMessageText")
@@ -788,6 +789,44 @@ def test_owned_client_uses_short_message_timeouts() -> None:
     assert timeout.read == 30.0
     assert timeout.connect == 10.0
     assert client._bulk_timeout_s == 120
+
+
+@pytest.mark.anyio
+async def test_1056_send_document_disables_content_type_detection() -> None:
+    """#1056: a .webp sent with ``sendDocument`` became a sticker because
+    the Bot API detected its type. The multipart request must carry
+    ``disable_content_type_detection=true`` so it arrives as a document."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"message_id": 5, "chat": {"id": 456, "type": "private"}},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = HttpBotClient("123:abcDEF_ghij", http_client=http)
+    try:
+        msg = await api.send_document(
+            chat_id=456,
+            filename="steer.webp",
+            content=b"RIFF\x00\x00\x00\x00WEBPVP8 ",
+            caption="steer.webp (1 kb)",
+        )
+    finally:
+        await http.aclose()
+
+    assert msg is not None and msg.message_id == 5
+    (request,) = seen
+    assert request.url.path.endswith("/sendDocument")
+    assert request.headers["content-type"].startswith("multipart/form-data")
+    body = request.content
+    assert b'name="disable_content_type_detection"\r\n\r\ntrue\r\n' in body
+    assert b'filename="steer.webp"' in body
 
 
 # --- #823: chat_id on every unattributable error line ---
