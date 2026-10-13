@@ -5726,6 +5726,11 @@ def _hook_summary_fields(stream: Any) -> dict[str, Any]:
     return fields
 
 
+def _session_token(token: ResumeToken | None) -> ResumeToken | None:
+    """*token* when it names a session — not ``/continue``'s (#1084)."""
+    return token if token is not None and not token.is_continue else None
+
+
 def sync_resume_token(
     tracker: ProgressTracker, resume: ResumeToken | None
 ) -> ResumeToken | None:
@@ -8935,7 +8940,14 @@ async def handle_message(
 
         if outcome.cancelled:
             release_reason = "cancelled"
-            resume = sync_resume_token(progress_tracker, outcome.resume)
+            # #1084: a resumed run cancelled after it started but before any
+            # event never saw its StartedEvent; the card still names the
+            # session it was resuming. A /continue token names none (its
+            # empty value would render a bare "resume" line), so it is skipped.
+            resume = sync_resume_token(
+                progress_tracker,
+                _session_token(outcome.resume) or _session_token(resume_token),
+            )
             logger.info(
                 "handle.cancelled",
                 resume=resume.value if resume else None,

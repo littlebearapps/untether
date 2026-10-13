@@ -491,6 +491,85 @@ async def test_1082_invalid_argument_refusal_logs_no_events_at_info() -> None:
     assert summary["prespawn_blocked"] == "invalid_argument"
 
 
+@pytest.mark.parametrize(
+    ("resume_token", "expected_line"),
+    [
+        (ResumeToken(engine="codex", value="sess-1084"), "codex resume sess-1084"),
+        (ResumeToken(engine="codex", value="", is_continue=True), None),
+    ],
+)
+async def test_1084_cancel_after_start_before_events_keeps_resume_line(
+    resume_token: ResumeToken, expected_line: str | None
+) -> None:
+    """#1084: a resumed run cancelled after the engine started but before
+    its first event (``handle.cancelled resume=None``) dropped the resume
+    line from the cancelled card. It names the session it was started
+    with — except ``/continue``, whose token names no session."""
+    from untether.runners.mock import Wait
+
+    transport = ReplyTransport()
+    never = anyio.Event()
+    runner = ScriptRunner([Wait(never)], engine="codex", emit_session_start=False)
+    running_tasks: dict = {}
+
+    async def run() -> None:
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=CHAT, message_id=USER_MSG, text="go"),
+            resume_token=resume_token,
+            running_tasks=running_tasks,
+        )
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            with anyio.fail_after(2):
+                while not runner.calls:
+                    await anyio.sleep(0.01)
+            (task,) = running_tasks.values()
+            task.cancel_requested.set()
+
+    final = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in final
+    (cancelled,) = [e for e in logs if e["event"] == "handle.cancelled"]
+    assert "handle.cancelled_before_start" not in [e["event"] for e in logs]
+    if expected_line is None:
+        assert "resume" not in final
+        assert cancelled["resume"] is None
+    else:
+        assert expected_line in final
+        assert cancelled["resume"] == resume_token.value
+
+
+async def test_1084_continue_cancelled_before_start_has_no_empty_resume_line() -> None:
+    """The #1082 before-start path keeps the token it was given; a
+    ``/continue`` token names no session, so no (empty) resume line."""
+    transport = _PacedTransport()
+    replies = ReplyTransport()
+    runner = ScriptRunner([Return(answer="should not run")], engine="codex")
+    running_tasks: dict = {}
+
+    async with anyio.create_task_group() as tg:
+        await _start(
+            tg,
+            transport,
+            runner,
+            running_tasks,
+            progress_ref=PLACEHOLDER,
+            resume_token=ResumeToken(engine="codex", value="", is_continue=True),
+        )
+        await handle_cancel(make_cfg(replies), _cancel_msg(), running_tasks)
+        transport.release.set()
+
+    assert runner.calls == []
+    final = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in final
+    assert "codex resume" not in final
+
+
 def test_1082_running_task_defaults_have_no_edits() -> None:
     """A starting run carries no ``edits`` yet; consumers read it with
     ``getattr`` (drain PID scan, idle checks)."""
