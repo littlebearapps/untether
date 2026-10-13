@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
-from ...logging import get_logger
-from ...runner_bridge import delete_outline_messages, register_ephemeral_message
-from ...runners.claude import (
-    _ACTIVE_RUNNERS,
-    _DISCUSS_APPROVED,
-    _OUTLINE_PENDING,
+from ...interactive.registry import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     ControlLookup,
@@ -18,12 +13,22 @@ from ...runners.claude import (
     claim_control_request,
     classify_control_request,
     control_request_origin,
-    mark_outline_pending,
     mark_request_handled,
     new_control_claim_owner,
-    plan_approved_feedback,
+    on_session_dropped,
     release_control_claims,
     respond_to_control_request,
+    session_alive,
+)
+from ...logging import get_logger
+from ...runner_bridge import delete_outline_messages, register_ephemeral_message
+
+# Claude's plan flow (Pause & Outline, post-outline approval) stays Claude's.
+from ...runners.claude import (
+    _DISCUSS_APPROVED,
+    _OUTLINE_PENDING,
+    mark_outline_pending,
+    plan_approved_feedback,
 )
 from ...transport import MessageRef
 from .ask_question import _ALREADY_ANSWERED_TOAST
@@ -33,6 +38,18 @@ logger = get_logger(__name__)
 # Tracks the "📋 Asked Claude Code to outline the plan" message ref per session,
 # so the post-outline approve/deny can edit it instead of sending a 2nd message.
 _DISCUSS_FEEDBACK_REFS: dict[str, MessageRef] = {}
+
+
+def _drop_discuss_feedback_ref(session_id: str) -> str | None:
+    """Session cleanup: forget the session's discuss feedback ref (#960 —
+    run by the registry's ``drop_session``, so the runner needs no import
+    of Telegram code)."""
+    if _DISCUSS_FEEDBACK_REFS.pop(session_id, None) is not None:
+        return "discuss_feedback_ref"
+    return None
+
+
+on_session_dropped(_drop_discuss_feedback_ref)
 
 
 _DISCUSS_DENY_MESSAGE = (
@@ -384,7 +401,7 @@ class ClaudeControlCommand:
 
             # Check if session is still alive — it may have ended
             # (context exhaustion) before the user clicked the button
-            if session_id not in _ACTIVE_RUNNERS:
+            if not session_alive(session_id):
                 logger.warning(
                     "claude_control.discuss_plan_session_ended",
                     session_id=session_id,
@@ -532,7 +549,7 @@ class ClaudeControlCommand:
             if (done := _claim_synthetic(ctx, request_id, "chat")) is not None:
                 return done
 
-            if session_id not in _ACTIVE_RUNNERS:
+            if not session_alive(session_id):
                 logger.warning(
                     "claude_control.discuss_plan_session_ended",
                     session_id=session_id,

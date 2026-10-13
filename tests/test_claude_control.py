@@ -3929,45 +3929,48 @@ def test_388_registration_records_run_originator() -> None:
 
 
 def test_388_every_registration_binds_its_channel() -> None:
-    """Structural: each ``_REQUEST_TO_SESSION[...] = ...`` in claude.py is
-    followed in the same block by ``_bind_request_channel(`` (a site that
-    forgot it would silently reopen #388)."""
+    """Structural (#388, #960): no ``_REQUEST_TO_SESSION[...] = ...`` is left
+    in claude.py — every site registers through ``interactive.registry.
+    register()``, which binds the chat and originator in the same call (a
+    site that skipped the binding would silently reopen #388) — and that
+    ``register()`` is the only writer and calls ``bind_request_channel``."""
     import ast
+    import inspect
     from pathlib import Path
 
     import untether.runners.claude as claude_mod
+    from untether.interactive import registry
+
+    def direct_assignments(tree: ast.AST) -> list[int]:
+        return [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Subscript)
+                and isinstance(t.value, ast.Name)
+                and t.value.id == "_REQUEST_TO_SESSION"
+                for t in node.targets
+            )
+        ]
 
     tree = ast.parse(Path(claude_mod.__file__).read_text(encoding="utf-8"))
-    sites = 0
-    missing: list[int] = []
-    blocks = [
-        block
+    assert direct_assignments(tree) == []
+    sites = [
+        node.lineno
         for node in ast.walk(tree)
-        for field in ("body", "orelse", "finalbody")
-        if isinstance(block := getattr(node, field, None), list)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "register"
     ]
-    for body in blocks:
-        for idx, stmt in enumerate(body):
-            if not (
-                isinstance(stmt, ast.Assign)
-                and len(stmt.targets) == 1
-                and isinstance(stmt.targets[0], ast.Subscript)
-                and isinstance(stmt.targets[0].value, ast.Name)
-                and stmt.targets[0].value.id == "_REQUEST_TO_SESSION"
-            ):
-                continue
-            sites += 1
-            follow = body[idx + 1 : idx + 3]
-            if not any(
-                isinstance(s, ast.Expr)
-                and isinstance(s.value, ast.Call)
-                and isinstance(s.value.func, ast.Name)
-                and s.value.func.id == "_bind_request_channel"
-                for s in follow
-            ):
-                missing.append(stmt.lineno)
-    assert sites >= 3, sites
-    assert not missing, f"registrations without _bind_request_channel: {missing}"
+    assert len(sites) >= 4, sites  # outline hold, da:, can_use_tool, other
+
+    reg_tree = ast.parse(Path(registry.__file__).read_text(encoding="utf-8"))
+    writers = direct_assignments(reg_tree)
+    register_src = inspect.getsource(registry.register)
+    assert len(writers) == 1, writers
+    assert "_REQUEST_TO_SESSION[request_id] = session_key" in register_src
+    assert "bind_request_channel(request_id)" in register_src
 
 
 # ===========================================================================

@@ -5530,7 +5530,7 @@ async def test_388_typed_ask_answer_originator_only(
         calls.append((request_id, text))
         return True
 
-    monkeypatch.setattr(claude_mod, "answer_ask_question", _answer)
+    monkeypatch.setattr("untether.interactive.questions.answer_ask_question", _answer)
     claude_mod._PENDING_ASK_REQUESTS["req-388a"] = (123, "Which one?")
     claude_mod._REQUEST_TO_SESSION["req-388a"] = "sess-388a"
     claude_mod._REQUEST_TO_ORIGINATOR["req-388a"] = 2

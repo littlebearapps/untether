@@ -10,8 +10,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
-import html
-import itertools
 import json
 import os
 import pty
@@ -22,13 +20,11 @@ import subprocess as subprocess_module
 import time
 import tty
 import weakref
-from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, Protocol
 
 import anyio
 import msgspec
@@ -37,8 +33,73 @@ from ..backends import EngineBackend, EngineConfig
 from ..background_status import CONTINUED_SUFFIX, format_tokens
 from ..config import ConfigError
 from ..events import EventFactory
+from ..interactive.preview import format_diff_preview
+
+# #960: AskUserQuestion state lives in ``interactive.questions``.
+from ..interactive.questions import (
+    _ANSWERED_ASK_FLOWS,  # noqa: F401 — re-exported
+    _ANSWERED_ASK_FLOWS_MAX,  # noqa: F401 — re-exported
+    _ASK_QUESTION_FLOWS,
+    _PENDING_ASK_REQUESTS,
+    ANSWERED_ASK_FLOW_TTL_S,  # noqa: F401 — re-exported
+    AskQuestionState,
+    _record_answered_ask_flow,
+    answer_ask_question,  # noqa: F401 — re-exported
+    answer_ask_question_with_options,  # noqa: F401 — re-exported
+    format_question_message,  # noqa: F401 — re-exported
+    get_ask_question_flow,  # noqa: F401 — re-exported
+    get_ask_question_flow_by_id,  # noqa: F401 — re-exported
+    get_pending_ask_request,  # noqa: F401 — re-exported
+    get_question_option_buttons,  # noqa: F401 — re-exported
+    option_label,
+    pending_control_requests_for_session,
+    recently_answered_ask_flow,  # noqa: F401 — re-exported
+    recently_resolved_ask_flow,  # noqa: F401 — re-exported
+)
+
+# #960: the control-request registry lives in ``interactive.registry``;
+# these are the same objects, re-exported for existing importers.
+from ..interactive.registry import (
+    _CANCELLED_DURING_WRITE,  # noqa: F401 — re-exported
+    _DIRECT_CLAIM_SEQ,  # noqa: F401 — re-exported
+    _HANDLED_REQUESTS,
+    _HANDLED_REQUESTS_MAX,  # noqa: F401 — re-exported
+    _INFLIGHT_CONTROL_RESPONSES,
+    _REQUEST_TO_CHANNEL,  # noqa: F401 — re-exported
+    _REQUEST_TO_CHANNEL_MAX,  # noqa: F401 — re-exported
+    _REQUEST_TO_INPUT,
+    _REQUEST_TO_ORIGINATOR,  # noqa: F401 — re-exported
+    _REQUEST_TO_SESSION,
+    _REQUEST_TO_TOOL_NAME,
+    _TERMINAL_CONTROL_OUTCOMES,  # noqa: F401 — re-exported
+    CONTROL_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_CALLBACK_PREFIX,
+    ControlLookup,  # noqa: F401 — re-exported
+    ControlRequestSnapshot,
+    ControlRequestStatus,  # noqa: F401 — re-exported
+    ControlSendResult,  # noqa: F401 — re-exported
+    Decision,
+    HandledControl,  # noqa: F401 — re-exported
+    InflightClaim,  # noqa: F401 — re-exported
+    _bind_request_channel,  # noqa: F401 — re-exported
+    answer_control_request,
+    bind_request_channel,  # noqa: F401 — re-exported
+    claim_control_request,  # noqa: F401 — re-exported
+    classify_control_request,  # noqa: F401 — re-exported
+    control_request_origin,  # noqa: F401 — re-exported
+    control_request_originator,  # noqa: F401 — re-exported
+    drop_session,
+    mark_request_handled,
+    new_control_claim_owner,  # noqa: F401 — re-exported
+    register,
+    release_control_claims,  # noqa: F401 — re-exported
+    respond_to_control_request,  # noqa: F401 — re-exported
+    set_default_responder,
+    withdraw,
+)
+from ..interactive.unattended import unattended_deny_message
 from ..logging import get_logger
-from ..markdown import _short_model_name, backtick_fence, inline_code
+from ..markdown import _short_model_name, inline_code
 from ..model import (
     TURN_COMPLETE_MARKER,
     Action,
@@ -67,7 +128,7 @@ from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
 from ..utils.env_audit import audit_proc_env
 from ..utils.json_state import atomic_write_json
-from ..utils.paths import get_run_base_dir, get_run_channel_id, get_run_sender_id
+from ..utils.paths import get_run_base_dir
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -96,6 +157,9 @@ from .run_options import (
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
+
+# Pre-#960 name of ``interactive.preview.format_diff_preview``.
+_format_diff_preview = format_diff_preview
 
 ENGINE: EngineId = "claude"
 DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Edit", "Write"]
@@ -316,109 +380,6 @@ _SESSION_STDIN: dict[str, Any] = {}
 # _cleanup_session_registries (run_impl finally).
 _SESSION_BG_STATE: dict[str, ClaudeStreamState] = {}
 
-# Phase 2: Global registry mapping request_id -> session_id
-# This allows callbacks to find the right runner instance
-_REQUEST_TO_SESSION: dict[str, str] = {}
-
-# Phase 2: Global registry mapping request_id -> original tool input
-# Claude Code CLI requires updatedInput in can_use_tool responses
-_REQUEST_TO_INPUT: dict[str, dict[str, Any]] = {}
-
-# Phase 2: Global registry mapping request_id -> tool_name
-# Used by claude_control.py to send tool-specific deny messages
-_REQUEST_TO_TOOL_NAME: dict[str, str] = {}
-
-# Recently handled request_ids (prevents duplicate callback warnings).
-# #197: previously a plain set cleared wholesale when len > 100, which opened
-# a small window where duplicate callbacks could slip through as "not found"
-# rather than being recognised as duplicates.  Now an LRU OrderedDict that
-# evicts oldest-first at _HANDLED_REQUESTS_MAX entries.
-_HANDLED_REQUESTS_MAX = 200
-
-
-class ControlRequestStatus(StrEnum):
-    """Where a control request stands when a button is tapped (#685).
-
-    The user-facing grouping is three-way: **sent** (a ``PENDING`` request we
-    answered) / **already handled** (``IN_FLIGHT``, ``ALREADY_HANDLED``,
-    ``CANCELLED``) / **not found**. The CLI gives no feedback on a duplicate
-    answer, so this status comes from Untether's own registries.
-    """
-
-    PENDING = "pending"  # in _REQUEST_TO_SESSION, not claimed
-    IN_FLIGHT = "in_flight"  # another tap is writing its answer right now
-    ALREADY_HANDLED = "already_handled"  # answered earlier (Telegram / auto)
-    CANCELLED = "cancelled"  # the CLI withdrew it (control_cancel_request)
-    NOT_FOUND = "not_found"  # unknown: restart, LRU-evicted, session gone, other chat
-
-
-@dataclass(frozen=True, slots=True)
-class HandledControl:
-    """How and where a control request was resolved (#685).
-
-    ``action``: approve | deny | discuss | chat | auto | cancelled | timeout |
-    superseded (``None`` when unknown). ``outcome``: answered | cancelled |
-    expired. ``channel_id``: the chat that resolved it (scopes the memo, #715).
-    """
-
-    action: str | None
-    outcome: str
-    channel_id: int | None
-    at: float
-
-
-# Outcomes that record a request Untether can no longer answer; a later tap
-# never overwrites them with "answered" (#685).
-_TERMINAL_CONTROL_OUTCOMES = frozenset({"cancelled", "expired"})
-
-# Values are ``HandledControl`` records; ``None`` is tolerated (legacy/tests)
-# and reads as "answered, details unknown".
-_HANDLED_REQUESTS: OrderedDict[str, HandledControl | None] = OrderedDict()
-
-# #388: request_id -> the chat its buttons were posted in (the run's chat,
-# ``get_run_channel_id()`` at registration). A tap from any other chat on a
-# pending / in-flight request reads ``NOT_FOUND`` (``channel_mismatch``) and
-# writes nothing. Only consulted while the id is still pending or claimed, so
-# an entry left behind by any of the deletion paths is inert. Bounded by
-# liveness pruning, never by evicting a live id (no fail-open under load).
-_REQUEST_TO_CHANNEL: dict[str, int] = {}
-_REQUEST_TO_CHANNEL_MAX = 512
-# #388 phase 2: request_id -> the Telegram user whose message started the run
-# (``get_run_sender_id()`` at registration). Read only when
-# ``[transports.telegram] approval_originator_only`` is on; no entry (cron,
-# webhook, /at, loop fires) means any allowed user may answer. Same liveness
-# rules and pruning as ``_REQUEST_TO_CHANNEL``.
-_REQUEST_TO_ORIGINATOR: dict[str, int] = {}
-
-
-@dataclass(slots=True)
-class InflightClaim:
-    """A tap that is answering a request right now (#685)."""
-
-    action: str
-    owner: str
-    channel_id: int | None
-    at: float
-
-
-# #685 §2.4: request_id -> the claim of the tap currently answering it.
-# Callbacks are dispatched concurrently, and the gap between "is it pending?"
-# and the registry cleanup spans an ``await`` (the stdin lock), so without a
-# synchronous claim two taps could both write — and the loser's ``del`` raised
-# KeyError. The dispatcher reserves the claim before its early answer, so the
-# toast reflects it too. Every writer respects it: the 5-min sweep skips a
-# claimed id, and ``_cleanup_session_registries`` drops the session's claims.
-_INFLIGHT_CONTROL_RESPONSES: dict[str, InflightClaim] = {}
-_DIRECT_CLAIM_SEQ = itertools.count(1)
-
-# #684: request ids the CLI withdrew (``control_cancel_request``) while a tap
-# was writing its answer. The cancel handler leaves the ``_REQUEST_TO_*``
-# entries to that writer (it still reads them) and parks the id here;
-# ``respond_to_control_request`` consumes it in its ``finally`` and records
-# ``outcome="cancelled"``. Bounded: the writer always discards its id, and
-# session cleanup drops any leftover.
-_CANCELLED_DURING_WRITE: set[str] = set()
-
 # NOTE (#570): the time-based progressive discuss cooldown (_DISCUSS_COOLDOWN,
 # 30/60/90/120s escalation) that lived here was a workaround for Claude Code
 # v2.1.72-2.1.74 re-issuing ExitPlanMode immediately after a denial (#126
@@ -456,12 +417,6 @@ _OUTLINE_PENDING: set[str] = set()
 
 # Minimum characters for an outline to be considered "substantial".
 _OUTLINE_MIN_CHARS = 200
-
-# A1: Pending AskUserQuestion requests: request_id -> (channel_id, question text)
-# When Claude Code asks a question, the user can reply via Telegram text.
-# Scoped by channel_id to prevent cross-chat message stealing (#144).
-_PENDING_ASK_REQUESTS: dict[str, tuple[int, str]] = {}
-
 
 # #776: stdin writes now come from several tasks (the reader's drains, the
 # control-response path, follow-up injection, the live-session lifecycle's
@@ -1538,41 +1493,6 @@ async def wait_for_session_handoff(
     return outcome
 
 
-def pending_control_requests_for_session(session_id: str | None) -> int:
-    """Return how many control requests for ``session_id`` are still awaiting
-    a response (approval buttons or AskUserQuestion).
-
-    This is the **authoritative** "is this session blocked on the user?"
-    signal: :data:`_REQUEST_TO_SESSION` is populated the moment a
-    ``control_request`` is intercepted and popped again in
-    :func:`write_control_response` (and in the Telegram callback handlers)
-    as soon as the request is answered — so an entry means the request is
-    genuinely outstanding right now, not merely that one happened earlier.
-
-    #495/#499/#500: the stall detector previously inferred this from
-    presentation state (``_has_pending_approval`` — the most recent action's
-    ``inline_keyboard`` detail) or from the JSONL ring buffer
-    (``_approval_pending`` — then the newest ring entry). Both are
-    "most recent thing" heuristics and both go stale during a long approval
-    wait: an ExitPlanMode permission request carries no ``inline_keyboard``
-    detail, and after hours of waiting the newest ring entry is a stale
-    ``user``/``result`` frame. The registry does not go stale. #697: the
-    watchdog now consults this registry first, keeping a non-positional
-    backward scan of the ring buffer only as a True-only fallback.
-
-    The post-result idle watchdog and the pre-result silence cap already
-    consult these same registries to decide whether to defer; this helper
-    centralises that query so the three consumers cannot drift apart.
-    """
-    if not session_id:
-        return 0
-    pending = sum(1 for v in _REQUEST_TO_SESSION.values() if v == session_id)
-    pending += sum(
-        1 for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == session_id
-    )
-    return pending
-
-
 _CONTROL_REASON_MAX_CHARS = 200
 
 
@@ -1614,64 +1534,6 @@ def _tool_input_details(tool_input: Any) -> str:
                 key_params.append(f"{key}={value}")
     return f"({', '.join(key_params)})" if key_params else ""
 
-
-@dataclass(frozen=True, slots=True)
-class ControlRequestSnapshot:
-    """One control request still registered for a user answer (#684).
-
-    Read by the bridge's ``control_request.unanswerable`` detector.
-    ``kind``: ``tool`` | ``ask`` | ``outline_hold`` | ``synthetic`` (``da:``).
-    ``answerable_by_text``: a text reply in the chat routes to it (a pending
-    AskUserQuestion). ``writer_ok``: a live stdin writer exists for the
-    session. ``input_details``: the tool's key parameters, for a title.
-    """
-
-    request_id: str
-    session_id: str
-    age_s: float
-    tool_name: str
-    kind: str
-    answerable_by_text: bool
-    writer_ok: bool
-    # #929: the key parameters Approve would allow (``_tool_input_details``),
-    # so a rescued request with no tracked action still says what it is.
-    input_details: str = ""
-
-
-@dataclass(slots=True)
-class AskQuestionState:
-    """Tracks multi-question AskUserQuestion flow state."""
-
-    request_id: str
-    channel_id: int
-    questions: list[dict[str, Any]]
-    current_index: int = 0
-    answers: dict[str, str] = field(default_factory=dict)
-    awaiting_text: bool = False  # True when "Other" was clicked
-
-
-# Active AskUserQuestion flows: request_id -> AskQuestionState
-_ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
-
-# #698: flows that were answered and torn down: request_id -> (channel_id, ts).
-# #550 strips the inline keyboard so late taps can't fire
-# ``ask_question.flow_missing``, but that strip is an async outbox edit issued
-# *after* the flow is popped — and a tap already in flight cannot be recalled,
-# so the losing side of that race is unavoidable (1s on nsd; wider in a busy
-# group chat where the edit queues behind other traffic). Remembering the
-# answered flow briefly lets a late tap resolve to "already answered" instead
-# of looking like an unexplained missing flow.
-# #684: values are (channel_id, ts, outcome) — ``outcome`` is ``answered``
-# or ``cancelled`` (the CLI withdrew the question), so a late tap can say
-# "No longer needed" rather than "Already answered".
-_ANSWERED_ASK_FLOWS: dict[str, tuple[int, float, str]] = {}
-ANSWERED_ASK_FLOW_TTL_S: float = 300.0
-_ANSWERED_ASK_FLOWS_MAX = 32
-# Untether policy, event-driven: swept only when another interactive
-# control_request arrives (#684) — a lone request never expires. The CLI has
-# no deadline on a permission prompt (findings 2026-09-30 Q1 §5); a request
-# that can't be answered is reported by ``control_request.unanswerable``.
-CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 
 # #374 (rc7): bounded keep for background-agent handles (Agent/Task
 # tool_use that runs in the background — #646: that is the *default*
@@ -3795,34 +3657,6 @@ def _unattended_autonomous_deny_reason(
     return None
 
 
-def _unattended_deny_message(trigger: str, tool: str, reason: str) -> str:
-    kind = "webhook" if trigger.startswith("webhook:") else "scheduled"
-    head = f"Untether: this is an unattended {kind} run ({trigger}) — "
-    if tool == "ExitPlanMode":
-        return (
-            head + "nobody can approve a plan. Do not call ExitPlanMode again. "
-            "Finish by giving the complete plan as your final answer."
-        )
-    if tool == "AskUserQuestion":
-        return (
-            head + "nobody can answer questions. Proceed with reasonable "
-            "defaults and state your assumptions."
-        )
-    if reason == "diff_preview":
-        what = f"nobody can review this change, so {tool} was denied"
-    elif reason == "plan_mode":
-        what = (
-            f"it runs in plan mode and nobody can approve a plan, so {tool} was denied"
-        )
-    else:
-        what = f"nobody is available to approve {tool}, so it was denied"
-    return (
-        head + what + ". Continue only with actions that don't need approval; "
-        "if the task can't be finished without it, stop and report what you "
-        "would have done and why it needs approval."
-    )
-
-
 def _unattended_deny(
     state: ClaudeStreamState,
     factory: EventFactory,
@@ -3842,7 +3676,7 @@ def _unattended_deny(
         tool = getattr(request, "tool_name", "") or "unknown"
     else:
         tool = type(request).__name__.replace("Control", "").replace("Request", "")
-    message = _unattended_deny_message(trigger, tool, reason)
+    message = unattended_deny_message(trigger, tool, reason)
     if tool == "ExitPlanMode":
         _drop_exitplanmode_plan(
             state,
@@ -6963,81 +6797,6 @@ def _tool_result_event(
     )
 
 
-def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
-    """Format a compact diff preview for Edit/Write tool approval messages."""
-    max_preview_lines = 8
-    max_line_len = 60
-
-    def _truncate(text: str, max_len: int) -> str:
-        if len(text) > max_len:
-            return text[: max_len - 1] + "…"
-        return text
-
-    def _fenced(lines: list[str], info: str = "diff") -> str:
-        # The approval text is rendered as Markdown: bare ``+ x`` lines
-        # became ``- x`` list items (an added line shown as removed) and the
-        # lines ran together. A fenced block keeps them verbatim; the fence
-        # outruns any backtick run in the content so it can't close early.
-        body = "\n".join(lines)
-        fence = backtick_fence(body, minimum=3)
-        return f"{fence}{info}\n{body}\n{fence}"
-
-    if tool_name == "Edit":
-        file_path = tool_input.get("file_path", "")
-        old_string = tool_input.get("old_string", "")
-        new_string = tool_input.get("new_string", "")
-        if not old_string and not new_string:
-            return ""
-        lines: list[str] = []
-        if file_path:
-            from ..utils.paths import relativize_path
-
-            lines.append(f"📝 {relativize_path(file_path)}")
-        old_lines = old_string.splitlines()
-        new_lines = new_string.splitlines()
-        # Show removed/added lines
-        half = max_preview_lines // 2
-        lines.extend(f"- {_truncate(line, max_line_len)}" for line in old_lines[:half])
-        if len(old_lines) > half:
-            lines.append(f"  …({len(old_lines) - half} more removed)")
-        lines.extend(f"+ {_truncate(line, max_line_len)}" for line in new_lines[:half])
-        if len(new_lines) > half:
-            lines.append(f"  …({len(new_lines) - half} more added)")
-        return _fenced(lines)
-
-    if tool_name == "Write":
-        file_path = tool_input.get("file_path", "")
-        content = tool_input.get("content", "")
-        if not content:
-            return ""
-        lines = []
-        if file_path:
-            from ..utils.paths import relativize_path
-
-            lines.append(f"📝 {relativize_path(file_path)}")
-        content_lines = content.splitlines()
-        line_count = len(content_lines)
-        for line in content_lines[:max_preview_lines]:
-            lines.append(f"+ {_truncate(line, max_line_len)}")
-        if line_count > max_preview_lines:
-            lines.append(f"  …({line_count - max_preview_lines} more lines)")
-        return _fenced(lines)
-
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if not command:
-            return ""
-        shown = _truncate(command.strip("\n"), 200)
-        # #871: the command the user approves must survive Markdown: a
-        # single line becomes a backtick-safe code span; a multi-line
-        # command (heredoc, script) keeps its lines in a fenced block.
-        if len(shown.splitlines()) > 1:
-            return f"$\n{_fenced(shown.splitlines(), info='sh')}"
-        return f"$ {inline_code(shown)}"
-
-    return ""
-
-
 # #438: classify Stream idle timeout failures so the user sees actionable
 # context instead of just "API Error: Stream idle timeout - partial response
 # received". Two distinct upstream Anthropic API failure modes:
@@ -7562,22 +7321,12 @@ def _handle_control_cancel(
     if flow is not None:
         _record_answered_ask_flow(rid, flow.channel_id, outcome="cancelled")
 
-    if inflight:
-        # A tap is writing its answer right now: ``write_control_response``
-        # still reads ``_REQUEST_TO_*``, so leave them to the writer and let
-        # it record the ``cancelled`` outcome (#685 respond path).
-        _CANCELLED_DURING_WRITE.add(rid)
-    else:
-        if still_registered:
-            del _REQUEST_TO_SESSION[rid]
-        _REQUEST_TO_INPUT.pop(rid, None)
-        _REQUEST_TO_TOOL_NAME.pop(rid, None)
-        mark_request_handled(
-            rid,
-            action="cancelled",
-            outcome="cancelled",
-            channel_id=get_run_channel_id(),
-        )
+    # #960: registry-side retirement. With a tap writing its answer right
+    # now (``inflight``) the id is parked for that writer, which still reads
+    # ``_REQUEST_TO_*`` and records the ``cancelled`` outcome (#685 respond
+    # path); otherwise it is deregistered (only if it is ours) and recorded
+    # ``cancelled`` in the run's chat.
+    withdraw(rid, deregister=still_registered)
 
     completed = _complete_control_action(
         state,
@@ -9444,15 +9193,15 @@ def _translate_claude_event_base(
                                 event,
                                 time.time(),
                             )
-                            _REQUEST_TO_SESSION[request_id] = session_id
-                            _bind_request_channel(request_id)  # #388
+                            # #388 / #960: one call registers, binds the
+                            # chat + originator and stores input / tool name.
+                            register(
+                                request_id,
+                                session_key=session_id,
+                                tool_name=getattr(request, "tool_name", ""),
+                                tool_input=getattr(request, "input", {}),
+                            )
                             state.control_registered_at[request_id] = time.monotonic()
-                            _REQUEST_TO_INPUT[request_id] = getattr(
-                                request, "input", {}
-                            )
-                            _REQUEST_TO_TOOL_NAME[request_id] = getattr(
-                                request, "tool_name", ""
-                            )
                             # #684 D5: the real request now carries the
                             # buttons; an earlier outline-guard ``da:`` entry
                             # would otherwise pause the live session until
@@ -9494,8 +9243,7 @@ def _translate_claude_event_base(
                             button_request_id = request_id
                         else:
                             button_request_id = f"da:{session_id}"
-                            _REQUEST_TO_SESSION[button_request_id] = session_id
-                            _bind_request_channel(button_request_id)  # #388
+                            register(button_request_id, session_key=session_id)
                             state.control_registered_at[button_request_id] = (
                                 time.monotonic()
                             )
@@ -9582,7 +9330,7 @@ def _translate_claude_event_base(
                 # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)
                 run_opts = get_run_options()
                 if run_opts is None or run_opts.diff_preview is not False:
-                    diff_preview = _format_diff_preview(tool_name, tool_input)
+                    diff_preview = format_diff_preview(tool_name, tool_input)
             elif isinstance(request, claude_schema.ControlSetPermissionModeRequest):
                 mode = getattr(request, "mode", "unknown")
                 details = f"mode: {mode}"
@@ -9609,15 +9357,18 @@ def _translate_claude_event_base(
             # Phase 2: Register request_id -> session_id mapping for callback routing
             if factory.resume:
                 session_id = factory.resume.value
-                _REQUEST_TO_SESSION[request_id] = session_id
-                _bind_request_channel(request_id)  # #388
-                state.control_registered_at[request_id] = time.monotonic()  # #684
-                # Store original tool input and tool name for response handling
+                # #388 / #960: registered, chat + originator bound, and the
+                # original tool input and tool name stored for the response.
                 if isinstance(request, claude_schema.ControlCanUseToolRequest):
-                    _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
-                    _REQUEST_TO_TOOL_NAME[request_id] = getattr(
-                        request, "tool_name", ""
+                    register(
+                        request_id,
+                        session_key=session_id,
+                        tool_name=getattr(request, "tool_name", ""),
+                        tool_input=getattr(request, "input", {}),
                     )
+                else:
+                    register(request_id, session_key=session_id)
+                state.control_registered_at[request_id] = time.monotonic()  # #684
                 logger.debug(
                     "control_request.registered",
                     request_id=request_id,
@@ -9784,7 +9535,7 @@ def _translate_claude_event_base(
                             # Replace Approve/Deny with option buttons
                             button_rows.clear()
                             for i, opt in enumerate(options[:4]):
-                                label = opt.get("label", f"Option {i + 1}")
+                                label = option_label(opt, i)
                                 # Truncate label to fit 64-byte callback limit
                                 # Format: aq:opt:N — very compact
                                 button_rows.append(
@@ -13146,347 +12897,35 @@ BACKEND = EngineBackend(
 )
 
 
-class ControlLookup(NamedTuple):
-    """Result of classifying a control request id (#685)."""
+class ClaudeResponder:
+    """Claude's :class:`~untether.interactive.registry.Responder` (#960).
 
-    status: ControlRequestStatus
-    prior: HandledControl | None = None
-    reason: str | None = None  # NOT_FOUND detail: unknown | channel_mismatch
-
-
-@dataclass(frozen=True, slots=True)
-class ControlSendResult:
-    """Outcome of :func:`respond_to_control_request` (#685).
-
-    ``status`` is ``PENDING`` when the request was ours to answer (``sent``
-    says whether the response line was actually written). ``prior`` is set
-    for ``IN_FLIGHT`` / ``ALREADY_HANDLED`` / ``CANCELLED``. ``reason``:
-    unknown | channel_mismatch | no_active_session | write_failed.
+    Writes the decision as a ``control_response`` on the session's stdin
+    through the runner that owns it; the registry does the claim, the
+    handled record and the cancelled-during-write check around it. It is the
+    registry's default responder, so every request Claude registers (none
+    passes a responder) routes here.
     """
 
-    status: ControlRequestStatus
-    sent: bool
-    session_id: str | None = None
-    prior: HandledControl | None = None
-    reason: str | None = None
-    # #822: the tool the request was for (logged on claude_control.sent).
-    tool_name: str | None = None
+    engine = ENGINE
+    callback_prefix = DEFAULT_CALLBACK_PREFIX
 
+    def is_alive(self, session_key: str) -> bool:
+        return session_key in _ACTIVE_RUNNERS
 
-def mark_request_handled(
-    request_id: str,
-    *,
-    action: str | None = None,
-    outcome: str = "answered",
-    channel_id: int | None = None,
-) -> None:
-    """Record *request_id* as resolved so the reconcile loop can retire it.
-
-    The reconcile loop in ``translate`` emits ``action_completed`` for every
-    handled request it can resolve to an action id, which is what clears the
-    stale inline keyboard (#229) and, since #683, the synthetic
-    ``claude.discuss_approve.N`` action from the Pause & Outline hold-open path.
-
-    #685: the record says *how* (``action`` / ``outcome``) and *where*
-    (``channel_id``, defaulting to the run's chat) it was resolved, so a later
-    tap on the same button can say what actually happened. A ``cancelled`` or
-    ``expired`` record is terminal: a later "answered" never overwrites it.
-
-    #197: LRU-evict oldest entries instead of clear()-ing the whole set.
-    """
-    existing = _HANDLED_REQUESTS.get(request_id)
-    if (
-        existing is not None
-        and existing.outcome in _TERMINAL_CONTROL_OUTCOMES
-        and outcome == "answered"
-    ):
-        logger.debug(
-            "control_response.terminal_kept",
-            request_id=request_id,
-            kept_outcome=existing.outcome,
-            kept_action=existing.action,
-            ignored_action=action,
-        )
-        return
-    if channel_id is None:
-        channel_id = get_run_channel_id()
-    _HANDLED_REQUESTS[request_id] = HandledControl(
-        action=action, outcome=outcome, channel_id=channel_id, at=time.monotonic()
-    )
-    _HANDLED_REQUESTS.move_to_end(request_id)
-    while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
-        _HANDLED_REQUESTS.popitem(last=False)
-
-
-def _bind_request_channel(request_id: str) -> None:
-    """Bind a just-registered request to the run's chat (#388).
-
-    Called right after every ``_REQUEST_TO_SESSION[...] =`` registration
-    (pinned by a structural test). No run chat (tests, legacy) → unbound,
-    which keeps the pre-#388 behaviour for that id.
-    """
-    channel = get_run_channel_id()
-    _REQUEST_TO_CHANNEL.pop(request_id, None)
-    _REQUEST_TO_ORIGINATOR.pop(request_id, None)
-    sender = get_run_sender_id()
-    if sender is not None:
-        _REQUEST_TO_ORIGINATOR[request_id] = sender
-    if channel is None:
-        return
-    _REQUEST_TO_CHANNEL[request_id] = channel
-    if len(_REQUEST_TO_CHANNEL) > _REQUEST_TO_CHANNEL_MAX:
-        # Liveness pruning: drop entries no longer pending or claimed; a
-        # live binding is never evicted.
-        for rid in [
-            rid
-            for rid in _REQUEST_TO_CHANNEL
-            if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
-        ]:
-            del _REQUEST_TO_CHANNEL[rid]
-    if len(_REQUEST_TO_ORIGINATOR) > _REQUEST_TO_CHANNEL_MAX:
-        for rid in [
-            rid
-            for rid in _REQUEST_TO_ORIGINATOR
-            if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
-        ]:
-            del _REQUEST_TO_ORIGINATOR[rid]
-
-
-def control_request_origin(request_id: str) -> int | None:
-    """The chat a pending / claimed request is bound to (#388), or None."""
-    if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
-        return _REQUEST_TO_CHANNEL.get(request_id)
-    return None
-
-
-def control_request_originator(request_id: str) -> int | None:
-    """The Telegram user who started the run that raised a pending / claimed
-    request (#388), or None — no human originator (cron, webhook, /at, loop
-    fire) or not pending."""
-    if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
-        return _REQUEST_TO_ORIGINATOR.get(request_id)
-    return None
-
-
-def classify_control_request(
-    request_id: str, *, channel_id: int | None = None
-) -> ControlLookup:
-    """Classify *request_id* for a tap from *channel_id* (#685). Pure and sync.
-
-    Order: an in-flight claim → ``IN_FLIGHT``; registered → ``PENDING``; a
-    handled record → ``CANCELLED`` / ``ALREADY_HANDLED``; else ``NOT_FOUND``.
-    A handled record from another chat reads ``NOT_FOUND`` (reason
-    ``channel_mismatch``) — one chat can't read another's resolution (#715).
-
-    #388: checked first, a pending or in-flight request bound to another chat
-    also reads ``NOT_FOUND`` (``channel_mismatch``) — a forged callback from
-    a different chat can't answer it, and learns nothing (not even "being
-    handled"). ``channel_id=None`` (internal callers) skips the check.
-    """
-    if channel_id is not None:
-        origin = control_request_origin(request_id)
-        if origin is not None and origin != channel_id:
-            return ControlLookup(
-                ControlRequestStatus.NOT_FOUND, reason="channel_mismatch"
-            )
-    claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
-    if claim is not None:
-        return ControlLookup(
-            ControlRequestStatus.IN_FLIGHT,
-            HandledControl(
-                action=claim.action,
-                outcome="answered",
-                channel_id=claim.channel_id,
-                at=claim.at,
-            ),
-        )
-    if request_id in _REQUEST_TO_SESSION:
-        if channel_id is not None and request_id not in _REQUEST_TO_CHANNEL:
-            # #388: a registration site that forgot _bind_request_channel
-            # (or a run without a chat) would silently reopen the gap.
-            logger.debug(
-                "claude_control.origin_unbound",
-                request_id=request_id,
-                channel_id=channel_id,
-            )
-        return ControlLookup(ControlRequestStatus.PENDING)
-    if request_id in _HANDLED_REQUESTS:
-        record = _HANDLED_REQUESTS[request_id]
-        if (
-            record is not None
-            and record.channel_id is not None
-            and channel_id is not None
-            and record.channel_id != channel_id
-        ):
-            return ControlLookup(
-                ControlRequestStatus.NOT_FOUND, reason="channel_mismatch"
-            )
-        if record is not None and record.outcome == "cancelled":
-            return ControlLookup(ControlRequestStatus.CANCELLED, record)
-        return ControlLookup(ControlRequestStatus.ALREADY_HANDLED, record)
-    return ControlLookup(ControlRequestStatus.NOT_FOUND, reason="unknown")
-
-
-def claim_control_request(
-    request_id: str,
-    *,
-    action: str,
-    owner: str | None,
-    channel_id: int | None = None,
-) -> ControlLookup:
-    """Classify *request_id* and, if it is ``PENDING``, reserve it (#685).
-
-    Synchronous — nothing is awaited between the check and the reservation,
-    so two concurrent taps serialise on the event loop: the first gets
-    ``PENDING`` and holds the claim, the second sees ``IN_FLIGHT``. A caller
-    that already holds the claim (same ``owner``) gets ``PENDING`` again.
-    ``owner=None`` only classifies.
-    """
-    existing = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
-    if existing is not None and owner is not None and existing.owner == owner:
-        if request_id in _REQUEST_TO_SESSION:
-            return ControlLookup(ControlRequestStatus.PENDING)
-        # The request vanished under our claim (session cleanup) — drop it
-        # and report what the registries say now.
-        del _INFLIGHT_CONTROL_RESPONSES[request_id]
-    lookup = classify_control_request(request_id, channel_id=channel_id)
-    if lookup.status is ControlRequestStatus.PENDING and owner is not None:
-        _INFLIGHT_CONTROL_RESPONSES[request_id] = InflightClaim(
-            action=action, owner=owner, channel_id=channel_id, at=time.monotonic()
-        )
-    return lookup
-
-
-def release_control_claims(owner: str | None) -> None:
-    """Drop every in-flight claim *owner* still holds (idempotent, #685)."""
-    if owner is None:
-        return
-    for rid in [
-        rid for rid, c in _INFLIGHT_CONTROL_RESPONSES.items() if c.owner == owner
-    ]:
-        del _INFLIGHT_CONTROL_RESPONSES[rid]
-
-
-def new_control_claim_owner() -> str:
-    """A unique claim owner for a caller without a callback query id (#685)."""
-    return f"direct:{next(_DIRECT_CLAIM_SEQ)}"
-
-
-async def respond_to_control_request(
-    request_id: str,
-    approved: bool,
-    *,
-    action: str,
-    channel_id: int | None = None,
-    deny_message: str | None = None,
-    rejects_plan: bool = True,
-    claim_owner: str | None = None,
-) -> ControlSendResult:
-    """Answer a control request, reporting what actually happened (#685).
-
-    Writes **nothing** unless the request is ``PENDING`` and this caller holds
-    (or can take) its in-flight claim. ``claim_owner`` is the callback query id
-    whose early toast already reserved the claim; without it a unique owner
-    is used. The claim is released in ``finally``.
-
-    Args:
-        request_id: The control request ID
-        approved: Whether to approve (True) or deny (False) the request
-        action: What the tap did (approve / deny / discuss / chat / auto …),
-            recorded so a later tap can say it
-        channel_id: The chat the tap came from (scopes the handled record)
-        deny_message: Custom denial message (used when approved=False)
-        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
-            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
-        claim_owner: The dispatcher's callback query id, if it reserved the
-            claim before the early answer
-    """
-    owner = claim_owner if claim_owner is not None else new_control_claim_owner()
-    lookup = claim_control_request(
-        request_id, action=action, owner=owner, channel_id=channel_id
-    )
-    if lookup.status is not ControlRequestStatus.PENDING:
-        if lookup.status is ControlRequestStatus.NOT_FOUND:
-            logger.warning(
-                "control_response.request_not_found",
-                request_id=request_id,
-                reason=lookup.reason,
-            )
-        else:
-            # Duplicate callback (a double tap, or Telegram long-polling
-            # delivering the same update twice) — nothing is written.
-            logger.debug(
-                "control_response.already_handled",
-                request_id=request_id,
-                status=str(lookup.status),
-            )
-        return ControlSendResult(
-            status=lookup.status,
-            sent=False,
-            prior=lookup.prior,
-            reason=lookup.reason,
-        )
-    # #822: read before write_control_response pops it.
-    tool_name = _REQUEST_TO_TOOL_NAME.get(request_id)
-    try:
-        session_id = _REQUEST_TO_SESSION[request_id]
-        if session_id not in _ACTIVE_RUNNERS:
-            logger.warning(
-                "control_response.no_active_session",
-                session_id=session_id,
-                request_id=request_id,
-            )
-            # Clean up stale mappings
-            _REQUEST_TO_SESSION.pop(request_id, None)
-            _REQUEST_TO_INPUT.pop(request_id, None)
-            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-            return ControlSendResult(
-                status=ControlRequestStatus.PENDING,
-                sent=False,
-                session_id=session_id,
-                reason="no_active_session",
-                tool_name=tool_name,
-            )
-
-        runner, _ = _ACTIVE_RUNNERS[session_id]
-        success = await runner.write_control_response(
-            request_id, approved, deny_message=deny_message, rejects_plan=rejects_plan
+    async def respond(
+        self, request_id: str, session_key: str, decision: Decision
+    ) -> bool:
+        runner, _ = _ACTIVE_RUNNERS[session_key]
+        return await runner.write_control_response(
+            request_id,
+            decision.approved,
+            deny_message=decision.deny_message,
+            rejects_plan=decision.rejects_plan,
         )
 
-        # Clean up the mapping after use. ``pop``, not ``del``: the claim
-        # makes a concurrent delete impossible, but it is cheap insurance.
-        _REQUEST_TO_SESSION.pop(request_id, None)
-        if request_id in _CANCELLED_DURING_WRITE:
-            # #684: the CLI withdrew the request while we were writing; it
-            # ignores our answer, so say so rather than "approved".
-            mark_request_handled(
-                request_id,
-                action="cancelled",
-                outcome="cancelled",
-                channel_id=channel_id,
-            )
-            return ControlSendResult(
-                status=ControlRequestStatus.CANCELLED,
-                sent=success,
-                session_id=session_id,
-                prior=_HANDLED_REQUESTS.get(request_id),
-                tool_name=tool_name,
-            )
-        # A written *or* attempted write marks it handled (a closed pipe
-        # means the session is gone either way).
-        mark_request_handled(request_id, action=action, channel_id=channel_id)
-        return ControlSendResult(
-            status=ControlRequestStatus.PENDING,
-            sent=success,
-            session_id=session_id,
-            reason=None if success else "write_failed",
-            tool_name=tool_name,
-        )
-    finally:
-        _CANCELLED_DURING_WRITE.discard(request_id)
-        claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
-        if claim is not None and claim.owner == owner:
-            del _INFLIGHT_CONTROL_RESPONSES[request_id]
+
+set_default_responder(ClaudeResponder())
 
 
 # Phase 2: Public API for sending control responses
@@ -13500,10 +12939,11 @@ async def send_claude_control_response(
 ) -> bool:
     """Send a control response to an active Claude Code session.
 
-    Thin bool wrapper over :func:`respond_to_control_request`, kept for the
-    AskUserQuestion callers (#685). A caller that needs to tell *sent* from
-    *already handled* from *not found* must call that function instead.
-    ``action`` is recorded on the handled record (default: approve / deny).
+    Thin bool wrapper over the registry's ``answer_control_request`` (#960),
+    kept for existing callers (#685). A caller that needs to tell *sent* from
+    *already handled* from *not found* must call
+    :func:`respond_to_control_request` instead. ``action`` is recorded on the
+    handled record (default: approve / deny).
 
     Returns:
         True if the response was written, or the request was already answered
@@ -13512,18 +12952,14 @@ async def send_claude_control_response(
         (cancelled: a text reply to a withdrawn question must fall through to
         a normal prompt, not be swallowed).
     """
-    result = await respond_to_control_request(
+    return await answer_control_request(
         request_id,
-        approved,
-        action=action or ("approve" if approved else "deny"),
-        deny_message=deny_message,
-        rejects_plan=rejects_plan,
-    )
-    if result.status is ControlRequestStatus.CANCELLED:
-        return False  # #684: even when written — the CLI ignored it
-    return result.sent or result.status in (
-        ControlRequestStatus.IN_FLIGHT,
-        ControlRequestStatus.ALREADY_HANDLED,
+        Decision(
+            approved=approved,
+            action=action or ("approve" if approved else "deny"),
+            deny_message=deny_message,
+            rejects_plan=rejects_plan,
+        ),
     )
 
 
@@ -13583,195 +13019,16 @@ def _cleanup_session_registries(
     if session_id in _OUTLINE_PENDING:
         cleaned.append("outline_pending")
     _OUTLINE_PENDING.discard(session_id)
-    # Clean up discuss feedback ref (post-outline edit-instead-of-send tracking)
-    from ..telegram.commands.claude_control import _DISCUSS_FEEDBACK_REFS
-
-    if _DISCUSS_FEEDBACK_REFS.pop(session_id, None) is not None:
-        cleaned.append("discuss_feedback_ref")
-    stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
-    if stale:
-        cleaned.append(f"requests({len(stale)})")
-    for k in stale:
-        del _REQUEST_TO_SESSION[k]
-        _REQUEST_TO_CHANNEL.pop(k, None)  # #388
-        _REQUEST_TO_ORIGINATOR.pop(k, None)
-        # #685: a claim on a request whose session is gone can never
-        # complete — drop it so the id doesn't read "in flight" for ever.
-        _INFLIGHT_CONTROL_RESPONSES.pop(k, None)
-        _CANCELLED_DURING_WRITE.discard(k)  # #684
-        # Also clean up any pending ask requests and flows for stale requests
-        _PENDING_ASK_REQUESTS.pop(k, None)
-        _ASK_QUESTION_FLOWS.pop(k, None)
+    # #960: the session's pending requests, chat bindings, claims and
+    # question state — and, via the callback ``telegram.commands.
+    # claude_control`` registers, its discuss feedback ref — are the
+    # engine-neutral registry's to drop.
+    cleaned.extend(drop_session(session_id))
     logger.info(
         "claude_runner.session_cleanup",
         session_id=session_id,
         cleaned=cleaned,
     )
-
-
-def get_pending_ask_request(
-    channel_id: int | None = None,
-) -> tuple[str, str] | None:
-    """Return the oldest pending AskUserQuestion for *channel_id*, or None.
-
-    When *channel_id* is provided, only requests from that channel are
-    returned — preventing cross-chat message stealing (#144).
-    """
-    for request_id, (ch, question) in _PENDING_ASK_REQUESTS.items():
-        if channel_id is not None and ch != channel_id:
-            continue
-        return request_id, question
-    return None
-
-
-async def answer_ask_question(request_id: str, answer: str) -> bool:
-    """Answer a pending AskUserQuestion by denying with the user's response.
-
-    The deny message contains the user's answer so Claude Code reads it and
-    continues with that information.
-    """
-    _PENDING_ASK_REQUESTS.pop(request_id, None)
-    deny_message = (
-        f"The user answered your question via Telegram:\n\n"
-        f'"{answer}"\n\n'
-        f"Use this answer and continue. Do not call AskUserQuestion again "
-        f"for this same question."
-    )
-    return await send_claude_control_response(
-        request_id, approved=False, deny_message=deny_message, action="answer"
-    )
-
-
-def _record_answered_ask_flow(
-    request_id: str, channel_id: int, *, outcome: str = "answered"
-) -> None:
-    """Remember that *request_id*'s AskUserQuestion flow was answered (#698)
-    — or withdrawn by the CLI (``outcome="cancelled"``, #684)."""
-    now = time.monotonic()
-    for rid, (_ch, ts, _outcome) in list(_ANSWERED_ASK_FLOWS.items()):
-        if now - ts > ANSWERED_ASK_FLOW_TTL_S:
-            del _ANSWERED_ASK_FLOWS[rid]
-    _ANSWERED_ASK_FLOWS[request_id] = (channel_id, now, outcome)
-    while len(_ANSWERED_ASK_FLOWS) > _ANSWERED_ASK_FLOWS_MAX:
-        _ANSWERED_ASK_FLOWS.pop(next(iter(_ANSWERED_ASK_FLOWS)))
-
-
-def recently_answered_ask_flow(channel_id: int | None = None) -> str | None:
-    """Return the request_id of a just-answered AskUserQuestion flow, or None.
-
-    #698: lets the callback handler tell a late tap on an already-answered
-    keyboard ("Already answered", INFO) apart from a genuinely unexplained
-    missing flow (WARNING). Scoped by channel so one chat's late tap cannot
-    claim another chat's answer.
-    """
-    resolved = recently_resolved_ask_flow(channel_id)
-    return resolved[0] if resolved is not None else None
-
-
-def recently_resolved_ask_flow(
-    channel_id: int | None = None,
-) -> tuple[str, str] | None:
-    """Like :func:`recently_answered_ask_flow`, with the outcome (#684).
-
-    Returns ``(request_id, outcome)`` — ``answered`` or ``cancelled`` (the
-    CLI withdrew the question) — or None.
-    """
-    now = time.monotonic()
-    for rid, (ch, ts, outcome) in list(_ANSWERED_ASK_FLOWS.items()):
-        if now - ts > ANSWERED_ASK_FLOW_TTL_S:
-            del _ANSWERED_ASK_FLOWS[rid]
-            continue
-        if channel_id is not None and ch != channel_id:
-            continue
-        return rid, outcome
-    return None
-
-
-def get_ask_question_flow(
-    channel_id: int | None = None,
-) -> AskQuestionState | None:
-    """Return the active AskUserQuestion flow for *channel_id*, or None."""
-    for flow in _ASK_QUESTION_FLOWS.values():
-        if channel_id is not None and flow.channel_id != channel_id:
-            continue
-        return flow
-    return None
-
-
-def get_ask_question_flow_by_id(request_id: str) -> AskQuestionState | None:
-    """Return a specific AskUserQuestion flow, or None."""
-    return _ASK_QUESTION_FLOWS.get(request_id)
-
-
-async def answer_ask_question_with_options(request_id: str) -> bool:
-    """Send a structured answer for an AskUserQuestion flow with collected answers.
-
-    Approves the request with updatedInput containing the answers dict.
-    """
-    flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
-    _PENDING_ASK_REQUESTS.pop(request_id, None)
-    if flow is None:
-        return False
-    _record_answered_ask_flow(request_id, flow.channel_id)
-
-    # Update the stored input to include answers
-    stored_input = _REQUEST_TO_INPUT.get(request_id)
-    if stored_input is not None:
-        stored_input["answers"] = flow.answers
-
-    return await send_claude_control_response(
-        request_id, approved=True, action="answer"
-    )
-
-
-def format_question_message(
-    flow: AskQuestionState, *, escape_html: bool = False
-) -> str:
-    """Format the current question in a flow as a display string.
-
-    The question text is agent-authored free text and routinely contains
-    angle brackets — a question about an inline ``<svg>``, a generic like
-    ``list<T>``, a shell redirect. It is consumed under two different and
-    incompatible rendering contracts:
-
-    * ``escape_html=True`` — the caller builds a ``RenderedMessage`` carrying
-      ``parse_mode="HTML"``. Telegram parses the whole body as HTML and
-      accepts only a small tag whitelist, so an unescaped ``<svg>`` fails the
-      **entire** request with ``400 Bad Request: can't parse entities:
-      Unsupported start tag``. Because the ask-flow messages carry the option
-      keyboard, losing that edit leaves the run unanswerable from Telegram
-      (#713 — same class as the #199 fix in ``commands/auth.py``).
-    * the default, ``escape_html=False`` — the caller stores the string as a
-      progress action title (``advance_ask_action_model``, #709), which is
-      rendered via ``render_markdown`` where markdown-it (``html: False``)
-      already neutralises tags. Escaping here as well would double-escape and
-      show the user a literal ``&lt;svg&gt;``.
-
-    Only the agent's text is escaped; the bot-authored ``❓ Question N of M:``
-    prefix contains no HTML-special characters. ``quote=False`` because
-    quotation marks are legal in HTML text content — escaping them would
-    surface a literal ``&quot;`` for a merely quoted question.
-    """
-    q = flow.questions[flow.current_index]
-    question_text = q.get("question", "")
-    if escape_html:
-        question_text = html.escape(question_text, quote=False)
-    total = len(flow.questions)
-    if total > 1:
-        return f"❓ Question {flow.current_index + 1} of {total}: {question_text}"
-    return f"❓ {question_text}"
-
-
-def get_question_option_buttons(flow: AskQuestionState) -> list[list[dict[str, str]]]:
-    """Build inline keyboard buttons for the current question's options."""
-    q = flow.questions[flow.current_index]
-    options = q.get("options", [])
-    buttons: list[list[dict[str, str]]] = []
-    for i, opt in enumerate(options[:4]):
-        label = opt.get("label", f"Option {i + 1}")
-        buttons.append([{"text": label, "callback_data": f"aq:opt:{i}"}])
-    buttons.append([{"text": "Other (type reply)", "callback_data": "aq:other"}])
-    return buttons
 
 
 def get_active_claude_sessions() -> list[str]:

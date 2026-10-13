@@ -188,9 +188,9 @@ async def maybe_steer(
         session_id = resume_token.value
 
     if session_id is not None and backend is not None:
-        # Pending questions are the Claude control channel's registry, not
-        # live-session state (#960 makes that one engine-neutral).
-        from ..runners.claude import get_pending_ask_request
+        # Pending questions live in the engine-neutral registry (#960), not
+        # in live-session state.
+        from ..interactive.questions import get_pending_ask_request
 
         if get_pending_ask_request(channel_id=chat_id) is not None:
             # The CLI is blocked on the question; an answer, not a steer, is
