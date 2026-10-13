@@ -3227,9 +3227,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         failed = su.state == "ERROR" or (
             err is not None and bool(err.message or err.type)
         )
+        end_status = _task_end_status(failed, err)
         if idx is not None:
             state.bg_steps.pop(idx, None)
-            self._task_step_ended(state, idx, status=_task_end_status(failed, err))
+            self._task_step_ended(state, idx, status=end_status)
             if su.state == "ERROR":
                 self._track_subagents(state, idx, [], failed=True)
         if tool_name == "run_command":
@@ -3251,6 +3252,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             detail = dict(action.detail)
             if err is not None and err.type:
                 detail["error_type"] = err.type
+            if end_status == "stopped":
+                # #1062: a step agy stopped (a ``manage_task`` kill) reads
+                # ⏹️ on its row, not ✗; the ⏳ block lists only live tasks.
+                detail["stopped"] = True
             action = Action(
                 id=action.id, kind=action.kind, title=action.title, detail=detail
             )

@@ -14,6 +14,7 @@ from .transport import RenderedMessage
 from .utils.paths import relativize_path
 
 STATUS = {"running": "▸", "update": "↻", "done": "✓", "fail": "✗"}
+STOPPED_STATUS = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16}"
 HEADER_SEP = " · "
 HARD_BREAK = "  \n"
 
@@ -152,6 +153,9 @@ def starts_with_pictograph(text: str) -> bool:
 def action_status(action: Action, *, completed: bool, ok: bool | None = None) -> str:
     if not completed:
         return STATUS["running"]
+    if (action.detail or {}).get("stopped") is True:
+        # #1062: stopped on purpose (an agy ``manage_task`` kill), not failed.
+        return STOPPED_STATUS
     if ok is not None:
         return STATUS["done"] if ok else STATUS["fail"]
     detail = action.detail or {}

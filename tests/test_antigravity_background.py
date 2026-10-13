@@ -17,7 +17,7 @@ import structlog.testing
 
 from untether.background_status import live_shown, render_background_block
 from untether.background_tasks import EngineBackgroundTask
-from untether.markdown import HARD_BREAK
+from untether.markdown import HARD_BREAK, STOPPED_STATUS, format_action_line
 from untether.model import ActionEvent, CompletedEvent
 from untether.runners.antigravity import AntigravityRunner, AntigravityStreamState
 from untether.runners.run_options import EngineRunOptions, apply_run_options
@@ -471,6 +471,12 @@ def test_task_killed_by_manage_task_ends_stopped_not_completed() -> None:
         ("step-2", "completed", False)
     ]
     assert closed[0].message == "context canceled"
+    # rc4 QA: the command's own row read "✗ sleep 300" (failed); it is ⏹️.
+    assert closed[0].action.detail.get("stopped") is True
+    row = format_action_line(closed[0].action, "completed", False, command_width=None)
+    assert row.startswith(STOPPED_STATUS + " ") and "✗" not in row
+    # The ⏳ block lists live tasks only, as for Claude: a stopped one leaves.
+    assert render_background_block(state.tasks.values(), now=time.monotonic()) is None
     # The kill owes the notice, not the cancelled step (it comes next).
     assert state.bg_notices_owed == 0
     events = _feed(runner, state, lines[5:])
@@ -552,8 +558,13 @@ def test_failed_step_with_a_non_cancel_error_is_failed() -> None:
     _feed(runner, state, [_tool(2, "run_command", "ACTIVE", {"CommandLine": "x"})])
     state.tasks["cmd:2"].background_from = None
     error = {"type": "TOOL_ERROR", "message": "exec failed"}
-    _feed(runner, state, [_tool(2, "run_command", "DONE", {}, error=error)])
+    events = _feed(runner, state, [_tool(2, "run_command", "DONE", {}, error=error)])
     assert state.tasks["cmd:2"].status == "failed"
+    # #1062: only a cancellation reads ⏹️; a real failure keeps its ✗.
+    (closed,) = [e for e in events if isinstance(e, ActionEvent)]
+    assert "stopped" not in closed.action.detail
+    row = format_action_line(closed.action, "completed", False, command_width=None)
+    assert row.startswith("✗ ")
 
 
 # ── #1061: the held answer ──────────────────────────────────────────────────
