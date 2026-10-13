@@ -6,8 +6,8 @@ label (``runners/antigravity.py`` imports it lazily). Mirrors
 ``_permission_mode_text.py`` for Claude.
 
 Honesty rules (REVIEW B2): Workspace is never called read-only or a sandbox;
-"Ask me" and "Plan first" need Untether's approval gate, so rc1 shows them as
-``· soon`` buttons that only answer a toast.
+"Ask me" needs Untether's approval gate, so it shows as a ``· soon`` button
+that only answers a toast. "Plan first" is agy's own plan mode (#981).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ ANTIGRAVITY_MODE_TEXT: dict[str, AgyModeText] = {
         label="plan first",
         button="Plan first",
         hint="plans, waits for your OK",
-        available=False,
+        available=True,
     ),
     "full": AgyModeText(
         label="full access",
@@ -80,6 +80,9 @@ BUTTON_ROWS: tuple[tuple[str, ...], ...] = (("agw", "agf"), ("aga", "agp"))
 # #1037: agy keeps a conversation on the agent it started with, so a chat
 # that began in Workspace has no shell until a new conversation starts.
 FULL_ACCESS_TOAST = "Permission mode: full access — send /new to start using it"
+# #981: Plan first plans under the no-shell agent; a conversation that
+# started in Full access keeps the default agent until /new (D38).
+PLAN_FIRST_TOAST = "Permission mode: plan first — applies from your next message"
 
 GATE_SOON_SUFFIX = " · soon"
 GATE_SOON_TOAST = (

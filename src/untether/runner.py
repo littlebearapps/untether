@@ -125,6 +125,29 @@ class SessionLockMixin:
 PRESPAWN_BLOCKED_KEY = "prespawn_blocked"
 
 
+# #981: ``CompletedEvent.usage`` key for a decision card an engine wants
+# posted right after the final (Antigravity's Plan first card):
+# ``{"text": str, "buttons": [[{"text", "callback_data"}, …], …]}``. The bridge
+# sends it as the final's last message, after the footers.
+REVIEW_CARD_KEY = "review_card"
+
+
+def review_card(usage: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The well-formed review card on ``usage`` (#981), or None."""
+    if not isinstance(usage, dict):
+        return None
+    card = usage.get(REVIEW_CARD_KEY)
+    if not isinstance(card, dict):
+        return None
+    text = card.get("text")
+    buttons = card.get("buttons")
+    if not isinstance(text, str) or not text or not isinstance(buttons, list):
+        return None
+    if not buttons or not all(isinstance(row, list) and row for row in buttons):
+        return None
+    return card
+
+
 def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
     """The guard-block reason marked on ``usage`` (#838), or None."""
     if not isinstance(usage, dict):
