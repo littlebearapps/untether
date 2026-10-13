@@ -419,6 +419,60 @@ def test_denied_action_without_step_gets_warning_row() -> None:
     assert warn.action.title.startswith("⚠️ Blocked: web fetch (ReadUrlContent)")
 
 
+def test_plan_first_write_denial_is_a_file_change_not_outside() -> None:
+    """#1073: in Plan first agy refuses every write but the plan, inside the
+    project too (rc4 QA: the plan copied to ``.untether-outbox/``). The row
+    and the final say plan mode stopped it, not "a file outside"."""
+    lines = _with_result(
+        _lines("ok"),
+        denied_actions=[{"action": "write_file", "display_name": "WriteToFile"}],
+    )
+    events, _ = _replay(lines, options=EngineRunOptions(permission_mode="plan"))
+    (warn,) = [
+        e
+        for e in _done_actions(events)
+        if e.action.id == "antigravity.denied.write_file"
+    ]
+    assert warn.action.title.startswith("⚠️ Blocked: file change (WriteToFile)")
+    answer = _completed(events).answer
+    assert (
+        "⚠️ Antigravity was blocked from changing a file — Plan first doesn't"
+        " change files until you approve the plan." in answer
+    )
+    assert "outside the project" not in answer
+
+
+def test_plan_first_read_denial_stays_outside_the_project() -> None:
+    """#1073: a read Plan first refuses is outside the project (the QA
+    ``ListDir`` was the project's parent; in-project reads go ahead)."""
+    lines = _with_result(
+        _lines("ok"),
+        denied_actions=[{"action": "read_file", "display_name": "ListDir"}],
+    )
+    events, _ = _replay(lines, options=EngineRunOptions(permission_mode="plan"))
+    titles = [e.action.title for e in _done_actions(events)]
+    assert "⚠️ Blocked: file outside the project (ListDir)" in titles
+    answer = _completed(events).answer
+    assert (
+        "⚠️ Antigravity was blocked from using a file outside the project —"
+        " Plan first works only with the project's own files." in answer
+    )
+
+
+def test_workspace_write_denial_wording_unchanged() -> None:
+    lines = _with_result(
+        _lines("ok"),
+        denied_actions=[{"action": "write_file", "display_name": "WriteToFile"}],
+    )
+    events, _ = _replay(lines)
+    titles = [e.action.title for e in _done_actions(events)]
+    assert "⚠️ Blocked: file outside the project (WriteToFile)" in titles
+    assert (
+        "\n\n⚠️ Antigravity was blocked from using a file outside the project —"
+        " headless runs can't ask for approval" in _completed(events).answer
+    )
+
+
 def test_denied_actions_empty_response_becomes_explanation() -> None:
     with structlog.testing.capture_logs() as logs:
         events, _ = _replay(_lines("tools_denied"))

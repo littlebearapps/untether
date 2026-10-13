@@ -334,6 +334,12 @@ A blocked tool doesn't fail in agy's stream: the step ends normally with no outp
   points at agy's own `permissions.deny` rules. Only a blocked shell command also gets
   `or add an allow rule such as command(git status) to agy's settings file`.
 
+In Plan first a blocked write is plan mode itself: agy refuses every file change except the plan, inside the project
+too, so the row reads `⚠️ Blocked: file change (WriteToFile)` and the paragraph says
+`Plan first doesn't change files until you approve the plan.` A blocked read in Plan first is a file outside the
+project, as in Workspace (reads inside the project go ahead), and is labelled that way
+([#1073](https://github.com/littlebearapps/untether/issues/1073)).
+
 With the Workspace agent a shell block is rare: it needs a conversation that began without the agent. When a
 resumed run that named the agent still has a shell call blocked, that is what happened, so the paragraph says so
 and asks for `/new` (or Full access) instead of "Full access, then /new" ([#1060](https://github.com/littlebearapps/untether/issues/1060)). Exact commands are the

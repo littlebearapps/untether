@@ -459,8 +459,21 @@ def test_the_approved_run_says_so(home: Path) -> None:
 
 def test_plan_denial_wording() -> None:
     text = agy.denial_paragraph(["file outside the project"], mode="plan", trigger=None)
-    assert "Plan first doesn't let it change anything" in text
+    assert text.endswith("Plan first works only with the project's own files.")
     assert "/new" not in text
+    # #1073: a write is plan mode itself, wherever the file is.
+    text = agy.denial_paragraph(["file change"], mode="plan", trigger=None)
+    assert text == (
+        "⚠️ Antigravity was blocked from changing a file — Plan first doesn't"
+        " change files until you approve the plan."
+    )
+    both = agy.denial_paragraph(
+        ["file change", "file outside the project"], mode="plan", trigger=None
+    )
+    assert both.startswith(
+        "⚠️ Antigravity was blocked from changing a file and from using a file"
+        " outside the project — Plan first doesn't change files"
+    )
 
 
 @pytest.mark.anyio

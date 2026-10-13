@@ -273,6 +273,18 @@ _DENIED_LABEL: dict[str, str] = {
     "read_file": "file outside the project",
     "write_file": "file outside the project",
 }
+# #1073: in Plan first a refused write is plan mode itself (agy denies every
+# file change but the plan, inside the project too: the rc4 QA run's copy to
+# ``.untether-outbox/``). A refused read is still outside the project (the
+# QA ``ListDir`` was the project's parent); in-project reads go ahead.
+_PLAN_WRITE_LABEL = "file change"
+_OUTSIDE_LABEL = "file outside the project"
+
+
+def _denied_label(action: str, mode: str | None) -> str:
+    if mode == "plan" and action == "write_file":
+        return _PLAN_WRITE_LABEL
+    return _DENIED_LABEL.get(action, "tool")
 
 # ── stderr kill classes (phase 03, D27) ─────────────────────────────────────
 
@@ -719,10 +731,7 @@ def denial_paragraph(
         return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
     if mode == "plan":
         # #981: a plan turn may only read and write its plan.
-        text = (
-            f"{what} — Plan first doesn't let it change anything until you "
-            "approve a plan."
-        )
+        text = _plan_denial_text(labels)
         if kept_shell and trigger is None:
             # #1060: it reached for a shell the no-shell agent doesn't have.
             text += (
@@ -760,6 +769,22 @@ def denial_paragraph(
     return (
         f"{head} To allow it: /config → Permission mode → Full access, then /new{rule}."
     )
+
+
+def _plan_denial_text(labels: list[str]) -> str:
+    """#1073: a Plan first denial names what plan mode refused — a file
+    change anywhere (the plan is the only write), a file outside the project
+    (as in Workspace) — rather than calling every file one outside."""
+    others = [label for label in labels if label != _PLAN_WRITE_LABEL]
+    parts = ["changing a file"] if _PLAN_WRITE_LABEL in labels else []
+    if others:
+        parts.append(f"using a {_join_labels(others)}")
+    what = "⚠️ Antigravity was blocked from " + " and from ".join(parts)
+    if _PLAN_WRITE_LABEL in labels:
+        return f"{what} — Plan first doesn't change files until you approve the plan."
+    if others == [_OUTSIDE_LABEL]:
+        return f"{what} — Plan first works only with the project's own files."
+    return f"{what} — Plan first doesn't let it change anything until you approve a plan."
 
 
 def _paths_text(paths: list[str], limit: int = 5) -> str:
@@ -3445,7 +3470,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         for item in denied:
             action = item.action or "unknown"
             display = item.display_name or action
-            label = _DENIED_LABEL.get(action, "tool")
+            label = _denied_label(action, state.effective_mode)
             family = _DENIED_FAMILY.get(action, frozenset())
             hits = [
                 action_id
