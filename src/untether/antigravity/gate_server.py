@@ -377,7 +377,7 @@ _BY_CONVERSATION: dict[str, GateRun] = {}
 def _peer_creds(stream: Any) -> tuple[int, int] | None:
     """``(pid, uid)`` of the connecting process (``SO_PEERCRED``), or None
     when they can't be read."""
-    raw = stream.extra(SocketAttribute.raw_socket, None)
+    raw = stream.extra(SocketAttribute.raw_socket, None)  # nosec B610 — anyio, not Django
     if raw is None:
         return None
     try:

@@ -374,7 +374,7 @@ def _manifest_bytes(files: dict[str, bytes], wait_s: int) -> bytes:
 
 def _run_agy(agy_cmd: str, *args: str) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(  # fixed argv, no shell
+        return subprocess.run(  # nosec B603 — fixed argv, no shell
             [agy_cmd, "plugin", *args],
             capture_output=True,
             text=True,
