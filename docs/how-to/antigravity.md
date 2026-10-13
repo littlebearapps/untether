@@ -330,7 +330,8 @@ Cron and webhook runs work with Antigravity, with three rules that differ from c
 - **They are held when the project's agy config changed** since someone last ran Antigravity in that chat (next
   section). The next message someone sends in the chat runs with the changed config and shows what changed in
   a ⚠️ row; the schedule runs again after that. An `/at` or `/loop` run doesn't release it. Check the files the
-  message lists first if you didn't change them.
+  message lists first if you didn't change them. When the change is to Untether's own agy plugin, the message says
+  so, and only reinstalling it on the host (`untether agy-gate install --force`) releases the hold.
 - **A Workspace run is held while agy's own tool-permission setting can't be read.** Untether checks it with
   `agy -p /config` before the run; if that fails or returns no value, the scheduled run replies `Untether couldn't
   read agy's tool-permission setting before this run …` and nothing starts. Nothing needs changing: the next fire

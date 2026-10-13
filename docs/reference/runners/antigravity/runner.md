@@ -474,7 +474,11 @@ for this, as a tripwire and not a sandbox:
   project (…), so this scheduled run is held. The next message someone sends in the chat will run with the
   changed config and show what changed in a ⚠️ row; the schedule runs again after that. Check those files first
   if you didn't change them.` There is no preview: that next message runs agy, and so the changed hooks, before
-  the row appears. Read the listed files on the host first if the change is unexpected.
+  the row appears. Read the listed files on the host first if the change is unexpected. When Untether's own
+  plugin (`untether-gate`) isn't what it installed, the scan tracks its files too, but that hold says so instead
+  (`gate_plugin_held_message`): the gate check (`_gate_setup`) holds every scheduled run until the plugin is
+  reinstalled, so a chat message doesn't release it
+  ([#1078](https://github.com/littlebearapps/untether/issues/1078)).
 - **Couldn't check.** If the check can't finish (too many files, unreadable files, links leading outside the
   project and home directory, a config file that isn't strict JSON, a custom agent whose front matter Untether
   can't read with certainty, a command or command path built from a variable), every attended run shows a ⚠️ row
