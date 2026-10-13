@@ -1630,13 +1630,15 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
         ("opencode", "unsupported_version"),
         ("antigravity", "no_project"),
         ("antigravity", "invalid_argument"),
+        (CODEX_ENGINE, "invalid_argument"),
     ],
 )
 async def test_1047_other_prespawn_blocks_keep_the_error_card(
     engine: str, blocked: str
 ) -> None:
     """#1047 made only Antigravity's ``/continue`` refusal a plain reply;
-    every other pre-spawn block still renders as an error card and warns."""
+    every other pre-spawn block still renders as an error card and warns —
+    except a refused invalid session/model id, logged at INFO (#1082)."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -1657,8 +1659,12 @@ async def test_1047_other_prespawn_blocks_keep_the_error_card(
     assert final.startswith(f"error · {engine}")
     assert "```\n🛑 refused\n```" in final
     (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
-    assert summary["log_level"] == "warning"
-    assert "prespawn_blocked" not in summary
+    if blocked == "invalid_argument":
+        assert summary["log_level"] == "info"
+        assert summary["prespawn_blocked"] == blocked
+    else:
+        assert summary["log_level"] == "warning"
+        assert "prespawn_blocked" not in summary
 
 
 @pytest.mark.anyio

@@ -54,6 +54,10 @@ class ThreadScheduler:
         self._lock = anyio.Lock()
         self._pending_by_thread: dict[str, deque[ThreadJob]] = {}
         self._queued_by_progress: dict[tuple[ChannelId, MessageId], ThreadJob] = {}
+        # #1082: jobs a worker has taken off the queue but holds until the
+        # session's previous run is done. Still listed in
+        # ``_queued_by_progress``, so /cancel can drop them from their card.
+        self._held: set[tuple[ChannelId, MessageId]] = set()
         self._active_threads: set[str] = set()
         self._busy_until: dict[str, anyio.Event] = {}
 
@@ -136,6 +140,10 @@ class ThreadScheduler:
             job = self._queued_by_progress.pop(progress_key, None)
             if job is None:
                 return None
+            if progress_key in self._held:
+                # #1082: the worker sees it gone and never runs it.
+                self._held.discard(progress_key)
+                return job
             thread_key = self.thread_key(job.resume_token)
             queue = self._pending_by_thread.get(thread_key)
             if queue is None:
@@ -212,6 +220,33 @@ class ThreadScheduler:
                     # Not injectable right now (not live yet / closing):
                     # keep FIFO order and look again next tick.
 
+    async def _hold_until(self, job: ThreadJob, done: anyio.Event) -> bool:
+        """Wait for the session's previous run, keeping ``job`` cancellable
+        from its queued card meanwhile (#1082). False = cancelled."""
+        if job.progress_ref is None:
+            await done.wait()
+            return True
+        progress_key = (job.chat_id, job.progress_ref.message_id)
+        async with self._lock:
+            self._queued_by_progress[progress_key] = job
+            self._held.add(progress_key)
+        try:
+            await done.wait()
+        finally:
+            with anyio.CancelScope(shield=True):
+                async with self._lock:
+                    held = progress_key in self._held
+                    self._held.discard(progress_key)
+                    if held:
+                        self._queued_by_progress.pop(progress_key, None)
+        if not held:
+            logger.info(
+                "scheduler.held_job_dropped",
+                chat_id=job.chat_id,
+                progress_message_id=job.progress_ref.message_id,
+            )
+        return held
+
     async def _thread_worker(self, key: str) -> None:
         try:
             while True:
@@ -241,8 +276,12 @@ class ThreadScheduler:
                     if injected:
                         continue
 
-                if done is not None and not done.is_set():
-                    await done.wait()
+                if (
+                    done is not None
+                    and not done.is_set()
+                    and not await self._hold_until(job, done)
+                ):
+                    continue  # #1082: cancelled from its queued card
 
                 try:
                     await self._run_job_with_live_pump(key, job)
