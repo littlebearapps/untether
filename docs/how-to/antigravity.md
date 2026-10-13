@@ -265,7 +265,8 @@ Workspace included, and without a tool call. Untether can't stop them, so it tel
 - **First run in a project that has such config:** a ⚠️ row says the project has agy hooks, plugins or MCP servers
   that Untether doesn't manage. Review them if you didn't add them.
 - **A run changed that config** (or files other engines act on, such as `.claude/`, `.mcp.json` or
-  `.github/workflows/`): a ⚠️ row after the run asks you to review it before sending another message.
+  `.github/workflows/`): a ⚠️ row after the run asks you to review it before sending another message. Claude
+  Code's worktrees in `.claude/worktrees/` aren't part of this check: each one is its own checkout.
 - **Scheduled runs** are held while the config differs from what a run someone started from the chat last showed,
   or while Untether can't finish the check. A changed config is released by the next message a person sends in
   the chat; a check that can't finish (too many files, or a config file Untether can't read with certainty) holds

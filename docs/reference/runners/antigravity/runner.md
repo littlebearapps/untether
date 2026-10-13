@@ -252,7 +252,10 @@ take a tool away from its default agent, but a custom agent's `tools:` list is t
   without `--agent` and logs `antigravity.workspace_agent.unavailable` once per reason. That run behaves as before:
   a shell attempt ends the turn with the blocked notice.
 - Asked for a shell command, the agent says it needs Full access; nothing is blocked, so there is no ⚠️ row. It
-  can't delete or rename a file either (a "rename" is a copy).
+  can't delete or rename a file either (a "rename" is a copy). Its advice names both routes, since the one agent
+  file serves every run: in a chat, `/config` → Permission mode → Full access, then `/new`; a cron gets Full access
+  only from its own `permission_mode = "full"`, and a webhook never does
+  ([#1055](https://github.com/littlebearapps/untether/issues/1055)).
 
 !!! warning "A conversation keeps the agent it started with"
     agy ignores `--agent` on a resume and reports nothing about it in `init`. A conversation that started in
@@ -306,6 +309,9 @@ for this, as a tripwire and not a sandbox:
   `.husky/`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`. That part
   only warns; it never refuses a run. `.git/config` is there for `core.hooksPath`, `core.fsmonitor`, aliases and
   filters; ordinary git commands that write it (adding a remote, setting a branch's upstream) raise the same row.
+  Claude Code's own worktrees under `.claude/worktrees/` are left out: each is a separate checkout with its own
+  config, and walking them used to run the check out of time on every run
+  ([#1051](https://github.com/littlebearapps/untether/issues/1051)).
 
 What is tracked ([#1043](https://github.com/littlebearapps/untether/issues/1043)):
 
@@ -342,7 +348,8 @@ Known limits:
 - User-level config is checked by timestamp, not content, and agy's own `settings.json` isn't part of the check
   because agy rewrites it itself. Both sit outside the project.
 - The after-run check of other engines' files looks at the project root only, and for a worktree or submodule the
-  real `hooks/` and `config` live outside the checkout and aren't watched.
+  real `hooks/` and `config` live outside the checkout and aren't watched. Config inside a Claude Code worktree
+  (`.claude/worktrees/<name>/`) belongs to that worktree and is checked only when a run uses it as its project.
 - Instruction files (`AGENTS.md`, `.agents/skills/`, `.agents/rules/`) steer the model but run nothing by
   themselves, so they don't hold scheduled runs. Root-level ones are in the after-run check.
 - A process still writing after the check can change files before agy reads them; the after-run check reports it.
