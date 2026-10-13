@@ -527,17 +527,23 @@ def test_tripwire_overdue_steps() -> None:
 @pytest.mark.anyio
 async def test_required_gate_never_answers_no_decision(harness: Harness) -> None:
     """Fail closed for a gate-reliant run (phase 14, under bypass): empty
-    output would let agy run the tool, so a tool with no policy is denied."""
+    output would let agy run the tool, so every tool gets an explicit
+    answer — a read is allowed, the rest are denied when nobody can tap."""
     harness.gate.required = True
+    read = {
+        "conversationId": CID,
+        "stepIdx": 8,
+        "toolCall": {"name": "list_permissions", "args": {}},
+    }
+    assert await harness.call("PreToolUse", read) == {"decision": "allow"}
+    harness.gate.unattended_trigger = "cron:nightly"
     payload = {
         "conversationId": CID,
         "stepIdx": 9,
         "toolCall": {"name": "run_command"},
     }
-    assert await harness.call("PreToolUse", payload) == {
-        "decision": "deny",
-        "reason": gate_server.NO_POLICY_TEXT,
-    }
+    out = await harness.call("PreToolUse", payload)
+    assert out is not None and out["decision"] == "deny"
     out = await harness.call("PreToolUse", _ask_payload(step=10, cid="someone-else"))
     assert out is not None and out["decision"] == "deny"
 

@@ -190,7 +190,7 @@ user guide.
 |---|---|---|---|
 | **Workspace** (default) | `workspace` | `--mode=accept-edits` `--agent=untether-workspace` | agy's own accept-edits mode under its `request-review` policy, run as Untether's [no-shell agent](#the-workspace-agent): file edits in the project and temp folders go ahead; the model has no shell, web, MCP or subagent tool; files outside the project are blocked by agy. Not a sandbox. Without `--mode`, headless agy refuses every write outside a temp folder (agy 1.3.3) |
 | **Full access** | `full` | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
-| **Ask me** | `ask` | — | Not available yet: refused before agy starts, until Untether's approval gate ships in a later 0.36.1 release |
+| **Ask me** | `ask` | `--dangerously-skip-permissions`, agy's default agent, no `--mode` — **only** once [Untether's agy gate](#untethers-agy-gate) is ready for the project | Untether's gate is the only check: reads and edits inside the project run on their own; shell, web, MCP, browser, subagents, timers, files outside the project and protected files get an approval card in Telegram. Refused before agy starts when the gate isn't ready. See [Ask me](#ask-me) |
 | **Plan first** | `plan` | `--mode=plan` `--agent=untether-workspace`, no `--disable-slash-commands` | agy's own plan mode under the [no-shell agent](#the-workspace-agent): it reads the project, writes a plan and stops; nothing in the project changes. The plan is posted with **Approve Plan / Deny / Let's discuss**; Approve resumes the conversation in Workspace. See [Plan first](#plan-first) |
 
 Rules the runner enforces:
@@ -200,8 +200,12 @@ Rules the runner enforces:
 - **Fails closed.** An unknown stored value runs as Workspace and logs `antigravity.permission_mode.unknown` once.
   An unknown value in `untether.toml` is a config error. `permission_mode = "full"` in `untether.toml` logs
   `antigravity.full_access_from_toml` once.
-- **Scheduled runs never inherit Full access.** A cron gets it only from its own `permission_mode = "full"`; a
-  webhook run never does. Otherwise the run is Workspace (`antigravity.unattended_full_downgraded`).
+- **Scheduled runs never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode`
+  (`"full"` / `"ask"`); a chat's or `untether.toml`'s choice never reaches it. Otherwise the run is Workspace
+  (`antigravity.unattended_full_downgraded` / `antigravity.unattended_ask_downgraded`).
+- **The bypass flag has one source.** `decide_antigravity_mode` (in `runners/antigravity.py`) is the only place that
+  grants `--dangerously-skip-permissions`; `build_args` only reads its decision. Without a ready gate, Ask me never
+  gets the flag, even when `build_args` is called directly.
 - **agy's own settings are checked.** Before a Workspace run Untether asks agy for its settings with a zero-token
   `agy -p /config` (cached for an hour per agy version and settings file). If `toolPermission` is anything other
   than `request-review` or `strict`, the run is refused: `agy's own settings change its permission checks
@@ -224,6 +228,111 @@ Rules the runner enforces:
 - **Widened settings are shown.** `permissions.allow` rules or `allowNonWorkspaceAccess` in agy's settings add a
   ⚠️ row (once per project and settings change), and the footer label becomes
   `workspace (agy allows files outside the project)`.
+
+### Ask me
+
+Ask me ([#980](https://github.com/littlebearapps/untether/issues/980), phase 14) needs
+[Untether's agy gate](#untethers-agy-gate) on the host. The run starts only when all of these hold, checked before
+agy starts (otherwise it is refused with a plain reply and nothing runs; `antigravity.permission_mode.gate_refused
+reason=…`):
+
+| Check | Refusal (`prespawn_blocked`) |
+|---|---|
+| The plugin is installed | `gate_missing`: run `untether agy-gate install` on the host |
+| The plugin is unedited and current, agy hasn't disabled it, and `agy -p /hooks` lists it for the project; the planted-config scan finished | `gate_not_ready`, with the reason (e.g. `agy plugin enable untether-gate`) |
+| The project doesn't contain Untether's own package, its venv or the plugin folder (REVIEW-2 B3) | `gate_self_protect` |
+| No hook group of another source (`-p /hooks`, any event) and nothing in the planted-config scan: the project's `.agents/` hooks, plugins, MCP servers and agents, agy's user-level plugins and agents. User-level `hooks.json` is judged by `-p /hooks`; user-level `mcp_config.json` by `agy mcp list` (an existing file with no servers, as on lba-1, is fine; a failed listing counts as "has servers") | `gate_foreign_config`, naming the paths |
+| The run's socket is listening | `gate_not_ready` |
+
+Then agy runs with `--dangerously-skip-permissions` on its default agent and no `--mode` (the no-shell Workspace agent
+would leave nothing to ask about, and `--mode` takes one value). The gate is **required** for the run: every tool
+call gets an explicit `allow` or `deny` (never "no decision", which would let agy run it), and the liveness check and
+the stepIdx tripwire stop the run (see [Liveness, tripwire](#liveness-tripwire-stop)). Ask me runs are always one
+agy process per message (no warm session).
+
+**Reading a call the way agy does.** agy is a Go program, and Go's JSON decoder matches field names
+case-insensitively, so the gate maps every argument onto agy's own spelling first (`commandline` is `CommandLine`) and
+**denies** a call outright when two keys fold to the same name, a key isn't plain printable ASCII, or the arguments
+aren't an object (`antigravity.gate.ambiguous_args`; agy is told to call again with each argument once). The hook
+denies a payload with duplicate JSON keys, or keys that differ only in case, before it reaches Untether. Only **plain absolute paths** (no `~`, `.` /
+`..` parts, doubled or trailing slashes, control characters) can be on the safe list, so Untether and agy can't
+resolve a path differently, and a safe-listed tool may carry only the argument names agy uses for it (from live
+hook payloads, agy 1.3.3 / 1.3.4); anything else asks.
+
+**What runs without asking** (`antigravity/gate_policy.py`, the safe list; exact tool names): `command_status`,
+`list_permissions`, `wait`, `wait_5_seconds`, `finish` (when they name no path); `view_file`, `list_dir`,
+`find_by_name`, `grep_search` when every path they name is inside the project or the conversation's own artifact
+folder (none: agy searches its workspace); and `write_to_file`, `replace_file_content`, `multi_replace_file_content`
+when every path argument (`TargetFile` and any other `…Path` / `…File` / `…Dir` key, realpath'd — the nearest
+existing parent for a new file, so a symlink out of the project resolves outside it) is inside the project or the
+artifact folder (`~/.gemini/antigravity-cli/brain/<conversation id>/`, a UUID-shaped id, the folder itself under
+agy's `brain/`), the payload's `workspacePaths[0]` is the project, the file isn't protected, and no
+part of the path below the project folder is a symlink (it could be repointed before agy acts). Reads follow the same
+link rule. An existing target must be a regular file with a single name (no hard link) — or, for a read, a folder.
+Shell commands are never parsed: every `run_command` asks. **The safe list is best effort** against a model that
+can make links: the check runs when the hook fires and agy acts a moment later, so a shell command you approve (or a
+daemon it started) can change what a later "in-project" path means. Approving a shell command is approving that. A
+non-string path, a NUL byte, arguments that aren't an object, or any error while checking asks. A subagent reporting back to its parent
+(`send_message` to a conversation of this run) is internal and runs too.
+
+**What asks:** everything else — `run_command`, `send_command_input`, `manage_task`, `schedule`, `run_workflow`,
+`notebook_execution`, `read_url_content`, `search_web`, `call_mcp_tool`, MCP resources, every browser tool,
+`invoke_subagent` and the other agent tools, `generate_image`, `sed_file` and `notebook_edit` (path argument not yet
+probed), any tool this version doesn't know, any call from a conversation that isn't this run's or a known
+subagent's, and edits that are outside the project, protected (`.agents/`, `.git/` anywhere, `.gemini/`,
+`.untether-outbox/`, `.claude/`, `.husky/`, `.github/workflows/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`,
+`.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, and Untether's default file deny globs: `.env*`,
+`*.pem`, `*.key`, SSH keys, `.netrc`, `.npmrc`, `.pypirc`) or in Untether's own package, venv or plugin folder. With
+the chat's **Diff preview** set to on, in-project edits ask too.
+
+**The card** is registered in the engine-neutral registry (`kind="tool"`, the `ia:` callback prefix) and posted as a
+⚠️ row with buttons: `Permission Request [agy] - <what>` (`shell command`, `write a file (outside this project)`,
+`MCP tool <server>/<tool>`, `start subagents` …), then a preview built from agy's own `toolCall.args`:
+
+- `run_command`: `$ <command>`, first and verbatim (a fenced block when it has several lines or is long; past 1,500
+  characters only its first and last 600 with a warning that the middle isn't shown, and no "Always allow"; a call
+  with no command line says so), `in <dir>` when `Cwd` isn't the project,
+  `moves to the background after N s if still running` (`WaitMsBeforeAsync`), and a ⚠️ line for `IsDaemon` (a daemon
+  approved once keeps running after the turn).
+- `replace_file_content` / `multi_replace_file_content`: `📝 path` and `-` / `+` lines (the first two chunks, then
+  `…N more chunks`); `write_to_file`: `+` lines and `(overwrites an existing file)`.
+- `invoke_subagent`: each subagent's role and prompt; each one's own tool calls come back as their own cards (P-H8),
+  labelled `from subagent: <role>`.
+- anything else: up to three `key = value` pairs (secret-looking keys masked) and how many were left out.
+- every string from the call is shown with control and invisible format characters (bidi overrides, zero-width
+  spaces) as `⟨U+XXXX⟩`, and file paths can't carry a line break into the card.
+- every argument that changes what runs and isn't already in the preview is listed (`• BypassSandbox = True`); an edit
+  whose path resolves elsewhere says `→ resolves to …`; a `Cwd` that isn't a plain absolute path is flagged. agy's
+  descriptive fields (`Description`, `Instruction`, `toolSummary` …) are never shown as what runs.
+- **Always allow** is offered only for a shell command shown in full, with no extra arguments and a plain absolute
+  `Cwd` (or none).
+- agy's own one-line summary last, escaped: `agy says: …` (model text, never in place of the arguments).
+
+Buttons: **✅ Approve**, **❌ Deny** and, for a shell command, **✅ Always allow this command here** (exact
+`CommandLine` and `Cwd`, for this chat and agy conversation, in memory only, at most 50; a run of the conversation
+in another mode, `/new` or a restart clears it; never used by cron or webhook runs; logged as a hash). Approve →
+`allow`; Deny → `deny` with "The user denied this in Telegram (Untether). They can't see your tool calls — explain
+in your reply what you were trying to do and ask how to proceed. Don't retry the same call." agy shows it as the
+step's error (`tool call denied by pre-tool hook: …`), which Untether's row shows as `blocked: denied in Telegram`.
+No answer within the wait (`untether agy-gate install --wait-s`, default 900 s, shortened by `[antigravity]
+approval_timeout_s`) → `deny` "No answer in Telegram within 15 min — the tool was blocked. …" and the card reads
+`⏱️ Timed out: denied after 15 min`. The hook going away withdraws the card. The usual reminder, push and
+"waiting for approval" stall suppression apply (the engine state reports the held request). At most 20 cards a minute
+per run. The originator check (`approval_originator_only`, #388) applies to these buttons.
+
+**Unattended runs** (#835): a cron whose own `permission_mode = "ask"` runs gated, and every tool off the safe list
+is denied at once with Untether's unattended text, logged `permission.unattended_deny engine=antigravity`, with one
+`🔒 Unattended run — denied …` row and the final's `🔒` footer. A chat's Ask me never reaches a cron or webhook (it
+runs as Workspace).
+
+**agy's reported mode:** under the bypass flag agy's first event says `permission_mode: always-proceed`. A stricter
+value is warned once (`antigravity.permission_mode.bypass_unreported`); any other value stops the run before a tool
+(`antigravity.permission_mode.mismatch`).
+
+**Switching modes needs `/new` across agents** (R3-3, D38): Workspace and Plan first start a conversation on the
+no-shell agent, Ask me and Full access on agy's default agent, and agy keeps a conversation on the agent it started
+with. A chat switched from Workspace to Ask me therefore has no shell to ask about until `/new`; the `/config` toast,
+the page and `/planmode` say so. Ask me ↔ Full access and Workspace ↔ Plan first need no `/new`.
 
 ### Plan first
 
@@ -429,9 +538,10 @@ Known limits:
 
 The transport for everything interactive on agy ([#980](https://github.com/littlebearapps/untether/issues/980),
 phase 13): an opt-in agy plugin whose hooks talk to the run that started agy over a per-run Unix socket. Today it
-carries **question buttons** (`ask_question`) and **steer** ([#981](https://github.com/littlebearapps/untether/issues/981));
-"Ask me" approvals build on it next. It changes nothing about what agy may do: every other tool call gets no
-decision from Untether, so agy's own permission check decides exactly as without the plugin.
+carries **question buttons** (`ask_question`), **steer** ([#981](https://github.com/littlebearapps/untether/issues/981))
+and, in [Ask me](#ask-me) only, **approval cards**. In Workspace, Plan first and Full access it changes nothing about
+what agy may do: every other tool call gets no decision from Untether, so agy's own permission check decides exactly
+as without the plugin.
 
 ### Install
 
@@ -463,9 +573,9 @@ Untether instance that started agy, so instances sharing a `HOME` each run their
    have it disabled (`agy plugin disable`); then `agy -p /hooks` in the run's cwd must list one enabled
    `untether-gate` group sourced from the plugin folder with the three commands byte for byte and a long enough
    timeout. Other hook groups agy lists are recorded (`foreign_sources`) and so is a project that contains
-   Untether's own code (`self_protect`); phase 14's gated modes refuse on them. A failed precheck only turns
-   questions and steer off for that run (`antigravity.gate.precheck_failed reason=…`): Workspace, Plan first and
-   Full access don't rely on the gate.
+   Untether's own code (`self_protect`); [Ask me](#ask-me) refuses on them. A failed precheck refuses an Ask me run
+   and only turns questions and steer off for any other (`antigravity.gate.precheck_failed reason=…`): Workspace,
+   Plan first and Full access don't rely on the gate.
 2. **Socket.** Bound before agy starts at `$XDG_RUNTIME_DIR/untether/<inst8>/agy-<run12>.sock` (or
    `$TMPDIR/untether-<uid>/<inst8>/`), 0600 in 0700 folders whose owner and mode are verified; `<inst8>` hashes the
    instance's config path. Stale sockets of the same instance older than a minute with no listener are removed once
@@ -510,8 +620,8 @@ the bridge's `⚠️ The session ended before this message ran — please send i
 `PreInvocation` fires before every model call, so a model step (`agent_response`, `tool`, `subagent`, `finish`) with
 no `PreInvocation` before it means the hooks don't run: `antigravity.gate.not_running`, and steer is off for the run.
 Each parent-stream tool step must get its `PreToolUse` within 3 s (`antigravity.gate.tripwire`, INFO). Both stop the
-run only for a mode whose safety rests on the gate (phase 14; the final then says Telegram approvals weren't
-running). Duplicate `(conversationId, stepIdx)` requests are refused (`antigravity.gate.duplicate_request`, P-H15).
+run (ERROR, SIGTERM) only in [Ask me](#ask-me), whose safety rests on the gate: the final then says "Telegram
+approvals aren't running for this agy run …" or "… stopped responding during this agy run …". Duplicate `(conversationId, stepIdx)` requests are refused (`antigravity.gate.duplicate_request`, P-H15).
 `Stop` with `fullyIdle: false` changes the `⏳ background` block's last line to say agy has finished its turn and is
 waiting for background work (#1061).
 
@@ -738,9 +848,14 @@ Turn the block off with `[progress] show_background_tasks = false`.
 
 ## Known gaps
 
-- **No approval buttons or live sessions yet.** Ask me arrives in a later 0.36.1 release. Plan first has its own
-  Approve / Deny / Let's discuss card (see [Plan first](#plan-first)). Question buttons and steer need
+- **No live sessions.** Approval cards are Ask me's ([Ask me](#ask-me)); Plan first has its own Approve / Deny /
+  Let's discuss card (see [Plan first](#plan-first)). Approval cards, question buttons and steer need
   [Untether's agy gate](#untethers-agy-gate) on the host.
+- **Ask me is not offered in a project with agy config Untether doesn't manage** (other hook groups, `.agents/`
+  plugins, MCP servers or agents, user-level plugins or MCP servers). There is no "trust this config" option yet.
+- **Ask me's previews for `sed_file`, `notebook_edit`, web and MCP tools are generic** (their argument shapes are
+  unprobed, P-H13); `sed_file` and `notebook_edit` always ask.
+- **Full access has no log-only gate** (the diff rows phase 14 §7 describes); it never claimed gating.
 - **Subagents** appear as one action row for the spawn and one status-panel row each; their own steps, output,
   token use and failures aren't shown (agy doesn't put them in the parent's stream).
 - **Images.** A Telegram photo reaches agy as a saved file path, not as image input.
@@ -762,14 +877,16 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Workspace = edits in the project | `--mode=accept-edits` | No flag: writes outside temp folders are refused. `--sandbox`: shell is still soft-denied |
 | Workspace has no shell tool ([#1037](https://github.com/littlebearapps/untether/issues/1037)) | A custom agent's `tools:` list, chosen with `--agent`; its body is the system prompt | No per-run system prompt (no flag, env var or stream-json field). `permissions.allow` rules are global settings only, prefix-matched, and chained commands still match, so they are not a safe read-only list. An agent's `commandExecutionPolicy: sandbox` doesn't stop the soft-denial. `--add-dir` pointing at a folder with the agent moves agy's workspace there. A workspace `.agents/agents/` file works but writes into the user's repo (rejected, D20) |
 | The agent file on disk | — (custom: Untether writes one file under `~/.gemini/config/agents/`) | agy has no way to pass an agent definition per run; a plugin is the other documented place and arrives with the approval gate |
-| Telling the user to send `/new` after switching to or from Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
+| Telling the user to send `/new` after switching between Workspace / Plan first and Ask me / Full access | — (custom wording only, no state; R3-3 extended it to Ask me) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
 | A background task agy stopped itself reads as stopped | `tool_info.error` on the step's DONE ("context canceled") and `manage_task`'s `Action: kill` / `TaskId: <cid>/task-<step>`; the kill is also proof the command was in the background, so a kill sooner than the 5 s guess below still lists it | — (native). agy sends the kill's step DONE and the kill together, and a `system_message` notice right after (1.3.4; on 1.3.3 it came after the next tool). Checked 2026-10-13, agy 1.3.3 and 1.3.4, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
-| Telling a cron or webhook run's model it is unattended ([#1055](https://github.com/littlebearapps/untether/issues/1055)) | — (**custom**: one line Untether puts before the prompt of an unattended Workspace run, `utils/antigravity_agent.scheduled_run_note`) | agy has no per-run system prompt (no flag, env var or stream-json field) and one agent file serves every run, so the model can't tell a cron from a chat; with both routes in the agent file it gave the chat's in 2 of 2 live cron fires (rc4 QA). Not in the preamble, which `[preamble] enabled = false` turns off. Checked 2026-10-13, agy 1.3.4. Retire when agy takes a per-run system prompt |
+| Telling a cron or webhook run's model it is unattended ([#1055](https://github.com/littlebearapps/untether/issues/1055)) | — (**custom**: one line Untether puts before the prompt of an unattended Workspace run (and, #980, of a cron or webhook whose own `permission_mode` is `ask`: nobody can approve, so everything off the safe list is refused), `utils/antigravity_agent.scheduled_run_note`) | agy has no per-run system prompt (no flag, env var or stream-json field) and one agent file serves every run, so the model can't tell a cron from a chat; with both routes in the agent file it gave the chat's in 2 of 2 live cron fires (rc4 QA). Not in the preamble, which `[preamble] enabled = false` turns off. Checked 2026-10-13, agy 1.3.4. Retire when agy takes a per-run system prompt |
 | agy 1.3.4 (self-updated 2026-10-13) | — (no change needed) | `agy changelog` and `--help` re-read; the CLI drift suite is green and `PROBED_CLI_VERSION` is 1.3.4. Relevant changes: an unknown `--agent` name now ends a headless run (rc 1, `ERROR` result naming the available agents) instead of quietly running the default agent, so a missing Workspace agent fails closed (pinned by the drift suite); `--model` with a base model id and no `--effort` now runs at that model's default level, and `/effort --model=<base id>` answers with its levels instead of the 1.3.3 "requires --effort" refusal (Untether still reads either); model-request retries now wait at most 30 s. Stream events, flags and `manage_task` shapes unchanged. Checked 2026-10-13 |
 | Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Showing an answer held for background work | Partly native: with the gate, the `Stop` hook's `fullyIdle: false` says the model has finished its turn and agy is waiting (the `⏳ background` note says so); the text itself is a **gap** | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; `Stop` carries no text (and a timer can still start another model call, probe pb2). The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3/1.3.4, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
 | Questions in Telegram ([#980](https://github.com/littlebearapps/untether/issues/980)) | agy's own `ask_question` tool, answered through a `PreToolUse` hook (`deny` + a reason that carries the answer, E3); the hook is installed with `agy plugin install` | Partly **custom**: headless agy skips `ask_question` and has no answer channel but a hook. The hook command, socket and plugin files are Untether's. Checked 2026-10-13, agy 1.3.3/1.3.4 |
 | Steer into a running turn ([#981](https://github.com/littlebearapps/untether/issues/981)) | `PreInvocation` hook `injectSteps[].userMessage` | Partly **custom** (the queue and the socket). agy's own "Queued Messages: send immediately" is a global TUI setting (`queuedMessages` in `-p /config`), not per run, and its effect on stream-json input is unprobed; stdin `control_request` is refused (rc 2). Checked 2026-10-12, agy 1.3.3 |
+| Ask me approvals ([#980](https://github.com/littlebearapps/untether/issues/980)) | `--dangerously-skip-permissions` plus a `PreToolUse` hook answering `allow` / `deny` (`deny` reason shown to the model and not retried, E2); agy's default agent | Partly **custom**: the safe list, path rules, approval card, "always allow" grants and unattended policy are Untether's. agy has no headless approval prompt, and a hook `allow` can't grant a tool in agy's default mode (E1), so the gate needs the bypass flag; `ask` / `force_ask` are auto-approved under bypass, so they are never returned (D22.3). `permissionOverrides` is unprobed for persistence (P-H11) and never emitted. Checked 2026-10-13, agy 1.3.4 (live: approve, deny, timeout, always-allow, unattended deny, a subagent's call) |
+| User-level MCP servers in scope for Ask me | `agy mcp list` ("No MCP servers configured.") | The planted-config scan only stats `~/.gemini/config/mcp_config.json` (D33); an existing file says nothing about servers (lba-1 has an empty one). `-p /mcp` is refused in print mode, and `agy mcp list` doesn't list a project's `.agents/mcp_config.json` (that stays with the scan). Checked 2026-10-13, agy 1.3.4 |
 | Installing the gate's hooks | `agy plugin validate` / `install` / `uninstall` (R3-1) | A hand-dropped folder is loaded but not listed by `agy plugin list` and can't be enabled or disabled (P-H0) |
 | Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
 | When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 and 1.3.4 streams carry only `CommandLine` (the per-call value, 5000 / 10000 / 500 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. A `manage_task` kill naming the task also counts. Checked 2026-10-12, re-checked 2026-10-13 on agy 1.3.4. Retire when the stream prints the value or the approval gate's hook supplies it |
@@ -793,7 +910,8 @@ lets `--agent` change on a resume.
 [antigravity]
 model = "gemini-3.8-flash"     # optional; passed as --model=<id>
 cmd = "~/.local/bin/agy"       # optional; default: agy on PATH, then ~/.local/bin/agy
-permission_mode = "workspace"  # workspace (default) | plan | full; ask is refused for now
+permission_mode = "workspace"  # workspace (default) | ask | plan | full
+approval_timeout_s = 900       # optional; Ask me's approval wait, 60-3000 s, never longer than the plugin's
 ```
 
 See the [config reference](../../config.md#antigravity). Unknown keys are ignored.
@@ -810,9 +928,13 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `.superseded` / `.sidecar_missing` / `.unreadable` / `.decision` (`decision`, `path=resume`) / `.tap_refused` /
 `.cwd_changed`,
 `antigravity.gate.listening` (`token_len`) / `.closed` / `.precheck` / `.precheck_failed` (`reason`) / `.request`
-(`hook_event`, `tool`, `step`, `foreign`) / `.decision` (`decision`, `kind`) / `.not_running` / `.tripwire` /
-`.duplicate_request` / `.no_policy` / `.peer_refused` / `.token_refused` / `.plugin_changed` / `.socket_failed` /
-`.handler_failed`, `antigravity.steer.queued` / `.injected` / `.delivered` (`step`), `ask_question.shown` /
+(`hook_event`, `tool`, `step`, `child`, `foreign`) / `.decision` (`decision`, `kind`, `tool`, `source` =
+`policy` / `user` / `always` / `timeout` / `unattended` / `internal` / `rate`) / `.card` (`request_id`, `tool`, `why`)
+/ `.always_granted` (`command_sha`) / `.withdrawn` / `.user_mcp` / `.ambiguous_args` / `.policy_failed` /
+`.bypass_without_gate` / `.not_running` / `.tripwire` /
+`.duplicate_request` / `.peer_refused` / `.token_refused` / `.plugin_changed` / `.socket_failed` /
+`.handler_failed`, `antigravity.permission_mode.gate_refused` (`reason`), `antigravity.unattended_ask_downgraded`,
+`permission.unattended_deny` (`engine=antigravity`, `permission_mode=ask`), `antigravity.steer.queued` / `.injected` / `.delivered` (`step`), `ask_question.shown` /
 `.answered` / `.withdrawn` (`engine=antigravity`),
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
 (a command still running when the answer arrived), `antigravity.quota.fetched` / `.failed`,

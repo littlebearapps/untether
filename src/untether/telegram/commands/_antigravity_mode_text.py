@@ -5,9 +5,15 @@ Single source of truth for the labels, hints and button order used by
 label (``runners/antigravity.py`` imports it lazily). Mirrors
 ``_permission_mode_text.py`` for Claude.
 
-Honesty rules (REVIEW B2): Workspace is never called read-only or a sandbox;
-"Ask me" needs Untether's approval gate, so it shows as a ``· soon`` button
-that only answers a toast. "Plan first" is agy's own plan mode (#981).
+Honesty rules (REVIEW B2): Workspace is never called read-only or a sandbox.
+"Ask me" (#980) needs Untether's Telegram approvals on the host; until they
+are installed its button reads ``🔒 Ask me — set up`` and opens the status
+page instead of storing anything. "Plan first" is agy's own plan mode (#981).
+
+agy keeps a conversation on the agent it started with (D38), and the modes
+use two: Workspace and Plan first run Untether's no-shell agent, Ask me and
+Full access agy's default one. Moving between those two groups needs /new
+(:func:`needs_new`); moving within a group doesn't.
 """
 
 from __future__ import annotations
@@ -33,7 +39,6 @@ class AgyModeText:
     label: str  # footer / home label (lower case)
     button: str  # /config button text
     hint: str  # home-page micro description
-    available: bool  # False → greyed until the gate ships (rc3)
 
 
 # Keyed by the canonical (effective) value. ``None`` and unknown stored
@@ -43,25 +48,21 @@ ANTIGRAVITY_MODE_TEXT: dict[str, AgyModeText] = {
         label="workspace",
         button="Workspace",
         hint="edits files, no shell — not a sandbox",
-        available=True,
     ),
     "ask": AgyModeText(
         label="ask me",
         button="Ask me",
         hint="asks before shell, web, MCP",
-        available=False,
     ),
     "plan": AgyModeText(
         label="plan first",
         button="Plan first",
         hint="plans, waits for your OK",
-        available=True,
     ),
     "full": AgyModeText(
         label="full access",
         button="Full access",
         hint="all tools approved",
-        available=True,
     ),
 }
 
@@ -77,31 +78,53 @@ ANTIGRAVITY_PM_ACTIONS: dict[str, str] = {
 # Button rows, in order.
 BUTTON_ROWS: tuple[tuple[str, ...], ...] = (("agw", "agf"), ("aga", "agp"))
 
+# Modes whose conversations start on Untether's no-shell agent (D38); the
+# others (Ask me, Full access) start on agy's default agent.
+NO_SHELL_AGENT_MODES = frozenset({"workspace", "plan"})
+
 # #1037: agy keeps a conversation on the agent it started with, so a chat
 # that began in Workspace has no shell until a new conversation starts.
-FULL_ACCESS_TOAST = "Permission mode: full access — send /new to start using it"
-# #1060 / #981: one that began in Full access keeps its shell, which
-# Workspace then blocks and a plan turn reaches for. Workspace and Plan first
-# share the no-shell agent, so moving between those two needs no /new.
+# R3-3 (2026-10-12): the same goes for Ask me — tell the user, keep no state.
+FULL_ACCESS_TOAST = (
+    "Permission mode: full access — send /new if you're switching from"
+    " Workspace or Plan first"
+)
+ASK_TOAST = (
+    "Permission mode: ask me — send /new if you're switching from"
+    " Workspace or Plan first"
+)
+# #1060 / #981: one that began in Full access (or Ask me) keeps its shell,
+# which Workspace then blocks and a plan turn reaches for. Workspace and Plan
+# first share the no-shell agent, so moving between those two needs no /new.
 WORKSPACE_TOAST = (
-    "Permission mode: workspace — send /new if you're switching from Full access"
+    "Permission mode: workspace — send /new if you're switching from Full"
+    " access or Ask me"
 )
 PLAN_FIRST_TOAST = (
-    "Permission mode: plan first — send /new if you're switching from Full access"
+    "Permission mode: plan first — send /new if you're switching from Full"
+    " access or Ask me"
 )
-# ``/planmode`` (#981) when its change crosses Full access.
+# ``/planmode`` (#981) when its change crosses the two agent groups.
 NEW_NEEDED_TEXT = "send /new to start using it"
 # The agy page's own Clear override (``config:pm:agc``, #1060): the shared
-# ``clr`` toast is engine-blind, and clearing can switch to or from Full
-# access when untether.toml sets it.
+# ``clr`` toast is engine-blind, and clearing can cross the agent groups
+# when untether.toml sets a mode.
 CLEARED_TOAST = (
-    "Permission mode: cleared — send /new if this switched to or from Full access"
+    "Permission mode: cleared — send /new if this switched between Workspace /"
+    " Plan first and Ask me / Full access"
 )
 
-GATE_SOON_SUFFIX = " · soon"
-GATE_SOON_TOAST = (
-    "Needs Untether's Telegram approval gate — coming in a later 0.36.1 release"
-)
+# #980: Ask me with no Telegram approvals installed on the host.
+ASK_SETUP_BUTTON = "🔒 Ask me — set up"
+
+
+def needs_new(before: str | None, after: str | None) -> bool:
+    """Whether a switch from *before* to *after* (canonical or stored
+    values) only applies from the next new conversation: it crosses the
+    no-shell agent group and agy's default-agent group."""
+    return (canonical_mode(before) in NO_SHELL_AGENT_MODES) != (
+        canonical_mode(after) in NO_SHELL_AGENT_MODES
+    )
 
 
 def canonical_mode(value: str | None) -> str:
@@ -116,9 +139,13 @@ def antigravity_mode_label(value: str | None) -> str:
     return ANTIGRAVITY_MODE_TEXT[canonical_mode(value)].label
 
 
-def button_text(action: str) -> str:
-    mode = ANTIGRAVITY_MODE_TEXT[ANTIGRAVITY_PM_ACTIONS[action]]
-    return mode.button if mode.available else f"{mode.button}{GATE_SOON_SUFFIX}"
+def button_text(action: str, *, gate_ready: bool = True) -> str:
+    """The /config button. Ask me reads "🔒 Ask me — set up" while the host
+    has no Telegram approvals (the button then opens their status page)."""
+    mode_value = ANTIGRAVITY_PM_ACTIONS[action]
+    if mode_value == "ask" and not gate_ready:
+        return ASK_SETUP_BUTTON
+    return ANTIGRAVITY_MODE_TEXT[mode_value].button
 
 
 def source_suffix(source: ModeSource) -> str:

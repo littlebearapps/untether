@@ -226,9 +226,19 @@ Untether couldn't write its no-shell agent file, `~/.gemini/config/agents/unteth
 
 With `reason=project_agents`, the project defines its own agy agents or plugins (an `agents`, `agents.json`, `plugins` or `plugins.json` entry in one of its `.agents/` folders). agy picks agents by name, so Untether won't name its own agent in such a project, and Workspace runs there use agy's default agent: a shell attempt ends the turn with the blocked notice, as it did before the no-shell agent. `reason=project_unchecked` means the project's `.agents` is a symlink or couldn't be listed. `reason=user_agent` or `user_unchecked` means your own `~/.gemini/config/agents/` has a second `untether-workspace`, or something other than `agent.md` sits in Untether's folder there: remove it.
 
-### "Ask me needs Untether's approval gate"
+### Antigravity Ask me is refused
 
-Ask me isn't available yet. Pick Workspace, Plan first or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+Ask me needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host and checks it before every run; nothing runs when a check fails, and the reply says which:
+
+- **"aren't set up on this host"**: run `untether agy-gate install` on the host.
+- **"aren't ready for this project"**: run `untether agy-gate status --project <folder>`. Common causes: `agy plugin disable untether-gate` was run (`agy plugin enable untether-gate`), the plugin is from another Untether version (`untether agy-gate install`), or agy isn't signed in.
+- **"isn't available in this project"**: the project contains Untether's own code (the dev bot's own checkout, for example), or agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage. Those run their own commands without asking, so Ask me would promise something it can't keep. Use Workspace or Full access there, or remove that config.
+
+Cron and webhook runs only use Ask me when the cron itself sets `permission_mode = "ask"`; a chat's Ask me runs them as Workspace.
+
+### Antigravity Ask me: no card for a shell command
+
+If you switched a chat from Workspace or Plan first to Ask me, the conversation still runs on Untether's no-shell agent, so agy has no shell to ask about. Send `/new`. Switching between Ask me and Full access needs no `/new`.
 
 ### Antigravity Plan first: "This plan card has expired" or "A newer plan replaced this one"
 

@@ -121,37 +121,76 @@ clean start.
 
 ## Permission modes
 
-Headless agy can't stop mid-run to ask, so you choose the mode before the run: `/config` → **Permission mode**.
+Headless agy can't stop mid-run to ask by itself, so you choose the mode before the run: `/config` →
+**Permission mode**. **Ask me** adds approval buttons through Untether's own agy plugin.
 
 | Mode | What Antigravity can do |
 |---|---|
 | **Workspace** (default) | Read, create and edit files in the project. No shell, web, MCP or subagent tools |
 | **Full access** | Everything: every tool is approved, including shell commands, network access and files outside the project |
 | **Plan first** | Read the project and write a plan, changing nothing. You get **✅ Approve Plan / ❌ Deny / 💬 Let's discuss**; Approve carries the plan out in Workspace mode. Also `/planmode on` / `off` ([how it works](interactive-approval.md#antigravity-plan-first)) |
-| **Ask me** · soon | Not available yet. Approval buttons arrive in a later 0.36.1 release |
+| **Ask me** | Read and edit files inside the project on its own; ask you in Telegram, with the command or a diff, before shell commands, web, MCP, subagents, timers and files outside the project. Needs [Untether's agy plugin](#telegram-questions-and-steer) on the host ([more below](#ask-me)) |
 
-!!! warning "After switching to Full access, send `/new`"
-    agy keeps a conversation on the tools it started with. A conversation that began in **Workspace** keeps its
-    no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`.
+!!! warning "After switching to Full access or Ask me, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in **Workspace** (or **Plan
+    first**) keeps its no-shell tools after you switch the chat to **Full access** or **Ask me**, even though the
+    footer says `full access` / `ask me` — so in Ask me it has no shell to ask you about.
 
-    **Send `/new`, then your message.** Full access applies from the next new conversation. The `/config` toast says
-    the same: `Permission mode: full access — send /new to start using it`.
+    **Send `/new`, then your message.** The new mode applies from the next new conversation. The `/config` toast
+    says the same: `Permission mode: ask me — send /new if you're switching from Workspace or Plan first`.
 
 **Switching back to Workspace needs `/new` too.** A conversation that began in Full access keeps its shell tool after
 you switch to Workspace. When it reaches for the shell, Workspace blocks it and the turn ends on a ⚠️ notice that
-says to send `/new` (or pick Full access again). The same goes for Full access → Plan first. The toasts say so:
-`Permission mode: workspace — send /new if you're switching from Full access` (and the same for plan first), and
-**Clear override** says `Permission mode: cleared — send /new if this switched to or from Full access`. Moving
-between Workspace and Plan first needs no `/new`: both use the same no-shell tools.
+says to send `/new` (or pick Full access again). The same goes for Ask me → Workspace and for either → Plan first.
+The toasts say so: `Permission mode: workspace — send /new if you're switching from Full access or Ask me` (and the
+same for plan first), and **Clear override** says `Permission mode: cleared — send /new if this switched between
+Workspace / Plan first and Ask me / Full access`. Moving between Workspace and Plan first, or between Ask me and Full
+access, needs no `/new`: each pair uses the same tools.
 
-<!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access, the "· soon" modes and the "send /new" warning line -->
+<!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access / Ask me / Plan first and the "send /new" warning line -->
 <!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
 
-<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new to start using it" -->
+<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first" -->
 <!-- <img src="../assets/screenshots/antigravity-full-access-toast.jpg" alt="Toast after picking Full access telling you to send /new" width="360" loading="lazy" /> -->
 
 To set a default for every Antigravity chat, use `permission_mode` under `[antigravity]`
 (see [Configuration](#configuration)). A chat's own `/config` choice wins over it.
+
+### Ask me
+
+Ask me ([#980](https://github.com/littlebearapps/untether/issues/980)) is Antigravity's equivalent of Claude Code's
+approval buttons. agy runs with all its tools, and Untether's agy plugin holds each tool call until Untether answers:
+
+- **Runs on its own:** reading, listing and searching files inside the project; creating and editing files there
+  (and agy's own notes for the conversation).
+- **Asks you first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents, timers, files
+  outside the project, and protected files inside it (`.agents/`, `.git/`, `.claude/`, `.github/workflows/`,
+  `.env` files, keys, `CLAUDE.md`, `AGENTS.md` and similar files other tools run or read as instructions). So does
+  any tool agy adds that Untether doesn't know yet.
+
+The card shows what would run: `$ git status` with its folder for a shell command (and a warning when it would start
+a daemon that keeps running after the turn), the lines added and removed for an edit, each subagent's task for a
+subagent. agy's own one-line description comes last as `agy says: …`. Tap **✅ Approve** or **❌ Deny**; for a shell
+command, **✅ Always allow this command here** lets that exact command (in that folder) run without asking for the
+rest of the conversation. A Deny, or no answer within 15 minutes, blocks the tool and agy is told not to retry it;
+the row reads `blocked: denied in Telegram`. A subagent's own tool calls ask too, labelled with the subagent's role.
+
+<!-- TODO: capture screenshot: antigravity-ask-me-card — an Ask me approval card for `$ git status` with Approve / Deny / Always allow this command here -->
+<!-- <img src="../assets/screenshots/antigravity-ask-me-card.jpg" alt="Antigravity Ask me approval card for a shell command" width="360" loading="lazy" /> -->
+
+Ask me needs [Untether's agy plugin](#telegram-questions-and-steer) on the host. Until it is installed, the button
+reads **🔒 Ask me — set up** and opens the plugin's status page. Untether checks the plugin before every Ask me run and
+**refuses the run** (nothing starts) when:
+
+- the plugin isn't installed, is disabled (`agy plugin disable`), was edited, or agy doesn't load it for the project;
+- the project contains Untether's own code (for example a checkout of Untether itself), which agy could edit to
+  switch approvals off;
+- agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage (in the project's `.agents/`
+  folder or your own `~/.gemini/config/`). They run their own commands without asking, so Ask me can't promise to
+  ask. An empty `mcp_config.json` is fine: Untether asks agy (`agy mcp list`) whether any server is configured.
+
+Workspace and Full access still work in those projects. To shorten the wait for an answer, set
+`approval_timeout_s` under `[antigravity]` (60 s or more, never longer than the plugin's own wait).
 
 ### What Workspace can and can't do
 
@@ -207,9 +246,10 @@ With **Untether's agy plugin** installed on the host, an Antigravity run can:
   `↪️ steer received: …`. If the run ends before agy takes another step, you get
   `⚠️ The session ended before this message ran — please send it again.`
 
-It works in every permission mode (Workspace, Plan first and Full access); nothing about what agy may do changes.
-Without the plugin, Antigravity works as before: questions are skipped (agy carries on with its own default) and
-follow-ups queue.
+It works in every permission mode; in Workspace, Plan first and Full access nothing about what agy may do
+changes. **Ask me** needs it: the plugin is what holds each tool call for your approval. Without the plugin,
+Antigravity works as before: questions are skipped (agy carries on with its own default), follow-ups queue, and Ask
+me is refused.
 
 **Install it on the host** (not from Telegram — it is shared by every agy on that machine):
 
@@ -282,8 +322,11 @@ Sample output: [Cost budgets → Antigravity](cost-budgets.md#antigravity).
 
 Cron and webhook runs work with Antigravity, with three rules that differ from chat:
 
-- **They never inherit Full access.** A cron gets it only from its own `permission_mode = "full"`. A webhook run
-  never does. Otherwise the run is Workspace, whatever the chat or `untether.toml` says.
+- **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode`
+  (`"full"` or `"ask"`). A webhook run never gets Full access. Otherwise the run is Workspace, whatever the chat or
+  `untether.toml` says. A cron with `permission_mode = "ask"` has nobody to tap Approve: reads and in-project edits
+  run, everything that would ask is denied at once, and the answer ends with a `🔒 unattended … nobody to approve`
+  footer.
 - **They are held when the project's agy config changed** since someone last ran Antigravity in that chat (next
   section). The next message someone sends in the chat runs with the changed config and shows what changed in
   a ⚠️ row; the schedule runs again after that. An `/at` or `/loop` run doesn't release it. Check the files the
@@ -327,9 +370,8 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 
 ## Not supported yet
 
-- Per-tool approval buttons (**Ask me** arrives in a later 0.36.1 release). **Plan first** works: plans are
-  answered with buttons after the plan turn ends. Question buttons and `/steer` work with
-  [Untether's agy plugin](#telegram-questions-and-steer).
+- Ask me in a project with agy config Untether doesn't manage: there is no "trust this config" option yet.
+  Approval buttons (**Ask me**), question buttons and `/steer` need [Untether's agy plugin](#telegram-questions-and-steer).
 - Live sessions: each message is its own agy run (a steer goes into the run that is in flight).
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: each subagent gets a row in the `⏳ background` block, but its own steps, output and token use
@@ -355,7 +397,7 @@ is listed in the [error reference](../reference/errors.md#antigravity-messages).
 
 ## Configuration
 
-All three keys are optional.
+All four keys are optional.
 
 === "untether config"
 
@@ -370,7 +412,8 @@ All three keys are optional.
     [antigravity]
     model = "gemini-3.8-flash"     # passed to agy as the model; ids from `agy models`
     cmd = "~/.local/bin/agy"       # default: agy on PATH, then ~/.local/bin/agy
-    permission_mode = "workspace"  # workspace (default) | full
+    permission_mode = "workspace"  # workspace (default) | ask | plan | full
+    approval_timeout_s = 900       # Ask me: how long a card waits (60 s or more)
     ```
 
 `permission_mode = "full"` makes Full access the default for every Antigravity chat that hasn't picked a mode.

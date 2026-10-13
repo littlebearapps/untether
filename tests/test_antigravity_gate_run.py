@@ -364,3 +364,243 @@ async def test_forged_manifest_still_counts_as_changed(
     finally:
         reset_run_options(token)
     assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
+
+
+# ── Ask me (#980, phase 14) ─────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_ask_me_run_end_to_end_allow_and_deny(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live-run replay under the bypass flag: Approve lets `echo allowme`
+    run, Deny blocks `echo denyme` with agy's hook error, the in-project
+    write passes on the safe list with no card, and the write outside the
+    project asks (denied here)."""
+    from untether.interactive import Decision, respond
+    from untether.runners.run_options import reset_run_options
+
+    (project / "README.md").write_text("hello\n")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    events: list[Any] = []
+    cards: list[ActionEvent] = []
+    token = set_run_options(EngineRunOptions(permission_mode="ask"))
+    try:
+        with structlog.testing.capture_logs() as logs:
+            async with anyio.create_task_group() as tg:
+                async for evt in _runner().run("do the four steps", None):
+                    events.append(evt)
+                    if (
+                        isinstance(evt, ActionEvent)
+                        and evt.phase == "started"
+                        and evt.action.detail.get("request_type") == "PreToolUse"
+                    ):
+                        cards.append(evt)
+                        approved = "echo allowme" in evt.action.title
+                        tg.start_soon(
+                            respond,
+                            evt.action.detail["request_id"],
+                            Decision(
+                                approved=approved,
+                                action="approve" if approved else "deny",
+                            ),
+                        )
+    finally:
+        reset_run_options(token)
+    done = _contract(events)
+    assert done.ok
+    # Bypass only after the gate precheck passed, and the default agent.
+    argv = json.loads(gate_env["record"].read_text())["argv"]
+    assert agy.BYPASS_FLAG in argv
+    assert not [a for a in argv if a.startswith(("--agent", "--mode"))]
+    names = [log["event"] for log in logs]
+    assert names.index("antigravity.gate.precheck") < names.index("runner.start")
+    # Three cards: the two shell commands and the write outside the project.
+    titles = [c.action.title for c in cards]
+    assert len(cards) == 3, titles
+    assert titles[0].startswith(
+        "Permission Request [agy] - shell command\n$ `echo allowme`"
+    )
+    assert "write a file (outside this project)" in titles[2]
+    assert "+ outside" in titles[2]
+    # Approve / Deny / Always for a shell command; no Always for a write.
+    buttons = cards[0].action.detail["inline_keyboard"]["buttons"]
+    assert [b["callback_data"].split(":")[1] for row in buttons for b in row] == [
+        "approve",
+        "deny",
+        "always",
+    ]
+    assert len(cards[2].action.detail["inline_keyboard"]["buttons"]) == 1
+    # How the steps ended.
+    rows = {
+        e.action.title: e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.id.startswith("step-")
+    }
+    assert rows["echo allowme"].ok is True
+    assert rows["echo denyme"].ok is False
+    assert rows["echo denyme"].message == "blocked: denied in Telegram"
+    assert rows["README.md"].ok is True
+    hook_outs = [
+        json.loads(h["out"])
+        for h in _hook_log(gate_env["log"])
+        if h["event"] == "PreToolUse"
+    ]
+    assert [o["decision"] for o in hook_outs] == ["allow", "deny", "allow", "deny"]
+    assert "Don't retry the same call" in hook_outs[1]["reason"]
+    decisions = [
+        (log["tool"], log["decision"], log["source"])
+        for log in logs
+        if log["event"] == "antigravity.gate.decision"
+    ]
+    assert decisions == [
+        ("run_command", "allow", "user"),
+        ("run_command", "deny", "user"),
+        ("write_to_file", "allow", "policy"),
+        ("write_to_file", "deny", "user"),
+    ]
+    # The gate was required (tripwire / liveness enforced) and never fired.
+    listening = next(
+        log for log in logs if log["event"] == "antigravity.gate.listening"
+    )
+    assert listening["required"] is True
+    assert "antigravity.gate.tripwire" not in names
+    assert "antigravity.gate.not_running" not in names
+    assert gate_server._RUNS == {}
+
+
+@pytest.mark.anyio
+async def test_ask_me_unattended_trigger_denies_without_cards(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#835 parity: a cron whose own permission_mode is `ask` runs gated;
+    nothing waits for a tap — every tool off the safe list is denied at once
+    and counted for the 🔒 footer."""
+    from untether.runners.run_options import reset_run_options
+
+    (project / "README.md").write_text("hello\n")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    token = set_run_options(
+        EngineRunOptions(
+            permission_mode="ask",
+            unattended_trigger="cron:nightly",
+            trigger_permission_mode="ask",
+        )
+    )
+    try:
+        with structlog.testing.capture_logs() as logs:
+            events = [evt async for evt in _runner().run("go", None)]
+    finally:
+        reset_run_options(token)
+    done = _contract(events)
+    assert done.ok
+    assert not [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.detail.get("request_type")
+    ]
+    notes = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.title.startswith("🔒 Unattended run")
+    ]
+    assert len(notes) == 1
+    unattended = done.usage["unattended"]
+    assert unattended["trigger"] == "cron:nightly"
+    assert unattended["mode"] == "ask"
+    assert unattended["denied"] == {"shell command": 2, "write a file": 1}
+    assert "permission_mode" in unattended["hint"]
+    denials = [log for log in logs if log["event"] == "permission.unattended_deny"]
+    assert len(denials) == 3 and denials[0]["engine"] == "antigravity"
+    argv = json.loads(gate_env["record"].read_text())["argv"]
+    assert agy.BYPASS_FLAG in argv
+
+
+@pytest.mark.anyio
+async def test_ask_me_chat_mode_never_reaches_a_cron(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW M3: a chat's Ask me doesn't give a cron the bypass flag — the
+    cron runs as Workspace."""
+    from untether.runners.run_options import reset_run_options
+
+    agy._reset_permission_warnings()  # the downgrade warning is once per trigger
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    token = set_run_options(
+        EngineRunOptions(permission_mode="ask", unattended_trigger="cron:nightly")
+    )
+    try:
+        with structlog.testing.capture_logs() as logs:
+            events = [evt async for evt in _runner().run("go", None)]
+    finally:
+        reset_run_options(token)
+    assert _contract(events).ok
+    argv = json.loads(gate_env["record"].read_text())["argv"]
+    assert agy.BYPASS_FLAG not in argv
+    assert "--mode=accept-edits" in argv
+    assert [
+        log for log in logs if log["event"] == "antigravity.unattended_ask_downgraded"
+    ]
+
+
+@pytest.mark.anyio
+async def test_ask_me_refused_when_precheck_fails(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agy plugin disable untether-gate` (agy lists the group disabled):
+    Ask me is refused before spawn with the repair hint — never run as
+    something else (REVIEW-2 M17)."""
+    from untether.runners.run_options import reset_run_options
+
+    async def disabled(runner: Any, cwd: Path) -> dict[str, Any]:
+        return hooks_listing(enabled=False)
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", disabled)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    token = set_run_options(EngineRunOptions(permission_mode="ask"))
+    try:
+        events = [evt async for evt in _runner().run("go", None)]
+    finally:
+        reset_run_options(token)
+    (done,) = events
+    assert isinstance(done, CompletedEvent) and not done.ok
+    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_NOT_READY_BLOCK}
+    assert "agy plugin enable untether-gate" in (done.error or "")
+    assert not gate_env["record"].exists()
+
+
+@pytest.mark.anyio
+async def test_ask_me_refused_with_foreign_hook_group(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-2 B2: another hook group agy loads for the project runs shell
+    outside the gate, so Ask me refuses (Workspace would run, with a ⚠️)."""
+    from untether.runners.run_options import reset_run_options
+
+    extra = {
+        "name": "planted",
+        "enabled": True,
+        "source": ".agents/hooks.json",
+        "actions": [
+            {"event": "PreToolUse", "matcher": "*", "type": "command", "command": "x"}
+        ],
+    }
+
+    async def listing(runner: Any, cwd: Path) -> dict[str, Any]:
+        return hooks_listing(extra_groups=[extra])
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    token = set_run_options(EngineRunOptions(permission_mode="ask"))
+    try:
+        events = [evt async for evt in _runner().run("go", None)]
+    finally:
+        reset_run_options(token)
+    (done,) = events
+    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    assert ".agents/hooks.json" in (done.error or "")
+    assert not gate_env["record"].exists()

@@ -196,9 +196,10 @@ async def _handle_antigravity(ctx: CommandContext, config_path) -> CommandResult
             prefs, chat_id, ctx.runtime
         )
         mode = agy_mode.ANTIGRAVITY_MODE_TEXT[agy_mode.canonical_mode(value)]
-        if (before == "full") != (agy_mode.canonical_mode(value) == "full"):
-            # #1060: a conversation keeps the tools it started with, so a
-            # switch to or from Full access applies from the next new one.
+        if agy_mode.needs_new(before, value):
+            # #1060 / #980: a conversation keeps the tools it started with,
+            # so a switch to or from Full access or Ask me applies from the
+            # next new one.
             prefix = prefix.replace(
                 "applies from your next message", agy_mode.NEW_NEEDED_TEXT
             ).replace(

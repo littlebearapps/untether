@@ -58,7 +58,10 @@ def install_cmd(
     wait_s: int = typer.Option(
         gate_plugin.DEFAULT_WAIT_S,
         "--wait-s",
-        help="How long a question waits for an answer in Telegram (seconds).",
+        help=(
+            "How long a question or an Ask me approval waits for an answer in"
+            " Telegram (seconds)."
+        ),
     ),
     force: bool = typer.Option(
         False,
@@ -132,7 +135,7 @@ def status_cmd(
     if state.present:
         manifest = state.manifest or {}
         typer.echo(f"Installed by Untether: {manifest.get('untether_version', '—')}")
-        typer.echo(f"Question wait: {state.wait_s or '—'} s")
+        typer.echo(f"Approval and question wait: {state.wait_s or '—'} s")
         for name, status in sorted(state.files.items()):
             typer.echo(f"  {name}: {status}")
     ok = state.ready

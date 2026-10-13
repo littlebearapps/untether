@@ -1076,13 +1076,18 @@ class TestAntigravityPermissionPage:
             text
         )
         # #1037: Workspace has no shell tool, so no allow-rule tip; the
-        # page says a switch either way needs /new (#1060).
+        # page says a switch across the two agent groups needs /new (#1060,
+        # #980 R3-3).
         assert "command(git status)" not in text
-        assert "After switching to or from Full access, send /new." in text.replace(
-            "</b>", ""
+        assert (
+            "After switching between Workspace / Plan first and Ask me / Full"
+            " access, send /new." in text.replace("</b>", "")
         )
-        assert "one that started in Full access keeps reaching for it" in text
-        assert "Switching between Workspace and Plan first" in text
+        assert "started in Ask me or Full access keeps reaching for it" in text
+        assert "(Workspace ↔ Plan first, Ask me ↔ Full access)" in text
+        # #980: Ask me is real now, and says what it asks about.
+        assert "coming soon" not in text
+        assert "asks you in Telegram (with the command or a diff)" in text
         # #981: Plan first is live and says what Approve does.
         assert "Approve / Deny / Let's discuss" in text
         assert "coming soon: needs the gate)" not in text.split("Plan first")[1]
@@ -1092,7 +1097,8 @@ class TestAntigravityPermissionPage:
         assert labels == [
             "✓ Workspace",
             "Full access",
-            "Ask me · soon",
+            # #980: no Telegram approvals on this (test) host.
+            "🔒 Ask me — set up",
             "Plan first",
             "🔐 Telegram approvals",  # #980: the read-only gate status page
             "Clear override",
@@ -1101,7 +1107,7 @@ class TestAntigravityPermissionPage:
         assert _buttons_data(msg) == [
             "config:pm:agw",
             "config:pm:agf",
-            "config:pm:aga",
+            "config:gt",  # set-up button opens the status page
             "config:pm:agp",
             "config:gt",
             "config:pm:agc",
@@ -1129,13 +1135,24 @@ class TestAntigravityPermissionPage:
         await cmd.handle(self._ctx(tmp_path, "agc"))
         override = await self._override(tmp_path)
         assert override is None or override.permission_mode is None
-        # Ask me still needs the gate: the "· soon" button stores nothing.
-        ctx = self._ctx(tmp_path, "aga")
-        await cmd.handle(ctx)
-        override = await self._override(tmp_path)
-        assert override is None or override.permission_mode is None
-        ctx.executor.edit.assert_not_called()
-        ctx.executor.send.assert_not_called()
+        # #980: Ask me is stored like any other mode (a run on a host with
+        # no Telegram approvals is refused with the install hint).
+        await cmd.handle(self._ctx(tmp_path, "aga"))
+        assert (await self._override(tmp_path)).permission_mode == "ask"
+
+    @pytest.mark.anyio
+    async def test_antigravity_ask_me_button_when_gate_installed(self, tmp_path):
+        """#980: with the plugin installed, Ask me is a plain setter button."""
+        from tests.antigravity_gate_support import install_plugin
+
+        install_plugin()
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        labels = _buttons_labels(msg)
+        data = _buttons_data(msg)
+        assert labels[2] == "Ask me"
+        assert data[2] == "config:pm:aga"
 
     @pytest.mark.anyio
     async def test_antigravity_pm_setter_keeps_loop_override(self, tmp_path):
@@ -1203,29 +1220,31 @@ class TestAntigravityPermissionPage:
 
     def test_antigravity_toast_labels_present(self):
         toast = ConfigCommand.early_answer_toast
-        # #1060 / #981: a conversation keeps the tools it started with, so a
-        # switch to or from Full access needs /new; Workspace ↔ Plan first
-        # share the no-shell agent.
+        # #1060 / #981 / #980 (R3-3): a conversation keeps the tools it
+        # started with, so a switch across Workspace / Plan first (no-shell
+        # agent) and Ask me / Full access (agy's default agent) needs /new.
         assert toast("pm:agw") == (
             "Permission mode: workspace — send /new if you're switching from Full"
-            " access"
+            " access or Ask me"
         )
         assert toast("pm:agp") == (
             "Permission mode: plan first — send /new if you're switching from Full"
-            " access"
+            " access or Ask me"
         )
         assert toast("pm:agf") == (
-            "Permission mode: full access — send /new to start using it"
+            "Permission mode: full access — send /new if you're switching from"
+            " Workspace or Plan first"
+        )
+        assert toast("pm:aga") == (
+            "Permission mode: ask me — send /new if you're switching from"
+            " Workspace or Plan first"
         )
         assert toast("pm:agc") == (
-            "Permission mode: cleared — send /new if this switched to or from Full"
-            " access"
+            "Permission mode: cleared — send /new if this switched between"
+            " Workspace / Plan first and Ask me / Full access"
         )
         # The shared Clear toast other engines use is unchanged.
         assert toast("pm:clr") == "Permission mode: cleared"
-        assert toast("pm:aga") == (
-            "Needs Untether's Telegram approval gate — coming in a later 0.36.1 release"
-        )
 
     @pytest.mark.anyio
     async def test_gemini_permission_page_unchanged(self, tmp_path):

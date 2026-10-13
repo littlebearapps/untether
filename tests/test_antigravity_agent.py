@@ -132,6 +132,45 @@ def test_unattended_workspace_prompt_says_it_is_scheduled() -> None:
         assert _sent_prompt(options) == "run ls -la", options
 
 
+def test_unattended_ask_me_prompt_says_nobody_approves() -> None:
+    """#980: a cron whose own permission_mode is ``ask`` is told up front
+    that everything needing a tap is refused; a chat's Ask me on a cron runs
+    as Workspace and gets the Workspace line."""
+    import json
+
+    from untether.antigravity.gate_server import GateRun
+    from untether.events import EventFactory
+    from untether.runners.antigravity import GateFacts, decide_antigravity_mode
+
+    runner = AntigravityRunner()
+    options = EngineRunOptions(
+        permission_mode="ask",
+        trigger_permission_mode="ask",
+        unattended_trigger="cron:nightly",
+    )
+    with apply_run_options(options):
+        state = runner.new_state("run ls -la", None)
+        # What run_impl hands over when the gate is ready.
+        state.decision = decide_antigravity_mode(
+            "ask", GateFacts(installed=True, listening=True)
+        )
+        state.gate = GateRun(
+            config_path=None, factory=EventFactory("antigravity"), required=True
+        )
+        runner.build_args("run ls -la", None, state=state)
+        raw = runner.stdin_payload("run ls -la", None, state=state)
+    assert raw is not None
+    trigger_ask = json.loads(raw)["message"]["content"]
+    assert trigger_ask.startswith("[Untether] This is a scheduled cron run")
+    assert "It runs in Ask me mode" in trigger_ask
+    assert "shell commands, web, MCP tools, subagents" in trigger_ask
+    inherited = _sent_prompt(
+        EngineRunOptions(permission_mode="ask", unattended_trigger="cron:nightly")
+    )
+    assert "It runs in Workspace mode" in inherited
+    assert _sent_prompt(EngineRunOptions(permission_mode="ask")) == "run ls -la"
+
+
 def test_upgrade_rewrites_the_old_agent_without_a_hold(project: Path) -> None:
     """An rc3 copy on disk is replaced on the next Workspace run, and neither
     copy is ever in the planted-config digest (#1043's exact-path exemption)."""

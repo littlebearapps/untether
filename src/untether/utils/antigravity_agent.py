@@ -99,10 +99,28 @@ _SCHEDULED_WEBHOOK = (
 )
 
 
+# #980: a trigger whose own ``permission_mode`` is ``ask`` runs Ask me with
+# nobody to approve: the gate refuses everything off its safe list at once.
+# Said up front so the model doesn't spend the run on refused calls.
+_SCHEDULED_ASK = (
+    "[Untether] This is a scheduled {kind} run, not a chat: nobody is "
+    "reading along to approve anything. It runs in Ask me mode, so it can "
+    "read and edit files in this project, but shell commands, web, MCP "
+    "tools, subagents and files outside the project are refused. If the "
+    "task needs any of that, do the part you can and say what was left."
+)
+
+
 def scheduled_run_note(trigger: str | None, mode: str | None) -> str | None:
-    """#1055: the line an unattended Workspace run's prompt starts with, or
-    None (a chat run, Full access, Plan first)."""
-    if mode != "workspace" or not trigger:
+    """#1055: the line an unattended Workspace (or trigger-level Ask me,
+    #980) run's prompt starts with, or None (a chat run, Full access, Plan
+    first)."""
+    if not trigger or not trigger.startswith(("cron:", "webhook:")):
+        return None
+    kind = "cron" if trigger.startswith("cron:") else "webhook"
+    if mode == "ask":
+        return _SCHEDULED_ASK.format(kind=kind)
+    if mode != "workspace":
         return None
     if trigger.startswith("cron:"):
         return _SCHEDULED_HEAD.format(kind="cron") + _SCHEDULED_CRON

@@ -1662,7 +1662,18 @@ async def test_1047_other_prespawn_blocks_keep_the_error_card(
 
 
 @pytest.mark.anyio
-async def test_1047_continue_refusal_is_plain_on_the_bridge() -> None:
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "continue_unresolved",
+        # #980: Ask me refused because Telegram approvals aren't ready.
+        "gate_missing",
+        "gate_not_ready",
+        "gate_foreign_config",
+        "gate_self_protect",
+    ],
+)
+async def test_1047_continue_refusal_is_plain_on_the_bridge(blocked: str) -> None:
     """The bridge side of #1047, engine-neutral: the reason alone decides."""
     from structlog.testing import capture_logs
 
@@ -1671,7 +1682,7 @@ async def test_1047_continue_refusal_is_plain_on_the_bridge() -> None:
         [
             ErrorReturn(
                 error="No conversation yet.",
-                usage={"prespawn_blocked": "continue_unresolved"},
+                usage={"prespawn_blocked": blocked},
             )
         ],
         engine="antigravity",
@@ -1690,7 +1701,7 @@ async def test_1047_continue_refusal_is_plain_on_the_bridge() -> None:
     assert final["options"].replace == progress["ref"]
     (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
     assert summary["log_level"] == "info"
-    assert summary["prespawn_blocked"] == "continue_unresolved"
+    assert summary["prespawn_blocked"] == blocked
 
 
 @pytest.mark.anyio

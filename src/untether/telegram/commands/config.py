@@ -712,15 +712,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Antigravity permission mode actions (#558, D21) ---
     if engine == "antigravity" and action in agy_mode.ANTIGRAVITY_PM_ACTIONS:
         mode_value = agy_mode.ANTIGRAVITY_PM_ACTIONS[action]
-        if not agy_mode.ANTIGRAVITY_MODE_TEXT[mode_value].available:
-            # "· soon" button: the early-answer toast explains; store nothing.
-            logger.info(
-                "config.antigravity_permission_mode.unavailable",
-                chat_id=chat_id,
-                sender_id=ctx.message.sender_id,
-                mode=action,
-            )
-            return
+        # Ask me is stored even when the host has no Telegram approvals yet
+        # (a typed `/config pm:aga`): the run is then refused with the
+        # install hint, never run as something else (#980).
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=mode_value)
         await prefs.set_engine_override(chat_id, engine, updated)
@@ -896,8 +890,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " folders); it has no shell, web or MCP tools. Not a"
             " sandbox: a run can still write files that later runs or tools"
             " execute (default)",
-            "• <b>Ask me</b> — asks you in Telegram before shell, web and MCP"
-            " calls (coming soon: needs Untether's approval gate)",
+            "• <b>Ask me</b> — reads and edits files in this project on its"
+            " own, and asks you in Telegram (with the command or a diff)"
+            " before shell commands, web, MCP, subagents and files outside"
+            " the project. A Deny, or no answer in 15 min, blocks the tool."
+            " Needs Telegram approvals on the host (🔐 below). Cron and"
+            " webhook runs only get it when the cron itself sets it",
             "• <b>Plan first</b> — writes a plan and changes nothing; the plan"
             " is posted with Approve / Deny / Let's discuss, and Approve"
             " carries it out in Workspace mode. Scheduled runs only post"
@@ -907,27 +905,38 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " --dangerously-skip-permissions). Cron and webhook runs only get"
             " this when the cron itself sets it",
             "",
-            "⚠️ <b>After switching to or from Full access, send /new.</b> A"
-            " conversation keeps the tools it started with: one that started"
-            " in Workspace or Plan first has no shell, and one that started in"
-            " Full access keeps reaching for it, which Workspace and Plan"
-            " first then block. The new mode applies from the next new"
-            " conversation. Switching between Workspace and Plan first, and"
-            " other changes, apply from your next message.",
+            "⚠️ <b>After switching between Workspace / Plan first and Ask me"
+            " / Full access, send /new.</b> A conversation keeps the tools it"
+            " started with: one that started in Workspace or Plan first has"
+            " no shell (so Ask me would have nothing to ask about), and one"
+            " that started in Ask me or Full access keeps reaching for it,"
+            " which Workspace and Plan first then block. The new mode applies"
+            " from the next new conversation. Switching within a pair"
+            " (Workspace ↔ Plan first, Ask me ↔ Full access) applies from"
+            " your next message.",
             "",
             f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
             "",
             _learn_more("interactive-approval", "antigravity-cli--permission-mode"),
         ]
+        from ...antigravity import gate_plugin
+
+        # #980: no Telegram approvals on the host → "🔒 Ask me — set up",
+        # which opens their status page (install is a host command).
+        gate_ready = await anyio.to_thread.run_sync(gate_plugin.installed_ready)
         buttons = [
             [
                 {
                     "text": _check(
-                        agy_mode.button_text(action_id),
+                        agy_mode.button_text(action_id, gate_ready=gate_ready),
                         active=active_mode
                         == agy_mode.ANTIGRAVITY_PM_ACTIONS[action_id],
                     ),
-                    "callback_data": f"config:pm:{action_id}",
+                    "callback_data": (
+                        "config:gt"
+                        if action_id == "aga" and not gate_ready
+                        else f"config:pm:{action_id}"
+                    ),
                 }
                 for action_id in row
             ]
@@ -1943,13 +1952,15 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
         "<b>🔐 Telegram approvals</b> <i>(Antigravity)</i>",
         "",
         "Untether's agy plugin lets an Antigravity run ask you questions"
-        " (buttons here, or reply with text) and take a message while it"
-        " works (Follow-up: steer). It only acts on agy runs Untether starts.",
+        " (buttons here, or reply with text), take a message while it works"
+        " (Follow-up: steer) and, in <b>Ask me</b> mode, ask before shell"
+        " commands, web, MCP and files outside the project. It only acts on"
+        " agy runs Untether starts.",
         "",
         f"Plugin: <b>{html.escape(install.summary())}</b>",
     ]
     if install.present:
-        lines.append(f"Question wait: <b>{install.wait_s or '—'} s</b>")
+        lines.append(f"Approval and question wait: <b>{install.wait_s or '—'} s</b>")
     if cwd is None:
         lines.append("This chat: <i>no project folder</i>")
     elif latest is None:
@@ -2694,8 +2705,7 @@ _ON_OFF_CLR = frozenset({"on", "off", "clr"})
 
 _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
     # Permission / approval mode for every engine, incl. Antigravity Full
-    # access (`agf`). The "· soon" Antigravity modes store nothing today but
-    # are gated with the rest so they are already covered when they ship.
+    # access (`agf`) and Ask me (`aga`, #980).
     "pm": frozenset(
         {
             *_PM_MODES,
@@ -2802,13 +2812,14 @@ class ConfigCommand:
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
-                # #558: Antigravity (the "· soon" modes store nothing).
-                # #1037 / #1060: a conversation keeps the agent it started
-                # with, so either switch needs /new.
+                # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
+                # conversation keeps the agent it started with, so a switch
+                # across Workspace / Plan first ↔ Ask me / Full access
+                # needs /new.
                 "agw": agy_mode.WORKSPACE_TOAST,
                 "agf": agy_mode.FULL_ACCESS_TOAST,
                 "agc": agy_mode.CLEARED_TOAST,
-                "aga": agy_mode.GATE_SOON_TOAST,
+                "aga": agy_mode.ASK_TOAST,
                 "agp": agy_mode.PLAN_FIRST_TOAST,
             },
             "vb": {
