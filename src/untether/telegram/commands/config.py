@@ -750,7 +750,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         return
 
     # --- Clear (all engines; ``agc`` is the agy page's own, #1060) ---
-    if action == "clr" or (engine == "antigravity" and action == agy_mode.CLEAR_ACTION):
+    if action == "clr" or (engine == "antigravity" and action == "agc"):
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
@@ -909,7 +909,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             [
                 {
                     "text": "Clear override",
-                    "callback_data": f"config:pm:{agy_mode.CLEAR_ACTION}",
+                    "callback_data": "config:pm:agc",
                 },
                 {"text": "← Back", "callback_data": "config:home"},
             ]
@@ -2561,6 +2561,7 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
             *agy_mode.ANTIGRAVITY_PM_ACTIONS,
             "ro",
             "clr",
+            "agc",  # #1060: the Antigravity page's own Clear override
         }
     ),
     "vb": _ON_OFF_CLR,
@@ -2658,7 +2659,7 @@ class ConfigCommand:
                 # with, so either switch needs /new.
                 "agw": agy_mode.WORKSPACE_TOAST,
                 "agf": agy_mode.FULL_ACCESS_TOAST,
-                agy_mode.CLEAR_ACTION: agy_mode.CLEARED_TOAST,
+                "agc": agy_mode.CLEARED_TOAST,
                 "aga": agy_mode.GATE_SOON_TOAST,
                 "agp": agy_mode.GATE_SOON_TOAST,
             },
