@@ -327,3 +327,28 @@ def test_context_event_reaches_the_shared_tracker() -> None:
     assert tracker.context_estimated is True
     # telemetry is a value for the header, never a step
     assert tracker.action_count == 0
+
+
+def test_result_usage_carries_the_runs_own_tokens() -> None:
+    """#1062: the resumed turn's ``result.usage`` (84,958) is both turns; the
+    run's own model calls add up to the difference, 42,365 = 84,958 -
+    42,593, which the bridge shows instead of the running total."""
+    resume = ResumeToken(engine=ENGINE, value=CID)
+    usage = _usage(_replay(_lines("context_resume"), resume=resume))
+    assert usage["input_tokens"] == 84958
+    assert usage["run_tokens"] == {
+        "input_tokens": 42365,
+        "output_tokens": 901,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 251,
+    }
+
+
+def test_fresh_run_tokens_equal_the_result() -> None:
+    full = EngineRunOptions(permission_mode="full")
+    usage = _usage(_replay(_lines("task_killed"), options=full))
+    run = usage["run_tokens"]
+    assert (run["input_tokens"], run["output_tokens"]) == (
+        usage["input_tokens"],
+        usage["output_tokens"],
+    )

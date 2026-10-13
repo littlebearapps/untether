@@ -375,6 +375,16 @@ async def manage_subprocess(
                 if timed_out:
                     kill_process(proc)
                     await proc.wait()
+            # #1062: the caller's own ``subprocess.exit`` line is never
+            # reached when the run is torn down (``/cancel``, a watchdog
+            # cancel), so log the exit of the process stopped here.
+            logger.info(
+                "subprocess.exit",
+                pid=proc.pid,
+                rc=proc.returncode,
+                reason="teardown",
+                killed=timed_out,
+            )
         # #590: the leader is dead — reap group survivors (leaked MCP
         # children etc.) before releasing the transport.
         if reap_orphans:

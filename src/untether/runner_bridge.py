@@ -55,7 +55,7 @@ from .runner import (
     reset_run_stream_handle,
     set_run_stream_handle,
 )
-from .session_costs import TokenScope, token_counts
+from .session_costs import RUN_TOKENS_KEY, TokenScope, token_counts
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -1292,9 +1292,15 @@ def _apply_token_delta(
         return usage
     from .session_costs import get_session_cost_ledger
 
+    run_tokens = usage.get(RUN_TOKENS_KEY)
     try:
         result = get_session_cost_ledger().record_tokens(
-            engine, session_id, counts, scope=scope, resumed=resumed
+            engine,
+            session_id,
+            counts,
+            scope=scope,
+            resumed=resumed,
+            run_tokens=run_tokens if isinstance(run_tokens, Mapping) else None,
         )
     except Exception:  # noqa: BLE001 — accounting must never break delivery
         logger.warning("usage.token_delta_failed", exc_info=True)

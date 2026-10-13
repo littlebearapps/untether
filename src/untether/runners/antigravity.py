@@ -70,6 +70,7 @@ from ..runner import (
     _session_label,
 )
 from ..schemas import antigravity as agy_schema
+from ..session_costs import RUN_TOKENS_KEY
 from ..utils import antigravity_context, antigravity_quota, antigravity_scan
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
@@ -385,6 +386,11 @@ _AGY_BACKGROUND_CAP_S = 1860.0
 # ``CommandLine``. Where the parameters do carry it, that value decides when
 # the command counts as background; otherwise it does after this long.
 _BACKGROUND_TITLE_AFTER_S = 5.0
+# #1062: agy 1.3.3 ends a step it killed (``manage_task``) DONE with
+# ``tool_info.error.message`` "context canceled", and names the task it
+# kills as ``<conversation id>/task-<step index>``.
+_CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.IGNORECASE)
+_KILLED_TASK_RE = re.compile(r"(?:^|/)task-(\d+)$")
 _ASYNC_WAIT_MAX_MS = 600_000
 _BACKGROUND_TITLE_CHARS = 120
 # Finished entries are dropped from the task map beyond this many.
@@ -954,6 +960,10 @@ class AntigravityStreamState:
     ctx_emitted: tuple[int, int] | None = None
     ctx_miss_logged: bool = False
     ctx_over_warned: bool = False
+    # #1062: this run's own token use — the sum of its model calls'
+    # ``agent_response`` usage. ``result.usage`` is the conversation's running
+    # total, which also counts a cancelled run that never reported a result.
+    run_tokens: dict[str, int] = field(default_factory=dict)
     text_by_step: dict[int, str] = field(default_factory=dict)
     pending_actions: dict[str, Action] = field(default_factory=dict)
     # DONE + empty output + deniable family → verdict unknown until a later
@@ -2253,6 +2263,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     state.text_by_step.get(idx, "") + su.text_delta
                 )
             if st == "DONE":
+                _add_run_tokens(state.run_tokens, su.usage)
                 out.extend(self._note_context(su.usage, state))
             return out
         # A tool step that turns into another type on completion (the
@@ -2262,7 +2273,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             action = state.pending_actions.pop(action_id)
             if idx is not None:
                 state.bg_steps.pop(idx, None)
-                self._task_step_ended(state, idx, ok=st == "DONE")
+                self._task_step_ended(
+                    state, idx, status="completed" if st == "DONE" else "failed"
+                )
             out.append(self._complete(action, state, ok=st == "DONE"))
             return out
         if step_type == "system_message" and terminal:
@@ -2382,9 +2395,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     action_id=action_id, kind=kind, title=title, detail=detail
                 )
             ]
+        err = info.error if info is not None else None
+        # #1062: a step agy stopped (``manage_task`` kill) ends DONE but
+        # carries ``tool_info.error`` ("context canceled", agy 1.3.3).
+        failed = su.state == "ERROR" or (
+            err is not None and bool(err.message or err.type)
+        )
         if idx is not None:
             state.bg_steps.pop(idx, None)
-            self._task_step_ended(state, idx, ok=su.state == "DONE")
+            self._task_step_ended(state, idx, status=_task_end_status(failed, err))
             if su.state == "ERROR":
                 self._track_subagents(state, idx, [], failed=True)
         if tool_name == "run_command":
@@ -2399,8 +2418,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 title=title,
                 detail={"tool_name": tool_name, "input": params},
             )
-        if su.state == "ERROR":
-            err = info.error if info is not None else None
+        if failed:
             message = (err.message if err and err.message else "tool failed")[
                 :_ERROR_MESSAGE_CHARS
             ]
@@ -2511,6 +2529,35 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             logger.info("antigravity.background.started", task_id=f"timer:{idx}")
         elif tool_name == "invoke_subagent":
             self._track_subagents(state, idx, _subagent_specs(params, None))
+        elif tool_name == "manage_task" and params.get("Action") == "kill":
+            self._task_killed(state, params.get("TaskId"))
+
+    @staticmethod
+    def _task_killed(state: AntigravityStreamState, task_id: Any) -> None:
+        """#1062: agy's ``manage_task`` kill names the task as
+        ``<conversation>/task-<step>``. A command or timer still listed as
+        running ends as stopped; one its own step already closed keeps that
+        status (the step's DONE carries the kill on 1.3.3)."""
+        match = _KILLED_TASK_RE.search(task_id) if isinstance(task_id, str) else None
+        if match is None:
+            return
+        step = match.group(1)
+        for key in (f"cmd:{step}", f"timer:{step}"):
+            task = state.tasks.get(key)
+            if task is None or task.status != "running":
+                continue
+            if not task.is_backgrounded:
+                del state.tasks[key]
+                continue
+            task.status = "stopped"
+            task.ended_at = time.monotonic()
+            logger.info(
+                "antigravity.background.finished",
+                task_id=key,
+                status="stopped",
+                elapsed_s=round(task.ended_at - task.started_at, 1),
+                source="manage_task",
+            )
 
     def _track_subagents(
         self,
@@ -2561,8 +2608,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 task.background_from = None
 
     @staticmethod
-    def _task_step_ended(state: AntigravityStreamState, idx: int, *, ok: bool) -> None:
-        """The ``run_command`` / ``schedule`` step *idx* reached DONE / ERROR."""
+    def _task_step_ended(
+        state: AntigravityStreamState, idx: int, *, status: str
+    ) -> None:
+        """The ``run_command`` / ``schedule`` step *idx* reached DONE / ERROR
+        (``completed``, ``failed``, or ``stopped`` when agy killed it)."""
         for key in (f"cmd:{idx}", f"timer:{idx}"):
             task = state.tasks.get(key)
             if task is None or task.status != "running":
@@ -2570,9 +2620,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if not task.is_backgrounded:
                 del state.tasks[key]  # finished in the foreground: never a row
                 continue
-            task.status = "completed" if ok else "failed"
+            task.status = status
             task.ended_at = time.monotonic()
-            state.bg_notices_owed += 1
+            if status != "stopped":
+                # A killed task gets no completion notice (agy 1.3.3).
+                state.bg_notices_owed += 1
             logger.info(
                 "antigravity.background.finished",
                 task_id=key,
@@ -2956,6 +3008,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
                 if isinstance(value, int)
             }
+        if state.run_tokens:
+            # #1062: the bridge's per-run figure (``_apply_token_delta``).
+            usage[RUN_TOKENS_KEY] = dict(state.run_tokens)
         if state.t_spawn:
             usage["duration_ms"] = int((time.monotonic() - state.t_spawn) * 1000)
         context = self._context_value(state)
@@ -3091,6 +3146,30 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
         )
         return out
+
+
+def _add_run_tokens(totals: dict[str, int], usage: agy_schema.StepUsage | None) -> None:
+    """#1062: add one model call's usage to the run's own totals, under the
+    names ``_usage`` gives the result's."""
+    if usage is None:
+        return
+    for key, value in (
+        ("input_tokens", usage.input_tokens),
+        ("output_tokens", usage.output_tokens),
+        ("cache_read_tokens", usage.cache_read_tokens),
+        ("reasoning_tokens", usage.thinking_tokens),
+    ):
+        if _is_count(value):
+            totals[key] = totals.get(key, 0) + value
+
+
+def _task_end_status(failed: bool, err: agy_schema.ToolError | None) -> str:
+    """#1062: how a background task's step ended. agy reports a task it
+    killed itself (``manage_task``) as DONE with a cancellation error."""
+    if not failed:
+        return "completed"
+    message = (err.message or "") if err is not None else ""
+    return "stopped" if _CANCELLED_RE.search(message) else "failed"
 
 
 def _step_of(action_id: str) -> int:

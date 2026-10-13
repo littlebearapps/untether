@@ -445,3 +445,64 @@ def test_task_map_is_what_the_bridge_duck_types() -> None:
     # No Claude live-session attribute came along with it.
     for name in ("live_mode", "completed_turns", "turn_open", "result_received_at"):
         assert not hasattr(state, name), name
+
+
+# ── #1062: a task agy killed itself ────────────────────────────────────────
+
+
+def test_task_killed_by_manage_task_ends_stopped_not_completed() -> None:
+    """agy 1.3.3 capture: ``manage_task`` kill ends the ``run_command`` step
+    DONE with ``tool_info.error`` "context canceled". The task reads as
+    stopped (⏹️), the log says so, and the row is not a ✓."""
+    lines = _lines("task_killed")
+    runner, state = _state()
+    _feed(runner, state, lines[:4])  # … run_command ACTIVE (step 2)
+    task = state.tasks["cmd:2"]
+    task.started_at -= 6.0
+    task.background_from -= 6.0
+    with structlog.testing.capture_logs() as logs:
+        events = _feed(runner, state, lines[4:5])  # step 2 DONE + error
+    assert task.status == "stopped" and task.ended_at is not None
+    finished = [e for e in logs if e["event"] == "antigravity.background.finished"]
+    assert [(e["task_id"], e["status"]) for e in finished] == [("cmd:2", "stopped")]
+    closed = [e for e in events if isinstance(e, ActionEvent)]
+    assert [(e.action.id, e.phase, e.ok) for e in closed] == [
+        ("step-2", "completed", False)
+    ]
+    assert closed[0].message == "context canceled"
+    # No completion notice is owed for a kill.
+    assert state.bg_notices_owed == 0
+    events = _feed(runner, state, lines[5:])
+    assert isinstance(events[-1], CompletedEvent) and events[-1].ok is True
+    assert _statuses(state) == {"cmd:2": "stopped"}
+
+
+def test_kill_before_the_step_closes_still_reads_stopped() -> None:
+    """Order-independent: if the ``manage_task`` kill arrives while the
+    command's step is still open, its task ends stopped at once."""
+    runner, state = _state()
+    _feed(
+        runner,
+        state,
+        [
+            _step(1, "agent_response", "DONE"),
+            _tool(2, "run_command", "ACTIVE", {"CommandLine": "sleep 300"}),
+        ],
+    )
+    task = state.tasks["cmd:2"]
+    task.background_from = None
+    kill = {"Action": "kill", "TaskId": f"{CID}/task-2"}
+    _feed(runner, state, [_tool(4, "manage_task", "ACTIVE", kill)])
+    assert task.status == "stopped"
+    # The step's own DONE later changes nothing.
+    _feed(runner, state, [_tool(2, "run_command", "DONE", {"CommandLine": "x"})])
+    assert task.status == "stopped"
+
+
+def test_failed_step_with_a_non_cancel_error_is_failed() -> None:
+    runner, state = _state()
+    _feed(runner, state, [_tool(2, "run_command", "ACTIVE", {"CommandLine": "x"})])
+    state.tasks["cmd:2"].background_from = None
+    error = {"type": "TOOL_ERROR", "message": "exec failed"}
+    _feed(runner, state, [_tool(2, "run_command", "DONE", {}, error=error)])
+    assert state.tasks["cmd:2"].status == "failed"

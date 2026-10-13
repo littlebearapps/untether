@@ -48,6 +48,7 @@ _FIXTURE_SOURCES: dict[str, str] = {
     "context_model_flag": "1.3.3/px4-init-with-model-flag (1.3.3; id synthetic)",
     "context_turn": "1.3.3/ph3b5-1a-plan (1.3.3; id synthetic, agent text and tool output condensed)",
     "context_resume": "1.3.3/ph3b5-1b-approve-resume (1.3.3; id synthetic, agent text and tool output condensed)",
+    "task_killed": "1.3.3/rc4-k1 manage_task kill, bypass (1.3.3; id synthetic, #1062)",
     "synthetic_no_result": "synthetic: ok minus its result line",
     "synthetic_result_then_agy_error": "synthetic: ok + AGY_ERROR stderr after the result, rc 3",
     "synthetic_agy_error_rc3": "synthetic: partial deltas, no result, AGY_ERROR, rc 3",
