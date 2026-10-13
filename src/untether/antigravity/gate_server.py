@@ -439,6 +439,9 @@ class GateRun:
         self._card_times: deque[float] = deque()
         self._tripwire_logged: set[int] = set()
         self.on_fatal: Callable[[str], None] | None = None
+        # #1080: (parent step, waiting) while an approval card is up, so the
+        # runner doesn't list a step agy hasn't run yet as background work.
+        self.on_approval_wait: Callable[[int, bool], None] | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1014,6 +1017,7 @@ class GateRun:
                     "request_type": "PreToolUse",
                     "tool_name": tool,
                     "inline_keyboard": {"buttons": buttons},
+                    "line_breaks": True,  # #1080: one card line per line
                 },
             )
         )
@@ -1026,6 +1030,12 @@ class GateRun:
             child=child_role is not None,
             foreign=not own,
         )
+        parent_step = (
+            step
+            if own and cid == self.conversation_id and isinstance(step, int)
+            else None
+        )
+        self._note_approval_wait(parent_step, True)
         settled = False
         try:
             await self._wait(held, stream)
@@ -1087,9 +1097,19 @@ class GateRun:
             return {"decision": "deny", "reason": timeout_text(self.wait_s)}
         finally:
             self._held.pop(request_id, None)
+            self._note_approval_wait(parent_step, False)
             if not settled:
                 # Cancelled (the run ended under it): no tap can land now.
                 withdraw(request_id)
+
+    def _note_approval_wait(self, step: int | None, waiting: bool) -> None:
+        callback = self.on_approval_wait
+        if step is None or callback is None:
+            return
+        try:
+            callback(step, waiting)
+        except Exception:  # noqa: BLE001 — display bookkeeping only
+            logger.debug("antigravity.gate.approval_wait_failed", exc_info=True)
 
     async def _card_done(
         self, action_id: str, title: str, *, ok: bool, request_id: str

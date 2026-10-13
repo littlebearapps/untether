@@ -137,12 +137,12 @@ Headless agy can't stop mid-run to ask by itself, so you choose the mode before 
     footer says `full access` / `ask me` — so in Ask me it has no shell to ask you about.
 
     **Send `/new`, then your message.** The new mode applies from the next new conversation. The `/config` toast
-    says the same: `Permission mode: ask me — send /new if you're switching from Workspace or Plan first`.
+    says the same: `Permission mode: ask me — send /new if you're switching from Workspace or Plan first (not from Full access)`.
 
 **Switching back to Workspace needs `/new` too.** A conversation that began in Full access keeps its shell tool after
 you switch to Workspace. When it reaches for the shell, Workspace blocks it and the turn ends on a ⚠️ notice that
 says to send `/new` (or pick Full access again). The same goes for Ask me → Workspace and for either → Plan first.
-The toasts say so: `Permission mode: workspace — send /new if you're switching from Full access or Ask me` (and the
+The toasts say so: `Permission mode: workspace — send /new if you're switching from Full access or Ask me (not from Plan first)` (and the
 same for plan first), and **Clear override** says `Permission mode: cleared — send /new if this switched between
 Workspace / Plan first and Ask me / Full access`. Moving between Workspace and Plan first, or between Ask me and Full
 access, needs no `/new`: each pair uses the same tools.
@@ -150,7 +150,7 @@ access, needs no `/new`: each pair uses the same tools.
 <!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access / Ask me / Plan first and the "send /new" warning line -->
 <!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
 
-<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first" -->
+<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)" -->
 <!-- <img src="../assets/screenshots/antigravity-full-access-toast.jpg" alt="Toast after picking Full access telling you to send /new" width="360" loading="lazy" /> -->
 
 To set a default for every Antigravity chat, use `permission_mode` under `[antigravity]`

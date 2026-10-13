@@ -1698,10 +1698,43 @@ async def test_1047_continue_refusal_is_plain_on_the_bridge(blocked: str) -> Non
         )
     progress, final = transport.send_calls
     assert final["message"].text == "No conversation yet."
+    assert "entities" not in final["message"].extra
     assert final["options"].replace == progress["ref"]
     (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
     assert summary["log_level"] == "info"
     assert summary["prespawn_blocked"] == blocked
+
+
+@pytest.mark.anyio
+async def test_plain_refusal_shows_commands_as_code() -> None:
+    """#1080 (AG-56): the refusal's `agy plugin enable …` showed literal
+    backticks; they are code entities now, the rest verbatim."""
+    transport = FakeTransport()
+    error = (
+        "Ask me needs Telegram approvals, and they aren't ready for this "
+        "project: agy has the plugin disabled (`agy plugin enable untether-gate`)."
+    )
+    runner = ScriptRunner(
+        [ErrorReturn(error=error, usage={"prespawn_blocked": "gate_not_ready"})],
+        engine="antigravity",
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+    message = transport.send_calls[-1]["message"]
+    assert "`" not in message.text
+    (entity,) = message.extra["entities"]
+    assert entity["type"] == "code"
+    start = entity["offset"]
+    assert (
+        message.text[start : start + entity["length"]]
+        == "agy plugin enable untether-gate"
+    )
 
 
 @pytest.mark.anyio

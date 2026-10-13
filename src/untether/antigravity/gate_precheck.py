@@ -419,7 +419,17 @@ async def foreign_config(
     by agy itself instead of by their presence: ``hooks.json`` (its groups
     are in the ``-p /hooks`` listing) and ``mcp_config.json``
     (:func:`user_mcp_configured`)."""
-    found = set(result.foreign_sources)
+    # #1080: agy names a hook group's source by its absolute path, the scan
+    # relative to the project (or ``~/``); one file must be listed once.
+    home_real = os.path.realpath(os.path.expanduser("~"))
+    root_real = os.path.realpath(scan.root) if scan is not None else None
+
+    def shown(source: str) -> str:
+        if root_real is None or not os.path.isabs(source):
+            return source
+        return antigravity_scan._display(os.path.realpath(source), root_real, home_real)
+
+    found = {shown(source) for source in result.foreign_sources}
     for path in scan.agy if scan is not None else ():
         if path == USER_HOOKS_KEY:
             continue

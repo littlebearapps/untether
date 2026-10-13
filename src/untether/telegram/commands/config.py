@@ -884,8 +884,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         lines = [
             "<b>📋 Permission mode</b>",
             "",
-            "Antigravity runs headless, so it can't stop mid-run to ask you."
-            " This picks what it may do on its own.",
+            # #1080: Ask me does stop to ask, so not "it can't ask you".
+            "This picks what Antigravity may do on its own, and in Ask me"
+            " what it asks you about first in Telegram.",
             "",
             "• <b>Workspace</b> — edits files in this project (and temp"
             " folders); it has no shell, web or MCP tools. Not a"

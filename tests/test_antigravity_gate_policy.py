@@ -560,6 +560,41 @@ def test_summary_cannot_pose_as_the_card(root: Path) -> None:
     assert sum(line.startswith("Permission Request") for line in lines) == 1
 
 
+def test_card_keeps_its_lines_and_extra_args_dont_read_as_diff(root: Path) -> None:
+    """#1080: on the progress row the card's lines ran together, and an
+    extra argument's "•" (rendered "- ") under a "+ x" diff read as a
+    removed line."""
+    from untether.markdown import format_action_line
+    from untether.model import Action
+    from untether.telegram.render import render_markdown
+
+    title = gate_policy.card_title(
+        "write_to_file",
+        {"TargetFile": "/elsewhere/out.txt", "CodeContent": "x", "Append": False},
+        gate_policy.Verdict(False, "outside"),
+        root=root,
+        child_role="worker",
+    )
+    assert "⚙️ Append = False" in title
+    assert not any(line.startswith("•") for line in title.splitlines())
+    action = Action(
+        id="a",
+        kind="warning",
+        title=title,
+        detail={"line_breaks": True, "inline_keyboard": {"buttons": []}},
+    )
+    text, _ = render_markdown(
+        format_action_line(action, "started", None, command_width=None)
+    )
+    lines = text.splitlines()
+    assert "⚙️ Append = False" in lines
+    assert "from subagent: worker" in lines
+    assert not any(line.startswith("- ") for line in lines)
+    # Without the flag (every other row) nothing changes.
+    plain = Action(id="b", kind="warning", title="a\nb", detail={})
+    assert format_action_line(plain, "started", None, command_width=None) == "▸ a\nb"
+
+
 def test_generic_preview_says_what_it_left_out(root: Path) -> None:
     text = gate_policy.preview(
         "call_mcp_tool", {f"k{n}": f"v{n}" for n in range(6)}, root=root

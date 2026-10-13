@@ -1303,6 +1303,43 @@ class AntigravityStreamState:
     gate_liveness_logged: bool = False
     # #980 phase 14: how this run started (``decide_antigravity_mode``).
     decision: ModeDecision | None = None
+    # #1080: parent tool steps waiting on an Ask me approval card, and the
+    # wait each held command had before it counts as background.
+    approval_steps: set[int] = field(default_factory=set)
+    approval_held: dict[str, float | None] = field(default_factory=dict)
+
+    def note_approval_wait(self, step: int, waiting: bool) -> None:
+        """#1080: a step waiting on an approval card isn't background work —
+        agy hasn't run it yet. Its rows stay out of the ⏳ block until the
+        card is answered, and their clocks start then (``GateRun``)."""
+        if waiting:
+            self.approval_steps.add(step)
+        else:
+            self.approval_steps.discard(step)
+        now = time.monotonic()
+        for key, task in self.tasks.items():
+            if task.status != "running" or not (
+                key in (f"cmd:{step}", f"timer:{step}")
+                or key.startswith(f"sub:{step}:")
+            ):
+                continue
+            if waiting:
+                self.hold_for_approval(task)
+            elif key in self.approval_held:
+                offset = self.approval_held.pop(key)
+                task.started_at = now
+                task.background_from = None if offset is None else now + offset
+        if not waiting and step in self.bg_steps:
+            self.bg_steps[step] = now
+
+    def hold_for_approval(self, task: EngineBackgroundTask) -> None:
+        if task.task_id in self.approval_held:
+            return
+        start = task.background_from
+        self.approval_held[task.task_id] = (
+            None if start is None else max(0.0, start - task.started_at)
+        )
+        task.background_from = float("inf")
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -2333,6 +2370,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
             return
         gate.on_fatal = lambda kind: self._gate_kill(state, kind)
+        gate.on_approval_wait = state.note_approval_wait  # #1080
         send, receive = anyio.create_memory_object_stream[UntetherEvent](64)
 
         async def pump() -> None:
@@ -3360,6 +3398,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._track_subagents(state, idx, _subagent_specs(params, None))
         elif tool_name == "manage_task" and params.get("Action") == "kill":
             self._task_killed(state, params.get("TaskId"))
+        if idx in state.approval_steps:
+            # #1080: the card came before the step's ACTIVE line.
+            state.note_approval_wait(idx, True)
 
     @staticmethod
     def _task_killed(state: AntigravityStreamState, task_id: Any) -> None:
@@ -3451,7 +3492,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if step >= idx:
                 continue
             task = state.tasks.get(f"cmd:{step}")
-            if task is not None and not task.is_backgrounded:
+            if (
+                task is not None
+                and not task.is_backgrounded
+                and step not in state.approval_steps  # #1080
+            ):
                 task.background_from = None
 
     @staticmethod

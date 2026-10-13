@@ -293,7 +293,50 @@ def format_countdown(seconds: float | int) -> str:
     return format_duration(seconds)
 
 
+def _hard_breaks(text: str) -> str:
+    """#1080: keep every line of a line-structured row (an agy approval card:
+    command, ``from subagent:``, ``agy says:``) on its own line. Markdown
+    reflows single newlines, so each becomes a hard break — except inside a
+    fenced block and next to a fence line, which keep plain newlines."""
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        is_fence = line.lstrip().startswith("```")
+        if is_fence:
+            in_fence = not in_fence
+        out.append(line)
+        if i == len(lines) - 1:
+            break
+        next_is_fence = lines[i + 1].lstrip().startswith("```")
+        plain = not (in_fence or is_fence or next_is_fence)
+        out.append(HARD_BREAK if plain else "\n")
+    return "".join(out)
+
+
 def format_action_line(
+    action: Action,
+    phase: str,
+    ok: bool | None,
+    *,
+    command_width: int | None,
+    elapsed_seconds: float | None = None,
+) -> str:
+    """One action line; a row flagged ``detail["line_breaks"]`` keeps its
+    lines (#1080, ``_hard_breaks``)."""
+    line = _format_action_line(
+        action,
+        phase,
+        ok,
+        command_width=command_width,
+        elapsed_seconds=elapsed_seconds,
+    )
+    if "\n" in line and (action.detail or {}).get("line_breaks") is True:
+        return _hard_breaks(line)
+    return line
+
+
+def _format_action_line(
     action: Action,
     phase: str,
     ok: bool | None,

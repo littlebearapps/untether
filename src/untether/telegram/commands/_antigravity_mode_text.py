@@ -87,22 +87,22 @@ NO_SHELL_AGENT_MODES = frozenset({"workspace", "plan"})
 # R3-3 (2026-10-12): the same goes for Ask me — tell the user, keep no state.
 FULL_ACCESS_TOAST = (
     "Permission mode: full access — send /new if you're switching from"
-    " Workspace or Plan first"
+    " Workspace or Plan first (not from Ask me)"
 )
 ASK_TOAST = (
     "Permission mode: ask me — send /new if you're switching from"
-    " Workspace or Plan first"
+    " Workspace or Plan first (not from Full access)"
 )
 # #1060 / #981: one that began in Full access (or Ask me) keeps its shell,
 # which Workspace then blocks and a plan turn reaches for. Workspace and Plan
 # first share the no-shell agent, so moving between those two needs no /new.
 WORKSPACE_TOAST = (
     "Permission mode: workspace — send /new if you're switching from Full"
-    " access or Ask me"
+    " access or Ask me (not from Plan first)"
 )
 PLAN_FIRST_TOAST = (
     "Permission mode: plan first — send /new if you're switching from Full"
-    " access or Ask me"
+    " access or Ask me (not from Workspace)"
 )
 # ``/planmode`` (#981) when its change crosses the two agent groups.
 NEW_NEEDED_TEXT = "send /new to start using it"

@@ -6657,6 +6657,31 @@ _PLAIN_PRESPAWN_BLOCKS = frozenset(
 )
 
 
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _code_span_entities(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """#1080: a plain refusal's `command` spans become code entities (no
+    literal backticks); every other character is sent verbatim."""
+    parts: list[str] = []
+    entities: list[dict[str, Any]] = []
+    pos = offset = 0
+    for match in _CODE_SPAN_RE.finditer(text):
+        before = text[pos : match.start()]
+        code = match.group(1)
+        parts += [before, code]
+        offset += _utf16_len(before)
+        entities.append({"type": "code", "offset": offset, "length": _utf16_len(code)})
+        offset += _utf16_len(code)
+        pos = match.end()
+    parts.append(text[pos:])
+    return "".join(parts), entities
+
+
 def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
     """The pre-spawn block reason when the refusal is a plain reply, else
     None (#1047)."""
@@ -7734,9 +7759,11 @@ async def handle_message(
         if plain_refusal:
             # #1047: the refusal's own text replaces the card — no header,
             # resume line or footers (nothing ran), and no Cancel button.
-            final_rendered = RenderedMessage(
-                text=final_answer, extra={"reply_markup": {"inline_keyboard": []}}
-            )
+            refusal_text, refusal_entities = _code_span_entities(final_answer)
+            refusal_extra: dict[str, Any] = {"reply_markup": {"inline_keyboard": []}}
+            if refusal_entities:
+                refusal_extra["entities"] = refusal_entities
+            final_rendered = RenderedMessage(text=refusal_text, extra=refusal_extra)
         else:
             # Append the engine's subscription-usage footer (Claude, Antigravity)
             final_rendered = await _append_subscription_footer(

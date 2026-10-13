@@ -746,8 +746,10 @@ def _other_args(args: dict[str, Any], shown: frozenset[str]) -> list[str]:
         for key, value in args.items()
         if key not in shown and key not in _DESCRIPTIVE_KEYS and value is not None
     ]
+    # #1080: "⚙️", not "•": the renderer turns a "•" line into "- ", which
+    # under a diff's "+ x" read as a removed line.
     lines = [
-        f"• {escape_markdown(_short(str(key), 40))} = "
+        f"\N{GEAR}\N{VARIATION SELECTOR-16} {escape_markdown(_short(str(key), 40))} = "
         f"{escape_markdown(_masked(str(key), value))}"
         for key, value in rest[:_OTHER_ARGS_SHOWN]
     ]
