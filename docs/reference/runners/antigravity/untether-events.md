@@ -17,6 +17,7 @@ the subagent, timer and background rows against 1.3.3.
 | `step_update` `tool`, `DONE`, with output | `ActionEvent` completed, `ok=True`, with a 500-character output preview |
 | `step_update` `tool`, `DONE`, no output, for a tool agy can block | Held back. Closed `ok=True` when a later step arrives; turned into a ⚠️ Blocked row if `result.denied_actions` names its family |
 | `step_update` `tool`, `ERROR` | `ActionEvent` completed, `ok=False`, with `tool_info.error.message` (a hook refusal lands here) |
+| `step_update` `tool`, `DONE` with `tool_info.error` | The same as `ERROR` (a step agy stopped itself ends this way: "context canceled", [#1062](https://github.com/littlebearapps/untether/issues/1062)) |
 | `step_update` `tool` `invoke_subagent`, `ACTIVE` (agy 1.3.3) | `ActionEvent` of kind `subagent` started, titled `<type>: <role>` (`+N` for more) from `parameters.Subagents[]` |
 | `step_update` `subagent`, `ACTIVE` / `DONE` / `ERROR` | `ActionEvent` of kind `subagent`, started (1.3.1 sends this type at `ACTIVE` too) / completed |
 | `step_update` `agent_response` | No event. `text_delta` is collected per step as the fallback answer |
@@ -74,11 +75,16 @@ own: the block is re-read whenever the progress message is drawn. Each entry is 
 | `tool` `run_command`, `ACTIVE` | `cmd:<step>` added, listed from the moment it counts as background: `IsDaemon` / `WaitMsBeforeAsync` from the parameters if present, a later `tool` / `subagent` / `agent_response` step while it is still open, else 5 s |
 | `tool` `schedule`, `ACTIVE` | `timer:<step>` added and listed at once (`timer (<DurationSeconds>s)`) |
 | `tool` `invoke_subagent` `ACTIVE`, or `subagent` `ACTIVE` / `DONE` | `sub:<step>:<n>` per subagent, listed at once as `<role> (<type>)`. `DONE` only adds the child's conversation id: the children are still working |
-| the `run_command` / `schedule` step `DONE` / `ERROR` | Removed if it never counted as background; otherwise `completed` / `failed`, and one `system_message` is expected for it |
+| the `run_command` / `schedule` step `DONE` / `ERROR` | Removed if it never counted as background; otherwise `completed` / `failed`, and one `system_message` is expected for it. A `DONE` with a cancellation error is `stopped` (⏹️), with no notice expected ([#1062](https://github.com/littlebearapps/untether/issues/1062)) |
+| `tool` `manage_task` `ACTIVE` with `Action: kill` | The `cmd:<step>` / `timer:<step>` its `TaskId` (`<cid>/task-<step>`) names → `stopped`, if still running |
 | `invoke_subagent` step `ERROR` | Its subagents → `failed` |
 | `system_message` `DONE` | Spends an expected notice if there is one; otherwise the oldest running subagent → `completed` |
 | any `tool` step `ACTIVE` | Expected notices are dropped |
 | `result`, or the run ending without one | Everything still running → `ended` (never `failed`: a daemon command is still running by design) |
+
+The state also offers two lines the bridge duck-types ([#1061](https://github.com/littlebearapps/untether/issues/1061)): `background_hold_note()`, the last line
+of the `⏳ background` block, and `cancelled_hold_note()`, added to the cancelled progress message when a listed
+task was still running at `/cancel` (agy drops an answer it is holding when it is stopped).
 
 Only `run_command`, `schedule` and `manage_task` steps count for the background wait (`awaiting_background`); a
 subagent row never does.

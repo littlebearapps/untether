@@ -175,7 +175,7 @@ This is a pre-run policy: headless agy can't stop to ask, so there are no Approv
 !!! warning "After switching to Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Send `/new`: Full access applies from the next new conversation. The `/config` toast says the same (`Permission mode: full access — send /new to start using it`).
 
-    Switching Full access → Workspace applies from your next message. A conversation that began in Full access keeps agy's default tools, though, so a shell attempt there is blocked with the ⚠️ notice below. Send `/new` for a clean Workspace conversation.
+    Switching Full access → Workspace needs `/new` too. A conversation that began in Full access keeps agy's default tools, so a shell attempt there is blocked and the turn ends on the ⚠️ notice, which then says to send `/new` (or pick Full access again). The toast says `Permission mode: workspace — send /new to start using it` ([#1060](https://github.com/littlebearapps/untether/issues/1060)).
 
 **What Workspace can and can't do.** Workspace runs use a no-shell agent that Untether manages ([#1037](https://github.com/littlebearapps/untether/issues/1037)). Its tool list is file tools only: view, list, find, grep, write and replace. So:
 
@@ -191,7 +191,7 @@ This is a pre-run policy: headless agy can't stop to ask, so there are no Approv
 !!! untether "Untether"
     ⚠️ Antigravity was blocked from using a file outside the project — headless runs can't ask for approval, so it stopped there. To allow it: /config → Permission mode → Full access, then /new.
 
-A blocked shell command (a row such as `⚠️ Blocked: shell command (RunCommand) — npm test`) can still happen in a conversation that isn't on the no-shell agent: one started in Full access, or when the agent file is unavailable. Its notice names the shell command and adds an allow-rule hint: "…Full access, then /new, or add an allow rule such as `command(git status)` to agy's settings file."
+A blocked shell command (a row such as `⚠️ Blocked: shell command (RunCommand) — npm test`) can still happen in a conversation that isn't on the no-shell agent: one started in Full access, or when the agent file is unavailable. Its notice names the shell command and adds an allow-rule hint: "…Full access, then /new, or add an allow rule such as `command(git status)` to agy's settings file." When the conversation started in Full access and the chat is now on Workspace, the notice says that instead: "This conversation started without Workspace's no-shell tools (in Full access, for example), and agy keeps the tools a conversation started with, so it still tried the shell. Send /new to start a Workspace conversation, or pick Full access in /config to let it run."
 
 **Allow rules.** Exact rules in `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`, only matter where agy has a shell tool to block, which is the cases in the paragraph above. A Workspace conversation on the no-shell agent has no shell tool, so an allow rule doesn't give it one; use Full access. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
 

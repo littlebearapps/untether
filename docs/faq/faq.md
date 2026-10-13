@@ -113,7 +113,7 @@ For Antigravity, `/continue` resumes only the conversation agy last ran from the
 
 **Send `/new`.** Antigravity (`agy`) keeps a conversation on the tools it started with. A conversation that began in **Workspace** mode keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Full access takes effect from the next new conversation, so send `/new` and then your message. The `/config` toast says the same: `Permission mode: full access — send /new to start using it`.
 
-In Workspace, Antigravity can read, create and edit files in the project but has no shell, web or MCP tools. Ask for a shell command and it tells you that needs Full access; the command doesn't run. It also can't delete or rename files, so a "rename" is a copy and the original stays. Switching from Full access back to Workspace applies from your next message. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/#antigravity-cli--permission-mode).
+In Workspace, Antigravity can read, create and edit files in the project but has no shell, web or MCP tools. Ask for a shell command and it tells you that needs Full access; the command doesn't run. It also can't delete or rename files, so a "rename" is a copy and the original stays. Switching from Full access back to Workspace needs `/new` too: a conversation that began in Full access keeps its shell tool, so Workspace blocks it and the turn ends on a ⚠️ notice asking for `/new`. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/#antigravity-cli--permission-mode).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 

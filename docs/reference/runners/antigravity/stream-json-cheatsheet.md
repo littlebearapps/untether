@@ -139,11 +139,23 @@ A turn that stopped at a blocked tool is still `SUCCESS`, with an empty `respons
 `denied_actions[].action` values seen or documented: `command`, `unsandboxed`, `mcp`, `read_url`, `execute_url`,
 `read_file`, `write_file`.
 
+A background task the model stops with `manage_task` ([#1062](https://github.com/littlebearapps/untether/issues/1062), agy 1.3.3): the command's step ends
+`DONE` with an error, then the kill step names the task by step index:
+
+```json
+{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"sleep 300"},"error":{"type":"TOOL_ERROR","message":"context canceled"}}}}
+{"event":"step_update","step_update":{"step_index":4,"state":"DONE","step_type":"tool","tool_name":"manage_task","tool_info":{"name":"manage_task","parameters":{"Action":"kill","TaskId":"d84b…/task-2"},"output":"Task \"d84b…/task-2\" cancelled."}}}
+```
+
 Cancelled (SIGINT or SIGTERM): the open step never closes, and the result is
 
 ```json
 {"event":"result","result":{"conversation_id":"f40d…","status":"ERROR","response":"","error":"interrupted","duration_seconds":11.9,"num_turns":1,"usage":{"input_tokens":13082,"output_tokens":273,"thinking_tokens":179,"cache_read_tokens":0,"total_tokens":13355}}}
 ```
+
+Cancelled while agy holds its answer for a background command ([#1061](https://github.com/littlebearapps/untether/issues/1061), agy 1.3.3): nothing was printed
+after the command's `ACTIVE` step, and `response` is still `""` although `usage` counts the model call that wrote
+the answer. The answer is in the conversation: the next resumed turn can repeat it.
 
 Signed out (no `init`, exit 1):
 

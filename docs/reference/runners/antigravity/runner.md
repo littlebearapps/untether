@@ -257,9 +257,11 @@ take a tool away from its default agent, but a custom agent's `tools:` list is t
 !!! warning "A conversation keeps the agent it started with"
     agy ignores `--agent` on a resume and reports nothing about it in `init`. A conversation that started in
     Workspace has no shell tool even after the chat is switched to Full access, and one that started in Full
-    access (or before this change) keeps agy's default agent in Workspace. **After switching Workspace → Full
-    access, send `/new`.** The `/config` toast and page, the agent's own text and the blocked notice all say so.
-    Untether keeps no per-conversation record of this.
+    access (or before this change) keeps agy's default agent in Workspace. **After switching either way between
+    Workspace and Full access, send `/new`.** The `/config` toasts and page, the agent's own text and the blocked
+    notice all say so. Untether keeps no per-conversation record of this. Re-checked on agy 1.3.3 for
+    [#1060](https://github.com/littlebearapps/untether/issues/1060): a Full access conversation resumed with `--agent=untether-workspace` still called
+    `run_command` (blocked), while `init` reported `agent: untether-workspace` and the full tool list.
 
 ### When agy blocks a tool
 
@@ -275,8 +277,10 @@ A blocked tool doesn't fail in agy's stream: the step ends normally with no outp
   points at agy's own `permissions.deny` rules. Only a blocked shell command also gets
   `or add an allow rule such as command(git status) to agy's settings file`.
 
-With the Workspace agent a shell block is rare: it needs a conversation that began without the agent. Exact
-commands are the reliable form of allow rule. agy 1.3.x stops the turn at the first blocked tool.
+With the Workspace agent a shell block is rare: it needs a conversation that began without the agent. When a
+resumed run that named the agent still has a shell call blocked, that is what happened, so the paragraph says so
+and asks for `/new` (or Full access) instead of "Full access, then /new" ([#1060](https://github.com/littlebearapps/untether/issues/1060)). Exact commands are the
+reliable form of allow rule. agy 1.3.x stops the turn at the first blocked tool.
 
 ### agy hooks, plugins and MCP servers
 
@@ -392,7 +396,11 @@ stderr lines are logged at DEBUG only.
 
 - agy reports tokens, not a cost. Its `usage` is a running total for the whole conversation, so Untether records
   each run's difference: the footer shows this run's tokens, and `/usage` shows the session total and the last
-  run. The first run Untether sees of a conversation started elsewhere is labelled "thread total".
+  run. Each run also adds up its own model calls (the `usage` on its `agent_response` steps, which matches the
+  difference exactly), and the footer uses that figure ([#1062](https://github.com/littlebearapps/untether/issues/1062)): the first reply after a cancelled run
+  shows only its own tokens, although agy's running total also holds the cancelled run's. Only a run with no
+  per-step usage falls back to the difference, and the first one Untether sees of a conversation started elsewhere
+  is then labelled "thread total".
 - `/usage` in an Antigravity chat shows agy's own quota groups (for example a 5-hour and a weekly limit per model
   group, each with a bar, percentage used and reset time), then the last session's token totals. The groups are
   separate pools and are shown separately.
@@ -474,7 +482,9 @@ publishes for that model:
 ## `/export`
 
 `/export` works in an Antigravity chat as it does for every engine: it renders what Untether itself saw of the
-session (the commands, file changes and answers), kept in memory for the 20 most recently active sessions.
+session (the commands, file changes and answers), kept in memory for the 20 most recently active sessions. Its
+`Model:` line is the model the chat set (`--model`, which agy echoes as `init.model`), or `agy default` when none
+was set: agy names no model in its stream then ([#1058](https://github.com/littlebearapps/untether/issues/1058)).
 
 - **It is empty after Untether restarts**, and it never includes turns you ran in a terminal. See
   [Export sessions](../../../how-to/export-sessions.md).
@@ -512,7 +522,13 @@ it waits:
 - where a stall warning would otherwise appear, the progress message shows `⏳ Antigravity is waiting for 1 background task
   (N min) — agy holds its answer until they finish (up to 30 min).` The run is not auto-cancelled for it
   (`subprocess.background_wait` in the logs, stall reason `background_waiting`);
-- when the run ends or is cancelled, Untether also stops the child processes it saw agy start.
+- when the run ends or is cancelled, Untether also stops the child processes it saw agy start;
+- the `⏳ background` block ends with `agy sends its answer when this work finishes (up to 30 min)`
+  ([#1061](https://github.com/littlebearapps/untether/issues/1061)). agy prints nothing while it holds its answer, and when it is stopped during the hold its
+  `result.response` is empty even though the answer's model call ran (agy 1.3.3), so the answer can't be shown from
+  the stream. A `/cancel` while a listed task is still running adds a note to the cancelled message: the answer
+  wasn't shown and the conversation kept it (a resumed "repeat your previous answer" returns it word for word). The
+  answer text would need agy's transcript file, which Untether doesn't read.
 
 Every running shell command is treated as possible background work, so a foreground command that hangs delays
 ordinary stall warnings for up to 31 minutes.
@@ -577,7 +593,10 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Workspace = edits in the project | `--mode=accept-edits` | No flag: writes outside temp folders are refused. `--sandbox`: shell is still soft-denied |
 | Workspace has no shell tool ([#1037](https://github.com/littlebearapps/untether/issues/1037)) | A custom agent's `tools:` list, chosen with `--agent`; its body is the system prompt | No per-run system prompt (no flag, env var or stream-json field). `permissions.allow` rules are global settings only, prefix-matched, and chained commands still match, so they are not a safe read-only list. An agent's `commandExecutionPolicy: sandbox` doesn't stop the soft-denial. `--add-dir` pointing at a folder with the agent moves agy's workspace there. A workspace `.agents/agents/` file works but writes into the user's repo (rejected, D20) |
 | The agent file on disk | — (custom: Untether writes one file under `~/.gemini/config/agents/`) | agy has no way to pass an agent definition per run; a plugin is the other documented place and arrives with the approval gate |
-| Telling the user to send `/new` after Workspace → Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses |
+| Telling the user to send `/new` after switching between Workspace and Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
+| A background task agy stopped itself reads as stopped | `tool_info.error` on the step's DONE ("context canceled") and `manage_task`'s `Action: kill` / `TaskId: <cid>/task-<step>` | — (native). Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
+| Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
+| Showing an answer held for background work | — (**gap**: a note says where the answer is) | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; the gate's `Stop` hook (`fullyIdle: false`) says an answer is ready but carries no text. The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
 | Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
 | When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 stream carries only `CommandLine` (the per-call value, 5000 / 10000 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. Checked 2026-10-12. Retire when the stream prints the value or the approval gate's hook supplies it |
 | Which subagent a completion belongs to | — (**custom**: first started, first finished) | The parent stream's `system_message` step has no content. The child's id is in agy's transcript file (`sender=`), which Untether doesn't read (rule 3: no engine state files). Checked 2026-10-12, agy 1.3.3. Retire when the stream names the child or the gate's hook reports it |

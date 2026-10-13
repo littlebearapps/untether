@@ -106,6 +106,12 @@ agy starts as a daemon (a dev server, say) can keep running after the answer; Un
 check for it and stop it yourself when you're done. Details:
 [Background tasks and subagents](../reference/runners/antigravity/runner.md#background-tasks-and-subagents-in-the-status-panel).
 
+**An answer held for background work.** agy sends its one answer only when its background work has finished (up to
+30 minutes), and nothing of it shows before then, so the block ends with `agy sends its answer when this work
+finishes (up to 30 min)`. If you `/cancel` during that wait, agy doesn't hand over the answer it was holding; the
+cancelled message says so. The conversation keeps it, though: send a message such as "repeat your last answer" to see
+it.
+
 **After `/cancel`.** The output of a turn you cancelled can appear at the start of agy's next reply in the same
 conversation. That is how agy behaves (seen on agy 1.3.3), not something Untether adds; send `/new` if you want a
 clean start.
@@ -131,8 +137,10 @@ Headless agy can't stop to ask, so you choose the mode before the run: `/config`
     **Send `/new`, then your message.** Full access applies from the next new conversation. The `/config` toast says
     the same: `Permission mode: full access — send /new to start using it`.
 
-Switching Full access → Workspace applies from your next message. A conversation that began in Full access keeps
-agy's default tools, though, so send `/new` there too for a clean Workspace conversation.
+**Switching back to Workspace needs `/new` too.** A conversation that began in Full access keeps its shell tool after
+you switch to Workspace. When it reaches for the shell, Workspace blocks it and the turn ends on a ⚠️ notice that
+says to send `/new` (or pick Full access again). The toast says so too: `Permission mode: workspace — send /new to
+start using it`, and **Clear override** says `Permission mode: cleared — send /new if this changed it`.
 
 <!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access, the "· soon" modes and the "send /new" warning line -->
 <!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
