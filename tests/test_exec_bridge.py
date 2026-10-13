@@ -8785,7 +8785,19 @@ async def test_991_delivery_timeout_mid_split_final_sends_every_chunk_once(
                 await release.wait()  # chunk 2 is stuck in a network retry
         return await original_send(chat_id, text, *args, **kwargs)
 
+    original_edit = bot.edit_message_text
+
+    async def recording_edit(chat_id: int, message_id: int, text: str, *args, **kw):
+        # On a slow host chunk 1 can go out as an edit of the progress
+        # message instead of a new send; it still counts as a chunk.
+        if "Paragraph" in text:
+            chunks.append(text)
+            if len(chunks) == 2:
+                await release.wait()
+        return await original_edit(chat_id, message_id, text, *args, **kw)
+
     bot.send_message = stalling_send  # type: ignore[method-assign]
+    bot.edit_message_text = recording_edit  # type: ignore[method-assign]
     client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
     await client.send_message(chat_id=123, text="warm-up")  # starts the outbox
     hang = anyio.Event()

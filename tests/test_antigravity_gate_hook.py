@@ -311,6 +311,7 @@ def test_gate_hook_imports_stdlib_only() -> None:
         "_virtualenv",
         "sitecustomize",
         "usercustomize",
+        "apport_python_hook",  # Debian/Ubuntu system sitecustomize
         "imported package",  # the header line of -X importtime
     }
     third_party = {
