@@ -113,6 +113,9 @@ TOO_MANY_TEXT = (
     "and state your assumptions."
 )
 DUPLICATE_TEXT = "Untether saw this tool call twice, so it was blocked."
+NO_POLICY_TEXT = (
+    "Untether has no Telegram approval for this tool call, so it was blocked."
+)
 ANSWER_TAIL = (
     "Use this answer and continue. Do not call ask_question again for this question."
 )
@@ -306,18 +309,24 @@ _RUNS: dict[str, GateRun] = {}
 _BY_CONVERSATION: dict[str, GateRun] = {}
 
 
-def _peer_uid(stream: Any) -> int | None:
+def _peer_ok(stream: Any) -> bool:
+    """The connecting process runs as this uid. Where the platform has
+    ``SO_PEERCRED`` (Linux) a peer whose credentials can't be read is
+    refused — fail closed; elsewhere (macOS) the 0700 folder and the token
+    are the check."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        return True
     raw = stream.extra(SocketAttribute.raw_socket, None)
-    if raw is None or not hasattr(socket, "SO_PEERCRED"):
-        return None
+    if raw is None:
+        return False
     try:
         creds = raw.getsockopt(
             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
         )
-    except OSError:
-        return None
-    _pid, uid, _gid = struct.unpack("3i", creds)
-    return uid
+        _pid, uid, _gid = struct.unpack("3i", creds)
+    except (OSError, struct.error):
+        return False
+    return uid == os.getuid()
 
 
 class GateRun:
@@ -587,8 +596,7 @@ class GateRun:
 
     async def _serve_one(self, stream: Any) -> None:
         async with stream:
-            uid = _peer_uid(stream)
-            if uid is not None and uid != os.getuid():
+            if not _peer_ok(stream):
                 logger.warning("antigravity.gate.peer_refused", run=self.key)
                 return
             raw = await self._read_line(stream)
@@ -716,8 +724,21 @@ class GateRun:
             self._tool_requests.add(key)
             if cid == self.conversation_id:
                 self._tool_steps.pop(step, None)
+        if self.required and (not own or tool != "ask_question"):
+            # Fail closed: a run whose safety rests on the gate (phase 14,
+            # under bypass) gets no "no decision" from it — empty output
+            # would let agy run the tool. Phase 14's policy answers these.
+            logger.warning(
+                "antigravity.gate.no_policy",
+                run=self.key,
+                tool=tool[:60],
+                foreign=not own,
+            )
+            return {"decision": "deny", "reason": NO_POLICY_TEXT}
         if tool != "ask_question" or not own:
-            # Phase 13: no policy on other tools — agy's own check decides.
+            # Phase 13: no policy on other tools — agy's own check decides
+            # (Workspace / Plan first: agy's permission check; Full access:
+            # the user approved every tool).
             return {}
         return await self._ask(call.get("args"), step, stream)
 

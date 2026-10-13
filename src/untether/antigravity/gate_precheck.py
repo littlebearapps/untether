@@ -43,7 +43,10 @@ logger = get_logger(__name__)
 CACHE_TTL_S = 3600.0
 FAILURE_TTL_S = 300.0
 HOOKS_TIMEOUT_S = 30.0
-_GROUP_SOURCE_SUFFIX = f"plugins/{gate_plugin.PLUGIN_NAME}/{gate_plugin.HOOKS_FILE}"
+# agy shows the user-level plugin folder as `~/.gemini/config/…` (P-H0).
+_GROUP_SOURCE = (
+    f"~/.gemini/config/plugins/{gate_plugin.PLUGIN_NAME}/{gate_plugin.HOOKS_FILE}"
+)
 
 # Reasons (logged as ``antigravity.gate.precheck_failed reason=…``).
 MISSING = "missing"
@@ -126,6 +129,20 @@ def _timeout(action: dict[str, Any]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 30
 
 
+def _is_our_source(source: str) -> bool:
+    """Exactly the user-level plugin's ``hooks.json`` — never a project's
+    ``.agents/plugins/untether-gate/`` that merely ends the same way."""
+    if source == _GROUP_SOURCE:
+        return True
+    try:
+        return (
+            Path(source).expanduser().resolve()
+            == (gate_plugin.plugin_dir() / gate_plugin.HOOKS_FILE).resolve()
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def evaluate_hooks(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
     """Pure: does agy's own listing carry our gate exactly?"""
     ours = [g for g in groups if g.name == gate_plugin.PLUGIN_NAME]
@@ -147,7 +164,7 @@ def evaluate_hooks(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
         return GatePrecheck(
             ok=False, reason=DISABLED, foreign_sources=foreign, wait_s=wait_s
         )
-    if not group.source.replace("\\", "/").endswith(_GROUP_SOURCE_SUFFIX):
+    if not _is_our_source(group.source):
         return GatePrecheck(
             ok=False,
             reason=MISMATCH,

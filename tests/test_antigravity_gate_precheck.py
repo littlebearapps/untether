@@ -88,6 +88,11 @@ def test_precheck_rejects_wrong_source_and_extra_event() -> None:
     data = hooks_listing()
     data["hooks"][0]["source"] = "<proj>/.agents/hooks.json"
     assert gate_precheck.evaluate_hooks(_groups(data), wait_s=900).detail == "source"
+    # Security review: a project plugin of the same name isn't ours.
+    data["hooks"][0]["source"] = "/proj/.agents/plugins/untether-gate/hooks.json"
+    assert gate_precheck.evaluate_hooks(_groups(data), wait_s=900).detail == "source"
+    data["hooks"][0]["source"] = str(gate_plugin.plugin_dir() / "hooks.json")
+    assert gate_precheck.evaluate_hooks(_groups(data), wait_s=900).ok
     data = hooks_listing()
     data["hooks"][0]["actions"].append(
         {"event": "PostToolUse", "type": "command", "command": "x"}

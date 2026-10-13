@@ -61,6 +61,7 @@ HOOK_GRACE_S = 60
 SHORT_HOOK_TIMEOUT_S = 15
 
 AGY_TIMEOUT_S = 60.0
+_MAX_FILE_BYTES = 64 * 1024
 
 DESCRIPTION = (
     "Untether: Telegram questions and mid-turn messages for agy runs that "
@@ -196,7 +197,10 @@ class InstallState:
         if self.disabled:
             return "installed but disabled in agy (agy plugin enable untether-gate)"
         if not self.current:
-            return "installed by another Untether version (re-run install)"
+            return (
+                "not the files this Untether version installs (another version,"
+                " or changed along with its record)"
+            )
         return "installed"
 
 
@@ -224,7 +228,7 @@ def _plugin_disabled() -> bool | None:
     return isinstance(entry, dict) and entry.get("enabled") is False
 
 
-def inspect_install() -> InstallState:
+def inspect_install(*, check_disabled: bool = True) -> InstallState:
     """Read what is installed. Never raises."""
     folder = plugin_dir()
     state = InstallState(path=folder)
@@ -248,7 +252,8 @@ def inspect_install() -> InstallState:
             if path.is_symlink() or not path.is_file():
                 state.files[name] = "missing"
                 continue
-            data = path.read_bytes()
+            with open(path, "rb") as handle:
+                data = handle.read(_MAX_FILE_BYTES + 1)  # ours are ~1 KB
             on_disk[name] = data
             state.files[name] = (
                 "ok" if wanted.get(name) == _sha256(data) else "modified"
@@ -260,10 +265,31 @@ def inspect_install() -> InstallState:
         state.current = state.wait_s is not None and all(
             on_disk.get(name) == data for name, data in templates.items()
         )
-        state.disabled = _plugin_disabled()
+        if check_disabled:
+            state.disabled = _plugin_disabled()
     except OSError as exc:
         state.problem = type(exc).__name__
     return state
+
+
+def verified_own_files() -> frozenset[str]:
+    """The plugin files the planted-config scanner may leave out (#1043):
+    all three, only when the folder is exactly what *this* Untether writes —
+    ``plugin.json`` and ``hooks.json`` byte-identical to its own templates,
+    ``.untether-managed`` recording those hashes, nothing else in the folder.
+    Otherwise none (the manifest alone proves nothing: whatever can rewrite
+    ``hooks.json`` can rewrite it too), so a changed or extra file is
+    tracked like any other agy plugin."""
+    state = inspect_install(check_disabled=False)
+    if (
+        state.present
+        and state.problem is None
+        and state.managed
+        and not state.edited
+        and state.current
+    ):
+        return frozenset((*PLUGIN_FILES, MANIFEST_FILE))
+    return frozenset()
 
 
 def installed_ready() -> bool:

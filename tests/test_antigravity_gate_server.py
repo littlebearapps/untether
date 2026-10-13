@@ -522,3 +522,53 @@ def test_tripwire_overdue_steps() -> None:
     gate._tool_requests.add((CID, 4))
     gate.note_tool_step(4, "list_dir")  # its request already arrived
     assert [s for s, _ in gate.overdue_tool_steps(now=time.monotonic() + 5)] == [3]
+
+
+@pytest.mark.anyio
+async def test_required_gate_never_answers_no_decision(harness: Harness) -> None:
+    """Fail closed for a gate-reliant run (phase 14, under bypass): empty
+    output would let agy run the tool, so a tool with no policy is denied."""
+    harness.gate.required = True
+    payload = {
+        "conversationId": CID,
+        "stepIdx": 9,
+        "toolCall": {"name": "run_command"},
+    }
+    assert await harness.call("PreToolUse", payload) == {
+        "decision": "deny",
+        "reason": gate_server.NO_POLICY_TEXT,
+    }
+    out = await harness.call("PreToolUse", _ask_payload(step=10, cid="someone-else"))
+    assert out is not None and out["decision"] == "deny"
+
+
+class _Raw:
+    def __init__(self, creds: bytes | Exception) -> None:
+        self.creds = creds
+
+    def getsockopt(self, *_args: Any) -> bytes:
+        if isinstance(self.creds, Exception):
+            raise self.creds
+        return self.creds
+
+
+class _Stream:
+    def __init__(self, raw: Any) -> None:
+        self.raw = raw
+
+    def extra(self, _attr: Any, default: Any = None) -> Any:
+        return self.raw if self.raw is not None else default
+
+
+@pytest.mark.skipif(not hasattr(socket, "SO_PEERCRED"), reason="Linux only")
+def test_peer_credentials_fail_closed() -> None:
+    """Security review: unreadable peer credentials refuse the connection."""
+    import struct
+
+    ok = struct.pack("3i", 1, os.getuid(), os.getgid())
+    other = struct.pack("3i", 1, os.getuid() + 1, os.getgid())
+    assert gate_server._peer_ok(_Stream(_Raw(ok))) is True
+    assert gate_server._peer_ok(_Stream(_Raw(other))) is False
+    assert gate_server._peer_ok(_Stream(_Raw(OSError("nope")))) is False
+    assert gate_server._peer_ok(_Stream(_Raw(b"short"))) is False
+    assert gate_server._peer_ok(_Stream(None)) is False

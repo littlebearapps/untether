@@ -1714,7 +1714,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return None, None
         options = get_run_options()
         trigger = options.unattended_trigger if options is not None else None
-        if not install.managed or install.edited or install.problem is not None:
+        if (
+            not install.managed
+            or install.edited
+            or install.problem is not None
+            or not install.current
+        ):
+            # Fail closed: only files byte-identical to this version's own
+            # templates count as Untether's. A manifest whose hashes match an
+            # edited hooks.json proves nothing (whatever rewrote one could
+            # rewrite both), and the planted-config scanner tracks such a
+            # folder too (``gate_plugin.verified_own_files``).
             logger.warning(
                 "antigravity.gate.plugin_changed",
                 state=install.summary(),

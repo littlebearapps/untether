@@ -75,9 +75,10 @@ What's tracked (agy set)
   (see ``_manifest_paths``). A folder passed to a hook or MCP command
   (``--root ./data``) is an argument, not config, and isn't walked;
 - agy's user-level manifests under ``~/.gemini/config/`` — stat only —
-  excluding the three files of Untether's own gate plugin
-  (``_MANAGED_GATE_FILES``) and Untether's own Workspace agent file
-  (``_MANAGED_AGENT``), each by exact path.
+  excluding Untether's own Workspace agent file (``_MANAGED_AGENT``) by
+  exact path, and Untether's gate plugin files (``_GATE_PLUGIN_DIR``) by
+  exact path only while their content is exactly what Untether writes
+  (Untether's own files, the only ones this scan reads under ``~/.gemini``).
 
 "Not checked" whenever: a budget (entries, bytes, wall clock) runs out; a
 link under ``.agents/`` (or in ``~/.gemini/config``) leads outside both the
@@ -140,23 +141,30 @@ _CHUNK_BYTES = 256 * 1024
 _REF_PARSE_CAP_BYTES = 256 * 1024
 USER_DISPLAY_PREFIX = "~/.gemini/config/"
 # Untether's gate plugin (#980, ``antigravity/gate_plugin.py``), relative to
-# ``~/.gemini/config``: exactly the files ``untether agy-gate install`` puts
-# there, as regular files, are left out of the digest (stat only, like the
-# agent below). Anything else in that folder — or a link in place of one of
-# them — is tracked like any other plugin file. Whether the three are still
-# what Untether wrote is the runner's check (``gate_plugin.inspect_install``
-# reads Untether's own files), never this scanner's.
+# ``~/.gemini/config``: the files ``untether agy-gate install`` puts there
+# are left out of the digest only when their *content* is exactly what this
+# Untether writes (``gate_plugin.verified_own_files``: byte compare with its
+# own templates — Untether's own files, the one read under ``~/.gemini`` this
+# scan makes). A changed, extra or linked file is tracked like any other
+# plugin file, so nothing planted rides on the exemption.
 _GATE_PLUGIN_DIR = "plugins/untether-gate/"
-_MANAGED_GATE_FILES = frozenset(
-    _GATE_PLUGIN_DIR + name
-    for name in ("plugin.json", "hooks.json", ".untether-managed")
-)
 # Untether's own Workspace agent (``utils/antigravity_agent.py``), relative
 # to ``~/.gemini/config``. That exact regular file is left out of the digest:
 # Untether rewrites it to its own text before every run that names it, so
 # tracking it would hold a cron on each install or upgrade. Nothing else in
 # or beside that folder is exempt (#1043).
 _MANAGED_AGENT = "agents/untether-workspace/agent.md"
+
+
+def _own_gate_files() -> frozenset[str]:
+    """The gate plugin files (relative to ``~/.gemini/config``) whose
+    content is exactly what this Untether writes — none unless all are.
+    Lazy import: ``gate_plugin`` imports this module."""
+    from ..antigravity import gate_plugin
+
+    return frozenset(_GATE_PLUGIN_DIR + n for n in gate_plugin.verified_own_files())
+
+
 _AGENTS_DIR = ".agents"
 # Instruction trees directly under .agents/ (exact names: anything else is
 # hashed — failing towards more coverage on case-insensitive filesystems).
@@ -1108,17 +1116,19 @@ def _plain_file(path: Path) -> bool:
 
 
 def _scan_user_level(out: dict[str, Fingerprint], budget: _Budget) -> None:
-    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33).
-    Linked folders are followed while they stay in ``$HOME`` (dotfiles)."""
+    """Stat only — never ``open()`` anything under ``~/.gemini`` (D33) but
+    Untether's own gate plugin files (``_own_gate_files``). Linked folders are followed while
+    they stay in ``$HOME`` (dotfiles)."""
     user_dir = user_config_dir()
     if not os.path.isdir(user_dir):
         return
     follow = (os.path.realpath(Path.home()),)
     seen: set[str] = set()
+    own_gate = _own_gate_files()
     for path in _walk(user_dir, budget, follow_within=follow, seen=seen):
         rel = path.relative_to(user_dir).as_posix()
-        if rel in _MANAGED_GATE_FILES and _plain_file(path):
-            continue  # Untether's own gate plugin, see _MANAGED_GATE_FILES
+        if rel in own_gate and _plain_file(path):
+            continue  # Untether's own gate plugin, unchanged: see _GATE_PLUGIN_DIR
         if rel == _MANAGED_AGENT and _plain_file(path):
             continue  # Untether's own agent, see _MANAGED_AGENT
         if not _is_user_manifest(rel) and not path.is_symlink():
