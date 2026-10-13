@@ -81,7 +81,7 @@ from ..interactive.registry import (
     Decision,
     HandledControl,  # noqa: F401 — re-exported
     InflightClaim,  # noqa: F401 — re-exported
-    _bind_request_channel,
+    _bind_request_channel,  # noqa: F401 — re-exported
     answer_control_request,
     bind_request_channel,  # noqa: F401 — re-exported
     claim_control_request,  # noqa: F401 — re-exported
@@ -91,6 +91,7 @@ from ..interactive.registry import (
     drop_session,
     mark_request_handled,
     new_control_claim_owner,  # noqa: F401 — re-exported
+    register,
     release_control_claims,  # noqa: F401 — re-exported
     respond_to_control_request,  # noqa: F401 — re-exported
     set_default_responder,
@@ -9192,15 +9193,15 @@ def _translate_claude_event_base(
                                 event,
                                 time.time(),
                             )
-                            _REQUEST_TO_SESSION[request_id] = session_id
-                            _bind_request_channel(request_id)  # #388
+                            # #388 / #960: one call registers, binds the
+                            # chat + originator and stores input / tool name.
+                            register(
+                                request_id,
+                                session_key=session_id,
+                                tool_name=getattr(request, "tool_name", ""),
+                                tool_input=getattr(request, "input", {}),
+                            )
                             state.control_registered_at[request_id] = time.monotonic()
-                            _REQUEST_TO_INPUT[request_id] = getattr(
-                                request, "input", {}
-                            )
-                            _REQUEST_TO_TOOL_NAME[request_id] = getattr(
-                                request, "tool_name", ""
-                            )
                             # #684 D5: the real request now carries the
                             # buttons; an earlier outline-guard ``da:`` entry
                             # would otherwise pause the live session until
@@ -9242,8 +9243,7 @@ def _translate_claude_event_base(
                             button_request_id = request_id
                         else:
                             button_request_id = f"da:{session_id}"
-                            _REQUEST_TO_SESSION[button_request_id] = session_id
-                            _bind_request_channel(button_request_id)  # #388
+                            register(button_request_id, session_key=session_id)
                             state.control_registered_at[button_request_id] = (
                                 time.monotonic()
                             )
@@ -9357,15 +9357,18 @@ def _translate_claude_event_base(
             # Phase 2: Register request_id -> session_id mapping for callback routing
             if factory.resume:
                 session_id = factory.resume.value
-                _REQUEST_TO_SESSION[request_id] = session_id
-                _bind_request_channel(request_id)  # #388
-                state.control_registered_at[request_id] = time.monotonic()  # #684
-                # Store original tool input and tool name for response handling
+                # #388 / #960: registered, chat + originator bound, and the
+                # original tool input and tool name stored for the response.
                 if isinstance(request, claude_schema.ControlCanUseToolRequest):
-                    _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
-                    _REQUEST_TO_TOOL_NAME[request_id] = getattr(
-                        request, "tool_name", ""
+                    register(
+                        request_id,
+                        session_key=session_id,
+                        tool_name=getattr(request, "tool_name", ""),
+                        tool_input=getattr(request, "input", {}),
                     )
+                else:
+                    register(request_id, session_key=session_id)
+                state.control_registered_at[request_id] = time.monotonic()  # #684
                 logger.debug(
                     "control_request.registered",
                     request_id=request_id,

@@ -490,6 +490,72 @@ def test_snapshot_lists_responder_requests() -> None:
     assert by_id["ag-q"].answerable_by_text is True
 
 
+# ── callbacks ───────────────────────────────────────────────────────────────
+
+
+def test_synth_keyboard_uses_request_prefix() -> None:
+    from untether.orphan_approvals import synth_keyboard
+
+    registry.register("req_1", session_key="sid")
+    registry.register("ag-1", session_key="conv", responder=FakeResponder())
+    # Claude ids (and unknown ids) keep exactly the pre-#960 keyboard.
+    for rid in ("req_1", "da:sid", "unknown"):
+        assert synth_keyboard(rid) == [
+            [
+                {
+                    "text": "✅ Approve",
+                    "callback_data": f"claude_control:approve:{rid}",
+                },
+                {"text": "❌ Deny", "callback_data": f"claude_control:deny:{rid}"},
+            ]
+        ]
+    assert [b["callback_data"] for b in synth_keyboard("ag-1")[0]] == [
+        "ia:approve:ag-1",
+        "ia:deny:ag-1",
+    ]
+
+
+def test_control_callbacks_in_sees_every_answer_prefix() -> None:
+    from untether.runner_bridge import control_callbacks_in
+    from untether.transport import RenderedMessage
+
+    rows = [
+        [{"text": "a", "callback_data": "claude_control:approve:r1"}],
+        [{"text": "b", "callback_data": "aq:opt:0"}],
+        [{"text": "c", "callback_data": "ia:deny:ag-1"}],
+        [{"text": "d", "callback_data": "cancel:x"}],
+    ]
+    message = RenderedMessage(
+        text="x", extra={"reply_markup": {"inline_keyboard": rows}}
+    )
+    assert control_callbacks_in(message) == {
+        "claude_control:approve:r1",
+        "aq:opt:0",
+        "ia:deny:ag-1",
+    }
+
+
+def test_ia_tap_from_non_originator_refused() -> None:
+    from untether.telegram.approval_originator import callback_originator_mismatch
+
+    channel = set_run_channel_id(CHAT_A)
+    sender = set_run_sender_id(USER_A)
+    try:
+        registry.register("ag-1", session_key="conv", responder=FakeResponder())
+    finally:
+        reset_run_sender_id(sender)
+        reset_run_channel_id(channel)
+    for command in ("ia", "claude_control"):
+        assert callback_originator_mismatch(command, "approve:ag-1", CHAT_A, 42) == (
+            "ag-1",
+            USER_A,
+        )
+        assert (
+            callback_originator_mismatch(command, "approve:ag-1", CHAT_A, USER_A)
+            is None
+        )
+
+
 def test_interactive_package_imports_no_runner_or_telegram() -> None:
     """``interactive`` sits below the runners and the transport: importing it
     in a fresh interpreter loads no ``untether.runners`` / ``telegram``."""

@@ -32,6 +32,7 @@ from .context import RunContext
 from .error_hints import SESSION_NOT_LOADED_HINT as _SESSION_NOT_LOADED_HINT
 from .error_hints import get_error_hint as _get_error_hint
 from .events import EventFactory
+from .interactive.buttons import CONTROL_CALLBACK_PREFIXES
 from .live_sessions import live_backend
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
@@ -282,14 +283,16 @@ def sweep_stale_registries(now: float | None = None) -> int:
     return pruned
 
 
-# #684: callback-data prefixes of buttons that can answer a Claude control
-# request (approval / plan buttons, AskUserQuestion options).
-_CONTROL_CALLBACK_PREFIXES = ("claude_control:", "aq:")
+# #684: callback-data prefixes of buttons that can answer a control request
+# (approval / plan buttons, question options); #960: owned by
+# ``interactive.buttons``.
+_CONTROL_CALLBACK_PREFIXES = CONTROL_CALLBACK_PREFIXES
 
 
 def control_callbacks_in(rendered: RenderedMessage | None) -> frozenset[str]:
-    """callback_data of every ``claude_control:`` / ``aq:`` button on a
-    rendered message (#684). The cancel row and other buttons are ignored."""
+    """callback_data of every ``claude_control:`` / ``aq:`` / ``ia:`` button
+    on a rendered message (#684). The cancel row and other buttons are
+    ignored."""
     if rendered is None:
         return frozenset()
     markup = rendered.extra.get("reply_markup")

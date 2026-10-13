@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
-from ...interactive.registry import on_session_dropped, session_alive
-from ...logging import get_logger
-from ...runner_bridge import delete_outline_messages, register_ephemeral_message
-from ...runners.claude import (
-    _DISCUSS_APPROVED,
-    _OUTLINE_PENDING,
+from ...interactive.registry import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     ControlLookup,
@@ -18,12 +13,22 @@ from ...runners.claude import (
     claim_control_request,
     classify_control_request,
     control_request_origin,
-    mark_outline_pending,
     mark_request_handled,
     new_control_claim_owner,
-    plan_approved_feedback,
+    on_session_dropped,
     release_control_claims,
     respond_to_control_request,
+    session_alive,
+)
+from ...logging import get_logger
+from ...runner_bridge import delete_outline_messages, register_ephemeral_message
+
+# Claude's plan flow (Pause & Outline, post-outline approval) stays Claude's.
+from ...runners.claude import (
+    _DISCUSS_APPROVED,
+    _OUTLINE_PENDING,
+    mark_outline_pending,
+    plan_approved_feedback,
 )
 from ...transport import MessageRef
 from .ask_question import _ALREADY_ANSWERED_TOAST

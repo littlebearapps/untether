@@ -362,7 +362,7 @@ async def test_live_backend_without_steer_falls_back_with_engine_reason(
         raise AssertionError("Claude consulted for another engine")
 
     monkeypatch.setitem(live_sessions._BACKENDS, "warm", _NoSteerLive())
-    monkeypatch.setattr(claude_mod, "get_pending_ask_request", _boom)
+    monkeypatch.setattr("untether.interactive.questions.get_pending_ask_request", _boom)
     monkeypatch.setattr(claude_mod, "get_live_session", _boom)
     cfg = _cfg("steer")
     running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}

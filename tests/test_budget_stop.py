@@ -467,7 +467,10 @@ class TestStopShutsInput:
             return "result_pending"
 
         monkeypatch.setattr(claude_mod, "get_live_session", lambda sid: object())
-        monkeypatch.setattr(claude_mod, "get_pending_ask_request", lambda **k: None)
+        monkeypatch.setattr(
+            "untether.interactive.questions.get_pending_ask_request",
+            lambda **k: None,
+        )
         monkeypatch.setattr(claude_mod, "steer_into_session", _steer)
         transport = FakeTransport()
         with capture_logs() as logs:

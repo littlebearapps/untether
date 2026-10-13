@@ -3440,7 +3440,7 @@ async def run_main_loop(
 
                 # A1: Intercept text as AskUserQuestion reply if one is pending
                 if text and not is_voice_transcribed:
-                    from ..runners.claude import (
+                    from ..interactive.questions import (
                         answer_ask_question,
                         answer_ask_question_with_options,
                         get_ask_question_flow,
