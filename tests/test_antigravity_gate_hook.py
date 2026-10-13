@@ -154,6 +154,27 @@ def test_unreadable_payload_denies() -> None:
     assert out == {"decision": "deny", "reason": gate_hook.BAD_PAYLOAD}
 
 
+@pytest.mark.parametrize(
+    "stdin",
+    [
+        b'{"toolCall":{"name":"run_command","args":{"CommandLine":"ls",'
+        b'"CommandLine":"rm -rf /"}}}',
+        b'{"toolCall":{"name":"view_file"},"toolCall":{"name":"run_command"}}',
+    ],
+)
+def test_duplicate_json_keys_deny(stdin: bytes) -> None:
+    """Security review (parser differential): Python keeps the last of two
+    equal keys and agy's parser may keep another, so such a payload never
+    reaches the gate's policy — and the server is never asked."""
+    server, sock = _serve({"v": 1, "out": {"decision": "allow"}})
+    try:
+        out = _out(_run("PreToolUse", env=_gate_env(sock), stdin=stdin))
+    finally:
+        server.close()
+    assert out == {"decision": "deny", "reason": gate_hook.DUPLICATE_KEYS}
+    assert server.requests == []
+
+
 @pytest.mark.parametrize("decision", ["ask", "force_ask", "deny_unless_prior_grant", 7])
 def test_never_emits_ask_or_force_ask(decision: object) -> None:
     """D22.3: under bypass agy approves an ``ask`` — never print one."""

@@ -21,8 +21,20 @@ paths:
   exact ``CommandLine`` + ``Cwd``, per chat and agy conversation, in memory
   only; never used by unattended runs.
 
-Tool names and argument shapes: agy 1.3.3/1.3.4 ``init.tools`` and hook
-payloads (probes E2, P-B4, P-B6, P-H8). New or unknown tools ask.
+Tool names and argument shapes: agy 1.3.3/1.3.4 ``init.tools``, hook
+payloads (probes E2, P-B4, P-B6, P-H8) and the Go struct tags in the agy
+binary (``json:"CommandLine"``, ``json:"Cwd"`` …). New or unknown tools ask.
+
+Parsing like agy does (security review, 2026-10-13): agy is a Go program and
+Go's JSON decoder matches field names case-insensitively, so
+:func:`normalise_args` maps every key onto agy's own spelling first and
+refuses arguments where two keys could mean the same field (or a key isn't
+plain ASCII) — the gate denies those outright. Duplicate JSON keys are
+refused earlier, by the hook (``gate_hook``). Only plain absolute paths
+(no ``~``, ``.``/``..`` parts, doubled slashes or control characters) can be
+on the safe list, so Untether and agy can't resolve a path differently, and
+a safe-listed tool may carry only the argument names agy is known to use for
+it.
 """
 
 from __future__ import annotations
@@ -58,6 +70,117 @@ _EDIT_PATH_KEYS = ("TargetFile", "AbsolutePath")
 # ``DirectoryPath``, ``SearchPath``, ``SearchDirectory``). Every one present
 # is checked, never only the first.
 _PATH_KEY_RE = re.compile(r"(path|file|dir|directory|folder|cwd)s?$", re.IGNORECASE)
+# Argument names agy's tools use (hook payloads and the binary's struct tags),
+# in agy's spelling: a key that matches one case-insensitively is read as it.
+_META_KEYS = frozenset({"toolAction", "toolSummary"})
+_RUN_COMMAND_KEYS = frozenset(
+    {
+        "CommandLine",
+        "Cwd",
+        "WaitMsBeforeAsync",
+        "IsDaemon",
+        "Blocking",
+        "SafeToAutoRun",
+        "BypassSandbox",
+        "RunPersistent",
+        "RequestedTerminalID",
+    }
+)
+_CHUNK_KEYS = frozenset(
+    {"TargetContent", "ReplacementContent", "StartLine", "EndLine", "AllowMultiple"}
+)
+# Safe-listed tools may carry only these (anything else asks).
+_SAFE_KEYS: dict[str, frozenset[str]] = {
+    "view_file": frozenset({"AbsolutePath", "StartLine", "EndLine"}),
+    "list_dir": frozenset({"DirectoryPath"}),
+    "find_by_name": frozenset(
+        {
+            "SearchDirectory",
+            "Pattern",
+            "Excludes",
+            "Includes",
+            "Extensions",
+            "Type",
+            "MaxDepth",
+            "FullPath",
+        }
+    ),
+    "grep_search": frozenset(
+        {
+            "SearchPath",
+            "Query",
+            "MatchPerLine",
+            "Includes",
+            "CaseInsensitive",
+            "IsRegex",
+        }
+    ),
+    "write_to_file": frozenset(
+        {
+            "TargetFile",
+            "CodeContent",
+            "Overwrite",
+            # agy 1.3.4 (live, 2026-10-13): appends instead of replacing.
+            "Append",
+            "EmptyFile",
+            "ArtifactMetadata",
+            "Description",
+            "Complexity",
+        }
+    ),
+    "replace_file_content": frozenset(
+        {
+            "TargetFile",
+            "TargetContent",
+            "ReplacementContent",
+            "StartLine",
+            "EndLine",
+            "AllowMultiple",
+            "Instruction",
+            "Description",
+            "ArtifactMetadata",
+            "TargetLintErrorIds",
+            "Complexity",
+        }
+    ),
+    "multi_replace_file_content": frozenset(
+        {
+            "TargetFile",
+            "ReplacementChunks",
+            "Instruction",
+            "Description",
+            "ArtifactMetadata",
+            "TargetLintErrorIds",
+            "Complexity",
+        }
+    ),
+}
+_KNOWN_KEYS: frozenset[str] = frozenset(
+    {
+        *_META_KEYS,
+        *_RUN_COMMAND_KEYS,
+        *_CHUNK_KEYS,
+        *(key for keys in _SAFE_KEYS.values() for key in keys),
+        "Subagents",
+        "Recipient",
+        "Message",
+        "Prompt",
+        "DurationSeconds",
+        "TimerCondition",
+        "Action",
+        "TaskId",
+        "Url",
+        "ServerName",
+        "ToolName",
+        "questions",
+    }
+)
+_KNOWN_BY_FOLD = {key.casefold(): key for key in _KNOWN_KEYS}
+# Shown on a card only as agy's words, never as what runs.
+_DESCRIPTIVE_KEYS = frozenset(
+    {*_META_KEYS, "Description", "Instruction", "explanation", "Complexity"}
+)
+
 # Conversation ids are UUIDs; anything else never names an artifact folder.
 _CONVERSATION_ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{7,127}$")
 
@@ -215,6 +338,53 @@ def path_values(args: Any) -> list[Any] | None:
     return found
 
 
+def normalise_args(args: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Tool arguments as agy reads them, or ``(None, why)`` when that is
+    ambiguous. Go's JSON decoder matches field names case-insensitively, so
+    ``commandline`` *is* ``CommandLine`` to agy; two keys that fold to the
+    same name (or any key that isn't plain ASCII, where folding rules
+    differ) could mean either value, and are refused."""
+    if args is None:
+        return {}, None
+    if not isinstance(args, dict):
+        return None, "the arguments aren't a JSON object"
+    out: dict[str, Any] = {}
+    seen: dict[str, str] = {}
+    for key, value in args.items():
+        if not isinstance(key, str) or not key.isascii() or not key.isprintable():
+            return None, "an argument name isn't plain text"
+        fold = key.casefold()
+        if fold in seen:
+            return None, f"{seen[fold]!r} and {key!r} name the same argument"
+        seen[fold] = key
+        out[_KNOWN_BY_FOLD.get(fold, key)] = value
+    chunks = out.get("ReplacementChunks")
+    if isinstance(chunks, list):
+        clean: list[Any] = []
+        for chunk in chunks:
+            if isinstance(chunk, dict):
+                fixed, why = normalise_args(chunk)
+                if fixed is None:
+                    return None, why
+                clean.append(fixed)
+            else:
+                clean.append(chunk)
+        out["ReplacementChunks"] = clean
+    return out, None
+
+
+def plain_absolute(path: Any) -> bool:
+    """An absolute path with nothing to interpret: no ``~``, no ``.`` or
+    ``..`` parts, no doubled or trailing slash, no control characters. Such
+    a path reads the same to Untether and to agy (bar symlinks, which the
+    realpath check catches)."""
+    if not isinstance(path, str) or not path.startswith("/") or "//" in path:
+        return False
+    if any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in path):
+        return False
+    return path == "/" or os.path.normpath(path) == path
+
+
 def _brain_root() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "brain"
 
@@ -299,10 +469,10 @@ def _classify_paths(
         if not isinstance(first, str) or _fold(_real(first)) != _fold(base):
             return Verdict(False, "mismatch")
     for target in paths:
-        path = (
-            target if os.path.isabs(os.path.expanduser(target)) else str(root / target)
-        )
-        real = _real(path)
+        if not plain_absolute(target):
+            # Relative, ``~``, ``..`` …: agy may resolve it differently.
+            return Verdict(False, "unclear")
+        real = _real(target)
         if write:
             for protected in self_protected_paths():
                 if _within(real, protected):
@@ -345,7 +515,7 @@ def classify(
             workspace_paths=workspace_paths,
             diff_preview=diff_preview,
         )
-    except (OSError, ValueError, TypeError):
+    except Exception:  # noqa: BLE001 — never safe-list what can't be checked
         return Verdict(False, "tool")
 
 
@@ -361,7 +531,11 @@ def _classify(
     if args is not None and not isinstance(args, dict):
         return Verdict(False, "tool")
     if tool in NO_PATH_TOOLS:
-        return ALLOW if not path_values(args) else Verdict(False, "tool")
+        # ``[]`` only: ``None`` (a non-string path value) asks too.
+        return ALLOW if path_values(args) == [] else Verdict(False, "tool")
+    allowed = _SAFE_KEYS.get(tool)
+    if allowed is not None and not _keys_ok(args, allowed):
+        return Verdict(False, "unclear")
     if tool in READ_TOOLS:
         paths = path_values(args)
         if paths is None or root is None:
@@ -388,6 +562,21 @@ def _classify(
     # ``notebook_edit`` (path argument unprobed, P-H13) and every tool this
     # version doesn't know.
     return Verdict(False, "tool")
+
+
+def _keys_ok(args: Any, allowed: frozenset[str]) -> bool:
+    """Only argument names agy is known to use for this tool (plus its own
+    ``toolAction`` / ``toolSummary``); a chunk only its chunk fields."""
+    if not isinstance(args, dict):
+        return args is None
+    if not set(args) <= allowed | _META_KEYS:
+        return False
+    chunks = args.get("ReplacementChunks")
+    if chunks is not None:
+        if not isinstance(chunks, list):
+            return False
+        return all(isinstance(c, dict) and set(c) <= _CHUNK_KEYS for c in chunks)
+    return True
 
 
 def tool_label(tool: str, args: Any) -> str:
@@ -516,6 +705,55 @@ def _generic_preview(args: Any) -> str:
     return "\n".join(lines)
 
 
+def _other_args(args: dict[str, Any], shown: frozenset[str]) -> list[str]:
+    """Every argument the preview didn't already show (agy's descriptive
+    fields aside), so nothing that changes what runs is hidden."""
+    rest = [
+        (key, value)
+        for key, value in args.items()
+        if key not in shown and key not in _DESCRIPTIVE_KEYS and value is not None
+    ]
+    lines = [
+        f"• {escape_markdown(_short(str(key), 40))} = "
+        f"{escape_markdown(_masked(str(key), value))}"
+        for key, value in rest[:_OTHER_ARGS_SHOWN]
+    ]
+    more = len(rest) - _OTHER_ARGS_SHOWN
+    if more > 0:
+        lines.append(f"…{more} more argument{'s' if more > 1 else ''} not shown")
+    return lines
+
+
+_OTHER_ARGS_SHOWN = 6
+_COMMAND_SHOWN = frozenset({"CommandLine", "Cwd", "WaitMsBeforeAsync", "IsDaemon"})
+_EDIT_SHOWN = frozenset(
+    {
+        "TargetFile",
+        "CodeContent",
+        "Overwrite",
+        "TargetContent",
+        "ReplacementContent",
+        "ReplacementChunks",
+        "StartLine",
+        "EndLine",
+    }
+)
+
+
+def _resolves_to(target: str) -> str | None:
+    """``→ resolves to …`` when the real file isn't the path as written
+    (a symlink, ``..``, a relative path)."""
+    if not target:
+        return None
+    try:
+        real = _real(target)
+    except (OSError, ValueError):
+        return "⚠️ this path can't be resolved"
+    if plain_absolute(target) and real == target:
+        return None
+    return f"→ resolves to {escape_markdown(_short(visible(real), 200))}"
+
+
 def _rel_cwd(cwd: Any, root: Path | None) -> str | None:
     if not isinstance(cwd, str) or not cwd or root is None:
         return None
@@ -548,17 +786,32 @@ def preview(tool: str, args: Any, *, root: Path | None) -> str:
         rel = _rel_cwd(args.get("Cwd"), root)
         if rel is not None:
             notes.append(f"in {escape_markdown(_short(rel, 200))}")
+        cwd = args.get("Cwd")
+        if cwd is not None and not plain_absolute(cwd):
+            notes.append("⚠️ the folder isn't a plain absolute path")
         wait = _wait_text(args.get("WaitMsBeforeAsync"))
         if wait is not None:
             notes.append(wait)
         if notes:
             lines.append(" · ".join(notes))
-        if args.get("IsDaemon") is True:
+        if args.get("IsDaemon") not in (None, False, 0, ""):
             lines.append(
                 "⚠️ starts a daemon: once approved it keeps running after this turn ends"
             )
+        lines.extend(_other_args(args, _COMMAND_SHOWN))
         return "\n".join(line for line in lines if line)
     target = edit_target(args) or ""
+    if tool in EDIT_TOOLS:
+        tail = [_resolves_to(target)] if target else ["⚠️ no target file in this call"]
+        tail.extend(_other_args(args, _EDIT_SHOWN))
+        body = _edit_preview(tool, args, target)
+        return "\n".join(line for line in (body, *tail) if line)
+    if tool == "invoke_subagent":
+        return _subagents_preview(args)
+    return _generic_preview(args)
+
+
+def _edit_preview(tool: str, args: dict[str, Any], target: str) -> str:
     if tool == "replace_file_content":
         return format_diff_preview(
             "Edit",
@@ -598,9 +851,7 @@ def preview(tool: str, args: Any, *, root: Path | None) -> str:
         if args.get("Overwrite") is True and target and os.path.exists(target):
             text += "\n(overwrites an existing file)"
         return text
-    if tool == "invoke_subagent":
-        return _subagents_preview(args)
-    return _generic_preview(args)
+    return ""
 
 
 _SUBAGENTS_SHOWN = 3
@@ -632,6 +883,7 @@ _WHY_NOTE = {
     "protected": "a protected file in this project",
     "self": "Untether's own files — approving lets agy change Telegram approvals",
     "mismatch": "agy's workspace isn't this chat's project",
+    "unclear": "arguments Untether can't check",
 }
 
 
@@ -687,7 +939,13 @@ def always_allowable(args: Any) -> bool:
     """ "Always allow" is offered only for a command shown in full on the
     card (never one whose middle was cut)."""
     key = _grant_key(args)
-    return key is not None and len(key[0]) <= _COMMAND_FULL_CHARS
+    if key is None or len(key[0]) > _COMMAND_FULL_CHARS:
+        return False
+    # Nothing beyond what the card shows, and a folder that reads the same
+    # to Untether and agy.
+    if not set(args) <= _COMMAND_SHOWN | _DESCRIPTIVE_KEYS:
+        return False
+    return not key[1] or plain_absolute(key[1])
 
 
 def grant(chat_id: int | None, conversation_id: str, args: Any) -> bool:

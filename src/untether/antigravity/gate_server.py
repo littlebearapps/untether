@@ -120,6 +120,11 @@ TOO_MANY_TEXT = (
 )
 DUPLICATE_TEXT = "Untether saw this tool call twice, so it was blocked."
 # Phase 14 (Ask me): what agy shows the model when a tool is blocked.
+AMBIGUOUS_TEXT = (
+    "Untether's gate can't tell how agy would read this tool call ({why}), so "
+    "it was blocked. Call the tool again with each argument once, spelled "
+    "exactly as the tool defines it."
+)
 DENY_TEXT = (
     "The user denied this in Telegram (Untether). They can't see your tool "
     "calls — explain in your reply what you were trying to do and ask how to "
@@ -814,6 +819,39 @@ class GateRun:
         own: bool,
         stream: Any,
     ) -> dict[str, Any] | None:
+        try:
+            return await self._decide(tool, args, payload, step, cid, own, stream)
+        except Exception as exc:  # noqa: BLE001 — Ask me fails closed
+            logger.error(
+                "antigravity.gate.policy_failed",
+                run=self.key,
+                tool=tool[:60],
+                error_type=exc.__class__.__name__,
+            )
+            return {"decision": "deny", "reason": gate_hook.BAD_PAYLOAD}
+
+    async def _decide(
+        self,
+        tool: str,
+        raw_args: Any,
+        payload: dict[str, Any],
+        step: Any,
+        cid: Any,
+        own: bool,
+        stream: Any,
+    ) -> dict[str, Any] | None:
+        # Read the arguments the way agy (a Go program) does; arguments that
+        # could mean two things are refused before anything else.
+        args, ambiguous = gate_policy.normalise_args(raw_args)
+        if args is None:
+            self._decision_log("deny", "policy", step, tool=tool, source="ambiguous")
+            logger.warning(
+                "antigravity.gate.ambiguous_args", run=self.key, tool=tool[:60]
+            )
+            return {
+                "decision": "deny",
+                "reason": AMBIGUOUS_TEXT.format(why=ambiguous or "unreadable"),
+            }
         verdict = (
             gate_policy.classify(
                 tool,

@@ -77,18 +77,44 @@ def test_unknown_and_ask_list_tools_ask(tool: str, root: Path) -> None:
 
 
 def test_edit_in_project_allowed(root: Path) -> None:
-    for tool in gate_policy.EDIT_TOOLS:
-        assert classify(
-            tool, _edit(root / "src" / "new.py"), root=root, conversation_id=CID
-        ).allow
-    # Relative targets resolve against the project.
-    assert classify_edit(_edit("README.md"), root=root, conversation_id=CID).allow
+    target = str(root / "src" / "new.py")
+    for tool, args in (
+        ("write_to_file", _edit(target, Overwrite=False)),
+        (
+            "replace_file_content",
+            {"TargetFile": target, "TargetContent": "a", "ReplacementContent": "b"},
+        ),
+        (
+            "multi_replace_file_content",
+            {
+                "TargetFile": target,
+                "ReplacementChunks": [
+                    {"TargetContent": "a", "ReplacementContent": "b"}
+                ],
+                "toolSummary": "edit",
+            },
+        ),
+    ):
+        assert classify(tool, args, root=root, conversation_id=CID).allow, tool
+    # A field agy doesn't use for that tool: not on the safe list.
+    assert (
+        classify(
+            "replace_file_content", _edit(target), root=root, conversation_id=CID
+        ).why
+        == "unclear"
+    )
+    # Relative targets ask: agy might resolve them against another base
+    # (security review: parser differential).
+    verdict = classify_edit(_edit("README.md"), root=root, conversation_id=CID)
+    assert not verdict.allow and verdict.why == "unclear"
 
 
 def test_edit_outside_project_asks(root: Path, tmp_path: Path) -> None:
-    for target in (tmp_path / "other.txt", "/etc/passwd", root / ".." / "x.txt"):
+    for target in (tmp_path / "other.txt", "/etc/passwd"):
         verdict = classify_edit(_edit(target), root=root, conversation_id=CID)
         assert not verdict.allow and verdict.why == "outside"
+    dotted = classify_edit(_edit(root / ".." / "x.txt"), root=root, conversation_id=CID)
+    assert not dotted.allow and dotted.why == "unclear"
     missing = classify_edit({"CodeContent": "x"}, root=root, conversation_id=CID)
     assert not missing.allow
 
@@ -396,7 +422,6 @@ def test_reads_inside_the_project_allowed(root: Path) -> None:
     (root / "src").mkdir()
     for tool, args in (
         ("view_file", {"AbsolutePath": str(root / "README.md")}),
-        ("view_file", {"AbsolutePath": "README.md"}),
         ("list_dir", {"DirectoryPath": str(root / "src")}),
         ("grep_search", {"Query": "x"}),  # no path: agy's workspace
         ("command_status", {"CommandId": "c-1"}),
@@ -466,10 +491,10 @@ def test_artifact_dir_linked_elsewhere_asks(
 @pytest.mark.parametrize(
     "sneaky",
     [
-        "‮",  # right-to-left override
-        "​",  # zero-width space
-        "⁦",  # left-to-right isolate
-        "﻿",  # BOM
+        "\u202e",  # right-to-left override
+        "\u200b",  # zero-width space
+        "\u2066",  # left-to-right isolate
+        "\ufeff",  # BOM
         "\x1b",  # escape
     ],
 )
@@ -541,3 +566,190 @@ def test_generic_preview_says_what_it_left_out(root: Path) -> None:
     )
     assert "k0 = v0" in text and "k3" not in text
     assert "…3 more arguments not shown" in text
+
+
+# ── security review 2: parser differentials and fail-open validators ───────
+
+
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        ({"CommandLine": "ls", "commandline": "rm -rf /"}, "name the same"),
+        ({"CommandLine": "ls", "COMMANDLINE": "rm -rf /"}, "name the same"),
+        ({"Comm\u0430ndLine": "rm -rf /"}, "plain text"),  # a Cyrillic letter
+        ({"\u212aey": "x"}, "plain text"),  # Kelvin sign: Go folds it to k
+        ({"Cmd\x00": "x"}, "plain text"),
+        ("rm -rf /", "JSON object"),
+        (
+            {"TargetFile": "/p/a", "ReplacementChunks": [{"a": 1, "A": 2}]},
+            "name the same",
+        ),
+    ],
+)
+def test_ambiguous_arguments_are_refused(args: object, why: str) -> None:
+    fixed, problem = gate_policy.normalise_args(args)
+    assert fixed is None and problem is not None and why in problem
+
+
+def test_arguments_read_case_insensitively_like_agy() -> None:
+    """Go's decoder gives ``commandline`` to the ``CommandLine`` field, so
+    Untether reads (and shows) it as that."""
+    fixed, problem = gate_policy.normalise_args(
+        {"commandline": "rm -rf /tmp/x", "cwd": "/p", "toolsummary": "harmless"}
+    )
+    assert problem is None
+    assert fixed == {
+        "CommandLine": "rm -rf /tmp/x",
+        "Cwd": "/p",
+        "toolSummary": "harmless",
+    }
+    assert gate_policy.normalise_args(None) == ({}, None)
+
+
+@pytest.mark.parametrize(
+    "path_text",
+    [
+        "~/proj/a.txt",
+        "{root}/./a.txt",
+        "{root}/sub/../a.txt",
+        "/{root}/a.txt",  # doubled leading slash
+        "{root}/a.txt/",
+        "{root}/a\u202e.txt",
+        "a.txt",
+    ],
+)
+def test_only_plain_absolute_paths_are_safe_listed(path_text: str, root: Path) -> None:
+    (root / "sub").mkdir(exist_ok=True)
+    target = path_text.format(root=root)
+    for tool, args in (
+        ("view_file", {"AbsolutePath": target}),
+        ("write_to_file", {"TargetFile": target, "CodeContent": "x"}),
+    ):
+        assert not classify(tool, args, root=root, conversation_id=CID).allow, (
+            tool,
+            target,
+        )
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        # A field agy may read as a path, under a name the safe list doesn't
+        # know (codebase_search's ``TargetDirectories``).
+        ("grep_search", {"Query": "x", "TargetDirectories": ["/etc"]}),
+        ("view_file", {"AbsolutePath": "{root}/README.md", "Target": "/etc/passwd"}),
+        ("write_to_file", {"TargetFile": "{root}/a", "CodeContent": "x", "Url": "u"}),
+        (
+            "multi_replace_file_content",
+            {
+                "TargetFile": "{root}/a",
+                "ReplacementChunks": [{"TargetContent": "a", "TargetFile": "/etc/x"}],
+            },
+        ),
+        (
+            "multi_replace_file_content",
+            {"TargetFile": "{root}/a", "ReplacementChunks": "x"},
+        ),
+    ],
+)
+def test_unknown_fields_on_safe_listed_tools_ask(
+    tool: str, args: dict, root: Path
+) -> None:
+    filled = {
+        k: v.format(root=root) if isinstance(v, str) else v for k, v in args.items()
+    }
+    verdict = classify(tool, filled, root=root, conversation_id=CID)
+    assert not verdict.allow and verdict.why == "unclear"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"Cwd": 5},
+        {"OutputFile": ["/etc"]},
+        {"ReportPath": {"x": 1}},
+    ],
+)
+def test_path_free_tools_with_odd_path_values_ask(args: dict, root: Path) -> None:
+    """Fail-open fix: a non-string path value used to read as "no path"."""
+    assert not classify("command_status", args, root=root, conversation_id=CID).allow
+
+
+def test_classify_is_total(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("surprise")
+
+    monkeypatch.setattr(gate_policy, "_classify_paths", boom)
+    verdict = classify(
+        "view_file",
+        {"AbsolutePath": str(root / "README.md")},
+        root=root,
+        conversation_id=CID,
+    )
+    assert not verdict.allow
+
+
+def test_command_card_shows_every_argument_that_runs(root: Path) -> None:
+    args = {
+        "CommandLine": "make deploy",
+        "Cwd": str(root),
+        "BypassSandbox": True,
+        "RunPersistent": True,
+        "Description": "model words, not shown",
+    }
+    text = gate_policy.preview("run_command", args, root=root)
+    assert text.startswith("$ `make deploy`")
+    assert "BypassSandbox = True" in text and "RunPersistent = True" in text
+    assert "model words" not in text
+    # Not offered for a call with more than the card's plain fields, or a
+    # folder that isn't a plain absolute path.
+    assert not gate_policy.always_allowable(args)
+    assert not gate_policy.always_allowable({"CommandLine": "ls", "Cwd": "sub/.."})
+    assert gate_policy.always_allowable(
+        {"CommandLine": "ls", "Cwd": str(root), "toolSummary": "x"}
+    )
+    odd = gate_policy.preview(
+        "run_command", {"CommandLine": "ls", "Cwd": "../elsewhere"}, root=root
+    )
+    assert "the folder isn't a plain absolute path" in odd
+
+
+def test_daemon_warning_for_any_truthy_value(root: Path) -> None:
+    for value in (True, "true", 1):
+        text = gate_policy.preview(
+            "run_command", {"CommandLine": "srv", "IsDaemon": value}, root=root
+        )
+        assert "starts a daemon" in text
+
+
+def test_edit_card_shows_where_the_path_really_goes(root: Path, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / "docs").symlink_to(elsewhere, target_is_directory=True)
+    text = gate_policy.preview(
+        "write_to_file",
+        {"TargetFile": str(root / "docs" / "a.md"), "CodeContent": "x", "Extra": 1},
+        root=root,
+    )
+    assert f"→ resolves to {elsewhere / 'a.md'}".replace("_", "\\_") in text
+    assert "Extra = 1" in text
+    missing = gate_policy.preview("write_to_file", {"CodeContent": "x"}, root=root)
+    assert "⚠️ no target file in this call" in missing
+
+
+def test_agy_1_3_4_write_fields_allowed(root: Path) -> None:
+    """The exact keys agy 1.3.4 sent in a live run (2026-10-13), incl.
+    ``Append``; an unknown extra key still asks."""
+    args = {
+        "Append": True,
+        "CodeContent": "gamma\n",
+        "Description": "Append gamma",
+        "Overwrite": False,
+        "TargetFile": str(root / "notes.txt"),
+        "toolAction": "Appending",
+        "toolSummary": "Append line",
+    }
+    assert classify("write_to_file", args, root=root, conversation_id=CID).allow
+    assert not classify(
+        "write_to_file", {**args, "Mode": "0777"}, root=root, conversation_id=CID
+    ).allow

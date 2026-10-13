@@ -63,6 +63,27 @@ MISMATCH = (
 )
 TOO_LARGE = "The tool call is too large for Untether's gate, so it was blocked."
 BAD_PAYLOAD = "Untether's gate couldn't read this tool call, so it was blocked."
+DUPLICATE_KEYS = (
+    "This tool call names the same field twice, so Untether can't tell which "
+    "one agy would use and blocked it. Call the tool again with each field once."
+)
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Python keeps the last of two equal keys; agy's own parser may not.
+    A payload that says two things never reaches the gate's policy."""
+    out: dict[str, object] = {}
+    for key, value in pairs:
+        if key in out:
+            raise _DuplicateKey(key)
+        out[key] = value
+    return out
+
+
 BAD_REPLY = (
     "Untether's gate gave an answer it doesn't understand, so the tool was blocked."
 )
@@ -194,8 +215,12 @@ def run(event: str) -> dict[str, object] | None:
     if data is None:
         return _failed(event, TOO_LARGE)
     try:
-        payload = json.loads(data) if data.strip() else {}
-    except ValueError:
+        payload = (
+            json.loads(data, object_pairs_hook=_no_duplicates) if data.strip() else {}
+        )
+    except _DuplicateKey:
+        return _failed(event, DUPLICATE_KEYS)
+    except (ValueError, RecursionError):
         return _failed(event, BAD_PAYLOAD)
     out = _round_trip(event, payload)
     if out is None:

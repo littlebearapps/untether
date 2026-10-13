@@ -533,7 +533,7 @@ async def test_required_gate_never_answers_no_decision(harness: Harness) -> None
     read = {
         "conversationId": CID,
         "stepIdx": 8,
-        "toolCall": {"name": "view_file", "args": {"AbsolutePath": "/x"}},
+        "toolCall": {"name": "list_permissions", "args": {}},
     }
     assert await harness.call("PreToolUse", read) == {"decision": "allow"}
     harness.gate.unattended_trigger = "cron:nightly"
