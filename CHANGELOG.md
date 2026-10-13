@@ -87,6 +87,7 @@
 
 ### docs
 
+- integration-test playbook: rows brought in line with 0.36.1rc3 behaviour. AG-13a no longer expects `background.started` for a command; AG-8 uses `gemini-3.8-flash` and `gpt-oss-120b` now that agy 1.3.3 lists no Gemini Pro model; AG-17 changes the planted script before the long answer; AG-12c checks the downgrade in the log rather than a `⚠️ Blocked` row; AG-12e expects `/model set` to refuse a leading-dash id up front; R3-906b scales with `rate_limit`; RC12-7 / R3-SEAM-3 state the follow-up mode and timing; Full-access rows use a plain run tag [#1054](https://github.com/littlebearapps/untether/issues/1054)
 - Antigravity CLI docs: runner reference, stream-json cheatsheet and event mapping; install, sign-in and Google terms note in Switch engines; permission mode, effort, security, troubleshooting, config and error references; FAQ and README compatibility tables; a new [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/) guide [#558](https://github.com/littlebearapps/untether/issues/558)
 - replace maintainer host names, bot usernames, session IDs and private project names in the public docs (older changelog sections, the dev-setup sample log, the Claude runner and config references) with neutral placeholders [#1027](https://github.com/littlebearapps/untether/issues/1027)
 
