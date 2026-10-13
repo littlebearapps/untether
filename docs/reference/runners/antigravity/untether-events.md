@@ -59,7 +59,10 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | RAM / concurrency guard | Same pre-spawn guard as every engine |
 | `no_project` | No project directory, or it is `/`, the home directory or the bot's own directory, or its path can't be resolved |
 | `invalid_argument` | The model id or the conversation id being resumed isn't a valid value (it could be read by agy as a flag). The bad id is not kept as the resume token |
-| `gate_missing` | The mode is Ask me (Plan first runs since [#981](https://github.com/littlebearapps/untether/issues/981)) |
+| `gate_missing` | Ask me, and Untether's agy plugin isn't installed on the host ([#980](https://github.com/littlebearapps/untether/issues/980)) |
+| `gate_not_ready` | Ask me, and the plugin is edited, outdated or disabled, agy doesn't list its hooks for the project, the planted-config scan didn't finish, or the run's socket couldn't open |
+| `gate_self_protect` | Ask me in a project that contains Untether's own package, venv or plugin folder |
+| `gate_foreign_config` | Ask me in a project with agy hooks, plugins, agents or MCP servers Untether doesn't manage (or user-level ones) |
 | `unsupported_version` | agy is older than 1.3.1 |
 | `config_changed` | Unattended run, and the project's agy config differs from what an attended run last showed |
 | `config_unchecked` | Unattended run, and that config couldn't be checked |

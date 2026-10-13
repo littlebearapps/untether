@@ -168,16 +168,44 @@ Toggle via `/config` → **Permission mode**:
 | Mode | CLI flag | Behaviour |
 |------|----------|-----------|
 | **Workspace** (default) | `--mode=accept-edits` `--agent=untether-workspace` | Antigravity reads, creates and edits files in the project. It has no shell, web, MCP or subagent tools, so it can't run commands, and can't delete or rename files. Not a sandbox — see below |
-| **Ask me** | — | Coming in a later 0.36.1 release: asks you in Telegram before shell, web and MCP calls. Needs Untether's approval gate, so it's shown but can't be picked yet |
+| **Ask me** | `--dangerously-skip-permissions`, once Untether's agy plugin is ready for the project | Reads and in-project edits run on their own; shell commands, web, MCP, browser, subagents, timers, files outside the project and protected files get **✅ Approve / ❌ Deny** buttons with the command or a diff. See [Ask me](#antigravity-ask-me) below |
 | **Plan first** | `--mode=plan` `--agent=untether-workspace` | Antigravity reads the project and writes a plan, changing nothing. The plan is posted with **✅ Approve Plan / ❌ Deny / 💬 Let's discuss**; Approve carries it out in Workspace mode. See [Plan first](#antigravity-plan-first) below |
 | **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project. Takes effect from the next new conversation — send `/new` after switching |
 
-This is a pre-run policy: headless agy can't stop mid-run to ask, so there are no per-tool Approve / Deny buttons for Antigravity yet (questions it asks with `ask_question` do get buttons with [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)). **Ask me** will add them; until then `/config` shows it with "· soon", and a run set to it (for example from `untether.toml`) is refused before it starts rather than run as something else. **Plan first** works today: agy plans and stops, and you answer the plan afterwards. In an Antigravity chat `/planmode on` picks Plan first and `/planmode off` goes back to Workspace.
+Workspace, Plan first and Full access are pre-run policies: headless agy can't stop mid-run to ask by itself. **Ask me** adds per-tool Approve / Deny buttons through [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) (which also gives questions asked with `ask_question` their buttons). Without the plugin `/config` shows **🔒 Ask me — set up**, and a run set to Ask me (for example from `untether.toml`) is refused before it starts rather than run as something else. **Plan first** agy plans and stops, and you answer the plan afterwards. In an Antigravity chat `/planmode on` picks Plan first and `/planmode off` goes back to Workspace.
 
-!!! warning "After switching to Full access, send `/new`"
-    agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Send `/new`: Full access applies from the next new conversation. The `/config` toast says the same (`Permission mode: full access — send /new to start using it`).
+!!! warning "After switching between Workspace / Plan first and Ask me / Full access, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in Workspace or Plan first keeps its no-shell tools after you switch the chat to **Full access** or **Ask me**, even though the footer says `full access` / `ask me` — in Ask me it then has no shell to ask you about. Send `/new`: the new mode applies from the next new conversation. The `/config` toast says the same (`Permission mode: ask me — send /new if you're switching from Workspace or Plan first`).
 
-    Switching Full access → Workspace needs `/new` too. A conversation that began in Full access keeps agy's default tools, so a shell attempt there is blocked and the turn ends on the ⚠️ notice, which then says to send `/new` (or pick Full access again). The same goes for Full access → Plan first. The toasts say `Permission mode: workspace — send /new if you're switching from Full access` (and the same for plan first); moving between Workspace and Plan first needs no `/new` ([#1060](https://github.com/littlebearapps/untether/issues/1060)).
+    Switching Full access or Ask me → Workspace needs `/new` too. A conversation that began on agy's default tools keeps them, so a shell attempt there is blocked and the turn ends on the ⚠️ notice, which then says to send `/new` (or pick Full access again). The same goes for → Plan first. The toasts say `Permission mode: workspace — send /new if you're switching from Full access or Ask me` (and the same for plan first); moving between Workspace and Plan first, or between Ask me and Full access, needs no `/new` ([#1060](https://github.com/littlebearapps/untether/issues/1060), [#980](https://github.com/littlebearapps/untether/issues/980)).
+
+#### Antigravity: Ask me
+
+**Ask me** ([#980](https://github.com/littlebearapps/untether/issues/980)) is the closest Antigravity gets to Claude Code's approval buttons. It needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: agy runs with all its tools (`--dangerously-skip-permissions`, its default agent), and the plugin holds every tool call until Untether answers. Untether never passes that flag for Ask me unless the plugin is installed, unedited and loaded by agy for the project.
+
+- **Runs without a card:** reading, listing and searching files inside the project, and creating or editing files there (plus agy's own notes for the conversation).
+- **Asks first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents and timers; files outside the project; protected files in it (`.agents/`, `.git/`, `.gemini/`, `.claude/`, `.github/workflows/`, `.husky/`, `.untether-outbox/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.env` files and keys); Untether's own files; and any tool Untether doesn't know yet. With **Diff preview** on, in-project edits ask too.
+
+The card reads like Claude's:
+
+!!! untether "Untether"
+    ⚠️ Permission Request [agy] - shell command
+    $ `npm test`
+    in packages/api · moves to the background after 5 s if still running
+    agy says: Run the test suite
+
+    [✅ Approve] [❌ Deny]
+    [✅ Always allow this command here]
+
+An edit shows the file and the lines added and removed (`📝 src/app.py`, `-` / `+`); a write outside the project says `(outside this project)`; a command that starts a daemon warns that it keeps running after the turn; a subagent's call says `from subagent: <role>`. agy's own description comes last and is only agy's words — the lines above it are what will actually run.
+
+- **✅ Approve** runs the tool. **✅ Always allow this command here** (shell commands only) also lets the exact same command, in the same folder, run without asking for the rest of the conversation; it is forgotten on `/new`, a switch to another mode or a restart.
+- **❌ Deny** blocks it: agy is told you refused and not to retry, and the step reads `blocked: denied in Telegram`.
+- **No answer** within 15 minutes (or `[antigravity] approval_timeout_s`) blocks it too, and the card reads `⏱️ Timed out: denied after 15 min`.
+
+Reminders, push notifications and [who can answer](#who-can-answer-in-a-group) work as for Claude Code. Cron runs get Ask me only from their own `permission_mode = "ask"`; with nobody to tap, everything that would ask is denied at once and the answer ends with a `🔒 unattended` footer. A chat's Ask me runs scheduled runs as Workspace.
+
+Ask me is refused (nothing runs) when the plugin isn't ready for the project, when the project contains Untether's own code, or when agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage — those run commands without asking. The reply says which and what to do; see [Troubleshooting](troubleshooting.md#antigravity-ask-me-is-refused).
 
 #### Antigravity: Plan first
 
@@ -227,7 +255,7 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
 
 **Allow rules.** Exact rules in `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`, only matter where agy has a shell tool to block, which is the cases in the paragraph above. A Workspace conversation on the no-shell agent has no shell tool, so an allow rule doesn't give it one; use Full access. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
 
-**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
+**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`, `"ask"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access or Ask me from the chat or `untether.toml`: a cron gets either only from its own `permission_mode`, and webhook runs never get Full access.
 
 **agy's own settings can override the mode.** If agy's settings file sets `toolPermission` to anything other than `request-review` or `strict` (for example `always-proceed`), agy would approve tools by itself, so Untether refuses to run Workspace and tells you to set it back or pick Full access.
 
