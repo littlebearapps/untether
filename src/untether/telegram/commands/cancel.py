@@ -13,6 +13,8 @@ from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
@@ -55,14 +57,25 @@ async def handle_cancel(
     msg: TelegramIncomingMessage,
     running_tasks: RunningTasks,
     scheduler: ThreadScheduler | None = None,
+    *,
+    dropped_pending: bool = False,
 ) -> None:
+    """``dropped_pending``: the #807 command barrier dropped a prompt sent
+    just before this ``/cancel`` and already replied with its 🗑️ notice —
+    that notice is this ``/cancel``'s reply, so a bare "nothing running"
+    fallback is not sent as well (#1084). Every other reply still is."""
     reply = make_reply(cfg, msg)
     chat_id = msg.chat_id
     reply_id = msg.reply_to_message_id
 
     if reply_id is None:
         if msg.reply_to_text:
-            await reply(text="nothing is currently running for that message.")
+            await _reply_nothing_running(
+                reply,
+                "nothing is currently running for that message.",
+                chat_id=chat_id,
+                dropped_pending=dropped_pending,
+            )
             return
         # Fallback: single active run or single queued job in this chat
         # #776: one entry per run — a live run is also registered under each
@@ -180,10 +193,18 @@ async def handle_cancel(
             thread_id=msg.thread_id,
             idle_closed=idle_closed,
         )
-        text = f"nothing running in this {thread_scope_label(msg)}"
         if idle_closed:
-            text += f" \u2014 {_idle_closed_label(idle_closed)}"
-        await reply(text=f"{text}.")
+            # #902: closing an idle session is news the 🗑️ notice doesn't
+            # carry, so this reply is always sent.
+            text = f"nothing running in this {thread_scope_label(msg)}"
+            await reply(text=f"{text} \u2014 {_idle_closed_label(idle_closed)}.")
+            return
+        await _reply_nothing_running(
+            reply,
+            f"nothing running in this {thread_scope_label(msg)}.",
+            chat_id=chat_id,
+            dropped_pending=dropped_pending,
+        )
         return
 
     progress_ref = MessageRef(channel_id=chat_id, message_id=reply_id)
@@ -200,7 +221,12 @@ async def handle_cancel(
                 )
                 await _edit_cancelled_message(cfg, progress_ref, job)
                 return
-        await reply(text="nothing is currently running for that message.")
+        await _reply_nothing_running(
+            reply,
+            "nothing is currently running for that message.",
+            chat_id=chat_id,
+            dropped_pending=dropped_pending,
+        )
         return
 
     if not _claim_cancel(chat_id, reply_id):
@@ -234,6 +260,21 @@ async def handle_cancel(
         progress_message_id=reply_id,
     )
     running_task.cancel_requested.set()
+
+
+async def _reply_nothing_running(
+    reply: Callable[..., Awaitable[object]],
+    text: str,
+    *,
+    chat_id: int,
+    dropped_pending: bool,
+) -> None:
+    """Send a "nothing running" reply unless the barrier's 🗑️ notice has
+    already answered this ``/cancel`` (#1084)."""
+    if dropped_pending:
+        logger.debug("cancel.nothing_running.answered_by_drop", chat_id=chat_id)
+        return
+    await reply(text=text)
 
 
 def _idle_closed_label(count: int) -> str:

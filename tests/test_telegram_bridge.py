@@ -4546,6 +4546,93 @@ async def test_807_command_barrier_real_window(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_1084_cancel_in_window_replies_once() -> None:
+    """#1084: `A, /cancel` inside one coalesce window answered twice — the
+    🗑️ notice and "nothing running in this chat." The notice is the reply."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "alpha prompt")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(2, "/cancel")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    assert runner.calls == []
+    texts = [call["message"].text for call in transport.send_calls]
+    assert texts == [
+        "🗑️ Dropped 1 message sent just before /cancel — "
+        "send it again if you still need it."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1084_cancel_outside_window_still_says_nothing_running() -> None:
+    """#902 still holds: a /cancel with nothing pending always replies."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(2, "/cancel")
+        await anyio.sleep(_cfg.forward_coalesce_s * 2)
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    texts = [call["message"].text for call in transport.send_calls]
+    assert texts == ["nothing running in this chat."]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("reply_to_message_id", "reply_to_text"),
+    [(None, None), (None, "an old message"), (77, "an old message")],
+)
+async def test_1084_dropped_pending_skips_only_nothing_running(
+    reply_to_message_id: int | None, reply_to_text: str | None
+) -> None:
+    """Every "nothing running" variant is skipped when the barrier's notice
+    already answered; an idle-session close is still reported (#902)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=reply_to_message_id,
+        reply_to_text=reply_to_text,
+        sender_id=123,
+    )
+    await handle_cancel(cfg, msg, {}, dropped_pending=True)
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
+async def test_1084_dropped_pending_still_reports_idle_close() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    idle = _idle_live_task()
+    await handle_cancel(
+        cfg,
+        _plain_cancel_msg(),
+        {MessageRef(channel_id=123, message_id=4084): idle},
+        dropped_pending=True,
+    )
+    assert idle.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == (
+        "nothing running in this chat \N{EM DASH} closed the idle session."
+    )
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_ignores_forwarded_without_prompt() -> None:
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
     runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())

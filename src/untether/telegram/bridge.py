@@ -748,10 +748,14 @@ async def handle_cancel(
     msg: TelegramIncomingMessage,
     running_tasks: RunningTasks,
     scheduler: ThreadScheduler | None = None,
+    *,
+    dropped_pending: bool = False,
 ) -> None:
     from .commands import handle_cancel as _handle_cancel
 
-    await _handle_cancel(cfg, msg, running_tasks, scheduler)
+    await _handle_cancel(
+        cfg, msg, running_tasks, scheduler, dropped_pending=dropped_pending
+    )
 
 
 async def handle_callback_cancel(

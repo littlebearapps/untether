@@ -3284,8 +3284,17 @@ async def run_main_loop(
                     )
 
                 if classification.is_cancel:
+                    # #1084: the 🗑️ notice above is this /cancel's reply when
+                    # it dropped a prompt — no "nothing running" as well.
                     tg.start_soon(
-                        handle_cancel, cfg, msg, state.running_tasks, scheduler
+                        partial(
+                            handle_cancel,
+                            cfg,
+                            msg,
+                            state.running_tasks,
+                            scheduler,
+                            dropped_pending=barrier_drop is not None,
+                        )
                     )
                     return
 
