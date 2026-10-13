@@ -19,6 +19,7 @@ from .background_status import (
     FOLDABLE_REASONS,
     BackgroundStatusManager,
     count_substantive_actions,
+    escape_markdown,
     format_tokens,
     is_collection_action,
     live_shown,
@@ -1259,6 +1260,20 @@ def _apply_cost_delta(
         "total_cost_usd": result.delta,
         "session_total_cost_usd": result.cumulative,
     }
+
+
+def _engine_note(stream: Any, name: str) -> str | None:
+    """#1061: a short line an engine's state offers for the progress message
+    (duck-typed like ``awaiting_background``); None when it has none."""
+    probe = getattr(getattr(stream, "engine_state", None), name, None)
+    if not callable(probe):
+        return None
+    try:
+        note = probe()
+    except Exception:  # noqa: BLE001 — cosmetic; never break a render
+        logger.debug("progress_edits.engine_note_failed", note=name, exc_info=True)
+        return None
+    return note if isinstance(note, str) and note else None
 
 
 # #419: engines whose CompletedEvent token usage needs the session ledger.
@@ -6947,7 +6962,10 @@ async def handle_message(
     if progress_cfg.show_background_tasks:
         _bg_max_rows = progress_cfg.background_tasks_max_rows
         edits.background_provider = lambda: render_background_block(
-            _bg_tasks(), now=time.monotonic(), max_rows=_bg_max_rows
+            _bg_tasks(),
+            now=time.monotonic(),
+            max_rows=_bg_max_rows,
+            note=_engine_note(edits.stream, "background_hold_note"),
         )
     _bg_count_token = register_live_count_source(
         incoming.channel_id, lambda: len(live_shown(_bg_tasks()))
@@ -8646,6 +8664,11 @@ async def handle_message(
                 context_line=context_line,
                 meta_formatter=format_meta_line,
             )
+            # #1061: an engine holding its answer for background work
+            # (Antigravity) says where the answer went.
+            if (hold := _engine_note(edits.stream, "cancelled_hold_note")) is not None:
+                state = dataclasses.replace(state, background=escape_markdown(hold))
+                logger.info("handle.cancelled_during_hold")
             final_rendered = effective_presenter.render_progress(
                 state,
                 elapsed_s=elapsed,

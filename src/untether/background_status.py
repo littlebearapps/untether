@@ -316,14 +316,21 @@ def _live_rows(
 
 
 def render_background_block(
-    tasks: Iterable[Any], *, now: float, max_rows: int = 5
+    tasks: Iterable[Any],
+    *,
+    now: float,
+    max_rows: int = 5,
+    note: str | None = None,
 ) -> str | None:
-    """The pre-result progress block (markdown; descriptions escaped)."""
+    """The pre-result progress block (markdown; descriptions escaped).
+    ``note`` (#1061): an engine's own last line, escaped."""
     live = sorted(live_shown(tasks), key=_start_key)
     if not live:
         return None
     lines = [f"{HOURGLASS} background ({len(live)})"]
     lines.extend(_live_rows(live, now, max(1, max_rows), markdown=True))
+    if note:
+        lines.append(escape_markdown(note))
     return HARD_BREAK.join(lines)
 
 

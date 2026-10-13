@@ -47,7 +47,12 @@ def _real_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _script(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, *, hold_after: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    hold_after: str,
+    hold_s: float = 0.6,
 ) -> None:
     """*name*'s capture with no gaps except a short hold after the first line
     containing *hold_after* (where agy sits silent while the work runs)."""
@@ -58,7 +63,7 @@ def _script(
             continue
         out.append(line)
         if not held and hold_after in line:
-            out.append("sleep:0.6")
+            out.append(f"sleep:{hold_s}")
             held = True
     assert held, hold_after
     script = tmp_path / f"{name}.script"
@@ -168,3 +173,66 @@ async def test_background_block_reaches_the_progress_message(
     assert chat_live_background_count(4242) == 0
     # Progress message + final answer only: no separate status message.
     assert not [t for t in texts if t.startswith("⏳ background")]
+
+
+@pytest.mark.anyio
+async def test_cancel_during_the_hold_says_where_the_answer_went(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1061: while agy holds its answer for a timer the ``⏳ background``
+    block says the answer comes when it finishes; /cancel during the hold
+    leaves a note that the conversation kept the answer. The engine's exit
+    is in the journal (#1062)."""
+    import structlog.testing
+
+    from untether import runner_bridge
+    from untether.settings import ProgressSettings
+
+    _script(
+        tmp_path,
+        monkeypatch,
+        "schedule_timer",
+        hold_after='"tool_name":"schedule"',
+        hold_s=30,
+    )
+    monkeypatch.setattr(
+        runner_bridge,
+        "_load_progress_settings",
+        lambda: ProgressSettings(min_render_interval=0),
+    )
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict[Any, Any] = {}
+
+    async def run() -> None:
+        await handle_message(
+            cfg,
+            runner=AntigravityRunner(antigravity_cmd=str(FAKE_AGY)),
+            incoming=IncomingMessage(channel_id=4243, message_id=10, text="timer"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    def _texts() -> list[str]:
+        return [c["message"].text for c in transport.edit_calls] + [
+            c["message"].text for c in transport.send_calls
+        ]
+
+    with structlog.testing.capture_logs() as logs, anyio.fail_after(30):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run)
+            while not any("⏳ background (1)" in t for t in _texts()):
+                await anyio.sleep(0.05)
+            task = running_tasks[next(iter(running_tasks))]
+            task.cancel_requested.set()
+    held = [t for t in _texts() if "⏳ background (1)" in t]
+    assert "agy sends its answer when this work finishes \\(up to 30 min\\)" in held[-1]
+    last = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last
+    assert "Cancelled while agy was holding its answer for background work" in last
+    assert "repeat your last answer" in last
+    assert any(e["event"] == "handle.cancelled_during_hold" for e in logs)
+    exits = [e for e in logs if e["event"] == "subprocess.exit"]
+    assert exits and exits[-1]["reason"] == "teardown"

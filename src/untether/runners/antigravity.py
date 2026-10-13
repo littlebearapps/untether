@@ -46,7 +46,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
-from ..background_status import escape_markdown
+from ..background_status import escape_markdown, live_shown
 from ..background_tasks import EngineBackgroundTask
 from ..config import ConfigError
 from ..events import EventFactory
@@ -1068,6 +1068,32 @@ class AntigravityStreamState:
             return False
         oldest = min(self.bg_steps.values())
         return time.monotonic() - oldest < _AGY_BACKGROUND_CAP_S
+
+    # #1061: agy prints nothing while it holds its answer for background
+    # work, and a cancel during the hold ends with an empty ``response``
+    # (probe rc4-h1), so the answer can't be shown from the stream. These two
+    # lines, duck-typed by ``runner_bridge``, say so where the user looks.
+
+    def background_hold_note(self) -> str:
+        """The last line of the ``⏳ background`` block."""
+        return BACKGROUND_HOLD_NOTE
+
+    def cancelled_hold_note(self) -> str | None:
+        """The cancelled progress message's note, when the run was cancelled
+        while a listed background task was still running."""
+        if not live_shown(self.tasks.values()):
+            return None
+        return CANCELLED_HOLD_NOTE
+
+
+# #1061. The held answer stays in agy's conversation (probe rc4-h2: a
+# resumed "repeat your previous answer" returned it word for word).
+BACKGROUND_HOLD_NOTE = "agy sends its answer when this work finishes (up to 30 min)"
+CANCELLED_HOLD_NOTE = (
+    "⏳ Cancelled while agy was holding its answer for background work, so"
+    " it wasn't shown. The conversation kept it: send a message such as"
+    ' "repeat your last answer" to see it.'
+)
 
 
 # ── runner ──────────────────────────────────────────────────────────────────

@@ -506,3 +506,37 @@ def test_failed_step_with_a_non_cancel_error_is_failed() -> None:
     error = {"type": "TOOL_ERROR", "message": "exec failed"}
     _feed(runner, state, [_tool(2, "run_command", "DONE", {}, error=error)])
     assert state.tasks["cmd:2"].status == "failed"
+
+
+# ── #1061: the held answer ──────────────────────────────────────────────────
+
+
+def test_hold_notes_follow_the_listed_tasks() -> None:
+    """The ``⏳ background`` block ends with the engine's note; the cancel
+    note is offered only while a listed task is still running."""
+    runner, state = _state()
+    assert state.cancelled_hold_note() is None
+    _feed(runner, state, [_tool(2, "schedule", "ACTIVE", {"DurationSeconds": 60})])
+    block = render_background_block(
+        state.tasks.values(), now=time.monotonic(), note=state.background_hold_note()
+    )
+    assert block is not None
+    assert block.split(HARD_BREAK)[-1] == (
+        "agy sends its answer when this work finishes \\(up to 30 min\\)"
+    )
+    assert state.cancelled_hold_note() == (
+        "⏳ Cancelled while agy was holding its answer for background work, so"
+        " it wasn't shown. The conversation kept it: send a message such as"
+        ' "repeat your last answer" to see it.'
+    )
+    # A command still inside its foreground window isn't listed: no note.
+    _feed(runner, state, [_tool(2, "schedule", "DONE", {}, output="ok")])
+    _feed(runner, state, [_tool(3, "run_command", "ACTIVE", {"CommandLine": "x"})])
+    assert state.cancelled_hold_note() is None
+
+
+def test_background_block_without_a_note_is_unchanged() -> None:
+    runner, state = _state()
+    _feed(runner, state, [_tool(2, "schedule", "ACTIVE", {"DurationSeconds": 60})])
+    rows = _rows(state)
+    assert len(rows) == 2 and rows[-1].startswith("🐚 timer")
