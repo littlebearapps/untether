@@ -20,7 +20,6 @@ voice note is not steered past it either.
 
 from __future__ import annotations
 
-import html
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -67,8 +66,14 @@ def split_followup_command(
     return mode, text
 
 
+def notice_is_html(engine: str) -> bool:
+    """#1077: Antigravity's notices name a host command as <code>."""
+    return engine == "antigravity"
+
+
 def fallback_notice(reason: FallbackReason, engine: str) -> str:
-    """The notice as Telegram HTML (``_send`` uses ``parse_mode=HTML``)."""
+    """The notice text. Antigravity's are Telegram HTML (``notice_is_html``);
+    every other engine's stay plain text, byte-identical (Claude golden)."""
     arrow = "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16}"
     if reason == "engine":
         if engine == "antigravity":
@@ -77,9 +82,7 @@ def fallback_notice(reason: FallbackReason, engine: str) -> str:
                 f"{arrow} Steer needs Untether's agy plugin on this host "
                 "(<code>untether agy-gate install</code>) — queued instead."
             )
-        return (
-            f"{arrow} Steer isn't supported on {html.escape(engine)} — queued instead."
-        )
+        return f"{arrow} Steer isn't supported on {engine} — queued instead."
     if reason == "closing":
         return f"{arrow} The current run is ending — queued instead."
     if reason == "starting":
@@ -147,11 +150,16 @@ async def _send(
     user_msg_id: int,
     thread_id: int | None,
     text: str,
+    html: bool = False,
 ) -> None:
     try:
         await cfg.exec_cfg.transport.send(
             channel_id=chat_id,
-            message=RenderedMessage(text=text, extra={"parse_mode": "HTML"}),
+            message=(
+                RenderedMessage(text=text, extra={"parse_mode": "HTML"})
+                if html
+                else RenderedMessage(text=text)
+            ),
             options=SendOptions(
                 reply_to=MessageRef(
                     channel_id=chat_id, message_id=user_msg_id, thread_id=thread_id
@@ -362,5 +370,6 @@ async def maybe_steer(
             user_msg_id=user_msg_id,
             thread_id=thread_id,
             text=fallback_notice(reason, target_engine),
+            html=notice_is_html(target_engine),
         )
     return False
