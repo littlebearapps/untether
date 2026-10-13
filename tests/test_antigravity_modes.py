@@ -15,6 +15,7 @@ import pytest
 import structlog.testing
 
 from untether.antigravity import gate_precheck
+from untether.antigravity.gate_server import GateRun
 from untether.events import EventFactory
 from untether.runners import antigravity as agy
 from untether.runners.antigravity import (
@@ -110,10 +111,22 @@ def test_bypass_only_for_full_or_ready_attended_ask() -> None:
         args = runner.build_args("p", None, state=state)
     assert BYPASS not in args
     assert "--mode=accept-edits" in args
-    # With run_impl's ready-gate decision: bypass, default agent, no --mode.
+    # A ready-gate decision without the run's own required gate: still no
+    # bypass (security review: the flag never travels without the gate).
     with apply_run_options(EngineRunOptions(permission_mode="ask")):
         state = runner.new_state("p", None)
         state.decision = decide_antigravity_mode("ask", READY)
+        assert BYPASS not in runner.build_args("p", None, state=state)
+        state.gate = GateRun(config_path=None, factory=EventFactory("antigravity"))
+        assert BYPASS not in runner.build_args("p", None, state=state)
+    # With run_impl's ready-gate decision and its required gate: bypass,
+    # default agent, no --mode.
+    with apply_run_options(EngineRunOptions(permission_mode="ask")):
+        state = runner.new_state("p", None)
+        state.decision = decide_antigravity_mode("ask", READY)
+        state.gate = GateRun(
+            config_path=None, factory=EventFactory("antigravity"), required=True
+        )
         args = runner.build_args("p", None, state=state)
     assert BYPASS in args
     assert not [a for a in args if a.startswith(("--mode", "--agent"))]

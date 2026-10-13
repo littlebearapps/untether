@@ -926,19 +926,14 @@ class GateRun:
         request_id = f"agy_{secrets.token_hex(6)}"
         action_id = f"antigravity.approval.{request_id}"
         tool_input = args if isinstance(args, dict) else {}
-        register(
-            request_id,
-            session_key=self.session_key,
-            responder=RESPONDER,
-            tool_name=tool,
-            tool_input=tool_input,
-            kind="tool",
-        )
         child_role = (
             self.child_roles.get(cid) or "subagent"
             if own and isinstance(cid, str) and cid != self.conversation_id
             else None
         )
+        # Everything that reads the model's arguments runs before the
+        # request is registered: a failure here leaves nothing pending, and
+        # the hook's closed connection is a deny.
         title = gate_policy.card_title(
             tool,
             args,
@@ -947,8 +942,19 @@ class GateRun:
             child_role=child_role,
             foreign=not own,
         )
+        offer_always = (
+            tool == "run_command" and own and gate_policy.always_allowable(args)
+        )
+        register(
+            request_id,
+            session_key=self.session_key,
+            responder=RESPONDER,
+            tool_name=tool,
+            tool_input=tool_input,
+            kind="tool",
+        )
         buttons = approval_keyboard(request_id)
-        if tool == "run_command" and own and gate_policy._grant_key(args) is not None:
+        if offer_always:
             buttons.append(
                 [
                     {
@@ -998,8 +1004,7 @@ class GateRun:
                 source = "user"
                 if (
                     decision.action == "always"
-                    and own
-                    and tool == "run_command"
+                    and offer_always
                     and gate_policy.grant(
                         self.channel_id, self.conversation_id or "", args
                     )

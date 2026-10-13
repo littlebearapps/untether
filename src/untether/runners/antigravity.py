@@ -2112,6 +2112,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             and state.decision.mode == mode
             else decide_antigravity_mode(mode)
         )
+        if decision.gated and (
+            not isinstance(state, AntigravityStreamState)
+            or state.gate is None
+            or not state.gate.required
+        ):
+            # Invariant: Ask me's bypass only ever travels with this run's
+            # own required gate. Without it, fail closed.
+            logger.error("antigravity.gate.bypass_without_gate", mode=mode)
+            decision = decide_antigravity_mode(mode)
         if decision.bypass:
             # Full access and Ask me: agy's default agent (Ask me has
             # nothing to ask about under the no-shell agent, G1) and no

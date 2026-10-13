@@ -416,3 +416,180 @@ def test_gate_block_text_rows() -> None:
     other = prefix + "probe hook deny: no"
     assert agy._gate_block_text(other) == other
     assert agy._gate_block_text("tool failed") == "tool failed"
+
+
+# ── security review (2026-10-13): who can answer, and failing closed ───────
+
+
+@pytest.mark.anyio
+async def test_card_bound_to_the_runs_chat(harness: Harness) -> None:
+    """#388: a tap from another chat can't answer the card."""
+    from untether.interactive import control_request_origin
+
+    async def call() -> dict[str, Any] | None:
+        return await harness.call("PreToolUse", _call("run_command", SHELL))
+
+    out: dict[str, Any] = {}
+
+    async def run() -> None:
+        out["v"] = await call()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run)
+        await _wait_for(lambda: bool(_cards(harness)))
+        rid = _cards(harness)[0].action.detail["request_id"]
+        assert control_request_origin(rid) == CHAT
+        foreign = await respond(rid, Decision(True, "approve"), channel_id=CHAT + 1)
+        assert foreign.status is ControlRequestStatus.NOT_FOUND and not foreign.sent
+        assert not _done(harness)
+        await respond(rid, Decision(False, "deny"), channel_id=CHAT)
+    assert out["v"] is not None and out["v"]["decision"] == "deny"
+
+
+@pytest.mark.anyio
+async def test_decision_only_reaches_its_own_request(project: Path) -> None:
+    """Two runs, two cards: answering one never resolves the other."""
+    async for first in _harness(project):
+        async for second in _harness(project):
+            await _two_runs(first, second)
+
+
+async def _two_runs(first: Harness, second: Harness) -> None:
+    assert first.gate.session_key != second.gate.session_key
+    results: dict[str, Any] = {}
+
+    async def call(h: Harness, key: str) -> None:
+        results[key] = await h.call("PreToolUse", _call("run_command", SHELL))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(call, first, "first")
+        tg.start_soon(call, second, "second")
+        await _wait_for(lambda: bool(_cards(first)) and bool(_cards(second)))
+        rid_first = _cards(first)[0].action.detail["request_id"]
+        # The second run's gate can't resolve the first run's id.
+        assert not second.gate.resolve(rid_first, Decision(True, "approve"))
+        await respond(rid_first, Decision(True, "approve"))
+        await _wait_for(lambda: "first" in results)
+        assert "second" not in results
+        await respond(
+            _cards(second)[0].action.detail["request_id"], Decision(False, "deny")
+        )
+    assert results["first"] == {"decision": "allow"}
+    assert results["second"] is not None
+    assert results["second"]["decision"] == "deny"
+
+
+@pytest.mark.anyio
+async def test_replayed_step_is_denied_without_a_card(harness: Harness) -> None:
+    out = await _held_call(
+        harness, _call("run_command", SHELL, step=7), Decision(True, "approve")
+    )
+    assert out == {"decision": "allow"}
+    again = await harness.call("PreToolUse", _call("run_command", SHELL, step=7))
+    assert again == {"decision": "deny", "reason": gate_server.DUPLICATE_TEXT}
+    assert len(_cards(harness)) == 1
+
+
+@pytest.mark.anyio
+async def test_forged_always_on_a_write_grants_nothing(
+    harness: Harness, project: Path, tmp_path: Path
+) -> None:
+    """An ``ia:always:`` callback on a card that never offered it approves
+    that one call (as Approve would) and remembers nothing."""
+    args = {"TargetFile": str(tmp_path / "out.txt"), "CodeContent": "x"}
+    out = await _held_call(
+        harness, _call("write_to_file", args), Decision(True, "always")
+    )
+    assert out == {"decision": "allow"}
+    assert len(_cards(harness)[0].action.detail["inline_keyboard"]["buttons"]) == 1
+    assert gate_policy._GRANTS == {}
+    assert _done(harness)[0].action.title.startswith("✅ Approved")
+
+
+@pytest.mark.anyio
+async def test_always_not_offered_for_a_cut_command(harness: Harness) -> None:
+    long_shell = {**SHELL, "CommandLine": "echo " + "z" * 4000}
+    out = await _held_call(
+        harness, _call("run_command", long_shell), Decision(True, "always")
+    )
+    assert out == {"decision": "allow"}
+    rows = _cards(harness)[0].action.detail["inline_keyboard"]["buttons"]
+    assert len(rows) == 1  # Approve / Deny only
+    assert not gate_policy.granted(CHAT, CID, long_shell)
+
+
+@pytest.mark.anyio
+async def test_unattended_never_gets_an_approval_allow(
+    harness: Harness, project: Path
+) -> None:
+    harness.gate.unattended_trigger = "cron:nightly"
+    gate_policy.grant(CHAT, CID, SHELL)
+    for step, (tool, args) in enumerate(
+        [
+            ("run_command", SHELL),
+            ("write_to_file", {"TargetFile": "/elsewhere/x", "CodeContent": "x"}),
+            ("view_file", {"AbsolutePath": "/etc/passwd"}),
+            ("totally_new_tool", {}),
+        ],
+        start=2,
+    ):
+        out = await harness.call("PreToolUse", _call(tool, args, step=step))
+        assert out is not None and out["decision"] == "deny", tool
+    assert _cards(harness) == []
+    assert pending_control_requests_for_session(harness.gate.session_key) == 0
+
+
+@pytest.mark.anyio
+async def test_card_building_failure_fails_closed(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exception while building the card from the model's arguments
+    closes the hook's connection (the hook prints a deny) and leaves no
+    request pending."""
+
+    def boom(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("bad args")
+
+    monkeypatch.setattr(gate_policy, "card_title", boom)
+    out = await harness.call("PreToolUse", _call("run_command", SHELL))
+    assert out is None  # no reply: gate_hook turns that into a deny
+    assert pending_control_requests_for_session(harness.gate.session_key) == 0
+    assert _cards(harness) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"conversationId": CID, "stepIdx": 3, "toolCall": "run_command"},
+        {"conversationId": CID, "stepIdx": 4, "toolCall": {"name": 5}},
+        {"conversationId": CID, "stepIdx": 5},
+        {"conversationId": 7, "stepIdx": 6, "toolCall": {"name": "view_file"}},
+    ],
+)
+async def test_unknown_payload_shapes_never_allowed(
+    harness: Harness, payload: dict[str, Any]
+) -> None:
+    out: dict[str, Any] = {}
+
+    async def run() -> None:
+        out["v"] = await harness.call("PreToolUse", payload)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run)
+        await _wait_for(lambda: bool(_cards(harness)) or "v" in out)
+        if _cards(harness):
+            await respond(
+                _cards(harness)[0].action.detail["request_id"], Decision(False, "deny")
+            )
+    assert out["v"] is not None and out["v"]["decision"] == "deny"
+
+
+def test_hook_prints_deny_without_a_reply(tmp_path: Path) -> None:
+    """The hook side of failing closed: no reply from Untether → deny."""
+    from untether.antigravity import gate_hook
+
+    out = gate_hook._validated("PreToolUse", {"decision": "ask"})
+    assert out is not None and out["decision"] == "deny"
+    out = gate_hook._validated("PreToolUse", {"decision": "allow", "x": 1})
+    assert out == {"decision": "allow"}
