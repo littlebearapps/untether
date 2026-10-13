@@ -224,6 +224,24 @@ async def test_precheck_records_project_containing_untether_package(
     assert gate_precheck.self_protect_path(Path("/nonexistent/elsewhere")) is None
 
 
+def test_self_protect_covers_config_folder_and_base_python(tmp_path: Path) -> None:
+    """Security review 3 M5: a project holding this instance's config
+    folder, or the Python Untether runs on, can't have Ask me."""
+    import sys
+
+    config = tmp_path / "inst" / "untether.toml"
+    config.parent.mkdir()
+    assert gate_precheck.self_protect_path(tmp_path, config_path=config) == (
+        config.parent.resolve()
+    )
+    assert (
+        gate_precheck.self_protect_path(tmp_path / "elsewhere", config_path=config)
+        is None
+    )
+    base = Path(sys.base_prefix).resolve()
+    assert gate_precheck.self_protect_path(base) is not None
+
+
 def test_reason_text_names_the_fix() -> None:
     assert "untether agy-gate install" in gate_precheck.reason_text(
         gate_precheck.MISSING

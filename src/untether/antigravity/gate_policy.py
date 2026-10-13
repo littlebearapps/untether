@@ -9,10 +9,11 @@ paths:
 - :func:`classify` — reads (``view_file``, ``list_dir`` …) and edits inside
   the project (or the conversation's own artifact folder) pass on Untether's
   safe list; everything else asks: shell, web, MCP, browser, subagents,
-  timers, files outside the project, protected files inside it (``.agents/``,
-  ``.git/``, ``.claude/``, ``.env`` …), Untether's own code and any tool this
-  version doesn't know. ``ask_question`` is the phase 13 question card and is
-  never classified here.
+  timers, files outside the project (a nested checkout or an ``@branch``
+  worktree inside it counts as outside), protected files inside it at any
+  depth (``.agents/``, ``.git/``, ``.claude/``, ``.env`` …), Untether's own
+  code and config, and any tool this version doesn't know. ``ask_question``
+  is the phase 13 question card and is never classified here.
 - :func:`card_title` — ``Permission Request [agy] - <what>`` plus a diff or
   command preview built from agy's own ``toolCall.args`` (reusing
   :func:`untether.interactive.format_diff_preview`), the subagent it came
@@ -39,6 +40,7 @@ it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -174,6 +176,18 @@ _KNOWN_KEYS: frozenset[str] = frozenset(
         "ServerName",
         "ToolName",
         "questions",
+        # agy 1.3.4 schemas of asking tools (security review 3 M1).
+        "Input",
+        "CronExpression",
+        "MaxIterations",
+        "ConversationIds",
+        "query",
+        "domain",
+        "name",
+        "system_prompt",
+        "enable_write_tools",
+        "enable_mcp_tools",
+        "enable_subagent_tools",
     }
 )
 _KNOWN_BY_FOLD = {key.casefold(): key for key in _KNOWN_KEYS}
@@ -215,29 +229,63 @@ _LABELS: dict[str, str] = {
     "notebook_edit": "edit a notebook",
 }
 
-# Inside the project these always ask (REVIEW B2, REVIEW-2 M4): planted agy
-# config, git internals, Untether's outbox (it sends files to Telegram), and
-# files another engine or tool executes or reads as instructions.
-_PROTECTED_DIRS = (
-    ".agents",
-    ".git",
-    ".gemini",
-    ".untether-outbox",
-    ".claude",
-    ".husky",
-    ".github/workflows",
-)
-_PROTECTED_FILES = frozenset(
+# Inside the project these always ask (REVIEW B2, REVIEW-2 M4, security
+# review 3 H1): planted agy config, git internals, and files another engine
+# or tool runs, loads or reads as instructions. Matched at ANY depth — a
+# nested checkout, a submodule or Untether's own ``@branch`` worktree under
+# ``.worktrees/`` loads its own copy of each — and case-folded. Untether's
+# outbox (it sends files to Telegram) is protected at the configured
+# ``files.outbox_dir`` (:func:`_protected_rel`).
+_PROTECTED_DIR_NAMES = frozenset(
     {
-        ".mcp.json",
-        ".envrc",
-        ".vscode/tasks.json",
-        ".pre-commit-config.yaml",
-        "claude.md",
-        "agents.md",
-        "gemini.md",
+        # agy and the other engines Untether drives (hooks, plugins, MCP
+        # servers, agents, settings).
+        ".agents",
+        ".gemini",
+        ".claude",
+        ".codex",
+        ".opencode",
+        ".pi",
+        ".cursor",
+        # git internals (hooks, config: filters and aliases run commands).
+        ".git",
+        # git hook managers and editors that run project commands.
+        ".husky",
+        ".lefthook",
+        ".vscode",
+        ".devcontainer",
     }
 )
+# Folder pairs at any depth: CI that runs on push.
+_PROTECTED_DIR_PAIRS = frozenset({(".github", "workflows"), (".github", "actions")})
+_PROTECTED_FILE_NAMES = frozenset(
+    {
+        # MCP servers / engine config read from the project.
+        ".mcp.json",
+        "opencode.json",
+        "opencode.jsonc",
+        # Instructions another agent reads as its own.
+        "claude.md",
+        "claude.local.md",
+        "agents.md",
+        "agents.override.md",
+        "gemini.md",
+        # git hook managers.
+        ".pre-commit-config.yaml",
+        "lefthook.yml",
+        "lefthook.yaml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        # Shell environments loaded on ``cd`` (direnv, mise hooks).
+        ".envrc",
+        "mise.toml",
+        ".mise.toml",
+        "mise.local.toml",
+    }
+)
+DEFAULT_OUTBOX_DIR = ".untether-outbox"
 # Untether's default file deny globs (``[transports.telegram.files]``):
 # secrets and credentials, at any depth.
 _SECRET_GLOBS = (
@@ -256,7 +304,6 @@ _SECRET_GLOBS = (
     "**/.pypirc",
 )
 
-_PREVIEW_PAIRS = 3
 _PREVIEW_VALUE_CHARS = 80
 _SUMMARY_CHARS = 160
 _SECRET_KEY_WORDS = ("token", "secret", "password", "passwd", "apikey", "api_key")
@@ -409,7 +456,12 @@ def plain_absolute(path: Any) -> bool:
     realpath check catches)."""
     if not isinstance(path, str) or not path.startswith("/") or "//" in path:
         return False
-    if any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in path):
+    # A lone surrogate (``Cs``) or U+FFFD: Go turns an unpaired ``\\ud800``
+    # into U+FFFD, so agy would open another file than Untether checked.
+    if any(
+        unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Zl", "Zp"} or ch == "�"
+        for ch in path
+    ):
         return False
     return path == "/" or os.path.normpath(path) == path
 
@@ -423,41 +475,136 @@ def artifact_dir(conversation_id: str) -> Path:
     return _brain_root() / conversation_id
 
 
-def _in_artifact_dir(real: str, conversation_id: str | None) -> bool:
+# What agy writes in a conversation's artifact folder (agy 1.3.4, the brain
+# folders on lba-1): top-level ``<name>.md`` artifacts with their
+# ``<name>.md.metadata.json``, and anything under ``scratch/``. Its
+# ``.system_generated/`` (messages, steps, task logs, transcripts) and
+# ``.user_uploaded/`` are agy's own records and never a safe-listed edit
+# (security review 3 L2): a forged message or step there is read back as
+# the conversation's history.
+_ARTIFACT_FILE_RE = re.compile(r"^[^./][^/]*\.md(\.metadata\.json)?$")
+_ARTIFACT_SCRATCH = "scratch"
+
+
+def _in_artifact_dir(
+    real: str,
+    conversation_id: str | None,
+    *,
+    write: bool = False,
+    artifact_path: Any = None,
+) -> bool:
     if not conversation_id or not _CONVERSATION_ID_RE.match(conversation_id):
         return False
     folder = _real(artifact_dir(conversation_id))
     # The folder itself must be agy's, not a link to somewhere else.
     if not _within(folder, _real(_brain_root())) or folder == _real(_brain_root()):
         return False
-    return _within(real, folder) and real != folder
+    if artifact_path is not None:
+        # The payload names the folder agy itself uses for this
+        # conversation: it must be the one Untether checks.
+        if not isinstance(artifact_path, str) or not artifact_path:
+            return False
+        if _fold(_real(artifact_path)) != _fold(folder):
+            return False
+    if not _within(real, folder) or real == folder:
+        return False
+    if not write:
+        return True
+    rel = os.path.relpath(real, folder)
+    if rel.startswith(_ARTIFACT_SCRATCH + os.sep):
+        return True
+    return _ARTIFACT_FILE_RE.match(rel) is not None
 
 
-def self_protected_paths() -> tuple[str, ...]:
-    """REVIEW-2 B3: Untether's package, its venv and the gate plugin. An
-    edit there could switch the gate off, wherever the project is."""
+def self_protected_paths(config_path: Path | str | None = None) -> tuple[str, ...]:
+    """REVIEW-2 B3: Untether's package, its venv, the Python it runs on
+    (``sys.base_prefix``: the gate hook imports its standard library) and
+    the gate plugin; and (security review 3 M5) this instance's config file
+    and its folder — ``watch_config`` applies an edit there. An edit to any
+    of them could switch the gate off, wherever the project is."""
     import untether
 
     from . import gate_plugin
 
-    return (
+    paths = [
         _real(Path(untether.__file__).parent),
         _real(sys.prefix),
+        _real(sys.base_prefix),
         _real(gate_plugin.plugin_dir()),
-    )
+    ]
+    if config_path is not None:
+        config = _real(config_path)
+        paths.extend((config, os.path.dirname(config)))
+    return tuple(dict.fromkeys(paths))
 
 
-def _protected_rel(rel: str) -> bool:
+def _protected_rel(rel: str, outbox_dir: str = DEFAULT_OUTBOX_DIR) -> bool:
+    """*rel* (relative to the project, ``/``-separated) is planted config at
+    any depth, a secret, or in Untether's outbox."""
     from ..telegram.files import deny_reason
 
     folded = unicodedata.normalize("NFC", rel).casefold()
-    if folded in _PROTECTED_FILES:
+    parts = folded.split("/")
+    if parts[-1] in _PROTECTED_FILE_NAMES:
         return True
-    for folder in _PROTECTED_DIRS:
-        if folded == folder or folded.startswith(folder + "/"):
-            return True
-    # ``.git`` anywhere (submodules), and the secrets globs.
+    if any(part in _PROTECTED_DIR_NAMES for part in parts):
+        return True
+    if any(pair in _PROTECTED_DIR_PAIRS for pair in itertools.pairwise(parts)):
+        return True
+    outbox = unicodedata.normalize("NFC", outbox_dir.strip("/")).casefold()
+    if outbox and (folded == outbox or folded.startswith(outbox + "/")):
+        return True
+    # The secrets globs.
     return deny_reason(Path(rel), _SECRET_GLOBS) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class _Scope:
+    root: Path
+    conversation_id: str | None
+    workspace_paths: Any
+    outbox_dir: str
+    # Folders inside the project that count as outside it (the projects'
+    # ``@branch`` worktree roots), realpath'd.
+    outside: tuple[str, ...]
+    config_path: Path | str | None
+    artifact_path: Any
+
+
+def _scope(
+    root: Path,
+    conversation_id: str | None,
+    workspace_paths: Any,
+    outbox_dir: str,
+    outside: tuple[Path | str, ...],
+    config_path: Path | str | None,
+    artifact_path: Any,
+) -> _Scope:
+    return _Scope(
+        root=root,
+        conversation_id=conversation_id,
+        workspace_paths=workspace_paths,
+        outbox_dir=outbox_dir or DEFAULT_OUTBOX_DIR,
+        outside=tuple(_real(p) for p in outside),
+        config_path=config_path,
+        artifact_path=artifact_path,
+    )
+
+
+def _nested_checkout(real: str, base: str) -> bool:
+    """A folder below the project on the way to *real* (or *real* itself)
+    holds a ``.git`` file or folder: another checkout — a submodule, a
+    nested repo or a git worktree — with hooks and config of its own
+    (security review 3 H1). It isn't this project."""
+    rel = os.path.relpath(real, base)
+    if rel == "." or rel.startswith(".."):
+        return False
+    current = base
+    for part in rel.split(os.sep):
+        current = os.path.join(current, part)
+        if os.path.lexists(os.path.join(current, ".git")):
+            return True
+    return False
 
 
 def classify_edit(
@@ -466,6 +613,10 @@ def classify_edit(
     root: Path | None,
     conversation_id: str | None,
     workspace_paths: Any = None,
+    outbox_dir: str = DEFAULT_OUTBOX_DIR,
+    outside: tuple[Path | str, ...] = (),
+    config_path: Path | str | None = None,
+    artifact_path: Any = None,
 ) -> Verdict:
     """An edit tool's targets: every path it names inside the project (or
     the conversation's artifact folder), not protected, not hard-linked →
@@ -475,24 +626,22 @@ def classify_edit(
     paths = path_values(args)
     if not paths:
         return Verdict(False, "outside")
-    return _classify_paths(
-        paths,
-        root=root,
-        conversation_id=conversation_id,
-        workspace_paths=workspace_paths,
-        write=True,
+    scope = _scope(
+        root,
+        conversation_id,
+        workspace_paths,
+        outbox_dir,
+        outside,
+        config_path,
+        artifact_path,
     )
+    return _classify_paths(paths, scope, write=True)
 
 
-def _classify_paths(
-    paths: list[Any],
-    *,
-    root: Path,
-    conversation_id: str | None,
-    workspace_paths: Any,
-    write: bool,
-) -> Verdict:
+def _classify_paths(paths: list[Any], scope: _Scope, *, write: bool) -> Verdict:
+    root = scope.root
     base = _real(root)
+    workspace_paths = scope.workspace_paths
     if isinstance(workspace_paths, list) and workspace_paths:
         first = workspace_paths[0]
         if not isinstance(first, str) or _fold(_real(first)) != _fold(base):
@@ -503,11 +652,23 @@ def _classify_paths(
             return Verdict(False, "unclear")
         real = _real(target)
         inside = _within(real, base)
-        artifact = _in_artifact_dir(real, conversation_id)
+        artifact = _in_artifact_dir(
+            real,
+            scope.conversation_id,
+            write=write,
+            artifact_path=scope.artifact_path,
+        )
         if write:
-            for protected in self_protected_paths():
+            for protected in self_protected_paths(scope.config_path):
                 if _within(real, protected):
                     return Verdict(False, "self")
+        if inside and (
+            # Untether's ``@branch`` worktrees and any nested checkout are
+            # other projects, wherever they sit (security review 3 H1).
+            any(_within(real, other) for other in scope.outside)
+            or _nested_checkout(real, base)
+        ):
+            inside = False
         if not inside and not artifact:
             return Verdict(False, "outside")
         # TOCTOU (security review): agy acts after this check, so the path
@@ -520,8 +681,8 @@ def _classify_paths(
             return Verdict(False, "unclear")
         if artifact or not write:
             continue
-        rel = os.path.relpath(real, base)
-        if rel == "." or _protected_rel(PurePosixPath(*Path(rel).parts).as_posix()):
+        rel = PurePosixPath(*Path(os.path.relpath(real, base)).parts).as_posix()
+        if rel == "." or _protected_rel(rel, scope.outbox_dir):
             return Verdict(False, "protected")
     return ALLOW
 
@@ -534,32 +695,60 @@ def classify(
     conversation_id: str | None,
     workspace_paths: Any = None,
     diff_preview: bool | None = None,
+    outbox_dir: str = DEFAULT_OUTBOX_DIR,
+    outside: tuple[Path | str, ...] = (),
+    config_path: Path | str | None = None,
+    artifact_path: Any = None,
 ) -> Verdict:
     """Ask me's safe list: exact tool names, fully resolved paths. Anything
     it can't prove safe — including an error while checking — asks.
     ``diff_preview`` (the chat's Diff preview toggle switched on) asks before
-    in-project edits too, with the diff (Claude's C5)."""
+    in-project edits too, with the diff (Claude's C5). ``outbox_dir`` is the
+    instance's ``files.outbox_dir``, ``outside`` the ``@branch`` worktree
+    roots, ``config_path`` the instance's config file and ``artifact_path``
+    the payload's ``artifactDirectoryPath``."""
     try:
-        return _classify(
-            tool,
-            args,
-            root=root,
-            conversation_id=conversation_id,
-            workspace_paths=workspace_paths,
-            diff_preview=diff_preview,
+        scope = (
+            _scope(
+                root,
+                conversation_id,
+                workspace_paths,
+                outbox_dir,
+                outside,
+                config_path,
+                artifact_path,
+            )
+            if root is not None
+            else None
         )
+        return _classify(tool, args, scope=scope, diff_preview=diff_preview)
     except Exception:  # noqa: BLE001 — never safe-list what can't be checked
         return Verdict(False, "tool")
 
 
+# Search tools whose values agy hands to a search program (agy 1.3.4, probed:
+# ``git grep … -- <Query> <Includes…>`` in a git repo, its own search
+# elsewhere). A value that starts with ``-`` could be read as a flag by
+# another version or backend (``rg --pre=<script>`` runs a program), so it is
+# never on the safe list (security review 3 M4).
+_DASH_CHECKED = frozenset({"grep_search", "find_by_name"})
+
+
+def _dash_value(args: Any) -> bool:
+    if not isinstance(args, dict):
+        return False
+    for key, value in args.items():
+        if key in _META_KEYS:
+            continue
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, str) and item.lstrip().startswith("-"):
+                return True
+    return False
+
+
 def _classify(
-    tool: str,
-    args: Any,
-    *,
-    root: Path | None,
-    conversation_id: str | None,
-    workspace_paths: Any,
-    diff_preview: bool | None,
+    tool: str, args: Any, *, scope: _Scope | None, diff_preview: bool | None
 ) -> Verdict:
     if args is not None and not isinstance(args, dict):
         return Verdict(False, "tool")
@@ -569,25 +758,21 @@ def _classify(
     allowed = _SAFE_KEYS.get(tool)
     if allowed is not None and not _keys_ok(args, allowed):
         return Verdict(False, "unclear")
+    if tool in _DASH_CHECKED and _dash_value(args):
+        return Verdict(False, "unclear")
     if tool in READ_TOOLS:
         paths = path_values(args)
-        if paths is None or root is None:
+        if paths is None or scope is None:
             return Verdict(False, "outside")
         # No path: agy searches its workspace (the project).
-        return _classify_paths(
-            paths,
-            root=root,
-            conversation_id=conversation_id,
-            workspace_paths=workspace_paths,
-            write=False,
-        )
+        return _classify_paths(paths, scope, write=False)
     if tool in EDIT_TOOLS:
-        verdict = classify_edit(
-            args,
-            root=root,
-            conversation_id=conversation_id,
-            workspace_paths=workspace_paths,
-        )
+        if edit_target(args) is None or scope is None:
+            return Verdict(False, "outside")
+        paths = path_values(args)
+        if not paths:
+            return Verdict(False, "outside")
+        verdict = _classify_paths(paths, scope, write=True)
         if verdict.allow and diff_preview is True:
             return Verdict(False, "preview")
         return verdict
@@ -684,80 +869,223 @@ def _short(value: Any, limit: int = _PREVIEW_VALUE_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _command_preview(command: Any) -> str:
-    """The command exactly as agy will run it, first on the card. Short and
-    single-line: inline code. Longer: a fenced block, in full up to 1,500
+def _block(
+    text: str,
+    *,
+    prefix: str,
+    lang: str = "",
+    what: str = "value",
+    verb: str = "does",
+    limit: int = _COMMAND_FULL_CHARS,
+) -> str:
+    """*text* exactly as agy gets it. Short and single-line: inline code
+    after *prefix*. Longer: a fenced block, in full up to *limit*
     characters, else its start and end with a visible warning that the
-    middle isn't shown (the user must not approve a hidden tail)."""
+    middle isn't shown (the user must not approve a hidden part)."""
     from ..markdown import backtick_fence, inline_code
 
+    text = visible(text.strip("\n"), keep_newlines=True)
+    if not text.strip():
+        return f"{prefix} (empty)"
+    if "\n" not in text and len(text) <= _COMMAND_INLINE_CHARS:
+        return f"{prefix} {inline_code(text)}"
+    note = ""
+    limit = max(limit, 2 * _MIN_EDGE_CHARS + 1)
+    if len(text) > limit:
+        edge = min(_COMMAND_EDGE_CHARS, limit // 2)
+        hidden = len(text) - 2 * edge
+        note = (
+            f"\n⚠️ long {what} ({len(text)} characters): {hidden} in the middle "
+            f"aren't shown — Deny unless you know what it {verb}"
+        )
+        text = text[:edge] + f"\n… [{hidden} characters not shown] …\n" + text[-edge:]
+    fence = backtick_fence(text, minimum=3)
+    return f"{prefix}\n{fence}{lang}\n{text}\n{fence}{note}"
+
+
+def _command_preview(command: Any) -> str:
+    """The command exactly as agy will run it, first on the card (in full
+    up to 1,500 characters, see :func:`_block`)."""
     if not isinstance(command, str) or not command.strip():
         return "⚠️ no command line in this call"
-    text = visible(command.strip("\n"), keep_newlines=True)
-    if "\n" not in text and len(text) <= _COMMAND_INLINE_CHARS:
-        return f"$ {inline_code(text)}"
-    note = ""
-    if len(text) > _COMMAND_FULL_CHARS:
-        hidden = len(text) - 2 * _COMMAND_EDGE_CHARS
-        note = (
-            f"\n⚠️ long command ({len(text)} characters): {hidden} in the middle "
-            "aren't shown — Deny unless you know what it runs"
-        )
-        text = (
-            text[:_COMMAND_EDGE_CHARS]
-            + f"\n… [{hidden} characters not shown] …\n"
-            + text[-_COMMAND_EDGE_CHARS:]
-        )
-    fence = backtick_fence(text, minimum=3)
-    return f"$\n{fence}sh\n{text}\n{fence}{note}"
+    return _block(command, prefix="$", lang="sh", what="command", verb="runs")
 
 
-def _masked(key: str, value: Any) -> str:
+# Security review 3 M1: an approval card shows every argument that can
+# change what a tool does, in full — values are never cut short silently,
+# and a value is never hidden just because the model chose a key name that
+# looks like a secret without the card saying so. Each tool's own semantic
+# arguments come first (``Url`` before anything the model added), then any
+# argument agy's schema for that tool doesn't have, flagged ⚠️.
+_MIN_EDGE_CHARS = 100
+_PREVIEW_BUDGET_CHARS = 3000
+_EXTRA_ARGS_BUDGET_CHARS = 1500
+# The arguments agy's own schema has for an asking tool (agy 1.3.4: hook
+# payloads and the model's own schema listing, 2026-10-13), in agy's
+# spelling after :func:`normalise_args`, the ones that say what runs first.
+_TOOL_KEYS: dict[str, tuple[str, ...]] = {
+    "read_url_content": ("Url",),
+    "schedule": (
+        "Prompt",
+        "CronExpression",
+        "DurationSeconds",
+        "TimerCondition",
+        "MaxIterations",
+        "IsDaemon",
+    ),
+    "search_web": ("query", "domain"),
+    "manage_task": ("Action", "TaskId"),
+    "manage_subagents": ("Action", "ConversationIds"),
+    "send_message": ("Recipient", "Message"),
+    "define_subagent": (
+        "system_prompt",
+        "enable_write_tools",
+        "enable_mcp_tools",
+        "enable_subagent_tools",
+        "name",
+        "Description",
+    ),
+}
+# Tools whose schema isn't known (agy 1.3.4 doesn't offer them to its
+# default agent): the arguments that most likely say what runs come first.
+_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "open_browser_url": ("Url",),
+    "send_command_input": ("Input",),
+    "call_mcp_tool": ("ServerName", "ToolName"),
+}
+
+
+def _secret_key(key: str) -> bool:
     folded = key.casefold().replace("-", "_")
-    if any(word in folded for word in _SECRET_KEY_WORDS):
-        return _MASK
-    return _short(value)
+    return any(word in folded for word in _SECRET_KEY_WORDS)
 
 
-def _generic_preview(args: Any) -> str:
-    if not isinstance(args, dict):
-        return ""
-    shown = [
+def _value_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=repr)
+    except (TypeError, ValueError, RecursionError):
+        return repr(value)
+
+
+def _arg_line(key: str, value: Any, *, budget: int, flag: bool = False) -> str:
+    """``• key = value`` with the value in full (see :func:`_block`)."""
+    name = escape_markdown(_short(str(key), 60))
+    head = f"⚠️ • {name} =" if flag else f"• {name} ="
+    if _secret_key(str(key)):
+        # Kept out of Telegram, but never silently: the card says why.
+        return (
+            f"{head} {_MASK} (hidden: its name looks like a secret — Deny "
+            "unless you expected one here)"
+        )
+    return _block(_value_text(value), prefix=head, limit=budget)
+
+
+def _args_lines(
+    items: list[tuple[str, Any]],
+    *,
+    budget: int,
+    flagged: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Each argument in full while *budget* (characters) lasts; then a ⚠️
+    line naming every argument that isn't shown."""
+    lines: list[str] = []
+    left = budget
+    for n, (key, value) in enumerate(items):
+        if left < 2 * _MIN_EDGE_CHARS + 1:
+            rest = [str(k) for k, _ in items[n:]]
+            names = ", ".join(escape_markdown(_short(k, 40)) for k in rest[:10])
+            lines.append(
+                f"⚠️ {len(rest)} more argument{'s' if len(rest) > 1 else ''} "
+                f"not shown ({names}) — Deny unless you know what they do"
+            )
+            break
+        line = _arg_line(key, value, budget=left, flag=key in flagged)
+        left -= len(line)
+        lines.append(line)
+    return lines
+
+
+def _ordered(
+    tool: str, args: dict[str, Any], skip: frozenset[str] = frozenset()
+) -> tuple[list[tuple[str, Any]], frozenset[str]]:
+    """The arguments to show: the tool's own (semantic first), then those
+    its schema doesn't have — returned as the flagged set."""
+    items = [
         (key, value)
         for key, value in args.items()
-        if key not in {"toolAction", "toolSummary"} and value not in (None, "")
+        if key not in _META_KEYS and key not in skip and value is not None
     ]
-    lines = [
-        f"• {escape_markdown(_short(str(key), 40))} = "
-        f"{escape_markdown(_masked(str(key), value))}"
-        for key, value in shown[:_PREVIEW_PAIRS]
-    ]
-    more = len(shown) - _PREVIEW_PAIRS
-    if more > 0:
-        lines.append(f"…{more} more argument{'s' if more > 1 else ''} not shown")
+    known = _TOOL_KEYS.get(tool)
+    primary = known or _PRIMARY_KEYS.get(tool, ())
+    flagged = frozenset(
+        str(key) for key, _ in items if known is not None and key not in known
+    )
+
+    def rank(item: tuple[str, Any]) -> tuple[int, int]:
+        key = item[0]
+        if key in primary:
+            return (0, primary.index(key))
+        return (1, 0) if key in flagged else (2, 0)
+
+    return sorted(items, key=rank), flagged
+
+
+def _generic_preview(tool: str, args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    items, flagged = _ordered(tool, args)
+    lines: list[str] = []
+    if flagged:
+        names = ", ".join(escape_markdown(_short(k, 40)) for k in sorted(flagged))
+        lines.append(f"⚠️ arguments agy's {escape_markdown(tool)} doesn't have: {names}")
+    lines.extend(_args_lines(items, budget=_PREVIEW_BUDGET_CHARS, flagged=flagged))
+    if tool == "define_subagent":
+        lines.extend(_define_subagent_notes(args))
     return "\n".join(lines)
 
 
-def _other_args(args: dict[str, Any], shown: frozenset[str]) -> list[str]:
+def _truthy(value: Any) -> bool:
+    return value not in (None, False, 0, "", "false", "False")
+
+
+def _define_subagent_notes(args: dict[str, Any]) -> list[str]:
+    """``define_subagent`` (agy 1.3.4 schema: name, description,
+    system_prompt and three ``enable_*`` switches; no hooks or commands of
+    its own). The subagent's tool calls come back here as their own cards."""
+    gives = [
+        what
+        for key, what in (
+            ("enable_write_tools", "file-writing and command tools"),
+            ("enable_mcp_tools", "MCP tools"),
+            ("enable_subagent_tools", "tools to define and start subagents"),
+        )
+        if _truthy(args.get(key))
+    ]
+    lines = []
+    if gives:
+        lines.append("⚠️ the new subagent gets " + ", ".join(gives))
+    lines.append("Its own commands and edits ask here too.")
+    return lines
+
+
+def _other_args(tool: str, args: dict[str, Any], shown: frozenset[str]) -> list[str]:
     """Every argument the preview didn't already show (agy's descriptive
-    fields aside), so nothing that changes what runs is hidden."""
-    rest = [
+    fields aside), in full, so nothing that changes what runs is hidden.
+    One that isn't among the argument names Untether knows agy uses is
+    flagged ⚠️."""
+    items = [
         (key, value)
         for key, value in args.items()
         if key not in shown and key not in _DESCRIPTIVE_KEYS and value is not None
     ]
-    lines = [
-        f"• {escape_markdown(_short(str(key), 40))} = "
-        f"{escape_markdown(_masked(str(key), value))}"
-        for key, value in rest[:_OTHER_ARGS_SHOWN]
-    ]
-    more = len(rest) - _OTHER_ARGS_SHOWN
-    if more > 0:
-        lines.append(f"…{more} more argument{'s' if more > 1 else ''} not shown")
-    return lines
+    own = _RUN_COMMAND_KEYS if tool == "run_command" else _SAFE_KEYS.get(tool)
+    flagged = frozenset(str(key) for key, _ in items if key not in (own or _KNOWN_KEYS))
+    items.sort(key=lambda item: 0 if item[0] in flagged else 1)
+    return _args_lines(items, budget=_EXTRA_ARGS_BUDGET_CHARS, flagged=flagged)
 
 
-_OTHER_ARGS_SHOWN = 6
 _COMMAND_SHOWN = frozenset({"CommandLine", "Cwd", "WaitMsBeforeAsync", "IsDaemon"})
 _EDIT_SHOWN = frozenset(
     {
@@ -812,6 +1140,7 @@ def preview(tool: str, args: Any, *, root: Path | None) -> str:
     arguments (what will run), every string made :func:`visible`."""
     if not isinstance(args, dict):
         return ""
+    raw = args  # values below go through _block, which makes them visible
     args = _display(args, keep_newlines=True)
     if tool == "run_command":
         lines = [_command_preview(args.get("CommandLine"))]
@@ -831,17 +1160,17 @@ def preview(tool: str, args: Any, *, root: Path | None) -> str:
             lines.append(
                 "⚠️ starts a daemon: once approved it keeps running after this turn ends"
             )
-        lines.extend(_other_args(args, _COMMAND_SHOWN))
+        lines.extend(_other_args(tool, raw, _COMMAND_SHOWN))
         return "\n".join(line for line in lines if line)
     target = edit_target(args) or ""
     if tool in EDIT_TOOLS:
         tail = [_resolves_to(target)] if target else ["⚠️ no target file in this call"]
-        tail.extend(_other_args(args, _EDIT_SHOWN))
+        tail.extend(_other_args(tool, raw, _EDIT_SHOWN))
         body = _edit_preview(tool, args, target)
         return "\n".join(line for line in (body, *tail) if line)
     if tool == "invoke_subagent":
-        return _subagents_preview(args)
-    return _generic_preview(args)
+        return _subagents_preview(raw)
+    return _generic_preview(tool, raw)
 
 
 def _edit_preview(tool: str, args: dict[str, Any], target: str) -> str:
@@ -887,26 +1216,51 @@ def _edit_preview(tool: str, args: dict[str, Any], target: str) -> str:
     return ""
 
 
-_SUBAGENTS_SHOWN = 3
-
-
 def _subagents_preview(args: dict[str, Any]) -> str:
-    """``invoke_subagent``: who starts and what each is told (P-H8: each
-    child's own tool calls come back here as their own cards)."""
+    """``invoke_subagent``: who starts and what each is told, in full (P-H8:
+    each child's own tool calls come back here as their own cards)."""
     raw = args.get("Subagents")
     specs = [s for s in raw if isinstance(s, dict)] if isinstance(raw, list) else []
-    if not specs:
-        return _generic_preview(args)
+    if not specs or len(specs) != len(raw):
+        return _generic_preview("invoke_subagent", args)
     lines = []
-    for spec in specs[:_SUBAGENTS_SHOWN]:
+    left = _PREVIEW_BUDGET_CHARS
+    for n, spec in enumerate(specs):
+        if left < 2 * _MIN_EDGE_CHARS + 1:
+            rest = len(specs) - n
+            lines.append(
+                f"⚠️ {rest} more subagent{'s' if rest > 1 else ''} not shown — "
+                "Deny unless you know what they're told"
+            )
+            break
         role = spec.get("Role") or spec.get("TypeName") or "subagent"
-        prompt = spec.get("Prompt") or ""
-        lines.append(
-            f"• {escape_markdown(_short(role, 40))}: {escape_markdown(_short(prompt))}"
+        head = f"• {escape_markdown(_short(_value_text(role), 40))}:"
+        prompt = spec.get("Prompt")
+        body = _block(_value_text(prompt or ""), prefix=head, limit=left)
+        left -= len(body)
+        lines.append(body)
+        extra = [
+            (str(key), value)
+            for key, value in spec.items()
+            if key not in {"Role", "Prompt"} and value is not None
+        ]
+        if extra:
+            extra_lines = _args_lines(extra, budget=max(left, 0))
+            left -= sum(len(line) for line in extra_lines)
+            lines.extend("  " + line for line in extra_lines)
+    rest_args = [
+        (key, value)
+        for key, value in args.items()
+        if key not in _META_KEYS and key != "Subagents" and value is not None
+    ]
+    if rest_args:
+        lines.extend(
+            _args_lines(
+                rest_args,
+                budget=_EXTRA_ARGS_BUDGET_CHARS,
+                flagged=frozenset(k for k, _ in rest_args),
+            )
         )
-    more = len(specs) - _SUBAGENTS_SHOWN
-    if more > 0:
-        lines.append(f"…{more} more")
     lines.append("Each subagent's own commands and edits ask here too.")
     return "\n".join(lines)
 
@@ -955,7 +1309,7 @@ def card_title(
 
 _GRANTS_MAX = 50
 _CONVERSATIONS_MAX = 64
-_GRANTS: OrderedDict[tuple[int | None, str], list[tuple[str, str]]] = OrderedDict()
+_GRANTS: OrderedDict[tuple[int | None, str], list[tuple[Any, ...]]] = OrderedDict()
 
 
 def _grant_key(args: Any) -> tuple[Any, ...] | None:
@@ -966,7 +1320,7 @@ def _grant_key(args: Any) -> tuple[Any, ...] | None:
     if not isinstance(args, dict):
         return None
     command = args.get("CommandLine")
-    if not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str) or not command.strip(_GRANT_TRIM):
         return None
     cwd = args.get("Cwd")
     rest = tuple(
@@ -976,14 +1330,38 @@ def _grant_key(args: Any) -> tuple[Any, ...] | None:
             if key not in _DESCRIPTIVE_KEYS and key not in {"CommandLine", "Cwd"}
         )
     )
-    return command.strip(), cwd if isinstance(cwd, str) else "", rest
+    # Only ASCII spaces and line feeds at the ends are trimmed (security
+    # review 3 M2): Python's ``strip()`` also removes Unicode spaces (U+3000)
+    # and the U+001C to U+001F separators, so U+3000 + ``npm test`` + U+001F
+    # would have matched a grant for ``npm test``.
+    return command.strip(_GRANT_TRIM), cwd if isinstance(cwd, str) else "", rest
+
+
+_GRANT_TRIM = " \n"
+
+
+def _plain_text(text: str) -> bool:
+    """No control, format, private-use, unassigned or surrogate characters
+    and no space but the ASCII one (tabs and line feeds are fine): what the
+    card shows is exactly what runs."""
+    for ch in text:
+        if ch in "\n\t":
+            continue
+        category = unicodedata.category(ch)
+        if category in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"} or ch == "�":
+            return False
+        if category == "Zs" and ch != " ":
+            return False
+    return True
 
 
 def always_allowable(args: Any) -> bool:
     """ "Always allow" is offered only for a command shown in full on the
-    card (never one whose middle was cut)."""
+    card (never one whose middle was cut), in plain text."""
     key = _grant_key(args)
     if key is None or len(key[0]) > _COMMAND_FULL_CHARS:
+        return False
+    if not _plain_text(args["CommandLine"]) or not _plain_text(key[1]):
         return False
     # Nothing beyond what the card shows, and a folder that reads the same
     # to Untether and agy.

@@ -77,6 +77,23 @@ def test_no_marker_exits_without_output() -> None:
         assert proc.stdout == b"" and proc.stderr == b""
 
 
+@pytest.mark.parametrize("python", ["/nonexistent/python", "", "/etc/hostname"])
+def test_missing_interpreter_denies_in_the_shell_guard(python: str) -> None:
+    """Security review 3 M3: with the marker set but Untether's interpreter
+    missing (or not executable), the shell guard itself prints a deny for a
+    tool — never a failed hook with no decision. Other events go on."""
+    env = {gate_hook.ENV_MARKER: "1", gate_hook.ENV_PY: python}
+    proc = _run("PreToolUse", env=env)
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout) == {
+        "decision": "deny",
+        "reason": gate_plugin.GUARD_DENY_REASON,
+    }
+    for event in ("PreInvocation", "Stop"):
+        other = _run(event, env=env)
+        assert other.returncode == 0 and other.stdout == b""
+
+
 def test_round_trip_sends_one_line_with_token_and_payload() -> None:
     server, sock = _serve({"v": 1, "out": {}})
     try:

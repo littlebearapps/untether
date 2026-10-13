@@ -62,7 +62,7 @@ SELF_PROTECT = "self_protect"
 _REASON_TEXT = {
     MISSING: "the plugin isn't installed (run `untether agy-gate install`)",
     EDITED: "the plugin was edited since install (run `untether agy-gate install --force`)",
-    OUTDATED: "the plugin is from another Untether version (run `untether agy-gate install`)",
+    OUTDATED: "the plugin is from another Untether version — run `untether agy-gate install` on the host to update it",
     DISABLED: "agy has the plugin disabled (`agy plugin enable untether-gate`)",
     NOT_LISTED: "agy doesn't list the plugin's hooks for this project",
     MISMATCH: "agy loads different hook commands than Untether wrote (run `untether agy-gate install`)",
@@ -223,18 +223,26 @@ def evaluate_hooks(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
     return GatePrecheck(ok=True, foreign_sources=foreign, wait_s=wait_s)
 
 
-def self_protect_path(cwd: Path, root: Path | None = None) -> Path | None:
+def self_protect_path(
+    cwd: Path, root: Path | None = None, config_path: Path | None = None
+) -> Path | None:
     """REVIEW-2 B3: a project that contains Untether's own package, its
-    venv or the plugin folder could have its gate edited by the agent it
-    guards. Returns the offending path, or None."""
+    venv, the Python it runs on (``sys.base_prefix``), the plugin folder or
+    (security review 3 M5) this instance's config file and its folder could
+    have its gate edited by the agent it guards. Returns the offending
+    path, or None."""
     import untether
 
     project = (root or cwd).resolve()
-    for candidate in (
+    candidates = [
         Path(untether.__file__).resolve().parent,
         Path(sys.prefix).resolve(),
+        Path(sys.base_prefix).resolve(),
         gate_plugin.plugin_dir().resolve(),
-    ):
+    ]
+    if config_path is not None:
+        candidates.append(config_path.expanduser().resolve().parent)
+    for candidate in candidates:
         if candidate == project or project in candidate.parents:
             return candidate
     return None
@@ -498,7 +506,9 @@ async def check(
                 wait_s=wait_s,
                 cwd=str(cwd),
             )
-            protected = self_protect_path(cwd, root)
+            protected = self_protect_path(
+                cwd, root, getattr(runner, "config_path", None)
+            )
             if protected is not None:
                 result = replace(result, self_protect=str(protected))
                 logger.info(

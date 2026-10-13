@@ -92,7 +92,9 @@ def test_install_writes_exactly_three_files_named_group(fake_agy: Path) -> None:
     assert pre["hooks"][0]["timeout"] == 960
     for event in ("PreInvocation", "Stop"):
         assert group[event][0]["command"].startswith(
-            '[ -n "$UNTETHER_AGY_GATE" ] || exit 0; exec "$UNTETHER_AGY_GATE_PY" -I -m'
+            '[ -n "$UNTETHER_AGY_GATE" ] || exit 0; '
+            '[ -x "$UNTETHER_AGY_GATE_PY" ] || exit 0; '
+            'exec "$UNTETHER_AGY_GATE_PY" -I -m'
         )
     manifest = json.loads((folder / ".untether-managed").read_text())
     assert manifest["protocol"] == 1 and manifest["wait_s"] == 900
@@ -156,7 +158,8 @@ def test_disabled_plugin_not_ready(fake_agy: Path) -> None:
 
 def test_other_version_templates_not_current(fake_agy: Path) -> None:
     folder = install_plugin()
-    stale = (folder / "plugin.json").read_bytes().replace(b'"1"', b'"0"')
+    stale = (folder / "plugin.json").read_bytes().replace(b'"2"', b'"0"')
+    assert stale != (folder / "plugin.json").read_bytes()
     (folder / "plugin.json").write_bytes(stale)
     manifest = json.loads((folder / ".untether-managed").read_text())
     manifest["files"]["plugin.json"] = gate_plugin._sha256(stale)
@@ -164,6 +167,39 @@ def test_other_version_templates_not_current(fake_agy: Path) -> None:
     state = gate_plugin.inspect_install()
     assert state.managed and not state.edited and not state.current
     assert not state.ready
+
+
+_V1_COMMAND = (
+    '[ -n "$UNTETHER_AGY_GATE" ] || exit 0; '
+    'exec "$UNTETHER_AGY_GATE_PY" -I -m untether.antigravity.gate_hook {event}'
+)
+
+
+def test_plugin_v1_install_reads_as_outdated(fake_agy: Path) -> None:
+    """Security review 3 M3 changed the hook commands (plugin version 2): an
+    install made by an earlier rc (version 1, no interpreter guard) is "not
+    current", so Ask me refuses until ``untether agy-gate install`` runs."""
+    folder = install_plugin()
+    hooks = (folder / "hooks.json").read_text()
+    for event in ("PreToolUse", "PreInvocation", "Stop"):
+        hooks = hooks.replace(
+            json.dumps(gate_plugin.hook_command(event))[1:-1],
+            json.dumps(_V1_COMMAND.format(event=event))[1:-1],
+        )
+    plugin = (folder / "plugin.json").read_text().replace('"2"', '"1"')
+    files = {"plugin.json": plugin.encode(), "hooks.json": hooks.encode()}
+    for name, data in files.items():
+        (folder / name).write_bytes(data)
+    (folder / ".untether-managed").write_bytes(
+        gate_plugin._manifest_bytes(files, gate_plugin.DEFAULT_WAIT_S)
+    )
+    state = gate_plugin.inspect_install()
+    assert state.managed and not state.edited and not state.current
+    assert not state.ready
+    from untether.antigravity import gate_precheck
+
+    text = gate_precheck.reason_text(gate_precheck.OUTDATED)
+    assert "untether agy-gate install" in text and "update it" in text
 
 
 def test_agy_failure_reported(fake_agy: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -261,6 +261,79 @@ async def test_edited_plugin_warns_attended_and_holds_unattended(
     assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
 
 
+@pytest.mark.anyio
+async def test_outdated_plugin_says_to_reinstall(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review 3 M3 changed the plugin's hook commands: an install
+    from an earlier version (unedited, recorded) asks for a reinstall in
+    plain words — in the chat's ⚠️ row and in a held cron's reply."""
+    from untether.antigravity import gate_plugin
+
+    folder = gate_plugin.plugin_dir()
+    old = (folder / "plugin.json").read_bytes().replace(b'"2"', b'"1"')
+    files = {"plugin.json": old, "hooks.json": (folder / "hooks.json").read_bytes()}
+    (folder / "plugin.json").write_bytes(old)
+    (folder / gate_plugin.MANIFEST_FILE).write_bytes(
+        gate_plugin._manifest_bytes(files, gate_plugin.DEFAULT_WAIT_S)
+    )
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    events = [evt async for evt in _runner().run("hi", None)]
+    assert _contract(events).ok
+    warned = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.id == "antigravity.gate.changed"
+    ]
+    assert warned and warned[0].action.title == agy.PLUGIN_OUTDATED_ROW
+    assert "untether agy-gate install" in agy.PLUGIN_OUTDATED_ROW
+    token = set_run_options(EngineRunOptions(unattended_trigger="cron:nightly"))
+    try:
+        held = [evt async for evt in _runner().run("hi", None)]
+    finally:
+        from untether.runners.run_options import reset_run_options
+
+        reset_run_options(token)
+    # Held either way: by the planted-config scan first (the plugin's files
+    # are tracked like any other until they're this version's), then by the
+    # plugin check, which says what to run.
+    assert isinstance(held[0], CompletedEvent) and not held[0].ok
+    assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
+    assert "untether-gate" in (held[0].error or "")
+    assert "`untether agy-gate install` on the host" in agy.plugin_outdated_message()
+
+
+def test_gate_paths_come_from_the_live_config(tmp_path: Path) -> None:
+    """H1 / M5: every project's ``@branch`` worktree root and the
+    instance's ``files.outbox_dir`` reach the gate."""
+    proj = tmp_path / "proj"
+    other = tmp_path / "other"
+    config = tmp_path / "untether.toml"
+    config.write_text(
+        'default_engine = "antigravity"\n'
+        "[transports.telegram]\n"
+        'bot_token = "123:abc"\n'
+        "chat_id = 1\n"
+        "allowed_user_ids = [1]\n"
+        "[transports.telegram.files]\n"
+        'outbox_dir = "out/box"\n'
+        "[projects.proj]\n"
+        f'path = "{proj}"\n'
+        "[projects.other]\n"
+        f'path = "{other}"\n'
+        'worktrees_dir = "/abs/wt"\n'
+    )
+    outbox, roots = agy._gate_paths(config, proj)
+    assert outbox == "out/box"
+    assert set(roots) == {proj / ".worktrees", Path("/abs/wt")}
+    # A folder that isn't a configured project keeps the default too.
+    _, roots = agy._gate_paths(config, tmp_path / "scratch")
+    assert tmp_path / "scratch" / ".worktrees" in roots
+    # No config: the defaults.
+    outbox, roots = agy._gate_paths(tmp_path / "missing.toml", proj)
+    assert outbox == ".untether-outbox" and roots == (proj / ".worktrees",)
+
+
 def test_liveness_without_preinvocation_marks_gate_dead() -> None:
     """13 §7.1: a model step with no PreInvocation before it."""
     from untether.events import EventFactory

@@ -27,10 +27,15 @@ Security (D22): the socket lives in a 0700 directory of this Untether
 instance (``<inst8>`` = the config path's hash, so instances sharing a
 ``HOME`` never share a directory), is 0600, and is unlinked when the run
 ends. Each connection must present the run's random token (constant-time
-compare) and, on Linux, come from this uid (``SO_PEERCRED``). The token is
-never logged. A tool process agy runs inherits agy's env, so a command the
-user already allowed could connect: it can only *ask* (a spoofed card, a
-drained steer), never grant itself anything — documented in ``security.md``.
+compare) and, on Linux, come from this uid (``SO_PEERCRED``) and (security
+review 3 L1) from a process below the agy pid this run spawned whose command
+line is exactly the plugin's hook for the event it sends — an Ask me run
+refuses every connection until that pid is known. The token is never
+logged. A tool process agy runs inherits agy's env (agy 1.3.4 has no way to
+keep variables from its tools) and is a child of agy too, so a command the
+user already allowed could still exec the hook's command line itself: it can
+only *ask* (a spoofed card, a drained steer, a pre-claimed step), never
+grant itself anything — documented in ``security.md``.
 """
 
 from __future__ import annotations
@@ -135,6 +140,12 @@ TOO_MANY_APPROVALS_TEXT = (
     "Don't retry it; say in your reply what you needed it for."
 )
 ALWAYS_LABEL = "✅ Always allow this command here"
+UNREADABLE_QUESTION_TEXT = (
+    "Untether couldn't read this question, so it wasn't shown in Telegram. "
+    "Ask again with a question text and up to four short options, or carry "
+    "on with reasonable defaults and state your assumptions."
+)
+_SEND_MESSAGE_KEYS = frozenset({"Recipient", "Message"})
 
 
 def timeout_text(wait_s: int) -> str:
@@ -363,6 +374,22 @@ _RUNS: dict[str, GateRun] = {}
 _BY_CONVERSATION: dict[str, GateRun] = {}
 
 
+def _peer_creds(stream: Any) -> tuple[int, int] | None:
+    """``(pid, uid)`` of the connecting process (``SO_PEERCRED``), or None
+    when they can't be read."""
+    raw = stream.extra(SocketAttribute.raw_socket, None)
+    if raw is None:
+        return None
+    try:
+        creds = raw.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+        )
+        pid, uid, _gid = struct.unpack("3i", creds)
+    except (OSError, struct.error):
+        return None
+    return pid, uid
+
+
 def _peer_ok(stream: Any) -> bool:
     """The connecting process runs as this uid. Where the platform has
     ``SO_PEERCRED`` (Linux) a peer whose credentials can't be read is
@@ -370,17 +397,60 @@ def _peer_ok(stream: Any) -> bool:
     are the check."""
     if not hasattr(socket, "SO_PEERCRED"):
         return True
-    raw = stream.extra(SocketAttribute.raw_socket, None)
-    if raw is None:
-        return False
+    creds = _peer_creds(stream)
+    return creds is not None and creds[1] == os.getuid()
+
+
+_HOOK_MODULE = "untether.antigravity.gate_hook"
+_MAX_ANCESTRY = 64
+
+
+def _parent_pid(pid: int) -> int | None:
     try:
-        creds = raw.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
-        )
-        _pid, uid, _gid = struct.unpack("3i", creds)
-    except (OSError, struct.error):
-        return False
-    return uid == os.getuid()
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            stat_line = handle.read(4096)
+    except OSError:
+        return None
+    # ``pid (comm) state ppid …``; comm may hold spaces and parentheses.
+    try:
+        return int(stat_line[stat_line.rindex(b")") + 2 :].split()[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _descends_from(pid: int, ancestor: int) -> bool:
+    current = pid
+    for _ in range(_MAX_ANCESTRY):
+        parent = _parent_pid(current)
+        if parent is None or parent <= 1:
+            return False
+        if parent == ancestor:
+            return True
+        current = parent
+    return False
+
+
+def peer_hook_problem(pid: int, agy_pid: int, event: str) -> str | None:
+    """Security review 3 L1 (Linux): the peer must be a process of this
+    run's agy (a descendant of the pid Untether spawned) running exactly the
+    plugin's hook command — ``<this interpreter> -I -m
+    untether.antigravity.gate_hook <event>`` — for the event it sends. Why
+    not, or None. Best effort: an approved shell command is a descendant
+    of agy too and could exec the same command line (``security.md``)."""
+    if pid == agy_pid or not _descends_from(pid, agy_pid):
+        return "lineage"
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            argv = handle.read(65536).split(b"\0")
+        exe = os.path.realpath(f"/proc/{pid}/exe")
+    except OSError:
+        return "unreadable"
+    expected = [sys.executable, "-I", "-m", _HOOK_MODULE, event]
+    if [part.decode("utf-8", "replace") for part in argv if part] != expected:
+        return "command"
+    if exe != os.path.realpath(sys.executable):
+        return "interpreter"
+    return None
 
 
 class GateRun:
@@ -398,6 +468,8 @@ class GateRun:
         project_root: Path | None = None,
         diff_preview: bool | None = None,
         channel_id: int | None = None,
+        outbox_dir: str = gate_policy.DEFAULT_OUTBOX_DIR,
+        outside: tuple[Path, ...] = (),
     ) -> None:
         self.key = secrets.token_hex(6)
         self.session_key = f"agy-gate:{self.key}"
@@ -414,6 +486,13 @@ class GateRun:
         self.project_root = project_root
         self.diff_preview = diff_preview
         self.channel_id = channel_id
+        # Security review 3: the instance's ``files.outbox_dir`` (protected)
+        # and the projects' ``@branch`` worktree roots (outside the project).
+        self.outbox_dir = outbox_dir
+        self.outside = outside
+        # The agy process this run spawned (L1: hook connections must come
+        # from below it); set by the runner at spawn.
+        self.agy_pid: int | None = None
         # Unattended Ask me (trigger-level ``ask``): what the gate denied,
         # for the final's 🔒 footer (#835 parity).
         self.unattended_denials: list[str] = []
@@ -666,6 +745,22 @@ class GateRun:
                 error_type=exc.__class__.__name__,
             )
 
+    def _lineage_problem(self, stream: Any, event: str, request: dict) -> str | None:
+        """L1: on Linux, the peer is this run's agy hook (see
+        :func:`peer_hook_problem`). An Ask me run whose agy pid isn't known
+        yet refuses (fail closed); elsewhere the check needs the pid."""
+        if not hasattr(socket, "SO_PEERCRED"):
+            return None
+        if self.agy_pid is None:
+            return "no_agy_pid" if self.required else None
+        creds = _peer_creds(stream)
+        if creds is None:
+            return "unreadable"
+        pid = creds[0]
+        if request.get("pid") != pid:
+            return "pid"
+        return peer_hook_problem(pid, self.agy_pid, event)
+
     async def _serve_one(self, stream: Any) -> None:
         async with stream:
             if not _peer_ok(stream):
@@ -697,6 +792,12 @@ class GateRun:
             if event not in gate_hook.EVENTS or not isinstance(payload, dict):
                 logger.warning(
                     "antigravity.gate.bad_request", run=self.key, why="event"
+                )
+                return
+            problem = _LINEAGE_CHECK(self, stream, event, request)
+            if problem is not None:
+                logger.warning(
+                    "antigravity.gate.peer_refused", run=self.key, why=problem
                 )
                 return
             if event == "PreInvocation":
@@ -860,6 +961,10 @@ class GateRun:
                 conversation_id=cid if isinstance(cid, str) else None,
                 workspace_paths=payload.get("workspacePaths"),
                 diff_preview=self.diff_preview,
+                outbox_dir=self.outbox_dir,
+                outside=self.outside,
+                config_path=self.config_path,
+                artifact_path=payload.get("artifactDirectoryPath"),
             )
             if own
             # A conversation Untether didn't start (13 §5): never on the
@@ -887,9 +992,19 @@ class GateRun:
         return await self._approve(tool, args, verdict, step, cid, own, stream)
 
     def _internal_message(self, args: Any) -> bool:
-        recipient = args.get("Recipient") if isinstance(args, dict) else None
-        return isinstance(recipient, str) and (
-            recipient == self.conversation_id or recipient in self.children
+        """``send_message`` to this run's own conversation or a known
+        subagent, carrying only agy's own fields (security review 3 L5:
+        ``Recipient`` and ``Message``, agy 1.3.4's schema)."""
+        if not isinstance(args, dict):
+            return False
+        if not set(args) <= _SEND_MESSAGE_KEYS | gate_policy._META_KEYS:
+            return False
+        recipient = args.get("Recipient")
+        message = args.get("Message")
+        return (
+            isinstance(recipient, str)
+            and (message is None or isinstance(message, str))
+            and (recipient == self.conversation_id or recipient in self.children)
         )
 
     async def _unattended_deny(
@@ -1147,6 +1262,11 @@ class GateRun:
         questions = normalise_questions(args)
         if not questions:
             logger.warning("antigravity.gate.ask_unreadable", run=self.key)
+            if self.required:
+                # Ask me (security review 3 L4): no decision would let agy
+                # run the tool under its bypass flag.
+                self._decision_log("deny", "unreadable", step)
+                return {"decision": "deny", "reason": UNREADABLE_QUESTION_TEXT}
             return {}
         if not self._cards_left():
             self._decision_log("deny", "rate_limited", step)
@@ -1276,6 +1396,13 @@ class GateRun:
             with anyio.move_on_after(self.wait_s):
                 await held.decided.wait()
             tg.cancel_scope.cancel()
+
+
+# Indirection so tests that speak the hook protocol from the test process
+# itself can stand in for agy's hook.
+_LINEAGE_CHECK: Callable[[GateRun, Any, str, dict], str | None] = (
+    GateRun._lineage_problem
+)
 
 
 # ── registry responder (#960) ───────────────────────────────────────────────

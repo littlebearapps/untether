@@ -69,10 +69,32 @@ DESCRIPTION = (
 )
 
 
+# Security review 3 M3: when Untether's interpreter can't run (an upgrade
+# swapped the venv, the path is wrong), the shell guard answers PreToolUse
+# with a deny itself instead of leaving agy a failed hook. agy 1.3.4 already
+# blocks the tool when a hook exits non-zero, is killed or prints something
+# that isn't JSON (probed 2026-10-13, ``gate_canary``); this doesn't rely on
+# it. Plain ASCII, no quotes: it sits inside the shell's single quotes.
+GUARD_DENY_REASON = (
+    "The Untether gate interpreter (UNTETHER_AGY_GATE_PY) is missing or not "
+    "executable, so the tool was blocked. Run untether agy-gate install on "
+    "the host."
+)
+# Bumped whenever the hook commands change: an install of another version
+# reads as "not current" (byte compare) and must be redone.
+PLUGIN_VERSION = "2"
+
+
 def hook_command(event: str) -> str:
     """The exact command line agy runs for *event* (``sh -c``)."""
+    if event == "PreToolUse":
+        deny = json.dumps({"decision": "deny", "reason": GUARD_DENY_REASON})
+        missing = f"{{ printf '%s' '{deny}'; exit 0; }}"
+    else:
+        missing = "exit 0"
     return (
         f'[ -n "${gate_hook.ENV_MARKER}" ] || exit 0; '
+        f'[ -x "${gate_hook.ENV_PY}" ] || {missing}; '
         f'exec "${gate_hook.ENV_PY}" -I -m untether.antigravity.gate_hook {event}'
     )
 
@@ -82,7 +104,9 @@ def _dump(obj: Any) -> bytes:
 
 
 def plugin_json_bytes() -> bytes:
-    return _dump({"name": PLUGIN_NAME, "version": "1", "description": DESCRIPTION})
+    return _dump(
+        {"name": PLUGIN_NAME, "version": PLUGIN_VERSION, "description": DESCRIPTION}
+    )
 
 
 def hooks_json_bytes(wait_s: int = DEFAULT_WAIT_S) -> bytes:

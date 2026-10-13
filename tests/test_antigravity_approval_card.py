@@ -48,6 +48,9 @@ def _runtime_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_dir()))
     gate_server._reset_for_tests()
     gate_policy._reset_for_tests()
+    # The test process speaks the hook's protocol itself (L1's peer check is
+    # covered in test_antigravity_gate_server.py).
+    monkeypatch.setattr(gate_server, "_LINEAGE_CHECK", lambda *_a: None)
 
 
 @pytest.fixture
@@ -348,6 +351,28 @@ async def test_unknown_conversation_never_on_the_safe_list(harness: Harness) -> 
     )
     assert out is not None and out["decision"] == "deny"
     assert "another agy conversation" in _cards(harness)[0].action.title
+
+
+@pytest.mark.anyio
+async def test_internal_send_message_carries_only_agys_fields(
+    harness: Harness,
+) -> None:
+    """L5: a subagent's report to its parent runs without a card only with
+    agy's own ``send_message`` fields; anything more asks."""
+    harness.gate.add_children([CHILD], role="Researcher")
+    plain = _call("send_message", {"Recipient": CID, "Message": "done"}, 7, CHILD)
+    assert await harness.call("PreToolUse", plain) == {"decision": "allow"}
+    for n, extra in enumerate(
+        ({"Attachment": "/etc/passwd"}, {"Message": ["not", "text"]}), start=8
+    ):
+        args = {"Recipient": CID, "Message": "done", **extra}
+        out = await _held_call(
+            harness,
+            _call("send_message", args, n, CHILD),
+            Decision(False, "deny"),
+        )
+        assert out is not None and out["decision"] == "deny"
+    assert len(_cards(harness)) == 2
 
 
 @pytest.mark.anyio

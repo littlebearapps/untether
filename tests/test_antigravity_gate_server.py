@@ -40,6 +40,9 @@ CHAT = 4242
 def _runtime_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_dir()))
     gate_server._reset_for_tests()
+    # The test process speaks the hook's protocol itself; the L1 peer check
+    # has its own tests below.
+    monkeypatch.setattr(gate_server, "_LINEAGE_CHECK", lambda *_a: None)
 
 
 def _ask_payload(step: int = 2, cid: str = CID, options: Any = None) -> dict[str, Any]:
@@ -578,3 +581,114 @@ def test_peer_credentials_fail_closed() -> None:
     assert gate_server._peer_ok(_Stream(_Raw(OSError("nope")))) is False
     assert gate_server._peer_ok(_Stream(_Raw(b"short"))) is False
     assert gate_server._peer_ok(_Stream(None)) is False
+
+
+# ── security review 3 L1: only this run's agy hook may speak ───────────────
+
+
+async def _run_real_hook(gate: GateRun, event: str, payload: dict) -> bytes:
+    """The plugin's own command line, as agy runs it (``sh -c``, which
+    execs Untether's interpreter): a child of this test process."""
+    import sys
+
+    from untether.antigravity import gate_plugin
+
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **gate.env()}
+    env[gate_hook.ENV_PY] = sys.executable
+    proc = await anyio.run_process(
+        ["sh", "-c", gate_plugin.hook_command(event)],
+        input=json.dumps(payload).encode(),
+        env=env,
+        check=False,
+    )
+    return proc.stdout
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="Linux /proc")
+@pytest.mark.anyio
+async def test_only_agys_own_hook_process_is_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L1: the token alone isn't enough — any command agy runs inherits it.
+    The peer must descend from the agy pid Untether spawned and be the
+    plugin's hook command line for the event it sends."""
+    import structlog.testing
+
+    monkeypatch.setattr(gate_server, "_LINEAGE_CHECK", GateRun._lineage_problem)
+    gate = GateRun(config_path=None, factory=EventFactory("antigravity"), required=True)
+    await gate.open()
+    gate.set_conversation(CID)
+    pre_invocation = {"conversationId": CID, "invocationNum": 0}
+    tool = {"conversationId": CID, "stepIdx": 3, "toolCall": {"name": "finish"}}
+    send, receive = anyio.create_memory_object_stream[Any](8)
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(gate.serve, send)
+            # agy's pid not known yet: an Ask me gate refuses (fail closed).
+            out = await _run_real_hook(gate, "PreToolUse", tool)
+            assert json.loads(out)["decision"] == "deny"
+            # This test process plays agy: its child hook is served.
+            gate.agy_pid = os.getpid()
+            assert await _run_real_hook(gate, "PreInvocation", pre_invocation) == b"{}"
+            assert gate.preinvocation_seen
+            out = await _run_real_hook(gate, "PreToolUse", dict(tool, stepIdx=4))
+            assert json.loads(out) == {"decision": "allow"}
+            # Not below the agy pid (a sibling process stands in for agy).
+            sibling = await anyio.open_process(["sleep", "30"])
+            try:
+                gate.agy_pid = sibling.pid
+                gate.preinvocation_seen = False
+                with structlog.testing.capture_logs() as logs:
+                    await _run_real_hook(gate, "PreInvocation", pre_invocation)
+                    out = await _run_real_hook(
+                        gate, "PreToolUse", dict(tool, stepIdx=5)
+                    )
+            finally:
+                sibling.kill()
+                await sibling.wait()
+            assert not gate.preinvocation_seen
+            assert json.loads(out)["decision"] == "deny"
+            whys = {
+                log.get("why")
+                for log in logs
+                if log["event"] == "antigravity.gate.peer_refused"
+            }
+            assert whys == {"lineage"}
+            # Below agy, right token, but not the hook's command line (an
+            # approved shell command speaking the protocol itself).
+            gate.agy_pid = os.getppid()
+            harness = Harness(gate)
+            with structlog.testing.capture_logs() as logs:
+                # Closed without a reply: the hook would print a deny.
+                assert await harness.call("PreToolUse", dict(tool, stepIdx=6)) is None
+            assert any(
+                log["event"] == "antigravity.gate.peer_refused"
+                and log.get("why") in {"command", "pid"}
+                for log in logs
+            )
+            tg.cancel_scope.cancel()
+    finally:
+        await gate.aclose()
+
+
+def test_peer_hook_problem_checks_event_and_lineage() -> None:
+    me = os.getpid()
+    assert gate_server.peer_hook_problem(me, me, "PreToolUse") == "lineage"
+    assert gate_server.peer_hook_problem(me, 999_999_999, "PreToolUse") == "lineage"
+    if os.path.isdir("/proc/self"):
+        # This test process descends from its parent but isn't the hook.
+        assert gate_server.peer_hook_problem(me, os.getppid(), "Stop") == "command"
+
+
+@pytest.mark.anyio
+async def test_unreadable_question_denied_in_ask_me(harness: Harness) -> None:
+    """L4: no decision under agy's bypass flag would let the tool run."""
+    bad = {
+        "conversationId": CID,
+        "stepIdx": 11,
+        "toolCall": {"name": "ask_question", "args": {"questions": "nope"}},
+    }
+    assert await harness.call("PreToolUse", bad) == {}
+    harness.gate.required = True
+    out = await harness.call("PreToolUse", dict(bad, stepIdx=12))
+    assert out == {"decision": "deny", "reason": gate_server.UNREADABLE_QUESTION_TEXT}

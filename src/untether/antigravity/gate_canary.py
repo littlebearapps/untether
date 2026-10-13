@@ -5,6 +5,16 @@
 (≈ 13 k tokens) in an empty temp folder with a gate socket of its own and
 requires a ``PreInvocation`` request on it. Manual only: never per run and
 never per agy version (agy self-updates almost daily).
+
+Not checked here, re-probe on a new agy minor version (security review 3
+M3, ``docs/how-to/security.md``): what agy does when the ``PreToolUse`` hook
+fails without a decision. agy 1.3.4 (2026-10-13, under
+``--dangerously-skip-permissions``) blocks the tool for exit 1, exit 2, exit
+127 (missing interpreter), SIGKILL, non-JSON and truncated JSON output —
+the step ends ``TOOL_ERROR`` "JSON hook … failed" / "failed to unmarshal
+result from hook". Only an empty output with exit 0 means "no decision"
+(runs). The plugin's shell guard denies on its own when the interpreter is
+missing; the Python hook prints a deny for every failure it can catch.
 """
 
 from __future__ import annotations

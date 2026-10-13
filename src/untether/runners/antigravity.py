@@ -686,6 +686,40 @@ def gate_not_ready_message(reason: str) -> str:
     )
 
 
+def _gate_paths(
+    config_path: Path | None, cwd: Path | None
+) -> tuple[str, tuple[Path, ...]]:
+    """Security review 3 (H1, M5): this instance's ``files.outbox_dir`` and
+    every project's ``@branch`` worktree root, from the live config. The
+    default ``.worktrees`` in the run's folder counts too unless the run's
+    folder is a configured project; with no readable config, the defaults."""
+    from ..antigravity import gate_policy
+
+    try:
+        from ..settings import load_settings_if_exists
+
+        loaded = load_settings_if_exists(config_path)
+    except Exception:  # noqa: BLE001 — the safe defaults below still apply
+        logger.warning("antigravity.gate.settings_unreadable", exc_info=True)
+        loaded = None
+    outbox_dir = gate_policy.DEFAULT_OUTBOX_DIR
+    roots: list[Path] = []
+    projects: set[str] = set()
+    if loaded is not None:
+        settings, path = loaded
+        outbox_dir = settings.transports.telegram.files.outbox_dir
+        for entry in settings.projects.values():
+            project = Path(entry.path).expanduser()
+            if not project.is_absolute():
+                project = path.parent / project
+            projects.add(os.path.realpath(project))
+            worktrees = Path(entry.worktrees_dir).expanduser()
+            roots.append(worktrees if worktrees.is_absolute() else project / worktrees)
+    if cwd is not None and os.path.realpath(cwd) not in projects:
+        roots.append(cwd / ".worktrees")
+    return outbox_dir, tuple(roots)
+
+
 def gate_self_protect_message(path: str) -> str:
     return (
         "Ask me isn't available in this project: it contains Untether's own "
@@ -929,6 +963,21 @@ def config_changed_message(paths: list[str]) -> str:
         "held. The next message someone sends in the chat will run with the "
         "changed config and show what changed in a ⚠️ row; the schedule runs "
         "again after that. Check those files first if you didn't change them."
+    )
+
+
+PLUGIN_OUTDATED_ROW = (
+    "⚠️ Untether's agy plugin (untether-gate) is from another Untether "
+    "version. Telegram questions, steering and Ask me are off until you run "
+    "`untether agy-gate install` on the host."
+)
+
+
+def plugin_outdated_message() -> str:
+    return (
+        "Untether's agy plugin (untether-gate) is from another Untether "
+        "version, so this scheduled run is held. Run `untether agy-gate "
+        "install` on the host; the schedule runs again after that."
     )
 
 
@@ -1935,10 +1984,18 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 path=str(install.path),
                 trigger=trigger,
             )
+            outdated = (
+                install.managed
+                and not install.edited
+                and install.problem is None
+                and not install.current
+            )
             if trigger is not None:
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=config_changed_message([str(install.path)]),
+                        error=plugin_outdated_message()
+                        if outdated
+                        else config_changed_message([str(install.path)]),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
@@ -1946,11 +2003,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     decision,
                 )
             if mode == "ask":
-                reason = (
-                    gate_precheck.OUTDATED
-                    if install.managed and not install.edited and not install.current
-                    else gate_precheck.EDITED
-                )
+                reason = gate_precheck.OUTDATED if outdated else gate_precheck.EDITED
                 refused = decide_antigravity_mode(
                     mode,
                     GateFacts(
@@ -1961,10 +2014,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             pre.config_rows.append(
                 (
                     "antigravity.gate.changed",
-                    "⚠️ Untether's agy plugin (untether-gate) isn't what Untether"
-                    f" installed: {install.summary()}. Its hooks run in every agy"
-                    " session on this host. Telegram questions and steering are"
-                    " off; run `untether agy-gate status` on the host.",
+                    PLUGIN_OUTDATED_ROW
+                    if outdated
+                    else "⚠️ Untether's agy plugin (untether-gate) isn't what"
+                    f" Untether installed: {install.summary()}. Its hooks run in"
+                    " every agy session on this host. Telegram questions and"
+                    " steering are off; run `untether agy-gate status` on the"
+                    " host.",
                 )
             )
             return None, None, decision
@@ -1988,6 +2044,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # plugin's own wait, never longer (agy's hook timeout is fixed
             # at install time).
             wait_s = min(wait_s, self.approval_timeout_s)
+        outbox_dir, worktree_roots = _gate_paths(self.config_path, pre.cwd)
         gate = gate_server.GateRun(
             config_path=self.config_path,
             factory=EventFactory(ENGINE),
@@ -1998,6 +2055,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             project_root=pre.cwd,
             diff_preview=options.diff_preview if options is not None else None,
             channel_id=get_run_channel_id(),
+            outbox_dir=outbox_dir,
+            outside=worktree_roots,
         )
         try:
             await gate.open()
@@ -2300,6 +2359,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
             return
         gate.on_fatal = lambda kind: self._gate_kill(state, kind)
+        # Security review 3 L1: hook connections must come from below agy.
+        gate.agy_pid = pid
         send, receive = anyio.create_memory_object_stream[UntetherEvent](64)
 
         async def pump() -> None:
