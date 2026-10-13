@@ -528,6 +528,7 @@ async def test_ask_me_chat_mode_never_reaches_a_cron(
     cron runs as Workspace."""
     from untether.runners.run_options import reset_run_options
 
+    agy._reset_permission_warnings()  # the downgrade warning is once per trigger
     monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
     token = set_run_options(
         EngineRunOptions(permission_mode="ask", unattended_trigger="cron:nightly")

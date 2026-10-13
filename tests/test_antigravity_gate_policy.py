@@ -782,3 +782,81 @@ def test_shell_commands_are_never_parsed_safe(root: Path) -> None:
             conversation_id=CID,
         )
         assert not verdict.allow and verdict.why == "tool"
+
+
+# ── security review 4: TOCTOU — paths that can change meaning ──────────────
+
+
+def test_read_through_an_in_project_symlink_asks(root: Path) -> None:
+    (root / "real").mkdir()
+    (root / "real" / "a.txt").write_text("x")
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    (root / "file-link").symlink_to(root / "real" / "a.txt")
+    for target in (root / "alias" / "a.txt", root / "file-link", root / "alias"):
+        tool, key = (
+            ("list_dir", "DirectoryPath")
+            if target.name == "alias"
+            else ("view_file", "AbsolutePath")
+        )
+        verdict = classify(tool, {key: str(target)}, root=root, conversation_id=CID)
+        assert not verdict.allow and verdict.why == "unclear", target
+    assert classify(
+        "view_file",
+        {"AbsolutePath": str(root / "real" / "a.txt")},
+        root=root,
+        conversation_id=CID,
+    ).allow
+
+
+def test_symlink_to_outside_reads_as_outside(root: Path, tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x")
+    (root / "innocent.txt").symlink_to(secret)
+    verdict = classify(
+        "view_file",
+        {"AbsolutePath": str(root / "innocent.txt")},
+        root=root,
+        conversation_id=CID,
+    )
+    assert not verdict.allow and verdict.why == "outside"
+
+
+def test_hard_link_read_and_write_ask(root: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+    os.link(outside, root / "linked.txt")
+    target = str(root / "linked.txt")
+    assert not classify(
+        "view_file", {"AbsolutePath": target}, root=root, conversation_id=CID
+    ).allow
+    assert not classify(
+        "write_to_file", _edit(target), root=root, conversation_id=CID
+    ).allow
+
+
+def test_edit_target_must_be_a_plain_file(root: Path) -> None:
+    (root / "folder").mkdir()
+    os.mkfifo(root / "pipe")
+    for name in ("folder", "pipe"):
+        verdict = classify(
+            "write_to_file", _edit(root / name), root=root, conversation_id=CID
+        )
+        assert not verdict.allow, name
+    # A new file and an existing plain one are fine.
+    (root / "plain.txt").write_text("x")
+    for name in ("new.txt", "plain.txt"):
+        assert classify(
+            "write_to_file", _edit(root / name), root=root, conversation_id=CID
+        ).allow, name
+
+
+def test_card_for_a_linked_path_shows_where_it_goes(root: Path) -> None:
+    (root / "real").mkdir()
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    title = gate_policy.card_title(
+        "write_to_file",
+        _edit(root / "alias" / "a.txt"),
+        gate_policy.Verdict(False, "unclear"),
+        root=root,
+    )
+    assert "→ resolves to" in title

@@ -266,9 +266,12 @@ folder (none: agy searches its workspace); and `write_to_file`, `replace_file_co
 when every path argument (`TargetFile` and any other `…Path` / `…File` / `…Dir` key, realpath'd — the nearest
 existing parent for a new file, so a symlink out of the project resolves outside it) is inside the project or the
 artifact folder (`~/.gemini/antigravity-cli/brain/<conversation id>/`, a UUID-shaped id, the folder itself under
-agy's `brain/`), the payload's `workspacePaths[0]` is the project, the file isn't protected or hard-linked, and no
-part of the path below the project folder is a symlink (it could be repointed before agy writes). Shell commands are
-never parsed: every `run_command` asks. A
+agy's `brain/`), the payload's `workspacePaths[0]` is the project, the file isn't protected, and no
+part of the path below the project folder is a symlink (it could be repointed before agy acts). Reads follow the same
+link rule. An existing target must be a regular file with a single name (no hard link) — or, for a read, a folder.
+Shell commands are never parsed: every `run_command` asks. **The safe list is best effort** against a model that
+can make links: the check runs when the hook fires and agy acts a moment later, so a shell command you approve (or a
+daemon it started) can change what a later "in-project" path means. Approving a shell command is approving that. A
 non-string path, a NUL byte, arguments that aren't an object, or any error while checking asks. A subagent reporting back to its parent
 (`send_message` to a conversation of this run) is internal and runs too.
 

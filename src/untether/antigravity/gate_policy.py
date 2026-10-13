@@ -317,14 +317,19 @@ def _has_link(path: str, trusted: str = "/") -> bool:
     return False
 
 
-def _hard_linked(real: str) -> bool:
-    """An existing file with more than one name: a write through the name
-    inside the project changes the other one too, wherever it is."""
+def _plain_target(path: str, *, write: bool) -> bool:
+    """The target as it is now: absent, a regular file with one name, or
+    (for a read) a folder. Anything else — a link, a FIFO, a device, a
+    hard-linked file — isn't auto-allowed."""
     try:
-        st = os.lstat(real)
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
+    if stat.S_ISREG(st.st_mode):
+        return st.st_nlink == 1
+    return stat.S_ISDIR(st.st_mode) and not write
 
 
 def _within(child: str, parent: str) -> bool:
@@ -496,28 +501,27 @@ def _classify_paths(
             # Relative, ``~``, ``..`` …: agy may resolve it differently.
             return Verdict(False, "unclear")
         real = _real(target)
-        if write and real != target and _has_link(target, str(root)):
-            # Through a symlink: where it lands can change before agy writes.
-            if not _within(real, base) and not _in_artifact_dir(real, conversation_id):
-                return Verdict(False, "outside")
-            return Verdict(False, "unclear")
+        inside = _within(real, base)
+        artifact = _in_artifact_dir(real, conversation_id)
         if write:
             for protected in self_protected_paths():
                 if _within(real, protected):
                     return Verdict(False, "self")
-        if _in_artifact_dir(real, conversation_id):
-            if write and _hard_linked(real):
-                return Verdict(False, "outside")
-            continue
-        if not _within(real, base):
+        if not inside and not artifact:
             return Verdict(False, "outside")
-        if not write:
+        # TOCTOU (security review): agy acts after this check, so the path
+        # must not be able to change meaning in between. No component below
+        # the trusted folder may be a symlink (a link can be repointed), and
+        # an existing target must be a plain file (or, for a read, folder)
+        # with one name (a hard link is the same file outside the project).
+        trusted = str(root) if inside else str(_brain_root())
+        if _has_link(target, trusted) or not _plain_target(target, write=write):
+            return Verdict(False, "unclear")
+        if artifact or not write:
             continue
         rel = os.path.relpath(real, base)
         if rel == "." or _protected_rel(PurePosixPath(*Path(rel).parts).as_posix()):
             return Verdict(False, "protected")
-        if _hard_linked(real):
-            return Verdict(False, "outside")
     return ALLOW
 
 
