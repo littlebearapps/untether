@@ -57,6 +57,12 @@
   - the "Ask me isn't available in this project" reply lists each file once
   - the permission-mode toasts say a switch within Ask me / Full access (or Workspace / Plan first) needs no `/new`
 - **fix(antigravity):** a cron or webhook Antigravity run held because Untether's agy plugin was edited now says so: the plugin isn't what Untether installed, a message in the chat doesn't release the hold, and `untether agy-gate install --force` (after checking the change) does. It used to get the changed-workspace text, which said the next chat message would let the schedule run again. Scheduled runs are still held exactly as before [#1078](https://github.com/littlebearapps/untether/issues/1078)
+- **fix:** approval and plugin follow-ups from the rc4 QA [#1083](https://github.com/littlebearapps/untether/issues/1083)
+  - the "Action required" push for an approval (Claude or Antigravity) is sent once the buttons are on the progress message. In a group it could arrive 3–6 seconds earlier, so tapping it opened a message with no buttons yet
+  - a scheduled Antigravity run held because Untether's agy plugin was edited shows `untether agy-gate install --force` and the plugin folder as code, not with literal backticks inside a code block; the plugin-changed ⚠️ row repeated in the final answer shows `untether agy-gate status` as code too
+  - when Untether's agy plugin was edited, its files are no longer also listed in the "agy hooks, plugins or MCP servers that Untether doesn't manage" row; the plugin's own row covers them, and any other plugin is still listed there. Scheduled runs stay held as before
+  - an Ask me card for a read says why it asks, e.g. `(outside this project)`, as an edit's card already did
+  - an Antigravity steer that never ran is logged as `antigravity.steer.not_run` instead of `claude.live_session.followup_not_run` (Claude's name is unchanged)
 - **fix(antigravity):** wording and page fixes around Telegram approvals [#1077](https://github.com/littlebearapps/untether/issues/1077)
   - an Antigravity question's push notification says "Question from Antigravity", not "Question from Claude Code"
   - commands in the 🔐 page's "not ready" reasons and in the steer notices show as code instead of with literal backticks

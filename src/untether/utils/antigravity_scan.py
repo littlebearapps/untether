@@ -148,6 +148,9 @@ USER_DISPLAY_PREFIX = "~/.gemini/config/"
 # scan makes). A changed, extra or linked file is tracked like any other
 # plugin file, so nothing planted rides on the exemption.
 _GATE_PLUGIN_DIR = "plugins/untether-gate/"
+# How those files are named in ``ScanResult.agy`` (#1083: the runner's
+# plugin-changed row reports them, so the generic row leaves them out).
+GATE_PLUGIN_DISPLAY_PREFIX = USER_DISPLAY_PREFIX + _GATE_PLUGIN_DIR
 # Untether's own Workspace agent (``utils/antigravity_agent.py``), relative
 # to ``~/.gemini/config``. That exact regular file is left out of the digest:
 # Untether rewrites it to its own text before every run that names it, so

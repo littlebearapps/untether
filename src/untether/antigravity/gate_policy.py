@@ -1298,7 +1298,9 @@ def card_title(
     labelled as agy's words."""
     head = f"Permission Request [agy] - {tool_label(tool, _display(args))}"
     note = _WHY_NOTE.get(verdict.why)
-    if note is not None and tool in EDIT_TOOLS:
+    if note is not None and (tool in EDIT_TOOLS or tool in READ_TOOLS):
+        # #1083: a read that asks says why too (outside the project, agy's
+        # workspace isn't the project, or paths Untether can't check).
         head += f" ({note})"
     lines = [head]
     body = preview(tool, args, root=root)

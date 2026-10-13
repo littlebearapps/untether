@@ -4698,6 +4698,7 @@ class ProgressEdits:
                 # doesn't need another "Action required" push.
                 self._outline_just_resolved = True
 
+            pending_notify: str | None = None
             try:
                 # Send full outline as separate message(s) when approval buttons appear
                 if has_approval and not had_approval and not self._outline_sent:
@@ -4746,27 +4747,11 @@ class ProgressEdits:
                                 notify_text = question_notify_text(self.tracker.engine)
                                 break
 
-                        async def _send_notify(text: str) -> None:
-                            try:
-                                with message_kind("approval_notify"):
-                                    self._approval_notify_ref = (
-                                        await self.transport.send(
-                                            channel_id=self.channel_id,
-                                            message=RenderedMessage(text=text),
-                                            options=SendOptions(
-                                                notify=True,
-                                                reply_to=self.progress_ref,
-                                                thread_id=self.thread_id,
-                                            ),
-                                        )
-                                    )
-                            except Exception:  # noqa: BLE001
-                                logger.debug(
-                                    "progress_edits.notify_send_failed",
-                                    exc_info=True,
-                                )
-
-                        bg_tg.start_soon(_send_notify, notify_text)
+                        # #1083: sent after this cycle's edit (below) has
+                        # landed. The outbox sends a new message before a
+                        # pending edit, so starting it here let the push
+                        # arrive seconds before the buttons it points at.
+                        pending_notify = notify_text
                 elif had_approval and not has_approval:
                     ref_to_delete = self._approval_notify_ref
                     self._approval_notify_ref = None
@@ -4859,8 +4844,26 @@ class ProgressEdits:
                 # Transport errors (timeouts, network issues) are best-effort —
                 # never crash a run because a progress edit failed to send.
                 logger.warning("progress_edits.transport_error", exc_info=True)
+            if pending_notify is not None:
+                bg_tg.start_soon(self._send_approval_notify, pending_notify)
 
             self.rendered_seq = seq_at_render
+
+    async def _send_approval_notify(self, text: str) -> None:
+        """The "Action required" push, a reply to the progress message."""
+        try:
+            with message_kind("approval_notify"):
+                self._approval_notify_ref = await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(text=text),
+                    options=SendOptions(
+                        notify=True,
+                        reply_to=self.progress_ref,
+                        thread_id=self.thread_id,
+                    ),
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_edits.notify_send_failed", exc_info=True)
 
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
     _STALL_THRESHOLD_TOOL: float = 600.0  # 10 minutes when a tool is actively running
@@ -8451,8 +8454,12 @@ async def handle_message(
                         )
             except Exception:  # noqa: BLE001
                 logger.debug("live_followup.unrun_notice_failed", exc_info=True)
+            # #1083: an Antigravity steer that never ran logs under its own
+            # engine's name; Claude's event name is unchanged.
             logger.warning(
-                "claude.live_session.followup_not_run",
+                "claude.live_session.followup_not_run"
+                if runner.engine == "claude"
+                else f"{runner.engine}.steer.not_run",
                 session_id=sid.value,
                 user_msg_id=reply_to.message_id,
             )

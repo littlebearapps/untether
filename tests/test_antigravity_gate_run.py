@@ -268,6 +268,67 @@ async def test_edited_plugin_warns_attended_and_holds_unattended(
 
 
 @pytest.mark.anyio
+async def test_edited_plugin_is_reported_by_its_own_row_only_1083(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1083: an edited gate plugin also showed up in the generic "hooks,
+    plugins or MCP servers that Untether doesn't manage" row, listing
+    Untether's own files. Only the plugin-changed row names that folder; a
+    genuinely foreign plugin beside it is still listed. The final repeats
+    the rows with the command as code, not literal backticks."""
+    from untether.antigravity import gate_plugin
+    from untether.telegram.render import render_markdown
+
+    folder = gate_plugin.plugin_dir()
+    (folder / gate_plugin.HOOKS_FILE).write_text("{}")
+    foreign = folder.parent / "someone-elses"
+    foreign.mkdir()
+    (foreign / "hooks.json").write_text("{}")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    with structlog.testing.capture_logs() as logs:
+        events = [evt async for evt in _runner().run("hi", None)]
+    done = _contract(events)
+    rows = {
+        e.action.id: e.action
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.kind == "warning"
+    }
+    assert "isn't what Untether installed" in rows["antigravity.gate.changed"].title
+    present = rows["antigravity.config.present"]
+    assert present.detail["paths"] == [
+        "~/.gemini/config/plugins/someone-elses/hooks.json"
+    ]
+    assert "untether-gate" not in present.title
+    # The scan still tracks the plugin's files (digest, log, cron hold).
+    (seen,) = [r for r in logs if r["event"] == "antigravity.workspace_config_present"]
+    assert any("plugins/untether-gate/" in p for p in seen["paths"])
+    text, entities = render_markdown(done.answer)
+    assert "`" not in text
+    utf16 = text.encode("utf-16-le")
+    codes = [
+        utf16[2 * e["offset"] : 2 * (e["offset"] + e["length"])].decode("utf-16-le")
+        for e in entities
+        if e["type"] == "code"
+    ]
+    assert "untether agy-gate status" in codes
+
+
+@pytest.mark.anyio
+async def test_edited_plugin_alone_shows_no_generic_row_1083(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.antigravity import gate_plugin
+
+    (gate_plugin.plugin_dir() / gate_plugin.HOOKS_FILE).write_text("{}")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    events = [evt async for evt in _runner().run("hi", None)]
+    _contract(events)
+    ids = [e.action.id for e in events if isinstance(e, ActionEvent)]
+    assert "antigravity.gate.changed" in ids
+    assert "antigravity.config.present" not in ids
+
+
+@pytest.mark.anyio
 async def test_outdated_plugin_says_to_reinstall(
     project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

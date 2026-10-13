@@ -346,6 +346,22 @@ def test_edit_card_says_why(root: Path, tmp_path: Path) -> None:
     )
 
 
+def test_read_card_says_why_1083(root: Path, tmp_path: Path) -> None:
+    """#1083: a read outside the project asked with no reason on its card."""
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("x")
+    args = {"AbsolutePath": str(outside)}
+    verdict = gate_policy.classify("view_file", args, root=root, conversation_id=None)
+    assert verdict.why == "outside"
+    head = gate_policy.card_title("view_file", args, verdict, root=root)
+    assert head.splitlines()[0].endswith("(outside this project)")
+    # A tool that names no path keeps a plain title.
+    shell = gate_policy.card_title(
+        "run_command", {"CommandLine": "ls"}, gate_policy.Verdict(False), root=root
+    )
+    assert shell.splitlines()[0] == "Permission Request [agy] - shell command"
+
+
 # ── "Always allow this command" ────────────────────────────────────────────
 
 

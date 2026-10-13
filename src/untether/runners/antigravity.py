@@ -57,7 +57,7 @@ from ..background_tasks import EngineBackgroundTask
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
-from ..markdown import HARD_BREAK
+from ..markdown import HARD_BREAK, inline_code
 from ..model import (
     Action,
     ActionEvent,
@@ -1003,7 +1003,13 @@ def gate_plugin_held_message(install: Any) -> str:
     """#1078: a scheduled run held because Untether's agy plugin isn't the
     one it installed. Unlike a changed workspace config, a chat message
     doesn't clear this hold: every unattended run stays held until the
-    plugin is reinstalled."""
+    plugin is reinstalled.
+
+    Markdown (#1083): sent as the held run's answer as well as its error
+    (:func:`_plugin_held`), so the commands render as code, like the 🔐
+    page's, instead of as literal backticks inside the error card's code
+    block. The summary can name files someone added to the folder, so it is
+    escaped."""
     if gate_plugin_outdated(install):
         return (
             "Untether's agy plugin (untether-gate) is from another Untether "
@@ -1015,11 +1021,25 @@ def gate_plugin_held_message(install: Any) -> str:
     command = "untether agy-gate install" + (" --force" if force else "")
     return (
         "Untether's agy plugin (untether-gate) isn't what Untether installed "
-        f"({install.summary()}), so this scheduled run is held. Its hooks run "
-        "in every agy session on this host, so scheduled Antigravity runs stay "
-        "held until the plugin is restored; a message in the chat doesn't "
-        f"release them. Check what changed in {install.path}, then run "
-        f"`{command}` on the host."
+        f"({escape_markdown(install.summary())}), so this scheduled run is "
+        "held. Its hooks run in every agy session on this host, so scheduled "
+        "Antigravity runs stay held until the plugin is restored; a message in "
+        "the chat doesn't release them. Check what changed in "
+        f"{inline_code(str(install.path))}, then run `{command}` on the host."
+    )
+
+
+def _plugin_held(install: Any, resume: ResumeToken | None) -> CompletedEvent:
+    """A scheduled run held by :func:`gate_plugin_held_message`. The text is
+    the answer too (one line, so the bridge shows it once, rendered, with no
+    code block under it: ``runner_bridge`` dedupes an error whose first line
+    is the answer's)."""
+    text = gate_plugin_held_message(install)
+    return EventFactory(ENGINE).completed_error(
+        error=text,
+        answer=text,
+        resume=resume,
+        usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
     )
 
 
@@ -1059,6 +1079,10 @@ class _RunPrecheck:
     cwd: Path | None = None
     scan: antigravity_scan.ScanResult | None = None
     first_sight: bool = False  # show the "hooks … Untether doesn't manage" row
+    # #1083: the ``antigravity.gate.changed`` row covers Untether's own
+    # plugin folder, so the row above leaves those files out (the scan still
+    # tracks them: the digest and the cron hold are unchanged).
+    gate_plugin_row: bool = False
     # The planted-config scan failed or was truncated: show a ⚠️ row (never
     # record a digest as seen); unattended runs were already refused.
     scan_problem: str | None = None
@@ -1910,13 +1934,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # chat message doesn't release the hold (``_gate_setup``
                 # keeps holding until it is reinstalled), so say that.
                 install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
+                if gate_plugin_changed(install):
+                    return _plugin_held(install, resume), None
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=(
-                            gate_plugin_held_message(install)
-                            if gate_plugin_changed(install)
-                            else config_changed_message(paths)
-                        ),
+                        error=config_changed_message(paths),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
@@ -2070,15 +2092,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             outdated = gate_plugin_outdated(install)
             if trigger is not None:
-                return (
-                    EventFactory(ENGINE).completed_error(
-                        error=gate_plugin_held_message(install),
-                        resume=resume,
-                        usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
-                    ),
-                    None,
-                    decision,
-                )
+                return _plugin_held(install, resume), None, decision
             if mode == "ask":
                 reason = gate_precheck.OUTDATED if outdated else gate_precheck.EDITED
                 refused = decide_antigravity_mode(
@@ -2088,6 +2102,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     ),
                 )
                 return self._decision_refusal(refused, resume), None, refused
+            pre.gate_plugin_row = True
             pre.config_rows.append(
                 (
                     "antigravity.gate.changed",
@@ -2995,17 +3010,25 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             if recorded:
                 self._seen().set(scan.root, scan.agy_digest)
-            out.append(
-                self._warning_row(
-                    state,
-                    "antigravity.config.present",
-                    "⚠️ This project has agy hooks, plugins or MCP servers that "
-                    f"Untether doesn't manage ({_paths_text(paths)}). They run "
-                    "their own commands in every mode, including Workspace. "
-                    "Review them if you didn't add them.",
-                    {"paths": paths},
+            if pre.gate_plugin_row:
+                # #1083: Untether's own plugin folder has its own row.
+                paths = [
+                    p
+                    for p in paths
+                    if not p.startswith(antigravity_scan.GATE_PLUGIN_DISPLAY_PREFIX)
+                ]
+            if paths:
+                out.append(
+                    self._warning_row(
+                        state,
+                        "antigravity.config.present",
+                        "⚠️ This project has agy hooks, plugins or MCP servers "
+                        f"that Untether doesn't manage ({_paths_text(paths)}). "
+                        "They run their own commands in every mode, including "
+                        "Workspace. Review them if you didn't add them.",
+                        {"paths": paths},
+                    )
                 )
-            )
         if pre.config_rows:
             out.extend(
                 self._warning_row(state, action_id, title)
@@ -4368,12 +4391,30 @@ def _note_warning(titles: list[str], evt: UntetherEvent) -> None:
         titles.append(title)
 
 
+# #1083: an Untether command a row names as code (`untether agy-gate status`).
+_UNTETHER_COMMAND_SPAN = re.compile(r"`(untether [^`\n]+)`")
+
+
+def _escape_keeping_commands(line: str) -> str:
+    """Escaped, except the ``untether …`` commands a row writes as code,
+    which stay code spans (as in the progress row and the 🔐 page) rather
+    than showing their backticks."""
+    out: list[str] = []
+    pos = 0
+    for match in _UNTETHER_COMMAND_SPAN.finditer(line):
+        out.append(escape_markdown(line[pos : match.start()]))
+        out.append(inline_code(match.group(1)))
+        pos = match.end()
+    out.append(escape_markdown(line[pos:]))
+    return "".join(out)
+
+
 def final_warning_block(titles: list[str]) -> str | None:
     """One line per distinct row, escaped: the rows carry project paths."""
     lines = list(dict.fromkeys(t for t in titles if t))
     if not lines:
         return None
-    return HARD_BREAK.join(escape_markdown(line) for line in lines)
+    return HARD_BREAK.join(_escape_keeping_commands(line) for line in lines)
 
 
 def _with_warning_block(evt: CompletedEvent, titles: list[str]) -> CompletedEvent:

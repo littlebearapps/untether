@@ -197,7 +197,7 @@ The card reads like Claude's:
     [✅ Approve] [❌ Deny]
     [✅ Always allow this command here]
 
-An edit shows the file and the lines added and removed (`📝 src/app.py`, `-` / `+`); a write outside the project says `(outside this project)`; a command that starts a daemon warns that it keeps running after the turn; a subagent's call says `from subagent: <role>`. agy's own description comes last and is only agy's words — the lines above it are what will actually run.
+An edit shows the file and the lines added and removed (`📝 src/app.py`, `-` / `+`); a write or read outside the project says `(outside this project)`; a command that starts a daemon warns that it keeps running after the turn; a subagent's call says `from subagent: <role>`. agy's own description comes last and is only agy's words — the lines above it are what will actually run.
 
 - **✅ Approve** runs the tool. **✅ Always allow this command here** (shell commands only) also lets the exact same command, in the same folder, run without asking for the rest of the conversation; it is forgotten on `/new`, a switch to another mode or a restart.
 - **❌ Deny** blocks it: agy is told you refused and not to retry, and the step reads `blocked: denied in Telegram`.

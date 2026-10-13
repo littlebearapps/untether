@@ -692,6 +692,63 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
     assert transport.delete_calls[0] == notification_sends[0]["ref"]
 
 
+class _SlowEditTransport(FakeTransport):
+    """The outbox sends a new message before a pending edit: an edit that
+    waits for delivery returns only once ``release`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ops: list[str] = []
+        self.release = anyio.Event()
+
+    async def send(self, **kwargs: Any) -> MessageRef:
+        self.ops.append("send")
+        return await super().send(**kwargs)
+
+    async def edit(
+        self, *, ref: MessageRef, message: RenderedMessage, wait: bool = True
+    ) -> MessageRef:
+        if wait:
+            await self.release.wait()
+        self.ops.append("edit")
+        return await super().edit(ref=ref, message=message, wait=wait)
+
+
+@pytest.mark.anyio
+async def test_approval_push_waits_for_the_buttons_1083() -> None:
+    """#1083: the "Action required" push arrived 3-6 s before the card's
+    buttons (the push was queued before the edit, and the outbox sends new
+    messages first). It is sent only once the edit with the buttons has
+    landed."""
+    transport = _SlowEditTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for _ in range(20):
+                await anyio.lowlevel.checkpoint()
+            # The edit is still on its way: no push yet.
+            assert transport.ops == []
+            transport.release.set()
+            for _ in range(20):
+                await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert transport.ops == ["edit", "send"]
+    (push,) = transport.send_calls
+    assert push["options"].notify is True
+    assert "approval" in push["message"].text.lower()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("engine", "expected"),
@@ -1735,6 +1792,98 @@ async def test_plain_refusal_shows_commands_as_code() -> None:
         message.text[start : start + entity["length"]]
         == "agy plugin enable untether-gate"
     )
+
+
+@pytest.mark.anyio
+async def test_agy_plugin_hold_renders_its_commands_as_code_1083(
+    tmp_path: Any,
+) -> None:
+    """#1083: a cron held by an edited agy plugin showed literal backticks
+    (the text sat in the error card's code block). The runner sends it as
+    the answer too, so the card shows it once, as markdown: the commands and
+    the folder are code, and a file name someone added is escaped."""
+    from untether.antigravity.gate_plugin import InstallState
+    from untether.runners import antigravity as agy
+    from untether.telegram.render import render_markdown
+
+    install = InstallState(
+        path=tmp_path / "untether-gate",
+        present=True,
+        manifest={"files": {}},
+        files={"hooks.json": "modified", "*x*_y": "modified"},
+    )
+    held = agy._plugin_held(install, None)
+    assert held.answer == held.error
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error=held.error or "", answer=held.answer, usage=dict(held.usage)
+            )
+        ],
+        engine="antigravity",
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+    final = transport.send_calls[-1]["message"].text
+    assert final.startswith("error · antigravity")
+    assert "```" not in final
+    assert final.count("so this scheduled run is held") == 1
+    text, entities = render_markdown(final)
+    assert "`" not in text
+    assert "*x*_y" in text
+    utf16 = text.encode("utf-16-le")
+    codes = {
+        utf16[2 * e["offset"] : 2 * (e["offset"] + e["length"])].decode("utf-16-le")
+        for e in entities
+        if e["type"] == "code"
+    }
+    assert "untether agy-gate install --force" in codes
+    assert str(tmp_path / "untether-gate") in codes
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "event"),
+    [
+        ("claude", "claude.live_session.followup_not_run"),
+        ("antigravity", "antigravity.steer.not_run"),
+    ],
+)
+async def test_unrun_followup_logs_under_its_engine_1083(
+    engine: str, event: str
+) -> None:
+    """#1083: an Antigravity steer that never ran logged as
+    ``claude.live_session.followup_not_run``. Claude's name is unchanged."""
+    from untether import runner_bridge as rb
+
+    sid = f"sess-{engine}"
+    rb.register_followup_anchor(
+        f"uuid-{engine}",
+        session_id=sid,
+        reply_to=MessageRef(channel_id=123, message_id=11),
+        placeholder=None,
+    )
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=engine, resume_value=sid)
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    names = [log["event"] for log in logs if log["event"].endswith("not_run")]
+    assert names == [event]
+    assert rb.drain_followup_anchors(sid) == []
 
 
 @pytest.mark.anyio

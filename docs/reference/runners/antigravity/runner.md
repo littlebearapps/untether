@@ -299,6 +299,7 @@ chat's **Diff preview** set to on, in-project edits ask too.
 
 **The card** is registered in the engine-neutral registry (`kind="tool"`, the `ia:` callback prefix) and posted as a
 ⚠️ row with buttons: `Permission Request [agy] - <what>` (`shell command`, `write a file (outside this project)`,
+a read's reason too since [#1083](https://github.com/littlebearapps/untether/issues/1083),
 `MCP tool <server>/<tool>`, `start subagents` …), then a preview built from agy's own `toolCall.args`:
 
 - `run_command`: `$ <command>`, first and verbatim (a fenced block when it has several lines or is long; past 1,500
@@ -494,6 +495,9 @@ for this, as a tripwire and not a sandbox:
   `antigravity_seen_config.json` beside `untether.toml`. Only a run started by a person's message records the
   config as seen. An `/at` or `/loop` re-fire still runs and shows the row, every time, but records nothing, so
   it can't release held crons while nobody is watching ([#1044](https://github.com/littlebearapps/untether/issues/1044)).
+  When Untether's own agy plugin folder has changed, the row leaves its files out (the plugin-changed row reports
+  them; the scan still tracks them) and is skipped when nothing else is left
+  ([#1083](https://github.com/littlebearapps/untether/issues/1083)).
 - **Changed since someone looked.** A cron or webhook run is refused while the config differs from what an
   attended run last showed: `agy's workspace config changed since someone last ran Antigravity in this chat's
   project (…), so this scheduled run is held. The next message someone sends in the chat will run with the
@@ -651,7 +655,9 @@ answers `{"injectSteps":[{"userMessage":"Message from the user, sent via Telegra
 at most eight per call (`antigravity.steer.injected`). Each injected message appears as one `user_input` step
 (P-H10); that step marks it delivered (`antigravity.steer.delivered step=<n>`) and adds a
 `↪️ steer received: …` row; it never starts a turn. A steer still queued or not seen when agy sends its result gets
-the bridge's `⚠️ The session ended before this message ran — please send it again.` (so does `/cancel`).
+the bridge's `⚠️ The session ended before this message ran — please send it again.` (so does `/cancel`), logged as
+`antigravity.steer.not_run` ([#1083](https://github.com/littlebearapps/untether/issues/1083); Claude's equivalent is
+`claude.live_session.followup_not_run`).
 
 ### Liveness, tripwire, `Stop`
 

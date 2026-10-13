@@ -2639,3 +2639,13 @@ def test_final_warning_block_dedupes_and_escapes() -> None:
     )
     assert block == "⚠️ one \\*two\\* \\[x\\]\\(y\\)  \n⚠️ second row"
     assert agy.final_warning_block([]) is None
+
+
+def test_final_warning_block_keeps_untether_commands_as_code_1083() -> None:
+    """#1083: the final showed the plugin row's `untether agy-gate status`
+    with literal backticks (escaped). Untether's commands stay code; any
+    other backtick is still escaped."""
+    block = agy.final_warning_block(
+        ["⚠️ run `untether agy-gate status` on the host (`*x*`)."]
+    )
+    assert block == "⚠️ run `untether agy-gate status` on the host \\(\\`\\*x\\*\\`\\)."
