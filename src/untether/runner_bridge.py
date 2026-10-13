@@ -75,6 +75,7 @@ from .transport import (
     Transport,
     message_kind,
 )
+from .utils import engine_argv
 
 logger = get_logger(__name__)
 
@@ -5326,6 +5327,19 @@ async def run_runner_with_cancel(
     on_delivered: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
+    if running_task is not None and running_task.cancel_requested.is_set():
+        # #1082: /cancel (or /new) arrived while the run was starting — its
+        # progress message was still being sent. Never spawn the engine; the
+        # caller renders the usual cancelled card, naming the session.
+        logger.info(
+            "handle.cancelled_before_start",
+            channel_id=channel_id,
+            engine=runner.engine,
+            resume=resume_token.value if resume_token else None,
+        )
+        outcome.cancelled = True
+        outcome.resume = resume_token
+        return outcome
     start_time = time.monotonic()
     runner_finished = anyio.Event()
     # #510: this run's own stream + pid. The runner instance is shared
@@ -5648,16 +5662,17 @@ async def run_runner_with_cancel(
     if event_count == 0 and not outcome.cancelled:
         # #1047: a refusal answered before anything was meant to start has
         # no events by design — INFO, with the reason, not a WARNING.
-        plain_block = _plain_prespawn_refusal(
+        # #1082: so is a refused invalid session/model id (the user's input).
+        info_block = prespawn_blocked_reason(
             outcome.completed.usage if outcome.completed else None
         )
-        if plain_block is not None:
+        if info_block in _INFO_PRESPAWN_BLOCKS:
             logger.info(
                 "session.summary.no_events",
                 session_id=outcome.resume.value if outcome.resume else None,
                 engine=runner.engine,
                 duration_seconds=round(duration, 1),
-                prespawn_blocked=plain_block,
+                prespawn_blocked=info_block,
             )
         else:
             logger.warning(
@@ -6660,6 +6675,12 @@ _PLAIN_PRESPAWN_BLOCKS = frozenset(
 )
 
 
+# #1082: pre-spawn refusals whose ``session.summary.no_events`` is INFO — the
+# plain ones above, plus a refused invalid session or model id
+# (``invalid_argument``), which still renders as an error card.
+_INFO_PRESPAWN_BLOCKS = _PLAIN_PRESPAWN_BLOCKS | {engine_argv.INVALID_ARGUMENT_BLOCK}
+
+
 _CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 
 
@@ -7006,17 +7027,42 @@ async def handle_message(
         channel_id=incoming.channel_id,
         message_id=incoming.message_id,
     )
-    progress_state = await send_initial_progress(
-        cfg,
-        channel_id=incoming.channel_id,
-        reply_to=user_ref,
-        label="starting",
-        tracker=progress_tracker,
-        progress_ref=progress_ref,
-        resume_formatter=runner.format_resume,
-        context_line=context_line,
-        thread_id=incoming.thread_id,
-    )
+    # #1082: the run is visible to /cancel and /new from here, not only once
+    # its progress message exists — that send can wait seconds behind
+    # group-chat pacing, and a /cancel then answered "nothing running" while
+    # the run went ahead. Until then it is keyed by the queued placeholder
+    # (the card the user sees) or, for a fresh run, the user's own message.
+    running_task: RunningTask | None = None
+    starting_ref: MessageRef | None = None
+    if running_tasks is not None:
+        running_task = RunningTask(context=context, thread_id=incoming.thread_id)
+        starting_ref = progress_ref or MessageRef(
+            channel_id=incoming.channel_id,
+            message_id=incoming.message_id,
+            thread_id=incoming.thread_id,
+        )
+        running_tasks[starting_ref] = running_task
+    sent = False
+    try:
+        progress_state = await send_initial_progress(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=user_ref,
+            label="starting",
+            tracker=progress_tracker,
+            progress_ref=progress_ref,
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            thread_id=incoming.thread_id,
+        )
+        sent = True
+    finally:
+        if running_task is not None and running_tasks is not None:
+            if running_tasks.get(starting_ref) is running_task:
+                running_tasks.pop(starting_ref, None)
+            if not sent:
+                # Anyone waiting on this run (a reply routed to it) moves on.
+                running_task.done.set()
     progress_ref = progress_state.ref
 
     edits = ProgressEdits(
@@ -7037,6 +7083,16 @@ async def handle_message(
         # fails.
         min_render_interval=progress_cfg.min_render_interval,
     )
+    if running_task is not None and running_tasks is not None:
+        # #1082: from the start-up key to the run's progress message.
+        if progress_ref is not None:
+            running_task.edits = edits
+            running_tasks[progress_ref] = running_task
+        elif not running_task.cancel_requested.is_set():
+            # No progress message: untracked, as before. A cancel asked for
+            # during start-up is still honoured (the runner never starts).
+            running_task.done.set()
+            running_task = None
 
     # Apply watchdog settings to runner and edits
     edits.run_level = True
@@ -7891,13 +7947,6 @@ async def handle_message(
         # Must happen AFTER send_result_message() so a crash between
         # delete_ephemeral() and here still has an orphan cleanup pointer.
         _release_progress(t_progress_ref, reason="final")
-
-    running_task: RunningTask | None = None
-    if running_tasks is not None and progress_ref is not None:
-        running_task = RunningTask(
-            context=context, edits=edits, thread_id=incoming.thread_id
-        )
-        running_tasks[progress_ref] = running_task
 
     # ── #776 live-session follow-up turns ─────────────────────────────────
     outbox_early = {"delivered": False}
