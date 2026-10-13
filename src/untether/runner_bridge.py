@@ -895,8 +895,20 @@ _ASK_QUESTIONS_ON_TEXT = (
     "\n\nWhen you need clarification from the user, use AskUserQuestion "
     "with clear options. The user will see interactive buttons to choose from."
 )
-# Engines with no question buttons (everything but Claude until agy's
-# arrive in rc3).
+# #980: agy's own tool is ``ask_question``; its buttons need Untether's agy
+# plugin, and a question nobody can answer is skipped (the turn goes on).
+_AGY_ASK_OFF_TEXT = (
+    "\n\nDo NOT call ask_question. Proceed with reasonable defaults. "
+    "State any assumptions in your Decisions Needed summary section."
+)
+_AGY_ASK_ON_TEXT = (
+    "\n\nWhen you need clarification from the user, use the ask_question tool "
+    "with clear options. The user will see buttons in Telegram to choose from; "
+    "if no answer comes back, carry on with sensible defaults and say what "
+    "you assumed."
+)
+# Engines with no question buttons (everything but Claude, and Antigravity
+# without Untether's agy plugin).
 _REPLY_CLARIFICATION_TEXT = (
     "\n\nIf you need clarification, say so in your final reply — the user "
     "will answer in their next message."
@@ -946,17 +958,19 @@ def _apply_preamble(prompt: str, engine: str) -> str:
         return prompt
 
     from .runners.run_options import get_run_options
-    from .telegram.engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES
+    from .telegram.engine_overrides import ask_questions_supported
+    from .utils.paths import get_run_base_dir
 
-    if engine in ASK_QUESTIONS_SUPPORTED_ENGINES:
+    if ask_questions_supported(engine, get_run_base_dir()):
         # AskUserQuestion guidance based on the per-chat toggle.
         run_opts = get_run_options()
         # Default is ON (ask_questions=None treated as True)
         ask_questions = run_opts.ask_questions if run_opts else None
+        agy = engine == "antigravity"
         if ask_questions is False:
-            text += _ASK_QUESTIONS_OFF_TEXT
+            text += _AGY_ASK_OFF_TEXT if agy else _ASK_QUESTIONS_OFF_TEXT
         else:
-            text += _ASK_QUESTIONS_ON_TEXT
+            text += _AGY_ASK_ON_TEXT if agy else _ASK_QUESTIONS_ON_TEXT
     else:
         text += _REPLY_CLARIFICATION_TEXT
 

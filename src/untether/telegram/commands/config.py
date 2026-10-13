@@ -244,10 +244,10 @@ async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
-        ASK_QUESTIONS_SUPPORTED_ENGINES,
         DIFF_PREVIEW_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        ask_questions_supported,
         get_engine_default_reasoning,
         get_reasoning_label,
         supports_reasoning,
@@ -341,7 +341,7 @@ async def _page_home(ctx: CommandContext) -> None:
 
     show_plan_mode = current_engine in PERMISSION_MODE_SUPPORTED_ENGINES
     show_reasoning = supports_reasoning(current_engine)
-    show_ask_questions = current_engine in ASK_QUESTIONS_SUPPORTED_ENGINES
+    show_ask_questions = ask_questions_supported(current_engine)
     show_diff_preview = current_engine in DIFF_PREVIEW_SUPPORTED_ENGINES
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
@@ -407,6 +407,11 @@ async def _page_home(ctx: CommandContext) -> None:
                 f"Permission mode: <b>{pm_label}</b>{pm_source}"
                 f"{_home_hint('pm', pm_label)}"
             )
+            if show_ask_questions:
+                # #980: Untether's agy plugin is installed.
+                lines.append(
+                    f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
+                )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
             lines.append(
@@ -447,7 +452,10 @@ async def _page_home(ctx: CommandContext) -> None:
         model_hint = f"  · {engine_hint}"
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
-    if current_engine == "claude":
+    if current_engine == "claude" or (
+        current_engine == "antigravity" and show_ask_questions
+    ):
+        # #981: agy steers through Untether's agy plugin (same predicate).
         lines.append(
             f"Follow-up: <b>{followup_label}</b>{_home_hint('fu', followup_label)}"
         )
@@ -593,7 +601,24 @@ async def _page_home(ctx: CommandContext) -> None:
         if show_reasoning:
             row3.append({"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"})
         buttons.append(row3)
-        buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
+        if current_engine == "antigravity":
+            # #980/#981: questions and steer need Untether's agy plugin; the
+            # 🔐 page says whether it is installed and how (read-only).
+            row4 = [{"text": "🔐 Telegram approvals", "callback_data": "config:gt"}]
+            if show_ask_questions:
+                row4.insert(0, {"text": "❓ Ask mode", "callback_data": "config:aq"})
+                buttons.append(row4)
+                buttons.append(
+                    [
+                        {"text": "↪️ Follow-up", "callback_data": "config:fu"},
+                        {"text": "ℹ️ About", "callback_data": "config:ab"},
+                    ]
+                )
+            else:
+                row4.append({"text": "ℹ️ About", "callback_data": "config:ab"})
+                buttons.append(row4)
+        else:
+            buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
     # #296: a ⏰ Triggers navigation button whenever triggers are enabled
     # (even with none configured, D2 — the page explains how to add one),
@@ -908,6 +933,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ]
             for row in agy_mode.BUTTON_ROWS
         ]
+        buttons.append(
+            [{"text": "🔐 Telegram approvals", "callback_data": "config:gt"}]
+        )
         buttons.append(
             [
                 {
@@ -1436,11 +1464,27 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
         "",
         f"Current: <b>{effective}</b> ({source})",
     ]
-    if current_engine != "claude":
+    if current_engine == "antigravity":
+        from ..engine_overrides import ask_questions_supported
+
+        # #981: agy takes a steer before its next model call, through
+        # Untether's agy plugin.
         lines += [
             "",
-            f"⚠️ Steer is Claude Code only — <b>{current_engine}</b> runs "
-            "always queue follow-ups.",
+            "Antigravity: a steer reaches agy before its next step"
+            + (
+                "."
+                if ask_questions_supported(current_engine)
+                else " once Untether's agy plugin is installed on the host"
+                " (<code>untether agy-gate install</code>); until then"
+                " follow-ups queue."
+            ),
+        ]
+    elif current_engine != "claude":
+        lines += [
+            "",
+            f"⚠️ Steer is Claude Code and Antigravity only — <b>{current_engine}</b>"
+            " runs always queue follow-ups.",
         ]
     lines += ["", _learn_more("steer-follow-ups")]
 
@@ -1750,7 +1794,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, with_override
+    from ..engine_overrides import ask_questions_supported, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1764,12 +1808,14 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude Code-only guard
+    # Claude Code, or Antigravity with Untether's agy plugin (#980)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if current_engine not in ASK_QUESTIONS_SUPPORTED_ENGINES:
+    if not ask_questions_supported(current_engine):
         await _respond(
             ctx,
-            "<b>❓ Ask mode</b>\n\nOnly available for Claude Code.",
+            "<b>❓ Ask mode</b>\n\nAvailable for Claude Code, and for"
+            " Antigravity once Untether's agy plugin is installed on the host"
+            " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1847,6 +1893,99 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         [{"text": "← Back", "callback_data": "config:home"}],
     ]
 
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Antigravity: Telegram approvals gate status (#980) — read-only
+# ---------------------------------------------------------------------------
+
+
+def _chat_project_cwd(ctx: CommandContext) -> Any:
+    """The folder a plain message in this chat runs agy in, or None."""
+    try:
+        context = ctx.ambient_context or ctx.runtime.default_context_for_chat(
+            ctx.message.channel_id
+        )
+        return ctx.runtime.resolve_run_cwd(context)
+    except Exception:  # noqa: BLE001 — a status line must never break /config
+        return None
+
+
+async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None:
+    """REVIEW-2 m3: status only. Installing writes into ``~/.gemini`` and is
+    host-wide, so it is a host command, never a button. ``Re-check`` only
+    re-runs agy's own ``-p /hooks`` listing for this chat's project."""
+    from ...antigravity import gate_plugin, gate_precheck
+
+    cwd = _chat_project_cwd(ctx)
+    note: str | None = None
+    if action == "rc":
+        if cwd is None:
+            note = "No project folder for this chat, so there is nothing to check."
+        else:
+            gate_precheck.clear_cache(cwd)
+            runner, _model = _antigravity_runner_and_model(ctx, None)
+            if runner is None:
+                note = "Antigravity isn't set up on this Untether instance."
+            else:
+                with anyio.move_on_after(gate_precheck.HOOKS_TIMEOUT_S + 5):
+                    await gate_precheck.check(runner, cwd, use_cache=False)
+                logger.info(
+                    "config.agy_gate.rechecked",
+                    chat_id=ctx.message.channel_id,
+                    sender_id=ctx.message.sender_id,
+                )
+
+    install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
+    latest = gate_precheck.latest(cwd)
+    lines = [
+        "<b>🔐 Telegram approvals</b> <i>(Antigravity)</i>",
+        "",
+        "Untether's agy plugin lets an Antigravity run ask you questions"
+        " (buttons here, or reply with text) and take a message while it"
+        " works (Follow-up: steer). It only acts on agy runs Untether starts.",
+        "",
+        f"Plugin: <b>{html.escape(install.summary())}</b>",
+    ]
+    if install.present:
+        lines.append(f"Question wait: <b>{install.wait_s or '—'} s</b>")
+    if cwd is None:
+        lines.append("This chat: <i>no project folder</i>")
+    elif latest is None:
+        lines.append(
+            "This chat's project: <i>not checked yet</i> (checked before the"
+            " next Antigravity run, or tap Re-check)"
+        )
+    elif latest.ok:
+        lines.append("This chat's project: <b>ready</b> (agy lists the hooks)")
+    else:
+        lines.append(
+            "This chat's project: <b>not ready</b> — "
+            + html.escape(gate_precheck.reason_text(latest.reason))
+        )
+    if latest is not None and latest.foreign_sources:
+        shown = ", ".join(latest.foreign_sources[:5])
+        lines.append(f"Other agy hooks here: <code>{html.escape(shown)}</code>")
+    if note is not None:
+        lines += ["", html.escape(note)]
+    lines += [
+        "",
+        "Install writes only <code>~/.gemini/config/plugins/untether-gate/</code>"
+        " (three files), through agy's own <code>agy plugin install</code>. It"
+        " is host-wide, so it is done on the host, not from Telegram:",
+        "<code>untether agy-gate install</code>",
+        "<code>untether agy-gate uninstall</code>",
+        "<code>untether agy-gate status --project &lt;folder&gt;</code>",
+        "",
+        _learn_more("antigravity", "telegram-questions-and-steer"),
+    ]
+    buttons = [
+        [
+            {"text": "🔄 Re-check", "callback_data": "config:gt:rc"},
+            {"text": "← Back", "callback_data": "config:pm"},
+        ]
+    ]
     await _respond(ctx, "\n".join(lines), buttons)
 
 
@@ -2525,6 +2664,7 @@ _PAGES: dict[str, object] = {
     "rl": _page_resume_line,
     "ab": _page_about,
     "loop": _page_loop,
+    "gt": _page_agy_gate,
 }
 
 # ---------------------------------------------------------------------------
@@ -2583,6 +2723,8 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
     ),
     "rl": _ON_OFF_CLR,
     "ab": frozenset(),
+    # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS.
+    "gt": frozenset(),
     "loop": _ON_OFF_CLR,
 }
 
@@ -2590,9 +2732,12 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
 # `clr` / `md_clr`), so every action on them is a change.
 _DYNAMIC_ACTION_PAGES: frozenset[str] = frozenset({"ag"})
 
-# Actions that only read or navigate. None today: a page is opened with no
-# action at all.
-_OPEN_ACTIONS: dict[str, frozenset[str]] = {}
+# Actions that only read or navigate (most pages are opened with no action).
+_OPEN_ACTIONS: dict[str, frozenset[str]] = {
+    # #980: re-runs agy's own zero-token `-p /hooks` listing for this chat's
+    # project; changes no setting and writes nothing (REVIEW-2 m3).
+    "gt": frozenset({"rc"}),
+}
 
 CONFIG_ADMIN_GATE = SETTINGS_ADMIN_GATE
 

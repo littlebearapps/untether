@@ -155,7 +155,7 @@ To set a default for every Antigravity chat, use `permission_mode` under `[antig
 
 ### What Workspace can and can't do
 
-Workspace runs use a no-shell agent that Untether manages. Its tools are file tools only.
+Workspace runs use a no-shell agent that Untether manages. Its tools are file tools, plus `ask_question`.
 
 | | In Workspace |
 |---|---|
@@ -164,6 +164,7 @@ Workspace runs use a no-shell agent that Untether manages. Its tools are file to
 | Delete or rename a file | No. A "rename" is a copy: the new file is written and the original stays |
 | Web fetches, MCP tools, subagents | No |
 | Files outside the project | Blocked by agy, with a ⚠️ notice |
+| Ask you a question | Yes, as buttons with [Untether's agy plugin](#telegram-questions-and-steer); without it the question is skipped and agy carries on |
 
 When agy blocks something, the progress message shows a `⚠️ Blocked` row, the turn stops there, and the reply ends
 with how to allow it:
@@ -193,6 +194,45 @@ agent. That agent has a shell tool which agy then blocks, so a shell attempt end
 
 More detail on modes, allow rules and agy's own settings:
 [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+## Telegram questions and steer
+
+With **Untether's agy plugin** installed on the host, an Antigravity run can:
+
+- **Ask you a question.** When agy calls its `ask_question` tool, you get the same question card as Claude Code:
+  option buttons, or **Other (type reply)**, or just reply with text. agy carries on with your answer. Turn it off
+  per chat with `/config` → **Ask mode**.
+- **Take a message while it works.** With `/config` → **Follow-up** set to **steer** (or `/steer <text>`), a message
+  you send during a run goes into that run before agy's next step, and the progress message shows
+  `↪️ steer received: …`. If the run ends before agy takes another step, you get
+  `⚠️ The session ended before this message ran — please send it again.`
+
+It works in every permission mode (Workspace, Plan first and Full access); nothing about what agy may do changes.
+Without the plugin, Antigravity works as before: questions are skipped (agy carries on with its own default) and
+follow-ups queue.
+
+**Install it on the host** (not from Telegram — it is shared by every agy on that machine):
+
+```sh
+untether agy-gate install          # via agy's own `agy plugin install`
+untether agy-gate status           # what's installed
+untether agy-gate status --project ~/my-project   # does agy load it there? (agy -p /hooks, no model turn)
+untether agy-gate uninstall
+```
+
+Install writes only `~/.gemini/config/plugins/untether-gate/` (`plugin.json`, `hooks.json` and Untether's
+`.untether-managed` record). Its hooks start with a check for a marker that only Untether-started agy runs carry, so
+your own `agy` sessions never run any Untether code. Install and uninstall refuse to touch a plugin folder that
+Untether didn't install or that was edited since (`--force` overrides). No restart is needed: Untether checks the
+plugin before each run (cached for an hour per project). `/config` → **Permission mode** → **🔐 Telegram
+approvals** shows the same status, read-only, with a **Re-check** button.
+
+**Scheduled runs** never show a question: cron and webhook runs answer it themselves ("nobody can answer
+questions… proceed with reasonable defaults").
+
+**If the plugin folder was changed** after install, attended runs show a ⚠️ row and run without questions or
+steer, and scheduled runs are held, because its hooks run their own commands in every agy session on the host.
+Run `untether agy-gate status`, then `untether agy-gate install --force` if you didn't change it.
 
 ## Models and effort
 
@@ -287,9 +327,10 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 
 ## Not supported yet
 
-- Per-tool approval buttons and question buttons (**Ask me** arrives in a later 0.36.1 release). **Plan first**
-  works: plans are answered with buttons after the plan turn ends.
-- `/steer` and live sessions: each message is its own agy run.
+- Per-tool approval buttons (**Ask me** arrives in a later 0.36.1 release). **Plan first** works: plans are
+  answered with buttons after the plan turn ends. Question buttons and `/steer` work with
+  [Untether's agy plugin](#telegram-questions-and-steer).
+- Live sessions: each message is its own agy run (a steer goes into the run that is in flight).
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: each subagent gets a row in the `⏳ background` block, but its own steps, output and token use
   aren't shown, and a subagent that failed looks the same as one that finished.

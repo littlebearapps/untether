@@ -254,6 +254,10 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
         table[("rs", engine)] = _NONE
         table[("cu", engine)] = _NONE
         table[("pm", engine)] = _NONE
+        # #980: the read-only 🔐 page (Antigravity's, reachable by its key).
+        table[("gt", engine)] = frozenset(
+            {_u("antigravity", "telegram-questions-and-steer")}
+        )
     table[("pm", "claude")] = frozenset({_u("plan-mode")})
     table[("pm", "codex")] = frozenset(
         {_u("interactive-approval", "codex-cli--approval-policy")}

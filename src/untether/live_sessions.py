@@ -31,6 +31,7 @@ __all__ = [
     "LiveSessionView",
     "idle_live_session_counts",
     "live_backend",
+    "steer_backend",
     "supports_live_session",
 ]
 
@@ -199,6 +200,31 @@ def live_backend(engine: str | None) -> LiveSessionBackend | None:
     if not engine:
         return None
     return _BACKENDS.get(engine)
+
+
+# #981: engines that can take a mid-turn message without a live process.
+# Antigravity's steer goes through its gate hook (``PreInvocation
+# .injectSteps``) into whichever one-shot run is in flight, so it is a steer
+# target only — never a live-session backend (the bridge's live-session
+# paths must not see it). Resolved lazily: the module imports the registry.
+_STEER_ONLY: dict[str, tuple[str, str]] = {
+    "antigravity": ("untether.antigravity.gate_server", "STEER_BACKEND"),
+}
+
+
+def steer_backend(engine: str | None) -> Any:
+    """What ``/steer`` writes into for ``engine``: its live-session backend,
+    else a steer-only target, else None. Needs ``engine``, ``display_name``,
+    ``supports_steer``, ``get(session_id)`` (``.closing``) and
+    ``steer(session_id, text, **kwargs)``."""
+    live = live_backend(engine)
+    if live is not None or not engine:
+        return live
+    target = _STEER_ONLY.get(engine)
+    if target is None:
+        return None
+    module, name = target
+    return getattr(importlib.import_module(module), name)
 
 
 def supports_live_session(engine: str | None) -> bool:

@@ -31,7 +31,28 @@ _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Engines whose question buttons need nothing on the host. Antigravity's
+# need Untether's agy plugin (#980): ``ask_questions_supported`` decides.
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
+
+
+def ask_questions_supported(engine: str | None, cwd: object = None) -> bool:
+    """Capability-driven (#980, D23): Claude always; Antigravity when
+    Untether's agy plugin is installed (and, when *cwd*'s ``-p /hooks``
+    check already ran, it passed). Cheap: never runs agy."""
+    if engine in ASK_QUESTIONS_SUPPORTED_ENGINES:
+        return True
+    if engine != "antigravity":
+        return False
+    from pathlib import Path
+
+    from ..antigravity import gate_plugin, gate_precheck
+
+    if not gate_plugin.installed_ready():
+        return False
+    latest = gate_precheck.latest(cwd if isinstance(cwd, Path) else None)
+    return latest is None or latest.ok
+
 
 # #558 (D23): engines with an `ExitPlanMode` tool — the only ones whose
 # preamble carries the plan-mode requirements block.

@@ -48,9 +48,20 @@ def followup_state_text(
         f"follow-up mode **set to** `{mode}` ({scope}) — {_DESCRIPTIONS[mode]}",
         f"one-off: `/{other} <text>` · switch: `/{other}`",
     ]
-    if mode == "steer" and engine is not None and engine != "claude":
+    if mode == "steer" and engine == "antigravity":
+        from ..engine_overrides import ask_questions_supported
+
+        # #981: agy steers through Untether's agy plugin.
+        if not ask_questions_supported(engine):
+            lines.append(
+                "note: Antigravity steers once Untether's agy plugin is installed"
+                " on the host (`untether agy-gate install`); until then its runs"
+                " queue follow-ups."
+            )
+    elif mode == "steer" and engine is not None and engine != "claude":
         lines.append(
-            f"note: steer is Claude-only — {engine} runs still queue follow-ups."
+            "note: steer works on Claude Code and Antigravity only —"
+            f" {engine} runs still queue follow-ups."
         )
     return "\n\n".join(lines)
 

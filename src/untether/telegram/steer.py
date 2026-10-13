@@ -1,4 +1,8 @@
-"""Steer follow-ups into a running Claude session (#775).
+"""Steer follow-ups into a running Claude session (#775) or agy turn (#981).
+
+Antigravity steers through Untether's agy gate (``PreInvocation
+.injectSteps``, ``antigravity/gate_server.py``) when the plugin is
+installed: the message is queued and injected before agy's next model call.
 
 The loop calls :func:`maybe_steer` once per prompt, right before the prompt
 would be queued behind a session (``dispatch_prompt_run``, i.e. after the
@@ -22,7 +26,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..live_sessions import live_backend
+from ..live_sessions import steer_backend
 from ..logging import get_logger
 from ..model import ResumeToken
 from ..transport import MessageRef, RenderedMessage, SendOptions
@@ -65,9 +69,17 @@ def split_followup_command(
 def fallback_notice(reason: FallbackReason, engine: str) -> str:
     arrow = "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16}"
     if reason == "engine":
+        if engine == "antigravity":
+            # #981: steer needs Untether's agy plugin on the host.
+            return (
+                f"{arrow} Steer needs Untether's agy plugin on this host "
+                "(`untether agy-gate install`) — queued instead."
+            )
         return f"{arrow} Steer isn't supported on {engine} — queued instead."
     if reason == "closing":
         return f"{arrow} The current run is ending — queued instead."
+    if engine == "antigravity":
+        return f"{arrow} No running Antigravity turn to steer — queued instead."
     return f"{arrow} No live Claude run to steer — queued instead."
 
 
@@ -178,8 +190,9 @@ async def maybe_steer(
     target_engine = resume_token.engine if resume_token is not None else engine
     reason: FallbackReason | None = None
     session_id: str | None = None
-    # #977: steering needs a live-session backend that can write mid-turn.
-    backend = live_backend(target_engine)
+    # #977: steering needs a live-session backend that can write mid-turn;
+    # #981: or a steer-only target (Antigravity's gate, no live process).
+    backend = steer_backend(target_engine)
     if backend is None or not backend.supports_steer:
         reason = "engine"
     elif resume_token is None or resume_token.is_continue or not resume_token.value:
