@@ -176,6 +176,10 @@ def create_app() -> typer.Typer:
     app.command(name="onboarding-paths")(onboarding_paths)
     app.command(name="plugins")(plugins_cmd)
     app.add_typer(config_app, name="config")
+    # #980: not `untether antigravity …` — engine ids are run commands.
+    from .agy_gate import agy_gate_app
+
+    app.add_typer(agy_gate_app, name="agy-gate")
     app.callback()(app_main)
     for engine_id in _engine_ids_for_cli():
         help_text = f"Run with the {engine_id} engine."

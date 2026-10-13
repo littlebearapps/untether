@@ -19,6 +19,10 @@ replayed faithfully::
                          background task that escapes agy's process group,
                          #975) and write its pid to
                          ``UNTETHER_FAKE_AGY_CHILD_PIDFILE``
+    hook:<Event>:<json>  run the gate plugin's real hook command (#980,
+                         see ``_hook``); ``hook:inject_at:<n>`` numbers
+                         the ``user_input`` steps an injection adds
+    wait_go:             wait (≤ 10 s) for the file ``UNTETHER_FAKE_AGY_GO``
     rc:<int>             exit code (last line)
 
 ``agy -p /<command> …`` (zero-token slash probes, ``run_agy_slash``) prints
@@ -153,6 +157,69 @@ def _slash(argv: list[str]) -> int:
     return 0
 
 
+_inject_step = 0
+
+
+def _hook(payload: str) -> None:
+    """``hook:<Event>:<payload json>`` (#980): run the REAL command of the
+    installed gate plugin for <Event> (``UNTETHER_FAKE_AGY_HOOKS_JSON``)
+    through ``sh -c`` with this process's env, as agy does, feeding the
+    payload (``__CID__`` → the conversation id) on stdin. Each call is
+    appended to ``UNTETHER_FAKE_AGY_HOOK_LOG`` as ``{event, rc, out}``. A
+    ``PreInvocation`` answer with ``injectSteps`` emits one ``user_input``
+    step per message, numbered from ``inject_at:<n>`` (P-H10)."""
+    global _inject_step
+    import subprocess
+
+    event, _, body = payload.partition(":")
+    if event == "inject_at":
+        _inject_step = int(body)
+        return
+    manifest = os.environ.get("UNTETHER_FAKE_AGY_HOOKS_JSON")
+    if not manifest:
+        return
+    groups = json.loads(Path(manifest).read_text())
+    commands = [
+        hook["command"]
+        for group in groups.values()
+        for entry in group.get(event, [])
+        for hook in entry.get("hooks", [entry])
+    ]
+    stdin = body.replace("__CID__", _conversation_id)
+    for command in commands:
+        proc = subprocess.run(
+            ["sh", "-c", command],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = proc.stdout
+        log = os.environ.get("UNTETHER_FAKE_AGY_HOOK_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps({"event": event, "rc": proc.returncode, "out": out})
+                    + "\n"
+                )
+        if event == "PreInvocation" and out.strip():
+            for _step in json.loads(out).get("injectSteps", []):
+                _out(
+                    json.dumps(
+                        {
+                            "event": "step_update",
+                            "step_update": {
+                                "conversation_id": _conversation_id,
+                                "step_index": _inject_step,
+                                "state": "DONE",
+                                "step_type": "user_input",
+                            },
+                        }
+                    )
+                )
+                _inject_step += 1
+
+
 def main(argv: list[str]) -> int:
     if "--version" in argv:
         print(os.environ.get("UNTETHER_FAKE_AGY_VERSION", "1.3.1"), flush=True)
@@ -199,6 +266,14 @@ def main(argv: list[str]) -> int:
             pidfile = os.environ.get("UNTETHER_FAKE_AGY_CHILD_PIDFILE")
             if pidfile:
                 Path(pidfile).write_text(str(child.pid))
+        elif kind == "hook":
+            _hook(payload)
+        elif kind == "wait_go":
+            # Until the test touches UNTETHER_FAKE_AGY_GO (bounded).
+            go = os.environ.get("UNTETHER_FAKE_AGY_GO")
+            deadline = time.monotonic() + 10
+            while go and not Path(go).exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
         elif kind == "rc":
             rc = int(payload)
     hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)

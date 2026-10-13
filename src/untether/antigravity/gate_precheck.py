@@ -1,0 +1,392 @@
+"""Is Untether's agy gate loaded for this run? (#980, D22.1 amended).
+
+Two layers, cheapest first:
+
+1. :func:`gate_plugin.inspect_install` — the plugin folder holds exactly the
+   files this Untether version writes (byte compare against its own
+   templates, never against ``.untether-managed``) and agy hasn't disabled it.
+2. ``agy -p /hooks`` in the run's cwd (0 tokens, 3-12 s; P-H16: starts no
+   planted MCP server and runs no hook) — agy itself lists the
+   ``untether-gate`` group as enabled, sourced from the plugin folder, with
+   our three commands byte for byte and a long enough ``PreToolUse`` timeout.
+   It also lists every *other* hook group with its source: those run shell
+   outside the gate (REVIEW-2 B2), which phase 14's gated modes refuse.
+
+Cached for an hour per (agy binary + version, plugin files, cwd, the planted
+config digest of the cwd, the stat of agy's user-level hook / plugin state
+files). A failed check is cached for five minutes. ``-p /hooks`` proves the
+hooks are *loaded*; the runner's liveness check (a ``PreInvocation`` before
+the first model step) proves they *run*.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import anyio
+
+from ..logging import get_logger
+from ..utils import antigravity_quota, antigravity_scan
+from . import gate_plugin
+
+if TYPE_CHECKING:
+    from ..runners.antigravity import AntigravityRunner
+
+logger = get_logger(__name__)
+
+CACHE_TTL_S = 3600.0
+FAILURE_TTL_S = 300.0
+HOOKS_TIMEOUT_S = 30.0
+_GROUP_SOURCE_SUFFIX = f"plugins/{gate_plugin.PLUGIN_NAME}/{gate_plugin.HOOKS_FILE}"
+
+# Reasons (logged as ``antigravity.gate.precheck_failed reason=…``).
+MISSING = "missing"
+EDITED = "edited"
+OUTDATED = "outdated"
+DISABLED = "disabled"
+NOT_LISTED = "not_listed"
+MISMATCH = "mismatch"
+NOT_SIGNED_IN = "not_signed_in"
+CHECK_FAILED = "check_failed"
+SELF_PROTECT = "self_protect"
+
+_REASON_TEXT = {
+    MISSING: "the plugin isn't installed (run `untether agy-gate install`)",
+    EDITED: "the plugin was edited since install (run `untether agy-gate install --force`)",
+    OUTDATED: "the plugin is from another Untether version (run `untether agy-gate install`)",
+    DISABLED: "agy has the plugin disabled (`agy plugin enable untether-gate`)",
+    NOT_LISTED: "agy doesn't list the plugin's hooks for this project",
+    MISMATCH: "agy loads different hook commands than Untether wrote (run `untether agy-gate install`)",
+    NOT_SIGNED_IN: "agy isn't signed in, so the hooks couldn't be listed",
+    CHECK_FAILED: "the `agy -p /hooks` check failed",
+    SELF_PROTECT: "this project contains Untether's own code, which agy could edit to switch the gate off",
+}
+
+
+def reason_text(reason: str | None) -> str:
+    return _REASON_TEXT.get(reason or "", reason or "unknown")
+
+
+@dataclass(frozen=True, slots=True)
+class HookGroup:
+    name: str
+    enabled: bool
+    source: str
+    actions: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GatePrecheck:
+    ok: bool
+    reason: str | None = None
+    detail: str | None = None
+    # Other hook groups agy lists for this cwd, by source (phase 14 refuses
+    # its gated modes while any is present; phase 13 only records them).
+    foreign_sources: tuple[str, ...] = ()
+    wait_s: int = gate_plugin.DEFAULT_WAIT_S
+    checked_at: float = field(default_factory=time.time)
+    cwd: str | None = None
+    # REVIEW-2 B3: the project holds Untether's own code (that path). Only a
+    # mode whose safety rests on the gate refuses on it (phase 14).
+    self_protect: str | None = None
+
+
+def parse_hooks(data: dict[str, Any]) -> list[HookGroup]:
+    """``command_result.command.data`` of ``agy -p /hooks``."""
+    groups: list[HookGroup] = []
+    raw = data.get("hooks")
+    if not isinstance(raw, list):
+        return groups
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        actions = item.get("actions")
+        groups.append(
+            HookGroup(
+                name=str(item.get("name") or ""),
+                enabled=item.get("enabled") is True,
+                source=str(item.get("source") or ""),
+                actions=tuple(a for a in actions if isinstance(a, dict))
+                if isinstance(actions, list)
+                else (),
+            )
+        )
+    return groups
+
+
+def _timeout(action: dict[str, Any]) -> int:
+    # Absent when it is agy's 30 s default.
+    value = action.get("timeout_seconds")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 30
+
+
+def evaluate_hooks(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
+    """Pure: does agy's own listing carry our gate exactly?"""
+    ours = [g for g in groups if g.name == gate_plugin.PLUGIN_NAME]
+    foreign = tuple(
+        sorted(
+            {g.source or g.name for g in groups if g.name != gate_plugin.PLUGIN_NAME}
+        )
+    )
+    if len(ours) != 1:
+        return GatePrecheck(
+            ok=False,
+            reason=NOT_LISTED,
+            detail=f"{len(ours)} {gate_plugin.PLUGIN_NAME} groups",
+            foreign_sources=foreign,
+            wait_s=wait_s,
+        )
+    group = ours[0]
+    if not group.enabled:
+        return GatePrecheck(
+            ok=False, reason=DISABLED, foreign_sources=foreign, wait_s=wait_s
+        )
+    if not group.source.replace("\\", "/").endswith(_GROUP_SOURCE_SUFFIX):
+        return GatePrecheck(
+            ok=False,
+            reason=MISMATCH,
+            detail="source",
+            foreign_sources=foreign,
+            wait_s=wait_s,
+        )
+    by_event: dict[str, list[dict[str, Any]]] = {}
+    for action in group.actions:
+        by_event.setdefault(str(action.get("event")), []).append(action)
+    for event in ("PreToolUse", "PreInvocation", "Stop"):
+        actions = by_event.get(event, [])
+        if len(actions) != 1:
+            return GatePrecheck(
+                ok=False,
+                reason=MISMATCH,
+                detail=f"{event}: {len(actions)} actions",
+                foreign_sources=foreign,
+                wait_s=wait_s,
+            )
+        action = actions[0]
+        if action.get("command") != gate_plugin.hook_command(event):
+            return GatePrecheck(
+                ok=False,
+                reason=MISMATCH,
+                detail=f"{event}: command",
+                foreign_sources=foreign,
+                wait_s=wait_s,
+            )
+        if event == "PreToolUse":
+            if action.get("matcher") != "*":
+                return GatePrecheck(
+                    ok=False,
+                    reason=MISMATCH,
+                    detail="PreToolUse: matcher",
+                    foreign_sources=foreign,
+                    wait_s=wait_s,
+                )
+            if _timeout(action) < wait_s + gate_plugin.HOOK_GRACE_S:
+                return GatePrecheck(
+                    ok=False,
+                    reason=MISMATCH,
+                    detail="PreToolUse: timeout",
+                    foreign_sources=foreign,
+                    wait_s=wait_s,
+                )
+    extra = set(by_event) - {"PreToolUse", "PreInvocation", "Stop"}
+    if extra:
+        return GatePrecheck(
+            ok=False,
+            reason=MISMATCH,
+            detail="extra events: " + ", ".join(sorted(extra)),
+            foreign_sources=foreign,
+            wait_s=wait_s,
+        )
+    return GatePrecheck(ok=True, foreign_sources=foreign, wait_s=wait_s)
+
+
+def self_protect_path(cwd: Path, root: Path | None = None) -> Path | None:
+    """REVIEW-2 B3: a project that contains Untether's own package, its
+    venv or the plugin folder could have its gate edited by the agent it
+    guards. Returns the offending path, or None."""
+    import untether
+
+    project = (root or cwd).resolve()
+    for candidate in (
+        Path(untether.__file__).resolve().parent,
+        Path(sys.prefix).resolve(),
+        gate_plugin.plugin_dir().resolve(),
+    ):
+        if candidate == project or project in candidate.parents:
+            return candidate
+    return None
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def _cache_key(
+    runner: AntigravityRunner, cwd: Path, scan_digest: str | None
+) -> tuple[Any, ...]:
+    from ..runners import antigravity as agy_runner
+
+    cmd = runner.command()
+    user = antigravity_scan.user_config_dir()
+    folder = gate_plugin.plugin_dir()
+    plugin_stats = tuple(
+        _stat_key(folder / name)
+        for name in (*gate_plugin.PLUGIN_FILES, gate_plugin.MANIFEST_FILE)
+    )
+    return (
+        cmd,
+        _stat_key(Path(cmd)) if os.path.isabs(cmd) else None,
+        agy_runner.cached_agy_version(cmd),
+        str(cwd),
+        scan_digest,
+        plugin_stats,
+        _stat_key(user / "config.json"),
+        _stat_key(user / "import_manifest.json"),
+        _stat_key(user / "hooks.json"),
+        _stat_key(antigravity_quota.agy_settings_path()),
+    )
+
+
+_CACHE: dict[tuple[Any, ...], GatePrecheck] = {}
+_LATEST: dict[str, GatePrecheck] = {}
+_LOCKS: dict[str, anyio.Lock] = {}
+
+
+def clear_cache(cwd: Path | None = None) -> None:
+    """``/config → 🔐 → Re-check`` (one project) or everything."""
+    if cwd is None:
+        _CACHE.clear()
+        _LATEST.clear()
+        return
+    key = str(cwd)
+    for k in [k for k in _CACHE if k[3] == key]:
+        _CACHE.pop(k, None)
+    _LATEST.pop(key, None)
+
+
+def latest(cwd: Path | None) -> GatePrecheck | None:
+    """The newest result for *cwd* (any age), for ``/config`` and the
+    ask-capability check. Never runs agy."""
+    if cwd is None:
+        return None
+    return _LATEST.get(str(cwd))
+
+
+async def _run_hooks(runner: AntigravityRunner, cwd: Path) -> dict[str, Any]:
+    return await antigravity_quota.run_agy_slash(
+        runner, "/hooks", timeout_s=HOOKS_TIMEOUT_S, cwd=cwd
+    )
+
+
+# Indirection so tests stub the probe without a real agy.
+_probe_hooks: Callable[[AntigravityRunner, Path], Awaitable[dict[str, Any]]] = (
+    _run_hooks
+)
+
+
+def _remember(cwd: Path, result: GatePrecheck) -> GatePrecheck:
+    _LATEST[str(cwd)] = result
+    if not result.ok:
+        logger.warning(
+            "antigravity.gate.precheck_failed",
+            reason=result.reason,
+            detail=result.detail,
+            cwd=str(cwd),
+        )
+    else:
+        logger.info(
+            "antigravity.gate.precheck",
+            ok=True,
+            foreign=len(result.foreign_sources),
+            cwd=str(cwd),
+        )
+    return result
+
+
+async def check(
+    runner: AntigravityRunner,
+    cwd: Path,
+    *,
+    scan_digest: str | None = None,
+    root: Path | None = None,
+    use_cache: bool = True,
+) -> GatePrecheck:
+    """The gate's readiness for a run in *cwd*. Never raises."""
+    install = gate_plugin.inspect_install()
+    if not install.present:
+        return GatePrecheck(ok=False, reason=MISSING, cwd=str(cwd))
+    if not install.managed or install.edited or install.problem:
+        return _remember(
+            cwd,
+            GatePrecheck(
+                ok=False,
+                reason=EDITED,
+                detail=install.summary(),
+                cwd=str(cwd),
+            ),
+        )
+    if not install.current:
+        return _remember(cwd, GatePrecheck(ok=False, reason=OUTDATED, cwd=str(cwd)))
+    if install.disabled:
+        return _remember(cwd, GatePrecheck(ok=False, reason=DISABLED, cwd=str(cwd)))
+    wait_s = install.wait_s or gate_plugin.DEFAULT_WAIT_S
+    key = _cache_key(runner, cwd, scan_digest)
+    now = time.time()
+    hit = _CACHE.get(key)
+    if use_cache and hit is not None:
+        ttl = CACHE_TTL_S if hit.ok else FAILURE_TTL_S
+        if now - hit.checked_at < ttl:
+            _LATEST[str(cwd)] = hit
+            return hit
+    lock = _LOCKS.setdefault(str(cwd), anyio.Lock())
+    async with lock:
+        hit = _CACHE.get(key)
+        if (
+            use_cache
+            and hit is not None
+            and now - hit.checked_at < (CACHE_TTL_S if hit.ok else FAILURE_TTL_S)
+        ):
+            return hit
+        try:
+            data = await _probe_hooks(runner, cwd)
+        except antigravity_quota.AntigravityNotSignedIn:
+            result = GatePrecheck(ok=False, reason=NOT_SIGNED_IN, cwd=str(cwd))
+        except antigravity_quota.AgySlashError as exc:
+            result = GatePrecheck(
+                ok=False, reason=CHECK_FAILED, detail=exc.kind, cwd=str(cwd)
+            )
+        except Exception as exc:  # noqa: BLE001 — never block a run on this
+            result = GatePrecheck(
+                ok=False,
+                reason=CHECK_FAILED,
+                detail=exc.__class__.__name__,
+                cwd=str(cwd),
+            )
+        else:
+            evaluated = evaluate_hooks(parse_hooks(data), wait_s=wait_s)
+            result = GatePrecheck(
+                ok=evaluated.ok,
+                reason=evaluated.reason,
+                detail=evaluated.detail,
+                foreign_sources=evaluated.foreign_sources,
+                wait_s=wait_s,
+                cwd=str(cwd),
+            )
+            protected = self_protect_path(cwd, root)
+            if protected is not None:
+                result = replace(result, self_protect=str(protected))
+                logger.info(
+                    "antigravity.gate.self_protect", cwd=str(cwd), path=str(protected)
+                )
+        _CACHE[key] = result
+        return _remember(cwd, result)

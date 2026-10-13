@@ -554,6 +554,11 @@ def test_user_level_manifests_stat_only(
     _write(gemini_home / "hooks.json", '{"x": 1}')
     _write(gemini_home / "plugins" / "foo" / "hooks.json", '{"x": 1}')
     _write(gemini_home / "plugins" / "untether-gate" / "hooks.json", '{"x": 1}')
+    _write(gemini_home / "plugins" / "untether-gate" / "plugin.json", '{"x": 1}')
+    _write(gemini_home / "plugins" / "untether-gate" / ".untether-managed", "{}")
+    # #980: only those three exact files are Untether's; anything else in
+    # the gate's folder is tracked like any other plugin file.
+    _write(gemini_home / "plugins" / "untether-gate" / "skills" / "x.md", "planted")
     _write(tmp_path / ".agents" / "hooks.json", '{"x": 1}')
     opened: list[str] = []
     real_open = builtins.open
@@ -574,7 +579,8 @@ def test_user_level_manifests_stat_only(
     monkeypatch.setattr(os, "open", real_os_open)
     assert "~/.gemini/config/hooks.json" in result.agy
     assert "~/.gemini/config/plugins/foo/hooks.json" in result.agy
-    assert not any("untether-gate" in p for p in result.agy)
+    gate_paths = sorted(p for p in result.agy if "untether-gate" in p)
+    assert gate_paths == ["~/.gemini/config/plugins/untether-gate/skills/x.md"]
     assert not any(str(gemini_home) in p for p in opened)
     assert any(".agents" in p for p in opened)  # project files are hashed
 

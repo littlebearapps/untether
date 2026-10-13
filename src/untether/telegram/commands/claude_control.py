@@ -635,3 +635,16 @@ class ClaudeControlCommand:
 
 
 BACKEND: CommandBackend = ClaudeControlCommand()
+
+
+class IaControlCommand(ClaudeControlCommand):
+    """``ia:<action>:<request_id>`` — the engine-neutral approval buttons of
+    a request registered with its own responder (#960; Antigravity's gate,
+    #980). Same claim / toast / registry path as Claude's: the request's
+    responder delivers the decision."""
+
+    id = "ia"
+    description = "Handle engine-neutral approval buttons"
+
+
+IA_BACKEND: CommandBackend = IaControlCommand()

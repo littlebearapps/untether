@@ -1,0 +1,15 @@
+#: #981 gate steer: PreInvocation.injectSteps (P-H10 / live run on agy 1.3.4, 2026-10-13, trimmed). The test queues a steer, then touches UNTETHER_FAKE_AGY_GO.
+out:{"event":"init","conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","init":{"cwd":"<scratch>/proj-steer","tools":["view_file","list_dir"],"permission_mode":"request-review"}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","step_index":0,"state":"DONE","step_type":"user_input"}}
+wait_go:
+hook:inject_at:1
+hook:PreInvocation:{"conversationId":"__CID__","initialNumSteps":1,"invocationNum":0,"modelName":"gemini-3.8-flash-low"}
+out:{"event":"step_update","step_update":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","step_index":2,"state":"DONE","step_type":"agent_response","duration_seconds":1.4,"usage":{"input_tokens":7106,"output_tokens":61,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":7167}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"AbsolutePath":"<scratch>/proj-steer/notes.txt"}}}}
+hook:PreToolUse:{"conversationId":"__CID__","stepIdx":3,"toolCall":{"args":{"AbsolutePath":"<scratch>/proj-steer/notes.txt"},"name":"view_file"}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","step_index":3,"state":"DONE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"AbsolutePath":"<scratch>/proj-steer/notes.txt"},"output":"3 lines, 21 bytes"}}}
+hook:PreInvocation:{"conversationId":"__CID__","initialNumSteps":4,"invocationNum":1,"modelName":"gemini-3.8-flash-low"}
+out:{"event":"step_update","step_update":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","step_index":4,"state":"DONE","step_type":"agent_response","text_delta":"hello\n\nPINEAPPLE\n","duration_seconds":1.2,"usage":{"input_tokens":7541,"output_tokens":6,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":7547}}}
+hook:Stop:{"conversationId":"__CID__","fullyIdle":true,"terminationReason":"NO_TOOL_CALL"}
+out:{"event":"result","result":{"conversation_id":"cb12f174-813d-47cb-9803-77e2c89a25fe","status":"SUCCESS","response":"hello\n\nPINEAPPLE\n","duration_seconds":3.1,"num_turns":2,"usage":{"input_tokens":14647,"output_tokens":67,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14714}}}
+rc:0
