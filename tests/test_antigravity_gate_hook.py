@@ -160,6 +160,11 @@ def test_unreadable_payload_denies() -> None:
         b'{"toolCall":{"name":"run_command","args":{"CommandLine":"ls",'
         b'"CommandLine":"rm -rf /"}}}',
         b'{"toolCall":{"name":"view_file"},"toolCall":{"name":"run_command"}}',
+        # Go matches field names case-insensitively: these are one field.
+        b'{"toolCall":{"name":"run_command","args":{"CommandLine":"ls",'
+        b'"commandline":"rm -rf /"}}}',
+        b'{"toolCall":{"name":"run_command","args":{"commandLINE":"rm -rf /",'
+        b'"CommandLine":"ls"}}}',
     ],
 )
 def test_duplicate_json_keys_deny(stdin: bytes) -> None:

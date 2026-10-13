@@ -74,12 +74,17 @@ class _DuplicateKey(ValueError):
 
 
 def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Python keeps the last of two equal keys; agy's own parser may not.
-    A payload that says two things never reaches the gate's policy."""
+    """Python keeps the last of two equal keys; agy's own parser may not, and
+    Go's JSON decoder also matches field names case-insensitively, so
+    ``CommandLine`` and ``commandline`` in one object are the same field to
+    agy. A payload that says two things never reaches the gate's policy."""
     out: dict[str, object] = {}
+    folded: set[str] = set()
     for key, value in pairs:
-        if key in out:
+        fold = key.casefold()
+        if key in out or fold in folded:
             raise _DuplicateKey(key)
+        folded.add(fold)
         out[key] = value
     return out
 

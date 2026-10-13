@@ -753,3 +753,32 @@ def test_agy_1_3_4_write_fields_allowed(root: Path) -> None:
     assert not classify(
         "write_to_file", {**args, "Mode": "0777"}, root=root, conversation_id=CID
     ).allow
+
+
+# ── security review 3: case-variant keys, symlinks at write time ───────────
+
+
+def test_edit_through_an_in_project_symlink_asks(root: Path) -> None:
+    """TOCTOU: a link inside the project could be pointed elsewhere between
+    the check and agy's write, so an edit through one asks even when it
+    resolves inside the project today."""
+    (root / "real").mkdir()
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    verdict = classify_edit(
+        _edit(root / "alias" / "a.txt"), root=root, conversation_id=CID
+    )
+    assert not verdict.allow and verdict.why == "unclear"
+    assert classify_edit(
+        _edit(root / "real" / "a.txt"), root=root, conversation_id=CID
+    ).allow
+
+
+def test_shell_commands_are_never_parsed_safe(root: Path) -> None:
+    for command in ("ls", "echo hi", "true", "cat README.md", "pwd"):
+        verdict = classify(
+            "run_command",
+            {"CommandLine": command, "Cwd": str(root)},
+            root=root,
+            conversation_id=CID,
+        )
+        assert not verdict.allow and verdict.why == "tool"

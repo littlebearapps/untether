@@ -294,6 +294,29 @@ def _real(path: str | Path) -> str:
     return os.path.realpath(os.path.expanduser(text))
 
 
+def _has_link(path: str, trusted: str = "/") -> bool:
+    """Any existing component of *path* below *trusted* (the project folder
+    as configured: system links above it, such as macOS's ``/var``, don't
+    count) is a symlink. A safe-listed edit must not go through one: the
+    link could be pointed elsewhere between the check and agy's write
+    (TOCTOU), so such an edit asks."""
+    base = trusted.rstrip("/")
+    if base and path.startswith(base + "/"):
+        current, rest = base, path[len(base) :]
+    else:
+        current, rest = "/", path
+    for part in rest.strip("/").split("/"):
+        current = os.path.join(current, part)
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+    return False
+
+
 def _hard_linked(real: str) -> bool:
     """An existing file with more than one name: a write through the name
     inside the project changes the other one too, wherever it is."""
@@ -473,6 +496,11 @@ def _classify_paths(
             # Relative, ``~``, ``..`` …: agy may resolve it differently.
             return Verdict(False, "unclear")
         real = _real(target)
+        if write and real != target and _has_link(target, str(root)):
+            # Through a symlink: where it lands can change before agy writes.
+            if not _within(real, base) and not _in_artifact_dir(real, conversation_id):
+                return Verdict(False, "outside")
+            return Verdict(False, "unclear")
         if write:
             for protected in self_protected_paths():
                 if _within(real, protected):

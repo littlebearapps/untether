@@ -254,7 +254,7 @@ agy process per message (no warm session).
 case-insensitively, so the gate maps every argument onto agy's own spelling first (`commandline` is `CommandLine`) and
 **denies** a call outright when two keys fold to the same name, a key isn't plain printable ASCII, or the arguments
 aren't an object (`antigravity.gate.ambiguous_args`; agy is told to call again with each argument once). The hook
-denies a payload with duplicate JSON keys before it reaches Untether. Only **plain absolute paths** (no `~`, `.` /
+denies a payload with duplicate JSON keys, or keys that differ only in case, before it reaches Untether. Only **plain absolute paths** (no `~`, `.` /
 `..` parts, doubled or trailing slashes, control characters) can be on the safe list, so Untether and agy can't
 resolve a path differently, and a safe-listed tool may carry only the argument names agy uses for it (from live
 hook payloads, agy 1.3.3 / 1.3.4); anything else asks.
@@ -266,7 +266,9 @@ folder (none: agy searches its workspace); and `write_to_file`, `replace_file_co
 when every path argument (`TargetFile` and any other `…Path` / `…File` / `…Dir` key, realpath'd — the nearest
 existing parent for a new file, so a symlink out of the project resolves outside it) is inside the project or the
 artifact folder (`~/.gemini/antigravity-cli/brain/<conversation id>/`, a UUID-shaped id, the folder itself under
-agy's `brain/`), the payload's `workspacePaths[0]` is the project, and the file isn't protected or hard-linked. A
+agy's `brain/`), the payload's `workspacePaths[0]` is the project, the file isn't protected or hard-linked, and no
+part of the path below the project folder is a symlink (it could be repointed before agy writes). Shell commands are
+never parsed: every `run_command` asks. A
 non-string path, a NUL byte, arguments that aren't an object, or any error while checking asks. A subagent reporting back to its parent
 (`send_message` to a conversation of this run) is internal and runs too.
 
