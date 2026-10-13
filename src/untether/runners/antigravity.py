@@ -948,9 +948,7 @@ def gate_plugin_held_message(install: Any) -> str:
     one it installed. Unlike a changed workspace config, a chat message
     doesn't clear this hold: every unattended run stays held until the
     plugin is reinstalled."""
-    force = (
-        not install.managed or bool(install.edited) or install.problem is not None
-    )
+    force = not install.managed or bool(install.edited) or install.problem is not None
     command = "untether agy-gate install" + (" --force" if force else "")
     return (
         "Untether's agy plugin (untether-gate) isn't what Untether installed "
