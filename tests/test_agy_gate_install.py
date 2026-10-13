@@ -290,3 +290,69 @@ async def test_config_gt_recheck_runs_hooks_listing(
     text, _ = _page(ctx)
     assert calls == [project]
     assert "<b>installed</b>" in text and "<b>ready</b>" in text
+
+
+@pytest.mark.anyio
+async def test_config_gt_cached_ready_yields_to_an_edited_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1077: the page showed "This chat's project: ready" from a cached
+    check under "Plugin: edited since install"."""
+    from tests.antigravity_gate_support import hooks_listing
+    from untether.antigravity import gate_precheck
+    from untether.telegram.commands import config as config_mod
+
+    install_plugin()
+    gate_precheck.clear_cache()
+
+    async def listing(runner: object, cwd: Path) -> dict[str, object]:
+        return hooks_listing()
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+    monkeypatch.setattr(
+        config_mod,
+        "_antigravity_runner_and_model",
+        lambda ctx, m: (AntigravityRunner(), None),
+    )
+    project = tmp_path / "proj"
+    project.mkdir()
+    ctx = _config_ctx("gt:rc", tmp_path, project)
+    await config_mod.ConfigCommand().handle(ctx)
+    assert "<b>ready</b>" in _page(ctx)[0]
+    (gate_plugin.plugin_dir() / gate_plugin.HOOKS_FILE).write_text("{}")
+    ctx = _config_ctx("gt", tmp_path, project)
+    await config_mod.ConfigCommand().handle(ctx)
+    text, _ = _page(ctx)
+    assert "edited since install" in text
+    assert "This chat's project: <b>not ready</b>" in text
+    assert "<b>ready</b>" not in text
+
+
+@pytest.mark.anyio
+async def test_config_gt_reason_renders_commands_as_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1077: a reason's `agy plugin enable …` showed literal backticks."""
+    from tests.antigravity_gate_support import hooks_listing
+    from untether.antigravity import gate_precheck
+    from untether.telegram.commands import config as config_mod
+
+    install_plugin()
+    gate_precheck.clear_cache()
+
+    async def disabled(runner: object, cwd: Path) -> dict[str, object]:
+        return hooks_listing(enabled=False)
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", disabled)
+    monkeypatch.setattr(
+        config_mod,
+        "_antigravity_runner_and_model",
+        lambda ctx, m: (AntigravityRunner(), None),
+    )
+    project = tmp_path / "proj"
+    project.mkdir()
+    ctx = _config_ctx("gt:rc", tmp_path, project)
+    await config_mod.ConfigCommand().handle(ctx)
+    text, _ = _page(ctx)
+    assert "<code>agy plugin enable untether-gate</code>" in text
+    assert "`" not in text

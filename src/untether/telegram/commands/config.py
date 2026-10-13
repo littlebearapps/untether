@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Any, Literal
 
 import anyio
@@ -1457,14 +1458,18 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
     effective = current or default
     source = "chat" if current is not None else "default"
     current_engine, _label = await _resolve_effective_engine(ctx)
+    # #1077: name the chat's engine, not Claude, in an Antigravity chat.
+    who = {"claude": "Claude", "antigravity": "Antigravity"}.get(
+        current_engine, "the agent"
+    )
 
     lines = [
         "<b>↪️ Follow-up mode</b>",
         "",
-        "What a message sent while Claude is working does.",
+        f"What a message sent while {who} is working does.",
         "",
         "• <b>queue</b> — waits for the current turn to finish, then runs (default)",
-        "• <b>steer</b> — goes straight into the running turn; Claude picks it "
+        f"• <b>steer</b> — goes straight into the running turn; {who} picks it "
         "up at its next step",
         "",
         "One-off: <code>/steer &lt;text&gt;</code> or "
@@ -1910,6 +1915,15 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
 # ---------------------------------------------------------------------------
 
 
+_BACKTICK_SPAN = re.compile(r"`([^`]+)`")
+
+
+def _code_spans(text: str) -> str:
+    """#1077: escape plain text for the page, rendering its `…` spans (CLI
+    commands in shared reason texts) as <code> instead of literal backticks."""
+    return _BACKTICK_SPAN.sub(r"<code>\1</code>", html.escape(text))
+
+
 def _chat_project_cwd(ctx: CommandContext) -> Any:
     """The folder a plain message in this chat runs agy in, or None."""
     try:
@@ -1968,12 +1982,19 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
             "This chat's project: <i>not checked yet</i> (checked before the"
             " next Antigravity run, or tap Re-check)"
         )
+    elif latest.ok and not install.ready:
+        # #1077: a cached pass predates the plugin's current state; runs
+        # check the plugin first, so the project isn't ready either.
+        lines.append(
+            "This chat's project: <b>not ready</b> — the plugin above isn't"
+            " ready (the last project check passed before that)"
+        )
     elif latest.ok:
         lines.append("This chat's project: <b>ready</b> (agy lists the hooks)")
     else:
         lines.append(
             "This chat's project: <b>not ready</b> — "
-            + html.escape(gate_precheck.reason_text(latest.reason))
+            + _code_spans(gate_precheck.reason_text(latest.reason))
         )
     if latest is not None and latest.foreign_sources:
         shown = ", ".join(latest.foreign_sources[:5])

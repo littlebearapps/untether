@@ -322,6 +322,24 @@ async def test_get_chat_and_member_uses_outbox() -> None:
 
 
 @pytest.mark.anyio
+async def test_get_chat_member_skips_the_group_send_pacing() -> None:
+    """#1077: the /config admin check (#1042) waited for the group's
+    message slot and then delayed the page's own edit by another slot, so
+    the old page stayed up for seconds after a tap."""
+    bot = FakeBot()
+    # One message a minute: a paced op would hang well past fail_after.
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=1 / 60)
+    group = -1001234567890
+    await client.send_message(chat_id=group, text="page")
+    next_slot = client._outbox._next_at[group]
+    with anyio.fail_after(2):
+        member = await client.get_chat_member(group, 42)
+    assert member is not None
+    assert client._outbox._next_at[group] == next_slot
+    await client.close()
+
+
+@pytest.mark.anyio
 async def test_create_forum_topic_uses_outbox() -> None:
     bot = FakeBot()
     client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)

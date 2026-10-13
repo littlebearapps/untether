@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
+import structlog
 
 from tests.telegram_fakes import FakeTransport
 from untether import runner_bridge as rb
@@ -957,6 +958,20 @@ async def test_config_page_notice_on_other_engines(tmp_path: Path) -> None:
     assert "Claude Code and Antigravity only" in _edited(ctx).text
 
 
+async def test_config_page_names_the_chat_engine(tmp_path: Path) -> None:
+    """#1077: an Antigravity chat's page said "while Claude is working"."""
+    path = tmp_path / "untether.toml"
+    ctx = _config_ctx("fu", config_path=path, engine="antigravity")
+    await ConfigCommand().handle(ctx)
+    text = _edited(ctx).text
+    assert "while Antigravity is working" in text
+    assert "Antigravity picks it up" in text
+    assert "Claude" not in text
+    ctx = _config_ctx("fu", config_path=path)
+    await ConfigCommand().handle(ctx)
+    assert "while Claude is working" in _edited(ctx).text
+
+
 async def test_config_page_no_config_path() -> None:
     ctx = _config_ctx("fu", config_path=None)
     await ConfigCommand().handle(ctx)
@@ -1126,6 +1141,44 @@ async def test_agy_steer_without_plugin_says_how_to_install() -> None:
     )
     assert ok is False
     assert "untether agy-gate install" in _texts(cfg)[0]
+    # #1077: sent as HTML, so the command shows as code, not in backticks.
+    (call,) = cfg.exec_cfg.transport.send_calls
+    assert call["message"].extra.get("parse_mode") == "HTML"
+    assert "`" not in _texts(cfg)[0]
+    assert "<code>untether agy-gate install</code>" in _texts(cfg)[0]
+
+
+async def test_agy_steer_while_the_turn_is_starting_says_so(
+    agy_gate_installed: None,
+) -> None:
+    """#1077: a steer sent before agy reported its session (so before its
+    gate is bound) said "No running Antigravity turn" while a turn was
+    starting."""
+    cfg = _cfg("steer")
+    busy = _Busy()
+    busy.resume_ready = anyio.Event()  # type: ignore[attr-defined]
+    running = {MessageRef(channel_id=CHAT, message_id=9): busy}
+    with structlog.testing.capture_logs() as logs:
+        ok = await _steer(
+            cfg,
+            engine="antigravity",
+            token=AGY_TOKEN,
+            override="steer",
+            running=running,
+        )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("starting", "antigravity")]
+    assert "still starting" in _texts(cfg)[0]
+    assert [log["reason"] for log in logs if log["event"] == "steer.fallback"] == [
+        "starting"
+    ]
+    # Once the run has reported its session, a missing gate is "no_live".
+    busy.resume_ready.set()  # type: ignore[attr-defined]
+    cfg = _cfg("steer")
+    await _steer(
+        cfg, engine="antigravity", token=AGY_TOKEN, override="steer", running=running
+    )
+    assert _texts(cfg) == [fallback_notice("no_live", "antigravity")]
 
 
 async def test_agy_steer_after_result_falls_back(agy_gate_installed: None) -> None:
