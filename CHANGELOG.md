@@ -47,6 +47,15 @@
 
 ### fixes
 
+- **fix:** with two approval requests waiting at once (an Antigravity Ask me subagent and its parent, or Claude's parallel subagents), the buttons on the progress message stay on the first one until it is answered, and that card's row is marked 👇. They used to jump to the newer request a few seconds later, so a tap could answer a different request than the one being read. A single request looks exactly as before [#1079](https://github.com/littlebearapps/untether/issues/1079)
+- **fix(antigravity):** Ask me display fixes [#1080](https://github.com/littlebearapps/untether/issues/1080)
+  - a command or subagent waiting on its approval card is no longer listed under `⏳ background`; its time counts from the approval
+  - an approval card's lines (the command, `from subagent:`, `agy says:`) stay on separate lines in the progress message
+  - an extra argument under a diff reads `⚙️ Append = False` instead of `- Append = False`, which looked like a removed line
+  - the "Ask me isn't ready" reply shows its commands as code instead of with literal backticks
+  - `/config` → Permission mode no longer says Antigravity can't stop mid-run to ask you
+  - the "Ask me isn't available in this project" reply lists each file once
+  - the permission-mode toasts say a switch within Ask me / Full access (or Workspace / Plan first) needs no `/new`
 - **fix(antigravity):** a cron or webhook Antigravity run held because Untether's agy plugin was edited now says so: the plugin isn't what Untether installed, a message in the chat doesn't release the hold, and `untether agy-gate install --force` (after checking the change) does. It used to get the changed-workspace text, which said the next chat message would let the schedule run again. Scheduled runs are still held exactly as before [#1078](https://github.com/littlebearapps/untether/issues/1078)
 - **fix(antigravity):** wording and page fixes around Telegram approvals [#1077](https://github.com/littlebearapps/untether/issues/1077)
   - an Antigravity question's push notification says "Question from Antigravity", not "Question from Claude Code"
