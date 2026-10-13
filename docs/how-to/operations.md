@@ -93,7 +93,7 @@ Untether automatically handles this: active progress messages are tracked in `ac
 !!! untether "Untether"
     ⚠️ interrupted by restart
 
-This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.36.0 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)).
+This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.36.0 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)). Since v0.36.1, if the message was waiting on an approval, its "Action required — approval needed" push is deleted too, so it doesn't point at a message with no buttons left ([#1084](https://github.com/littlebearapps/untether/issues/1084)).
 
 The cleanup happens before the startup message is sent, so by the time you see "Untether started", all orphan messages are already resolved.
 

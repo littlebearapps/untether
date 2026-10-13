@@ -242,7 +242,10 @@ Behaviour:
     `forward.prompt.dropped` with `reason` and `merged_count`. Sending it first would only start a run for the command
     to kill, or run it in the session being left. Before v0.36.0
     `/continue` dropped it silently and `/cancel` / `/new` let it run after
-    them.
+    them. For `/cancel`, the 🗑️ notice is its reply: since v0.36.1 it no
+    longer also answers `nothing running in this chat.` (closing an idle
+    session, a pending `/at` run or a loop is still reported;
+    [#1084](https://github.com/littlebearapps/untether/issues/1084)).
   - Every other command **flushes** the pending prompt first
     (`forward.prompt.flushed reason=command`). Ordering is best-effort: the
     prompt is dispatched before the command is handled, but its run starts

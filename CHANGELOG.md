@@ -47,6 +47,11 @@
 
 ### fixes
 
+- **fix:** small follow-ups from the final rc4 QA [#1084](https://github.com/littlebearapps/untether/issues/1084)
+  - `/cancel` sent within a second of a message gets one reply, `🗑️ Dropped 1 message sent just before /cancel …`, instead of that and `nothing running in this chat.` as well. Closing an idle session, a pending `/at` run or a loop is still reported
+  - the "Action required — approval needed" push is deleted when a restart marks its progress message `⚠️ interrupted by restart`, instead of staying behind pointing at a card with nothing to tap
+  - a resumed run cancelled just after it started, before the engine had sent anything, keeps its resume line on the `cancelled` card. A `/continue` cancelled while starting no longer shows an empty resume line
+  - a scheduled run held before it starts (for example because Antigravity's workspace config or Untether's agy plugin changed) still logs `session.summary.no_events` as a warning, now with the reason (`prespawn_blocked`)
 - **fix:** `/cancel` sent while a run is still starting — its card reads `queued` or `starting` while the message waits for the chat's message slot — now cancels it instead of replying `nothing running in this chat.` and letting the run go ahead. The engine is never started and the card shows `cancelled`. `/new` and a `/cancel` reply to the card work the same way, and replying `/cancel` to a follow-up's `queued` card now drops it while the session's previous run is still finishing. A refused invalid session or model id is now logged at INFO, not WARNING [#1082](https://github.com/littlebearapps/untether/issues/1082)
 - **fix:** with two approval requests waiting at once (an Antigravity Ask me subagent and its parent, or Claude's parallel subagents), the buttons on the progress message stay on the first one until it is answered, and that card's row is marked 👇. They used to jump to the newer request a few seconds later, so a tap could answer a different request than the one being read. A single request looks exactly as before [#1079](https://github.com/littlebearapps/untether/issues/1079)
 - **fix(antigravity):** Ask me display fixes [#1080](https://github.com/littlebearapps/untether/issues/1080)

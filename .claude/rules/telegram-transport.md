@@ -68,7 +68,7 @@ Freshness (#924): only entries changed since the dispatch's `outbox_since` are s
 
 ## Progress persistence
 
-`progress_persistence.py` tracks active progress messages in `active_progress.json`. On startup, orphan messages from a prior instance are edited to "⚠️ interrupted by restart" with keyboard removed.
+`progress_persistence.py` tracks active progress messages in `active_progress.json`. On startup, orphan messages from a prior instance are edited to "⚠️ interrupted by restart" with keyboard removed, and an entry's tracked approval push (`notify_message_id`, set/cleared by `ProgressEdits._persist_approval_notify`) is deleted (#1084). Keep new entry keys optional: older files must still load.
 
 ## Telegram update_id persistence (#287)
 
@@ -103,6 +103,8 @@ A slash command sent while a prompt is pending in the `ForwardCoalescer` window
 - `/cancel`, `/new`, `/continue` → `ForwardCoalescer.drop(key, reason=<cmd>)`
   (INFO `forward.prompt.dropped`) and a reply to the dropped prompt:
   `🗑️ Dropped N message(s) sent just before /<cmd> — …`. Never drop silently (#794).
+  For `/cancel` that notice is its reply: `handle_cancel(dropped_pending=True)` skips only
+  the bare "nothing running" fallbacks — idle close / `/at` / loop replies still go (#1084).
 - any other command → `ForwardCoalescer.flush(key, reason="command")` first.
   **Best-effort ordering only:** the prompt is dispatched via `start_soon` and
   awaits prefs/context, so a `/model` or `/planmode` right behind it can still
