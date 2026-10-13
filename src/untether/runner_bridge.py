@@ -5675,11 +5675,16 @@ async def run_runner_with_cancel(
                 prespawn_blocked=info_block,
             )
         else:
+            # #1084: the other pre-spawn refusals stay WARNING — a held
+            # schedule (``config_changed``), RAM or concurrency refusal is
+            # something the operator should see — but carry the reason, so
+            # the line says why nothing ran.
             logger.warning(
                 "session.summary.no_events",
                 session_id=outcome.resume.value if outcome.resume else None,
                 engine=runner.engine,
                 duration_seconds=round(duration, 1),
+                **({"prespawn_blocked": info_block} if info_block else {}),
             )
 
     return outcome

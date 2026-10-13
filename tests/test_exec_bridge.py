@@ -1688,6 +1688,9 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
         ("antigravity", "no_project"),
         ("antigravity", "invalid_argument"),
         (CODEX_ENGINE, "invalid_argument"),
+        # #1084: a schedule held because agy's config (or the gate plugin)
+        # changed.
+        ("antigravity", "config_changed"),
     ],
 )
 async def test_1047_other_prespawn_blocks_keep_the_error_card(
@@ -1695,7 +1698,8 @@ async def test_1047_other_prespawn_blocks_keep_the_error_card(
 ) -> None:
     """#1047 made only Antigravity's ``/continue`` refusal a plain reply;
     every other pre-spawn block still renders as an error card and warns —
-    except a refused invalid session/model id, logged at INFO (#1082)."""
+    except a refused invalid session/model id, logged at INFO (#1082). The
+    WARNING carries the reason too (#1084)."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -1716,12 +1720,11 @@ async def test_1047_other_prespawn_blocks_keep_the_error_card(
     assert final.startswith(f"error · {engine}")
     assert "```\n🛑 refused\n```" in final
     (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
+    assert summary["prespawn_blocked"] == blocked
     if blocked == "invalid_argument":
         assert summary["log_level"] == "info"
-        assert summary["prespawn_blocked"] == blocked
     else:
         assert summary["log_level"] == "warning"
-        assert "prespawn_blocked" not in summary
 
 
 @pytest.mark.anyio
