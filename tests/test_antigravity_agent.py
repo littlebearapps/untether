@@ -42,9 +42,11 @@ def test_agent_flag_allows_only_untethers_agent() -> None:
             agy_flag("--agent", bad)
 
 
-def test_agent_file_lists_file_tools_only() -> None:
+def test_agent_file_lists_file_tools_and_ask_only() -> None:
     head = agent.AGENT_MD.split("---")[1]
     tools = [line.strip()[2:] for line in head.splitlines() if line.startswith("  - ")]
+    # #980 (R3-2): ask_question joins the file tools — an unanswered question
+    # is skipped and the turn goes on. Still no shell, web, MCP or subagent.
     assert tools == [
         "view_file",
         "list_dir",
@@ -53,7 +55,10 @@ def test_agent_file_lists_file_tools_only() -> None:
         "write_to_file",
         "replace_file_content",
         "multi_replace_file_content",
+        "ask_question",
     ]
+    assert not {"run_command", "invoke_subagent", "call_mcp_tool"} & set(tools)
+    assert "ask_question" in agent.AGENT_MD.split("---", 2)[2]
     assert "name: untether-workspace\n" in head
     # The user is told that Full access needs a new conversation.
     assert "/new" in agent.AGENT_MD and "Full access" in agent.AGENT_MD

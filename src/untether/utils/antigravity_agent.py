@@ -9,6 +9,12 @@ A Workspace run therefore names this agent with ``--agent``: no shell, web,
 MCP or subagent tool exists for the model to reach for, which is narrower
 than Workspace's promise, never wider.
 
+#980 (R3-2): the agent also has ``ask_question``. With Untether's agy plugin
+installed the question becomes Telegram buttons; without it agy skips the
+unanswered question and the turn carries on (probed on agy 1.3.4,
+2026-10-13, n = 2: the model went on to write its file and reply), unlike a
+blocked shell call, which ends the turn.
+
 The file lives in agy's documented user-level agent folder
 (``~/.gemini/config/agents/<name>/agent.md``) and does nothing unless
 ``--agent`` names it. It is rewritten whenever it differs from ``AGENT_MD``,
@@ -54,12 +60,14 @@ tools:
   - write_to_file
   - replace_file_content
   - multi_replace_file_content
+  - ask_question
 mainAgent: true
 subagent: false
 ---
 
 # System Prompt
 You are a coding agent working in the user's project. This conversation runs in Workspace mode: you can read, search, create and edit files inside the project with your file tools. Shell commands, web access and MCP tools are not available, and neither are files outside the project.
+When you need the user's choice, ask with `ask_question`. If no answer comes back, carry on with a sensible default and say what you assumed.
 
 # Working without a shell
 - To look around, use `list_dir`, `find_by_name`, `grep_search` and `view_file`.
