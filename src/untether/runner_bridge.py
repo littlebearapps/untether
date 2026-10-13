@@ -6547,7 +6547,7 @@ async def handle_message(
     running_tasks: RunningTasks | None = None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]]
     | None = None,
-    on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
+    on_resume_failed: Callable[[ResumeToken], Awaitable[bool | None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
     quarantine_store: QuarantineStore | None = None,
@@ -7202,13 +7202,25 @@ async def handle_message(
                 resume_token.engine, completed.usage, run_error
             ):
                 try:
-                    await on_resume_failed(resume_token)
-                    logger.info(
-                        "session.auto_cleared",
-                        engine=resume_token.engine,
-                        resume=resume_token.value,
-                    )
-                    _session_auto_cleared = True
+                    # #1052: the callback says whether it removed anything
+                    # (``None`` = a caller that doesn't report; assume it
+                    # did). A stale resume line for another session leaves
+                    # the chat's saved session alone, so no notice either.
+                    cleared = await on_resume_failed(resume_token)
+                    if cleared is False:
+                        logger.info(
+                            "session.auto_clear_skipped",
+                            reason="not_saved_session",
+                            engine=resume_token.engine,
+                            resume=resume_token.value,
+                        )
+                    else:
+                        logger.info(
+                            "session.auto_cleared",
+                            engine=resume_token.engine,
+                            resume=resume_token.value,
+                        )
+                        _session_auto_cleared = True
                 except Exception:  # noqa: BLE001
                     logger.debug("session.auto_clear_failed", exc_info=True)
             else:

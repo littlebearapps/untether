@@ -142,6 +142,39 @@ def _chat_session_key(
     return (msg.chat_id, msg.sender_id)
 
 
+async def _clear_failed_session(
+    token: ResumeToken,
+    *,
+    topic_store: TopicStateStore | None,
+    topic_key: tuple[int, int] | None,
+    chat_session_store: ChatSessionStore | None,
+    chat_session_key: tuple[int, int | None] | None,
+) -> bool:
+    """Clear the saved session a failed resume named; return whether one was
+    removed (``on_resume_failed``).
+
+    #1052: compare by session id, not just engine. A stale resume line names
+    some other session, so its failure leaves the chat's (or topic's) own
+    saved session alone, and the run says nothing was cleared.
+    """
+    cleared = False
+    if topic_store is not None and topic_key is not None:
+        cleared = await topic_store.clear_engine_session(
+            topic_key[0], topic_key[1], token.engine, resume=token.value
+        )
+    if chat_session_store is not None and chat_session_key is not None:
+        cleared = (
+            await chat_session_store.clear_engine_session(
+                chat_session_key[0],
+                chat_session_key[1],
+                token.engine,
+                resume=token.value,
+            )
+            or cleared
+        )
+    return cleared
+
+
 async def _resolve_engine_run_options(
     chat_id: int,
     thread_id: int | None,
@@ -2367,22 +2400,18 @@ async def run_main_loop(
             def wrap_on_resume_failed(
                 topic_key: tuple[int, int] | None,
                 chat_session_key: tuple[int, int | None] | None,
-            ) -> Callable[[ResumeToken], Awaitable[None]] | None:
+            ) -> Callable[[ResumeToken], Awaitable[bool]] | None:
                 if topic_key is None and chat_session_key is None:
                     return None
 
-                async def _wrapped(token: ResumeToken) -> None:
-                    if state.topic_store is not None and topic_key is not None:
-                        await state.topic_store.clear_engine_session(
-                            topic_key[0], topic_key[1], token.engine
-                        )
-                    if (
-                        state.chat_session_store is not None
-                        and chat_session_key is not None
-                    ):
-                        await state.chat_session_store.clear_engine_session(
-                            chat_session_key[0], chat_session_key[1], token.engine
-                        )
+                async def _wrapped(token: ResumeToken) -> bool:
+                    return await _clear_failed_session(
+                        token,
+                        topic_store=state.topic_store,
+                        topic_key=topic_key,
+                        chat_session_store=state.chat_session_store,
+                        chat_session_key=chat_session_key,
+                    )
 
                 return _wrapped
 

@@ -121,22 +121,46 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             logger.info("session.cleared", chat_id=chat_id, cleared_count=session_count)
 
     async def clear_engine_session(
-        self, chat_id: int, owner_id: int | None, engine: str
-    ) -> None:
-        """Clear the saved session for a specific engine in a chat."""
+        self,
+        chat_id: int,
+        owner_id: int | None,
+        engine: str,
+        *,
+        resume: str | None = None,
+    ) -> bool:
+        """Clear the saved session for a specific engine in a chat.
+
+        With ``resume``, clear only when that is the saved session (#1052):
+        a stale resume line names some other session, and its failure says
+        nothing about the chat's own. Returns whether a session was removed.
+        """
         async with self._lock:
             self._reload_locked_if_needed()
             chat = self._get_chat_locked(chat_id, owner_id)
             if chat is None:
-                return
-            removed = chat.sessions.pop(engine, None)
-            if removed is not None:
-                self._save_locked()
+                return False
+            saved = chat.sessions.get(engine)
+            if saved is None:
+                return False
+            if resume is not None and saved.resume != resume:
                 logger.info(
-                    "session.engine_cleared",
+                    "session.engine_clear_skipped",
                     chat_id=chat_id,
                     engine=engine,
+                    reason="not_saved_session",
+                    resume=resume,
+                    saved=saved.resume,
                 )
+                return False
+            chat.sessions.pop(engine, None)
+            self._save_locked()
+            logger.info(
+                "session.engine_cleared",
+                chat_id=chat_id,
+                engine=engine,
+                resume=saved.resume,
+            )
+            return True
 
     def _get_chat_locked(self, chat_id: int, owner_id: int | None) -> _ChatState | None:
         return self._state.chats.get(_chat_key(chat_id, owner_id))
