@@ -761,11 +761,39 @@ def test_callback_backend_is_registered() -> None:
 # ── /config and /planmode ───────────────────────────────────────────────────
 
 
-def test_plan_first_is_offered_and_ask_me_still_soon() -> None:
+def test_plan_first_and_ask_me_are_offered() -> None:
     from untether.telegram.commands import _antigravity_mode_text as text
 
     assert text.button_text("agp") == "Plan first"
-    assert text.button_text("aga") == "Ask me · soon"
+    # #980: Ask me is real; without Telegram approvals it reads "set up".
+    assert text.button_text("aga") == "Ask me"
+    assert text.button_text("aga", gate_ready=False) == "🔒 Ask me — set up"
+    assert text.button_text("agp", gate_ready=False) == "Plan first"
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "new"),
+    [
+        ("workspace", "plan", False),
+        ("plan", "workspace", False),
+        ("ask", "full", False),
+        ("full", "ask", False),
+        ("workspace", "ask", True),
+        ("plan", "ask", True),
+        ("ask", "workspace", True),
+        ("workspace", "full", True),
+        (None, "ask", True),
+        ("yolo", "plan", False),
+    ],
+)
+def test_needs_new_only_across_agent_groups(
+    before: str | None, after: str, new: bool
+) -> None:
+    """#980 R3-3: Workspace / Plan first share Untether's no-shell agent, Ask
+    me / Full access agy's default one; only a switch across needs /new."""
+    from untether.telegram.commands import _antigravity_mode_text as text
+
+    assert text.needs_new(before, after) is new
 
 
 async def _planmode(
@@ -825,6 +853,18 @@ async def test_planmode_antigravity_from_full_access_says_new(tmp_path: Path) ->
     text, _ = await _planmode(tmp_path, "on")
     text, _ = await _planmode(tmp_path, "off")
     assert text.startswith("applies from your next message.")
+
+
+@pytest.mark.anyio
+async def test_planmode_antigravity_from_ask_me_says_new(tmp_path: Path) -> None:
+    """#980 R3-3: Ask me runs on agy's default agent like Full access, so a
+    switch to Plan first (the no-shell agent) needs /new too."""
+    text, stored = await _planmode(tmp_path, "on", toml_mode="ask")
+    assert stored == "plan"
+    assert text.startswith("send /new to start using it. permission mode")
+    text, _ = await _planmode(tmp_path, "off", toml_mode="ask")
+    assert text.startswith("send /new to start using it.")
+    assert "<b>ask me</b>" in text
 
 
 @pytest.mark.anyio

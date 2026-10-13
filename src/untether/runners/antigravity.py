@@ -15,11 +15,14 @@ stream-json user line (never in argv), the stream comes back as
 - ``result`` — ``status`` ``SUCCESS`` / ``ERROR``; ``usage``, ``num_turns``
   and ``duration_seconds`` are **session-cumulative** across resumes
 
-Safety (phase 02, D21): ``--dangerously-skip-permissions`` is passed only
-when a human explicitly chose **Full access** (``/config``, ``[antigravity]
-permission_mode = "full"`` or a cron's own ``permission_mode``); unknown
-values fail closed to Workspace, unattended runs never inherit Full access
-(08 §10), and "Ask me" is refused until Untether's approval gate ships.
+Safety (phase 02, D21; phase 14): ``--dangerously-skip-permissions`` is
+passed only through :func:`decide_antigravity_mode` — when a human
+explicitly chose **Full access** (``/config``, ``[antigravity]
+permission_mode = "full"`` or a cron's own ``permission_mode``), or chose
+**Ask me** and Untether's approval gate is ready for the project (#980: the
+gate then answers every tool, and anything less refuses the run). Unknown
+values fail closed to Workspace, and unattended runs never inherit Full
+access or Ask me (08 §10).
 "Plan first" (#981) runs agy's own ``--mode=plan`` under the no-shell agent:
 the turn stops after writing its plan, the plan is posted with Approve /
 Deny / Let's discuss, and Approve resumes the conversation in Workspace
@@ -541,6 +544,19 @@ def unsupported_version_message(version: str) -> str:
 # ── permission modes (phase 02, D21; 08 §10) ────────────────────────────────
 
 BYPASS_FLAG = "--dangerously-skip-permissions"
+# What agy's ``init.permission_mode`` says under the bypass flag (agy 1.3.3,
+# probes pb4/hook_deny_bypass).
+BYPASS_REPORTED = "always-proceed"
+
+
+def ask_mode_mismatch_message(reported: str) -> str:
+    return (
+        f"agy started in a permission mode Untether didn't ask for "
+        f"({reported}), so this Ask me run was stopped before any tool ran. "
+        "Check for an Untether update, or pick Workspace in /config."
+    )
+
+
 # Workspace = agy's own accept-edits mode. With no flag, print mode
 # soft-denies every file write outside a temp folder, so the project itself
 # is read-only (agy 1.3.3, probed 2026-10-11 in a non-temp repo; the rc1
@@ -549,9 +565,6 @@ BYPASS_FLAG = "--dangerously-skip-permissions"
 # ``init.permission_mode`` still reports ``request-review``. A fixed value,
 # never a user's; ``agy_flag`` allows nothing else for this flag.
 WORKSPACE_AGY_MODE = "accept-edits"
-# Modes that still need Untether's approval gate (refused before spawn).
-_GATE_MODES = frozenset({"ask"})
-_GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
 # Modes that run on agy's own permission checks (no bypass flag), so agy's
 # tool-permission setting must be its default or stricter (#1044, D22.7).
 _NO_BYPASS_MODES = frozenset({"workspace", "plan"})
@@ -635,12 +648,124 @@ def _reset_permission_warnings() -> None:
     _BYPASS_UNREPORTED_WARNED = False
 
 
-def gate_missing_message(mode: str) -> str:
-    name = _GATE_MODE_NAMES.get(mode, mode)
+# ── Ask me (#980, phase 14): the one place that decides bypass ───────────────
+
+# Pre-spawn blocks of an Ask me run whose gate isn't ready (answered as a
+# plain reply, #1047; the chat's session is kept).
+GATE_NOT_READY_BLOCK = "gate_not_ready"
+GATE_FOREIGN_BLOCK = "gate_foreign_config"
+GATE_SELF_PROTECT_BLOCK = "gate_self_protect"
+_ASK_ELSEWHERE = "Nothing was run. Workspace and Full access still work here."
+GATE_MISSING_TEXT = (
+    "Ask me needs Telegram approvals, which aren't set up on this host. Run "
+    "`untether agy-gate install` on the host (`untether agy-gate status` "
+    "shows what's missing; /config → 🔐 Telegram approvals shows the same). "
+    + _ASK_ELSEWHERE
+)
+
+
+def gate_not_ready_message(reason: str) -> str:
     return (
-        f"{name} needs Untether's approval gate, which arrives in a later "
-        "0.36.1 release — switch to Workspace or Full access in /config."
+        "Ask me needs Telegram approvals, and they aren't ready for this "
+        f"project: {reason}. Run `untether agy-gate status --project <folder>` "
+        "on the host to see what to repair. " + _ASK_ELSEWHERE
     )
+
+
+def gate_self_protect_message(path: str) -> str:
+    return (
+        "Ask me isn't available in this project: it contains Untether's own "
+        f"code ({path}), which agy could edit to switch Telegram approvals "
+        "off. Use Workspace or Full access here."
+    )
+
+
+def gate_foreign_message(paths: list[str]) -> str:
+    return (
+        "Ask me isn't available in this project: agy loads hooks, plugins, "
+        "agents or MCP servers here that Untether doesn't manage "
+        f"({_paths_text(paths)}), and they run their own commands without "
+        "asking in Telegram. " + _ASK_ELSEWHERE + " Remove them (or move them "
+        "out of the project) to use Ask me."
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GateFacts:
+    """What run_impl learnt about the gate before spawn (Ask me only)."""
+
+    installed: bool = False  # the plugin folder holds Untether's files
+    problem: str | None = None  # why the plugin or agy's listing isn't ready
+    self_protect: str | None = None  # REVIEW-2 B3 path
+    foreign: tuple[str, ...] = ()  # untrusted config in scope (REVIEW-2 B2)
+    listening: bool = False  # this run's socket is bound
+
+
+@dataclass(frozen=True, slots=True)
+class ModeDecision:
+    """How an agy run starts. ``build_args`` reads only this."""
+
+    mode: str  # workspace / ask / plan / full (after fail-closed mapping)
+    bypass: bool = False  # --dangerously-skip-permissions
+    gated: bool = False  # GateRun.required: the gate is the only check
+    no_shell_agent: bool = True  # --agent=untether-workspace (when it can)
+    refusal: str | None = None  # refuse before spawn with this text
+    block: str | None = None  # its PRESPAWN_BLOCKED_KEY value
+
+
+def decide_antigravity_mode(mode: str, gate: GateFacts | None = None) -> ModeDecision:
+    """Phase 14 §1: the single decision point for the bypass flag.
+
+    ``mode`` is :meth:`AntigravityRunner._effective_mode`'s answer (the
+    unattended downgrade and the fail-closed mapping already applied).
+
+    - Workspace / Plan first: agy's own checks, Untether's no-shell agent.
+    - Full access: bypass, agy's default agent; the gate (if installed) only
+      asks questions.
+    - Ask me: bypass **only** when the gate is ready — plugin installed and
+      listed by agy for this project (``gate_precheck.check(...).ok``), no
+      untrusted hook / plugin / agent / MCP server in scope, the project
+      doesn't hold Untether's own code, and the socket is listening. Then the
+      gate is required (deny-by-default) and agy runs on its default agent
+      with no ``--mode`` (G1/G2: the no-shell agent would leave nothing to
+      ask about, and ``--mode`` takes one value). Anything less refuses the
+      run — never a silent downgrade (REVIEW-2 M17).
+    - Anything else fails closed to Workspace (D21).
+    """
+    if mode == "full":
+        return ModeDecision(mode="full", bypass=True, no_shell_agent=False)
+    if mode == "plan":
+        return ModeDecision(mode="plan")
+    if mode != "ask":
+        return ModeDecision(mode="workspace")
+    refused = ModeDecision(mode="ask", no_shell_agent=False)
+    if gate is None or not gate.installed:
+        return replace(refused, refusal=GATE_MISSING_TEXT, block=GATE_MISSING_BLOCK)
+    if gate.problem is not None:
+        return replace(
+            refused,
+            refusal=gate_not_ready_message(gate.problem),
+            block=GATE_NOT_READY_BLOCK,
+        )
+    if gate.self_protect is not None:
+        return replace(
+            refused,
+            refusal=gate_self_protect_message(gate.self_protect),
+            block=GATE_SELF_PROTECT_BLOCK,
+        )
+    if gate.foreign:
+        return replace(
+            refused,
+            refusal=gate_foreign_message(list(gate.foreign)),
+            block=GATE_FOREIGN_BLOCK,
+        )
+    if not gate.listening:
+        return replace(
+            refused,
+            refusal=gate_not_ready_message("Untether couldn't open its socket"),
+            block=GATE_NOT_READY_BLOCK,
+        )
+    return ModeDecision(mode="ask", bypass=True, gated=True, no_shell_agent=False)
 
 
 def _warn_unknown_mode(value: str) -> None:
@@ -842,6 +967,10 @@ _FROM_CONTINUE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # goes into agy's env).
 _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "untether_agy_gate", default=None
+)
+# #980 phase 14: same hand-off — how the run starts (``build_args``).
+_DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
+    "untether_agy_decision", default=None
 )
 
 
@@ -1109,6 +1238,8 @@ class AntigravityStreamState:
     # otherwise (no marker env reaches agy, nothing changes).
     gate: Any = None
     gate_liveness_logged: bool = False
+    # #980 phase 14: how this run started (``decide_antigravity_mode``).
+    decision: ModeDecision | None = None
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -1212,6 +1343,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     model: str | None = None
     # ``[antigravity] permission_mode`` (validated in build_runner).
     default_permission_mode: str | None = None
+    # ``[antigravity] approval_timeout_s`` (#980): Ask me's approval wait,
+    # capped by the gate plugin's own (set at ``untether agy-gate install``).
+    approval_timeout_s: int | None = None
     # untether.toml; the small state files live beside chat_prefs.json.
     config_path: Path | None = None
     logger = logger
@@ -1270,14 +1404,21 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if precheck_block is not None:
             yield precheck_block
             return
-        gate_block, gate = await self._gate_setup(precheck, resume)
+        gate_block, gate, decision = await self._gate_setup(precheck, resume)
         if gate_block is not None:
             yield gate_block
             return
+        if decision.mode != "ask" and resume is not None:
+            # "Always allow this command" lasts while the conversation stays
+            # in Ask me (phase 14 §5).
+            from ..antigravity import gate_policy
+
+            gate_policy.forget_grants(resume.value)
         # Consumed by ``new_state`` inside the base run_impl (same task).
         _PRECHECK.set(precheck)
         _FROM_CONTINUE.set(from_continue)
         _GATE.set(gate)
+        _DECISION.set(decision)
         _log_tos_notice_once()
         # #1045: the ⚠️ rows shown on the progress message, for the final.
         warnings: list[str] = []
@@ -1312,6 +1453,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
         finally:
             _GATE.set(None)
+            _DECISION.set(None)
             if gate is not None:
                 with anyio.CancelScope(shield=True):
                     await gate.aclose()
@@ -1466,35 +1608,53 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         trigger = options.unattended_trigger if options is not None else None
         if (
             trigger is not None
-            and mode == "full"
-            and (options is None or options.trigger_permission_mode != "full")
+            and mode in {"full", "ask"}
+            and (options is None or options.trigger_permission_mode != mode)
         ):
-            key = (trigger, origin)
+            # REVIEW M3: a chat's (or untether.toml's) bypass mode never
+            # reaches a cron or webhook run; only the trigger's own setting
+            # does. Ask me runs agy with the bypass flag too (phase 14 §1).
+            key = (trigger, f"{origin}:{mode}")
             if key not in _UNATTENDED_DOWNGRADE_WARNED:
                 if len(_UNATTENDED_DOWNGRADE_WARNED) >= _WARNED_MAX:
                     _UNATTENDED_DOWNGRADE_WARNED.clear()
                 _UNATTENDED_DOWNGRADE_WARNED.add(key)
                 logger.warning(
-                    "antigravity.unattended_full_downgraded",
+                    f"antigravity.unattended_{mode}_downgraded",
                     trigger=trigger,
                     origin=origin,
-                    note="unattended runs get Full access only from the "
-                    "trigger's own permission_mode",
+                    note="unattended runs get Full access or Ask me only from "
+                    "the trigger's own permission_mode",
                 )
             mode = "workspace"
         return mode
 
     def _gate_missing_refusal(self, resume: ResumeToken | None) -> UntetherEvent | None:
-        """rc1: Ask me / Plan first need the approval gate (rc3) — refuse
-        before spawn rather than run them as something else."""
-        mode = self._effective_mode()
-        if mode not in _GATE_MODES:
+        """Ask me with no gate plugin on this host: refuse at once with the
+        install hint (before the version check and the scans). A plugin that
+        is there is checked properly in :meth:`_gate_setup`."""
+        if self._effective_mode() != "ask":
             return None
-        logger.warning("antigravity.permission_mode.gate_missing", mode=mode)
+        from ..antigravity import gate_plugin
+
+        if gate_plugin.inspect_install().present:
+            return None
+        return self._decision_refusal(decide_antigravity_mode("ask", None), resume)
+
+    @staticmethod
+    def _decision_refusal(
+        decision: ModeDecision, resume: ResumeToken | None
+    ) -> UntetherEvent:
+        assert decision.refusal is not None
+        logger.warning(
+            "antigravity.permission_mode.gate_refused",
+            mode=decision.mode,
+            reason=decision.block,
+        )
         return EventFactory(ENGINE).completed_error(
-            error=gate_missing_message(mode),
+            error=decision.refusal,
             resume=resume,
-            usage={PRESPAWN_BLOCKED_KEY: GATE_MISSING_BLOCK},
+            usage={PRESPAWN_BLOCKED_KEY: decision.block},
         )
 
     def _seen(self) -> SeenConfigStore:
@@ -1695,23 +1855,32 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     async def _gate_setup(
         self, pre: _RunPrecheck | None, resume: ResumeToken | None
-    ) -> tuple[UntetherEvent | None, Any]:
+    ) -> tuple[UntetherEvent | None, Any, ModeDecision]:
         """#980: bind this run's gate socket when Untether's agy plugin is
-        installed and ``agy -p /hooks`` lists it for the run's cwd.
+        installed and ``agy -p /hooks`` lists it for the run's cwd, and
+        decide how the run starts (:func:`decide_antigravity_mode`).
 
         Workspace, Plan first and Full access don't rely on the gate for
         safety, so a gate that isn't ready only means no Telegram questions
-        and no steering for the run (logged; the run goes on). The one
-        refusal: the plugin folder isn't what Untether installed and the run
-        is unattended — the planted-config scanner leaves the plugin's own
-        files to this check, and a changed hook runs its own commands."""
+        and no steering for the run (logged; the run goes on). Ask me relies
+        on it entirely: every gap refuses the run before spawn. One more
+        refusal for every mode: the plugin folder isn't what Untether
+        installed and the run is unattended — the planted-config scanner
+        leaves the plugin's own files to this check, and a changed hook runs
+        its own commands."""
         from ..antigravity import gate_plugin, gate_precheck, gate_server
 
+        mode = self._effective_mode()
+        decision = decide_antigravity_mode(mode)
         if pre is None or pre.cwd is None:
-            return None, None
+            if mode == "ask":
+                return self._decision_refusal(decision, resume), None, decision
+            return None, None, decision
         install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
         if not install.present:
-            return None, None
+            if mode == "ask":
+                return self._decision_refusal(decision, resume), None, decision
+            return None, None, decision
         options = get_run_options()
         trigger = options.unattended_trigger if options is not None else None
         if (
@@ -1739,7 +1908,21 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
                     None,
+                    decision,
                 )
+            if mode == "ask":
+                reason = (
+                    gate_precheck.OUTDATED
+                    if install.managed and not install.edited and not install.current
+                    else gate_precheck.EDITED
+                )
+                refused = decide_antigravity_mode(
+                    mode,
+                    GateFacts(
+                        installed=True, problem=gate_precheck.reason_text(reason)
+                    ),
+                )
+                return self._decision_refusal(refused, resume), None, refused
             pre.config_rows.append(
                 (
                     "antigravity.gate.changed",
@@ -1749,7 +1932,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     " off; run `untether agy-gate status` on the host.",
                 )
             )
-            return None, None
+            return None, None, decision
         scan = pre.scan
         result = await gate_precheck.check(
             self,
@@ -1757,14 +1940,29 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             scan_digest=scan.agy_digest if scan is not None else None,
             root=scan.root if scan is not None else None,
         )
-        if not result.ok:
-            return None, None
+        if mode == "ask":
+            facts = await self._ask_facts(pre, result)
+            decision = decide_antigravity_mode(mode, facts)
+            if decision.refusal is not None:
+                return self._decision_refusal(decision, resume), None, decision
+        elif not result.ok:
+            return None, None, decision
+        wait_s = result.wait_s
+        if self.approval_timeout_s is not None:
+            # ``[antigravity] approval_timeout_s``: shorter than the
+            # plugin's own wait, never longer (agy's hook timeout is fixed
+            # at install time).
+            wait_s = min(wait_s, self.approval_timeout_s)
         gate = gate_server.GateRun(
             config_path=self.config_path,
             factory=EventFactory(ENGINE),
-            wait_s=result.wait_s,
+            wait_s=wait_s,
             unattended_trigger=trigger,
             ask_questions=options.ask_questions if options is not None else None,
+            required=decision.gated,
+            project_root=pre.cwd,
+            diff_preview=options.diff_preview if options is not None else None,
+            channel_id=get_run_channel_id(),
         )
         try:
             await gate.open()
@@ -1774,8 +1972,51 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 error_type=exc.__class__.__name__,
                 error=str(exc)[:200],
             )
-            return None, None
-        return None, gate
+            if mode == "ask":
+                refused = decide_antigravity_mode(mode, replace(facts, listening=False))
+                return self._decision_refusal(refused, resume), None, refused
+            return None, None, decision
+        return None, gate, decision
+
+    async def _ask_facts(self, pre: _RunPrecheck, result: Any) -> GateFacts:
+        """Ask me's gate facts: agy's own listing (``result``, a
+        ``GatePrecheck``), Untether's own code in the project, and config that
+        runs commands outside the gate (hooks, plugins, agents, MCP)."""
+        from ..antigravity import gate_precheck
+
+        if not result.ok:
+            return GateFacts(
+                installed=True, problem=gate_precheck.reason_text(result.reason)
+            )
+        if pre.scan_problem is not None or pre.scan is None:
+            # The planted-config scan didn't finish: nothing proves the
+            # project carries no hooks or MCP servers of its own.
+            why = pre.scan_problem or "the check didn't run"
+            return GateFacts(
+                installed=True,
+                problem=f"Untether couldn't check this project's agy config ({why})",
+            )
+        foreign = await gate_precheck.foreign_config(self, result, pre.scan)
+        if foreign:
+            logger.warning(
+                "antigravity.gate.precheck_failed",
+                reason="foreign_config",
+                paths=list(foreign)[:20],
+                cwd=str(pre.cwd),
+            )
+        if result.self_protect is not None:
+            logger.warning(
+                "antigravity.gate.precheck_failed",
+                reason=gate_precheck.SELF_PROTECT,
+                path=result.self_protect,
+                cwd=str(pre.cwd),
+            )
+        return GateFacts(
+            installed=True,
+            self_protect=result.self_protect,
+            foreign=foreign,
+            listening=True,
+        )
 
     async def _unsupported_version_event(
         self, resume: ResumeToken | None
@@ -1857,13 +2098,30 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         effort = self._effort_arg(model, state)
         if effort:
             args.append(agy_flag("--effort", effort))
-        # Phase 02 (D21): the bypass flag only for an explicit Full access.
-        # Ask me never gets here (refused before spawn); Plan first is agy's
-        # own plan mode under the same no-shell agent (#981, shape A);
-        # anything else fails closed to Workspace.
-        if mode == "full":
+        # Phase 02 (D21) / phase 14: the bypass flag only as
+        # ``decide_antigravity_mode`` says — an explicit Full access, or Ask
+        # me with its gate ready (the decision ``run_impl`` made before
+        # spawn). Without one (a direct call), Ask me decides with no gate
+        # facts, which never bypasses. Plan first is agy's own plan mode
+        # under the no-shell agent (#981, shape A); anything else fails
+        # closed to Workspace.
+        decision = (
+            state.decision
+            if isinstance(state, AntigravityStreamState)
+            and state.decision is not None
+            and state.decision.mode == mode
+            else decide_antigravity_mode(mode)
+        )
+        if decision.bypass:
+            # Full access and Ask me: agy's default agent (Ask me has
+            # nothing to ask about under the no-shell agent, G1) and no
+            # ``--mode`` (it takes one value, G2).
             args.append(BYPASS_FLAG)
         else:
+            if mode == "ask":
+                # Refused before spawn; never reached by a real run. Fail
+                # closed to Workspace's flags all the same.
+                mode = "workspace"
             agy_mode = (
                 antigravity_plan.PLAN_AGY_MODE if mode == "plan" else WORKSPACE_AGY_MODE
             )
@@ -2025,9 +2283,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         gate = _GATE.get()
         if gate is not None:
             gate.factory = factory
+        decision = _DECISION.get()
+        if decision is None or decision.mode != mode:
+            # A test driving ``translate`` / ``build_args`` without
+            # ``run_impl``: decide without gate facts (Ask me then never
+            # gets the bypass flag).
+            decision = decide_antigravity_mode(mode)
         return AntigravityStreamState(
             factory=factory,
             gate=gate,
+            decision=decision,
             expected_resume=expected or None,
             from_continue=from_continue,
             resumed=resume is not None,
@@ -2400,9 +2665,31 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         two is missing the run goes on with a ⚠️ row."""
         state.permission_checked = True
         state.permission_note = None
-        if state.effective_mode == "full":
-            if reported == "request-review":
+        decision = state.decision
+        bypass = (
+            decision.bypass if decision is not None else state.effective_mode == "full"
+        )
+        if bypass:
+            # We passed the bypass flag (Full access, Ask me): agy reports
+            # always-proceed. A stricter value only means agy's own checks
+            # also apply (harmless; warned once). In Ask me anything else is
+            # a mode Untether didn't ask for: stop (D22.7).
+            if reported in _WORKSPACE_TOOL_PERMISSIONS:
                 _warn_bypass_unreported()
+            elif (
+                state.effective_mode == "ask"
+                and reported is not None
+                and reported != BYPASS_REPORTED
+            ):
+                logger.error(
+                    "antigravity.permission_mode.mismatch",
+                    source="init",
+                    requested="ask",
+                    reported=reported,
+                )
+                return self._refuse_in_stream(
+                    state, resume, ask_mode_mismatch_message(reported)
+                )
             return None
         if reported is not None and reported not in _WORKSPACE_TOOL_PERMISSIONS:
             logger.error(
@@ -2862,9 +3149,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 detail={"tool_name": tool_name, "input": params},
             )
         if failed:
-            message = (err.message if err and err.message else "tool failed")[
-                :_ERROR_MESSAGE_CHARS
-            ]
+            message = _gate_block_text(
+                err.message if err and err.message else "tool failed"
+            )[:_ERROR_MESSAGE_CHARS]
             detail = dict(action.detail)
             if err is not None and err.type:
                 detail["error_type"] = err.type
@@ -3031,8 +3318,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if task is not None and child:
                 task.ref = child
             if child and state.gate is not None:
-                # P-H8: a child's tool calls reach the gate with its own id.
-                state.gate.add_children([child])
+                # P-H8: a child's tool calls reach the gate with its own id;
+                # Ask me's approval card names the child by its role.
+                state.gate.add_children([child], role=role or type_name or None)
         if failed:
             prefix = f"sub:{idx}:"
             for key, task in state.tasks.items():
@@ -3361,6 +3649,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         usage = self._usage(res, state)
         self._log_timing(res, state)
         resume_token = self._resume_for_completed(state, resume)
+        if state.gate is not None and (gated := state.gate.unattended_usage()):
+            # #835 parity: an unattended Ask me run's gate denials → 🔒 footer.
+            usage = {**usage, "unattended": gated}
         if status == "SUCCESS" and state.effective_mode == "plan":
             answer, usage = self._plan_review(state, answer, usage)
         elif status == "SUCCESS" and state.approved_plan is not None:
@@ -3703,6 +3994,28 @@ def _kept_shell_agent(state: AntigravityStreamState, labels: list[str]) -> bool:
     return any(arg.startswith("--agent=") for arg in state.argv or ())
 
 
+# agy's error on a tool its PreToolUse hook denied (E2, agy 1.3.3).
+_HOOK_DENIED_PREFIX = "tool call denied by pre-tool hook:"
+
+
+def _gate_block_text(message: str) -> str:
+    """#980: a tool Untether's gate blocked reads as that, not as agy's
+    error plus the long reason meant for the model."""
+    if not message.startswith(_HOOK_DENIED_PREFIX):
+        return message
+    from ..antigravity import gate_server
+
+    reason = message[len(_HOOK_DENIED_PREFIX) :].strip()
+    if reason.startswith(gate_server.DENY_TEXT[:40]):
+        return "blocked: denied in Telegram"
+    if reason.startswith("No answer in Telegram within"):
+        return "blocked: no answer in Telegram in time"
+    if reason.startswith("Untether: this is an unattended"):
+        return "blocked: unattended run, nobody to approve"
+    # Another hook's reason (or a question's answer): agy's own words.
+    return message
+
+
 def _add_run_tokens(totals: dict[str, int], usage: agy_schema.StepUsage | None) -> None:
     """#1062: add one model call's usage to the run's own totals, under the
     names ``_usage`` gives the result's."""
@@ -3832,9 +4145,11 @@ def _with_warning_block(evt: CompletedEvent, titles: list[str]) -> CompletedEven
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     """Build an ``AntigravityRunner`` from ``[antigravity]`` config.
 
-    rc1 keys: ``model`` (str), ``cmd`` (str, ``~`` expanded) and
+    Keys: ``model`` (str), ``cmd`` (str, ``~`` expanded),
     ``permission_mode`` (``workspace`` / ``ask`` / ``plan`` / ``full``,
-    validated here; ``full`` warns once). Unknown keys — including PR #766's
+    validated here; ``full`` warns once) and ``approval_timeout_s`` (#980:
+    Ask me's approval wait, 60-3000 s, capped by the gate plugin's own
+    wait). Unknown keys — including PR #766's
     ``dangerously_skip_permissions`` / ``antigravity_cmd`` — are ignored.
     """
     model = config.get("model")
@@ -3889,12 +4204,32 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         )
     if mode == "full":
         _warn_full_access_from_toml(config_path)
+    timeout = config.get("approval_timeout_s")
+    if timeout is not None:
+        from ..antigravity import gate_plugin
+
+        if (
+            not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or not gate_plugin.MIN_WAIT_S <= timeout <= gate_plugin.MAX_WAIT_S
+        ):
+            logger.warning(
+                "antigravity.config.invalid",
+                error="approval_timeout_s out of range",
+                config_path=str(config_path),
+            )
+            raise ConfigError(
+                f"Invalid `antigravity.approval_timeout_s` in {config_path}; "
+                f"expected whole seconds from {gate_plugin.MIN_WAIT_S} to "
+                f"{gate_plugin.MAX_WAIT_S}."
+            )
     cmd = os.path.expanduser(raw_cmd) if raw_cmd else default_antigravity_cmd()
     return AntigravityRunner(
         antigravity_cmd=cmd,
         model=model or None,
         default_permission_mode=mode,
         config_path=config_path,
+        approval_timeout_s=timeout,
     )
 
 

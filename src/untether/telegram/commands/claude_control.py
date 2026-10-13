@@ -9,6 +9,7 @@ from ...interactive.registry import (
     ControlLookup,
     ControlRequestStatus,
     ControlSendResult,
+    Decision,
     HandledControl,
     claim_control_request,
     classify_control_request,
@@ -17,6 +18,7 @@ from ...interactive.registry import (
     new_control_claim_owner,
     on_session_dropped,
     release_control_claims,
+    respond,
     respond_to_control_request,
     session_alive,
 )
@@ -117,6 +119,9 @@ _PRIOR_LABELS: dict[str, str] = {
     "auto": "answered automatically",
     "answer": "answered",
     "timeout": "timed out after 5 min (auto-denied)",
+    # #980: Antigravity's gate has its own deadline.
+    "gate_timeout": "timed out (denied)",
+    "always": "approved (always for this command)",
     "superseded": "replaced by the outlined plan",
 }
 
@@ -131,11 +136,13 @@ def _is_expired(prior: HandledControl | None) -> bool:
     return prior is not None and prior.outcome == "expired"
 
 
-def _toast_for(lookup: ControlLookup, action: str) -> str | None:
+def _toast_for(
+    lookup: ControlLookup, action: str, toasts: dict[str, str] = _EARLY_TOASTS
+) -> str | None:
     """Early toast for a tap on a request in state ``lookup`` (#685)."""
     match lookup.status:
         case ControlRequestStatus.PENDING:
-            return _EARLY_TOASTS.get(action)
+            return toasts.get(action)
         case ControlRequestStatus.CANCELLED:
             return _NO_LONGER_NEEDED_TOAST
         case ControlRequestStatus.NOT_FOUND:
@@ -223,6 +230,33 @@ def _unsent_result(
     return CommandResult(text=_NOT_FOUND_TEXT, notify=True)
 
 
+def _early_toast(
+    args_text: str,
+    toasts: dict[str, str],
+    *,
+    channel_id: int | None,
+    claim_owner: str | None,
+) -> str | None:
+    action, _, request_id = (args_text or "").partition(":")
+    action = action.lower()
+    if action not in toasts or not request_id:
+        return None
+    try:
+        if claim_owner is not None:
+            lookup = claim_control_request(
+                request_id,
+                action=action,
+                owner=claim_owner,
+                channel_id=channel_id,
+            )
+        else:
+            lookup = classify_control_request(request_id, channel_id=channel_id)
+        return _toast_for(lookup, action, toasts)
+    except Exception:  # noqa: BLE001 — a toast must never take out the tap
+        logger.debug("claude_control.early_toast_failed", exc_info=True)
+        return toasts.get(action)
+
+
 def _claim_synthetic(
     ctx: CommandContext, request_id: str, action: str
 ) -> CommandResult | None:
@@ -282,24 +316,9 @@ class ClaudeControlCommand:
         a concurrent second tap then sees it in flight. ``channel_id`` scopes
         the resolved-request lookup (#715). Never raises.
         """
-        action, _, request_id = (args_text or "").partition(":")
-        action = action.lower()
-        if action not in _EARLY_TOASTS or not request_id:
-            return None
-        try:
-            if claim_owner is not None:
-                lookup = claim_control_request(
-                    request_id,
-                    action=action,
-                    owner=claim_owner,
-                    channel_id=channel_id,
-                )
-            else:
-                lookup = classify_control_request(request_id, channel_id=channel_id)
-            return _toast_for(lookup, action)
-        except Exception:  # noqa: BLE001 — a toast must never take out the tap
-            logger.debug("claude_control.early_toast_failed", exc_info=True)
-            return _EARLY_TOASTS.get(action)
+        return _early_toast(
+            args_text, _EARLY_TOASTS, channel_id=channel_id, claim_owner=claim_owner
+        )
 
     @staticmethod
     def release_early_claim(owner: str) -> None:
@@ -639,16 +658,57 @@ class ClaudeControlCommand:
 BACKEND: CommandBackend = ClaudeControlCommand()
 
 
+_IA_TOASTS: dict[str, str] = {**_EARLY_TOASTS, "always": "Always allowed"}
+_ALWAYS_TEXT = (
+    "✅ Approved — this exact command runs without asking for the rest of "
+    "this conversation"
+)
+
+
 class IaControlCommand(ClaudeControlCommand):
     """``ia:<action>:<request_id>`` — the engine-neutral approval buttons of
     a request registered with its own responder (#960; Antigravity's gate,
     #980). Same claim / toast / registry path as Claude's: the request's
-    responder delivers the decision."""
+    responder delivers the decision. ``always`` (Antigravity's "Always allow
+    this command here") approves and tells the responder to remember it."""
 
     id = "ia"
     description = "Handle engine-neutral approval buttons"
     # #1068: buttons only — never in the command menu, typed use is refused.
     callback_only = True
+
+    @staticmethod
+    def early_answer_toast(
+        args_text: str,
+        *,
+        channel_id: int | None = None,
+        claim_owner: str | None = None,
+    ) -> str | None:
+        return _early_toast(
+            args_text, _IA_TOASTS, channel_id=channel_id, claim_owner=claim_owner
+        )
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        action, _, request_id = ctx.args_text.partition(":")
+        if action.lower() != "always" or not request_id:
+            return await super().handle(ctx)
+        channel_id = ctx.message.channel_id
+        sent = await respond(
+            request_id,
+            Decision(approved=True, action="always"),
+            channel_id=channel_id,
+            claim_owner=ctx.callback_query_id,
+        )
+        if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
+            return _unsent_result(sent, request_id, "always", channel_id=channel_id)
+        logger.info(
+            "claude_control.sent",
+            request_id=request_id,
+            approved=True,
+            action="always",
+            tool_name=sent.tool_name,
+        )
+        return CommandResult(text=_ALWAYS_TEXT, notify=True)
 
 
 IA_BACKEND: CommandBackend = IaControlCommand()

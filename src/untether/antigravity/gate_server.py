@@ -5,16 +5,21 @@ is spawned (agy's env names its path), served for the whole run from the
 runner's event loop and closed in the runner's ``finally``. Only agy runs
 Untether starts carry the marker env, so only their hooks connect.
 
-What it answers (phase 13; phase 14's "Ask me" policy builds on the same
-request path):
+What it answers:
 
 - ``PreToolUse`` for ``ask_question`` → the existing question card (option
   buttons + typed answer, :mod:`untether.interactive`); the hook is held
   until the user answers, the request's deadline passes, or the hook goes
   away. The answer reaches the model as a ``deny`` whose reason carries it
-  (E3: agy shows the reason to the model and the turn carries on). Every
-  other tool gets **no decision** (empty reply): agy's own permission check
-  decides, exactly as without the gate.
+  (E3: agy shows the reason to the model and the turn carries on).
+- ``PreToolUse`` for any other tool: in Workspace, Plan first and Full
+  access **no decision** (empty reply) — agy's own permission check decides,
+  exactly as without the gate. In **Ask me** (``required``: agy runs with
+  ``--dangerously-skip-permissions``, phase 14) the gate is the only check:
+  :mod:`gate_policy`'s safe list (reads, in-project edits) gets ``allow``,
+  everything else an approval card (Approve / Deny, and "Always allow this
+  command" for a shell command) and the user's answer; a deny, a timeout or
+  an unattended run blocks the tool.
 - ``PreInvocation`` → the steer queue, drained into ``injectSteps`` (#981).
 - ``Stop`` → whether agy is still waiting for background work (``fullyIdle``).
 
@@ -55,6 +60,7 @@ from ..events import EventFactory
 from ..interactive import (
     AskQuestionState,
     Decision,
+    approval_keyboard,
     expire,
     format_question_message,
     get_question_option_buttons,
@@ -70,7 +76,7 @@ from ..interactive.questions import (
 from ..logging import get_logger
 from ..model import UntetherEvent
 from ..utils.paths import get_run_channel_id
-from . import gate_hook, gate_plugin
+from . import gate_hook, gate_plugin, gate_policy
 
 logger = get_logger(__name__)
 
@@ -113,9 +119,52 @@ TOO_MANY_TEXT = (
     "and state your assumptions."
 )
 DUPLICATE_TEXT = "Untether saw this tool call twice, so it was blocked."
-NO_POLICY_TEXT = (
-    "Untether has no Telegram approval for this tool call, so it was blocked."
+# Phase 14 (Ask me): what agy shows the model when a tool is blocked.
+DENY_TEXT = (
+    "The user denied this in Telegram (Untether). They can't see your tool "
+    "calls — explain in your reply what you were trying to do and ask how to "
+    "proceed. Don't retry the same call."
 )
+TOO_MANY_APPROVALS_TEXT = (
+    "Too many approval requests in a short time, so this one was blocked. "
+    "Don't retry it; say in your reply what you needed it for."
+)
+ALWAYS_LABEL = "✅ Always allow this command here"
+
+
+def timeout_text(wait_s: int) -> str:
+    return (
+        f"No answer in Telegram within {_minutes(wait_s)} — the tool was "
+        "blocked. Don't retry it; say what you needed it for."
+    )
+
+
+def _minutes(wait_s: int) -> str:
+    if wait_s < 120:
+        return f"{wait_s} s"
+    return f"{round(wait_s / 60)} min"
+
+
+def unattended_hint(trigger: str) -> str:
+    """The 🔒 footer's remedy for an unattended Ask me run (#835)."""
+    if trigger.startswith("webhook:"):
+        return (
+            "Ask me needs a person to approve these \N{EM DASH} run it from "
+            "the chat instead"
+        )
+    return (
+        "Ask me needs a person to approve these \N{EM DASH} run it from the "
+        'chat, or set permission_mode = "full" on the cron to allow them'
+    )
+
+
+def _command_sha(args: Any) -> str:
+    """Logs name a granted command by hash only, never its text."""
+    command = args.get("CommandLine") if isinstance(args, dict) else None
+    text = command.strip() if isinstance(command, str) else ""
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
 ANSWER_TAIL = (
     "Use this answer and continue. Do not call ask_question again for this question."
 )
@@ -341,6 +390,9 @@ class GateRun:
         unattended_trigger: str | None = None,
         ask_questions: bool | None = None,
         required: bool = False,
+        project_root: Path | None = None,
+        diff_preview: bool | None = None,
+        channel_id: int | None = None,
     ) -> None:
         self.key = secrets.token_hex(6)
         self.session_key = f"agy-gate:{self.key}"
@@ -350,15 +402,25 @@ class GateRun:
         self.wait_s = int(wait_s)
         self.unattended_trigger = unattended_trigger
         self.ask_questions = ask_questions
-        # Phase 14: a gated mode whose safety rests on the gate. Liveness
-        # and tripwire failures stop the run only then.
+        # Phase 14 (Ask me): agy runs with the bypass flag and this gate is
+        # the only check. Liveness and tripwire failures stop the run only
+        # then, and only then does the approval policy answer tools.
         self.required = required
+        self.project_root = project_root
+        self.diff_preview = diff_preview
+        self.channel_id = channel_id
+        # Unattended Ask me (trigger-level ``ask``): what the gate denied,
+        # for the final's 🔒 footer (#835 parity).
+        self.unattended_denials: list[str] = []
         self.sock_path: Path | None = None
         self._listener: Any = None
         self._send: Any = None
         self.conversation_id: str | None = None
         self._conversation_known = anyio.Event()
         self.children: set[str] = set()
+        # P-H8: a child's tool calls reach the gate with its own id; the
+        # card names the subagent's role.
+        self.child_roles: dict[str, str] = {}
         self._held: dict[str, _Held] = {}
         self.steer_queue: deque[SteerItem] = deque()
         self.injected: deque[SteerItem] = deque()
@@ -465,8 +527,13 @@ class GateRun:
         _BY_CONVERSATION[conversation_id] = self
         self._conversation_known.set()
 
-    def add_children(self, ids: list[str]) -> None:
-        self.children.update(i for i in ids if i)
+    def add_children(self, ids: list[str], role: str | None = None) -> None:
+        for child in ids:
+            if not child:
+                continue
+            self.children.add(child)
+            if role:
+                self.child_roles[child] = role
 
     def note_result(self) -> None:
         """agy's result arrived: nothing more can be injected."""
@@ -724,23 +791,275 @@ class GateRun:
             self._tool_requests.add(key)
             if cid == self.conversation_id:
                 self._tool_steps.pop(step, None)
-        if self.required and (not own or tool != "ask_question"):
-            # Fail closed: a run whose safety rests on the gate (phase 14,
-            # under bypass) gets no "no decision" from it — empty output
-            # would let agy run the tool. Phase 14's policy answers these.
-            logger.warning(
-                "antigravity.gate.no_policy",
-                run=self.key,
-                tool=tool[:60],
-                foreign=not own,
-            )
-            return {"decision": "deny", "reason": NO_POLICY_TEXT}
-        if tool != "ask_question" or not own:
-            # Phase 13: no policy on other tools — agy's own check decides
-            # (Workspace / Plan first: agy's permission check; Full access:
-            # the user approved every tool).
+        if tool == "ask_question" and own:
+            return await self._ask(call.get("args"), step, stream)
+        if not self.required:
+            # No policy on other tools — agy's own check decides (Workspace /
+            # Plan first: agy's permission check; Full access: the user
+            # approved every tool).
             return {}
-        return await self._ask(call.get("args"), step, stream)
+        # Ask me: agy runs with the bypass flag, so an empty reply would let
+        # the tool run. Every tool gets an explicit answer (D22.3).
+        return await self._policy(
+            tool, call.get("args"), payload, step, cid, own, stream
+        )
+
+    async def _policy(
+        self,
+        tool: str,
+        args: Any,
+        payload: dict[str, Any],
+        step: Any,
+        cid: Any,
+        own: bool,
+        stream: Any,
+    ) -> dict[str, Any] | None:
+        verdict = (
+            gate_policy.classify(
+                tool,
+                args,
+                root=self.project_root,
+                conversation_id=cid if isinstance(cid, str) else None,
+                workspace_paths=payload.get("workspacePaths"),
+                diff_preview=self.diff_preview,
+            )
+            if own
+            # A conversation Untether didn't start (13 §5): never on the
+            # safe list.
+            else gate_policy.Verdict(False, "foreign")
+        )
+        if verdict.allow:
+            self._decision_log("allow", "policy", step, tool=tool, source="policy")
+            return {"decision": "allow"}
+        if own and tool == "send_message" and self._internal_message(args):
+            # A subagent reporting to its parent (or the parent writing to
+            # its own child): agent-internal, nothing runs.
+            self._decision_log("allow", "policy", step, tool=tool, source="internal")
+            return {"decision": "allow"}
+        label = gate_policy.tool_label(tool, args)
+        if self.unattended_trigger is not None:
+            return await self._unattended_deny(tool, label, step)
+        if (
+            tool == "run_command"
+            and own
+            and gate_policy.granted(self.channel_id, self.conversation_id, args)
+        ):
+            self._decision_log("allow", "approval", step, tool=tool, source="always")
+            return {"decision": "allow"}
+        return await self._approve(tool, args, verdict, step, cid, own, stream)
+
+    def _internal_message(self, args: Any) -> bool:
+        recipient = args.get("Recipient") if isinstance(args, dict) else None
+        return isinstance(recipient, str) and (
+            recipient == self.conversation_id or recipient in self.children
+        )
+
+    async def _unattended_deny(
+        self, tool: str, label: str, step: Any
+    ) -> dict[str, Any]:
+        """#835 parity: a cron / webhook run has nobody to tap Approve, so
+        the tool is denied at once and counted for the 🔒 footer."""
+        trigger = self.unattended_trigger or "?"
+        self.unattended_denials.append(label)
+        self._decision_log("deny", "approval", step, tool=tool, source="unattended")
+        logger.warning(
+            "permission.unattended_deny",
+            engine=ENGINE,
+            tool_name=tool[:60],
+            trigger_source=trigger,
+            session_id=self.conversation_id,
+            permission_mode="ask",
+            reason="approval",
+            turn_denials=len(self.unattended_denials),
+        )
+        if len(self.unattended_denials) == 1:
+            title = f"\N{LOCK} Unattended run — denied {label}: nobody to approve it"
+            action_id = f"antigravity.unattended_deny.{self.key}"
+            detail = {"trigger": trigger, "tool_name": tool, "reason": "approval"}
+            await self._emit(
+                self.factory.action_started(
+                    action_id=action_id, kind="note", title=title, detail=detail
+                ),
+                self.factory.action_completed(
+                    action_id=action_id,
+                    kind="note",
+                    title=title,
+                    ok=True,
+                    level="warning",
+                    detail=detail,
+                ),
+            )
+        return {
+            "decision": "deny",
+            "reason": unattended_deny_message(trigger, label, "approval"),
+        }
+
+    def unattended_usage(self) -> dict[str, Any] | None:
+        """``usage["unattended"]`` for the final's 🔒 footer, or None."""
+        if self.unattended_trigger is None or not self.unattended_denials:
+            return None
+        denied: dict[str, int] = {}
+        for label in self.unattended_denials:
+            denied[label] = denied.get(label, 0) + 1
+        return {
+            "trigger": self.unattended_trigger,
+            "mode": "ask",
+            "denied": denied,
+            "hint": unattended_hint(self.unattended_trigger),
+        }
+
+    async def _approve(
+        self,
+        tool: str,
+        args: Any,
+        verdict: gate_policy.Verdict,
+        step: Any,
+        cid: Any,
+        own: bool,
+        stream: Any,
+    ) -> dict[str, Any] | None:
+        """The approval card (phase 14 §4): held until Approve / Deny, the
+        deadline, or the hook going away."""
+        if not self._cards_left():
+            self._decision_log("deny", "approval", step, tool=tool, source="rate")
+            return {"decision": "deny", "reason": TOO_MANY_APPROVALS_TEXT}
+        request_id = f"agy_{secrets.token_hex(6)}"
+        action_id = f"antigravity.approval.{request_id}"
+        tool_input = args if isinstance(args, dict) else {}
+        register(
+            request_id,
+            session_key=self.session_key,
+            responder=RESPONDER,
+            tool_name=tool,
+            tool_input=tool_input,
+            kind="tool",
+        )
+        child_role = (
+            self.child_roles.get(cid) or "subagent"
+            if own and isinstance(cid, str) and cid != self.conversation_id
+            else None
+        )
+        title = gate_policy.card_title(
+            tool,
+            args,
+            verdict,
+            root=self.project_root,
+            child_role=child_role,
+            foreign=not own,
+        )
+        buttons = approval_keyboard(request_id)
+        if tool == "run_command" and own and gate_policy._grant_key(args) is not None:
+            buttons.append(
+                [
+                    {
+                        "text": ALWAYS_LABEL,
+                        "callback_data": f"{CALLBACK_PREFIX}:always:{request_id}",
+                    }
+                ]
+            )
+        held = _Held(request_id=request_id, action_id=action_id)
+        self._held[request_id] = held
+        label = gate_policy.tool_label(tool, args)
+        await self._emit(
+            self.factory.action_started(
+                action_id=action_id,
+                kind="warning",
+                title=title,
+                detail={
+                    "request_id": request_id,
+                    "request_type": "PreToolUse",
+                    "tool_name": tool,
+                    "inline_keyboard": {"buttons": buttons},
+                },
+            )
+        )
+        logger.info(
+            "antigravity.gate.card",
+            run=self.key,
+            request_id=request_id,
+            tool=tool[:60],
+            why=verdict.why,
+            child=child_role is not None,
+            foreign=not own,
+        )
+        settled = False
+        try:
+            await self._wait(held, stream)
+            if held.decision is None and not held.gone:
+                # Deadline. A tap writing its answer right now wins.
+                if expire(request_id, action="gate_timeout"):
+                    settled = True
+                else:
+                    with anyio.move_on_after(_LATE_TAP_GRACE_S):
+                        await held.decided.wait()
+            settled = True
+            decision = held.decision
+            if decision is not None and decision.approved:
+                source = "user"
+                if (
+                    decision.action == "always"
+                    and own
+                    and tool == "run_command"
+                    and gate_policy.grant(
+                        self.channel_id, self.conversation_id or "", args
+                    )
+                ):
+                    source = "always"
+                    logger.info(
+                        "antigravity.gate.always_granted",
+                        run=self.key,
+                        command_sha=_command_sha(args),
+                    )
+                self._decision_log("allow", "approval", step, tool=tool, source=source)
+                done = "✅ Always allowed" if source == "always" else "✅ Approved"
+                await self._card_done(
+                    action_id, f"{done}: {label}", ok=True, request_id=request_id
+                )
+                return {"decision": "allow"}
+            if decision is not None:
+                self._decision_log("deny", "approval", step, tool=tool, source="user")
+                await self._card_done(
+                    action_id, f"❌ Denied: {label}", ok=False, request_id=request_id
+                )
+                return {"decision": "deny", "reason": DENY_TEXT}
+            if held.gone:
+                withdraw(request_id)
+                logger.info(
+                    "antigravity.gate.withdrawn", run=self.key, request_id=request_id
+                )
+                await self._card_done(
+                    action_id,
+                    f"⏹️ Withdrawn — agy stopped waiting: {label}",
+                    ok=False,
+                    request_id=request_id,
+                )
+                return None
+            self._decision_log("deny", "approval", step, tool=tool, source="timeout")
+            await self._card_done(
+                action_id,
+                f"⏱️ Timed out: denied after {_minutes(self.wait_s)} — {label}",
+                ok=False,
+                request_id=request_id,
+            )
+            return {"decision": "deny", "reason": timeout_text(self.wait_s)}
+        finally:
+            self._held.pop(request_id, None)
+            if not settled:
+                # Cancelled (the run ended under it): no tap can land now.
+                withdraw(request_id)
+
+    async def _card_done(
+        self, action_id: str, title: str, *, ok: bool, request_id: str
+    ) -> None:
+        await self._emit(
+            self.factory.action_completed(
+                action_id=action_id,
+                kind="warning",
+                title=title,
+                ok=ok,
+                detail={"request_id": request_id},
+            )
+        )
 
     def _cards_left(self) -> bool:
         now = time.monotonic()
@@ -751,13 +1070,22 @@ class GateRun:
         self._card_times.append(now)
         return True
 
-    def _decision_log(self, decision: str, kind: str, step: Any) -> None:
+    def _decision_log(
+        self,
+        decision: str,
+        kind: str,
+        step: Any,
+        *,
+        tool: str = "ask_question",
+        source: str | None = None,
+    ) -> None:
         logger.info(
             "antigravity.gate.decision",
             run=self.key,
             decision=decision,
             kind=kind,
-            tool="ask_question",
+            tool=tool[:60],
+            source=source,
             step=step if isinstance(step, int) else None,
         )
 

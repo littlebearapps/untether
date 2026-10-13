@@ -22,6 +22,11 @@ replayed faithfully::
     hook:<Event>:<json>  run the gate plugin's real hook command (#980,
                          see ``_hook``); ``hook:inject_at:<n>`` numbers
                          the ``user_input`` steps an injection adds
+    allowed:<json line>  write to stdout only when the last PreToolUse hook
+                         answered ``allow`` (Ask me, phase 14)
+    denied:<json line>   … only when it answered ``deny`` (or nothing, which
+                         agy treats as blocked under a crashed hook);
+                         ``__REASON__`` → the deny reason, JSON-escaped
     wait_go:             wait (≤ 10 s) for the file ``UNTETHER_FAKE_AGY_GO``
     rc:<int>             exit code (last line)
 
@@ -158,6 +163,8 @@ def _slash(argv: list[str]) -> int:
 
 
 _inject_step = 0
+# The last PreToolUse hook's answer (``allowed:`` / ``denied:`` lines).
+_last_tool_out: dict = {}
 
 
 def _hook(payload: str) -> None:
@@ -168,7 +175,7 @@ def _hook(payload: str) -> None:
     appended to ``UNTETHER_FAKE_AGY_HOOK_LOG`` as ``{event, rc, out}``. A
     ``PreInvocation`` answer with ``injectSteps`` emits one ``user_input``
     step per message, numbered from ``inject_at:<n>`` (P-H10)."""
-    global _inject_step
+    global _inject_step, _last_tool_out
     import subprocess
 
     event, _, body = payload.partition(":")
@@ -185,7 +192,9 @@ def _hook(payload: str) -> None:
         for entry in group.get(event, [])
         for hook in entry.get("hooks", [entry])
     ]
-    stdin = body.replace("__CID__", _conversation_id)
+    stdin = body.replace("__CID__", _conversation_id).replace(
+        "__CWD__", json.dumps(os.getcwd())[1:-1]
+    )
     for command in commands:
         proc = subprocess.run(
             ["sh", "-c", command],
@@ -202,6 +211,12 @@ def _hook(payload: str) -> None:
                     json.dumps({"event": event, "rc": proc.returncode, "out": out})
                     + "\n"
                 )
+        if event == "PreToolUse":
+            try:
+                parsed = json.loads(out) if out.strip() else {}
+            except ValueError:
+                parsed = {}
+            _last_tool_out = parsed if isinstance(parsed, dict) else {}
         if event == "PreInvocation" and out.strip():
             for _step in json.loads(out).get("injectSteps", []):
                 _out(
@@ -242,7 +257,8 @@ def main(argv: list[str]) -> int:
     for raw in Path(script_path).read_text(encoding="utf-8").splitlines():
         kind, _, payload = raw.partition(":")
         if kind == "out":
-            _out(payload)
+            # ``__CWD__``: the project folder (Ask me fixtures, phase 14).
+            _out(payload.replace("__CWD__", json.dumps(os.getcwd())[1:-1]))
         elif kind == "err":
             _err(payload)
         elif kind == "sleep":
@@ -268,6 +284,13 @@ def main(argv: list[str]) -> int:
                 Path(pidfile).write_text(str(child.pid))
         elif kind == "hook":
             _hook(payload)
+        elif kind == "allowed":
+            if _last_tool_out.get("decision") == "allow":
+                _out(payload.replace("__CWD__", json.dumps(os.getcwd())[1:-1]))
+        elif kind == "denied":
+            if _last_tool_out.get("decision") != "allow":
+                reason = str(_last_tool_out.get("reason") or "")
+                _out(payload.replace("__REASON__", json.dumps(reason)[1:-1]))
         elif kind == "wait_go":
             # Until the test touches UNTETHER_FAKE_AGY_GO (bounded).
             go = os.environ.get("UNTETHER_FAKE_AGY_GO")

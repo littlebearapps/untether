@@ -273,7 +273,7 @@ def test_meta_permission_label_each_mode(mode: str | None, label: str) -> None:
     assert format_meta_line(started.meta) == f"gemini-3.8-flash · {label}"
 
 
-# ── refusal of Ask me (Plan first runs since #981) ─────────────────────────
+# ── Ask me with no gate plugin on the host (#980) ─────────────────────────
 
 
 @pytest.mark.anyio
@@ -294,7 +294,8 @@ async def test_ask_refused_before_spawn(
     assert isinstance(done, CompletedEvent) and done.ok is False
     assert done.usage == {PRESPAWN_BLOCKED_KEY: "gate_missing"}
     assert label in (done.error or "")
-    assert "Workspace or Full access" in (done.error or "")
+    assert "untether agy-gate install" in (done.error or "")
+    assert "Workspace and Full access still work" in (done.error or "")
     assert not record.exists()
 
 

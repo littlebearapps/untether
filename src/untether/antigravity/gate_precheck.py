@@ -284,6 +284,7 @@ def clear_cache(cwd: Path | None = None) -> None:
     if cwd is None:
         _CACHE.clear()
         _LATEST.clear()
+        _MCP_CACHE.clear()
         return
     key = str(cwd)
     for k in [k for k in _CACHE if k[3] == key]:
@@ -328,6 +329,101 @@ def _remember(cwd: Path, result: GatePrecheck) -> GatePrecheck:
             cwd=str(cwd),
         )
     return result
+
+
+USER_MCP_KEY = f"{antigravity_scan.USER_DISPLAY_PREFIX}mcp_config.json"
+USER_HOOKS_KEY = f"{antigravity_scan.USER_DISPLAY_PREFIX}hooks.json"
+MCP_LIST_TIMEOUT_S = 15.0
+_NO_MCP_SERVERS = "No MCP servers configured."
+_MCP_CACHE: dict[tuple[Any, ...], bool] = {}
+
+
+async def _run_mcp_list(runner: AntigravityRunner) -> str | None:
+    """``agy mcp list`` (agy's own listing of user-level MCP servers; no
+    model call, ≈ 0.5 s). Its stdout, or None when it failed."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    from ..utils.subprocess import manage_subprocess
+
+    env = runner.env(state=None)
+    if env is not None:
+        env = {k: v for k, v in env.items() if not k.startswith("UNTETHER_AGY_GATE")}
+    folder = tempfile.mkdtemp(prefix="untether-agy-")
+    out = bytearray()
+    try:
+        with anyio.fail_after(MCP_LIST_TIMEOUT_S):
+            async with manage_subprocess(
+                [runner.command(), "mcp", "list"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                cwd=folder,
+            ) as proc:
+                assert proc.stdout is not None
+                async for chunk in proc.stdout:
+                    out.extend(chunk[: max(0, 65536 - len(out))])
+                rc = await proc.wait()
+    except (TimeoutError, OSError):
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return out.decode("utf-8", errors="replace") if rc == 0 else None
+
+
+# Indirection so tests stub it without a real agy.
+_probe_mcp: Callable[[AntigravityRunner], Awaitable[str | None]] = _run_mcp_list
+
+
+async def user_mcp_configured(runner: AntigravityRunner) -> bool:
+    """Whether agy has user-level MCP servers. The scanner only stats
+    ``~/.gemini/config/mcp_config.json`` (D33: never read), and an existing
+    file says nothing about servers (lba-1 has an empty one), so agy's own
+    ``agy mcp list`` decides. Fails closed: an error counts as "has some"."""
+    from ..runners import antigravity as agy_runner
+
+    cmd = runner.command()
+    key = (
+        cmd,
+        agy_runner.cached_agy_version(cmd),
+        _stat_key(antigravity_scan.user_config_dir() / "mcp_config.json"),
+    )
+    hit = _MCP_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = await _probe_mcp(runner)
+    configured = out is None or out.strip() != _NO_MCP_SERVERS
+    if out is not None:
+        _MCP_CACHE[key] = configured
+    logger.info(
+        "antigravity.gate.user_mcp", configured=configured, checked=out is not None
+    )
+    return configured
+
+
+async def foreign_config(
+    runner: AntigravityRunner,
+    result: GatePrecheck,
+    scan: antigravity_scan.ScanResult | None,
+) -> tuple[str, ...]:
+    """Config that runs commands outside the gate and that Untether doesn't
+    manage, in scope for this run (REVIEW-2 B2, D34): every other hook group
+    agy lists (``-p /hooks``, any event), and every file of the planted-config
+    scan — the project's ``.agents/`` hooks, plugins, MCP servers and agents,
+    and agy's user-level plugins and agents. Two user-level files are judged
+    by agy itself instead of by their presence: ``hooks.json`` (its groups
+    are in the ``-p /hooks`` listing) and ``mcp_config.json``
+    (:func:`user_mcp_configured`)."""
+    found = set(result.foreign_sources)
+    for path in scan.agy if scan is not None else ():
+        if path == USER_HOOKS_KEY:
+            continue
+        if path == USER_MCP_KEY and not await user_mcp_configured(runner):
+            continue
+        found.add(path)
+    return tuple(sorted(found))
 
 
 async def check(

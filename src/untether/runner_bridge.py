@@ -6595,9 +6595,19 @@ _STALE_RESUME_HINT = (
 # error header, code block or footers, and ``session.summary.no_events`` at
 # INFO, since nothing was meant to start. Antigravity's ``/continue`` with no
 # conversation of this project's own to resume (#1039) is an answer, not a
-# failure. The other pre-spawn refusals (RAM, concurrency, OpenCode 2.x,
-# Antigravity's other blocks) still render as an error card.
-_PLAIN_PRESPAWN_BLOCKS = frozenset({"continue_unresolved"})
+# failure; so is an Antigravity "Ask me" run refused because Telegram
+# approvals aren't ready for the project (#980: the text says what to do).
+# The other pre-spawn refusals (RAM, concurrency, OpenCode 2.x, Antigravity's
+# other blocks) still render as an error card.
+_PLAIN_PRESPAWN_BLOCKS = frozenset(
+    {
+        "continue_unresolved",
+        "gate_missing",
+        "gate_not_ready",
+        "gate_foreign_config",
+        "gate_self_protect",
+    }
+)
 
 
 def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
