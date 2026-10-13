@@ -969,10 +969,12 @@ def _value_text(value: Any) -> str:
         return repr(value)
 
 
-def _arg_line(key: str, value: Any, *, budget: int, flag: bool = False) -> str:
+def _arg_line(
+    key: str, value: Any, *, budget: int, flag: bool = False, bullet: str = "•"
+) -> str:
     """``• key = value`` with the value in full (see :func:`_block`)."""
     name = escape_markdown(_short(str(key), 60))
-    head = f"⚠️ • {name} =" if flag else f"• {name} ="
+    head = f"⚠️ {bullet} {name} =" if flag else f"{bullet} {name} ="
     if _secret_key(str(key)):
         # Kept out of Telegram, but never silently: the card says why.
         return (
@@ -987,6 +989,7 @@ def _args_lines(
     *,
     budget: int,
     flagged: frozenset[str] = frozenset(),
+    bullet: str = "•",
 ) -> list[str]:
     """Each argument in full while *budget* (characters) lasts; then a ⚠️
     line naming every argument that isn't shown."""
@@ -1001,7 +1004,7 @@ def _args_lines(
                 f"not shown ({names}) — Deny unless you know what they do"
             )
             break
-        line = _arg_line(key, value, budget=left, flag=key in flagged)
+        line = _arg_line(key, value, budget=left, flag=key in flagged, bullet=bullet)
         left -= len(line)
         lines.append(line)
     return lines
@@ -1083,7 +1086,14 @@ def _other_args(tool: str, args: dict[str, Any], shown: frozenset[str]) -> list[
     own = _RUN_COMMAND_KEYS if tool == "run_command" else _SAFE_KEYS.get(tool)
     flagged = frozenset(str(key) for key, _ in items if key not in (own or _KNOWN_KEYS))
     items.sort(key=lambda item: 0 if item[0] in flagged else 1)
-    return _args_lines(items, budget=_EXTRA_ARGS_BUDGET_CHARS, flagged=flagged)
+    # #1080: "⚙️", not "•": the renderer turns a "•" line into "- ", which
+    # under a diff's "+ x" read as a removed line.
+    return _args_lines(
+        items, budget=_EXTRA_ARGS_BUDGET_CHARS, flagged=flagged, bullet=_GEAR
+    )
+
+
+_GEAR = "\N{GEAR}\N{VARIATION SELECTOR-16}"
 
 
 _COMMAND_SHOWN = frozenset({"CommandLine", "Cwd", "WaitMsBeforeAsync", "IsDaemon"})

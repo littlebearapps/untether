@@ -973,11 +973,53 @@ PLUGIN_OUTDATED_ROW = (
 )
 
 
-def plugin_outdated_message() -> str:
+def gate_plugin_outdated(install: Any) -> bool:
+    """Installed by Untether and unedited, and byte-identical to what an
+    earlier Untether wrote (an upgrade changed the templates: run ``untether
+    agy-gate install``). Files changed together with their record never
+    count: they get the "changed" wording."""
     return (
-        "Untether's agy plugin (untether-gate) is from another Untether "
-        "version, so this scheduled run is held. Run `untether agy-gate "
-        "install` on the host; the schedule runs again after that."
+        install.present
+        and install.managed
+        and not install.edited
+        and install.problem is None
+        and not install.current
+        and getattr(install, "previous_version", None) is not None
+    )
+
+
+def gate_plugin_changed(install: Any) -> bool:
+    """A present plugin folder that isn't byte-for-byte what this Untether
+    installed (``gate_plugin.InstallState``; fail closed)."""
+    return install.present and (
+        not install.managed
+        or bool(install.edited)
+        or install.problem is not None
+        or not install.current
+    )
+
+
+def gate_plugin_held_message(install: Any) -> str:
+    """#1078: a scheduled run held because Untether's agy plugin isn't the
+    one it installed. Unlike a changed workspace config, a chat message
+    doesn't clear this hold: every unattended run stays held until the
+    plugin is reinstalled."""
+    if gate_plugin_outdated(install):
+        return (
+            "Untether's agy plugin (untether-gate) is from another Untether "
+            "version, so this scheduled run is held. Scheduled Antigravity runs "
+            "stay held until you run `untether agy-gate install` on the host; a "
+            "message in the chat doesn't release them."
+        )
+    force = not install.managed or bool(install.edited) or install.problem is not None
+    command = "untether agy-gate install" + (" --force" if force else "")
+    return (
+        "Untether's agy plugin (untether-gate) isn't what Untether installed "
+        f"({install.summary()}), so this scheduled run is held. Its hooks run "
+        "in every agy session on this host, so scheduled Antigravity runs stay "
+        "held until the plugin is restored; a message in the chat doesn't "
+        f"release them. Check what changed in {install.path}, then run "
+        f"`{command}` on the host."
     )
 
 
@@ -1324,6 +1366,43 @@ class AntigravityStreamState:
     gate_liveness_logged: bool = False
     # #980 phase 14: how this run started (``decide_antigravity_mode``).
     decision: ModeDecision | None = None
+    # #1080: parent tool steps waiting on an Ask me approval card, and the
+    # wait each held command had before it counts as background.
+    approval_steps: set[int] = field(default_factory=set)
+    approval_held: dict[str, float | None] = field(default_factory=dict)
+
+    def note_approval_wait(self, step: int, waiting: bool) -> None:
+        """#1080: a step waiting on an approval card isn't background work —
+        agy hasn't run it yet. Its rows stay out of the ⏳ block until the
+        card is answered, and their clocks start then (``GateRun``)."""
+        if waiting:
+            self.approval_steps.add(step)
+        else:
+            self.approval_steps.discard(step)
+        now = time.monotonic()
+        for key, task in self.tasks.items():
+            if task.status != "running" or not (
+                key in (f"cmd:{step}", f"timer:{step}")
+                or key.startswith(f"sub:{step}:")
+            ):
+                continue
+            if waiting:
+                self.hold_for_approval(task)
+            elif key in self.approval_held:
+                offset = self.approval_held.pop(key)
+                task.started_at = now
+                task.background_from = None if offset is None else now + offset
+        if not waiting and step in self.bg_steps:
+            self.bg_steps[step] = now
+
+    def hold_for_approval(self, task: EngineBackgroundTask) -> None:
+        if task.task_id in self.approval_held:
+            return
+        start = task.background_from
+        self.approval_held[task.task_id] = (
+            None if start is None else max(0.0, start - task.started_at)
+        )
+        task.background_from = float("inf")
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -1825,9 +1904,19 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     paths=paths[:20],
                     digest=scan.agy_digest[:12],
                 )
+                from ..antigravity import gate_plugin
+
+                # #1078: when the change includes Untether's own plugin, a
+                # chat message doesn't release the hold (``_gate_setup``
+                # keeps holding until it is reinstalled), so say that.
+                install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=config_changed_message(paths),
+                        error=(
+                            gate_plugin_held_message(install)
+                            if gate_plugin_changed(install)
+                            else config_changed_message(paths)
+                        ),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
@@ -1967,12 +2056,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return None, None, decision
         options = get_run_options()
         trigger = options.unattended_trigger if options is not None else None
-        if (
-            not install.managed
-            or install.edited
-            or install.problem is not None
-            or not install.current
-        ):
+        if gate_plugin_changed(install):
             # Fail closed: only files byte-identical to this version's own
             # templates count as Untether's. A manifest whose hashes match an
             # edited hooks.json proves nothing (whatever rewrote one could
@@ -1984,18 +2068,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 path=str(install.path),
                 trigger=trigger,
             )
-            outdated = (
-                install.managed
-                and not install.edited
-                and install.problem is None
-                and not install.current
-            )
+            outdated = gate_plugin_outdated(install)
             if trigger is not None:
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=plugin_outdated_message()
-                        if outdated
-                        else config_changed_message([str(install.path)]),
+                        error=gate_plugin_held_message(install),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
@@ -2359,6 +2436,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
             return
         gate.on_fatal = lambda kind: self._gate_kill(state, kind)
+        gate.on_approval_wait = state.note_approval_wait  # #1080
         # Security review 3 L1: hook connections must come from below agy.
         gate.agy_pid = pid
         send, receive = anyio.create_memory_object_stream[UntetherEvent](64)
@@ -3253,9 +3331,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         failed = su.state == "ERROR" or (
             err is not None and bool(err.message or err.type)
         )
+        end_status = _task_end_status(failed, err)
         if idx is not None:
             state.bg_steps.pop(idx, None)
-            self._task_step_ended(state, idx, status=_task_end_status(failed, err))
+            self._task_step_ended(state, idx, status=end_status)
             if su.state == "ERROR":
                 self._track_subagents(state, idx, [], failed=True)
         if tool_name == "run_command":
@@ -3277,6 +3356,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             detail = dict(action.detail)
             if err is not None and err.type:
                 detail["error_type"] = err.type
+            if end_status == "stopped":
+                # #1062: a step agy stopped (a ``manage_task`` kill) reads
+                # ⏹️ on its row, not ✗; the ⏳ block lists only live tasks.
+                detail["stopped"] = True
             action = Action(
                 id=action.id, kind=action.kind, title=action.title, detail=detail
             )
@@ -3383,6 +3466,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._track_subagents(state, idx, _subagent_specs(params, None))
         elif tool_name == "manage_task" and params.get("Action") == "kill":
             self._task_killed(state, params.get("TaskId"))
+        if idx in state.approval_steps:
+            # #1080: the card came before the step's ACTIVE line.
+            state.note_approval_wait(idx, True)
 
     @staticmethod
     def _task_killed(state: AntigravityStreamState, task_id: Any) -> None:
@@ -3474,7 +3560,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if step >= idx:
                 continue
             task = state.tasks.get(f"cmd:{step}")
-            if task is not None and not task.is_backgrounded:
+            if (
+                task is not None
+                and not task.is_backgrounded
+                and step not in state.approval_steps  # #1080
+            ):
                 task.background_from = None
 
     @staticmethod

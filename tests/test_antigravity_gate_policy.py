@@ -560,6 +560,41 @@ def test_summary_cannot_pose_as_the_card(root: Path) -> None:
     assert sum(line.startswith("Permission Request") for line in lines) == 1
 
 
+def test_card_keeps_its_lines_and_extra_args_dont_read_as_diff(root: Path) -> None:
+    """#1080: on the progress row the card's lines ran together, and an
+    extra argument's "•" (rendered "- ") under a "+ x" diff read as a
+    removed line."""
+    from untether.markdown import format_action_line
+    from untether.model import Action
+    from untether.telegram.render import render_markdown
+
+    title = gate_policy.card_title(
+        "write_to_file",
+        {"TargetFile": "/elsewhere/out.txt", "CodeContent": "x", "Append": False},
+        gate_policy.Verdict(False, "outside"),
+        root=root,
+        child_role="worker",
+    )
+    assert "⚙️ Append = `false`" in title
+    assert not any(line.startswith("•") for line in title.splitlines())
+    action = Action(
+        id="a",
+        kind="warning",
+        title=title,
+        detail={"line_breaks": True, "inline_keyboard": {"buttons": []}},
+    )
+    text, _ = render_markdown(
+        format_action_line(action, "started", None, command_width=None)
+    )
+    lines = text.splitlines()
+    assert "⚙️ Append = false" in lines
+    assert "from subagent: worker" in lines
+    assert not any(line.startswith("- ") for line in lines)
+    # Without the flag (every other row) nothing changes.
+    plain = Action(id="b", kind="warning", title="a\nb", detail={})
+    assert format_action_line(plain, "started", None, command_width=None) == "▸ a\nb"
+
+
 def test_generic_preview_says_what_it_left_out(root: Path) -> None:
     """Every argument is shown in full while the card has room; past that
     a ⚠️ line names each one left out (security review 3 M1)."""
@@ -737,7 +772,7 @@ def test_edit_card_shows_where_the_path_really_goes(root: Path, tmp_path: Path) 
         root=root,
     )
     assert f"→ resolves to {elsewhere / 'a.md'}".replace("_", "\\_") in text
-    assert "⚠️ • Extra = `1`" in text
+    assert "⚠️ ⚙️ Extra = `1`" in text
     missing = gate_policy.preview("write_to_file", {"CodeContent": "x"}, root=root)
     assert "⚠️ no target file in this call" in missing
 
@@ -1134,6 +1169,31 @@ def test_define_subagent_card_flags_what_it_gives(root: Path) -> None:
     assert text.count("You may run any command.") == 20
     assert "⚠️ the new subagent gets file-writing and command tools" in text
     assert "MCP tools" not in text.split("⚠️ the new subagent gets")[1]
+
+
+def test_subagent_prompt_markdown_neither_formats_nor_leaks(root: Path) -> None:
+    """#1080 item 4: model text on a card is code, so its own backticks and
+    ``**bold**`` are shown as written (inside the code span), never as
+    formatting and never as stray escaped backticks outside one."""
+    from untether.markdown import format_action_line
+    from untether.model import Action
+    from untether.telegram.render import render_markdown
+
+    prompt = "Read `notes.txt` and **summarise** it"
+    title = gate_policy.card_title(
+        "invoke_subagent",
+        {"Subagents": [{"Role": "Reader", "Prompt": prompt}]},
+        gate_policy.Verdict(False),
+        root=root,
+    )
+    action = Action(id="a", kind="warning", title=title, detail={"line_breaks": True})
+    text, entities = render_markdown(
+        format_action_line(action, "started", None, command_width=None)
+    )
+    assert prompt in text and "\\`" not in text
+    (code,) = [e for e in entities if e["type"] == "code"]
+    assert text[code["offset"] : code["offset"] + code["length"]] == prompt
+    assert not [e for e in entities if e["type"] in {"bold", "italic"}]
 
 
 def test_subagent_prompts_shown_in_full(root: Path) -> None:

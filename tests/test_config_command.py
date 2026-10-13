@@ -1069,6 +1069,9 @@ class TestAntigravityPermissionPage:
         msg = _last_edit_msg(ctx)
         text = msg.text
         assert "<b>📋 Permission mode</b>" in text
+        # #1080: Ask me does ask mid-run.
+        assert "can't stop mid-run to ask you" not in text
+        assert "in Ask me what it asks you about first in Telegram" in text
         assert "Not a sandbox" in text
         assert "read-only" not in text.lower()
         assert "--dangerously-skip-permissions" in text
@@ -1225,19 +1228,19 @@ class TestAntigravityPermissionPage:
         # agent) and Ask me / Full access (agy's default agent) needs /new.
         assert toast("pm:agw") == (
             "Permission mode: workspace — send /new if you're switching from Full"
-            " access or Ask me"
+            " access or Ask me (not from Plan first)"
         )
         assert toast("pm:agp") == (
             "Permission mode: plan first — send /new if you're switching from Full"
-            " access or Ask me"
+            " access or Ask me (not from Workspace)"
         )
         assert toast("pm:agf") == (
             "Permission mode: full access — send /new if you're switching from"
-            " Workspace or Plan first"
+            " Workspace or Plan first (not from Ask me)"
         )
         assert toast("pm:aga") == (
             "Permission mode: ask me — send /new if you're switching from"
-            " Workspace or Plan first"
+            " Workspace or Plan first (not from Full access)"
         )
         assert toast("pm:agc") == (
             "Permission mode: cleared — send /new if this switched between"

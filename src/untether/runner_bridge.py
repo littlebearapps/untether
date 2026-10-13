@@ -49,7 +49,7 @@ from .model import (
 )
 from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
-from .progress import ProgressTracker
+from .progress import ProgressTracker, keyboard_action, keyboard_actions
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
@@ -2395,6 +2395,14 @@ def engine_background_busy(engine_state: Any) -> bool:
     return False
 
 
+# #1077: the push sent with a question card names the engine asking.
+_QUESTION_ENGINE_NAMES = {"claude": "Claude Code", "antigravity": "Antigravity"}
+
+
+def question_notify_text(engine: str) -> str:
+    return f"Question from {_QUESTION_ENGINE_NAMES.get(engine, engine)}"
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -4180,9 +4188,10 @@ class ProgressEdits:
     def _pending_request_info(self) -> _PendingRequestInfo | None:
         """#919: classify the pending request the reminder is about.
 
-        Engine registry first (``control_request_snapshot()``, newest request
-        wins — the one whose buttons are visible), else the newest uncompleted
-        tracked action carrying an inline keyboard.
+        Engine registry first (``control_request_snapshot()``: the request
+        whose buttons are visible, #1079 ``keyboard_actions`` order, else the
+        newest), else the first tracked action with an inline keyboard in that
+        order.
         """
         # #929: requests on the run's standalone approval surface are not
         # this turn's to remind about — remind about the newest other one.
@@ -4190,8 +4199,17 @@ class ProgressEdits:
         snaps = [
             s for s in (self._control_snapshots() or []) if s.request_id not in excluded
         ]
+        shown = keyboard_actions(self.tracker._actions.values())
         if snaps:
-            snap = min(snaps, key=lambda s: s.age_s)
+            by_id = {s.request_id: s for s in snaps}
+            snap = next(
+                (
+                    by_id[rid]
+                    for a in shown
+                    if (rid := a.action.detail.get("request_id")) in by_id
+                ),
+                None,
+            ) or min(snaps, key=lambda s: s.age_s)
             tool_name = snap.tool_name or None
             if snap.kind == "ask":
                 return _PendingRequestInfo(
@@ -4211,12 +4229,8 @@ class ProgressEdits:
             return _PendingRequestInfo(
                 kind=kind, request_id=snap.request_id, tool_name=tool_name
             )
-        for action_state in reversed(list(self.tracker._actions.values())):
-            if action_state.completed:
-                continue
+        for action_state in shown:
             detail = action_state.action.detail
-            if not detail.get("inline_keyboard"):
-                continue
             rid = detail.get("request_id")
             rid = rid if isinstance(rid, str) and rid else None
             if rid is not None and rid in excluded:
@@ -4656,21 +4670,18 @@ class ProgressEdits:
             # uncompleted for the whole run, so this `any()` stayed True and
             # stripped EVERY later approval keyboard down to the cancel row —
             # an AskUserQuestion rendered its question text with no option
-            # buttons and the run was unanswerable. Matches the newest-first
-            # convention in TelegramPresenter.render_progress and
-            # _has_pending_approval.
+            # buttons and the run was unanswerable. #1079: the same choice as
+            # TelegramPresenter.render_progress (``keyboard_action``).
             _current_is_outline = False
             _kb_tool: str | None = None  # #822
             _kb_request_id: str | None = None
-            for _a in reversed(state.actions):
-                if _a.completed or not _a.action.detail.get("inline_keyboard"):
-                    continue
+            _a = keyboard_action(state.actions)
+            if _a is not None:
                 _current_is_outline = (
                     _a.action.detail.get("request_type") == "DiscussApproval"
                 )
                 _kb_tool = _a.action.detail.get("tool_name")
                 _kb_request_id = _a.action.detail.get("request_id")
-                break
             if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
@@ -4732,7 +4743,7 @@ class ProgressEdits:
                         notify_text = "Action required \u2014 approval needed"
                         for a in state.actions:
                             if not a.completed and a.action.detail.get("ask_question"):
-                                notify_text = "Question from Claude Code"
+                                notify_text = question_notify_text(self.tracker.engine)
                                 break
 
                         async def _send_notify(text: str) -> None:
@@ -6646,6 +6657,31 @@ _PLAIN_PRESPAWN_BLOCKS = frozenset(
 )
 
 
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _code_span_entities(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """#1080: a plain refusal's `command` spans become code entities (no
+    literal backticks); every other character is sent verbatim."""
+    parts: list[str] = []
+    entities: list[dict[str, Any]] = []
+    pos = offset = 0
+    for match in _CODE_SPAN_RE.finditer(text):
+        before = text[pos : match.start()]
+        code = match.group(1)
+        parts += [before, code]
+        offset += _utf16_len(before)
+        entities.append({"type": "code", "offset": offset, "length": _utf16_len(code)})
+        offset += _utf16_len(code)
+        pos = match.end()
+    parts.append(text[pos:])
+    return "".join(parts), entities
+
+
 def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
     """The pre-spawn block reason when the refusal is a plain reply, else
     None (#1047)."""
@@ -7723,9 +7759,11 @@ async def handle_message(
         if plain_refusal:
             # #1047: the refusal's own text replaces the card — no header,
             # resume line or footers (nothing ran), and no Cancel button.
-            final_rendered = RenderedMessage(
-                text=final_answer, extra={"reply_markup": {"inline_keyboard": []}}
-            )
+            refusal_text, refusal_entities = _code_span_entities(final_answer)
+            refusal_extra: dict[str, Any] = {"reply_markup": {"inline_keyboard": []}}
+            if refusal_entities:
+                refusal_extra["entities"] = refusal_entities
+            final_rendered = RenderedMessage(text=refusal_text, extra=refusal_extra)
         else:
             # Append the engine's subscription-usage footer (Claude, Antigravity)
             final_rendered = await _append_subscription_footer(

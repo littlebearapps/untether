@@ -427,7 +427,17 @@ async def foreign_config(
     by agy itself instead of by their presence: ``hooks.json`` (its groups
     are in the ``-p /hooks`` listing) and ``mcp_config.json``
     (:func:`user_mcp_configured`)."""
-    found = set(result.foreign_sources)
+    # #1080: agy names a hook group's source by its absolute path, the scan
+    # relative to the project (or ``~/``); one file must be listed once.
+    home_real = os.path.realpath(os.path.expanduser("~"))
+    root_real = os.path.realpath(scan.root) if scan is not None else None
+
+    def shown(source: str) -> str:
+        if root_real is None or not os.path.isabs(source):
+            return source
+        return antigravity_scan._display(os.path.realpath(source), root_real, home_real)
+
+    found = {shown(source) for source in result.foreign_sources}
     for path in scan.agy if scan is not None else ():
         if path == USER_HOOKS_KEY:
             continue
@@ -460,7 +470,15 @@ async def check(
             ),
         )
     if not install.current:
-        return _remember(cwd, GatePrecheck(ok=False, reason=OUTDATED, cwd=str(cwd)))
+        # Only a byte-exact earlier version is "outdated"; files changed
+        # together with their record read as edited.
+        reason = OUTDATED if install.previous_version is not None else EDITED
+        return _remember(
+            cwd,
+            GatePrecheck(
+                ok=False, reason=reason, detail=install.summary(), cwd=str(cwd)
+            ),
+        )
     if install.disabled:
         return _remember(cwd, GatePrecheck(ok=False, reason=DISABLED, cwd=str(cwd)))
     wait_s = install.wait_s or gate_plugin.DEFAULT_WAIT_S

@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .model import Action, ActionEvent, StartedEvent, UntetherEvent
-from .progress import ProgressState
+from .progress import ProgressState, keyboard_actions
 from .transport import RenderedMessage
 from .utils.paths import relativize_path
 
 STATUS = {"running": "▸", "update": "↻", "done": "✓", "fail": "✗"}
+STOPPED_STATUS = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16}"
+# #1079: marks the waiting request the buttons below answer (2+ waiting).
+ANSWERING_MARK = "\N{WHITE DOWN POINTING BACKHAND INDEX}"
 HEADER_SEP = " · "
 HARD_BREAK = "  \n"
 
@@ -152,6 +155,9 @@ def starts_with_pictograph(text: str) -> bool:
 def action_status(action: Action, *, completed: bool, ok: bool | None = None) -> str:
     if not completed:
         return STATUS["running"]
+    if (action.detail or {}).get("stopped") is True:
+        # #1062: stopped on purpose (an agy ``manage_task`` kill), not failed.
+        return STOPPED_STATUS
     if ok is not None:
         return STATUS["done"] if ok else STATUS["fail"]
     detail = action.detail or {}
@@ -287,7 +293,50 @@ def format_countdown(seconds: float | int) -> str:
     return format_duration(seconds)
 
 
+def _hard_breaks(text: str) -> str:
+    """#1080: keep every line of a line-structured row (an agy approval card:
+    command, ``from subagent:``, ``agy says:``) on its own line. Markdown
+    reflows single newlines, so each becomes a hard break — except inside a
+    fenced block and next to a fence line, which keep plain newlines."""
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        is_fence = line.lstrip().startswith("```")
+        if is_fence:
+            in_fence = not in_fence
+        out.append(line)
+        if i == len(lines) - 1:
+            break
+        next_is_fence = lines[i + 1].lstrip().startswith("```")
+        plain = not (in_fence or is_fence or next_is_fence)
+        out.append(HARD_BREAK if plain else "\n")
+    return "".join(out)
+
+
 def format_action_line(
+    action: Action,
+    phase: str,
+    ok: bool | None,
+    *,
+    command_width: int | None,
+    elapsed_seconds: float | None = None,
+) -> str:
+    """One action line; a row flagged ``detail["line_breaks"]`` keeps its
+    lines (#1080, ``_hard_breaks``)."""
+    line = _format_action_line(
+        action,
+        phase,
+        ok,
+        command_width=command_width,
+        elapsed_seconds=elapsed_seconds,
+    )
+    if "\n" in line and (action.detail or {}).get("line_breaks") is True:
+        return _hard_breaks(line)
+    return line
+
+
+def _format_action_line(
     action: Action,
     phase: str,
     ok: bool | None,
@@ -716,6 +765,10 @@ class MarkdownFormatter:
         self, state: ProgressState, *, now: float | None = None
     ) -> list[str]:
         actions = list(state.actions)
+        # #1079: with two or more requests waiting, mark the one the buttons
+        # below answer (one request alone is unmarked, as before).
+        waiting = keyboard_actions(actions)
+        answering = waiting[0] if len(waiting) > 1 else None
         actions = [] if self.max_actions == 0 else actions[-self.max_actions :]
         lines: list[str] = []
         for action_state in actions:
@@ -733,6 +786,8 @@ class MarkdownFormatter:
                 command_width=self.command_width,
                 elapsed_seconds=elapsed_seconds,
             )
+            if action_state is answering:
+                line = f"{ANSWERING_MARK} {line}"
             lines.append(line)
             if self.verbosity == "verbose":
                 action = action_state.action

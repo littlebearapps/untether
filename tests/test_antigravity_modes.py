@@ -268,6 +268,24 @@ async def test_configured_or_unknown_user_mcp_is_foreign(
     )
 
 
+@pytest.mark.anyio
+async def test_foreign_hook_file_listed_once(tmp_path: Path) -> None:
+    """#1080 (AG-57): agy's listing names a project hook file by its absolute
+    path and the scan by its relative one; the refusal listed it twice."""
+    hooks = tmp_path / ".agents" / "hooks.json"
+    hooks.parent.mkdir()
+    hooks.write_text("{}")
+    scan = antigravity_scan.ScanResult(
+        root=tmp_path, agy={".agents/hooks.json": (1, "z")}
+    )
+    found = await gate_precheck.foreign_config(
+        AntigravityRunner(),
+        gate_precheck.GatePrecheck(ok=True, foreign_sources=(str(hooks),)),
+        scan,
+    )
+    assert found == (".agents/hooks.json",)
+
+
 def test_build_runner_approval_timeout(tmp_path: Path) -> None:
     """``[antigravity] approval_timeout_s``: whole seconds, 60-3000."""
     from untether.config import ConfigError

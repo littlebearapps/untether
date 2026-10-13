@@ -60,7 +60,8 @@ The message is queued as normal and Untether tells you why:
 | Reply | Meaning |
 |---|---|
 | `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine isn't Claude Code or Antigravity. |
-| ``↪️ Steer needs Untether's agy plugin on this host (`untether agy-gate install`) — queued instead.`` | Antigravity without the plugin. |
+| `↪️ Steer needs Untether's agy plugin on this host (untether agy-gate install) — queued instead.` | Antigravity without the plugin. |
+| `↪️ The Antigravity turn is still starting, so it can't take a message yet — queued; it runs when this turn ends.` | Antigravity: the run hasn't started agy's conversation yet (the first few seconds), so there is nothing to steer into ([#1077](https://github.com/littlebearapps/untether/issues/1077)). |
 | `↪️ No running Antigravity turn to steer — queued instead.` | Antigravity: nothing is running, the run has already sent its answer, or its hooks aren't reaching Untether. |
 | `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |

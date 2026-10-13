@@ -44,7 +44,7 @@ FOLLOWUP_COMMAND_IDS: frozenset[str] = frozenset({"steer", "queue"})
 
 STEERED_ACK = "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Steered into the current run."
 
-FallbackReason = Literal["engine", "no_live", "closing"]
+FallbackReason = Literal["engine", "no_live", "closing", "starting"]
 
 # Default-mode fallback notices are sent once per (chat, thread, reason, run)
 # so a chat set to steer isn't nagged on every message (#775).
@@ -66,18 +66,32 @@ def split_followup_command(
     return mode, text
 
 
+def notice_is_html(engine: str) -> bool:
+    """#1077: Antigravity's notices name a host command as <code>."""
+    return engine == "antigravity"
+
+
 def fallback_notice(reason: FallbackReason, engine: str) -> str:
+    """The notice text. Antigravity's are Telegram HTML (``notice_is_html``);
+    every other engine's stay plain text, byte-identical (Claude golden)."""
     arrow = "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16}"
     if reason == "engine":
         if engine == "antigravity":
             # #981: steer needs Untether's agy plugin on the host.
             return (
                 f"{arrow} Steer needs Untether's agy plugin on this host "
-                "(`untether agy-gate install`) — queued instead."
+                "(<code>untether agy-gate install</code>) — queued instead."
             )
         return f"{arrow} Steer isn't supported on {engine} — queued instead."
     if reason == "closing":
         return f"{arrow} The current run is ending — queued instead."
+    if reason == "starting":
+        # #1077: agy binds its gate to the conversation only once the run
+        # reports its session, so nothing can be steered in before that.
+        return (
+            f"{arrow} The Antigravity turn is still starting, so it can't take "
+            "a message yet — queued; it runs when this turn ends."
+        )
     if engine == "antigravity":
         return f"{arrow} No running Antigravity turn to steer — queued instead."
     return f"{arrow} No live Claude run to steer — queued instead."
@@ -114,6 +128,12 @@ def _active_run_ref(
     return None
 
 
+def _run_starting(task: Any) -> bool:
+    """#1077: the run hasn't reported its session yet (``resume_ready``)."""
+    ready = getattr(task, "resume_ready", None)
+    return ready is not None and not ready.is_set()
+
+
 def _should_notice(key: tuple[Any, ...]) -> bool:
     if key in _NOTICED:
         return False
@@ -130,11 +150,16 @@ async def _send(
     user_msg_id: int,
     thread_id: int | None,
     text: str,
+    html: bool = False,
 ) -> None:
     try:
         await cfg.exec_cfg.transport.send(
             channel_id=chat_id,
-            message=RenderedMessage(text=text),
+            message=(
+                RenderedMessage(text=text, extra={"parse_mode": "HTML"})
+                if html
+                else RenderedMessage(text=text)
+            ),
             options=SendOptions(
                 reply_to=MessageRef(
                     channel_id=chat_id, message_id=user_msg_id, thread_id=thread_id
@@ -313,6 +338,13 @@ async def maybe_steer(
 
     assert reason is not None
     active = _active_run_ref(running_tasks, chat_id, thread_filter)
+    if (
+        reason == "no_live"
+        and target_engine == "antigravity"
+        and active is not None
+        and _run_starting(running_tasks[active])
+    ):
+        reason = "starting"
     logger.info(
         "steer.fallback",
         chat_id=chat_id,
@@ -338,5 +370,6 @@ async def maybe_steer(
             user_msg_id=user_msg_id,
             thread_id=thread_id,
             text=fallback_notice(reason, target_engine),
+            html=notice_is_html(target_engine),
         )
     return False

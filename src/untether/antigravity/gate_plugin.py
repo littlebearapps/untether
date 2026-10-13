@@ -85,8 +85,14 @@ GUARD_DENY_REASON = (
 PLUGIN_VERSION = "2"
 
 
-def hook_command(event: str) -> str:
-    """The exact command line agy runs for *event* (``sh -c``)."""
+def hook_command(event: str, version: str = PLUGIN_VERSION) -> str:
+    """The exact command line agy runs for *event* (``sh -c``); *version*
+    "1" is what 0.36.1rc1 to rc3 installed (no interpreter check)."""
+    if version == "1":
+        return (
+            f'[ -n "${gate_hook.ENV_MARKER}" ] || exit 0; '
+            f'exec "${gate_hook.ENV_PY}" -I -m untether.antigravity.gate_hook {event}'
+        )
     if event == "PreToolUse":
         deny = json.dumps({"decision": "deny", "reason": GUARD_DENY_REASON})
         missing = f"{{ printf '%s' '{deny}'; exit 0; }}"
@@ -103,13 +109,13 @@ def _dump(obj: Any) -> bytes:
     return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode()
 
 
-def plugin_json_bytes() -> bytes:
-    return _dump(
-        {"name": PLUGIN_NAME, "version": PLUGIN_VERSION, "description": DESCRIPTION}
-    )
+def plugin_json_bytes(version: str = PLUGIN_VERSION) -> bytes:
+    return _dump({"name": PLUGIN_NAME, "version": version, "description": DESCRIPTION})
 
 
-def hooks_json_bytes(wait_s: int = DEFAULT_WAIT_S) -> bytes:
+def hooks_json_bytes(
+    wait_s: int = DEFAULT_WAIT_S, version: str = PLUGIN_VERSION
+) -> bytes:
     """agy needs a named top-level group (a flat manifest loads 0 hooks)."""
     return _dump(
         {
@@ -120,7 +126,7 @@ def hooks_json_bytes(wait_s: int = DEFAULT_WAIT_S) -> bytes:
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": hook_command("PreToolUse"),
+                                "command": hook_command("PreToolUse", version),
                                 "timeout": int(wait_s) + HOOK_GRACE_S,
                             }
                         ],
@@ -129,14 +135,14 @@ def hooks_json_bytes(wait_s: int = DEFAULT_WAIT_S) -> bytes:
                 "PreInvocation": [
                     {
                         "type": "command",
-                        "command": hook_command("PreInvocation"),
+                        "command": hook_command("PreInvocation", version),
                         "timeout": SHORT_HOOK_TIMEOUT_S,
                     }
                 ],
                 "Stop": [
                     {
                         "type": "command",
-                        "command": hook_command("Stop"),
+                        "command": hook_command("Stop", version),
                         "timeout": SHORT_HOOK_TIMEOUT_S,
                     }
                 ],
@@ -145,8 +151,19 @@ def hooks_json_bytes(wait_s: int = DEFAULT_WAIT_S) -> bytes:
     )
 
 
-def template_files(wait_s: int = DEFAULT_WAIT_S) -> dict[str, bytes]:
-    return {PLUGIN_FILE: plugin_json_bytes(), HOOKS_FILE: hooks_json_bytes(wait_s)}
+def template_files(
+    wait_s: int = DEFAULT_WAIT_S, version: str = PLUGIN_VERSION
+) -> dict[str, bytes]:
+    return {
+        PLUGIN_FILE: plugin_json_bytes(version),
+        HOOKS_FILE: hooks_json_bytes(wait_s, version),
+    }
+
+
+# Plugin versions an earlier Untether installed. Files byte-identical to one
+# of them are a genuine older install (re-run ``untether agy-gate install``);
+# anything else that isn't current was changed.
+PREVIOUS_VERSIONS = ("1",)
 
 
 def plugin_dir() -> Path:
@@ -188,6 +205,8 @@ class InstallState:
     wait_s: int | None = None
     # The files are byte-identical to what *this* Untether writes.
     current: bool = False
+    # ... or to what an earlier Untether wrote (``PREVIOUS_VERSIONS``).
+    previous_version: str | None = None
     # ``agy plugin disable`` was run (agy's config.json); None: unknown.
     disabled: bool | None = None
     problem: str | None = None
@@ -220,6 +239,11 @@ class InstallState:
             return "edited since install: " + ", ".join(sorted(self.edited))
         if self.disabled:
             return "installed but disabled in agy (agy plugin enable untether-gate)"
+        if not self.current and self.previous_version is not None:
+            return (
+                f"plugin version {self.previous_version} from an earlier Untether"
+                " (run `untether agy-gate install` to update it)"
+            )
         if not self.current:
             return (
                 "not the files this Untether version installs (another version,"
@@ -288,6 +312,18 @@ def inspect_install(*, check_disabled: bool = True) -> InstallState:
         templates = template_files(state.wait_s or DEFAULT_WAIT_S)
         state.current = state.wait_s is not None and all(
             on_disk.get(name) == data for name, data in templates.items()
+        )
+        state.previous_version = next(
+            (
+                version
+                for version in PREVIOUS_VERSIONS
+                if state.wait_s is not None
+                and all(
+                    on_disk.get(name) == data
+                    for name, data in template_files(state.wait_s, version).items()
+                )
+            ),
+            None,
         )
         if check_disabled:
             state.disabled = _plugin_disabled()

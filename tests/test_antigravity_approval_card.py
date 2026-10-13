@@ -182,6 +182,29 @@ async def test_approve_returns_allow(harness: Harness) -> None:
 
 
 @pytest.mark.anyio
+async def test_card_reports_the_parent_step_waiting(harness: Harness) -> None:
+    """#1080: the runner keeps a step out of ``⏳ background`` while its card
+    waits; only the parent conversation's own steps are reported."""
+    seen: list[tuple[int, bool]] = []
+    harness.gate.on_approval_wait = lambda step, waiting: seen.append((step, waiting))
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(harness.call, "PreToolUse", _call("run_command", SHELL, step=5))
+        await _wait_for(lambda: len(_cards(harness)) == 1)
+        assert seen == [(5, True)]
+        rid = _cards(harness)[0].action.detail["request_id"]
+        await respond(rid, Decision(True, "approve"))
+    assert seen == [(5, True), (5, False)]
+    # A subagent's card names no parent step.
+    seen.clear()
+    await _held_call(
+        harness,
+        _call("run_command", SHELL, step=1, cid="child-1"),
+        Decision(True, "approve"),
+    )
+    assert seen == []
+
+
+@pytest.mark.anyio
 async def test_deny_returns_reason_and_no_retry_text(harness: Harness) -> None:
     out = await _held_call(
         harness,

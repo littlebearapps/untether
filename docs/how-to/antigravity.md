@@ -137,12 +137,12 @@ Headless agy can't stop mid-run to ask by itself, so you choose the mode before 
     footer says `full access` / `ask me` — so in Ask me it has no shell to ask you about.
 
     **Send `/new`, then your message.** The new mode applies from the next new conversation. The `/config` toast
-    says the same: `Permission mode: ask me — send /new if you're switching from Workspace or Plan first`.
+    says the same: `Permission mode: ask me — send /new if you're switching from Workspace or Plan first (not from Full access)`.
 
 **Switching back to Workspace needs `/new` too.** A conversation that began in Full access keeps its shell tool after
 you switch to Workspace. When it reaches for the shell, Workspace blocks it and the turn ends on a ⚠️ notice that
 says to send `/new` (or pick Full access again). The same goes for Ask me → Workspace and for either → Plan first.
-The toasts say so: `Permission mode: workspace — send /new if you're switching from Full access or Ask me` (and the
+The toasts say so: `Permission mode: workspace — send /new if you're switching from Full access or Ask me (not from Plan first)` (and the
 same for plan first), and **Clear override** says `Permission mode: cleared — send /new if this switched between
 Workspace / Plan first and Ask me / Full access`. Moving between Workspace and Plan first, or between Ask me and Full
 access, needs no `/new`: each pair uses the same tools.
@@ -150,7 +150,7 @@ access, needs no `/new`: each pair uses the same tools.
 <!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access / Ask me / Plan first and the "send /new" warning line -->
 <!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
 
-<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first" -->
+<!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)" -->
 <!-- <img src="../assets/screenshots/antigravity-full-access-toast.jpg" alt="Toast after picking Full access telling you to send /new" width="360" loading="lazy" /> -->
 
 To set a default for every Antigravity chat, use `permission_mode` under `[antigravity]`
@@ -280,7 +280,7 @@ Run `untether agy-gate status`, then `untether agy-gate install --force` if you 
 
 **After upgrading Untether, run `untether agy-gate install` again** whenever the new version changes the plugin's
 files — 0.36.1rc4 does (its hooks now block a tool themselves when Untether's Python can't start). Until you do,
-`untether agy-gate status` says the files aren't the ones this Untether version installs, Ask me is refused
+`untether agy-gate status` says `plugin version 1 from an earlier Untether`, Ask me is refused
 ("the plugin is from another Untether version — run `untether agy-gate install` on the host to update it"), attended runs show `⚠️ Untether's agy plugin (untether-gate) is from another Untether version …` and run
 without questions or steer, and scheduled agy runs are held.
 
@@ -340,7 +340,8 @@ Cron and webhook runs work with Antigravity, with three rules that differ from c
 - **They are held when the project's agy config changed** since someone last ran Antigravity in that chat (next
   section). The next message someone sends in the chat runs with the changed config and shows what changed in
   a ⚠️ row; the schedule runs again after that. An `/at` or `/loop` run doesn't release it. Check the files the
-  message lists first if you didn't change them.
+  message lists first if you didn't change them. When the change is to Untether's own agy plugin, the message says
+  so, and only reinstalling it on the host (`untether agy-gate install --force`) releases the hold.
 - **A Workspace run is held while agy's own tool-permission setting can't be read.** Untether checks it with
   `agy -p /config` before the run; if that fails or returns no value, the scheduled run replies `Untether couldn't
   read agy's tool-permission setting before this run …` and nothing starts. Nothing needs changing: the next fire

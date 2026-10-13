@@ -693,6 +693,51 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "expected"),
+    [
+        ("claude", "Question from Claude Code"),
+        ("antigravity", "Question from Antigravity"),
+    ],
+)
+async def test_progress_edits_question_push_names_the_engine(
+    engine: str, expected: str
+) -> None:
+    """#1077: an Antigravity question card's push said "Question from Claude
+    Code". Claude's text stays byte-identical (golden replay)."""
+    from untether.events import EventFactory
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter, engine=engine)
+    edits.tracker.note_event(
+        EventFactory(engine).action_started(
+            action_id="q1",
+            kind="tool",
+            title="Question",
+            detail={"ask_question": "Which file?", "inline_keyboard": [[]]},
+        )
+    )
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def one_cycle() -> None:
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(one_cycle)
+
+    assert [s["message"].text for s in transport.send_calls] == [expected]
+
+
+@pytest.mark.anyio
 async def test_progress_edits_delete_ephemeral_cleans_pending_notification() -> None:
     """delete_ephemeral() cleans up a pending approval notification."""
     transport = FakeTransport()
@@ -1653,10 +1698,43 @@ async def test_1047_continue_refusal_is_plain_on_the_bridge(blocked: str) -> Non
         )
     progress, final = transport.send_calls
     assert final["message"].text == "No conversation yet."
+    assert "entities" not in final["message"].extra
     assert final["options"].replace == progress["ref"]
     (summary,) = [r for r in logs if r.get("event") == "session.summary.no_events"]
     assert summary["log_level"] == "info"
     assert summary["prespawn_blocked"] == blocked
+
+
+@pytest.mark.anyio
+async def test_plain_refusal_shows_commands_as_code() -> None:
+    """#1080 (AG-56): the refusal's `agy plugin enable …` showed literal
+    backticks; they are code entities now, the rest verbatim."""
+    transport = FakeTransport()
+    error = (
+        "Ask me needs Telegram approvals, and they aren't ready for this "
+        "project: agy has the plugin disabled (`agy plugin enable untether-gate`)."
+    )
+    runner = ScriptRunner(
+        [ErrorReturn(error=error, usage={"prespawn_blocked": "gate_not_ready"})],
+        engine="antigravity",
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+    message = transport.send_calls[-1]["message"]
+    assert "`" not in message.text
+    (entity,) = message.extra["entities"]
+    assert entity["type"] == "code"
+    start = entity["offset"]
+    assert (
+        message.text[start : start + entity["length"]]
+        == "agy plugin enable untether-gate"
+    )
 
 
 @pytest.mark.anyio
