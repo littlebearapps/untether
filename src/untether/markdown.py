@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .model import Action, ActionEvent, StartedEvent, UntetherEvent
-from .progress import ProgressState
+from .progress import ProgressState, keyboard_actions
 from .transport import RenderedMessage
 from .utils.paths import relativize_path
 
 STATUS = {"running": "▸", "update": "↻", "done": "✓", "fail": "✗"}
 STOPPED_STATUS = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16}"
+# #1079: marks the waiting request the buttons below answer (2+ waiting).
+ANSWERING_MARK = "\N{WHITE DOWN POINTING BACKHAND INDEX}"
 HEADER_SEP = " · "
 HARD_BREAK = "  \n"
 
@@ -720,6 +722,10 @@ class MarkdownFormatter:
         self, state: ProgressState, *, now: float | None = None
     ) -> list[str]:
         actions = list(state.actions)
+        # #1079: with two or more requests waiting, mark the one the buttons
+        # below answer (one request alone is unmarked, as before).
+        waiting = keyboard_actions(actions)
+        answering = waiting[0] if len(waiting) > 1 else None
         actions = [] if self.max_actions == 0 else actions[-self.max_actions :]
         lines: list[str] = []
         for action_state in actions:
@@ -737,6 +743,8 @@ class MarkdownFormatter:
                 command_width=self.command_width,
                 elapsed_seconds=elapsed_seconds,
             )
+            if action_state is answering:
+                line = f"{ANSWERING_MARK} {line}"
             lines.append(line)
             if self.verbosity == "verbose":
                 action = action_state.action

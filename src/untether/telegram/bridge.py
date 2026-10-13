@@ -13,7 +13,7 @@ from ..context import RunContext
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter, MarkdownParts
 from ..model import ResumeToken
-from ..progress import ProgressState
+from ..progress import ProgressState, keyboard_action
 from ..runner_bridge import ExecBridgeConfig, RunningTask, RunningTasks
 from ..scheduler import ThreadScheduler
 from ..settings import (
@@ -115,34 +115,29 @@ class TelegramPresenter:
         if _is_cancelled_label(label):
             reply_markup = CLEAR_MARKUP
         else:
-            # Check if any active action has inline keyboard buttons (e.g. permission approval)
-            #
-            # #683: scan NEWEST-first. Telegram renders one keyboard per
-            # message, and the newest pending request is the one the user must
-            # answer. Oldest-first let an uncompleted keyboard action — most
-            # notably the synthetic ``claude.discuss_approve.N`` emitted by the
-            # Pause & Outline hold-open path, which nothing ever completes —
-            # pin the keyboard for the rest of the run and silently swallow
-            # every later AskUserQuestion / approval keyboard.
+            # A pending action's inline keyboard (e.g. permission approval).
+            # Telegram renders one keyboard per message: #1079 keeps it on
+            # the oldest pending request until that is answered
+            # (``progress.keyboard_action``; a Pause & Outline hold ranks
+            # last, #683).
             reply_markup = CANCEL_MARKUP
-            for action_state in reversed(state.actions):
-                if not action_state.completed:
-                    kb = action_state.action.detail.get("inline_keyboard")
-                    if kb and isinstance(kb, dict) and "buttons" in kb:
-                        # Merge permission buttons with cancel button
-                        reply_markup = {
-                            "inline_keyboard": kb["buttons"]
-                            + CANCEL_MARKUP["inline_keyboard"]
-                        }
-                        logger.info(
-                            "render_progress.inline_keyboard_found",
-                            action_id=action_state.action.id,
-                            buttons=len(kb["buttons"]),
-                            # #822: which request / tool the keyboard is for.
-                            request_id=action_state.action.detail.get("request_id"),
-                            tool_name=action_state.action.detail.get("tool_name"),
-                        )
-                        break
+            action_state = keyboard_action(state.actions)
+            if action_state is not None:
+                kb = action_state.action.detail.get("inline_keyboard")
+                if kb and isinstance(kb, dict) and "buttons" in kb:
+                    # Merge permission buttons with cancel button
+                    reply_markup = {
+                        "inline_keyboard": kb["buttons"]
+                        + CANCEL_MARKUP["inline_keyboard"]
+                    }
+                    logger.info(
+                        "render_progress.inline_keyboard_found",
+                        action_id=action_state.action.id,
+                        buttons=len(kb["buttons"]),
+                        # #822: which request / tool the keyboard is for.
+                        request_id=action_state.action.detail.get("request_id"),
+                        tool_name=action_state.action.detail.get("tool_name"),
+                    )
         return RenderedMessage(
             text=text,
             extra={"entities": entities, "reply_markup": reply_markup},

@@ -49,7 +49,7 @@ from .model import (
 )
 from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
-from .progress import ProgressTracker
+from .progress import ProgressTracker, keyboard_action, keyboard_actions
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
@@ -4188,9 +4188,10 @@ class ProgressEdits:
     def _pending_request_info(self) -> _PendingRequestInfo | None:
         """#919: classify the pending request the reminder is about.
 
-        Engine registry first (``control_request_snapshot()``, newest request
-        wins — the one whose buttons are visible), else the newest uncompleted
-        tracked action carrying an inline keyboard.
+        Engine registry first (``control_request_snapshot()``: the request
+        whose buttons are visible, #1079 ``keyboard_actions`` order, else the
+        newest), else the first tracked action with an inline keyboard in that
+        order.
         """
         # #929: requests on the run's standalone approval surface are not
         # this turn's to remind about — remind about the newest other one.
@@ -4198,8 +4199,17 @@ class ProgressEdits:
         snaps = [
             s for s in (self._control_snapshots() or []) if s.request_id not in excluded
         ]
+        shown = keyboard_actions(self.tracker._actions.values())
         if snaps:
-            snap = min(snaps, key=lambda s: s.age_s)
+            by_id = {s.request_id: s for s in snaps}
+            snap = next(
+                (
+                    by_id[rid]
+                    for a in shown
+                    if (rid := a.action.detail.get("request_id")) in by_id
+                ),
+                None,
+            ) or min(snaps, key=lambda s: s.age_s)
             tool_name = snap.tool_name or None
             if snap.kind == "ask":
                 return _PendingRequestInfo(
@@ -4219,12 +4229,8 @@ class ProgressEdits:
             return _PendingRequestInfo(
                 kind=kind, request_id=snap.request_id, tool_name=tool_name
             )
-        for action_state in reversed(list(self.tracker._actions.values())):
-            if action_state.completed:
-                continue
+        for action_state in shown:
             detail = action_state.action.detail
-            if not detail.get("inline_keyboard"):
-                continue
             rid = detail.get("request_id")
             rid = rid if isinstance(rid, str) and rid else None
             if rid is not None and rid in excluded:
@@ -4664,21 +4670,18 @@ class ProgressEdits:
             # uncompleted for the whole run, so this `any()` stayed True and
             # stripped EVERY later approval keyboard down to the cancel row —
             # an AskUserQuestion rendered its question text with no option
-            # buttons and the run was unanswerable. Matches the newest-first
-            # convention in TelegramPresenter.render_progress and
-            # _has_pending_approval.
+            # buttons and the run was unanswerable. #1079: the same choice as
+            # TelegramPresenter.render_progress (``keyboard_action``).
             _current_is_outline = False
             _kb_tool: str | None = None  # #822
             _kb_request_id: str | None = None
-            for _a in reversed(state.actions):
-                if _a.completed or not _a.action.detail.get("inline_keyboard"):
-                    continue
+            _a = keyboard_action(state.actions)
+            if _a is not None:
                 _current_is_outline = (
                     _a.action.detail.get("request_type") == "DiscussApproval"
                 )
                 _kb_tool = _a.action.detail.get("tool_name")
                 _kb_request_id = _a.action.detail.get("request_id")
-                break
             if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(

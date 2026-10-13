@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -24,6 +24,38 @@ class ActionState:
     # clock callable is configured.
     started_at: float = 0.0
     last_update_at: float = 0.0
+
+
+def keyboard_actions(actions: Iterable[ActionState]) -> list[ActionState]:
+    """The pending actions that carry an inline keyboard, in the order their
+    buttons get the progress message (it has room for one keyboard).
+
+    #1079: oldest first, first in first out, so the buttons stay on the
+    request the user is reading until it is answered — newest-first moved
+    them to a request that arrived a moment later, under the user's finger.
+    A Pause & Outline hold (``DiscussApproval``) ranks after every other
+    request, newest of those first: an uncompleted one must never shadow a
+    later approval (#683)."""
+    pending = sorted(
+        (
+            a
+            for a in actions
+            if not a.completed and a.action.detail.get("inline_keyboard")
+        ),
+        key=lambda a: a.first_seen,
+    )
+    first: list[ActionState] = []
+    held: list[ActionState] = []
+    for a in pending:
+        is_hold = a.action.detail.get("request_type") == "DiscussApproval"
+        (held if is_hold else first).append(a)
+    return first + held[::-1]
+
+
+def keyboard_action(actions: Iterable[ActionState]) -> ActionState | None:
+    """The pending request whose buttons the progress message shows."""
+    ordered = keyboard_actions(actions)
+    return ordered[0] if ordered else None
 
 
 @dataclass(frozen=True, slots=True)
