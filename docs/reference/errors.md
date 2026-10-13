@@ -185,7 +185,9 @@ Antigravity CLI (`agy`) errors are Untether's own messages, written when the run
 | `Antigravity needs a project` | The chat has no project directory, or its path can't be resolved | `/ctx set <project>`, or add a `[projects.*]` entry |
 | `🛑 Antigravity CLI <version> is older than 1.3.1` | agy is too old | `agy update` on the host |
 | `⚠️ Antigravity was blocked from using a …` | agy refused a tool in Workspace: usually a file outside the project; a shell command only in a conversation that isn't on Untether's no-shell agent | `/config` → Permission mode → Full access, then `/new` (agy keeps a conversation on the tools it started with). See [Troubleshooting](../how-to/troubleshooting.md#antigravity-cli) |
-| `Ask me needs Untether's approval gate` / `Plan first needs …` | That mode isn't available yet | Pick Workspace or Full access in `/config` |
+| `Ask me needs Untether's approval gate` | That mode isn't available yet | Pick Workspace, Plan first or Full access in `/config` |
+| `⚠️ This plan card has expired` / `ℹ️ A newer plan replaced this one` | An Antigravity Plan first card was tapped after a restart, after 24 hours, or after a newer plan | Send a message to plan again, then use the new card |
+| `⚠️ This chat's project directory changed since the plan was written` | The project or branch path moved between the plan and the Approve tap | Send a message to plan again |
 | `agy's own settings change its permission checks` | agy's `toolPermission` setting would approve tools by itself | Set it back to `request-review`, or pick Full access |
 | `Untether couldn't confirm agy's tool-permission setting` | Neither the check before the run nor agy's first event gave agy's `toolPermission`, so a Workspace run was stopped | Try again in a few minutes. If it keeps happening, check `agy -p /config` works on the host and update Untether; or pick Full access |
 | `Untether couldn't read agy's tool-permission setting before this run` | A scheduled Workspace run was held because the `agy -p /config` check failed or returned no `toolPermission` | Nothing to change: the next fire checks again. If it persists, run `agy -p /config` on the host |

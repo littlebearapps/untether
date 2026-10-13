@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar, Token
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..context import RunContext
 
 _run_base_dir: ContextVar[Path | None] = ContextVar(
     "untether_run_base_dir", default=None
@@ -30,6 +34,14 @@ _run_sender_id: ContextVar[int | None] = ContextVar(
 # the chat right now, not whether the run may wait for a tap.
 _run_trigger_source: ContextVar[str | None] = ContextVar(
     "untether_run_trigger_source", default=None
+)
+
+
+# #981: the run's ``RunContext`` (project / branch), so a runner can record
+# where a pending decision (an Antigravity plan card) has to run when the
+# user answers it later.
+_run_context: ContextVar[RunContext | None] = ContextVar(
+    "untether_run_context", default=None
 )
 
 
@@ -91,6 +103,18 @@ def set_run_trigger_source(source: str | None) -> Token[str | None]:
 
 def reset_run_trigger_source(token: Token[str | None]) -> None:
     _run_trigger_source.reset(token)
+
+
+def get_run_context() -> RunContext | None:
+    return _run_context.get()
+
+
+def set_run_context(context: RunContext | None) -> Token[RunContext | None]:
+    return _run_context.set(context)
+
+
+def reset_run_context(token: Token[RunContext | None]) -> None:
+    _run_context.reset(token)
 
 
 def relativize_path(value: str, *, base_dir: Path | None = None) -> str:

@@ -351,7 +351,16 @@ def _no_agy_version_probe(
     monkeypatch.setattr(
         antigravity_continue, "last_conversations_path", lambda: no_cache
     )
+    # #981: a Plan first result never reads the host's real plan artifacts,
+    # and no plan card outlives its test.
+    from untether.utils import antigravity_plan
+
+    monkeypatch.setattr(
+        antigravity_plan, "brain_root", lambda: empty_config_dir / "brain"
+    )
+    antigravity_plan._reset_for_tests()
     yield
+    antigravity_plan._reset_for_tests()
     antigravity_runner._VERSION_CACHE.clear()
     antigravity_quota.clear_config_cache()
     antigravity_quota.reset_quota_cache()

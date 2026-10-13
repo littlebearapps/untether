@@ -67,6 +67,7 @@ telegram = "untether.telegram.backend:BACKEND"
 
 [project.entry-points."untether.command_backends"]
 claude_control = "untether.telegram.commands.claude_control:BACKEND"
+agy_plan = "untether.telegram.commands.antigravity_plan:BACKEND"
 usage = "untether.telegram.commands.usage:BACKEND"
 planmode = "untether.telegram.commands.planmode:BACKEND"
 ping = "untether.telegram.commands.ping:BACKEND"

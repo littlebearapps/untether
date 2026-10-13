@@ -53,6 +53,7 @@ from .runner import (
     RunStreamHandle,
     prespawn_blocked_reason,
     reset_run_stream_handle,
+    review_card,
     set_run_stream_handle,
 )
 from .session_costs import TokenScope, token_counts
@@ -1903,6 +1904,30 @@ def _insert_into_chunk(msg: RenderedMessage, insertion: str) -> RenderedMessage:
     return RenderedMessage(text=text[:idx] + insertion + text[idx:], extra=extra)
 
 
+def _append_review_card(
+    msg: RenderedMessage, usage: Mapping[str, Any] | None
+) -> RenderedMessage:
+    """#981: add the engine's review card (``usage[REVIEW_CARD_KEY]``) as a
+    trailing follow-up message carrying its own buttons. The final's own
+    chunks keep their markup, so the card is the only message with buttons."""
+    card = review_card(dict(usage) if usage is not None else None)
+    if card is None:
+        return msg
+    followups = msg.extra.get("followups")
+    existing = (
+        [f for f in followups if isinstance(f, RenderedMessage)]
+        if isinstance(followups, list)
+        else []
+    )
+    chunk = RenderedMessage(
+        text=card["text"],
+        extra={"entities": [], "reply_markup": {"inline_keyboard": card["buttons"]}},
+    )
+    return RenderedMessage(
+        text=msg.text, extra={**msg.extra, "followups": [*existing, chunk]}
+    )
+
+
 def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage:
     """Add a footer line (cost, budget alert, #702 outlier, usage) to a final.
 
@@ -2004,7 +2029,11 @@ def _unattended_footer(unattended: Mapping[str, Any]) -> str:
     _UNATTENDED_HINTED[trigger] = None
     while len(_UNATTENDED_HINTED) > _UNATTENDED_HINTED_MAX:
         _UNATTENDED_HINTED.pop(next(iter(_UNATTENDED_HINTED)))
-    if unattended.get("mode") in _UNATTENDED_ASK_CLASS_MODES:
+    custom = unattended.get("hint")
+    if isinstance(custom, str) and custom:
+        # #981: the engine knows its own remedy (Antigravity's modes differ).
+        hint = custom
+    elif unattended.get("mode") in _UNATTENDED_ASK_CLASS_MODES:
         hint = (
             "these always ask (an ask rule, a hook, a tool that needs a person, "
             "or auto mode falling back after repeated blocks) \N{EM DASH} "
@@ -7650,6 +7679,10 @@ async def handle_message(
         if turn is not None:
             _promote_quiet_breakout(turn)
             t_notify = turn.notify  # a quiet batch's breakout always pushes
+
+        # #981: an engine's decision card (Antigravity Plan first) goes out
+        # as the final's last message — after every footer above.
+        final_rendered = _append_review_card(final_rendered, completed.usage)
 
         can_edit_final = t_progress_ref is not None
         edit_ref = None if t_notify or not can_edit_final else t_progress_ref

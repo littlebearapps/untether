@@ -106,9 +106,10 @@ LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 #
 # Antigravity (D21, D37): ``workspace`` = agy's ``--mode=accept-edits``
 # (without it headless agy refuses file writes inside the project),
-# ``full`` = ``--dangerously-skip-permissions``; ``ask`` / ``plan`` need
-# Untether's approval gate and are refused before spawn until it ships, but
-# stay valid so configs written now keep working. ``accept-edits`` is not an
+# ``full`` = ``--dangerously-skip-permissions``; ``plan`` = agy's own
+# ``--mode=plan`` under the no-shell agent, approved by a Workspace resume
+# (#981); ``ask`` needs Untether's approval gate and is refused before spawn
+# until it ships, but stays valid so configs written now keep working. ``accept-edits`` is not an
 # Untether value: it is what Workspace already passes to agy. Unknown
 # stored values fail **closed** to Workspace — unlike Codex, whose unknown
 # mode fails open (``codex.py``).

@@ -228,7 +228,11 @@ With `reason=project_agents`, the project defines its own agy agents or plugins 
 
 ### "Ask me needs Untether's approval gate"
 
-Ask me and Plan first aren't available yet. Pick Workspace or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+Ask me isn't available yet. Pick Workspace, Plan first or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+
+### Antigravity Plan first: "This plan card has expired" or "A newer plan replaced this one"
+
+Plan cards live in Untether's memory for 24 hours and only the newest card for a conversation can be approved. After a restart, or once you have sent another message (which plans again), older cards no longer work. Send a message to get a fresh plan and use its card. If Antigravity answers without writing a plan, the answer ends with "no plan was written this time"; reply to keep planning.
 
 ### "That Antigravity conversation no longer exists"
 

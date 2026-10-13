@@ -183,10 +183,16 @@ def test_build_args_default_never_bypasses() -> None:
 def test_bypass_flag_only_for_full(mode: str | None) -> None:
     args = _args(EngineRunOptions(permission_mode=mode))
     assert (BYPASS in args) is (mode == "full")
-    # Every other run is Workspace = agy's accept-edits mode: without it agy
-    # refuses file writes inside the project. Never both, never plan.
-    assert ("--mode=accept-edits" in args) is (mode != "full")
-    assert [a for a in args if a.startswith("--mode")] in ([], ["--mode=accept-edits"])
+    # Every other run is Workspace = agy's accept-edits mode (without it agy
+    # refuses file writes inside the project), except Plan first, which is
+    # agy's own plan mode (#981). Never two modes, never bypass with either.
+    assert ("--mode=accept-edits" in args) is (mode not in ("full", "plan"))
+    assert ("--mode=plan" in args) is (mode == "plan")
+    assert [a for a in args if a.startswith("--mode")] in (
+        [],
+        ["--mode=accept-edits"],
+        ["--mode=plan"],
+    )
     assert "--sandbox" not in args
 
 
@@ -267,12 +273,12 @@ def test_meta_permission_label_each_mode(mode: str | None, label: str) -> None:
     assert format_meta_line(started.meta) == f"gemini-3.8-flash · {label}"
 
 
-# ── rc1 refusal of Ask me / Plan first ─────────────────────────────────────
+# ── refusal of Ask me (Plan first runs since #981) ─────────────────────────
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("mode", "label"), [("ask", "Ask me"), ("plan", "Plan first")])
-async def test_ask_and_plan_refused_before_spawn_in_rc1(
+@pytest.mark.parametrize(("mode", "label"), [("ask", "Ask me")])
+async def test_ask_refused_before_spawn(
     mode: str,
     label: str,
     project: Path,

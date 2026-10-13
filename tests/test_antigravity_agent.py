@@ -102,7 +102,9 @@ def test_upgrade_rewrites_the_old_agent_without_a_hold(project: Path) -> None:
 @pytest.mark.parametrize("mode", [None, "workspace", "ask", "plan", "bogus"])
 def test_workspace_runs_name_the_agent(mode: str | None) -> None:
     args = _args(EngineRunOptions(permission_mode=mode))
-    assert args[-2:] == ["--mode=accept-edits", AGENT_FLAG]
+    # #981: Plan first plans under the same no-shell agent.
+    agy_mode = "--mode=plan" if mode == "plan" else "--mode=accept-edits"
+    assert args[-2:] == [agy_mode, AGENT_FLAG]
     assert agy.BYPASS_FLAG not in args
     assert agent.agent_path().read_text() == agent.AGENT_MD
 

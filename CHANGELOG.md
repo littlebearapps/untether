@@ -4,6 +4,11 @@
 
 ### changes
 
+- **feat(antigravity):** **Plan first** works in Antigravity chats. Pick it in `/config` → Permission mode (or send `/planmode on`) and Antigravity reads the project, writes a plan and stops without changing anything. The answer shows the plan, followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss** [#981](https://github.com/littlebearapps/untether/issues/981)
+  - **Approve Plan** carries the plan out in the same conversation, in Workspace mode (file edits in the project, no shell); that answer starts `📋 Plan (approved)` and its footer says `workspace · plan approved`. The chat stays in Plan first, so your next request is planned again
+  - **Deny** runs nothing and keeps the conversation; **Let's discuss** runs nothing either: reply with what to change and Antigravity rewrites the plan under a new card. Only the newest card for a conversation can be approved, once, and cards expire after 24 hours or a restart
+  - cron and webhook runs in Plan first post the plan and change nothing, since nobody is there to approve it; the footer says `🔒 unattended … denied plan approval` and suggests `permission_mode = "workspace"` on the cron
+  - an answer without a plan says there is nothing to approve yet; `/planmode on` / `off` / `show` now work for Antigravity (`plan-auto` and `auto` stay Claude-only). **Ask me** is still marked "· soon"
 - **feat(antigravity):** more of what agy reports is shown in Antigravity chats [#979](https://github.com/littlebearapps/untether/issues/979)
   - `/usage` adds your remaining AI credits under the quota groups (`AI credits: 2,500 remaining`, with agy's own top-up link). Reading them costs no tokens and is reused for 5 minutes; if it fails you get one `AI credits: couldn't read (…)` line and the rest of `/usage` still shows
   - a quota line can follow an answer, on the same switch as Claude's (`/config` → Cost & usage → Subscription usage, or `[footer] show_subscription_usage`): `⚡ Gemini Models 5h: 12% | wk: 3%` per quota group. With the switch off, a group shows only once one of its limits reaches 70 %. The line is built from what your last `/usage` fetched, for up to 15 minutes (a figure more than a minute old says so); a run never checks the quota itself, so send `/usage` for current numbers

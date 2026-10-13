@@ -2,7 +2,8 @@
 
 With ``[transports.telegram] approval_originator_only = true``, a Claude
 approval button (``claude_control:``, incl. the orphan-approval surface) or an
-AskUserQuestion answer (``aq:`` buttons and typed replies) is accepted only
+AskUserQuestion answer (``aq:`` buttons and typed replies), or an Antigravity
+plan card (``agy_plan:``, #981) is accepted only
 from the Telegram user whose message started the run. Runs with no human
 originator — cron, webhook, ``/at`` and loop fires — stay answerable by any
 allowed user. Off by default: every allowed user can answer, as before.
@@ -70,6 +71,15 @@ def callback_originator_mismatch(
     comes from someone other than the run's originator, else None."""
     if command_id == "claude_control":
         _action, _, request_id = (args_text or "").partition(":")
+    elif command_id == "agy_plan":
+        # #981: an Antigravity plan card records the plan run's originator.
+        from ..utils import antigravity_plan
+
+        _action, _, request_id = (args_text or "").partition(":")
+        originator = antigravity_plan.originator(request_id) if request_id else None
+        if originator is None or originator == sender_id:
+            return None
+        return request_id, originator
     elif command_id == "aq":
         from ..runners.claude import get_ask_question_flow
 

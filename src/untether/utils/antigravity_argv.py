@@ -104,10 +104,14 @@ def check_effort(value: Any) -> str:
     return value
 
 
+# ``accept-edits`` = Workspace (D37); ``plan`` = Plan first (#981, shape A).
+_MODE_VALUES = frozenset({"accept-edits", "plan"})
+
+
 def check_mode(value: Any) -> str:
-    """Only the mode Untether's Workspace runs under; ``plan`` waits for the
-    approval gate, and nothing a user typed ever reaches this flag."""
-    if value != "accept-edits":
+    """Only the two fixed modes Untether runs agy in (Workspace and Plan
+    first); nothing a user typed ever reaches this flag."""
+    if not isinstance(value, str) or value not in _MODE_VALUES:
         raise AgyArgvError("mode", "unknown_mode")
     return value
 

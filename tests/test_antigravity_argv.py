@@ -179,9 +179,19 @@ def test_agy_flag_effort_is_the_cli_vocabulary_only() -> None:
             agy_flag("--effort", bad)
 
 
-def test_agy_flag_mode_is_accept_edits_only() -> None:
+def test_agy_flag_mode_is_accept_edits_or_plan_only() -> None:
     assert agy_flag("--mode", agy.WORKSPACE_AGY_MODE) == _WORKSPACE_FLAG
-    for bad in ("plan", "ACCEPT-EDITS", "accept-edits ", "", None, agy.BYPASS_FLAG):
+    # #981: Plan first is the only other value.
+    assert agy_flag("--mode", "plan") == "--mode=plan"
+    for bad in (
+        "PLAN",
+        "plan ",
+        "ACCEPT-EDITS",
+        "accept-edits ",
+        "",
+        None,
+        agy.BYPASS_FLAG,
+    ):
         with pytest.raises(AgyArgvError):
             agy_flag("--mode", bad)
 

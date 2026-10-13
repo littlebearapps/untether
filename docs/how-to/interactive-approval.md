@@ -167,15 +167,45 @@ Toggle via `/config` → **Permission mode**:
 |------|----------|-----------|
 | **Workspace** (default) | `--mode=accept-edits` `--agent=untether-workspace` | Antigravity reads, creates and edits files in the project. It has no shell, web, MCP or subagent tools, so it can't run commands, and can't delete or rename files. Not a sandbox — see below |
 | **Ask me** | — | Coming in a later 0.36.1 release: asks you in Telegram before shell, web and MCP calls. Needs Untether's approval gate, so it's shown but can't be picked yet |
-| **Plan first** | — | Coming in a later 0.36.1 release: writes a plan and waits for your approval before changing anything |
+| **Plan first** | `--mode=plan` `--agent=untether-workspace` | Antigravity reads the project and writes a plan, changing nothing. The plan is posted with **✅ Approve Plan / ❌ Deny / 💬 Let's discuss**; Approve carries it out in Workspace mode. See [Plan first](#antigravity-plan-first) below |
 | **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project. Takes effect from the next new conversation — send `/new` after switching |
 
-This is a pre-run policy: headless agy can't stop to ask, so there are no Approve / Deny buttons for Antigravity yet. **Ask me** and **Plan first** will add them; until then `/config` shows both with "· soon", and a run set to either one (for example from `untether.toml`) is refused before it starts rather than run as something else. `/planmode` is a Claude command; in an Antigravity chat it points you to `/config` → **Permission mode**.
+This is a pre-run policy: headless agy can't stop mid-run to ask, so there are no per-tool Approve / Deny buttons for Antigravity yet. **Ask me** will add them; until then `/config` shows it with "· soon", and a run set to it (for example from `untether.toml`) is refused before it starts rather than run as something else. **Plan first** works today: agy plans and stops, and you answer the plan afterwards. In an Antigravity chat `/planmode on` picks Plan first and `/planmode off` goes back to Workspace.
 
 !!! warning "After switching to Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Send `/new`: Full access applies from the next new conversation. The `/config` toast says the same (`Permission mode: full access — send /new to start using it`).
 
     Switching Full access → Workspace applies from your next message. A conversation that began in Full access keeps agy's default tools, though, so a shell attempt there is blocked with the ⚠️ notice below. Send `/new` for a clean Workspace conversation.
+
+#### Antigravity: Plan first
+
+Pick **Plan first** in `/config` → **Permission mode** (or send `/planmode on`), then ask for a change as usual:
+
+1. Antigravity looks around the project and writes a plan. Nothing in the project changes; agy itself blocks
+   project edits in a plan run.
+2. The answer shows the plan (`📋 Plan — implementation_plan.md` and the plan text), then a card with three
+   buttons:
+    - **✅ Approve Plan** — Antigravity carries out the plan in Workspace mode: it edits files in the project, with
+      no shell. A new run starts in the same conversation; its footer says `workspace · plan approved` and its
+      answer starts `📋 Plan (approved)`.
+    - **❌ Deny** — nothing runs. Send a message to keep planning, or `/new` to start over.
+    - **💬 Let's discuss** — nothing runs. Reply with what to change; Antigravity rewrites the plan and posts a new
+      card.
+3. The chat stays in Plan first, so your next request is planned again first. Switch back with `/planmode off` or
+   `/config`.
+
+Good to know:
+
+- Only the newest card for a conversation can be approved, and a card can be answered once. Cards expire after 24
+  hours or when Untether restarts; send a message to get a fresh plan.
+- If Antigravity answers without writing a plan, there is nothing to approve: the answer ends with a note saying
+  so. Reply to keep planning.
+- Cron and webhook runs in Plan first post the plan and change nothing — nobody is there to approve it. The footer
+  says `🔒 unattended … denied plan approval`. Give the cron `permission_mode = "workspace"` if it should make the
+  change.
+- After switching from **Full access** to Plan first, send `/new`: a conversation that started in Full access keeps
+  its shell-capable tools.
+- Plan first can't approve into Full access: the approved run is always Workspace.
 
 **What Workspace can and can't do.** Workspace runs use a no-shell agent that Untether manages ([#1037](https://github.com/littlebearapps/untether/issues/1037)). Its tool list is file tools only: view, list, find, grep, write and replace. So:
 
@@ -195,7 +225,7 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
 
 **Allow rules.** Exact rules in `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`, only matter where agy has a shell tool to block, which is the cases in the paragraph above. A Workspace conversation on the no-shell agent has no shell tool, so an allow rule doesn't give it one; use Full access. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
 
-**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
+**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access from the chat or `untether.toml`: a cron gets it only from its own `permission_mode = "full"`, and webhook runs never do.
 
 **agy's own settings can override the mode.** If agy's settings file sets `toolPermission` to anything other than `request-review` or `strict` (for example `always-proceed`), agy would approve tools by itself, so Untether refuses to run Workspace and tells you to set it back or pick Full access.
 
