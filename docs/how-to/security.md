@@ -168,6 +168,17 @@ Antigravity (`agy`) runs headless and can't ask for approval, so its mode is fix
 - **The prompt never appears on the command line**, and sign-in URLs, tokens and paths in agy's error output are redacted before they reach Telegram or the logs (INFO level and above).
 - **Google account sign-ins carry an account risk** under Google's terms; an API key or Enterprise sign-in avoids it. See [Switch engines](switch-engines.md#antigravity-cli).
 
+### Antigravity: Telegram questions and steer
+
+Untether's agy plugin ([#980](https://github.com/littlebearapps/untether/issues/980), [set-up](antigravity.md#telegram-questions-and-steer)) is opt-in and installed on the host only (`untether agy-gate install`, never from Telegram). What it can and can't do:
+
+- **It grants nothing.** Every tool call other than `ask_question` gets no decision from Untether, so agy's own permission check (or Full access) decides as before. A question's answer goes back to the model as text.
+- **Your own agy is untouched.** Its hooks start with a shell check for a marker that only Untether-started agy runs carry; without it they exit before any Python runs. Untether drops any copy of that marker from its own environment before starting agy.
+- **Only the run that started agy can answer.** Each run gets its own Unix socket (0600, in a 0700 folder per Untether instance, owner and mode verified, unlinked at the end) and a random 32-byte token in agy's environment only; the token is never logged. On Linux the connecting process must also run as the same user (an unreadable peer is refused).
+- **It fails closed.** For a tool call, a hook that can't reach Untether, gets a malformed answer or times out prints a `deny`; it never prints `ask` / `force_ask` (which agy approves under bypass) or argument rewrites.
+- **Its files are checked.** Before each run Untether compares the plugin's files with its own templates and asks agy which hooks it has loaded (`agy -p /hooks`). The planted-config tripwire ignores the plugin's three files only while they are byte-identical to what Untether writes; a changed or extra file there is shown and holds scheduled runs like any other agy plugin, and attended runs then go without questions or steer.
+- **Known limit (same user).** agy's tool processes inherit its environment, so a shell command you already allowed (Full access) could read the socket path and token and connect. It could only *ask* — post a spoofed question card or take a queued steer — never approve anything for itself. The same is true of other engines' hook channels.
+
 ## File transfer deny globs
 
 File transfer includes a deny list that blocks access to sensitive paths. The defaults are:

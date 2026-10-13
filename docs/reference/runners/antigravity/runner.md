@@ -286,8 +286,9 @@ Workspace reply used to be nothing but the blocked notice
 take a tool away from its default agent, but a custom agent's `tools:` list is the model's whole toolset. So:
 
 - Before a Workspace run Untether makes sure `~/.gemini/config/agents/untether-workspace/agent.md` (agy's
-  user-level agent folder) holds its agent: file tools only (`view_file`, `list_dir`, `find_by_name`,
-  `grep_search`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`) and a short system prompt.
+  user-level agent folder) holds its agent: file tools (`view_file`, `list_dir`, `find_by_name`,
+  `grep_search`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`), `ask_question` (R3-2, see
+  [Questions](#questions)) and a short system prompt.
   A changed file is rewritten (`antigravity.workspace_agent.installed`). The file does nothing unless an agy run
   names it.
 - The run then passes `--agent=untether-workspace`. Full access never does.
@@ -385,9 +386,13 @@ What is tracked ([#1043](https://github.com/littlebearapps/untether/issues/1043)
   string is looked up beside its own manifest only, so a plugin called `docs` doesn't pull the project's `docs/`
   folder into the check.
 - agy's user-level manifests under `~/.gemini/config/`, including agents in both layouts, by file size and
-  timestamps only (Untether doesn't read them). The one exception is Untether's own
-  `agents/untether-workspace/agent.md`: that exact file is left out, because Untether rewrites it to its own text
-  before every run that selects it. Anything else in or beside that folder, or a link in its place, is tracked.
+  timestamps only (Untether doesn't read them). The exceptions are Untether's own files, each by exact path and only
+  as a regular file: `agents/untether-workspace/agent.md` (rewritten to Untether's text before every run that
+  selects it), and the gate plugin's `plugins/untether-gate/plugin.json`, `hooks.json` and `.untether-managed`, left
+  out only while all three are byte-identical to what this Untether version writes (its own files, the one thing
+  the check reads under `~/.gemini`; a manifest that matches a changed `hooks.json` proves nothing, so then all
+  three are tracked, see [Untether's agy gate](#untethers-agy-gate)). Anything else in or beside those folders, or a
+  link in their place, is tracked.
 
 Known limits:
 
@@ -410,6 +415,100 @@ Known limits:
 - Instruction files (`AGENTS.md`, `.agents/skills/`, `.agents/rules/`) steer the model but run nothing by
   themselves, so they don't hold scheduled runs. Root-level ones are in the after-run check.
 - A process still writing after the check can change files before agy reads them; the after-run check reports it.
+
+## Untether's agy gate
+
+The transport for everything interactive on agy ([#980](https://github.com/littlebearapps/untether/issues/980),
+phase 13): an opt-in agy plugin whose hooks talk to the run that started agy over a per-run Unix socket. Today it
+carries **question buttons** (`ask_question`) and **steer** ([#981](https://github.com/littlebearapps/untether/issues/981));
+"Ask me" approvals build on it next. It changes nothing about what agy may do: every other tool call gets no
+decision from Untether, so agy's own permission check decides exactly as without the plugin.
+
+### Install
+
+`untether agy-gate install` (host-wide, never from Telegram, REVIEW-2 m3) stages `plugin.json`, `hooks.json` and
+`.untether-managed` in a temp folder and runs `agy plugin validate` then `agy plugin install <folder>` (R3-1, agy's
+own plugin manager; agy copies the folder to `~/.gemini/config/plugins/untether-gate/` and lists it in
+`import_manifest.json`). `uninstall` runs `agy plugin uninstall untether-gate`. Both refuse a folder without
+`.untether-managed` or with files edited since (`--force` overrides); `--wait-s` sets how long a question waits
+(default 900 s; the hook's agy timeout is that plus 60 s). `status [--project <dir>] [--canary]` shows the install,
+runs agy's own `-p /hooks` listing in a project (0 tokens), and with `--canary` sends one trivial turn (≈ 13 k tokens)
+to prove the hooks run. Nothing else under `~/.gemini` is written. agy leaves an empty `plugins/` folder and
+`import_manifest.json` behind after an uninstall (P-H0).
+
+`hooks.json` registers one named group with three hooks:
+
+```
+PreToolUse (matcher "*", timeout wait + 60), PreInvocation (15 s), Stop (15 s):
+[ -n "$UNTETHER_AGY_GATE" ] || exit 0; exec "$UNTETHER_AGY_GATE_PY" -I -m untether.antigravity.gate_hook <Event>
+```
+
+The shell guard means your own agy sessions (no marker) never start Python. The interpreter comes from the env of the
+Untether instance that started agy, so instances sharing a `HOME` each run their own code.
+
+### Per run
+
+1. **Precheck** (cached an hour per agy binary + version, plugin files, cwd, the planted-config digest and the stat
+   of agy's user-level hook / plugin state files; a failure for five minutes): the plugin folder must hold exactly
+   what this Untether version writes (byte compare with its own templates, never with the manifest) and agy must not
+   have it disabled (`agy plugin disable`); then `agy -p /hooks` in the run's cwd must list one enabled
+   `untether-gate` group sourced from the plugin folder with the three commands byte for byte and a long enough
+   timeout. Other hook groups agy lists are recorded (`foreign_sources`) and so is a project that contains
+   Untether's own code (`self_protect`); phase 14's gated modes refuse on them. A failed precheck only turns
+   questions and steer off for that run (`antigravity.gate.precheck_failed reason=…`): Workspace, Plan first and
+   Full access don't rely on the gate.
+2. **Socket.** Bound before agy starts at `$XDG_RUNTIME_DIR/untether/<inst8>/agy-<run12>.sock` (or
+   `$TMPDIR/untether-<uid>/<inst8>/`), 0600 in 0700 folders whose owner and mode are verified; `<inst8>` hashes the
+   instance's config path. Stale sockets of the same instance older than a minute with no listener are removed once
+   per process. Unlinked when the run ends, on every path.
+3. **Env, agy only.** `UNTETHER_AGY_GATE=1`, `UNTETHER_AGY_GATE_SOCK`, `UNTETHER_AGY_GATE_TOKEN` (32 random bytes,
+   never logged — `token_len` only), `UNTETHER_AGY_GATE_PY`, `UNTETHER_AGY_GATE_DEADLINE_S`. Any `UNTETHER_AGY_GATE*`
+   in Untether's own environment is dropped first, and the zero-token `-p` probes never carry them.
+4. **Each hook call** connects, sends one line `{v, token, event, pid, ppid, payload}`, reads one line back. The
+   server checks the token (constant time) and, on Linux, `SO_PEERCRED` uid. `PreToolUse` fails **closed**: no
+   socket, a bad reply or a timeout prints a `deny`; `ask` / `force_ask` / `permissionOverrides` / `overwrite` are
+   never printed. `PreInvocation` and `Stop` fail open (`{}`).
+
+### Questions
+
+A `PreToolUse` for `ask_question` from the run's conversation (or a known subagent's, P-H8) becomes the question
+card through the engine-neutral registry ([#960](https://github.com/littlebearapps/untether/issues/960)): options are
+agy's plain strings (at most four, 60 characters each), plus **Other (type reply)**; a text reply in the chat answers
+too. The hook is held until the answer, which goes back as `{"decision":"deny","reason":"The user answered via
+Telegram: \"…\". Use this answer and continue. …"}` (E3: agy shows the reason to the model and the turn carries on);
+the card becomes `❓ answered: …`. No answer by the deadline: `deny` "No answer from the user in Telegram; use your
+best judgement and say what you assumed." and `⏱️ No answer — agy carried on`. The hook going away (agy's own timeout,
+agy stopped) withdraws the card. Cron and webhook runs are answered with the unattended text and no card; Ask mode
+off answers "Questions are turned off in this chat …". At most 20 cards a minute per run. The question step itself
+arrives as `step_type: unknown` (`ERROR` when answered, `DONE` when skipped) and is not shown.
+
+The Workspace agent has `ask_question` since R3-2: without the gate (no plugin, or a run whose precheck failed) agy
+skips the unanswered question and the turn goes on (probed on agy 1.3.4, n = 2).
+
+### Steer
+
+With Follow-up = steer (or `/steer <text>`), a message for a chat whose agy run is in flight and hasn't sent its
+result is queued on the run (`live_sessions.steer_backend`: a steer-only target, not a live session) and acknowledged
+`↪️ Steered into the current run.` The next `PreInvocation` for the run's own conversation (never a subagent's)
+answers `{"injectSteps":[{"userMessage":"Message from the user, sent via Telegram while you were working: …"}]}`,
+at most eight per call (`antigravity.steer.injected`). Each injected message appears as one `user_input` step
+(P-H10); that step marks it delivered (`antigravity.steer.delivered step=<n>`) and adds a
+`↪️ steer received: …` row; it never starts a turn. A steer still queued or not seen when agy sends its result gets
+the bridge's `⚠️ The session ended before this message ran — please send it again.` (so does `/cancel`).
+
+### Liveness, tripwire, `Stop`
+
+`PreInvocation` fires before every model call, so a model step (`agent_response`, `tool`, `subagent`, `finish`) with
+no `PreInvocation` before it means the hooks don't run: `antigravity.gate.not_running`, and steer is off for the run.
+Each parent-stream tool step must get its `PreToolUse` within 3 s (`antigravity.gate.tripwire`, INFO). Both stop the
+run only for a mode whose safety rests on the gate (phase 14; the final then says Telegram approvals weren't
+running). Duplicate `(conversationId, stepIdx)` requests are refused (`antigravity.gate.duplicate_request`, P-H15).
+`Stop` with `fullyIdle: false` changes the `⏳ background` block's last line to say agy has finished its turn and is
+waiting for background work (#1061).
+
+Same-uid caveat (documented, not fixed): agy's tool processes inherit its env, so a command the user already allowed
+could read the socket path and token and connect. It can only *ask* (a spoofed question card or a drained steer
+queue), never grant itself a tool. See [Security](../../../how-to/security.md#antigravity-telegram-questions-and-steer).
 
 ## Errors
 
@@ -630,8 +729,9 @@ Turn the block off with `[progress] show_background_tasks = false`.
 
 ## Known gaps
 
-- **No approval buttons, question buttons, steering or live sessions yet.** Ask me arrives in a later 0.36.1
-  release. Plan first has its own Approve / Deny / Let's discuss card (see [Plan first](#plan-first)).
+- **No approval buttons or live sessions yet.** Ask me arrives in a later 0.36.1 release. Plan first has its own
+  Approve / Deny / Let's discuss card (see [Plan first](#plan-first)). Question buttons and steer need
+  [Untether's agy gate](#untethers-agy-gate) on the host.
 - **Subagents** appear as one action row for the spawn and one status-panel row each; their own steps, output,
   token use and failures aren't shown (agy doesn't put them in the parent's stream).
 - **Images.** A Telegram photo reaches agy as a saved file path, not as image input.
@@ -656,7 +756,10 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Telling the user to send `/new` after switching to or from Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
 | A background task agy stopped itself reads as stopped | `tool_info.error` on the step's DONE ("context canceled") and `manage_task`'s `Action: kill` / `TaskId: <cid>/task-<step>` | — (native). Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
-| Showing an answer held for background work | — (**gap**: a note says where the answer is) | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; the gate's `Stop` hook (`fullyIdle: false`) says an answer is ready but carries no text. The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
+| Showing an answer held for background work | Partly native: with the gate, the `Stop` hook's `fullyIdle: false` says the model has finished its turn and agy is waiting (the `⏳ background` note says so); the text itself is a **gap** | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; `Stop` carries no text (and a timer can still start another model call, probe pb2). The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3/1.3.4, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
+| Questions in Telegram ([#980](https://github.com/littlebearapps/untether/issues/980)) | agy's own `ask_question` tool, answered through a `PreToolUse` hook (`deny` + a reason that carries the answer, E3); the hook is installed with `agy plugin install` | Partly **custom**: headless agy skips `ask_question` and has no answer channel but a hook. The hook command, socket and plugin files are Untether's. Checked 2026-10-13, agy 1.3.3/1.3.4 |
+| Steer into a running turn ([#981](https://github.com/littlebearapps/untether/issues/981)) | `PreInvocation` hook `injectSteps[].userMessage` | Partly **custom** (the queue and the socket). agy's own "Queued Messages: send immediately" is a global TUI setting (`queuedMessages` in `-p /config`), not per run, and its effect on stream-json input is unprobed; stdin `control_request` is refused (rc 2). Checked 2026-10-12, agy 1.3.3 |
+| Installing the gate's hooks | `agy plugin validate` / `install` / `uninstall` (R3-1) | A hand-dropped folder is loaded but not listed by `agy plugin list` and can't be enabled or disabled (P-H0) |
 | Background rows for timers and subagents ([#978](https://github.com/littlebearapps/untether/issues/978)) | The stream's own steps: `schedule` (open for the timer's life), `invoke_subagent` (`Subagents[]` / `subagent_info.subagents[]`) | Nothing custom to rule out. `/tasks` and `/agents` are TUI only. Checked 2026-10-12, agy 1.3.3 |
 | When a `run_command` counts as background | Partly native: `WaitMsBeforeAsync` / `IsDaemon` if the step's parameters carry them; a later model step while the command is still open (agy runs tool calls one at a time). Otherwise **custom**: 5 s since the step opened | The 1.3.3 stream carries only `CommandLine` (the per-call value, 5000 / 10000 / 0, is in hook payloads only), so headless stream mode fails the "available on Untether's surface" test. Checked 2026-10-12. Retire when the stream prints the value or the approval gate's hook supplies it |
 | Which subagent a completion belongs to | — (**custom**: first started, first finished) | The parent stream's `system_message` step has no content. The child's id is in agy's transcript file (`sender=`), which Untether doesn't read (rule 3: no engine state files). Checked 2026-10-12, agy 1.3.3. Retire when the stream names the child or the gate's hook reports it |
@@ -695,6 +798,11 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.workspace_agent.installed` / `.unavailable`, `antigravity.plan.detected` / `.card` / `.no_artifact` /
 `.superseded` / `.sidecar_missing` / `.unreadable` / `.decision` (`decision`, `path=resume`) / `.tap_refused` /
 `.cwd_changed`,
+`antigravity.gate.listening` (`token_len`) / `.closed` / `.precheck` / `.precheck_failed` (`reason`) / `.request`
+(`hook_event`, `tool`, `step`, `foreign`) / `.decision` (`decision`, `kind`) / `.not_running` / `.tripwire` /
+`.duplicate_request` / `.no_policy` / `.peer_refused` / `.token_refused` / `.plugin_changed` / `.socket_failed` /
+`.handler_failed`, `antigravity.steer.queued` / `.injected` / `.delivered` (`step`), `ask_question.shown` /
+`.answered` / `.withdrawn` (`engine=antigravity`),
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
 (a command still running when the answer arrived), `antigravity.quota.fetched` / `.failed`,
 `antigravity.credits.fetched` / `.failed`, `antigravity.context.window_miss` (DEBUG, once per run: the model has

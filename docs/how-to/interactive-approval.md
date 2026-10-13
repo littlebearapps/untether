@@ -89,6 +89,8 @@ When Claude Code calls `AskUserQuestion`, Untether renders the question with int
 
 Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude Code proceeds with defaults.
 
+**Antigravity** asks through its own `ask_question` tool, and you get the same card: option buttons, **Other (type reply)**, or a text reply. This needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host; without it agy skips the question and carries on with its own default. agy shows your answer to the model and the progress row becomes `❓ answered: …`. If nobody answers within 15 minutes, agy is told to use its best judgement and say what it assumed (`⏱️ No answer — agy carried on`). Cron and webhook runs never show the card.
+
 <img src="../assets/screenshots/ask-text-reply-howto.jpg" alt="AskUserQuestion with option buttons and &quot;Other (type reply)&quot;" width="360" loading="lazy" />
 
 <div markdown>
@@ -170,7 +172,7 @@ Toggle via `/config` → **Permission mode**:
 | **Plan first** | `--mode=plan` `--agent=untether-workspace` | Antigravity reads the project and writes a plan, changing nothing. The plan is posted with **✅ Approve Plan / ❌ Deny / 💬 Let's discuss**; Approve carries it out in Workspace mode. See [Plan first](#antigravity-plan-first) below |
 | **Full access** | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project. Takes effect from the next new conversation — send `/new` after switching |
 
-This is a pre-run policy: headless agy can't stop mid-run to ask, so there are no per-tool Approve / Deny buttons for Antigravity yet. **Ask me** will add them; until then `/config` shows it with "· soon", and a run set to it (for example from `untether.toml`) is refused before it starts rather than run as something else. **Plan first** works today: agy plans and stops, and you answer the plan afterwards. In an Antigravity chat `/planmode on` picks Plan first and `/planmode off` goes back to Workspace.
+This is a pre-run policy: headless agy can't stop mid-run to ask, so there are no per-tool Approve / Deny buttons for Antigravity yet (questions it asks with `ask_question` do get buttons with [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)). **Ask me** will add them; until then `/config` shows it with "· soon", and a run set to it (for example from `untether.toml`) is refused before it starts rather than run as something else. **Plan first** works today: agy plans and stops, and you answer the plan afterwards. In an Antigravity chat `/planmode on` picks Plan first and `/planmode off` goes back to Workspace.
 
 !!! warning "After switching to Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you switch the chat to **Full access**, even though the footer says `full access`. Send `/new`: Full access applies from the next new conversation. The `/config` toast says the same (`Permission mode: full access — send /new to start using it`).
