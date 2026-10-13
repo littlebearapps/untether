@@ -6,8 +6,8 @@ label (``runners/antigravity.py`` imports it lazily). Mirrors
 ``_permission_mode_text.py`` for Claude.
 
 Honesty rules (REVIEW B2): Workspace is never called read-only or a sandbox;
-"Ask me" and "Plan first" need Untether's approval gate, so rc1 shows them as
-``· soon`` buttons that only answer a toast.
+"Ask me" needs Untether's approval gate, so it shows as a ``· soon`` button
+that only answers a toast. "Plan first" is agy's own plan mode (#981).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ ANTIGRAVITY_MODE_TEXT: dict[str, AgyModeText] = {
         label="plan first",
         button="Plan first",
         hint="plans, waits for your OK",
-        available=False,
+        available=True,
     ),
     "full": AgyModeText(
         label="full access",
@@ -80,13 +80,23 @@ BUTTON_ROWS: tuple[tuple[str, ...], ...] = (("agw", "agf"), ("aga", "agp"))
 # #1037: agy keeps a conversation on the agent it started with, so a chat
 # that began in Workspace has no shell until a new conversation starts.
 FULL_ACCESS_TOAST = "Permission mode: full access — send /new to start using it"
-# #1060: and one that began in Full access keeps its shell, so Workspace
-# would block it every time it reaches for one.
-WORKSPACE_TOAST = "Permission mode: workspace — send /new to start using it"
+# #1060 / #981: one that began in Full access keeps its shell, which
+# Workspace then blocks and a plan turn reaches for. Workspace and Plan first
+# share the no-shell agent, so moving between those two needs no /new.
+WORKSPACE_TOAST = (
+    "Permission mode: workspace — send /new if you're switching from Full access"
+)
+PLAN_FIRST_TOAST = (
+    "Permission mode: plan first — send /new if you're switching from Full access"
+)
+# ``/planmode`` (#981) when its change crosses Full access.
+NEW_NEEDED_TEXT = "send /new to start using it"
 # The agy page's own Clear override (``config:pm:agc``, #1060): the shared
-# ``clr`` toast is engine-blind, and clearing can switch between Workspace and
-# Full access when untether.toml sets one.
-CLEARED_TOAST = "Permission mode: cleared — send /new if this changed it"
+# ``clr`` toast is engine-blind, and clearing can switch to or from Full
+# access when untether.toml sets it.
+CLEARED_TOAST = (
+    "Permission mode: cleared — send /new if this switched to or from Full access"
+)
 
 GATE_SOON_SUFFIX = " · soon"
 GATE_SOON_TOAST = (

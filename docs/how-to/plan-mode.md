@@ -187,6 +187,18 @@ For unattended crons, `auto` is usually the better choice: Claude Code's classif
 
 Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. The rest of the chat's interactive traffic continues to honour plan mode. See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the full reference.
 
+## Antigravity CLI: Plan first
+
+Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` are Claude-only. It works differently from Claude's plan mode, because agy can't stop mid-run to ask:
+
+- Antigravity plans in one run and **stops**: the final shows the plan, followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss**. Nothing in the project changes until you approve.
+- **Approve Plan** starts a second run in the same conversation, in Workspace mode (file edits, no shell). Its answer starts `📋 Plan (approved)`.
+- **Deny** and **Let's discuss** run nothing; reply to revise the plan and a new card appears.
+- There is no Pause & Outline button: the plan file already is the outline.
+- Cron and webhook runs post the plan and change nothing; set `permission_mode = "workspace"` on a cron that should make the change.
+
+Details: [Interactive approval — Antigravity: Plan first](interactive-approval.md#antigravity-plan-first).
+
 ## Related
 
 - [Interactive approval](interactive-approval.md) — how approval buttons and diff previews work

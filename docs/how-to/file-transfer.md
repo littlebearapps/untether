@@ -140,7 +140,7 @@ When the run finishes successfully, Untether:
 1. Scans `.untether-outbox/` for files (flat scan, no subdirectories)
 2. Keeps only the files written or copied into it **during this run** (#924) — judged by the later of the file's modification and status-change times, so `mv` and `cp -p` still count. Anything older is moved once to `.untether-outbox/.skipped/` and listed in a single `📎 N older files were already in .untether-outbox/ …` notice instead of being sent
 3. Validates each file against deny globs, size limits, and path traversal rules
-4. Sends valid files as Telegram documents with `📎 filename (size)` captions
+4. Sends valid files as Telegram documents with `📎 filename (size)` captions. Every file arrives as the original file, whatever its type: a `.webp` image is no longer turned into a sticker, so you can open it full-size and save it
 5. Cleans up — deletes sent files and removes the empty directory
 
 Files are sent in alphabetical order, one at a time, immediately after the agent's text response. In a live Claude session, "this run" starts when the session started, so a background task's file that a later wake turn reports is still delivered.

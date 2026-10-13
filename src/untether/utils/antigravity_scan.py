@@ -93,7 +93,9 @@ referenced folder that holds the project itself; a cwd so deep that the
 project root is out of reach.
 
 The cross-engine set (project root only, stat only) never refuses (REVIEW-2
-M4); it only feeds the post-run ⚠️ row.
+M4); it only feeds the post-run ⚠️ row. Claude Code's worktrees
+(``.claude/worktrees/``) aren't in it: each is its own checkout with its own
+config (#1051).
 
 Changing what is tracked changes digests: there is no digest version, so a
 project whose set gains an entry after an upgrade differs from the stored
@@ -180,6 +182,15 @@ _CROSS_ENGINE_FILES = (
     ".git/config",
 )
 _CROSS_ENGINE_TREES = (".claude", ".github/workflows", ".husky", ".git/hooks")
+# Folders directly under a cross-engine tree that hold no config for *this*
+# project (exact names, real folders only; a link there is still recorded).
+# ``.claude/worktrees/<name>/`` is where Claude Code keeps the checkouts it
+# makes with ``--worktree`` and for isolated subagents: each is a separate
+# copy of the repo with its own config, loaded only by a session whose
+# working directory is that worktree (Claude Code 2.1.296 docs, "Run
+# parallel sessions with worktrees"). Walking them ran the budget out on
+# every run in a repo that uses them (#1051). The agy set never looks here.
+_CROSS_ENGINE_SKIP = {".claude": frozenset({"worktrees"})}
 
 # Problem reasons (shown in the ⚠️ row / refusal text).
 TOO_MANY = "too many files to check in time"
@@ -189,7 +200,12 @@ UNREADABLE = "files Untether can't read"
 VARIABLE_PATH = "a hook or MCP command path Untether can't resolve"
 TOO_LARGE = "a config file too large to check"
 CHANGING = "files changing while they were checked"
-AMBIGUOUS = "a config file agy might read differently (not strict JSON)"
+# Each reason is shown inside the row's own parentheses, so none may contain any.
+AMBIGUOUS = "a config file that isn't strict JSON, which agy might read differently"
+OTHER_FORMAT = "a config file in a format Untether can't check, such as YAML or JSONC"
+FRONT_MATTER = (
+    "an agent file whose YAML front matter Untether can't read the way agy would"
+)
 TOO_DEEP = "a project folder too deep to check"
 
 # (size, content hash | stat stamp)
@@ -374,12 +390,16 @@ def _is_reference_manifest(path: Path, base: Path) -> bool:
     return "agents" in {_fold(part) for part in (base.name, *folders)}
 
 
+# The wall clock the time budget reads (tests swap it, #1053).
+_clock = time.monotonic
+
+
 class _Budget:
     """One per set: entries, bytes hashed, wall clock, plus the reasons the
     set couldn't be checked. Every early stop goes through here."""
 
     def __init__(self) -> None:
-        self.deadline = time.monotonic() + TIME_BUDGET_S
+        self.deadline = _clock() + TIME_BUDGET_S
         self.entries = 0
         self.bytes = 0
         self.exceeded = False
@@ -390,7 +410,7 @@ class _Budget:
         if (
             self.entries > MAX_FILES
             or self.bytes > MAX_HASH_BYTES
-            or time.monotonic() > self.deadline
+            or _clock() > self.deadline
         ):
             self.exceeded = True
         return not self.exceeded
@@ -912,7 +932,7 @@ def _scan_agents(
         if not budget.take():
             return False
         if _ALT_MANIFEST.match(_fold(path.name)):
-            budget.flag(AMBIGUOUS)
+            budget.flag(OTHER_FORMAT)
         fp, data = _fingerprint(
             path,
             budget,
@@ -1029,12 +1049,12 @@ def _scan_agents(
         if is_md:
             lines = _front_matter(data)
             if lines is None:
-                budget.flag(AMBIGUOUS)
+                budget.flag(FRONT_MATTER)
                 continue
             content = _Manifest(strings=lines)
             everywhere, commands, ambiguous = _front_matter_paths(lines)
             if ambiguous:
-                budget.flag(AMBIGUOUS)
+                budget.flag(FRONT_MATTER)
         else:
             loaded = _strict_json(data)
             if loaded is None:
@@ -1109,7 +1129,15 @@ def _scan_cross_engine(
     for tree in _CROSS_ENGINE_TREES:
         base = root / tree
         if os.path.isdir(base) and not os.path.islink(base):
-            candidates.extend(_walk(base, budget, follow_within=(), seen=seen))
+            candidates.extend(
+                _walk(
+                    base,
+                    budget,
+                    follow_within=(),
+                    seen=seen,
+                    skip_top=_CROSS_ENGINE_SKIP.get(tree, frozenset()),
+                )
+            )
         elif os.path.lexists(base):
             candidates.append(base)
         if budget.exceeded:

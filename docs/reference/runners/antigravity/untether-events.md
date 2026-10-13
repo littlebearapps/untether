@@ -27,6 +27,8 @@ the subagent, timer and background rows against 1.3.3.
 | a `run_command` that counts as background, or a `schedule` / `manage_task` step `ACTIVE` for more than 5 s | `ActionEvent` updated, title `⏳ background: <command>` (once, on the next line agy prints) |
 | `result` `SUCCESS` | Open rows are closed, then `CompletedEvent(ok=True)`. Answer is `result.response`, or the collected text when that is empty |
 | `result` with `denied_actions` | A `⚠️ Blocked: <what> (<agy name>) — <title>` row per denial, and a closing paragraph on the answer |
+| `result` `SUCCESS` of a Plan first run, after a `write_to_file` `DONE` into `brain/<conversation id>/` ([#981](https://github.com/littlebearapps/untether/issues/981)) | `CompletedEvent(ok=True)`: the answer is `📋 Plan — <file>`, the plan read from that file, then agy's reply. `usage["review_card"]` = `{"text", "buttons"}` (Approve Plan / Deny / Let's discuss, callback `agy_plan:<action>:<id>`), sent by the bridge as the final's last message. A cron or webhook run gets `usage["unattended"]` (`denied: {"plan approval": 1}`, `hint`) instead of the card. No plan file: the ordinary answer plus a one-line note |
+| `result` `SUCCESS` of the run an Approve started | The answer starts `📋 Plan (approved) — <file>`; the footer label is `workspace · plan approved` |
 | Any `CompletedEvent` after ⚠️ rows | The answer gets those rows appended after it, once each, one per line (the post-run config re-check's rows included), because the final replaces the progress message that showed them ([#1045](https://github.com/littlebearapps/untether/issues/1045)). `⚠️ Blocked` rows are left out: the closing paragraph already explains them |
 | `result` `ERROR` + `interrupted` | `CompletedEvent(ok=False)`, resumable, "Antigravity was interrupted …" |
 | `result` `ERROR` + other text | `CompletedEvent(ok=False)` with agy's text, redacted and trimmed to three lines |
@@ -56,7 +58,7 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | RAM / concurrency guard | Same pre-spawn guard as every engine |
 | `no_project` | No project directory, or it is `/`, the home directory or the bot's own directory, or its path can't be resolved |
 | `invalid_argument` | The model id or the conversation id being resumed isn't a valid value (it could be read by agy as a flag). The bad id is not kept as the resume token |
-| `gate_missing` | The mode is Ask me or Plan first |
+| `gate_missing` | The mode is Ask me (Plan first runs since [#981](https://github.com/littlebearapps/untether/issues/981)) |
 | `unsupported_version` | agy is older than 1.3.1 |
 | `config_changed` | Unattended run, and the project's agy config differs from what an attended run last showed |
 | `config_unchecked` | Unattended run, and that config couldn't be checked |

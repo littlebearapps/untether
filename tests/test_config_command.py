@@ -1078,11 +1078,14 @@ class TestAntigravityPermissionPage:
         # #1037: Workspace has no shell tool, so no allow-rule tip; the
         # page says a switch either way needs /new (#1060).
         assert "command(git status)" not in text
-        assert (
-            "After switching between Workspace and Full access, send /new."
-            in text.replace("</b>", "")
+        assert "After switching to or from Full access, send /new." in text.replace(
+            "</b>", ""
         )
         assert "one that started in Full access keeps reaching for it" in text
+        assert "Switching between Workspace and Plan first" in text
+        # #981: Plan first is live and says what Approve does.
+        assert "Approve / Deny / Let's discuss" in text
+        assert "coming soon: needs the gate)" not in text.split("Plan first")[1]
         assert "Current: <b>workspace</b> (default)" in text
         assert "interactive-approval/#antigravity-cli--permission-mode" in text
         labels = _buttons_labels(msg)
@@ -1090,7 +1093,7 @@ class TestAntigravityPermissionPage:
             "✓ Workspace",
             "Full access",
             "Ask me · soon",
-            "Plan first · soon",
+            "Plan first",
             "Clear override",
             "← Back",
         ]
@@ -1118,13 +1121,19 @@ class TestAntigravityPermissionPage:
         await cmd.handle(self._ctx(tmp_path, "agc"))
         override = await self._override(tmp_path)
         assert override is None or override.permission_mode is None
-        for soon in ("aga", "agp"):
-            ctx = self._ctx(tmp_path, soon)
-            await cmd.handle(ctx)
-            override = await self._override(tmp_path)
-            assert override is None or override.permission_mode is None
-            ctx.executor.edit.assert_not_called()
-            ctx.executor.send.assert_not_called()
+        # #981: Plan first is stored like any other mode.
+        await cmd.handle(self._ctx(tmp_path, "agp"))
+        assert (await self._override(tmp_path)).permission_mode == "plan"
+        await cmd.handle(self._ctx(tmp_path, "agc"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        # Ask me still needs the gate: the "· soon" button stores nothing.
+        ctx = self._ctx(tmp_path, "aga")
+        await cmd.handle(ctx)
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        ctx.executor.edit.assert_not_called()
+        ctx.executor.send.assert_not_called()
 
     @pytest.mark.anyio
     async def test_antigravity_pm_setter_keeps_loop_override(self, tmp_path):
@@ -1192,23 +1201,29 @@ class TestAntigravityPermissionPage:
 
     def test_antigravity_toast_labels_present(self):
         toast = ConfigCommand.early_answer_toast
-        # #1060: a conversation keeps the tools it started with either way.
+        # #1060 / #981: a conversation keeps the tools it started with, so a
+        # switch to or from Full access needs /new; Workspace ↔ Plan first
+        # share the no-shell agent.
         assert toast("pm:agw") == (
-            "Permission mode: workspace — send /new to start using it"
+            "Permission mode: workspace — send /new if you're switching from Full"
+            " access"
+        )
+        assert toast("pm:agp") == (
+            "Permission mode: plan first — send /new if you're switching from Full"
+            " access"
         )
         assert toast("pm:agf") == (
             "Permission mode: full access — send /new to start using it"
         )
         assert toast("pm:agc") == (
-            "Permission mode: cleared — send /new if this changed it"
+            "Permission mode: cleared — send /new if this switched to or from Full"
+            " access"
         )
         # The shared Clear toast other engines use is unchanged.
         assert toast("pm:clr") == "Permission mode: cleared"
-        for soon in ("pm:aga", "pm:agp"):
-            assert toast(soon) == (
-                "Needs Untether's Telegram approval gate — coming in a later "
-                "0.36.1 release"
-            )
+        assert toast("pm:aga") == (
+            "Needs Untether's Telegram approval gate — coming in a later 0.36.1 release"
+        )
 
     @pytest.mark.anyio
     async def test_gemini_permission_page_unchanged(self, tmp_path):

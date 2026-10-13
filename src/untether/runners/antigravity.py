@@ -19,8 +19,11 @@ Safety (phase 02, D21): ``--dangerously-skip-permissions`` is passed only
 when a human explicitly chose **Full access** (``/config``, ``[antigravity]
 permission_mode = "full"`` or a cron's own ``permission_mode``); unknown
 values fail closed to Workspace, unattended runs never inherit Full access
-(08 §10), and "Ask me" / "Plan first" are refused until Untether's approval
-gate ships. The runner also refuses to run without a project directory or on
+(08 §10), and "Ask me" is refused until Untether's approval gate ships.
+"Plan first" (#981) runs agy's own ``--mode=plan`` under the no-shell agent:
+the turn stops after writing its plan, the plan is posted with Approve /
+Deny / Let's discuss, and Approve resumes the conversation in Workspace
+(``utils/antigravity_plan.py``). The runner also refuses to run without a project directory or on
 agy older than 1.3.1, cross-checks agy's own settings (``-p /config``) and the
 reported ``init.permission_mode``, and warns about agy hooks, plugins and MCP
 servers it doesn't manage (REVIEW-2 B2).
@@ -63,6 +66,7 @@ from ..model import (
 )
 from ..runner import (
     PRESPAWN_BLOCKED_KEY,
+    REVIEW_CARD_KEY,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
@@ -525,8 +529,12 @@ BYPASS_FLAG = "--dangerously-skip-permissions"
 # ``init.permission_mode`` still reports ``request-review``. A fixed value,
 # never a user's; ``agy_flag`` allows nothing else for this flag.
 WORKSPACE_AGY_MODE = "accept-edits"
-_GATE_MODES = frozenset({"ask", "plan"})
+# Modes that still need Untether's approval gate (refused before spawn).
+_GATE_MODES = frozenset({"ask"})
 _GATE_MODE_NAMES = {"ask": "Ask me", "plan": "Plan first"}
+# Modes that run on agy's own permission checks (no bypass flag), so agy's
+# tool-permission setting must be its default or stricter (#1044, D22.7).
+_NO_BYPASS_MODES = frozenset({"workspace", "plan"})
 
 # agy ``toolPermission`` / ``init.permission_mode`` values a Workspace run
 # may proceed under. Anything else — ``always-proceed`` (D22.7),
@@ -682,13 +690,27 @@ def denial_paragraph(
 ) -> str:
     """Why the run stopped and how to allow it — trigger-aware (audit §6).
 
-    ``kept_shell`` (#1060): a resumed Workspace run under Untether's no-shell
-    agent still called the shell, so the conversation started under another
+    ``kept_shell`` (#1060): a resumed Workspace or Plan first run under
+    Untether's no-shell agent still called the shell, so the conversation started under another
     agent (Full access, usually) and agy kept it — agy ignores ``--agent`` on
     a resume. Full access then /new is the wrong advice there."""
     what = f"⚠️ Antigravity was blocked from using a {_join_labels(labels)}"
     if mode == "full":
         return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
+    if mode == "plan":
+        # #981: a plan turn may only read and write its plan.
+        text = (
+            f"{what} — Plan first doesn't let it change anything until you "
+            "approve a plan."
+        )
+        if kept_shell and trigger is None:
+            # #1060: it reached for a shell the no-shell agent doesn't have.
+            text += (
+                " This conversation started without the no-shell tools (in Full"
+                " access, for example), and agy keeps the tools a conversation"
+                " started with. Send /new to plan in a fresh conversation."
+            )
+        return text
     head = f"{what} — headless runs can't ask for approval, so it stopped there."
     # An allow rule only helps for a shell command (#1037): agy has no rule
     # that lets a run reach a file outside the project.
@@ -1052,6 +1074,11 @@ class AntigravityStreamState:
     agy_error: dict[str, Any] | None = None
     stderr_flags: set[str] = field(default_factory=set)
     result_seen: bool = False
+    # #981 Plan first: ``TargetFile`` of every finished write in a plan run
+    # (the plan is the one inside ``brain/<conversation id>/``), and the
+    # plan an Approve resumed this run for (its file name).
+    plan_writes: list[str] = field(default_factory=list)
+    approved_plan: str | None = None
 
     def has_live_background_work(self) -> bool:
         """REVIEW-2 B1: answers ``runner_bridge.engine_background_busy``."""
@@ -1494,7 +1521,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         pre.config = config
         pre.auth_route = antigravity_quota.auth_route(config)
         tool_permission = config.tool_permission if config is not None else None
-        if mode == "workspace" and not tool_permission:
+        if mode in _NO_BYPASS_MODES and not tool_permission:
             # #1044: no usable value. An attended run goes on — ``init``
             # still has to report a safe one (``_check_reported_mode``) —
             # but nobody reads an unattended run's ⚠️ row, so that is held,
@@ -1519,7 +1546,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     ),
                     None,
                 )
-        elif mode == "workspace" and tool_permission not in _WORKSPACE_TOOL_PERMISSIONS:
+        elif (
+            mode in _NO_BYPASS_MODES
+            and tool_permission not in _WORKSPACE_TOOL_PERMISSIONS
+        ):
             logger.error(
                 "antigravity.permission_mode.mismatch",
                 source="config",
@@ -1639,9 +1669,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # ``--flag=value`` so agy can't read it as another flag. It raises
         # ``AgyArgvError`` on a bad value; ``run_impl`` refused that run
         # before getting here.
-        from ..utils import antigravity_agent
+        from ..utils import antigravity_agent, antigravity_plan
         from ..utils.antigravity_argv import AgyArgvError, agy_flag
 
+        mode = self._effective_mode()
         args = [
             "--input-format",
             "stream-json",
@@ -1649,8 +1680,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             "stream-json",
             "--print-timeout",
             "0",
-            "--disable-slash-commands",
         ]
+        if mode != "plan":
+            # C7: the flag turns ``--mode=plan`` into a no-op, so a plan run
+            # goes without it and escapes a ``/``-leading prompt instead
+            # (``stdin_payload``, D30).
+            args.append("--disable-slash-commands")
         if resume is not None:
             # #1039: agy's own continue flag also resumes a parent or child
             # directory's conversation, so it is never passed. ``run_impl``
@@ -1666,13 +1701,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if effort:
             args.append(agy_flag("--effort", effort))
         # Phase 02 (D21): the bypass flag only for an explicit Full access.
-        # Ask me / Plan first never get here in rc1 (refused before spawn);
+        # Ask me never gets here (refused before spawn); Plan first is agy's
+        # own plan mode under the same no-shell agent (#981, shape A);
         # anything else fails closed to Workspace.
-        mode = self._effective_mode()
         if mode == "full":
             args.append(BYPASS_FLAG)
         else:
-            args.append(agy_flag("--mode", WORKSPACE_AGY_MODE))
+            agy_mode = (
+                antigravity_plan.PLAN_AGY_MODE if mode == "plan" else WORKSPACE_AGY_MODE
+            )
+            args.append(agy_flag("--mode", agy_mode))
             # #1037: Workspace runs use Untether's no-shell agent, so the
             # model has no shell tool to open with (a soft-denied shell call
             # ends the turn). Skipped when the file can't be put in place, or
@@ -1728,6 +1766,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
+        if isinstance(state, AntigravityStreamState) and state.effective_mode == "plan":
+            from ..utils import antigravity_plan
+
+            prompt = antigravity_plan.escape_slash(prompt)
         line = {"event": "user", "message": {"content": prompt}}
         return (json.dumps(line, ensure_ascii=False) + "\n").encode()
 
@@ -1759,6 +1801,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         options = get_run_options()
         mode = self._effective_mode()
         label = _mode_label(mode)
+        approved = self._plan_bookkeeping(mode, prompt, expected)
+        if approved is not None:
+            label += " · plan approved"
         if precheck is not None:
             label += precheck.label_suffix
             precheck.effective_mode = mode
@@ -1780,7 +1825,31 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 else None
             ),
             trigger_source=get_run_trigger_source(),
+            approved_plan=approved,
         )
+
+    @staticmethod
+    def _plan_bookkeeping(
+        mode: str, prompt: str, conversation_id: str | None
+    ) -> str | None:
+        """#981, at the start of a run on a known conversation: a new plan
+        turn retires the conversation's older plan cards; the run an Approve
+        queued (Workspace, Untether's approve prompt) takes the approval and
+        returns the plan's file name for the footer and the final."""
+        if conversation_id is None:
+            return None
+        from ..utils import antigravity_plan
+
+        if mode == "plan":
+            if antigravity_plan.supersede(conversation_id):
+                logger.info("antigravity.plan.superseded", session_id=conversation_id)
+            return None
+        if mode != "workspace" or not prompt.rstrip().endswith(
+            antigravity_plan.APPROVE_PROMPT
+        ):
+            return None
+        plan = antigravity_plan.take_approved(conversation_id)
+        return plan.name if plan is not None else None
 
     def start_run(
         self,
@@ -2276,6 +2345,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._note_overtaken(state, idx)
 
         if step_type == "tool":
+            if st == "DONE" and state.effective_mode == "plan":
+                # #981: the plan artifact is a finished write into the
+                # conversation's own folder (resolved at the result).
+                from ..utils import antigravity_plan
+
+                info = su.tool_info
+                antigravity_plan.note_plan_write(
+                    state.plan_writes,
+                    su.tool_name or (info.name if info and info.name else ""),
+                    info.parameters if info is not None else None,
+                )
             out.extend(self._translate_tool(su, state, action_id))
             return out
         if step_type == "subagent":
@@ -2809,6 +2889,88 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.text_by_step[i].rstrip("\n") for i in sorted(state.text_by_step)
         )
 
+    def _plan_review(
+        self,
+        state: AntigravityStreamState,
+        answer: str,
+        usage: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """#981: a finished Plan first turn → the plan in the final, plus the
+        Approve / Deny / Let's discuss card (``usage[REVIEW_CARD_KEY]``, sent
+        by the bridge right after the final). Unattended runs (#835) post the
+        plan and change nothing: no card, a 🔒 footer instead. A turn that
+        wrote no plan is an ordinary answer with a one-line note."""
+        from ..utils import antigravity_plan
+        from ..utils.paths import (
+            get_run_context,
+            get_run_sender_id,
+            get_run_thread_id,
+        )
+
+        plan = antigravity_plan.find_plan(state.session_id, state.plan_writes)
+        if plan is None:
+            logger.info(
+                "antigravity.plan.no_artifact",
+                session_id=state.session_id,
+                writes=len(state.plan_writes),
+                trigger=state.unattended,
+            )
+            if state.unattended is None:
+                answer = _append_paragraph(answer, antigravity_plan.NO_PLAN_NOTE)
+            return answer, usage
+        answer = antigravity_plan.plan_answer(plan, answer)
+        logger.info(
+            "antigravity.plan.detected",
+            session_id=state.session_id,
+            name=plan.name,
+            chars=len(plan.body),
+            truncated=plan.truncated,
+            trigger=state.unattended,
+        )
+        if state.unattended is not None:
+            label = antigravity_plan.UNATTENDED_DENIED_LABEL
+            logger.warning(
+                "permission.unattended_deny",
+                tool_name=label,
+                trigger_source=state.unattended,
+                session_id=state.session_id,
+                permission_mode="plan",
+                reason="plan_mode",
+            )
+            usage = {
+                **usage,
+                "unattended": {
+                    "trigger": state.unattended,
+                    "mode": "plan",
+                    "denied": {label: 1},
+                    "hint": antigravity_plan.unattended_hint(state.unattended),
+                },
+            }
+            return answer, usage
+        base = get_run_base_dir()
+        pending = antigravity_plan.register(
+            conversation_id=state.session_id or "",
+            name=plan.name,
+            channel_id=get_run_channel_id(),
+            thread_id=get_run_thread_id(),
+            context=get_run_context(),
+            cwd=str(base) if base is not None else None,
+            originator=get_run_sender_id(),
+        )
+        logger.info(
+            "antigravity.plan.card",
+            session_id=state.session_id,
+            request_id=pending.request_id,
+        )
+        usage = {
+            **usage,
+            REVIEW_CARD_KEY: {
+                "text": antigravity_plan.card_text(plan.name),
+                "buttons": antigravity_plan.keyboard(pending.request_id),
+            },
+        }
+        return answer, usage
+
     def _resume_for_completed(
         self, state: AntigravityStreamState, resume: ResumeToken | None
     ) -> ResumeToken | None:
@@ -2878,6 +3040,14 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         usage = self._usage(res, state)
         self._log_timing(res, state)
         resume_token = self._resume_for_completed(state, resume)
+        if status == "SUCCESS" and state.effective_mode == "plan":
+            answer, usage = self._plan_review(state, answer, usage)
+        elif status == "SUCCESS" and state.approved_plan is not None:
+            from ..utils import antigravity_plan
+
+            answer = _prepend_paragraph(
+                answer, antigravity_plan.approved_header(state.approved_plan)
+            )
         factory = state.factory
         if status == "SUCCESS":
             out.append(
@@ -3290,6 +3460,12 @@ def _append_paragraph(answer: str, paragraph: str) -> str:
     if not answer.strip():
         return paragraph
     return f"{answer.rstrip()}\n\n{paragraph}"
+
+
+def _prepend_paragraph(answer: str, paragraph: str) -> str:
+    if not answer.strip():
+        return paragraph
+    return f"{paragraph}\n\n{answer.lstrip()}"
 
 
 # ── #1045: ⚠️ rows in the final answer ──────────────────────────────────────

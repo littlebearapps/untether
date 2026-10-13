@@ -212,6 +212,7 @@ CODEX_FLAGS_CLASSIFIED_0_157_1: dict[str, str] = {
     "--local-provider": "allowed",
     "--profile": "allowed",
     "--search": "allowed",
+    "--cyber-access-program": "allowed",  # 0.162.1: model access tier, no sandbox/approval effect
     "--help": "allowed",
     "--version": "allowed",
     "--ephemeral": "d16",

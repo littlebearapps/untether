@@ -228,7 +228,11 @@ With `reason=project_agents`, the project defines its own agy agents or plugins 
 
 ### "Ask me needs Untether's approval gate"
 
-Ask me and Plan first aren't available yet. Pick Workspace or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+Ask me isn't available yet. Pick Workspace, Plan first or Full access in `/config` → **Permission mode** (or change `[antigravity] permission_mode`).
+
+### Antigravity Plan first: "This plan card has expired" or "A newer plan replaced this one"
+
+Plan cards live in Untether's memory for 24 hours and only the newest card for a conversation can be approved. After a restart, or once you have sent another message (which plans again), older cards no longer work. Send a message to get a fresh plan and use its card. If Antigravity answers without writing a plan, the answer ends with "no plan was written this time"; reply to keep planning.
 
 ### "That Antigravity conversation no longer exists"
 
@@ -584,7 +588,7 @@ Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If a resumed run fails and its error card ends with `ℹ️ The saved session couldn't be resumed, so it was cleared — your next message starts a new session.`, the saved session couldn't be found (Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`) or, for Claude, the run ended with no turns. Just send your message again. For Codex, OpenCode and Pi, a resumed run that fails for an unrelated reason (a bad `/model`, a missing API key) keeps the saved session, so fix the cause and carry on in the same conversation ([#952](https://github.com/littlebearapps/untether/issues/952)).
+- If a resumed run fails and its error card ends with `ℹ️ The saved session couldn't be resumed, so it was cleared — your next message starts a new session.`, the saved session couldn't be found (Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`) or, for Claude, the run ended with no turns. Just send your message again. For Codex, OpenCode and Pi, a resumed run that fails for an unrelated reason (a bad `/model`, a missing API key) keeps the saved session, so fix the cause and carry on in the same conversation ([#952](https://github.com/littlebearapps/untether/issues/952)). A resume line that names some other session (an old one you replied to) never clears the chat's saved session: that run just fails, and your next plain message carries on in the saved session ([#1052](https://github.com/littlebearapps/untether/issues/1052)).
 - If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.36.0 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
 
 ## Follow-up message says it's "queued"

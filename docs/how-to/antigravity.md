@@ -121,14 +121,14 @@ clean start.
 
 ## Permission modes
 
-Headless agy can't stop to ask, so you choose the mode before the run: `/config` → **Permission mode**.
+Headless agy can't stop mid-run to ask, so you choose the mode before the run: `/config` → **Permission mode**.
 
 | Mode | What Antigravity can do |
 |---|---|
 | **Workspace** (default) | Read, create and edit files in the project. No shell, web, MCP or subagent tools |
 | **Full access** | Everything: every tool is approved, including shell commands, network access and files outside the project |
+| **Plan first** | Read the project and write a plan, changing nothing. You get **✅ Approve Plan / ❌ Deny / 💬 Let's discuss**; Approve carries the plan out in Workspace mode. Also `/planmode on` / `off` ([how it works](interactive-approval.md#antigravity-plan-first)) |
 | **Ask me** · soon | Not available yet. Approval buttons arrive in a later 0.36.1 release |
-| **Plan first** · soon | Not available yet |
 
 !!! warning "After switching to Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in **Workspace** keeps its
@@ -139,8 +139,10 @@ Headless agy can't stop to ask, so you choose the mode before the run: `/config`
 
 **Switching back to Workspace needs `/new` too.** A conversation that began in Full access keeps its shell tool after
 you switch to Workspace. When it reaches for the shell, Workspace blocks it and the turn ends on a ⚠️ notice that
-says to send `/new` (or pick Full access again). The toast says so too: `Permission mode: workspace — send /new to
-start using it`, and **Clear override** says `Permission mode: cleared — send /new if this changed it`.
+says to send `/new` (or pick Full access again). The same goes for Full access → Plan first. The toasts say so:
+`Permission mode: workspace — send /new if you're switching from Full access` (and the same for plan first), and
+**Clear override** says `Permission mode: cleared — send /new if this switched to or from Full access`. Moving
+between Workspace and Plan first needs no `/new`: both use the same no-shell tools.
 
 <!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access, the "· soon" modes and the "send /new" warning line -->
 <!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
@@ -273,7 +275,8 @@ Workspace included, and without a tool call. Untether can't stop them, so it tel
 - **First run in a project that has such config:** a ⚠️ row says the project has agy hooks, plugins or MCP servers
   that Untether doesn't manage. Review them if you didn't add them.
 - **A run changed that config** (or files other engines act on, such as `.claude/`, `.mcp.json` or
-  `.github/workflows/`): a ⚠️ row after the run asks you to review it before sending another message.
+  `.github/workflows/`): a ⚠️ row after the run asks you to review it before sending another message. Claude
+  Code's worktrees in `.claude/worktrees/` aren't part of this check: each one is its own checkout.
 - **Scheduled runs** are held while the config differs from what a run someone started from the chat last showed,
   or while Untether can't finish the check. A changed config is released by the next message a person sends in
   the chat; a check that can't finish (too many files, or a config file Untether can't read with certainty) holds
@@ -284,8 +287,8 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 
 ## Not supported yet
 
-- Approval buttons, plan approval and question buttons (**Ask me** and **Plan first** arrive in a later 0.36.1
-  release). `/planmode` is a Claude command.
+- Per-tool approval buttons and question buttons (**Ask me** arrives in a later 0.36.1 release). **Plan first**
+  works: plans are answered with buttons after the plan turn ends.
 - `/steer` and live sessions: each message is its own agy run.
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: each subagent gets a row in the `⏳ background` block, but its own steps, output and token use

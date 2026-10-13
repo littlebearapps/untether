@@ -181,7 +181,7 @@ directory, `/` or the bot's own directory:
 
 ## Permission modes
 
-Headless agy can't stop to ask, so the mode is chosen before the run: `/config` → **Permission mode**, or
+Headless agy can't stop mid-run to ask, so the mode is chosen before the run: `/config` → **Permission mode**, or
 `permission_mode` under `[antigravity]`. See
 [Antigravity CLI — Permission mode](../../../how-to/interactive-approval.md#antigravity-cli-permission-mode) for the
 user guide.
@@ -191,7 +191,7 @@ user guide.
 | **Workspace** (default) | `workspace` | `--mode=accept-edits` `--agent=untether-workspace` | agy's own accept-edits mode under its `request-review` policy, run as Untether's [no-shell agent](#the-workspace-agent): file edits in the project and temp folders go ahead; the model has no shell, web, MCP or subagent tool; files outside the project are blocked by agy. Not a sandbox. Without `--mode`, headless agy refuses every write outside a temp folder (agy 1.3.3) |
 | **Full access** | `full` | `--dangerously-skip-permissions` | Every tool is approved, including shell, network and files outside the project |
 | **Ask me** | `ask` | — | Not available yet: refused before agy starts, until Untether's approval gate ships in a later 0.36.1 release |
-| **Plan first** | `plan` | — | Not available yet: refused the same way |
+| **Plan first** | `plan` | `--mode=plan` `--agent=untether-workspace`, no `--disable-slash-commands` | agy's own plan mode under the [no-shell agent](#the-workspace-agent): it reads the project, writes a plan and stops; nothing in the project changes. The plan is posted with **Approve Plan / Deny / Let's discuss**; Approve resumes the conversation in Workspace. See [Plan first](#plan-first) |
 
 Rules the runner enforces:
 
@@ -225,6 +225,59 @@ Rules the runner enforces:
   ⚠️ row (once per project and settings change), and the footer label becomes
   `workspace (agy allows files outside the project)`.
 
+### Plan first
+
+Plan first ([#981](https://github.com/littlebearapps/untether/issues/981)) uses agy's native plan mode and approves
+by resuming the conversation; there is no hook gate and nothing is held open.
+
+1. **The plan turn.** `--mode=plan --agent=untether-workspace`, under agy's `request-review` policy (the same
+   `toolPermission` checks as Workspace). `--disable-slash-commands` is left off, because it turns `--mode=plan`
+   into a no-op; a prompt that starts with `/` is sent as `Task: /…` instead, since agy would otherwise run it as
+   one of its own slash commands and end the session. agy writes one plan artifact into the conversation's own
+   folder, `~/.gemini/antigravity-cli/brain/<conversation id>/` (with a `<name>.metadata.json` sidecar that says
+   `"requestFeedback": true`), and ends the turn by itself. Probed on agy 1.3.3: 5 of 5 plan turns stopped with
+   the project untouched (2026-10-12), and again on 2026-10-13.
+2. **Finding the plan.** agy's `result` looks like any other turn's, and `init.permission_mode` is
+   `request-review` for plan and Workspace runs alike. The only signal is a finished `write_to_file` step whose
+   `TargetFile` resolves (after `realpath`) to a `.md` file directly inside that folder. Untether reads that one
+   file and its sidecar, nothing else under `~/.gemini`: never a link out of the folder, another conversation's
+   folder, `walkthrough.md` or `task.md`, and never a file whose sidecar says `requestFeedback` is not true. The
+   plan is capped at 8,000 characters in Telegram.
+3. **The card.** The final shows `📋 Plan — <file>`, the plan, then agy's own reply. Right after it comes a card
+   with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss**. The card answers only in the chat it was posted
+   in, only once, and only while it is the conversation's newest plan (a new plan turn retires older cards);
+   cards last 24 hours and don't survive a restart. With `approval_originator_only` on, only the person whose
+   message started the plan run can answer it.
+4. **Approve** queues a follow-up in the chat, like a reply: agy resumes the same conversation with
+   `--mode=accept-edits` (Workspace) and the prompt `The plan is approved. Implement it now.`, in the plan run's
+   own project and branch (refused if that directory changed meanwhile). The footer reads
+   `workspace · plan approved` and the final starts `📋 Plan (approved) — <file>`. The chat stays in Plan first,
+   so the next message plans again.
+5. **Deny** runs nothing. The conversation is kept: a message carries on planning, `/new` starts over.
+6. **Let's discuss** runs nothing either. Your next message is a plan turn on the same conversation; agy rewrites
+   the plan (probed 2026-10-13: the same file, project untouched) and a new card appears.
+7. **No plan written** (the model answered instead): the answer is shown as usual with a one-line note that there
+   is nothing to approve yet (`antigravity.plan.no_artifact`).
+8. **Cron and webhook runs** ([#835](https://github.com/littlebearapps/untether/issues/835)): nobody can approve,
+   so the plan is posted and nothing runs. There is no card; the footer says
+   `🔒 unattended (cron:…) · denied plan approval — nobody to approve`, with a hint the first time
+   (`permission.unattended_deny`, `reason=plan_mode`). To let a cron make changes, give it
+   `permission_mode = "workspace"`.
+
+Limits:
+
+- The approved run is Workspace: file edits in the project, no shell. agy keeps a conversation on the agent it
+  started with, so there is no way to carry a plan out with a shell in the same conversation.
+- A conversation that started in Full access keeps agy's default agent; a plan turn there may try to carry out the
+  plan straight away. agy itself soft-denies the edits (no `accept-edits`), but send `/new` after switching Full
+  access → Plan first. A shell call blocked in such a plan turn adds that `/new` hint to the Plan first notice
+  ([#1060](https://github.com/littlebearapps/untether/issues/1060)).
+- agy lets any mode write in temp folders, so a project under `/tmp` gets no such protection.
+- A project that defines its own agents runs plan turns on agy's default agent, as Workspace does.
+- "Stops by itself" is the model following agy's plan-mode instructions; agy doesn't enforce it beyond its normal
+  permission checks, which block project writes in a plan run.
+- No question buttons while planning: the no-shell agent has no `ask_question` tool.
+
 ### The Workspace agent
 
 A blocked tool ends an agy 1.3.x turn, and agy's default agent often opens with a shell command (`ls -la`), so a
@@ -252,14 +305,17 @@ take a tool away from its default agent, but a custom agent's `tools:` list is t
   without `--agent` and logs `antigravity.workspace_agent.unavailable` once per reason. That run behaves as before:
   a shell attempt ends the turn with the blocked notice.
 - Asked for a shell command, the agent says it needs Full access; nothing is blocked, so there is no ⚠️ row. It
-  can't delete or rename a file either (a "rename" is a copy).
+  can't delete or rename a file either (a "rename" is a copy). Its advice names both routes, since the one agent
+  file serves every run: in a chat, `/config` → Permission mode → Full access, then `/new`; a cron gets Full access
+  only from its own `permission_mode = "full"`, and a webhook never does
+  ([#1055](https://github.com/littlebearapps/untether/issues/1055)).
 
 !!! warning "A conversation keeps the agent it started with"
     agy ignores `--agent` on a resume and reports nothing about it in `init`. A conversation that started in
     Workspace has no shell tool even after the chat is switched to Full access, and one that started in Full
-    access (or before this change) keeps agy's default agent in Workspace. **After switching either way between
-    Workspace and Full access, send `/new`.** The `/config` toasts and page, the agent's own text and the blocked
-    notice all say so. Untether keeps no per-conversation record of this. Re-checked on agy 1.3.3 for
+    access (or before this change) keeps agy's default agent in Workspace and Plan first. **After switching to or
+    from Full access, send `/new`;** Workspace ↔ Plan first share the agent and need none. The `/config` toasts and
+    page, `/planmode`, the agent's own text and the blocked notice all say so. Untether keeps no per-conversation record of this. Re-checked on agy 1.3.3 for
     [#1060](https://github.com/littlebearapps/untether/issues/1060): a Full access conversation resumed with `--agent=untether-workspace` still called
     `run_command` (blocked), while `init` reported `agent: untether-workspace` and the full tool list.
 
@@ -310,6 +366,9 @@ for this, as a tripwire and not a sandbox:
   `.husky/`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md` and `GEMINI.md`. That part
   only warns; it never refuses a run. `.git/config` is there for `core.hooksPath`, `core.fsmonitor`, aliases and
   filters; ordinary git commands that write it (adding a remote, setting a branch's upstream) raise the same row.
+  Claude Code's own worktrees under `.claude/worktrees/` are left out: each is a separate checkout with its own
+  config, and walking them used to run the check out of time on every run
+  ([#1051](https://github.com/littlebearapps/untether/issues/1051)).
 
 What is tracked ([#1043](https://github.com/littlebearapps/untether/issues/1043)):
 
@@ -346,7 +405,8 @@ Known limits:
 - User-level config is checked by timestamp, not content, and agy's own `settings.json` isn't part of the check
   because agy rewrites it itself. Both sit outside the project.
 - The after-run check of other engines' files looks at the project root only, and for a worktree or submodule the
-  real `hooks/` and `config` live outside the checkout and aren't watched.
+  real `hooks/` and `config` live outside the checkout and aren't watched. Config inside a Claude Code worktree
+  (`.claude/worktrees/<name>/`) belongs to that worktree and is checked only when a run uses it as its project.
 - Instruction files (`AGENTS.md`, `.agents/skills/`, `.agents/rules/`) steer the model but run nothing by
   themselves, so they don't hold scheduled runs. Root-level ones are in the after-run check.
 - A process still writing after the check can change files before agy reads them; the after-run check reports it.
@@ -570,8 +630,8 @@ Turn the block off with `[progress] show_background_tasks = false`.
 
 ## Known gaps
 
-- **No approval buttons, plan gate, question buttons, steering or live sessions yet.** Ask me and Plan first
-  arrive in a later 0.36.1 release.
+- **No approval buttons, question buttons, steering or live sessions yet.** Ask me arrives in a later 0.36.1
+  release. Plan first has its own Approve / Deny / Let's discuss card (see [Plan first](#plan-first)).
 - **Subagents** appear as one action row for the spawn and one status-panel row each; their own steps, output,
   token use and failures aren't shown (agy doesn't put them in the parent's stream).
 - **Images.** A Telegram photo reaches agy as a saved file path, not as image input.
@@ -593,7 +653,7 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Workspace = edits in the project | `--mode=accept-edits` | No flag: writes outside temp folders are refused. `--sandbox`: shell is still soft-denied |
 | Workspace has no shell tool ([#1037](https://github.com/littlebearapps/untether/issues/1037)) | A custom agent's `tools:` list, chosen with `--agent`; its body is the system prompt | No per-run system prompt (no flag, env var or stream-json field). `permissions.allow` rules are global settings only, prefix-matched, and chained commands still match, so they are not a safe read-only list. An agent's `commandExecutionPolicy: sandbox` doesn't stop the soft-denial. `--add-dir` pointing at a folder with the agent moves agy's workspace there. A workspace `.agents/agents/` file works but writes into the user's repo (rejected, D20) |
 | The agent file on disk | — (custom: Untether writes one file under `~/.gemini/config/agents/`) | agy has no way to pass an agent definition per run; a plugin is the other documented place and arrives with the approval gate |
-| Telling the user to send `/new` after switching between Workspace and Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
+| Telling the user to send `/new` after switching to or from Full access | — (custom wording only, no state) | agy ignores `--agent` on a resume and `init` doesn't say which agent a resumed conversation uses (`init.agent` echoes the flag; `init.tools` lists every tool). Re-checked 2026-10-13, agy 1.3.3, [#1060](https://github.com/littlebearapps/untether/issues/1060) |
 | A background task agy stopped itself reads as stopped | `tool_info.error` on the step's DONE ("context canceled") and `manage_task`'s `Action: kill` / `TaskId: <cid>/task-<step>` | — (native). Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Showing an answer held for background work | — (**gap**: a note says where the answer is) | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; the gate's `Stop` hook (`fullyIdle: false`) says an answer is ready but carries no text. The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
@@ -607,6 +667,7 @@ The record required by `.claude/rules/runner-development.md` → "Native-first".
 | Which model a run used, for `~N% ctx` | `init.model` only | It is present only when `--model` is passed (it echoes the flag); with no flag nothing in the stream names the model, so no percentage is shown. `-p /model` answers with the default model for 0 tokens but is a second process answering for the account, not for the run, and a hook payload's `modelName` needs the approval gate; neither is used. The id Untether would pass is not used either: it is not proof of what agy ran. Checked 2026-10-12, agy 1.3.3 |
 | AI credits on `/usage` ([#979](https://github.com/littlebearapps/untether/issues/979)) | `agy -p /credits` (0 tokens; `remaining_credits`, `upgrade_uri`) | Nothing custom. Checked 2026-10-12, agy 1.3.3. Not checked on an API-key sign-in |
 | Quota line under an answer | The cached answer of `agy -p /usage` | Partly custom: agy has no push or cheap in-stream quota value (`/usage` is refused inside a stream-json session), and a probe before each final would delay it, so the line only reads what `/usage` cached (15 min at most). Checked 2026-10-12, agy 1.3.3. Revisit if the stream starts carrying quota |
+| Plan first ([#981](https://github.com/littlebearapps/untether/issues/981)) | `--mode=plan` under the no-shell agent; approve = `--conversation=<id> --mode=accept-edits`; revise = `--conversation=<id> --mode=plan` | Partly **custom**: agy has no headless "plan ready" signal (`result` and `init.permission_mode` are the same as any turn's) and no way to answer a plan from print mode, so Untether detects the plan from the finished `write_to_file` into `brain/<conversation id>/`, reads that one file and its sidecar (realpath-contained; the D33 exception extended to this file), and keeps the pending-card store itself. agy 1.3.2's `artifactReviewPolicy` is a settings key (changing it would edit the user's agy settings). Checked 2026-10-12/13, agy 1.3.3. Retire when the stream carries the plan or agy can wait for a review headless |
 | `/export` | — (**custom**: Untether's in-memory record of the events it saw) | agy writes `transcript_full.jsonl` under `brain/<id>/` but has no export command or flag for it, and reading it is rule 3 (an engine state file, holding whole file contents). Not read. Checked 2026-10-12, agy 1.3.3 |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
@@ -618,7 +679,7 @@ lets `--agent` change on a resume.
 [antigravity]
 model = "gemini-3.8-flash"     # optional; passed as --model=<id>
 cmd = "~/.local/bin/agy"       # optional; default: agy on PATH, then ~/.local/bin/agy
-permission_mode = "workspace"  # workspace (default) | full; ask and plan are refused for now
+permission_mode = "workspace"  # workspace (default) | plan | full; ask is refused for now
 ```
 
 See the [config reference](../../config.md#antigravity). Unknown keys are ignored.
@@ -631,7 +692,9 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `antigravity.workspace_config_present` / `_changed` / `.unattended_refused`, `antigravity.config_check.fetched` /
 `.failed`, `antigravity.effort.dropped`, `antigravity.tos_notice.shown`, `antigravity.version.unsupported`,
 `antigravity.argv.invalid_value`, `antigravity.continue.resolved` / `.refused` (`reason`) / `.lookup_failed`,
-`antigravity.workspace_agent.installed` / `.unavailable`,
+`antigravity.workspace_agent.installed` / `.unavailable`, `antigravity.plan.detected` / `.card` / `.no_artifact` /
+`.superseded` / `.sidecar_missing` / `.unreadable` / `.decision` (`decision`, `path=resume`) / `.tap_refused` /
+`.cwd_changed`,
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`
 (a command still running when the answer arrived), `antigravity.quota.fetched` / `.failed`,
 `antigravity.credits.fetched` / `.failed`, `antigravity.context.window_miss` (DEBUG, once per run: the model has

@@ -864,7 +864,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         lines = [
             "<b>📋 Permission mode</b>",
             "",
-            "Antigravity runs headless, so today it can't stop to ask you."
+            "Antigravity runs headless, so it can't stop mid-run to ask you."
             " This picks what it may do on its own.",
             "",
             "• <b>Workspace</b> — edits files in this project (and temp"
@@ -873,19 +873,22 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " execute (default)",
             "• <b>Ask me</b> — asks you in Telegram before shell, web and MCP"
             " calls (coming soon: needs Untether's approval gate)",
-            "• <b>Plan first</b> — writes a plan and waits for your approval"
-            " before changing anything (coming soon: needs the gate)",
+            "• <b>Plan first</b> — writes a plan and changes nothing; the plan"
+            " is posted with Approve / Deny / Let's discuss, and Approve"
+            " carries it out in Workspace mode. Scheduled runs only post"
+            " the plan",
             "• <b>Full access</b> — every tool is approved, including shell,"
             " network and files outside the project (agy's"
             " --dangerously-skip-permissions). Cron and webhook runs only get"
             " this when the cron itself sets it",
             "",
-            "⚠️ <b>After switching between Workspace and Full access, send"
-            " /new.</b> A conversation keeps the tools it started with: one"
-            " that started in Workspace has no shell, and one that started in"
-            " Full access keeps reaching for it, which Workspace then blocks."
-            " The new mode applies from the next new conversation. Other"
-            " changes apply from your next message.",
+            "⚠️ <b>After switching to or from Full access, send /new.</b> A"
+            " conversation keeps the tools it started with: one that started"
+            " in Workspace or Plan first has no shell, and one that started in"
+            " Full access keeps reaching for it, which Workspace and Plan"
+            " first then block. The new mode applies from the next new"
+            " conversation. Switching between Workspace and Plan first, and"
+            " other changes, apply from your next message.",
             "",
             f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
             "",
@@ -2661,7 +2664,7 @@ class ConfigCommand:
                 "agf": agy_mode.FULL_ACCESS_TOAST,
                 "agc": agy_mode.CLEARED_TOAST,
                 "aga": agy_mode.GATE_SOON_TOAST,
-                "agp": agy_mode.GATE_SOON_TOAST,
+                "agp": agy_mode.PLAN_FIRST_TOAST,
             },
             "vb": {
                 "on": "Verbose: on",

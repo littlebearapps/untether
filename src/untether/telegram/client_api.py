@@ -758,6 +758,11 @@ class HttpBotClient:
             params["message_thread_id"] = message_thread_id
         if caption is not None:
             params["caption"] = caption
+        # #1056: every caller sends a file to keep (outbox delivery, /file
+        # get, command attachments). Without this, the Bot API's server-side
+        # content type detection turns a .webp into a sticker (and can turn
+        # other media into a non-document message), losing the original file.
+        params["disable_content_type_detection"] = True
         result = await self._post_form(
             "sendDocument",
             params,

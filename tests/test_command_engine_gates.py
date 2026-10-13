@@ -678,16 +678,18 @@ class TestPlanModeEngineGate:
         assert "approval policy" in result.text.lower()
 
     @pytest.mark.anyio
-    async def test_planmode_blocked_for_antigravity_with_permission_mode_hint(self):
+    async def test_planmode_on_for_antigravity_stores_plan_first(self, tmp_path):
+        """#981: /planmode works for Antigravity (Plan first), it is no
+        longer blocked with a /config hint."""
         ctx = FakeCommandContext(
             args_text="on",
-            config_path=Path("/tmp/fake.toml"),
+            config_path=tmp_path / "untether.toml",
             runtime=FakeTransportRuntime(default_engine="antigravity"),
         )
         result = await PlanModeCommand().handle(ctx)  # type: ignore[arg-type]
         assert result is not None
-        assert "only available for claude" in result.text.lower()
-        assert "Use /config → Permission mode instead." in result.text
+        assert "only available for claude" not in result.text.lower()
+        assert "<b>plan first</b>" in result.text
         assert "approval policy" not in result.text.lower()
 
     @pytest.mark.anyio
