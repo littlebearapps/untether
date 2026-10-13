@@ -39,6 +39,7 @@ it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -957,14 +958,25 @@ _CONVERSATIONS_MAX = 64
 _GRANTS: OrderedDict[tuple[int | None, str], list[tuple[str, str]]] = OrderedDict()
 
 
-def _grant_key(args: Any) -> tuple[str, str] | None:
+def _grant_key(args: Any) -> tuple[Any, ...] | None:
+    """The command, its folder and every other argument that changes what
+    runs (``IsDaemon``, ``WaitMsBeforeAsync``, anything new), so a grant
+    never covers a call that differs in any of them; agy's own descriptive
+    fields are left out."""
     if not isinstance(args, dict):
         return None
     command = args.get("CommandLine")
     if not isinstance(command, str) or not command.strip():
         return None
     cwd = args.get("Cwd")
-    return command.strip(), cwd if isinstance(cwd, str) else ""
+    rest = tuple(
+        sorted(
+            (key, json.dumps(value, sort_keys=True, default=repr))
+            for key, value in args.items()
+            if key not in _DESCRIPTIVE_KEYS and key not in {"CommandLine", "Cwd"}
+        )
+    )
+    return command.strip(), cwd if isinstance(cwd, str) else "", rest
 
 
 def always_allowable(args: Any) -> bool:
@@ -998,6 +1010,10 @@ def grant(chat_id: int | None, conversation_id: str, args: Any) -> bool:
 def granted(chat_id: int | None, conversation_id: str | None, args: Any) -> bool:
     key = _grant_key(args)
     if key is None or not conversation_id:
+        return False
+    # A grant only ever covers a call that could have been granted itself:
+    # nothing the card wouldn't show, the command in full, a plain folder.
+    if not always_allowable(args):
         return False
     return key in _GRANTS.get((chat_id, conversation_id), ())
 

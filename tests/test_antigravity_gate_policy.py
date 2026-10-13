@@ -860,3 +860,22 @@ def test_card_for_a_linked_path_shows_where_it_goes(root: Path) -> None:
         root=root,
     )
     assert "→ resolves to" in title
+
+
+def test_always_allow_never_covers_extra_or_changed_arguments() -> None:
+    """A grant for `make` must not cover the same command with an argument
+    the card never showed (security review: grant reuse ignored extras)."""
+    args = {"CommandLine": "make", "Cwd": "/p", "toolSummary": "build"}
+    assert gate_policy.grant(1, CID, args)
+    # agy's own wording may differ between calls.
+    assert gate_policy.granted(1, CID, {"CommandLine": "make", "Cwd": "/p"})
+    # Anything that changes what runs asks again.
+    assert not gate_policy.granted(
+        1, CID, {"CommandLine": "make", "Cwd": "/p", "IsDaemon": True}
+    )
+    assert not gate_policy.granted(
+        1, CID, {"CommandLine": "make", "Cwd": "/p", "WaitMsBeforeAsync": 0}
+    )
+    assert not gate_policy.granted(
+        1, CID, {"CommandLine": "make", "Cwd": "/p", "BypassSandbox": True}
+    )
