@@ -282,6 +282,8 @@ _STATUS_TEXT = {
         "💬 Let's discuss — reply with what to change and Antigravity will "
         "revise the plan."
     ),
+    # #1074: a newer plan turn on the conversation replaced this card.
+    "superseded": "ℹ️ Replaced by a newer plan — use the latest card.",
 }
 
 
@@ -345,7 +347,7 @@ def register(
     now = _now()
     with _LOCK:
         _sweep(now)
-        _supersede_locked(conversation_id)
+        superseded = _supersede_locked(conversation_id)
         rid = secrets.token_hex(6)
         while rid in _PENDING:
             rid = secrets.token_hex(6)
@@ -360,27 +362,53 @@ def register(
             name=name,
             created_at=now,
         )
+        if superseded:
+            plan.extra["superseded"] = superseded
         _PENDING[rid] = plan
     return plan
 
 
-def _supersede_locked(conversation_id: str) -> int:
-    count = 0
+def _supersede_locked(conversation_id: str) -> list[str]:
+    retired: list[str] = []
     for plan in _PENDING.values():
         if plan.conversation_id == conversation_id and plan.status in (
             "pending",
             "discuss",
         ):
             plan.status = "superseded"
-            count += 1
-    return count
+            retired.append(plan.request_id)
+    return retired
 
 
-def supersede(conversation_id: str) -> int:
+def supersede(conversation_id: str) -> list[str]:
     """A new plan turn on this conversation started: older cards can't be
-    approved any more (their plan is being rewritten)."""
+    approved any more (their plan is being rewritten). Returns their ids."""
     with _LOCK:
         return _supersede_locked(conversation_id)
+
+
+def retire(request_ids: list[str]) -> list[dict[str, str]]:
+    """#1074: ``{"id", "text"}`` for each superseded card still showing its
+    buttons, for the bridge to edit (``runner.RETIRED_CARDS_KEY``). Each card
+    is handed out once; a tap on it retires it too (``mark_retired``)."""
+    out: list[dict[str, str]] = []
+    with _LOCK:
+        for rid in request_ids:
+            plan = _PENDING.get(rid)
+            if plan is None or plan.status != "superseded":
+                continue
+            if plan.extra.get("retired"):
+                continue
+            plan.extra["retired"] = True
+            out.append({"id": rid, "text": card_text(plan.name, "superseded")})
+    return out
+
+
+def mark_retired(request_id: str) -> None:
+    with _LOCK:
+        plan = _PENDING.get(request_id)
+        if plan is not None:
+            plan.extra["retired"] = True
 
 
 def originator(request_id: str) -> int | None:

@@ -21,7 +21,12 @@ import structlog.testing
 
 from untether.context import RunContext
 from untether.model import CompletedEvent, ResumeToken
-from untether.runner import REVIEW_CARD_KEY, review_card
+from untether.runner import (
+    RETIRED_CARDS_KEY,
+    REVIEW_CARD_KEY,
+    retired_cards,
+    review_card,
+)
 from untether.runners import antigravity as agy
 from untether.runners.antigravity import AntigravityRunner, AntigravityStreamState
 from untether.runners.run_options import EngineRunOptions, apply_run_options
@@ -675,27 +680,157 @@ async def test_a_second_tap_is_told_it_was_answered() -> None:
     result = await cmd.handle(
         _ctx("approve", plan.request_id, executor=executor, query="q-2")
     )
-    assert result is not None and "Already answered" in result.text
-    assert result.notify is False
-    assert executor.enqueued == [] and executor.edits == []
+    # #1074: no second message; the card keeps its decision, without buttons.
+    assert result is None
+    assert executor.enqueued == []
+    ((ref, card),) = executor.edits
+    assert ref.message_id == 555
+    assert "❌ Plan denied" in card.text
+    assert card.extra["reply_markup"] == {"inline_keyboard": []}
 
 
 @pytest.mark.anyio
 async def test_superseded_expired_and_foreign_taps_do_nothing() -> None:
+    """#1074: a refused tap runs nothing and takes the card's buttons off, so
+    it can't be tapped again; the toast already said why."""
     old = _register()
     _register()  # a newer plan for the same conversation
     cmd = AntigravityPlanCommand()
-    result = await cmd.handle(_ctx("approve", old.request_id))
-    assert result is not None and "newer plan" in result.text
-    result = await cmd.handle(_ctx("approve", "deadbeef0000"))
-    assert result is not None and "expired" in result.text
+    executor = _Executor()
+    result = await cmd.handle(_ctx("approve", old.request_id, executor=executor))
+    assert result is None
+    ((ref, card),) = executor.edits
+    assert ref.message_id == 555
+    assert card.text == (
+        f"📋 Antigravity's plan is ready — {PLAN_NAME}\n\n"
+        "ℹ️ Replaced by a newer plan — use the latest card."
+    )
+    assert card.extra["reply_markup"] == {"inline_keyboard": []}
+    # Retired by the tap: a later run won't edit it again.
+    assert plan_mod.retire([old.request_id]) == []
+    executor = _Executor()
+    result = await cmd.handle(_ctx("approve", "deadbeef0000", executor=executor))
+    assert result is None
+    ((_, card),) = executor.edits
+    assert (
+        "expired" in card.text and card.extra["reply_markup"]["inline_keyboard"] == []
+    )
     fresh = _register(cid="0d0d0d0d-1111-4222-8333-444444444444")
     executor = _Executor()
     result = await cmd.handle(
         _ctx("approve", fresh.request_id, executor=executor, channel=1)
     )
-    assert result is not None and "expired" in result.text
+    assert result is None and "expired" in executor.edits[0][1].text
     assert executor.enqueued == []
+    # The other chat's card itself is untouched and still answerable.
+    assert plan_mod.claim(fresh.request_id, 4242, "owner")[0] == "ok"
+
+
+@pytest.mark.anyio
+async def test_refused_tap_falls_back_to_a_message_when_the_edit_fails() -> None:
+    old = _register()
+    _register()
+
+    class _Failing(_Executor):
+        async def edit(self, ref: Any, message: RenderedMessage) -> Any:
+            return None
+
+    result = await AntigravityPlanCommand().handle(
+        _ctx("approve", old.request_id, executor=_Failing())
+    )
+    assert result is not None and "newer plan" in result.text
+
+
+@pytest.mark.anyio
+async def test_a_tap_in_flight_elsewhere_leaves_the_card_alone() -> None:
+    plan = _register()
+    assert plan_mod.claim(plan.request_id, 4242, "other-tap")[0] == "ok"
+    executor = _Executor()
+    result = await AntigravityPlanCommand().handle(
+        _ctx("deny", plan.request_id, executor=executor, query="q-9")
+    )
+    assert result is not None and executor.edits == []
+
+
+def test_a_newer_plan_turn_retires_the_old_cards_buttons(
+    home: Path, run_vars: RunContext
+) -> None:
+    """#1074: the plan turn that replaces a card hands its id and closing
+    text to the bridge once (``usage[RETIRED_CARDS_KEY]``); the new card
+    carries its own id so the bridge can find it later."""
+    old = _register()
+    _write_plan(home)
+    resume = ResumeToken(engine="antigravity", value=CID)
+    events, state = _replay(_lines("context_turn"), options=PLAN, resume=resume)
+    assert state.superseded_cards == [old.request_id]
+    done = _completed(events)
+    assert retired_cards(done.usage) == [
+        (
+            old.request_id,
+            f"📋 Antigravity's plan is ready — {PLAN_NAME}\n\n"
+            "ℹ️ Replaced by a newer plan — use the latest card.",
+        )
+    ]
+    card = review_card(done.usage)
+    assert card is not None and card["id"] != old.request_id
+    assert plan_mod.peek(card["id"], 4242) is not None
+    assert plan_mod.retire([old.request_id]) == []  # handed out once
+
+
+@pytest.mark.anyio
+async def test_bridge_edits_a_retired_card_it_posted() -> None:
+    """#1074: the bridge records where a card with an id landed and, when a
+    later run retires it, edits it through the transport without buttons."""
+    from tests.test_exec_bridge import FakeTransport
+    from untether.markdown import MarkdownPresenter
+    from untether.runner import pop_review_card_ref
+    from untether.runner_bridge import (
+        ExecBridgeConfig,
+        IncomingMessage,
+        _append_review_card,
+        handle_message,
+    )
+    from untether.runners.mock import Return, ScriptRunner
+    from untether.transport import MessageRef
+
+    usage = {REVIEW_CARD_KEY: {"id": "old1", "text": "card", "buttons": [[{}]]}}
+    chunk = _append_review_card(RenderedMessage(text="f"), usage).extra["followups"][0]
+    card_ref = MessageRef(channel_id=123, message_id=77, thread_id=None)
+    chunk.extra["on_sent"](card_ref)  # what the Telegram transport does
+
+    runner = ScriptRunner(
+        [
+            Return(
+                answer="next plan",
+                usage={
+                    RETIRED_CARDS_KEY: [
+                        {"id": "old1", "text": "replaced"},
+                        {"id": "never-posted", "text": "x"},
+                        {"id": 5, "text": "bad"},
+                    ]
+                },
+            )
+        ],
+        engine="antigravity",
+        resume_value=CID,
+    )
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="again"),
+        resume_token=None,
+    )
+    retired = [c for c in transport.edit_calls if c["ref"] == card_ref]
+    assert len(retired) == 1
+    assert retired[0]["message"].text == "replaced"
+    assert retired[0]["message"].extra["reply_markup"] == {"inline_keyboard": []}
+    # Each card is retired once: its ref is gone.
+    assert pop_review_card_ref("old1") is None
+    assert retired_cards({RETIRED_CARDS_KEY: "nope"}) == []
 
 
 @pytest.mark.anyio

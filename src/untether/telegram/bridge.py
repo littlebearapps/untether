@@ -400,7 +400,10 @@ class TelegramTransport:
         }
         for index, followup in enumerate(followups):
             try:
-                await self._bot.send_message(**self._followup_params(followup, **route))
+                sent = await self._bot.send_message(
+                    **self._followup_params(followup, **route)
+                )
+                self._note_followup_sent(followup, chat_id, sent, message_thread_id)
             except anyio.get_cancelled_exc_class():
                 # #928: a bounded caller (the early final delivery) cut the
                 # send short. This chunk is already queued; queue the rest
@@ -414,6 +417,31 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    @staticmethod
+    def _note_followup_sent(
+        followup: RenderedMessage,
+        chat_id: int,
+        sent: Any,
+        thread_id: int | None,
+    ) -> None:
+        """#1074: a chunk may ask where it landed (``extra["on_sent"]``, called
+        with its ``MessageRef``), e.g. a review card a later run retires."""
+        hook = followup.extra.get("on_sent")
+        message_id = getattr(sent, "message_id", None)
+        if not callable(hook) or not isinstance(message_id, int):
+            return
+        sent_thread = getattr(sent, "message_thread_id", None)
+        try:
+            hook(
+                MessageRef(
+                    channel_id=chat_id,
+                    message_id=message_id,
+                    thread_id=sent_thread if sent_thread is not None else thread_id,
+                )
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a send
+            logger.debug("transport.followup.on_sent_failed", exc_info=True)
 
     async def _queue_followups(
         self,

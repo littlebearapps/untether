@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import os
 import re
 import signal as _signal
@@ -54,8 +55,11 @@ from .runner import (
     Runner,
     RunStreamHandle,
     _sanitise_stderr,
+    note_review_card_ref,
+    pop_review_card_ref,
     prespawn_blocked_reason,
     reset_run_stream_handle,
+    retired_cards,
     review_card,
     set_run_stream_handle,
 )
@@ -1958,13 +1962,45 @@ def _append_review_card(
         if isinstance(followups, list)
         else []
     )
-    chunk = RenderedMessage(
-        text=card["text"],
-        extra={"entities": [], "reply_markup": {"inline_keyboard": card["buttons"]}},
-    )
+    extra: dict[str, Any] = {
+        "entities": [],
+        "reply_markup": {"inline_keyboard": card["buttons"]},
+    }
+    card_id = card.get("id")
+    if isinstance(card_id, str) and card_id:
+        # #1074: remember where it landed, so a newer card can retire it.
+        extra["on_sent"] = functools.partial(note_review_card_ref, card_id)
+    chunk = RenderedMessage(text=card["text"], extra=extra)
     return RenderedMessage(
         text=msg.text, extra={**msg.extra, "followups": [*existing, chunk]}
     )
+
+
+async def _retire_review_cards(
+    transport: Transport, usage: Mapping[str, Any] | None
+) -> None:
+    """#1074: edit each card the engine says can no longer be answered (a
+    newer plan replaced it) to its closing text, without buttons. A card
+    whose message isn't known (sent before a restart, or never confirmed) is
+    left for its tap to retire."""
+    for card_id, text in retired_cards(dict(usage) if usage is not None else None):
+        ref = pop_review_card_ref(card_id)
+        if ref is None:
+            continue
+        try:
+            with message_kind("review_card"):
+                await transport.edit(
+                    ref=ref,
+                    message=RenderedMessage(
+                        text=text,
+                        extra={"entities": [], "reply_markup": {"inline_keyboard": []}},
+                    ),
+                    wait=False,
+                )
+        except Exception:  # noqa: BLE001 — the old card is cosmetic
+            logger.debug("review_card.retire_failed", card_id=card_id, exc_info=True)
+            continue
+        logger.info("review_card.retired", card_id=card_id)
 
 
 def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage:
@@ -7785,6 +7821,7 @@ async def handle_message(
         except Exception:
             delivery["sent"] = False
             raise
+        await _retire_review_cards(cfg.transport, completed.usage)
         if (
             capped_head is not None
             and final_ref is not None

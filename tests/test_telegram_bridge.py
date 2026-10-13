@@ -435,6 +435,31 @@ async def test_telegram_transport_sends_followups() -> None:
 
 
 @pytest.mark.anyio
+async def test_telegram_transport_reports_where_a_followup_landed() -> None:
+    """#1074: a follow-up chunk's ``on_sent`` hook gets its MessageRef (the
+    plan card a later run retires); a failing hook doesn't fail the send."""
+    bot = FakeBot()
+    transport = TelegramTransport(bot)
+    seen: list[MessageRef] = []
+
+    def boom(_ref: MessageRef) -> None:
+        raise RuntimeError("hook")
+
+    card = RenderedMessage(text="card", extra={"on_sent": seen.append})
+    bad = RenderedMessage(text="bad", extra={"on_sent": boom})
+    await transport.send(
+        channel_id=123,
+        message=RenderedMessage(text="final", extra={"followups": [card, bad]}),
+        options=SendOptions(thread_id=7),
+    )
+    assert len(bot.send_calls) == 3
+    (ref,) = seen
+    assert ref.channel_id == 123 and ref.thread_id == 7
+    assert isinstance(ref.message_id, int)
+    assert "on_sent" not in bot.send_calls[1]
+
+
+@pytest.mark.anyio
 async def test_telegram_transport_edits_and_sends_followups() -> None:
     bot = FakeBot()
     transport = TelegramTransport(bot)

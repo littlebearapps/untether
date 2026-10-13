@@ -66,6 +66,7 @@ from ..model import (
 )
 from ..runner import (
     PRESPAWN_BLOCKED_KEY,
+    RETIRED_CARDS_KEY,
     REVIEW_CARD_KEY,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
@@ -285,6 +286,7 @@ def _denied_label(action: str, mode: str | None) -> str:
     if mode == "plan" and action == "write_file":
         return _PLAN_WRITE_LABEL
     return _DENIED_LABEL.get(action, "tool")
+
 
 # ── stderr kill classes (phase 03, D27) ─────────────────────────────────────
 
@@ -784,7 +786,9 @@ def _plan_denial_text(labels: list[str]) -> str:
         return f"{what} — Plan first doesn't change files until you approve the plan."
     if others == [_OUTSIDE_LABEL]:
         return f"{what} — Plan first works only with the project's own files."
-    return f"{what} — Plan first doesn't let it change anything until you approve a plan."
+    return (
+        f"{what} — Plan first doesn't let it change anything until you approve a plan."
+    )
 
 
 def _paths_text(paths: list[str], limit: int = 5) -> str:
@@ -1133,6 +1137,8 @@ class AntigravityStreamState:
     # plan an Approve resumed this run for (its file name).
     plan_writes: list[str] = field(default_factory=list)
     approved_plan: str | None = None
+    # #1074: plan cards this run's plan turn replaced (request ids).
+    superseded_cards: list[str] = field(default_factory=list)
     # #980/#981: this run's gate (``antigravity/gate_server.GateRun``) when
     # Untether's agy plugin is installed and ``-p /hooks`` lists it; None
     # otherwise (no marker env reaches agy, nothing changes).
@@ -2044,7 +2050,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         options = get_run_options()
         mode = self._effective_mode()
         label = _mode_label(mode)
-        approved = self._plan_bookkeeping(mode, prompt, expected)
+        approved, superseded = self._plan_bookkeeping(mode, prompt, expected)
         if approved is not None:
             label += " · plan approved"
         if precheck is not None:
@@ -2074,30 +2080,33 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ),
             trigger_source=get_run_trigger_source(),
             approved_plan=approved,
+            superseded_cards=superseded,
         )
 
     @staticmethod
     def _plan_bookkeeping(
         mode: str, prompt: str, conversation_id: str | None
-    ) -> str | None:
+    ) -> tuple[str | None, list[str]]:
         """#981, at the start of a run on a known conversation: a new plan
-        turn retires the conversation's older plan cards; the run an Approve
-        queued (Workspace, Untether's approve prompt) takes the approval and
-        returns the plan's file name for the footer and the final."""
+        turn retires the conversation's older plan cards (their ids, for the
+        bridge to take their buttons off, #1074); the run an Approve queued
+        (Workspace, Untether's approve prompt) takes the approval and returns
+        the plan's file name for the footer and the final."""
         if conversation_id is None:
-            return None
+            return None, []
         from ..utils import antigravity_plan
 
         if mode == "plan":
-            if antigravity_plan.supersede(conversation_id):
+            superseded = antigravity_plan.supersede(conversation_id)
+            if superseded:
                 logger.info("antigravity.plan.superseded", session_id=conversation_id)
-            return None
+            return None, superseded
         if mode != "workspace" or not prompt.rstrip().endswith(
             antigravity_plan.APPROVE_PROMPT
         ):
-            return None
+            return None, []
         plan = antigravity_plan.take_approved(conversation_id)
-        return plan.name if plan is not None else None
+        return (plan.name if plan is not None else None), []
 
     def start_run(
         self,
@@ -3327,9 +3336,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             session_id=state.session_id,
             request_id=pending.request_id,
         )
+        state.superseded_cards.extend(pending.extra.get("superseded", ()))
         usage = {
             **usage,
             REVIEW_CARD_KEY: {
+                "id": pending.request_id,
                 "text": antigravity_plan.card_text(plan.name),
                 "buttons": antigravity_plan.keyboard(pending.request_id),
             },
@@ -3418,6 +3429,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             answer = _prepend_paragraph(
                 answer, antigravity_plan.approved_header(state.approved_plan)
             )
+        if state.superseded_cards:
+            usage = _with_retired_cards(usage, state.superseded_cards)
         factory = state.factory
         if status == "SUCCESS":
             out.append(
@@ -3765,6 +3778,15 @@ def _add_run_tokens(totals: dict[str, int], usage: agy_schema.StepUsage | None) 
     ):
         if _is_count(value):
             totals[key] = totals.get(key, 0) + value
+
+
+def _with_retired_cards(usage: dict[str, Any], ids: list[str]) -> dict[str, Any]:
+    """#1074: the replaced plan cards still showing buttons, for the bridge
+    to edit (``usage[RETIRED_CARDS_KEY]``)."""
+    from ..utils import antigravity_plan
+
+    retired = antigravity_plan.retire(ids)
+    return {**usage, RETIRED_CARDS_KEY: retired} if retired else usage
 
 
 def _task_end_status(failed: bool, err: agy_schema.ToolError | None) -> str:
