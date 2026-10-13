@@ -49,6 +49,11 @@ _RESUME_RE = re.compile(r"(?im)^\s*`?pi\s+--session\s+(?P<token>.+?)`?\s*$")
 
 _SESSION_ID_PREFIX_LEN = 8
 
+# #1064: Pi's own session-id grammar (``assertValidSessionId`` in
+# ``core/session-manager.js``, pi 0.78.0). ``--session <id>`` only looks the
+# id (or a prefix of one) up among existing sessions and never writes a file.
+_PI_SESSION_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
 
 def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """#409: read [security] env_extra_allow / env_extra_prefix_allow.
@@ -102,6 +107,59 @@ def _looks_like_session_path(token: str) -> bool:
     if "/" in token or "\\" in token:
         return True
     return token.startswith("~")
+
+
+def _pi_treats_as_path(value: str) -> bool:
+    """Pi 0.78.0 ``resolveSessionPath``: a value with a slash or backslash,
+    or ending in ``.jsonl``, is a session *file* (opened, or created if
+    missing, relative to the run's cwd); anything else is a session id."""
+    return "/" in value or "\\" in value or value.endswith(".jsonl")
+
+
+def _pi_session_roots() -> tuple[str, ...]:
+    """Real paths of the directories Pi keeps session files in: the
+    ``sessions`` directory under ``PI_CODING_AGENT_DIR`` (the base
+    ``_default_session_dir`` writes new sessions into) and, when set,
+    ``PI_CODING_AGENT_SESSION_DIR``."""
+    roots = [_pi_agent_dir() / "sessions"]
+    env_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if env_session_dir:
+        roots.append(Path(env_session_dir).expanduser())
+    return tuple(os.path.realpath(root) for root in roots)
+
+
+def check_pi_resume(value: Any) -> str:
+    """*value* if Pi may resume it, else ``EngineArgvError`` (#1064).
+
+    Pi resumes by session id or by session-file path, and opens — or
+    creates — a file at any path it is given, so a resume line could make it
+    write a session file anywhere the service user can (``/tmp/x.jsonl``, a
+    URL turned into ``<project>/https:/…``). Accepted:
+
+    - a Pi session id or id prefix (Pi's own grammar) — what Untether saves
+      after a run, and what ``pi --session <id>`` looks up natively;
+    - an absolute (or ``~/``) path to a ``.jsonl`` file whose real path is
+      inside Pi's sessions directory — what Untether hands a new run, and
+      what a resume line keeps when Pi never reported an id.
+    """
+    engine_argv.check_resume(value)
+    if not _pi_treats_as_path(value):
+        if _PI_SESSION_ID_RE.fullmatch(value) is None:
+            raise engine_argv.EngineArgvError("resume", "not_a_session")
+        return value
+    path = os.path.expanduser(value) if value.startswith("~/") else value
+    if (
+        "://" in value
+        or "\\" in value
+        or not path.endswith(".jsonl")
+        or not os.path.isabs(path)
+    ):
+        raise engine_argv.EngineArgvError("resume", "not_a_session")
+    real = os.path.realpath(path)
+    for root in _pi_session_roots():
+        if real != root and os.path.commonpath([real, root]) == root:
+            return value
+    raise engine_argv.EngineArgvError("resume", "not_a_session")
 
 
 def _short_session_id(session_id: str) -> str:
@@ -520,6 +578,9 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def command(self) -> str:
         return "pi"
 
+    def check_resume_value(self, value: Any) -> str:
+        return check_pi_resume(value)
+
     def build_args(
         self,
         prompt: str,
@@ -542,7 +603,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if state.resume.is_continue:
             args.append("--continue")
         else:
-            args.extend(["--session", engine_argv.check_resume(state.resume.value)])
+            args.extend(["--session", self.check_resume_value(state.resume.value)])
         args.append(self.sanitize_prompt(prompt))
         return args
 
@@ -743,9 +804,13 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return f'"{escaped}"'
 
 
-def _default_session_dir(cwd: PurePath) -> Path:
+def _pi_agent_dir() -> Path:
     agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
-    base = Path(agent_dir).expanduser() if agent_dir else Path.home() / ".pi" / "agent"
+    return Path(agent_dir).expanduser() if agent_dir else Path.home() / ".pi" / "agent"
+
+
+def _default_session_dir(cwd: PurePath) -> Path:
+    base = _pi_agent_dir()
     cwd_str = str(cwd).lstrip("/\\")
     safe_path_part = cwd_str.translate(str.maketrans({"/": "-", "\\": "-", ":": "-"}))
     safe_path = f"--{safe_path_part}--"

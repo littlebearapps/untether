@@ -288,6 +288,49 @@ def test_987_distinct_warnings_both_render() -> None:
     ]
 
 
+def test_1066_warning_row_hides_home_and_host_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1066: a Codex ⚠️ row never shows a home path (``/home/<user>/…``):
+    home → ``~``, the project → relative, other absolute paths ``[path]``,
+    URLs ``[url]``."""
+    from untether.markdown import format_action_line
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    home = tmp_path / "home" / "alice"
+    project = tmp_path / "srv" / "proj"
+    monkeypatch.setenv("HOME", str(home))
+    message = (
+        "Codex is ignoring 1 unrecognized configuration setting. Check for typos"
+        f" or deprecated settings.\n  user ({home}/.codex/config.toml): `project`"
+        f" is ignored.\n  project ({project}/.codex/config.toml): ok\n"
+        " system (/etc/codex/config.toml) see https://example.invalid/x?token=abc"
+        " and ~/.codex/config.toml or /help"
+    )
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    data = codex_schema.ItemCompleted(
+        item=codex_schema.ErrorItem(id="item_0", message=message)
+    )
+    token = set_run_base_dir(project)
+    try:
+        (event,) = runner.translate(data, state=state, resume=None, found_session=None)
+    finally:
+        reset_run_base_dir(token)
+    assert isinstance(event, ActionEvent)
+    rendered = format_action_line(
+        event.action, event.phase, event.ok, command_width=500
+    )
+    for text in (rendered, event.message or "", str(event.action.detail)):
+        assert str(home) not in text
+        assert str(tmp_path) not in text
+        assert "token=abc" not in text
+    assert "user (~/.codex/config.toml): `project` is ignored." in event.message
+    assert "project (.codex/config.toml): ok" in event.message
+    assert "system ([path]) see [url]" in event.message
+    assert "~/.codex/config.toml or /help" in event.message
+
+
 def test_codex_runner_process_and_stream_end_events() -> None:
     runner = CodexRunner(codex_cmd="codex", extra_args=[])
     state = runner.new_state("hi", None)

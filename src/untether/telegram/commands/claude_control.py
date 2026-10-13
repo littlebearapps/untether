@@ -262,6 +262,8 @@ class ClaudeControlCommand:
     id = "claude_control"
     description = "Handle Claude Code permission requests"
     answer_early = True
+    # #1068: button taps only — not in the command menu.
+    callback_only = True
 
     @staticmethod
     def early_answer_toast(

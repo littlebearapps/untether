@@ -564,6 +564,58 @@ async def test_build_versions_line_caches_probes(
     assert sorted(calls) == ["claude", "pi", "pi"]
 
 
+@pytest.mark.anyio
+async def test_failed_probe_is_cached_only_briefly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1067: a probe that failed (e.g. timed out) is retried after the short
+    failure TTL, not hidden for the full 5-minute success TTL."""
+    calls: list[str] = []
+    answers = iter([None, "1.14.33"])
+
+    def probe(cmd: str) -> str | None:
+        calls.append(cmd)
+        return next(answers)
+
+    clock = [1000.0]
+    monkeypatch.setattr(telegram_backend.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    assert await telegram_backend._cli_version("opencode") is None
+    clock[0] += telegram_backend._CLI_VERSION_FAILED_TTL_S - 1
+    assert await telegram_backend._cli_version("opencode") is None
+    assert calls == ["opencode"]
+    clock[0] += 2
+    assert await telegram_backend._cli_version("opencode") == "1.14.33"
+    assert calls == ["opencode", "opencode"]
+    assert (
+        telegram_backend._CLI_VERSION_FAILED_TTL_S < telegram_backend._CLI_VERSION_TTL_S
+    )
+
+
+def test_detect_cli_version_timeout_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1067: a slow `--version` gets a generous bound (OpenCode takes ~3.5 s
+    alone) and a timeout leaves a debug line instead of vanishing."""
+    import subprocess as sp
+
+    from structlog.testing import capture_logs
+
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        seen.update(kwargs)
+        raise sp.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    with capture_logs() as logs:
+        assert telegram_backend._detect_cli_version("opencode") is None
+    assert seen["timeout"] >= 10
+    (line,) = [e for e in logs if e["event"] == "cli_version.probe_timeout"]
+    assert line["cmd"] == "opencode"
+    assert line["log_level"] == "debug"
+
+
 def test_startup_message_excludes_versions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -152,6 +152,23 @@ class TestRedactGenericSecrets:
         out = _redact_text("https://x.example/sse?token=abcdef123456&x=1")
         assert out == "https://x.example/sse?token=[REDACTED]&x=1"
 
+    def test_redacts_every_url_query_value(self) -> None:
+        """#1065: not only ``token=`` — ``state=``, ``code=`` and any other
+        query value long enough to be a credential is masked."""
+        out = _redact_text(
+            "expected https://example.invalid/cb?token=SECRETX1&state=STATEY12"
+            "&code=4/0AbCdEf&page=2&x=1&flag#frag ok"
+        )
+        assert out == (
+            "expected https://example.invalid/cb?token=[REDACTED]"
+            "&state=[REDACTED]&code=[REDACTED]&page=2&x=1&flag#frag ok"
+        )
+        # A URL's query in a structured field, and any scheme.
+        assert _redact_text("wss://h/x?sig=abcdef12") == "wss://h/x?sig=[REDACTED]"
+        # No query string: untouched.
+        assert _redact_text("https://h/a?") == "https://h/a?"
+        assert _redact_text("is it? x=abcdef") == "is it? x=abcdef"
+
     def test_does_not_double_redact_specific_patterns(self) -> None:
         out = _redact_text("token=123456789:ABCdefGHIjklMNOpqrsTUVwxyz")
         assert out == "token=[REDACTED_TOKEN]"
@@ -333,6 +350,13 @@ class TestRedactUrlUserinfo:
             "a" * 200_000 + "://" + "b" * 200_000,
             "://" * 100_000,
             ("://" + "x" * 600) * 500,
+            # #1065: the query-string pass
+            "a" * 200_000 + "://" + "b" * 200_000 + "?",
+            "://" * 100_000 + "?",
+            ("://" + "x" * 600 + "?") * 500,
+            ("a" * 20 + "://?") * 20_000,
+            "https://h/?" + "a" * 400_000,
+            "https://h/?" + "a=bcdefgh&" * 40_000,
         ):
             start = time.perf_counter()
             _redact_text(text)

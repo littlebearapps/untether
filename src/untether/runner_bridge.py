@@ -53,6 +53,7 @@ from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
     RunStreamHandle,
+    _sanitise_stderr,
     prespawn_blocked_reason,
     reset_run_stream_handle,
     review_card,
@@ -8646,8 +8647,13 @@ async def handle_message(
         if error is not None:
             release_reason = "error"
             sync_resume_token(progress_tracker, outcome.resume)
-            err_body = _format_error(error)
-            hint = _get_error_hint(err_body)
+            raw_err = _format_error(error)
+            hint = _get_error_hint(raw_err)
+            # #1065: a runner exception can quote a user-typed value (the
+            # "emitted session id … but expected …" check) or a path, so the
+            # card gets the shared stderr sanitiser (#1033: URLs incl. their
+            # query string, then absolute paths). The log keeps the raw text.
+            err_body = _sanitise_stderr(raw_err)
             if hint:
                 err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
             else:

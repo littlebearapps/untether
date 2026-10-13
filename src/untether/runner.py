@@ -1475,6 +1475,21 @@ class JsonlSubprocessRunner(BaseRunner):
         that needs the PID (e.g. for a descendant snapshot) records it here.
         """
 
+    def check_resume_value(self, value: Any) -> str:
+        """*value* if this engine's CLI can take it as a resume value, else
+        ``EngineArgvError`` (#1034).
+
+        The default is the engine-neutral ``engine_argv.check_resume``. A
+        runner whose CLI reads more into the value narrows it — Pi opens or
+        creates a session *file* at a path (#1064), Codex starts a new
+        thread for any value that isn't a known thread (#1065) — and calls
+        the same method from ``build_args``, so the pre-spawn refusal and
+        argv never disagree.
+        """
+        from .utils import engine_argv
+
+        return engine_argv.check_resume(value)
+
     def _invalid_argv_refusal(
         self, resume: ResumeToken | None
     ) -> CompletedEvent | None:
@@ -1508,7 +1523,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 (
                     "resume",
                     resume.value,
-                    engine_argv.check_resume,
+                    self.check_resume_value,
                     engine_argv.INVALID_RESUME_TEXT,
                 )
             )

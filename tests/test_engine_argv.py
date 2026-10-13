@@ -64,7 +64,9 @@ VALID_RESUMES = {
     "claude": "0c1f6a52-6c1e-4b8e-9a5d-1f2e3d4c5b6a",
     "codex": "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b",
     "opencode": "ses_AbC123xyz",
-    "pi": "/home/me/My Projects/.pi/sessions/2026-10-11_ab12cd34.jsonl",
+    # What Untether saves after a Pi run: the session id's first segment
+    # (#1064 — a session *path* must be under Pi's sessions directory).
+    "pi": "019e81c8",
     "gemini": "abc123_DEF-456",
 }
 
@@ -147,7 +149,10 @@ def test_check_resume_accepts_real_ids(value: str) -> None:
 
 def test_refusal_texts_are_plain_and_actionable() -> None:
     assert "/model" in engine_argv.INVALID_MODEL_TEXT
-    assert "/new" in engine_argv.INVALID_RESUME_TEXT
+    # #1069: the refusal keeps the chat's saved session, so the text says
+    # so rather than sending the user to /new.
+    assert "/new" not in engine_argv.INVALID_RESUME_TEXT
+    assert "saved session isn't affected" in engine_argv.INVALID_RESUME_TEXT
 
 
 # ── build_args: no value becomes a flag ─────────────────────────────────────
@@ -390,3 +395,215 @@ def test_config_load_accepts_real_ids(tmp_path: Path, engine: str, model: str) -
     module = importlib.import_module(f"untether.runners.{engine}")
     runner = module.build_runner({"model": model}, tmp_path / "untether.toml")
     assert runner.model == model
+
+
+# ── #1064 Pi / #1065 Codex: only values the CLI treats as a session ─────────
+
+_PI_UUID = "019e81c8-5c5c-76d3-afa8-ca92a049c4d6"
+
+
+@pytest.fixture
+def pi_agent_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    agent = tmp_path / "pi-agent"
+    (agent / "sessions" / "--home-me-proj--").mkdir(parents=True)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    return agent
+
+
+def _pi_refused(value: str) -> None:
+    from untether.runners.pi import check_pi_resume
+
+    with pytest.raises(EngineArgvError) as err:
+        check_pi_resume(value)
+    assert err.value.field == "resume"
+    assert value not in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _PI_UUID,
+        "019e81c8",  # Untether's saved short id (``_short_session_id``)
+        "ccd569e0",
+        "my-session_1.2",  # Pi's own grammar (``--session-id``)
+    ],
+)
+def test_pi_accepts_session_ids(pi_agent_dir: Path, value: str) -> None:
+    from untether.runners.pi import check_pi_resume
+
+    assert check_pi_resume(value) == value
+
+
+def test_pi_accepts_session_files_under_its_sessions_dir(pi_agent_dir: Path) -> None:
+    from untether.runners.pi import check_pi_resume
+
+    inside = pi_agent_dir / "sessions" / "--home-me-proj--" / f"2026_{_PI_UUID}.jsonl"
+    assert check_pi_resume(str(inside)) == str(inside)
+    # Not created yet (a new run's path) is fine too, and so is a space.
+    spaced = pi_agent_dir / "sessions" / "--home-me-My Projects--" / "s.jsonl"
+    assert check_pi_resume(str(spaced)) == str(spaced)
+
+
+def test_pi_accepts_a_tilde_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners.pi import check_pi_resume
+
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    value = "~/.pi/agent/sessions/--home-me-proj--/s.jsonl"
+    assert check_pi_resume(value) == value
+    _pi_refused("~/.pi/agent/s.jsonl")
+
+
+def test_pi_accepts_its_session_dir_env(
+    tmp_path: Path, pi_agent_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners.pi import check_pi_resume
+
+    other = tmp_path / "pi-sessions"
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(other))
+    value = str(other / "--p--" / "s.jsonl")
+    assert check_pi_resume(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/tmp/qa/qa-pi-escape.jsonl",  # the #1064 repro
+        "https://example.invalid/cb?token=abc123&state=xyz",  # the other one
+        "http:/example.invalid/x.jsonl",
+        "qa-pi-escape.jsonl",  # relative: Pi resolves it against the cwd
+        "notes/escape.jsonl",
+        "../escape.jsonl",
+        "a b",
+        "id?x",
+        "id:x",
+        ".hidden",
+        "trailing-",
+        "~",
+        "~/escape.jsonl",
+        "a\\b",
+    ],
+)
+def test_pi_refuses_anything_else(pi_agent_dir: Path, value: str) -> None:
+    _pi_refused(value)
+
+
+def test_pi_refuses_paths_that_escape_its_sessions_dir(
+    tmp_path: Path, pi_agent_dir: Path
+) -> None:
+    sessions = pi_agent_dir / "sessions"
+    _pi_refused(str(sessions / ".." / "escape.jsonl"))
+    _pi_refused(str(sessions / "--p--" / ".." / ".." / "escape.jsonl"))
+    _pi_refused(str(sessions / "--p--" / "notes.txt"))  # not a session file
+    _pi_refused(str(pi_agent_dir / "auth.jsonl"))
+    _pi_refused(str(tmp_path / "pi-agent-sessions" / "x.jsonl"))  # prefix twin
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (sessions / "link").symlink_to(outside, target_is_directory=True)
+    _pi_refused(str(sessions / "link" / "x.jsonl"))
+
+
+def test_pi_new_run_path_and_saved_id_still_resume(
+    tmp_path: Path, pi_agent_dir: Path
+) -> None:
+    """The path Untether hands a new Pi run, and the id it saves from the run
+    (what a later message resumes), both pass the narrowed check."""
+    from untether.runners.pi import PiRunner, _short_session_id, check_pi_resume
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    token = set_run_base_dir(tmp_path / "proj")
+    try:
+        state = runner.new_state("hello", None)
+        args = runner.build_args("hello", None, state=state)
+    finally:
+        reset_run_base_dir(token)
+    new_path = args[args.index("--session") + 1]
+    assert new_path.startswith(str(pi_agent_dir / "sessions"))
+    saved = _short_session_id(_PI_UUID)
+    assert check_pi_resume(saved) == saved
+    resumed = ResumeToken(engine="pi", value=saved)
+    args = runner.build_args("again", resumed, state=runner.new_state("again", resumed))
+    assert args[args.index("--session") + 1] == saved
+
+
+def test_pi_continue_is_untouched(pi_agent_dir: Path) -> None:
+    from untether.runners.pi import PiRunner
+
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    token = ResumeToken(engine="pi", value="", is_continue=True)
+    args = runner.build_args("hi", token, state=runner.new_state("hi", token))
+    assert "--continue" in args and "--session" not in args
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b", "019A2B3C-4D5E-7F60-8A9B-0C1D2E3F4A5B"],
+)
+def test_codex_accepts_thread_ids(value: str) -> None:
+    runner = _runner("codex")
+    assert runner.check_resume_value(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.invalid/cb?token=X&state=Y",  # the #1065 repro
+        "my-thread-name",  # a name: unknown → Codex silently starts a new thread
+        "019a2b3c",
+        "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b-extra",
+        "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5g",
+    ],
+)
+def test_codex_refuses_non_thread_ids(value: str) -> None:
+    runner = _runner("codex")
+    with pytest.raises(EngineArgvError) as err:
+        runner.check_resume_value(value)
+    assert value not in str(err.value)
+    with pytest.raises(EngineArgvError):
+        _args("codex", resume=value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "value"),
+    [
+        ("pi", "/tmp/qa/qa-pi-escape.jsonl"),
+        ("pi", "https://example.invalid/cb?token=abc123"),
+        ("codex", "https://example.invalid/cb?token=X&state=Y"),
+        ("codex", "my-thread-name"),
+    ],
+)
+async def test_narrowed_resume_refused_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, pi_agent_dir: Path, engine: str, value: str
+) -> None:
+    runner = _runner(engine)
+    spawned: list[str] = []
+
+    def _command(self: Any) -> str:
+        spawned.append("command")
+        return "/nonexistent/untether-test-engine"
+
+    monkeypatch.setattr(type(runner), "command", _command)
+    monkeypatch.setattr(
+        JsonlSubprocessRunner, "_check_prespawn_ram_guard", lambda self, resume: None
+    )
+    resume = ResumeToken(engine=engine, value=value)
+    with structlog.testing.capture_logs() as logs:
+        events = [evt async for evt in runner.run("Reply OK", resume)]
+
+    assert spawned == []
+    (done,) = events
+    assert isinstance(done, CompletedEvent) and done.ok is False
+    assert done.error == engine_argv.INVALID_RESUME_TEXT
+    assert done.usage == {PRESPAWN_BLOCKED_KEY: engine_argv.INVALID_ARGUMENT_BLOCK}
+    assert done.resume is None
+    (line,) = [e for e in logs if e["event"] == "runner.argv.invalid_value"]
+    assert line["reason"] == "not_a_session"
+    # Only the inert, cut preview (#1034) — never a URL or a path.
+    assert line["preview"] == engine_argv.safe_preview(value)
+    assert "/" not in line["preview"]

@@ -93,3 +93,27 @@ def test_get_verbosity_override_default():
 
 def test_backend_id():
     assert BACKEND.id == "verbose"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("args", "event"),
+    [
+        ("on", "verbose.set"),
+        ("off", "verbose.set"),
+        ("clear", "verbose.cleared"),
+        ("", "verbose.toggled"),
+    ],
+)
+async def test_verbose_logs_carry_sender_id(args: str, event: str) -> None:
+    """#1069: who changed the chat's verbosity is logged, like `config.*`."""
+    from structlog.testing import capture_logs
+
+    ctx = _make_ctx(args)
+    ctx.message.sender_id = 4242
+    with capture_logs() as logs:
+        await VerboseCommand().handle(ctx)
+    lines = [e for e in logs if e["event"] == event]
+    assert len(lines) == 1
+    assert lines[0]["sender_id"] == 4242
+    assert lines[0]["chat_id"] == 123

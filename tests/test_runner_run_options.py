@@ -52,7 +52,9 @@ def test_opencode_run_options_override_model() -> None:
 
 def test_pi_run_options_override_model() -> None:
     runner = PiRunner(extra_args=[], model="pi-default", provider=None)
-    state = PiStreamState(resume=ResumeToken(engine=PI_ENGINE, value="sess.jsonl"))
+    # #1064: a real-shaped saved Pi session id (a bare `sess.jsonl` would
+    # be a file in the cwd, which the resume check refuses).
+    state = PiStreamState(resume=ResumeToken(engine=PI_ENGINE, value="019e81c8"))
     with apply_run_options(EngineRunOptions(model="pi-override")):
         args = runner.build_args("hi", None, state=state)
 
