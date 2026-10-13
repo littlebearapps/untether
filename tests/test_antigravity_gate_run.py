@@ -259,6 +259,12 @@ async def test_edited_plugin_warns_attended_and_holds_unattended(
         reset_run_options(token)
     assert len(held) == 1 and isinstance(held[0], CompletedEvent) and not held[0].ok
     assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
+    # #1078: only a reinstall releases this hold, not the next chat message.
+    error = held[0].error or ""
+    assert "edited since install: hooks.json" in error
+    assert "`untether agy-gate install --force`" in error
+    assert "a message in the chat doesn't release them" in error
+    assert "next message" not in error and "runs again after that" not in error
 
 
 def test_liveness_without_preinvocation_marks_gate_dead() -> None:
@@ -364,6 +370,11 @@ async def test_forged_manifest_still_counts_as_changed(
     finally:
         reset_run_options(token)
     assert held[0].usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
+    # #1078: managed and unedited (only the bytes differ), so a plain
+    # install replaces it; the text still says to check the change first.
+    error = held[0].error or ""
+    assert "`untether agy-gate install`" in error
+    assert "Check what changed in" in error
 
 
 # ── Ask me (#980, phase 14) ─────────────────────────────────────────────────
@@ -604,3 +615,44 @@ async def test_ask_me_refused_with_foreign_hook_group(
     assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
     assert ".agents/hooks.json" in (done.error or "")
     assert not gate_env["record"].exists()
+
+
+@pytest.mark.anyio
+async def test_edited_plugin_cron_hold_says_only_a_reinstall_releases_it(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1078: the first cron after the plugin was edited is held by the
+    planted-config scan (the plugin's files are tracked once they aren't
+    Untether's), and said the next chat message releases it. A chat message
+    doesn't: the gate check holds every scheduled run until a reinstall."""
+    from untether.antigravity import gate_plugin
+    from untether.runners.run_options import reset_run_options
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    runner = _runner()
+
+    async def cron() -> CompletedEvent:
+        token = set_run_options(EngineRunOptions(unattended_trigger="cron:nightly"))
+        try:
+            events = [evt async for evt in runner.run("hi", None)]
+        finally:
+            reset_run_options(token)
+        done = events[-1]
+        assert isinstance(done, CompletedEvent)
+        return done
+
+    assert (await cron()).ok
+    (gate_plugin.plugin_dir() / gate_plugin.HOOKS_FILE).write_text("{}")
+    texts = []
+    for _ in range(2):
+        held = await cron()
+        assert not held.ok
+        assert held.usage[agy.PRESPAWN_BLOCKED_KEY] == agy.CONFIG_CHANGED_BLOCK
+        texts.append(held.error or "")
+        # An attended run between the two holds changes nothing for crons.
+        assert _contract([evt async for evt in runner.run("hi", None)]).ok
+    for text in texts:
+        assert "`untether agy-gate install --force`" in text
+        assert "runs again after that" not in text
+    install_plugin()
+    assert (await cron()).ok

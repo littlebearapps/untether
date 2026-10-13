@@ -932,6 +932,36 @@ def config_changed_message(paths: list[str]) -> str:
     )
 
 
+def gate_plugin_changed(install: Any) -> bool:
+    """A present plugin folder that isn't byte-for-byte what this Untether
+    installed (``gate_plugin.InstallState``; fail closed)."""
+    return install.present and (
+        not install.managed
+        or bool(install.edited)
+        or install.problem is not None
+        or not install.current
+    )
+
+
+def gate_plugin_held_message(install: Any) -> str:
+    """#1078: a scheduled run held because Untether's agy plugin isn't the
+    one it installed. Unlike a changed workspace config, a chat message
+    doesn't clear this hold: every unattended run stays held until the
+    plugin is reinstalled."""
+    force = (
+        not install.managed or bool(install.edited) or install.problem is not None
+    )
+    command = "untether agy-gate install" + (" --force" if force else "")
+    return (
+        "Untether's agy plugin (untether-gate) isn't what Untether installed "
+        f"({install.summary()}), so this scheduled run is held. Its hooks run "
+        "in every agy session on this host, so scheduled Antigravity runs stay "
+        "held until the plugin is restored; a message in the chat doesn't "
+        f"release them. Check what changed in {install.path}, then run "
+        f"`{command}` on the host."
+    )
+
+
 def config_unchecked_message(reason: str) -> str:
     return (
         "Untether couldn't check agy's hooks, plugins and MCP servers in this "
@@ -1776,9 +1806,19 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     paths=paths[:20],
                     digest=scan.agy_digest[:12],
                 )
+                from ..antigravity import gate_plugin
+
+                # #1078: when the change includes Untether's own plugin, a
+                # chat message doesn't release the hold (``_gate_setup``
+                # keeps holding until it is reinstalled), so say that.
+                install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=config_changed_message(paths),
+                        error=(
+                            gate_plugin_held_message(install)
+                            if gate_plugin_changed(install)
+                            else config_changed_message(paths)
+                        ),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
@@ -1918,12 +1958,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return None, None, decision
         options = get_run_options()
         trigger = options.unattended_trigger if options is not None else None
-        if (
-            not install.managed
-            or install.edited
-            or install.problem is not None
-            or not install.current
-        ):
+        if gate_plugin_changed(install):
             # Fail closed: only files byte-identical to this version's own
             # templates count as Untether's. A manifest whose hashes match an
             # edited hooks.json proves nothing (whatever rewrote one could
@@ -1938,7 +1973,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if trigger is not None:
                 return (
                     EventFactory(ENGINE).completed_error(
-                        error=config_changed_message([str(install.path)]),
+                        error=gate_plugin_held_message(install),
                         resume=resume,
                         usage={PRESPAWN_BLOCKED_KEY: CONFIG_CHANGED_BLOCK},
                     ),
