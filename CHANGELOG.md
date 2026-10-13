@@ -47,6 +47,7 @@
 
 ### fixes
 
+- **fix:** `/cancel` sent while a run is still starting — its card reads `queued` or `starting` while the message waits for the chat's message slot — now cancels it instead of replying `nothing running in this chat.` and letting the run go ahead. The engine is never started and the card shows `cancelled`. `/new` and a `/cancel` reply to the card work the same way, and replying `/cancel` to a follow-up's `queued` card now drops it while the session's previous run is still finishing. A refused invalid session or model id is now logged at INFO, not WARNING [#1082](https://github.com/littlebearapps/untether/issues/1082)
 - **fix:** with two approval requests waiting at once (an Antigravity Ask me subagent and its parent, or Claude's parallel subagents), the buttons on the progress message stay on the first one until it is answered, and that card's row is marked 👇. They used to jump to the newer request a few seconds later, so a tap could answer a different request than the one being read. A single request looks exactly as before [#1079](https://github.com/littlebearapps/untether/issues/1079)
 - **fix(antigravity):** Ask me display fixes [#1080](https://github.com/littlebearapps/untether/issues/1080)
   - a command or subagent waiting on its approval card is no longer listed under `⏳ background`; its time counts from the approval
