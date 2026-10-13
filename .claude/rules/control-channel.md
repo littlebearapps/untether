@@ -4,6 +4,7 @@ paths:
   - "src/untether/runners/run_options.py"
   - "src/untether/telegram/commands/claude_control.py"
   - "src/untether/telegram/commands/ask_question.py"
+  - "src/untether/interactive/**"
   - "src/untether/live_followup.py"
   - "src/untether/loop_scheduler.py"
 ---
@@ -18,11 +19,15 @@ Read those before changing any of these areas.
 - Stdin is a PTY (`pty.openpty()`, `tty.setraw(master)`); **always close the master FD in `finally`** — leaks break later runs.
 - Register session registries on the first `system.init`; clean **all** of them (incl. outline/approval state) in `run_impl`'s `finally`.
 - Every stdin write goes through `_locked_send` (per-pipe `anyio.Lock`) — several tasks write concurrently.
-- Control responses go through `write_control_response(...)`. Taps go through `respond_to_control_request()` (#685):
+- The request/claim/question registries live in `src/untether/interactive/` (#960, engine-neutral); `runners.claude`
+  re-exports the **same objects** — never copy them, never import `runners`/`telegram` from `interactive/`.
+- Control responses go through `write_control_response(...)` (via `ClaudeResponder`, the registry's default
+  responder). Taps go through `respond_to_control_request()` (#685):
   **never write a response without a claim** (`claim_control_request()` before the dispatcher's first `await`).
-- A CLI `control_cancel_request` (#684) retires the request everywhere and records `cancelled`; write nothing back.
-  A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`.
-- Every request registration binds through `_bind_request_channel()`, which records `_REQUEST_TO_CHANNEL` **and** the
+- A CLI `control_cancel_request` (#684) retires the request everywhere (`registry.withdraw()`) and records
+  `cancelled`; write nothing back. A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`.
+- Every request registration goes through `registry.register()` — never assign `_REQUEST_TO_SESSION[...]` directly
+  (structural test) — which binds via `bind_request_channel()`: `_REQUEST_TO_CHANNEL` **and** the
   run's originator (`_REQUEST_TO_ORIGINATOR`, from `get_run_sender_id()`, #388); clean both with the other registries.
   No originator entry (cron, webhook, `/at`, loop fires) means any allowed user may answer — never invent one.
   `[transports.telegram] approval_originator_only` checks it in `_dispatch_callback` **before** the early answer

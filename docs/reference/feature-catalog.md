@@ -121,7 +121,11 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 
 | File | Purpose |
 |------|---------|
-| `runners/claude.py` | Claude Code runner, interactive features |
+| `runners/claude.py` | Claude Code runner, interactive features; `ClaudeResponder` (the registry's default responder: writes the `control_response`) |
+| `interactive/registry.py` | Engine-neutral store of control requests awaiting a user answer (#960): request → session / input / tool name / chat (#388) / originator / in-flight claim (#685) / handled record (#685, #684); `register`, `classify` / `claim`, `respond` / `respond_to_control_request` through a `Responder`, `expire`, `withdraw`, `drop_session` + `on_session_dropped`, `snapshot`, `callback_prefix` |
+| `interactive/questions.py` | AskUserQuestion / question state (#960): pending typed-reply entry (#144), multi-question flows, answered memo (#698, #684), `answer_ask_question(_with_options)`, `option_label` (dict or plain-string options) |
+| `interactive/buttons.py` | `CONTROL_CALLBACK_PREFIXES` (`claude_control:`, `aq:`, `ia:`), `APPROVAL_COMMAND_IDS`, `approval_keyboard` under the registering engine's prefix (#960) |
+| `interactive/preview.py`, `interactive/unattended.py` | Approval-card diff / command preview (`format_diff_preview`, CC4) and the unattended-run deny wording (`unattended_deny_message`, #835) (#960) |
 | `runners/antigravity.py` | Antigravity CLI (`agy`) runner: permission modes and the tool-permission confirmation (#1044), denial rows, stderr stop classes, version guard, background wait and background rows (#978), `/continue` resolution (#1039), context estimate (#979) (#558) |
 | `schemas/antigravity.py` | msgspec structs for agy's stream-json (`init`, `step_update`, `result`, `command_result`) |
 | `utils/antigravity_scan.py` | Planted-config tripwire: digest of agy-executable project config, or "not checked"; nested agents, bare manifest names, nested checkouts, `.agents/settings.json`, `.git/config` in the cross-engine set (#1043) |
@@ -147,7 +151,7 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | `telegram/budget_notice.py` | Daily-budget refusal / skip notices and the Run anyway callback (#896) |
 | `session_stats.py` | `/stats` store (`stats.json`): per-engine day buckets, triggered vs manual (#271), 90-day roll-up into an `archive` bucket (#897) |
 | `background_status.py` | Background-task status block and status message for live sessions (#777, #785) |
-| `orphan_approvals.py` | `OrphanApprovalSurface` — standalone approval messages for a background agent's request while the session is idle: event + rescue paths, 10/30-min re-post with replace, delete/edit retire, one I/O lock; pure `render_surface_markdown` / `synth_keyboard` (#929) |
+| `orphan_approvals.py` | `OrphanApprovalSurface` — standalone approval messages for a background agent's request while the session is idle: event + rescue paths, 10/30-min re-post with replace, delete/edit retire, one I/O lock; pure `render_surface_markdown` / `synth_keyboard` (#929; prefix from the registry, #960) |
 | `service_manager.py` | Detects the running systemd unit (cgroup + `INVOCATION_ID`/`SYSTEMD_EXEC_PID`) or launchd label (`XPC_SERVICE_NAME`); `restart_hint()` for restart-required notices and the preamble, generic fallback; `service.detected` log (#927) |
 | `loop_scheduler.py` | Untether-owned loop and wake-up scheduler (`active_loops.json`): `[loop]` caps, live-session fire path, per-loop cancel sentinel, cron-suppression records, session-scoped CronDelete stop, wake-cap expiry (#912, #925, #926) |
 | `runners/run_options.py` | Claude permission-mode allowlist, `is_claude_prompting_mode()` (#741, #742, #749) |

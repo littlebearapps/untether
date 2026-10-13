@@ -17,6 +17,9 @@ ClaudeRunner uses `pty.openpty()` for stdin (not `subprocess.PIPE`):
 
 ## Session registries
 
+The request / claim / question stores below live in `src/untether/interactive/` (`registry.py`, `questions.py`,
+#960); `runners.claude` re-exports the same objects. Registration is `registry.register()` (binds chat + originator).
+
 ```python
 _SESSION_STDIN: dict[str, Any]                         # session_id -> stdin writer (PTY/pipe)
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
@@ -27,8 +30,8 @@ _PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip 
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel_id, question)
 _HANDLED_REQUESTS: dict[str, HandledControl | None]    # #685: answered/cancelled/expired record (action, outcome, channel)
 _INFLIGHT_CONTROL_RESPONSES: dict[str, str]            # #685: request_id -> claim owner while a tap is being written
-_REQUEST_TO_CHANNEL: dict[str, int]                    # #388: request_id -> chat its buttons were posted in (bind after every _REQUEST_TO_SESSION[...] =)
-_REQUEST_TO_ORIGINATOR: dict[str, int]                 # #388 phase 2: request_id -> Telegram user who started the run (set by the same _bind_request_channel; read only with approval_originator_only)
+_REQUEST_TO_CHANNEL: dict[str, int]                    # #388: request_id -> chat its buttons were posted in (bound by registry.register())
+_REQUEST_TO_ORIGINATOR: dict[str, int]                 # #388 phase 2: request_id -> Telegram user who started the run (set by the same bind_request_channel; read only with approval_originator_only)
 _CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the request while a tap was mid-write
 ```
 
@@ -113,7 +116,7 @@ When Claude calls `AskUserQuestion`:
 
 ## Diff preview
 
-`_format_diff_preview(tool_name, tool_input)` generates compact diffs for approval messages:
+`format_diff_preview(tool_name, tool_input)` (`interactive/preview.py`) generates compact diffs for approval messages:
 - Only for tools going through `ControlRequest` (not auto-approved)
 - Edit: `- old` / `+ new` lines (max 4 each, 60 char truncation)
 - Write: `+ content` (max 8 lines)
