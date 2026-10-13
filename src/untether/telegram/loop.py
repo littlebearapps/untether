@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -24,7 +24,7 @@ from ..progress import ProgressTracker
 from ..runners.run_options import EngineRunOptions, claude_tap_waits_for
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
-from ..transport import MessageRef, RenderedMessage, SendOptions
+from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
@@ -716,6 +716,7 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if config_path is None:
         return
     from .progress_persistence import (
+        NOTIFY_KEY,
         clear_all_progress,
         load_active_progress,
         resolve_progress_path,
@@ -726,11 +727,16 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if not entries:
         return
     logger.info("startup.orphan_cleanup", count=len(entries))
-    edited = failed = skipped = 0
+    edited = failed = skipped = notify_deleted = 0
     pop = getattr(cfg.bot, "pop_edit_error", None)
     for entry in entries.values():
         chat_id = entry.get("chat_id")
         message_id = entry.get("message_id")
+        # #1084: the card's buttons go below, so its "Action required" push
+        # would point at nothing to tap — delete it, whatever the edit does.
+        notify_id = entry.get(NOTIFY_KEY)
+        if chat_id is not None and notify_id is not None:
+            notify_deleted += await _delete_orphan_notify(cfg, chat_id, notify_id)
         if chat_id is None or message_id is None:
             skipped += 1
             continue
@@ -770,8 +776,38 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
         edited=edited,
         failed=failed,
         skipped=skipped,
+        notify_deleted=notify_deleted,
     )
     clear_all_progress(progress_path)
+
+
+async def _delete_orphan_notify(
+    cfg: TelegramBridgeConfig, chat_id: Any, message_id: Any
+) -> int:
+    """#1084: delete an orphan card's approval push. 1 when it went, else 0;
+    a failure (already deleted, too old, corrupt id) is DEBUG, like an
+    orphan edit (#746)."""
+    try:
+        cid, mid = int(chat_id), int(message_id)
+        with message_kind("approval_notify"):
+            ok = await cfg.bot.delete_message(chat_id=cid, message_id=mid)
+    except Exception:  # noqa: BLE001 — corrupt entry (int()) or an unexpected raise
+        logger.debug(
+            "startup.orphan_cleanup.notify_delete_failed",
+            chat_id=chat_id,
+            message_id=message_id,
+            exc_info=True,
+        )
+        return 0
+    if not ok:
+        logger.debug(
+            "startup.orphan_cleanup.notify_delete_failed",
+            chat_id=cid,
+            message_id=mid,
+        )
+        return 0
+    logger.debug("startup.orphan_cleanup.notify_deleted", chat_id=cid, message_id=mid)
+    return 1
 
 
 def _init_quarantine_store(config_path: Path) -> None:

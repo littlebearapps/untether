@@ -692,6 +692,81 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
     assert transport.delete_calls[0] == notification_sends[0]["ref"]
 
 
+@pytest.mark.anyio
+async def test_1084_approval_push_tracked_beside_its_progress_message(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1084: the "Action required" push is recorded on its progress
+    message's ``active_progress.json`` entry while visible (so a restart's
+    orphan cleanup can delete it) and forgotten once the buttons go."""
+    import untether.runner_bridge as rb
+    from untether.telegram.progress_persistence import (
+        NOTIFY_KEY,
+        load_active_progress,
+        register_progress,
+    )
+
+    path = tmp_path / "active_progress.json"
+    monkeypatch.setattr(rb, "_PROGRESS_PERSISTENCE_PATH", path)
+    register_progress(path, "123:1", chat_id=123, message_id=1)
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+    seen: dict[str, Any] = {}
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for _ in range(10):
+                await anyio.lowlevel.checkpoint()
+            seen["while_visible"] = dict(load_active_progress(path)["123:1"])
+            presenter.set_no_approval()
+            edits.event_seq = 2
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            for _ in range(10):
+                await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    (push,) = transport.send_calls
+    assert seen["while_visible"] == {
+        "chat_id": 123,
+        "message_id": 1,
+        NOTIFY_KEY: push["ref"].message_id,
+    }
+    assert load_active_progress(path) == {"123:1": {"chat_id": 123, "message_id": 1}}
+
+
+@pytest.mark.anyio
+async def test_1084_delete_ephemeral_forgets_the_tracked_push(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import untether.runner_bridge as rb
+    from untether.telegram.progress_persistence import (
+        load_active_progress,
+        register_progress,
+        set_progress_notify,
+    )
+
+    path = tmp_path / "active_progress.json"
+    monkeypatch.setattr(rb, "_PROGRESS_PERSISTENCE_PATH", path)
+    register_progress(path, "123:1", chat_id=123, message_id=1)
+    set_progress_notify(path, "123:1", 99)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits._approval_notify_ref = MessageRef(channel_id=123, message_id=99)
+
+    await edits.delete_ephemeral()
+
+    assert load_active_progress(path) == {"123:1": {"chat_id": 123, "message_id": 1}}
+
+
 class _SlowEditTransport(FakeTransport):
     """The outbox sends a new message before a pending edit: an edit that
     waits for delivery returns only once ``release`` is set."""

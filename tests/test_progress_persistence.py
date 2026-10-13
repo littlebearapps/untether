@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from untether.telegram.progress_persistence import (
+    NOTIFY_KEY,
     clear_all_progress,
     load_active_progress,
     register_progress,
     resolve_progress_path,
+    set_progress_notify,
     unregister_progress,
 )
 
@@ -397,4 +399,116 @@ async def test_746_orphan_cleanup_http_400_end_to_end(tmp_path: Path) -> None:
         556: "Bad Request: message to edit not found",
         557: "Bad Request: message can't be edited",
     }
+    assert load_active_progress(progress_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# #1084 — the approval push is tracked with its card and deleted on restart
+# ---------------------------------------------------------------------------
+
+
+def test_1084_set_progress_notify_records_and_forgets(tmp_path: Path) -> None:
+    path = tmp_path / "active_progress.json"
+    register_progress(path, "123:456", chat_id=123, message_id=456)
+
+    assert set_progress_notify(path, "123:456", 789) is True
+    assert load_active_progress(path) == {
+        "123:456": {"chat_id": 123, "message_id": 456, NOTIFY_KEY: 789}
+    }
+    assert set_progress_notify(path, "123:456", 789) is False  # unchanged
+    assert set_progress_notify(path, "123:456", None) is True
+    assert load_active_progress(path) == {
+        "123:456": {"chat_id": 123, "message_id": 456}
+    }
+    assert set_progress_notify(path, "123:456", None) is False
+
+
+def test_1084_set_progress_notify_ignores_released_entry(tmp_path: Path) -> None:
+    """A push that lands after its run was released must not resurrect an
+    entry: there is no card left for the restart to relabel."""
+    path = tmp_path / "active_progress.json"
+    register_progress(path, "123:456", chat_id=123, message_id=456)
+    unregister_progress(path, "123:456")
+
+    assert set_progress_notify(path, "123:456", 789) is False
+    assert load_active_progress(path) == {}
+
+
+class _NotifyBot:
+    def __init__(self, *, delete_ok: bool = True) -> None:
+        self.edited: list[int] = []
+        self.deleted: list[tuple[int, int]] = []
+        self.delete_ok = delete_ok
+
+    async def edit_message_text(self, *, chat_id, message_id, text):
+        self.edited.append(message_id)
+        return object()
+
+    async def delete_message(self, *, chat_id, message_id):
+        self.deleted.append((chat_id, message_id))
+        return self.delete_ok
+
+
+@pytest.mark.anyio
+async def test_1084_orphan_cleanup_deletes_the_approval_push(tmp_path: Path) -> None:
+    """#1084: the restart relabels the card and removes its buttons; the
+    "Action required" push pointing at it is deleted too."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    register_progress(progress_path, "123:555", chat_id=123, message_id=555)
+    set_progress_notify(progress_path, "123:555", 556)
+    register_progress(progress_path, "123:600", chat_id=123, message_id=600)
+
+    bot = _NotifyBot()
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, bot))  # type: ignore[arg-type]
+
+    assert bot.edited == [555, 600]
+    assert bot.deleted == [(123, 556)]
+    done = _events(logs, "startup.orphan_cleanup.done")[0]
+    assert (done["edited"], done["notify_deleted"]) == (2, 1)
+    assert load_active_progress(progress_path) == {}
+
+
+@pytest.mark.anyio
+async def test_1084_orphan_cleanup_legacy_file_and_failed_delete(
+    tmp_path: Path,
+) -> None:
+    """A file written before #1084 (no push key) cleans up as before; a
+    push that can't be deleted (gone, too old, corrupt id) is DEBUG only and
+    the card is still relabelled."""
+    import json
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    progress_path.write_text(
+        json.dumps(
+            {
+                "1:10": {"chat_id": 1, "message_id": 10},
+                "1:20": {"chat_id": 1, "message_id": 20, NOTIFY_KEY: 21},
+                "1:30": {"chat_id": 1, "message_id": 30, NOTIFY_KEY: "nope"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bot = _NotifyBot(delete_ok=False)
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, bot))  # type: ignore[arg-type]
+
+    assert bot.edited == [10, 20, 30]
+    assert bot.deleted == [(1, 21)]
+    failed = _events(logs, "startup.orphan_cleanup.notify_delete_failed")
+    assert len(failed) == 2
+    assert all(r["log_level"] == "debug" for r in failed)
+    done = _events(logs, "startup.orphan_cleanup.done")[0]
+    assert (done["edited"], done["notify_deleted"]) == (3, 0)
     assert load_active_progress(progress_path) == {}

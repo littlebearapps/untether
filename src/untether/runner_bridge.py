@@ -4758,6 +4758,7 @@ class ProgressEdits:
                     self._approval_notify_ref = None
                     self._approval_notified = False
                     if ref_to_delete is not None:
+                        self._persist_approval_notify(None)
 
                         async def _delete_notify(ref: MessageRef) -> None:
                             try:
@@ -4865,6 +4866,27 @@ class ProgressEdits:
                 )
         except Exception:  # noqa: BLE001
             logger.debug("progress_edits.notify_send_failed", exc_info=True)
+            return
+        if self._approval_notify_ref is not None:
+            self._persist_approval_notify(self._approval_notify_ref.message_id)
+
+    def _persist_approval_notify(self, message_id: int | None) -> None:
+        """#1084: keep the approval push beside its progress message in
+        ``active_progress.json`` (``None`` forgets it), so a restart's orphan
+        cleanup deletes the push along with the card's buttons. A progress
+        message that isn't tracked (already released) is left alone."""
+        if _PROGRESS_PERSISTENCE_PATH is None or self.progress_ref is None:
+            return
+        from .telegram.progress_persistence import set_progress_notify
+
+        try:
+            set_progress_notify(
+                _PROGRESS_PERSISTENCE_PATH,
+                f"{self.channel_id}:{self.progress_ref.message_id}",
+                message_id,
+            )
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            logger.debug("progress_edits.notify_persist_failed", exc_info=True)
 
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
     _STALL_THRESHOLD_TOOL: float = 600.0  # 10 minutes when a tool is actively running
@@ -5145,6 +5167,7 @@ class ProgressEdits:
                     error_type=exc.__class__.__name__,
                 )
             self._approval_notify_ref = None
+            self._persist_approval_notify(None)
         # #920: then the pending-approval reminder (run end / turn close).
         await self._retire_approval_reminder("run_end")
         # #929: then (run-level only — turn edits share the reference) the
