@@ -74,12 +74,21 @@ ANTIGRAVITY_PM_ACTIONS: dict[str, str] = {
     "aga": "ask",
     "agp": "plan",
 }
+# #1060: the agy page's own Clear override, so its toast can carry the /new
+# hint (the shared ``clr`` toast is engine-blind).
+CLEAR_ACTION = "agc"
 # Button rows, in order.
 BUTTON_ROWS: tuple[tuple[str, ...], ...] = (("agw", "agf"), ("aga", "agp"))
 
 # #1037: agy keeps a conversation on the agent it started with, so a chat
 # that began in Workspace has no shell until a new conversation starts.
 FULL_ACCESS_TOAST = "Permission mode: full access — send /new to start using it"
+# #1060: and one that began in Full access keeps its shell, so Workspace
+# would block it every time it reaches for one.
+WORKSPACE_TOAST = "Permission mode: workspace — send /new to start using it"
+# The agy page's Clear override (``config:pm:agc``): clearing can switch
+# between Workspace and Full access when untether.toml sets one.
+CLEARED_TOAST = "Permission mode: cleared — send /new if this changed it"
 
 GATE_SOON_SUFFIX = " · soon"
 GATE_SOON_TOAST = (

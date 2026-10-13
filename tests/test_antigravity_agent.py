@@ -178,6 +178,68 @@ def test_denial_notice_points_at_new_and_keeps_the_rule_hint_for_shell() -> None
     assert hook_shell.endswith(", or run it from the chat.")
 
 
+def _replay_resumed(name: str, *, agent_flag: bool) -> str:
+    """Replay a resumed Workspace run of fixture *name*; its final answer."""
+    import json as _json
+
+    from untether.model import CompletedEvent, ResumeToken
+    from untether.schemas import antigravity as schema
+
+    fixture = Path(__file__).parent / "fixtures" / "antigravity" / f"{name}.jsonl"
+    lines = [ln for ln in fixture.read_text().splitlines() if ln.strip()]
+    cid = _json.loads(lines[0])["conversation_id"]
+    runner = AntigravityRunner()
+    resume = ResumeToken(engine="antigravity", value=cid)
+    state = runner.new_state("p", resume)
+    runner.build_args("p", resume, state=state)
+    assert (AGENT_FLAG in (state.argv or [])) is True
+    if not agent_flag:
+        state.argv = [a for a in state.argv or [] if a != AGENT_FLAG]
+    events = []
+    for line in lines:
+        events.extend(
+            runner.translate(
+                schema.decode_event(line),
+                state=state,
+                resume=resume,
+                found_session=None,
+            )
+        )
+    (done,) = [e for e in events if isinstance(e, CompletedEvent)]
+    return done.answer
+
+
+def test_resumed_conversation_that_kept_its_shell_says_new() -> None:
+    """#1060 (agy 1.3.3 capture rc4-a3): a conversation started in Full
+    access, resumed in Workspace with ``--agent=untether-workspace``. agy
+    ignores ``--agent`` on a resume, so the model still had ``run_command``,
+    Workspace blocked it and the turn ended there. The notice says /new, not
+    "Full access, then /new"."""
+    answer = _replay_resumed("resume_kept_shell", agent_flag=True)
+    assert "This conversation started without Workspace's no-shell tools" in answer
+    assert "Send /new to start a Workspace conversation" in answer
+    assert "Full access, then /new" not in answer
+
+
+def test_shell_denial_without_the_agent_keeps_the_old_advice() -> None:
+    """No ``--agent`` on the run (the file couldn't be put in place): a
+    shell denial says nothing about the conversation's first agent."""
+    answer = _replay_resumed("resume_kept_shell", agent_flag=False)
+    assert "Full access, then /new, or add an allow rule" in answer
+    assert "no-shell tools" not in answer
+
+
+def test_kept_shell_wording_is_for_attended_runs_only() -> None:
+    cron = agy.denial_paragraph(
+        ["shell command"], mode="workspace", trigger="cron:x", kept_shell=True
+    )
+    assert "on this cron" in cron and "no-shell tools" not in cron
+    files = agy.denial_paragraph(
+        ["file outside the project"], mode="workspace", trigger=None
+    )
+    assert "no-shell tools" not in files
+
+
 @pytest.fixture(autouse=True)
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from untether.utils.paths import reset_run_base_dir, set_run_base_dir

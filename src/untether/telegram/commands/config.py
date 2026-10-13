@@ -749,8 +749,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         await _page_home(ctx)
         return
 
-    # --- Clear (all engines) ---
-    if action == "clr":
+    # --- Clear (all engines; ``agc`` is the agy page's own, #1060) ---
+    if action == "clr" or (engine == "antigravity" and action == agy_mode.CLEAR_ACTION):
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
@@ -880,10 +880,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             " --dangerously-skip-permissions). Cron and webhook runs only get"
             " this when the cron itself sets it",
             "",
-            "⚠️ <b>After switching Workspace → Full access, send /new.</b> A"
-            " conversation that started in Workspace keeps its no-shell"
-            " tools; Full access applies from the next new conversation."
-            " Other changes apply from your next message.",
+            "⚠️ <b>After switching between Workspace and Full access, send"
+            " /new.</b> A conversation keeps the tools it started with: one"
+            " that started in Workspace has no shell, and one that started in"
+            " Full access keeps reaching for it, which Workspace then blocks."
+            " The new mode applies from the next new conversation. Other"
+            " changes apply from your next message.",
             "",
             f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
             "",
@@ -905,7 +907,10 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         ]
         buttons.append(
             [
-                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                {
+                    "text": "Clear override",
+                    "callback_data": f"config:pm:{agy_mode.CLEAR_ACTION}",
+                },
                 {"text": "← Back", "callback_data": "config:home"},
             ]
         )
@@ -2649,9 +2654,11 @@ class ConfigCommand:
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
                 # #558: Antigravity (the "· soon" modes store nothing).
-                "agw": "Permission mode: workspace",
-                # #1037: a Workspace conversation keeps its no-shell agent.
+                # #1037 / #1060: a conversation keeps the agent it started
+                # with, so either switch needs /new.
+                "agw": agy_mode.WORKSPACE_TOAST,
                 "agf": agy_mode.FULL_ACCESS_TOAST,
+                agy_mode.CLEAR_ACTION: agy_mode.CLEARED_TOAST,
                 "aga": agy_mode.GATE_SOON_TOAST,
                 "agp": agy_mode.GATE_SOON_TOAST,
             },

@@ -673,8 +673,19 @@ def _join_labels(labels: list[str]) -> str:
     return ", ".join(labels[:-1]) + " and " + labels[-1]
 
 
-def denial_paragraph(labels: list[str], *, mode: str, trigger: str | None) -> str:
-    """Why the run stopped and how to allow it — trigger-aware (audit §6)."""
+def denial_paragraph(
+    labels: list[str],
+    *,
+    mode: str,
+    trigger: str | None,
+    kept_shell: bool = False,
+) -> str:
+    """Why the run stopped and how to allow it — trigger-aware (audit §6).
+
+    ``kept_shell`` (#1060): a resumed Workspace run under Untether's no-shell
+    agent still called the shell, so the conversation started under another
+    agent (Full access, usually) and agy kept it — agy ignores ``--agent`` on
+    a resume. Full access then /new is the wrong advice there."""
     what = f"⚠️ Antigravity was blocked from using a {_join_labels(labels)}"
     if mode == "full":
         return f"{what} by agy's own deny rules (`permissions.deny` in agy's settings file)."
@@ -695,6 +706,14 @@ def denial_paragraph(labels: list[str], *, mode: str, trigger: str | None) -> st
         return f"{head} Webhook runs never get Full access; {tail}."
     if trigger is not None:
         return f'{head} To allow it, set `permission_mode = "full"` on this cron{rule}.'
+    if kept_shell:
+        return (
+            f"{head} This conversation started without Workspace's no-shell"
+            " tools (in Full access, for example), and agy keeps the tools a"
+            " conversation started with, so it still tried the shell. Send /new"
+            " to start a Workspace conversation, or pick Full access in /config"
+            " to let it run."
+        )
     # A conversation that started in Workspace keeps its no-shell agent.
     return (
         f"{head} To allow it: /config → Permission mode → Full access, then /new{rule}."
@@ -2820,7 +2839,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             answer = _append_paragraph(
                 answer,
                 denial_paragraph(
-                    denied_labels, mode=state.effective_mode, trigger=state.unattended
+                    denied_labels,
+                    mode=state.effective_mode,
+                    trigger=state.unattended,
+                    kept_shell=_kept_shell_agent(state, denied_labels),
                 ),
             )
         if status == "SUCCESS":
@@ -3151,6 +3173,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
         )
         return out
+
+
+def _kept_shell_agent(state: AntigravityStreamState, labels: list[str]) -> bool:
+    """#1060: a shell command was denied on a resumed run that named
+    Untether's no-shell agent. That agent has no shell tool, so the
+    conversation is still on the agent it started with (agy 1.3.3 ignores
+    ``--agent`` on ``--conversation``; ``init.agent`` echoes the flag either
+    way, so the stream can't say so before the turn)."""
+    if not state.resumed or "shell command" not in labels:
+        return False
+    return any(arg.startswith("--agent=") for arg in state.argv or ())
 
 
 def _add_run_tokens(totals: dict[str, int], usage: agy_schema.StepUsage | None) -> None:

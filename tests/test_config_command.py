@@ -1076,9 +1076,13 @@ class TestAntigravityPermissionPage:
             text
         )
         # #1037: Workspace has no shell tool, so no allow-rule tip; the
-        # page says a switch to Full access needs /new.
+        # page says a switch either way needs /new (#1060).
         assert "command(git status)" not in text
-        assert "After switching Workspace → Full access, send /new." in text
+        assert (
+            "After switching between Workspace and Full access, send /new."
+            in text.replace("</b>", "")
+        )
+        assert "one that started in Full access keeps reaching for it" in text
         assert "Current: <b>workspace</b> (default)" in text
         assert "interactive-approval/#antigravity-cli--permission-mode" in text
         labels = _buttons_labels(msg)
@@ -1095,7 +1099,7 @@ class TestAntigravityPermissionPage:
             "config:pm:agf",
             "config:pm:aga",
             "config:pm:agp",
-            "config:pm:clr",
+            "config:pm:agc",
             "config:home",
         ]
 
@@ -1107,6 +1111,11 @@ class TestAntigravityPermissionPage:
         await cmd.handle(self._ctx(tmp_path, "agw"))
         assert (await self._override(tmp_path)).permission_mode == "workspace"
         await cmd.handle(self._ctx(tmp_path, "clr"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        # #1060: the agy page's own Clear override clears the same way.
+        await cmd.handle(self._ctx(tmp_path, "agf"))
+        await cmd.handle(self._ctx(tmp_path, "agc"))
         override = await self._override(tmp_path)
         assert override is None or override.permission_mode is None
         for soon in ("aga", "agp"):
@@ -1183,10 +1192,18 @@ class TestAntigravityPermissionPage:
 
     def test_antigravity_toast_labels_present(self):
         toast = ConfigCommand.early_answer_toast
-        assert toast("pm:agw") == "Permission mode: workspace"
+        # #1060: a conversation keeps the tools it started with either way.
+        assert toast("pm:agw") == (
+            "Permission mode: workspace — send /new to start using it"
+        )
         assert toast("pm:agf") == (
             "Permission mode: full access — send /new to start using it"
         )
+        assert toast("pm:agc") == (
+            "Permission mode: cleared — send /new if this changed it"
+        )
+        # The shared Clear toast other engines use is unchanged.
+        assert toast("pm:clr") == "Permission mode: cleared"
         for soon in ("pm:aga", "pm:agp"):
             assert toast(soon) == (
                 "Needs Untether's Telegram approval gate — coming in a later "
