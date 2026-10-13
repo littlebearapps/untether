@@ -2395,6 +2395,14 @@ def engine_background_busy(engine_state: Any) -> bool:
     return False
 
 
+# #1077: the push sent with a question card names the engine asking.
+_QUESTION_ENGINE_NAMES = {"claude": "Claude Code", "antigravity": "Antigravity"}
+
+
+def question_notify_text(engine: str) -> str:
+    return f"Question from {_QUESTION_ENGINE_NAMES.get(engine, engine)}"
+
+
 class ProgressEdits:
     def __init__(
         self,
@@ -4732,7 +4740,7 @@ class ProgressEdits:
                         notify_text = "Action required \u2014 approval needed"
                         for a in state.actions:
                             if not a.completed and a.action.detail.get("ask_question"):
-                                notify_text = "Question from Claude Code"
+                                notify_text = question_notify_text(self.tracker.engine)
                                 break
 
                         async def _send_notify(text: str) -> None:

@@ -693,6 +693,51 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "expected"),
+    [
+        ("claude", "Question from Claude Code"),
+        ("antigravity", "Question from Antigravity"),
+    ],
+)
+async def test_progress_edits_question_push_names_the_engine(
+    engine: str, expected: str
+) -> None:
+    """#1077: an Antigravity question card's push said "Question from Claude
+    Code". Claude's text stays byte-identical (golden replay)."""
+    from untether.events import EventFactory
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter, engine=engine)
+    edits.tracker.note_event(
+        EventFactory(engine).action_started(
+            action_id="q1",
+            kind="tool",
+            title="Question",
+            detail={"ask_question": "Which file?", "inline_keyboard": [[]]},
+        )
+    )
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def one_cycle() -> None:
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(one_cycle)
+
+    assert [s["message"].text for s in transport.send_calls] == [expected]
+
+
+@pytest.mark.anyio
 async def test_progress_edits_delete_ephemeral_cleans_pending_notification() -> None:
     """delete_ephemeral() cleans up a pending approval notification."""
     transport = FakeTransport()
