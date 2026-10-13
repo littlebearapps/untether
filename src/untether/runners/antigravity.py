@@ -405,7 +405,7 @@ _AGY_BACKGROUND_CAP_S = 1860.0
 # ``CommandLine``. Where the parameters do carry it, that value decides when
 # the command counts as background; otherwise it does after this long.
 _BACKGROUND_TITLE_AFTER_S = 5.0
-# #1062: agy 1.3.3 ends a step it killed (``manage_task``) DONE with
+# #1062: agy (1.3.3, 1.3.4) ends a step it killed (``manage_task``) DONE with
 # ``tool_info.error.message`` "context canceled", and names the task it
 # kills as ``<conversation id>/task-<step index>``.
 _CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.IGNORECASE)
@@ -453,7 +453,7 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
 # The newest agy the fixtures and drift notes were checked against.
-PROBED_CLI_VERSION = "1.3.3"
+PROBED_CLI_VERSION = "1.3.4"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -1056,6 +1056,10 @@ class AntigravityStreamState:
     # ``system_message`` steps still expected for a finished background
     # command / timer; those are not a subagent finishing.
     bg_notices_owed: int = 0
+    # #1062: a command / timer step that ended cancelled before it counted
+    # as background, held (not listed) in case a ``manage_task`` kill names
+    # it next.
+    cancelled_steps: dict[str, EngineBackgroundTask] = field(default_factory=dict)
     agy_pid: int | None = None
     # Phase 05: the ``--effort`` level actually passed (footer), and the one
     # ⚠️ row to show when a stored level was dropped for this model.
@@ -2978,27 +2982,41 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     @staticmethod
     def _task_killed(state: AntigravityStreamState, task_id: Any) -> None:
         """#1062: agy's ``manage_task`` kill names the task as
-        ``<conversation>/task-<step>``. A command or timer still listed as
-        running ends as stopped; one its own step already closed keeps that
-        status (the step's DONE carries the kill on 1.3.3)."""
+        ``<conversation>/task-<step>``. Only a task in the background can be
+        killed, so a command or timer still running ends as stopped and is
+        listed even if its wait hadn't passed; one its own cancelled DONE
+        already closed keeps that status — or is listed now, if that DONE
+        came before the background threshold (the kill's own DONE arrives
+        with it, so a fast kill beats the 5 s default; rc4 QA on 1.3.4).
+        agy sends a ``system_message`` for the kill (1.3.3 and 1.3.4), so
+        one notice is owed."""
         match = _KILLED_TASK_RE.search(task_id) if isinstance(task_id, str) else None
         if match is None:
             return
         step = match.group(1)
         for key in (f"cmd:{step}", f"timer:{step}"):
             task = state.tasks.get(key)
-            if task is None or task.status != "running":
+            if task is None:
+                task = state.cancelled_steps.pop(key, None)
+                if task is None:
+                    continue
+                task.background_from = None
+                AntigravityRunner._add_task(state, task)
+            elif task.status == "stopped":
+                state.bg_notices_owed += 1
                 continue
-            if not task.is_backgrounded:
-                del state.tasks[key]
+            elif task.status != "running":
                 continue
-            task.status = "stopped"
-            task.ended_at = time.monotonic()
+            else:
+                task.background_from = None
+                task.status = "stopped"
+                task.ended_at = time.monotonic()
+            state.bg_notices_owed += 1
             logger.info(
                 "antigravity.background.finished",
                 task_id=key,
                 status="stopped",
-                elapsed_s=round(task.ended_at - task.started_at, 1),
+                elapsed_s=round((task.ended_at or 0.0) - task.started_at, 1),
                 source="manage_task",
             )
 
@@ -3065,11 +3083,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 continue
             if not task.is_backgrounded:
                 del state.tasks[key]  # finished in the foreground: never a row
+                if status == "stopped" and len(state.cancelled_steps) < _TASKS_MAX:
+                    # #1062: unless a ``manage_task`` kill names it next.
+                    task.status = status
+                    task.ended_at = time.monotonic()
+                    state.cancelled_steps[key] = task
                 continue
             task.status = status
             task.ended_at = time.monotonic()
             if status != "stopped":
-                # A killed task gets no completion notice (agy 1.3.3).
+                # A kill's notice is owed by the kill (``_task_killed``).
                 state.bg_notices_owed += 1
             logger.info(
                 "antigravity.background.finished",
@@ -3113,6 +3136,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.tasks[key].status = "ended"
             state.tasks[key].ended_at = now
         state.bg_notices_owed = 0
+        state.cancelled_steps.clear()
         outlived = [key for key in left if key.startswith("cmd:")]
         if ok and outlived:
             logger.info("antigravity.background.outlived", tasks=outlived)

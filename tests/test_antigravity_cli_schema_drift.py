@@ -42,9 +42,10 @@ from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas import antigravity as agy_schema
 
 # Last CLI these probes were re-derived against (the pack was written on
-# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09 and to 1.3.3 on
-# 2026-10-10, with no drift here either time).
-PROBED_CLI_VERSION = "1.3.3"
+# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09, to 1.3.3 on 2026-10-10
+# and to 1.3.4 on 2026-10-13, with no drift here any time; 1.3.4 added the
+# unknown-agent refusal pinned below).
+PROBED_CLI_VERSION = "1.3.4"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
@@ -343,3 +344,33 @@ def test_invalid_model_shape(
     assert result["event"] == "result"
     assert result["result"]["status"] == "ERROR"
     assert "invalid model selection" in result["result"]["error"]
+
+
+@gated
+def test_unknown_agent_is_refused(
+    signed_in: subprocess.CompletedProcess, tmp_path: Path
+) -> None:
+    """agy 1.3.4: an ``--agent`` name that matches no agent ends a headless
+    run with rc 1 and an ERROR result naming the available agents (1.3.3 and
+    older ran the default agent, shell included). Untether passes
+    ``--agent=untether-workspace`` only once the file is in place, so this
+    is the backstop: a missing Workspace agent can no longer fall back to a
+    shell-capable one."""
+    version = agy.parse_agy_version(_run_agy(["--version"], tmp_path).stdout)
+    if version is None or version < (1, 3, 4):
+        pytest.skip(f"agy {version} predates the unknown-agent refusal (1.3.4)")
+    proc = _run_agy(
+        [
+            "-p",
+            "/effort",
+            "--output-format",
+            "stream-json",
+            "--agent=untether-drift-probe-missing",
+        ],
+        tmp_path,
+    )
+    assert proc.returncode == 1, proc.stdout[:300]
+    (result,) = _events(proc.stdout)
+    assert result["result"]["status"] == "ERROR"
+    assert 'unknown agent "untether-drift-probe-missing"' in result["result"]["error"]
+    assert result["result"]["usage"]["total_tokens"] == 0

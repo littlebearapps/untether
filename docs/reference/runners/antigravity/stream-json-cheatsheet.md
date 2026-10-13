@@ -139,8 +139,10 @@ A turn that stopped at a blocked tool is still `SUCCESS`, with an empty `respons
 `denied_actions[].action` values seen or documented: `command`, `unsandboxed`, `mcp`, `read_url`, `execute_url`,
 `read_file`, `write_file`.
 
-A background task the model stops with `manage_task` ([#1062](https://github.com/littlebearapps/untether/issues/1062), agy 1.3.3): the command's step ends
-`DONE` with an error, then the kill step names the task by step index:
+A background task the model stops with `manage_task` ([#1062](https://github.com/littlebearapps/untether/issues/1062), agy 1.3.3 and 1.3.4): the command's step ends
+`DONE` with an error, then the kill step names the task by step index. agy prints the step's `DONE` only when the
+kill lands (both lines arrive together), so with a short `WaitMsBeforeAsync` the gap can be under 5 s; 1.3.4 follows
+the kill with a content-less `system_message` step (the task's cancellation notice):
 
 ```json
 {"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"sleep 300"},"error":{"type":"TOOL_ERROR","message":"context canceled"}}}}
