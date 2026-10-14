@@ -103,7 +103,7 @@ Notes:
 
 * `mode` controls model selection, system prompt, and tool availability within AMP.
 * `dangerously_allow_all` defaults to `false` as of v0.35.3 ([#206](https://github.com/littlebearapps/untether/issues/206)) — opt in only if you specifically want AMP runs without its built-in permission system. Untether's own permission layer remains the primary control.
-* `stream_json_input` enables `--stream-json-input` for stdin streaming. Nothing reads it back: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only.
+* `stream_json_input` enables `--stream-json-input` for stdin streaming. Nothing reads it back: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code features (and partly Antigravity CLI's).
 
 ---
 
@@ -155,7 +155,7 @@ Run `amp login` to authenticate with Sourcegraph.
 
 * AMP uses `amp threads continue <thread-id>` for resume, not `--resume`.
 * Thread IDs use the format `T-<uuid>` (e.g., `T-2775dc92-90ed-4f85-8b73-8f9766029e83`).
-* `--stream-json-input` is passed when `stream_json_input = true` in config. No approve/deny flow is wired for AMP; interactive features are Claude Code-only.
+* `--stream-json-input` is passed when `stream_json_input = true` in config. No approve/deny flow is wired for AMP; interactive features are Claude Code and Antigravity CLI only.
 * Untether does not pass `--model`; model selection is controlled server-side by `--mode`.
 
 ## See also

@@ -272,9 +272,12 @@ followup_mode` → `queue`. `/steer <text>` and `/queue <text>` override once;
 bare `/steer` / `/queue` set the chat (or topic) default, as does the `/config`
 Follow-up page. Only plain text and voice transcripts steer — files, media
 groups, forwards and commands always queue, and a pending `AskUserQuestion`
-takes the message as its answer first. Steering is Claude-only: other engines,
-or a chat with no live Claude run, fall back to queueing with a one-line notice
-(`↪️ Steer isn't supported on <engine> — queued instead.`). See
+takes the message as its answer first. Steering works on Claude Code and, with
+Untether's agy plugin on the host, on Antigravity CLI (the steer reaches the agy
+run before its next step; [#981](https://github.com/littlebearapps/untether/issues/981)).
+Other engines, or a chat with no running Claude or Antigravity turn, fall back to
+queueing with a one-line notice (`↪️ Steer isn't supported on <engine> — queued
+instead.`). See
 [Steer follow-ups](../../how-to/steer-follow-ups.md).
 
 === "toml"

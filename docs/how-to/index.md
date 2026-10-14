@@ -14,7 +14,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 ## Daily use
 
 - [Switch engines](switch-engines.md) (`/codex`, `/claude`, `/opencode`, `/pi`, `/antigravity`)
-- [Use Antigravity CLI](antigravity.md) (Google's `agy`: sign-in, permission modes, effort, quota)
+- [Use Antigravity CLI](antigravity.md) (Google's `agy`: sign-in, permission modes, Ask me approvals and the agy plugin, effort, quota)
 - [Projects](projects.md) (register repos + run from anywhere)
 - [Worktrees](worktrees.md) (run work on `@branch` without switching your main checkout)
 - [Route by chat](route-by-chat.md) (dedicated chats per project)
@@ -31,7 +31,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 - [Model and reasoning overrides](model-reasoning.md) (customise model and reasoning level)
 - [Verbose progress](verbose-progress.md) (control progress message detail)
 - [Inline settings menu](inline-settings.md) (`/config` — toggle settings with buttons)
-- [Steer follow-ups](steer-follow-ups.md) (`/steer` — send a message into a running Claude run)
+- [Steer follow-ups](steer-follow-ups.md) (`/steer` — send a message into a running Claude Code or Antigravity run)
 - [Agent preamble](preamble.md) (the context Untether adds to every prompt)
 
 ## Messaging extras
@@ -48,7 +48,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 ## Cost and usage
 
 - [Cost budgets](cost-budgets.md) (per-run and daily cost limits)
-- [Subscription usage](subscription-usage.md) (monitor Claude Code subscription from Telegram)
+- [Subscription usage](subscription-usage.md) (monitor Claude Code subscription and Antigravity quota from Telegram)
 - [Session statistics](session-statistics.md) (`/stats` — runs, actions and time per engine)
 
 ## Multi-user and security

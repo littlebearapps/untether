@@ -6,7 +6,7 @@ title: untether
 
 Untether runs coding agents on your computer and bridges them to Telegram. Send a task from your phone while walking the dog, dictate the next one by voice at the gym, and review results on your tablet later — your agents keep working even if you close Telegram or lose signal. Scale from quick one-offs to multi-project workflows with topics and parallel worktrees.
 
-It works with Claude Code, Codex, OpenCode (1.x), Pi and Antigravity CLI; approval buttons, plan mode, questions and steering are Claude Code features. Gemini CLI and Amp still load but are deprecated and no longer supported. Website: [untether.cc](https://untether.cc).
+It works with Claude Code, Codex, OpenCode (1.x), Pi and Antigravity CLI. Approval buttons, plan approval, questions and steering work with Claude Code, and with Antigravity CLI through [Untether's agy plugin](how-to/antigravity.md#telegram-questions-and-steer) (its Plan first mode needs no plugin). Gemini CLI and Amp still load but are deprecated and no longer supported; Antigravity CLI is a separate engine, not a renamed Gemini CLI. Website: [untether.cc](https://untether.cc).
 
 <div class="hero-demo">
 <div class="hero-chat">
@@ -26,7 +26,7 @@ untether --onboard
 
 Untether needs Python 3.12 or newer. Onboarding walks you through bot setup and asks how you want to work. [Full install guide →](tutorials/install.md)
 
-Upgrading from v0.35.4 or earlier? v0.36.0 has breaking changes — read [Upgrading to v0.36.0](how-to/update.md#upgrading-to-v0360) first.
+Upgrading from v0.35.4 or earlier? v0.36.0 has breaking changes — read [Upgrading to v0.36.0](how-to/update.md#upgrading-to-v0360) first. Moving to v0.36.1? See [Upgrading to v0.36.1](how-to/update.md#upgrading-to-v0361) for the changes to group settings and scheduled Antigravity runs.
 
 ## Pick your workflow
 
@@ -71,7 +71,7 @@ Step-by-step guides for new users:
 
 1. [Install & onboard](tutorials/install.md) — set up Untether and your bot
 2. [First run](tutorials/first-run.md) — send a task, watch it stream, continue the conversation
-3. [Interactive control](tutorials/interactive-control.md) — approve or deny Claude Code's actions, review plans, answer questions
+3. [Interactive control](tutorials/interactive-control.md) — approve or deny Claude Code's actions, review plans, answer questions (Antigravity CLI: [Use Antigravity CLI](how-to/antigravity.md))
 4. [Projects & branches](tutorials/projects-and-branches.md) — target repos from anywhere, run on feature branches
 5. [Multi-engine](tutorials/multi-engine.md) — use different engines for different tasks
 

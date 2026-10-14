@@ -225,6 +225,7 @@ flowchart TD
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
     D -->|OpenCode 1.x| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;<br/>(2.x refused before spawn)"]
+    D -->|Antigravity| D7["agy --input-format stream-json<br/>--output-format stream-json<br/>[--conversation=id] --mode=… or<br/>--dangerously-skip-permissions<br/>(prompt on stdin)"]
     D -->|Gemini, deprecated| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
     D -->|Amp, deprecated| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
@@ -232,6 +233,7 @@ flowchart TD
     D2 --> E
     D3 --> E
     D4 --> E
+    D7 --> E
     D5 --> E
     D6 --> E
 
@@ -335,6 +337,7 @@ flowchart TD
         codex[codex.py]
         opencode[opencode.py]
         pi[pi.py]
+        antigravity[antigravity.py]
         gemini[gemini.py]
         amp[amp.py]
     end
@@ -344,6 +347,7 @@ flowchart TD
         codex_s[codex.py]
         opencode_s[opencode.py]
         pi_s[pi.py]
+        antigravity_s[antigravity.py]
         gemini_s[gemini.py]
         amp_s[amp.py]
     end
@@ -352,6 +356,7 @@ flowchart TD
     codex --> codex_s
     opencode --> opencode_s
     pi --> pi_s
+    antigravity --> antigravity_s
     gemini --> gemini_s
     amp --> amp_s
 

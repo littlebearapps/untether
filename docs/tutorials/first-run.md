@@ -16,10 +16,10 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.36.0)
+    🐕 **untether is ready** (v0.36.1)
 
     *default engine:* `codex`<br>
-    *installed engines:* `claude, codex, opencode`<br>
+    *installed engines:* `claude, codex, opencode` (not installed: amp, antigravity, gemini, pi)<br>
     *mode:* `assistant`<br>
     *directories:* `api, happy-gadgets, website`
 
@@ -114,7 +114,7 @@ Untether extracts the resume token from the message you replied to and continues
     `/new` cancels any running task and clears stored sessions for the current chat or topic.
 
 !!! tip "Sending while the agent is still working"
-    A message you send mid-run is queued: it runs as the next turn once the current one finishes. With Claude Code you can send `/steer <text>` instead to slip it into the running turn — see [Steer follow-ups](../how-to/steer-follow-ups.md).
+    A message you send mid-run is queued: it runs as the next turn once the current one finishes. With Claude Code (or Antigravity CLI with Untether's agy plugin installed) you can send `/steer <text>` instead to slip it into the running turn — see [Steer follow-ups](../how-to/steer-follow-ups.md).
 
 ## 6. Cancel a run
 

@@ -23,7 +23,7 @@ Out of scope:
 
 ## 2. Terminology
 
-- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`; the deprecated `"gemini"` and `"amp"` still load but are deprecated and no longer supported, and may be removed in a future release).
+- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`, `"antigravity"`; the deprecated `"gemini"` and `"amp"` still load but are deprecated and no longer supported, and may be removed in a future release).
 - **Runner**: Untether adapter that executes an engine process and yields **Untether events**.
 - **Thread**: a single engine-side conversation, identified in Untether by a **ResumeToken**.
 - **ResumeToken**: Untether-owned thread identifier `{ engine: EngineId, value: str }`.
@@ -45,6 +45,7 @@ The canonical ResumeLine embedded in chat MUST be the engine’s CLI resume comm
 - `claude --resume <id>`
 - `opencode --session <id>`
 - `pi --session <token>`
+- `agy --conversation <id>` (Antigravity CLI)
 - `gemini --resume <id>` (deprecated engine)
 - `amp threads continue <id>` (deprecated engine)
 
@@ -337,7 +338,7 @@ Runs that start as new threads:
 Live sessions:
 
 * While a live-session run is in flight, the bridge MAY deliver queued jobs for the same ThreadKey into the live engine process as follow-up turns instead of waiting for the run to end ([#776](https://github.com/littlebearapps/untether/issues/776)). A job taken off the queue MUST be either delivered or put back at the head of the queue — never lost or run twice. The engine process serialises the turns, so the one-active-run invariant (§5.2) still holds.
-* Follow-up mode ([#775](https://github.com/littlebearapps/untether/issues/775)) decides what a message sent mid-run does: `queue` (default) waits for the running turn to end; `steer` writes it into the running session at once. Steering is Claude Code-only; other engines fall back to `queue`.
+* Follow-up mode ([#775](https://github.com/littlebearapps/untether/issues/775)) decides what a message sent mid-run does: `queue` (default) waits for the running turn to end; `steer` writes it into the running session at once. Steering works on Claude Code, and on Antigravity CLI with Untether's agy plugin ([#981](https://github.com/littlebearapps/untether/issues/981)); other engines fall back to `queue`.
 
 ### 6.3 Progress message behaviour
 

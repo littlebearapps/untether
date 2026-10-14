@@ -56,7 +56,8 @@ instead (it also labels the `🏷` footer).
 
 `[opencode]` has no `extra_args` or permission-mode setting: OpenCode runs
 non-interactively, and approvals, plan mode, AskUserQuestion, live sessions and
-steer are Claude Code-only.
+steer are Claude Code features (Antigravity CLI has its own, see its
+runner reference).
 
 ## Permissions in `opencode run`
 

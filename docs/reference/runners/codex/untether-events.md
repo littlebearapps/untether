@@ -6,7 +6,7 @@ This document describes how Codex exec --json events are translated to Untether'
 
 ## Invocation
 
-Untether runs Codex non-interactively; it never stops to ask for approval, and approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only. The argv (prompt on stdin) is:
+Untether runs Codex non-interactively; it never stops to ask for approval, and approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code features (Antigravity CLI has its own, without live sessions). The argv (prompt on stdin) is:
 
 ```text
 codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<level>] \

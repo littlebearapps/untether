@@ -4,8 +4,8 @@ This tutorial walks you through Untether's interactive permission system — app
 
 **What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, and how to answer agent questions from anywhere.
 
-!!! note "Claude Code only"
-    Interactive approval buttons (Approve / Deny / Pause & Outline Plan) are a Claude Code feature. Other engines run non-interactively. Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox) Antigravity CLI has a pre-run [permission mode](../how-to/interactive-approval.md#antigravity-cli-permission-mode) (Workspace or Full access), and the deprecated Gemini CLI has an [approval mode](../how-to/interactive-approval.md#gemini-cli-approval-mode), but none of them has per-tool interactive buttons.
+!!! note "Claude Code and Antigravity CLI"
+    This tutorial uses Claude Code, which has the full set of buttons (Approve / Deny / Pause & Outline Plan). Antigravity CLI has its own [permission modes](../how-to/interactive-approval.md#antigravity-cli-permission-mode): **Plan first** posts a plan with Approve Plan / Deny / Let's discuss, and **Ask me** sends Approve / Deny cards before shell commands and other risky tools (it needs Untether's agy plugin on the host); see [Use Antigravity CLI](../how-to/antigravity.md). Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox), and the deprecated Gemini CLI has an [approval mode](../how-to/interactive-approval.md#gemini-cli-approval-mode); neither has per-tool buttons, and OpenCode and Pi run non-interactively.
 
 ## 1. Understand permission modes
 
@@ -246,7 +246,7 @@ Key concepts:
 
 **Approval buttons don't appear**
 
-Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and which permission mode is active (`/planmode show`). **engine default** with no `[engines.claude] permission_mode` in `untether.toml` (a fresh install) means Claude Code runs under its own settings with no buttons — set a mode with `/planmode`. In `plan-auto` and `auto` no plan buttons appear by design; tool buttons appear in Accept edits / `default`, or with Diff preview on. Other engines don't support interactive approval.
+Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and which permission mode is active (`/planmode show`). **engine default** with no `[engines.claude] permission_mode` in `untether.toml` (a fresh install) means Claude Code runs under its own settings with no buttons — set a mode with `/planmode`. In `plan-auto` and `auto` no plan buttons appear by design; tool buttons appear in Accept edits / `default`, or with Diff preview on. In an Antigravity chat, buttons appear only in **Ask me** (with Untether's agy plugin installed) and **Plan first**; other engines don't support interactive approval.
 
 **Buttons appear but nothing happens when I tap them**
 

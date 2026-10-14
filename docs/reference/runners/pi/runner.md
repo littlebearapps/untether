@@ -16,7 +16,7 @@ Provide the **`pi`** engine backend so Untether can:
 
 * Interactive TUI flows (session picker, prompts, etc.)
 * RPC mode (requires a long-running process and JSON commands)
-* Approvals, plan mode, AskUserQuestion, live sessions and steer: these are Claude Code-only. Pi runs non-interactively.
+* Approvals, plan mode, AskUserQuestion, live sessions and steer: these are Claude Code features (Antigravity CLI has its own, without live sessions). Pi runs non-interactively.
 
 ---
 

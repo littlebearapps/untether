@@ -32,7 +32,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.36.0`).
+You should see the installed version number (e.g. `0.36.1`).
 
 ## 3. Install agent CLIs
 
@@ -310,21 +310,22 @@ step 4: default engine
 
 untether runs these engines on your computer. switch anytime with /agent.
 
-  engine    status         install command
-  ───────────────────────────────────────────
-  codex     ✓ installed
-  claude    ✓ installed
-  opencode  ✗ not found    npm install -g opencode-ai@1
-  pi        ✗ not found    npm install -g @mariozechner/pi-coding-agent
-  gemini    ✗ not found    npm install -g @google/gemini-cli
-  amp       ✗ not found    npm install -g @sourcegraph/amp
+  engine       status         install command
+  ──────────────────────────────────────────────
+  amp          ✗ not found    npm install -g @sourcegraph/amp
+  antigravity  ✗ not found    curl -fsSL https://antigravity.google/cli/install.sh | bash
+  claude       ✓ installed
+  codex        ✓ installed
+  gemini       ✗ not found    npm install -g @google/gemini-cli
+  opencode     ✗ not found    npm install -g opencode-ai@1
+  pi           ✗ not found    npm install -g @mariozechner/pi-coding-agent
 
 ? choose default engine:
- ❯ codex
-   claude
+ ❯ claude
+   codex
 ```
 
-Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI (`antigravity`, which is a separate engine from `gemini`). The wizard looks for each CLI on your `PATH`: agy's installer puts it in `~/.local/bin`, so open a new terminal (or add that folder to `PATH`) if `antigravity` shows as not found after installing it. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 
@@ -362,10 +363,10 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.36.0)
+    🐕 **untether is ready** (v0.36.1)
 
     *default engine:* `codex`<br>
-    *installed engines:* `codex, claude` (not installed: opencode, pi, gemini, amp)<br>
+    *installed engines:* `claude, codex` (not installed: amp, antigravity, gemini, opencode, pi)<br>
     *mode:* `assistant`<br>
     *directories:* `none`
 

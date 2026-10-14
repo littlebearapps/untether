@@ -115,14 +115,14 @@ These work identically in all three modes:
 
 - All engine runners (Claude, Codex, OpenCode, Pi, Antigravity; plus the deprecated, unsupported Gemini and AMP)
 - All commands except `/topic` (workspace-only); `/ctx` binds the chat instead of a topic outside workspace mode
-- Permission control (approve/deny/discuss, plan mode) — Claude Code only
-- AskUserQuestion with option buttons — Claude Code only
-- Live sessions and steer/queue follow-ups — Claude Code only
+- Permission control (approve/deny/discuss, plan mode) — Claude Code, and Antigravity CLI's Plan first and Ask me
+- Question option buttons — Claude Code, and Antigravity CLI with Untether's agy plugin
+- Steer/queue follow-ups — Claude Code, and Antigravity CLI with Untether's agy plugin; live sessions are Claude Code only
 - `/continue` cross-environment resume
 - `/config` inline settings menu
 - `/browse` file browser (in assistant mode it needs `default_project` or a project-bound chat)
 - `/export` session transcript
-- `/usage` subscription usage (Claude Code) or session token totals (other engines)
+- `/usage` subscription usage (Claude Code), quota groups and AI credits (Antigravity CLI) or session token totals (other engines)
 - File upload and outbox delivery
 - Voice transcription
 - Cost tracking and budget alerts

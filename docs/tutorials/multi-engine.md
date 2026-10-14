@@ -14,7 +14,7 @@ Different engines have different strengths:
 | **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe = read-only sandbox), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
-| **Antigravity CLI** | Google's Gemini models (plus Claude and GPT models on some plans) | Effort levels per model, pre-run permission mode, quota groups in `/usage` |
+| **Antigravity CLI** | Google's Gemini models (plus Claude and GPT models on some plans) | Permission modes (Workspace, Plan first, Ask me, Full access), effort levels per model, quota groups and AI credits in `/usage`; approval and question buttons and steer with Untether's agy plugin |
 | **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
 | **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
@@ -90,7 +90,7 @@ Example response:
     model: **default** (no override)<br>
     reasoning: **default** (no override)<br>
     defaults: topic: none, chat: claude, project: none, global: codex<br>
-    available: codex, claude, opencode, pi, gemini, amp
+    available: amp, antigravity, claude, codex, gemini, opencode, pi
 
 <img src="../assets/screenshots/agent-resolution.jpg" alt="/agent command output showing engine resolution layers" width="360" loading="lazy" />
 
