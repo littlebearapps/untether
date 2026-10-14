@@ -741,3 +741,52 @@ async def test_839_real_awatch_keeps_event_during_slow_callback(
             await second.wait()
         tg.cancel_scope.cancel()
     assert recorder.contents[-1] == b"x = 'during the callback'\n"
+
+
+@pytest.mark.anyio
+async def test_1049_mid_save_reload_warns_not_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1049: a half-written config keeps the applied one and logs WARNING
+    (the issue watcher files every ERROR); the restored file then applies."""
+    from structlog.testing import capture_logs
+
+    import untether.runtime_loader as runtime_loader
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    path = tmp_path / "untether.toml"
+    path.write_text(_BLOCKED_TOML, encoding="utf-8")
+    codex_runner = ScriptRunner([Return(answer="ok")], engine="codex")
+    runtime = TransportRuntime(
+        router=AutoRouter(
+            entries=[RunnerEntry(engine=codex_runner.engine, runner=codex_runner)],
+            default_engine=codex_runner.engine,
+        ),
+        projects=ProjectsConfig(projects={}, default_project=None),
+        config_path=path,
+    )
+    watch = _install(monkeypatch)
+
+    async def body() -> None:
+        path.write_text(_BLOCKED_TOML + 'note = "half-writ', encoding="utf-8")
+        await watch.push(path)
+        path.write_text(_BLOCKED_TOML + "# saved\n", encoding="utf-8")
+        await watch.push(path)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def run() -> None:
+                await watch_config(config_path=path, runtime=runtime)
+
+            tg.start_soon(run)
+            with anyio.fail_after(2):
+                await watch.started.wait()
+            await body()
+            tg.cancel_scope.cancel()
+    assert not [e for e in logs if e.get("log_level") == "error"]
+    warned = _events(logs, "config.read.toml_error_fallback")
+    assert [e["log_level"] for e in warned] == ["warning"]
+    assert "Unterminated string" in warned[0]["error"]
+    assert len(_events(logs, "config.reload.failed")) == 1
+    assert len(_events(logs, "config.reload.applied")) == 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
@@ -18,6 +19,16 @@ HOME_CONFIG_PATH = Path.home() / ".untether" / "untether.toml"
 
 class ConfigError(RuntimeError):
     pass
+
+
+class MalformedConfigError(ConfigError):
+    """The config file isn't valid TOML (or UTF-8) — e.g. caught mid-save.
+
+    ``detail`` is the parser's own message, as logged (#1049/#1050)."""
+
+    def __init__(self, message: str, *, detail: str) -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 def ensure_table(
@@ -38,7 +49,14 @@ def ensure_table(
     return value
 
 
-def read_config(cfg_path: Path) -> dict:
+def read_config(cfg_path: Path, *, log_toml_errors: bool = True) -> dict:
+    """Read and parse ``cfg_path``.
+
+    #1049/#1050: a caller that can fall back to the last good config (the
+    config watcher, per-run settings reads) passes ``log_toml_errors=False``
+    and logs the :class:`MalformedConfigError` itself, at WARNING while the
+    file may just be mid-save. Everyone else gets today's ERROR here.
+    """
     if cfg_path.exists() and not cfg_path.is_file():
         logger.error("config.read.not_file", path=str(cfg_path))
         raise ConfigError(f"Config path {cfg_path} exists but is not a file.") from None
@@ -53,8 +71,11 @@ def read_config(cfg_path: Path) -> dict:
     try:
         return tomllib.loads(raw)
     except tomllib.TOMLDecodeError as e:
-        logger.error("config.read.toml_error", path=str(cfg_path), error=str(e))
-        raise ConfigError(f"Malformed TOML in {cfg_path}: {e}") from None
+        if log_toml_errors:
+            logger.error("config.read.toml_error", path=str(cfg_path), error=str(e))
+        raise MalformedConfigError(
+            f"Malformed TOML in {cfg_path}: {e}", detail=str(e)
+        ) from None
 
 
 def load_or_init_config(path: str | Path | None = None) -> tuple[dict, Path]:
@@ -132,8 +153,16 @@ def dump_toml(config: dict[str, Any]) -> str:
 
 
 def write_config(config: dict[str, Any], path: Path) -> None:
+    """Write ``config`` atomically: temp file in the same directory, fsync,
+    ``os.replace``. A reader never sees a half-written file (#1049). An
+    existing file keeps its permission bits; a new one is owner-only (0600,
+    it holds the bot token)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dump_toml(config)
+    try:
+        mode: int | None = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = None
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -148,6 +177,8 @@ def write_config(config: dict[str, Any], path: Path) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_path = Path(tmp.name)
+        if mode is not None:
+            os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
         logger.debug("config.written", path=str(path))
     except OSError as e:

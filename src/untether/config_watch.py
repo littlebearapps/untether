@@ -94,7 +94,9 @@ def _reload_config(
     but builds the spec with ``report_path`` (the configured, unresolved path)
     so ``runtime.config_path`` and relative project paths match startup.
     """
-    settings, resolved_path = load_settings(config_path)
+    # #1049: the watcher keeps the config it already applied, so a file
+    # caught mid-save is a WARNING here (ERROR only if it stays bad).
+    settings, resolved_path = load_settings(config_path, has_fallback=True)
     spec_path = report_path if report_path is not None else resolved_path
     spec = build_runtime_spec(
         settings=settings,

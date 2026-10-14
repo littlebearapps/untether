@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import os
 import re
+import time
 import tomllib
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -28,6 +29,7 @@ from pydantic_settings.sources import InitSettingsSource, TomlConfigSettingsSour
 from .config import (
     HOME_CONFIG_PATH,
     ConfigError,
+    MalformedConfigError,
     ProjectConfig,
     ProjectsConfig,
 )
@@ -1026,12 +1028,31 @@ class UntetherSettings(BaseSettings):
         )
 
 
-def load_settings(path: str | Path | None = None) -> tuple[UntetherSettings, Path]:
-    """Strict loader (startup, config watcher, onboarding). Never cached (#506 D3)."""
+def load_settings(
+    path: str | Path | None = None, *, has_fallback: bool = False
+) -> tuple[UntetherSettings, Path]:
+    """Strict loader (startup, config watcher, onboarding). Never cached (#506 D3).
+
+    Always raises on a bad file. ``has_fallback=True`` (the config watcher,
+    which keeps the config it already applied) only changes how loudly that is
+    logged: WARNING while the file may be mid-save, one ERROR if it stays bad
+    past ``BAD_CONFIG_GRACE_S`` (#1049). A successful load becomes the last
+    good config that per-run reads fall back on (#1050).
+    """
     cfg_path = _resolve_config_path(path)
     _ensure_config_file(cfg_path)
-    migrate_config_file(cfg_path)
-    return _load_settings_from_path(cfg_path), cfg_path
+    if has_fallback:
+        try:
+            migrate_config_file(cfg_path, log_toml_errors=False)
+            settings = _load_settings_from_path(cfg_path)
+        except ConfigError as exc:
+            _log_bad_config(cfg_path, exc)
+            raise
+    else:
+        migrate_config_file(cfg_path)
+        settings = _load_settings_from_path(cfg_path)
+    _remember_good(cfg_path, settings)
+    return settings, cfg_path
 
 
 def load_settings_if_exists(
@@ -1047,6 +1068,11 @@ def load_settings_if_exists(
     A cache hit returns a **shared, read-only** ``UntetherSettings`` instance:
     do not mutate it — ``model_copy()`` it if you need a private copy.
     Set ``UNTETHER_SETTINGS_CACHE=0`` to disable the cache.
+
+    #1050: if the file doesn't parse or validate (e.g. it was caught
+    mid-save) and this process has loaded it successfully before, the last
+    good settings are returned instead of raising — see ``_log_bad_config``.
+    With no good load to fall back on, it raises as before.
     """
     cfg_path = _resolve_config_path(path)
     if cfg_path.exists():
@@ -1138,16 +1164,27 @@ def _env_fingerprint() -> tuple[tuple[str, str], ...]:
     )
 
 
-def _parse_settings_bytes(raw: bytes, cfg_path: Path) -> UntetherSettings:
-    """Parse and validate ``raw`` (the config file's bytes) in memory."""
+def _parse_settings_bytes(
+    raw: bytes, cfg_path: Path, *, log_toml_errors: bool = True
+) -> UntetherSettings:
+    """Parse and validate ``raw`` (the config file's bytes) in memory.
+
+    ``log_toml_errors=False``: the caller logs a :class:`MalformedConfigError`
+    itself (#1050 last-good fallback)."""
     try:
         data = tomllib.loads(raw.decode("utf-8"))
     except UnicodeDecodeError as exc:
-        logger.error("config.read.decode_error", path=str(cfg_path), error=str(exc))
-        raise ConfigError(f"Failed to read config file {cfg_path}: {exc}") from None
+        if log_toml_errors:
+            logger.error("config.read.decode_error", path=str(cfg_path), error=str(exc))
+        raise MalformedConfigError(
+            f"Failed to read config file {cfg_path}: {exc}", detail=str(exc)
+        ) from None
     except tomllib.TOMLDecodeError as exc:
-        logger.error("config.read.toml_error", path=str(cfg_path), error=str(exc))
-        raise ConfigError(f"Malformed TOML in {cfg_path}: {exc}") from None
+        if log_toml_errors:
+            logger.error("config.read.toml_error", path=str(cfg_path), error=str(exc))
+        raise MalformedConfigError(
+            f"Malformed TOML in {cfg_path}: {exc}", detail=str(exc)
+        ) from None
     token = _TOML_DATA.set(data)
     try:
         return _InMemoryTomlSettings()
@@ -1171,14 +1208,25 @@ def _load_settings_cached(cfg_path: Path) -> UntetherSettings:
         return _load_settings_from_path(cfg_path)
     if entry is not None and entry.raw == raw_now and entry.env == env_now:
         _SETTINGS_CACHE.move_to_end(key)
+        _BAD_CONFIG.pop(key, None)
         return entry.settings
 
     # Miss: migrate (may rewrite the file), then parse the post-migration
     # bytes captured here — never a re-read — so no write racing the parse can
     # leave settings cached under the wrong key. Errors are not cached (D7).
-    migrate_config_file(cfg_path)
-    raw = cfg_path.read_bytes()
-    settings = _parse_settings_bytes(raw, cfg_path)
+    # #1050: with a last good config to fall back on, a bad file is logged
+    # here (WARNING inside the grace period) and the run keeps going.
+    fallback = _LAST_GOOD.get(key)
+    quiet = fallback is not None
+    try:
+        migrate_config_file(cfg_path, log_toml_errors=not quiet)
+        raw = cfg_path.read_bytes()
+        settings = _parse_settings_bytes(raw, cfg_path, log_toml_errors=not quiet)
+    except ConfigError as exc:
+        if fallback is None:
+            raise
+        _log_bad_config(cfg_path, exc)
+        return fallback
     if entry is None:
         reason = "first_load"
     elif entry.raw != raw:
@@ -1189,6 +1237,7 @@ def _load_settings_cached(cfg_path: Path) -> UntetherSettings:
     _SETTINGS_CACHE.move_to_end(key)
     while len(_SETTINGS_CACHE) > _SETTINGS_CACHE_MAX:
         _SETTINGS_CACHE.popitem(last=False)
+    _remember_good(cfg_path, settings)
     # INFO again (#498 demoted it while it fired on every read): it now fires
     # once per real parse, and is the live verification signal for #506.
     logger.info("config.loaded", path=key, reason=reason)
@@ -1196,9 +1245,92 @@ def _load_settings_cached(cfg_path: Path) -> UntetherSettings:
 
 
 def clear_settings_cache() -> None:
-    """Drop every cached settings entry and bound class (tests, #808)."""
+    """Drop every cached settings entry, last good config, bad-config
+    tracker and bound class (tests, #808)."""
     _SETTINGS_CACHE.clear()
+    _LAST_GOOD.clear()
+    _BAD_CONFIG.clear()
     _bound_settings_class.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #1049/#1050: a config caught mid-save
+# ---------------------------------------------------------------------------
+#
+# Untether's own writes are atomic (``write_config``), but an agent or editor
+# can leave untether.toml half-written for a few seconds. A reader that has a
+# good config to keep using (the watcher keeps the applied runtime; per-run
+# reads return ``_LAST_GOOD``) logs that at WARNING — the issue watcher files
+# every ERROR as a bug. If the file is still bad after ``BAD_CONFIG_GRACE_S``
+# it logs one ERROR (the same ``config.read.toml_error`` event), so a config
+# that is really broken is still reported.
+
+BAD_CONFIG_GRACE_S = 60.0
+
+# Last successfully loaded settings per config path (strict or cached load).
+_LAST_GOOD: dict[str, UntetherSettings] = {}
+
+
+@dataclass(slots=True)
+class _BadConfig:
+    since: float
+    error: str
+    escalated: bool = False
+
+
+_BAD_CONFIG: dict[str, _BadConfig] = {}
+
+_now = time.monotonic
+
+
+def _remember_good(cfg_path: Path, settings: UntetherSettings) -> None:
+    key = str(cfg_path)
+    _LAST_GOOD[key] = settings
+    _BAD_CONFIG.pop(key, None)
+
+
+def _bad_config_level(key: str, error: str) -> tuple[str, float]:
+    """``(log level, seconds the file has been bad)`` for one bad read.
+
+    WARNING for the first read of a bad state (or a new one), DEBUG for
+    repeats, ERROR once when the grace period runs out. The bad-since clock
+    resets only on a good load."""
+    now = _now()
+    state = _BAD_CONFIG.get(key)
+    if state is None:
+        _BAD_CONFIG[key] = _BadConfig(since=now, error=error)
+        return "warning", 0.0
+    age = now - state.since
+    changed = state.error != error
+    state.error = error
+    if not state.escalated and age >= BAD_CONFIG_GRACE_S:
+        state.escalated = True
+        return "error", age
+    return ("warning" if changed else "debug"), age
+
+
+def _log_bad_config(cfg_path: Path, exc: ConfigError) -> None:
+    key = str(cfg_path)
+    malformed = isinstance(exc, MalformedConfigError)
+    error = exc.detail if isinstance(exc, MalformedConfigError) else str(exc)
+    level, age = _bad_config_level(key, error)
+    if level == "error":
+        logger.error(
+            "config.read.toml_error" if malformed else "config.read.invalid",
+            path=key,
+            error=error,
+            bad_for_s=round(age, 1),
+        )
+        return
+    log = logger.warning if level == "warning" else logger.debug
+    log(
+        "config.read.toml_error_fallback"
+        if malformed
+        else "config.read.invalid_fallback",
+        path=key,
+        error=error,
+        grace_s=BAD_CONFIG_GRACE_S,
+    )
 
 
 def validate_settings_data(

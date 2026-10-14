@@ -116,8 +116,8 @@ def migrate_config(config: dict[str, Any], *, config_path: Path) -> list[str]:
     return applied
 
 
-def migrate_config_file(path: Path) -> list[str]:
-    config = read_config(path)
+def migrate_config_file(path: Path, *, log_toml_errors: bool = True) -> list[str]:
+    config = read_config(path, log_toml_errors=log_toml_errors)
     applied = migrate_config(config, config_path=path)
     if applied:
         write_config(config, path)
