@@ -329,7 +329,10 @@ a read's reason too since [#1083](https://github.com/littlebearapps/untether/iss
   elsewhere says `→ resolves to …`; a `Cwd` that isn't a plain absolute path is flagged. agy's descriptive fields
   (`Description`, `Instruction`, `toolSummary` …) are never shown as what runs on a command or edit card.
 - **Always allow** is offered only for a shell command shown in full, with no extra arguments and a plain absolute
-  `Cwd` (or none), and neither holding a control, format, private-use, unassigned or surrogate character or any
+  `Cwd` (or none). A field agy decodes to its Go zero value counts as absent ([#1085](https://github.com/littlebearapps/untether/issues/1085):
+  `RunPersistent` / `BypassSandbox` / `IsDaemon` exactly `false`, an empty `RequestedTerminalID`, or `null`), for the
+  offer and for matching a grant; the card still lists them, and any other value keeps the button off. The command and
+  `Cwd` may not hold a control, format, private-use, unassigned or surrogate character or any
   space but the ASCII one (tabs and line feeds are fine). Grants compare the command trimmed of ASCII spaces and line
   feeds only (security review 3 M2: Python's `strip()` also drops U+3000 and U+001C–U+001F).
 - agy's own one-line summary last, escaped: `agy says: …` (model text, never in place of the arguments).

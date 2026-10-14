@@ -310,6 +310,36 @@ async def test_always_allow_exact_command_and_cwd_only(harness: Harness) -> None
 
 
 @pytest.mark.anyio
+async def test_always_allow_offered_when_agy_fills_default_arguments(
+    harness: Harness,
+) -> None:
+    """#1085: agy 1.3.4's main agent often adds ``RunPersistent = false`` and
+    an empty ``RequestedTerminalID``. The card lists them and still offers
+    Always allow, and the grant covers the same command with or without
+    them; a non-default value asks again."""
+    padded = {**SHELL, "RunPersistent": False, "RequestedTerminalID": ""}
+    with structlog.testing.capture_logs() as logs:
+        out = await _held_call(
+            harness, _call("run_command", padded), Decision(True, "always")
+        )
+        assert out == {"decision": "allow"}
+        card = _cards(harness)[0].action
+        assert len(card.detail["inline_keyboard"]["buttons"]) == 2
+        assert "RunPersistent = `false`" in card.title
+        assert "RequestedTerminalID = (empty)" in card.title
+        again = await harness.call("PreToolUse", _call("run_command", SHELL, step=4))
+        assert again == {"decision": "allow"}
+        persistent = {**SHELL, "RunPersistent": True}
+        out = await _held_call(
+            harness, _call("run_command", persistent, step=6), Decision(False, "deny")
+        )
+        assert out is not None and out["decision"] == "deny"
+    assert len(_cards(harness)) == 2
+    sources = [log.get("source") for log in logs if log.get("decision") == "allow"]
+    assert sources == ["always", "always"]
+
+
+@pytest.mark.anyio
 async def test_always_allow_never_unattended(harness: Harness) -> None:
     gate_policy.grant(CHAT, CID, SHELL)
     harness.gate.unattended_trigger = "cron:nightly"

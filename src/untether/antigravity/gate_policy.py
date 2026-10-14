@@ -1323,14 +1323,44 @@ _GRANTS_MAX = 50
 _CONVERSATIONS_MAX = 64
 _GRANTS: OrderedDict[tuple[int | None, str], list[tuple[Any, ...]]] = OrderedDict()
 
+# #1085: ``run_command`` fields agy 1.3.4 decodes into Go zero values (the
+# binary's struct tags and proto3 fields without presence: ``run_persistent``,
+# ``requested_terminal_id``, ``is_daemon``; ``BypassSandbox,omitempty``), so
+# their zero value — or JSON ``null`` — runs exactly as if the field were
+# absent. agy's main agent often fills the first two that way. Only the exact
+# zero value counts (``0`` or ``"false"`` for a bool isn't one); any other
+# value still keeps "Always allow" off and never matches a grant.
+_RUN_COMMAND_DEFAULTS: dict[str, Any] = {
+    "RunPersistent": False,
+    "RequestedTerminalID": "",
+    "BypassSandbox": False,
+    "IsDaemon": False,
+}
+
+
+def _at_default(key: str, value: Any) -> bool:
+    if key not in _RUN_COMMAND_DEFAULTS:
+        return False
+    if value is None:
+        return True
+    default = _RUN_COMMAND_DEFAULTS[key]
+    return type(value) is type(default) and value == default
+
+
+def _without_defaults(args: dict[str, Any]) -> dict[str, Any]:
+    """*args* minus the ``run_command`` fields that sit at agy's default (the
+    card still shows them; see :func:`preview`)."""
+    return {k: v for k, v in args.items() if not _at_default(k, v)}
+
 
 def _grant_key(args: Any) -> tuple[Any, ...] | None:
     """The command, its folder and every other argument that changes what
     runs (``IsDaemon``, ``WaitMsBeforeAsync``, anything new), so a grant
     never covers a call that differs in any of them; agy's own descriptive
-    fields are left out."""
+    fields, and fields at agy's default (#1085), are left out."""
     if not isinstance(args, dict):
         return None
+    args = _without_defaults(args)
     command = args.get("CommandLine")
     if not isinstance(command, str) or not command.strip(_GRANT_TRIM):
         return None
@@ -1382,9 +1412,9 @@ def always_allowable(args: Any) -> bool:
         return False
     if not _plain_text(args["CommandLine"]) or not _plain_text(key[1]):
         return False
-    # Nothing beyond what the card shows, and a folder that reads the same
-    # to Untether and agy.
-    if not set(args) <= _COMMAND_SHOWN | _DESCRIPTIVE_KEYS:
+    # Nothing beyond what the card shows (a field at agy's default changes
+    # nothing, #1085), and a folder that reads the same to Untether and agy.
+    if not set(_without_defaults(args)) <= _COMMAND_SHOWN | _DESCRIPTIVE_KEYS:
         return False
     return not key[1] or plain_absolute(key[1])
 

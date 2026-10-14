@@ -47,6 +47,7 @@
 
 ### fixes
 
+- **fix(antigravity):** in an Ask me chat, a shell command's approval card offers **✅ Always allow this command here** again when agy fills in optional settings at their default (`RunPersistent = false`, an empty `RequestedTerminalID`), and a command you always allowed no longer asks again because a later call carries them. The card still lists those settings, and one that changes what runs (for example `RunPersistent = true`) still leaves the button off and asks [#1085](https://github.com/littlebearapps/untether/issues/1085)
 - **fix:** small follow-ups from the final rc4 QA [#1084](https://github.com/littlebearapps/untether/issues/1084)
   - `/cancel` sent within a second of a message gets one reply, `🗑️ Dropped 1 message sent just before /cancel …`, instead of that and `nothing running in this chat.` as well. Closing an idle session, a pending `/at` run or a loop is still reported
   - the "Action required — approval needed" push is deleted when a restart marks its progress message `⚠️ interrupted by restart`, instead of staying behind pointing at a card with nothing to tap

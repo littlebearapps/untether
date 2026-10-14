@@ -937,6 +937,76 @@ def test_always_allow_never_covers_extra_or_changed_arguments() -> None:
     )
 
 
+# agy 1.3.4's main agent often fills these hidden run_command fields with
+# their Go zero value; agy decodes that exactly as if they were absent.
+_AT_DEFAULT = {"RunPersistent": False, "RequestedTerminalID": ""}
+
+
+def test_always_allow_offered_with_arguments_at_their_default(root: Path) -> None:
+    """#1085: ``RunPersistent = false`` and an empty ``RequestedTerminalID``
+    change nothing that runs, so they don't hide Always allow (the card still
+    lists them)."""
+    args = {"CommandLine": "git status", "Cwd": str(root), **_AT_DEFAULT}
+    assert gate_policy.always_allowable(args)
+    for key, value in (
+        ("RunPersistent", None),
+        ("RequestedTerminalID", None),
+        ("BypassSandbox", False),
+        ("IsDaemon", False),
+    ):
+        assert gate_policy.always_allowable(
+            {"CommandLine": "ls", "Cwd": str(root), key: value}
+        ), key
+    text = gate_policy.preview("run_command", args, root=root)
+    assert "RunPersistent = `false`" in text
+    assert "RequestedTerminalID = (empty)" in text
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("RunPersistent", True),
+        ("RunPersistent", 0),
+        ("RunPersistent", "false"),
+        ("RequestedTerminalID", "term-1"),
+        ("RequestedTerminalID", " "),
+        ("BypassSandbox", True),
+        ("IsDaemon", True),
+        ("SafeToAutoRun", False),
+        ("Blocking", False),
+    ],
+)
+def test_always_allow_not_offered_for_a_non_default_value(
+    root: Path, key: str, value: object
+) -> None:
+    """#1085: only agy's exact zero value counts as absent; anything else
+    (or a field whose default isn't known) still hides Always allow and
+    never matches a grant."""
+    base = {"CommandLine": "make", "Cwd": str(root)}
+    args = {**base, key: value}
+    if key != "IsDaemon":  # IsDaemon is on the card's own lines
+        assert not gate_policy.always_allowable(args)
+    assert gate_policy.grant(1, CID, base)
+    assert not gate_policy.granted(1, CID, args)
+
+
+def test_grant_matches_with_or_without_arguments_at_their_default() -> None:
+    """#1085: a grant made on a call without the default-valued fields covers
+    a later call that carries them, and the other way round."""
+    plain = {"CommandLine": "git status", "Cwd": "/p"}
+    padded = {**plain, **_AT_DEFAULT, "BypassSandbox": False, "IsDaemon": None}
+    assert gate_policy.grant(1, CID, plain)
+    assert gate_policy.granted(1, CID, padded)
+    gate_policy._reset_for_tests()
+    assert gate_policy.grant(1, CID, padded)
+    assert gate_policy.granted(1, CID, plain)
+    assert gate_policy._grant_key(plain) == gate_policy._grant_key(padded)
+    # Never a call with a value that changes what runs.
+    assert not gate_policy.granted(1, CID, {**plain, "RunPersistent": True})
+    assert not gate_policy.granted(1, CID, {**plain, "BypassSandbox": True})
+    assert not gate_policy.granted(1, CID, {**plain, "RequestedTerminalID": "term-1"})
+
+
 # ── security review 3 (2026-10-13): hardening the safe list and the card ───
 
 
