@@ -30,7 +30,7 @@ from untether.schemas.claude import (
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.289"
+PROBED_CLI_VERSION = "2.1.299"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -703,6 +703,18 @@ def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
     codes = {"invalid_mode"}
     codes.update(c.decode() for c in re.findall(rb'code:"([a-z_]+)"', body))
     codes.update(c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', body))
+    # Since CLI 2.1.299 the auto refusal is built by a helper the validator
+    # returns (``return err(nP())``); read that helper's codes too.
+    for helper in set(re.findall(rb"return (\w{1,4})\(", body)):
+        helper_re = (
+            rb"function "
+            + re.escape(helper)
+            + rb"\(\w\)\{return\{ok:!1,(.{0,300}?)\}\}"
+        )
+        if helper_match := re.search(helper_re, cli_blob):
+            codes.update(
+                c.decode() for c in re.findall(rb'"([a-z_]+)"', helper_match.group(1))
+            )
     auto_map = re.search(rb'\{settings:"auto_mode_settings",[^}]*\}', cli_blob)
     if auto_map is None:
         pytest.fail(f"auto-mode refusal-code map not found — {hint}")
