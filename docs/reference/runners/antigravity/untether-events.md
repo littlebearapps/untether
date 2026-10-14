@@ -83,8 +83,10 @@ own: the block is re-read whenever the progress message is drawn. Each entry is 
 | `tool` `invoke_subagent` `ACTIVE`, or `subagent` `ACTIVE` / `DONE` | `sub:<step>:<n>` per subagent, listed at once as `<role> (<type>)`. `DONE` only adds the child's conversation id: the children are still working |
 | the `run_command` / `schedule` step `DONE` / `ERROR` | Removed if it never counted as background; otherwise `completed` / `failed`, and one `system_message` is expected for it. A `DONE` with a cancellation error is `stopped` (⏹️), with no notice expected ([#1062](https://github.com/littlebearapps/untether/issues/1062)) |
 | `tool` `manage_task` `ACTIVE` with `Action: kill` | The `cmd:<step>` / `timer:<step>` its `TaskId` (`<cid>/task-<step>`) names → `stopped`, if still running |
+| the `schedule` step `DONE` with output `Timer cancelled early: … met by a message from <sender>.` | The timer → `completed`; its expected notice is that message (agy sends no other for the timer). If `<sender>` is a running subagent's conversation id, that `sub:` row → `completed` (`attribution=sender`) ([#1086](https://github.com/littlebearapps/untether/issues/1086)) |
+| `tool` `manage_subagents` `ACTIVE` with `Action: kill_all` (or `kill` + `ConversationIds`) | Every running `sub:` row (or the named ones) → `stopped` (`source=manage_subagents`); no notice expected ([#1086](https://github.com/littlebearapps/untether/issues/1086)) |
 | `invoke_subagent` step `ERROR` | Its subagents → `failed` |
-| `system_message` `DONE` | Spends an expected notice if there is one; otherwise the oldest running subagent → `completed` |
+| `system_message` `DONE` | Spends an expected notice if there is one; otherwise the oldest running subagent → `completed` (`attribution=fifo`) |
 | any `tool` step `ACTIVE` | Expected notices are dropped |
 | `result`, or the run ending without one | Everything still running → `ended` (never `failed`: a daemon command is still running by design) |
 

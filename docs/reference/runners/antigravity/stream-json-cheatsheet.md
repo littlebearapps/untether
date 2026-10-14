@@ -102,7 +102,8 @@ That is agy 1.3.1. On 1.3.3 the spawn is a `tool` step while `ACTIVE` and become
 {"event":"step_update","step_update":{"conversation_id":"0000…","step_index":2,"state":"DONE","step_type":"subagent","tool_name":"invoke_subagent","duration_seconds":0.27,"subagent_info":{"subagents":[{"type_name":"research","role":"Alpha","initial_prompt":"…","conversation_id":"…","log_uri":"file://…/transcript.jsonl","workspace_uris":["file:///work/proj"]},{"type_name":"research","role":"Beta","initial_prompt":"…","conversation_id":"…"}]}}}
 ```
 
-Each subagent finishing is one `system_message` step in the parent stream, with nothing to say which one:
+Each subagent finishing is one `system_message` step in the parent stream, with nothing to say which one (still so on
+1.3.5; the sender is only in agy's transcript file):
 
 ```json
 {"event":"step_update","step_update":{"conversation_id":"0000…","step_index":4,"state":"DONE","step_type":"system_message","duration_seconds":0.0004}}
@@ -114,7 +115,21 @@ Each subagent finishing is one `system_message` step in the parent stream, with 
   holds the model's reply). Its `parameters` carry only `CommandLine`; `WaitMsBeforeAsync` and `IsDaemon` are
   not in the stream.
 - A `schedule` step (`parameters`: `DurationSeconds`, `Prompt`) stays `ACTIVE` for the timer's whole life.
-- When either finishes, its `DONE` line is followed by the held reply and a `system_message` step.
+- When either finishes, its `DONE` line is followed by the held reply and a `system_message` step. agy prints
+  steps in order, so everything that happened while the step was open (replies, a subagent's `system_message`) comes
+  in one burst after its `DONE`, and the timer's own notice can come after a subagent's (1.3.5).
+- A timer the model gives `TimerCondition` (`any`, or a sender id) ends at the first matching message. The stream
+  drops `TimerCondition` from the parameters, but the `DONE` output names the sender, and that message (the next
+  `system_message`) is the timer's only notice ([#1086](https://github.com/littlebearapps/untether/issues/1086), agy 1.3.5):
+
+```json
+{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"schedule","duration_seconds":7.84,"tool_info":{"name":"schedule","parameters":{"DurationSeconds":60,"Prompt":"Check on the subagents' progress"},"output":"Timer cancelled early: its early-termination condition (any) was met by a message from 0000…0003."}}}
+```
+
+  A timer that runs its course ends with `"output":"Finished waiting 30 seconds."`.
+- `manage_subagents` takes `Action` `list`, `kill` (with `ConversationIds`) or `kill_all`. `kill_all` answers
+  `Successfully killed N subagent(s) and their descendants.` (N counts idle children of earlier turns too) and is
+  followed by no `system_message` (1.3.4, 1.3.5). Subagents stay alive, idle, after they report.
 - A daemon `run_command` never reaches `DONE`: the next `agent_response` and the `result` arrive while it is still
   `ACTIVE`, and the process is still running after agy exits (1.3.3).
 

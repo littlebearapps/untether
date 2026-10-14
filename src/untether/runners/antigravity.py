@@ -427,6 +427,10 @@ _BACKGROUND_TITLE_AFTER_S = 5.0
 # kills as ``<conversation id>/task-<step index>``.
 _CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.IGNORECASE)
 _KILLED_TASK_RE = re.compile(r"(?:^|/)task-(\d+)$")
+# #1086: a ``schedule`` timer with a ``TimerCondition`` cut short by a message
+# (agy 1.3.5 output: "Timer cancelled early: its early-termination condition
+# (any) was met by a message from <conversation id or cid/task-N>.").
+_TIMER_CUT_SHORT_RE = re.compile(r"^Timer cancelled early: .* message from ([\w/-]+)")
 _ASYNC_WAIT_MAX_MS = 600_000
 _BACKGROUND_TITLE_CHARS = 120
 # Finished entries are dropped from the task map beyond this many.
@@ -3357,7 +3361,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         end_status = _task_end_status(failed, err)
         if idx is not None:
             state.bg_steps.pop(idx, None)
-            self._task_step_ended(state, idx, status=end_status)
+            self._task_step_ended(
+                state,
+                idx,
+                status=end_status,
+                output=info.output if info is not None else None,
+            )
             if su.state == "ERROR":
                 self._track_subagents(state, idx, [], failed=True)
         if tool_name == "run_command":
@@ -3489,6 +3498,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._track_subagents(state, idx, _subagent_specs(params, None))
         elif tool_name == "manage_task" and params.get("Action") == "kill":
             self._task_killed(state, params.get("TaskId"))
+        elif tool_name == "manage_subagents" and params.get("Action") in {
+            "kill",
+            "kill_all",
+        }:
+            self._subagents_killed(state, params)
         if idx in state.approval_steps:
             # #1080: the card came before the step's ACTIVE line.
             state.note_approval_wait(idx, True)
@@ -3532,6 +3546,36 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 status="stopped",
                 elapsed_s=round((task.ended_at or 0.0) - task.started_at, 1),
                 source="manage_task",
+            )
+
+    @staticmethod
+    def _subagents_killed(
+        state: AntigravityStreamState, params: dict[str, Any]
+    ) -> None:
+        """#1086: ``manage_subagents`` ``kill_all`` (or ``kill`` with
+        ``ConversationIds``) stops subagents still at work, so their rows end
+        stopped, as #1062 does for a ``manage_task`` kill; one that already
+        reported keeps ``completed``. agy sends no ``system_message`` for it
+        (1.3.4 and 1.3.5), so no notice is owed."""
+        named: set[str] | None = None
+        if params.get("Action") != "kill_all":
+            ids = params.get("ConversationIds")
+            ids = ids if isinstance(ids, list) else []
+            named = {cid for cid in ids if isinstance(cid, str)}
+        now = time.monotonic()
+        for key, task in state.tasks.items():
+            if task.task_type != "local_agent" or task.status != "running":
+                continue
+            if named is not None and task.ref not in named:
+                continue
+            task.status = "stopped"
+            task.ended_at = now
+            logger.info(
+                "antigravity.background.finished",
+                task_id=key,
+                status="stopped",
+                elapsed_s=round(now - task.started_at, 1),
+                source="manage_subagents",
             )
 
     def _track_subagents(
@@ -3592,10 +3636,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     @staticmethod
     def _task_step_ended(
-        state: AntigravityStreamState, idx: int, *, status: str
+        state: AntigravityStreamState, idx: int, *, status: str, output: Any = None
     ) -> None:
         """The ``run_command`` / ``schedule`` step *idx* reached DONE / ERROR
-        (``completed``, ``failed``, or ``stopped`` when agy killed it)."""
+        (``completed``, ``failed``, or ``stopped`` when agy killed it);
+        *output* is the step's ``tool_info.output``."""
         for key in (f"cmd:{idx}", f"timer:{idx}"):
             task = state.tasks.get(key)
             if task is None or task.status != "running":
@@ -3619,6 +3664,36 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 status=task.status,
                 elapsed_s=round(task.ended_at - task.started_at, 1),
             )
+            if key.startswith("timer:"):
+                AntigravityRunner._timer_woken_by(state, output)
+
+    @staticmethod
+    def _timer_woken_by(state: AntigravityStreamState, output: Any) -> None:
+        """#1086: a timer with a ``TimerCondition`` is cut short by the first
+        matching message, and its DONE output names the sender. That message
+        is the timer's wakeup (agy sends no other notice for the timer), so
+        the notice owed for the timer is spent on it — and when the sender is
+        one of this run's subagents, that subagent has finished."""
+        match = _TIMER_CUT_SHORT_RE.search(output) if isinstance(output, str) else None
+        if match is None:
+            return
+        sender = match.group(1)
+        for key, task in state.tasks.items():
+            if (
+                task.task_type == "local_agent"
+                and task.status == "running"
+                and task.ref == sender
+            ):
+                task.status = "completed"
+                task.ended_at = time.monotonic()
+                logger.info(
+                    "antigravity.background.finished",
+                    task_id=key,
+                    status="completed",
+                    elapsed_s=round(task.ended_at - task.started_at, 1),
+                    attribution="sender",
+                )
+                return
 
     @staticmethod
     def _note_system_message(state: AntigravityStreamState) -> None:
@@ -3626,8 +3701,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ``system_message`` step each, with no content in the stream (P-B1;
         the child's id is only in agy's transcript file, which Untether does
         not read). One owed to a command / timer that just ended is spent on
-        it; otherwise it is a subagent finishing, and with nothing to say
-        which, the oldest running one — first in, first out."""
+        it (for a timer cut short by a message, on that message, #1086);
+        otherwise it is a subagent finishing, and with nothing to say which,
+        the oldest running one — first in, first out."""
         if state.bg_notices_owed > 0:
             state.bg_notices_owed -= 1
             return

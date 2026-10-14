@@ -397,6 +397,147 @@ def test_system_message_with_nothing_running_is_ignored() -> None:
     assert state.tasks == {} and state.bg_notices_owed == 0
 
 
+# ── #1086: a timer cut short by a message; subagents agy killed ────────────
+
+_CHILD_A = "00001086-0000-4000-8000-000000000002"
+_CHILD_B = "00001086-0000-4000-8000-000000000003"
+
+
+def _spawned(idx: int, *children: tuple[str, str]) -> list[str]:
+    """An ``invoke_subagent`` step ACTIVE then DONE with each child's id."""
+    subs = [
+        {"type_name": "research", "role": role, "conversation_id": child}
+        for role, child in children
+    ]
+    return [
+        _spawn(idx, *(role for role, _ in children)),
+        _step(
+            idx,
+            "subagent",
+            "DONE",
+            tool_name="invoke_subagent",
+            subagent_info={"subagents": subs},
+        ),
+    ]
+
+
+def test_timer_cut_short_by_a_subagent_closes_that_subagent() -> None:
+    """agy 1.3.5 capture (the #1086 shape): a timer the model gave
+    ``TimerCondition`` "any" (not in the stream) ends as soon as a subagent's
+    message arrives, and its DONE output names the sender. That message is
+    the timer's wakeup — agy sends no other notice for the timer — so it
+    closes the named subagent (here the second one), not the oldest."""
+    lines = _lines("subagents_timer_any")
+    runner, state = _state("workspace")
+    with apply_run_options(EngineRunOptions(permission_mode="workspace")):
+        _feed(runner, state, lines[:6])  # … schedule ACTIVE (step 3)
+        assert _statuses(state) == {
+            "sub:2:0": "running",
+            "sub:2:1": "running",
+            "timer:3": "running",
+        }
+        assert state.tasks["sub:2:1"].ref == _CHILD_B
+        with structlog.testing.capture_logs() as logs:
+            _feed(runner, state, lines[6:7])  # schedule DONE, cut short by B
+        finished = [e for e in logs if e["event"] == "antigravity.background.finished"]
+        assert [(e["task_id"], e["status"]) for e in finished] == [
+            ("timer:3", "completed"),
+            ("sub:2:1", "completed"),
+        ]
+        assert finished[1]["attribution"] == "sender"
+        assert _statuses(state) == {
+            "sub:2:0": "running",
+            "sub:2:1": "completed",
+            "timer:3": "completed",
+        }
+        _feed(runner, state, lines[7:9])  # reply, system_message (B's result)
+        assert state.tasks["sub:2:0"].status == "running"
+        assert state.bg_notices_owed == 0
+        _feed(runner, state, lines[9:14])  # manage_subagents list, A's result
+        assert state.tasks["sub:2:0"].status == "completed"
+        assert _rows(state) == []
+        with structlog.testing.capture_logs() as logs:
+            events = _feed(runner, state, lines[14:])  # kill_all, reply, result
+        # kill_all found nothing still open: both had reported.
+        assert not [e for e in logs if e.get("source") == "manage_subagents"]
+    assert isinstance(events[-1], CompletedEvent) and events[-1].ok is True
+    assert set(_statuses(state).values()) == {"completed"}
+
+
+def test_timer_cut_short_by_another_sender_closes_no_subagent() -> None:
+    """A condition met by a task's message (``<cid>/task-N``) or by a child
+    this run never listed: no row is the sender's, and the message still
+    comes, so it must not close the oldest subagent either."""
+    runner, state = _state()
+    _feed(runner, state, _spawned(2, ("Alpha", _CHILD_A)))
+    _feed(runner, state, [_tool(3, "schedule", "ACTIVE", {"DurationSeconds": 60})])
+    for sender in (f"{CID}/task-9", "00001086-0000-4000-8000-0000000000ff"):
+        output = (
+            "Timer cancelled early: its early-termination condition (any) was "
+            f"met by a message from {sender}."
+        )
+        state.tasks["timer:3"].status = "running"
+        _feed(
+            runner,
+            state,
+            [_tool(3, "schedule", "DONE", {"DurationSeconds": 60}, output=output)],
+        )
+        assert state.tasks["timer:3"].status == "completed"
+        assert state.tasks["sub:2:0"].status == "running"
+        assert state.bg_notices_owed == 1
+        _feed(runner, state, [_step(4, "system_message", "DONE")])
+        assert state.tasks["sub:2:0"].status == "running", sender
+        assert state.bg_notices_owed == 0
+
+
+def test_manage_subagents_kill_all_stops_the_open_subagent_rows() -> None:
+    """agy's ``manage_subagents`` ``kill_all`` ends every subagent still at
+    work: their rows end stopped (as a ``manage_task`` kill does, #1062); one
+    that already reported keeps ``completed``. agy sends no notice for it."""
+    runner, state = _state()
+    _feed(runner, state, _spawned(2, ("Alpha", _CHILD_A), ("Beta", _CHILD_B)))
+    _feed(runner, state, [_step(3, "system_message", "DONE")])  # Alpha's
+    assert _statuses(state) == {"sub:2:0": "completed", "sub:2:1": "running"}
+    kill_all = {"Action": "kill_all"}
+    with structlog.testing.capture_logs() as logs:
+        _feed(runner, state, [_tool(4, "manage_subagents", "ACTIVE", kill_all)])
+    finished = [e for e in logs if e["event"] == "antigravity.background.finished"]
+    assert [(e["task_id"], e["status"], e["source"]) for e in finished] == [
+        ("sub:2:1", "stopped", "manage_subagents")
+    ]
+    assert _statuses(state) == {"sub:2:0": "completed", "sub:2:1": "stopped"}
+    assert state.tasks["sub:2:1"].ended_at is not None
+    assert _rows(state) == [] and state.bg_notices_owed == 0
+    output = "Successfully killed 2 subagent(s) and their descendants."
+    _feed(
+        runner,
+        state,
+        [_tool(4, "manage_subagents", "DONE", kill_all, output=output)],
+    )
+    assert _statuses(state) == {"sub:2:0": "completed", "sub:2:1": "stopped"}
+
+
+def test_manage_subagents_kill_stops_only_the_named_subagents() -> None:
+    runner, state = _state()
+    _feed(runner, state, _spawned(2, ("Alpha", _CHILD_A), ("Beta", _CHILD_B)))
+    _feed(
+        runner,
+        state,
+        [_tool(3, "manage_subagents", "ACTIVE", {"Action": "list"})],
+    )
+    assert _statuses(state) == {"sub:2:0": "running", "sub:2:1": "running"}
+    kill = {"Action": "kill", "ConversationIds": [_CHILD_B]}
+    _feed(runner, state, [_tool(4, "manage_subagents", "ACTIVE", kill)])
+    assert _statuses(state) == {"sub:2:0": "running", "sub:2:1": "stopped"}
+    # A kill with no usable ids stops nothing.
+    _feed(
+        runner,
+        state,
+        [_tool(5, "manage_subagents", "ACTIVE", {"Action": "kill"})],
+    )
+    assert _statuses(state) == {"sub:2:0": "running", "sub:2:1": "stopped"}
+
+
 # ── end of run ──────────────────────────────────────────────────────────────
 
 

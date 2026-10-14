@@ -50,6 +50,7 @@ _FIXTURE_SOURCES: dict[str, str] = {
     "context_resume": "1.3.3/ph3b5-1b-approve-resume (1.3.3; id synthetic, agent text and tool output condensed)",
     "task_killed": "1.3.3/rc4-k1 manage_task kill, bypass (1.3.3; id synthetic, #1062)",
     "task_killed_fast": "1.3.4/rc4-k2 manage_task kill ~5 s in, bypass (1.3.4; id synthetic, #1062)",
+    "subagents_timer_any": "1.3.5/rc5-1086 two subagents + 60 s timer with TimerCondition any + kill_all, accept-edits (1.3.5; ids synthetic, agent text condensed, #1086)",
     "resume_kept_shell": "1.3.3/rc4-a3 Full access conversation resumed with --agent=untether-workspace (1.3.3; id synthetic, #1060)",
     "synthetic_no_result": "synthetic: ok minus its result line",
     "synthetic_result_then_agy_error": "synthetic: ok + AGY_ERROR stderr after the result, rc 3",
