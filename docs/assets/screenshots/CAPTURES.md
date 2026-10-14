@@ -4,7 +4,7 @@ Filenames, descriptions, and capture notes for each screenshot. All images go in
 `docs/assets/screenshots/`. Crop tightly to the relevant UI element — no status
 bars, no keyboard, no notification tray.
 
-**Bot:** `@untether_dev_bot` (dev instance)
+**Bot:** the dev instance's bot (never a production chat)
 **Theme:** Light Telegram theme
 **Content:** Real tasks against the Untether repo (public, nothing sensitive)
 
@@ -61,7 +61,7 @@ bars, no keyboard, no notification tray.
 - [ ] `planmode-show.jpg` — `/planmode show` output. (iPhone) **RECAPTURE (post-#747): `/planmode show` with the mode set to `plan-auto` ([#783](https://github.com/littlebearapps/untether/issues/783)).**
 - [x] `project-command.jpg` — `/<project>` command with ctx: footer. (iPhone)
 - [ ] `branch-directive.jpg` — `@branch` directive response with ctx: project @branch footer. (iPhone)
-- [x] `agent-resolution.jpg` — `/agent` command output showing engine resolution layers. (MacBook)
+- [x] `agent-resolution.jpg` — `/agent` command output showing engine resolution layers. (MacBook) **RECAPTURE (v0.36.1): the `available:` line now includes `antigravity` (the current file lists the old six engines).**
 - [x] `engine-footer.jpg` — Engine directive in progress footer (e.g. /codex). (iPhone)
 - [ ] `route-by-chat.jpg` — Chat bound to project, message routed with project context in footer. (iPhone)
 - [ ] `startup-message.jpg` — Bot startup message showing version and engine info. **RECAPTURE: now includes help/bug links on separate line.**
@@ -80,6 +80,25 @@ bars, no keyboard, no notification tray.
 - [ ] `orphan-cleanup.jpg` — Progress message showing "⚠️ interrupted by restart" after orphan cleanup.
 - [ ] `continue-command.jpg` — `/continue` picking up a CLI session from Telegram.
 - [ ] `config-cost-budget.jpg` — Cost & Usage sub-page with budget and auto-cancel toggles.
+
+## Tier 6: v0.36.1 Antigravity CLI (12 images)
+
+Capture these in an Antigravity chat bound to a test project, with Untether's agy plugin installed on the host
+unless the entry says otherwise. Crop out home-folder paths, conversation ids you don't want public, and any
+account email in `/usage` or `/stats auth`.
+
+- [ ] `antigravity-config-home.jpg` — `/config` home page in an Antigravity chat, showing Permission mode and Effort. (`how-to/antigravity.md`)
+- [ ] `antigravity-workspace-final.jpg` — Final message of a Workspace run with the model · effort · workspace footer and the `agy --conversation …` resume line. (`how-to/antigravity.md`)
+- [ ] `antigravity-background-block.jpg` — A Full access run's progress message with the `⏳ background (N)` block listing a 🐚 command and a 🤖 subagent row with elapsed times. (`how-to/antigravity.md`)
+- [ ] `antigravity-permission-mode.jpg` — `/config` → Permission mode on a host **without** the plugin: Workspace / Full access / 🔒 Ask me — set up / Plan first, the 🔐 Telegram approvals button and the "send /new" warning line. (`how-to/antigravity.md`)
+- [ ] `antigravity-full-access-toast.jpg` — The toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)". (`how-to/antigravity.md`)
+- [ ] `antigravity-ask-me-card.jpg` — An Ask me approval card for `$ git status` with ✅ Approve / ❌ Deny / ✅ Always allow this command here. (`how-to/antigravity.md`)
+- [ ] `antigravity-blocked-outside-project.jpg` — A Workspace run with a "⚠️ Blocked: file outside the project" row and the blocked notice at the end of the reply. (`how-to/antigravity.md`)
+- [ ] `antigravity-question-card.jpg` — An Antigravity `ask_question` card with option buttons and Other (type reply), with the progress row above it. (`how-to/antigravity.md`)
+- [ ] `antigravity-agy-gate-status.jpg` — Terminal output of `untether agy-gate status --project <folder>` with the plugin installed and loaded (crop the home-folder path). (`how-to/antigravity.md`)
+- [ ] `antigravity-effort-limited.jpg` — `/config` → Effort in a chat whose model is set without an effort suffix, showing only the levels that model accepts. (`how-to/antigravity.md`)
+- [ ] `antigravity-usage-quota.jpg` — `/usage` showing the quota groups with bars and reset times, the `AI credits: … remaining` line, then the last session's tokens. (`how-to/antigravity.md`)
+- [ ] `antigravity-plan-first-card.jpg` — End of a Plan first answer (`📋 Plan — implementation_plan.md` and plan text) followed by the ✅ Approve Plan / ❌ Deny / 💬 Let's discuss card. (`how-to/interactive-approval.md`)
 
 ## Reuse map
 
