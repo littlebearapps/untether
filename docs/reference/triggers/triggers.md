@@ -197,9 +197,13 @@ startup and every config reload log WARNING `trigger.cron.permission_mode_invali
 instead of disabling every trigger ([#751](https://github.com/littlebearapps/untether/issues/751)).
 
 **Antigravity.** An Antigravity cron's value is validated too: `workspace`, `full`,
-`ask` or `plan` (`ask` and `plan` are refused at run time until a later 0.36.1
-release). A cron gets Full access only from its own `permission_mode = "full"`;
-webhook runs never do.
+`ask` or `plan`. A cron gets Full access or Ask me only from its own
+`permission_mode` (`"full"` / `"ask"`), never from the chat or `untether.toml`;
+webhook runs never get Full access. With `"ask"` there is nobody to tap a card, so
+reads and in-project edits run and everything that would ask is denied
+(`🔒 unattended` footer); with `"plan"` (or a chat in Plan first) the run posts its
+plan and changes nothing ([#980](https://github.com/littlebearapps/untether/issues/980),
+[#981](https://github.com/littlebearapps/untether/issues/981)).
 
 **Other engines.** The value is still handed to whichever engine runs the cron,
 but only Claude and Antigravity validate it. Codex honours `safe` (read-only sandbox) and treats

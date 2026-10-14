@@ -131,7 +131,7 @@ launchctl kickstart -k gui/$(id -u)/<your-launchd-label>  # macOS (launchd)
 | `voice_transcription_prompt` | string\|null | `null` (→ built-in) | ([#691](https://github.com/littlebearapps/untether/issues/691), [#703](https://github.com/littlebearapps/untether/issues/703)) Vocabulary-bias prompt (≤1000 chars) passed to the transcription `prompt` param — steers the decoder toward domain proper nouns (`"Trello, Untether, Claude Code"`). Effect is model-dependent; keep it to high-frequency nouns (overstuffing can induce hallucinated terms). **Unset = a shipped product-generic default** (a bare `Claude`, Claude Code, `CLAUDE.md`, `AGENTS.md`, Codex, OpenCode and Untether's own nouns — [#789](https://github.com/littlebearapps/untether/issues/789)); keep an override under Whisper's ~224-token window; a value **replaces** that default; `""` disables the bias and omits the parameter. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
-| `followup_mode` | `"queue"`\|`"steer"` | `"queue"` | ([#775](https://github.com/littlebearapps/untether/issues/775)) Default for messages sent while a Claude Code run is working: `queue` waits for the turn to end; `steer` writes the message into the running turn. Overridden per chat (`/config` → Follow-up, bare `/steer` / `/queue`), per forum topic (bare `/steer` / `/queue` in the topic) and per message (`/steer <text>`, `/queue <text>`). Claude Code only — other engines always queue. Hot-reloadable. See [steer follow-ups](../how-to/steer-follow-ups.md). |
+| `followup_mode` | `"queue"`\|`"steer"` | `"queue"` | ([#775](https://github.com/littlebearapps/untether/issues/775)) Default for messages sent while a Claude Code or Antigravity run is working: `queue` waits for the turn to end; `steer` writes the message into the running turn. Overridden per chat (`/config` → Follow-up, bare `/steer` / `/queue`), per forum topic (bare `/steer` / `/queue` in the topic) and per message (`/steer <text>`, `/queue <text>`). Claude Code, and Antigravity CLI with Untether's agy plugin on the host ([#981](https://github.com/littlebearapps/untether/issues/981)) — other engines always queue. Hot-reloadable. See [steer follow-ups](../how-to/steer-follow-ups.md). |
 
 When `allowed_user_ids` is set, updates without a sender id (for example, some channel posts) are ignored.
 
@@ -655,17 +655,17 @@ Antigravity CLI (`agy` 1.3.1 or newer). Read the [terms note](runners/antigravit
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `model` | string | (unset) | Optional model, passed as `--model=<id>`. Allowed characters: ASCII letters, digits and `. _ - : / @ +`; it must start with a letter or digit, have no spaces and be at most 128 characters. Anything else is a config error at load. Prefer a base id; an id that names its effort (ending `-low`, `-medium`, `-high`) fixes the effort level. `agy models` lists them. |
-| `cmd` | string | `agy` on `PATH`, then `~/.local/bin/agy` | Path to the agy binary (`~` is expanded). The "installed engines" check at startup looks for `agy` on `PATH` only. |
+| `model` | string | (unset) | Optional model, passed as `--model=<id>`. Allowed characters: ASCII letters, digits and `. _ - : / @ +`; it must start with a letter or digit, have no spaces and be at most 128 characters. Anything else is a config error at load. An id that names its effort (ending `-low`, `-medium`, `-high`, as `agy models` lists them) fixes the effort level; an id without the suffix takes the chat's `/config` → **Effort** level, or the model's default level on agy 1.3.4 and newer (older agy refuses some models without one). There is no `untether.toml` key for the effort level. |
+| `cmd` | string | `agy` on `PATH`, then `~/.local/bin/agy` | Path to the agy binary (`~` is expanded). The "installed engines" check at startup looks for `agy` on `PATH` only, and an engine it doesn't find there can't be used, so `agy` must be on the service's `PATH` even when `cmd` is set. |
 | `approval_timeout_s` | int | the plugin's wait (900) | Ask me: how long an approval card (and a question) waits for a tap, in seconds, 60–3000. Never longer than the wait the plugin was installed with (`untether agy-gate install --wait-s`), since agy's own hook timeout is fixed then. No answer = the tool is blocked |
-| `permission_mode` | string | `workspace` | `workspace` (file tools only: no shell, web or MCP, no deleting or renaming files), `plan` (Plan first: agy's `--mode=plan`, the plan is answered with Approve / Deny / Let's discuss and Approve carries it out in Workspace, [#981](https://github.com/littlebearapps/untether/issues/981)) `ask` (Ask me: approval buttons before shell, web, MCP, subagents and files outside the project, [#980](https://github.com/littlebearapps/untether/issues/980); needs Untether's agy plugin on the host, `untether agy-gate install`, and a run is refused when it isn't ready) or `full` (passes `--dangerously-skip-permissions`; logged once at startup). A conversation keeps the tools it started with, so after changing between `workspace` / `plan` and `ask` / `full`, send `/new` in chats with an existing conversation. Any other value is a config error. A chat's `/config` → **Permission mode** overrides it; cron and webhook runs never inherit `ask` or `full` from here (a cron's own `permission_mode` can set them). See [Permission mode](../how-to/interactive-approval.md#antigravity-cli-permission-mode). |
+| `permission_mode` | string | `workspace` | `workspace` (file tools only: no shell, web or MCP, no deleting or renaming files), `plan` (Plan first: agy's `--mode=plan`, the plan is answered with Approve / Deny / Let's discuss and Approve carries it out in Workspace, [#981](https://github.com/littlebearapps/untether/issues/981)), `ask` (Ask me: approval buttons before shell, web, MCP, subagents and files outside the project, [#980](https://github.com/littlebearapps/untether/issues/980); needs Untether's agy plugin on the host, `untether agy-gate install`, and a run is refused when it isn't ready) or `full` (passes `--dangerously-skip-permissions`; logged once at startup). A conversation keeps the tools it started with, so after changing between `workspace` / `plan` and `ask` / `full`, send `/new` in chats with an existing conversation. Any other value is a config error. A chat's `/config` → **Permission mode** overrides it; cron and webhook runs never inherit `ask` or `full` from here (a cron's own `permission_mode` can set them). See [Permission mode](../how-to/interactive-approval.md#antigravity-cli-permission-mode). |
 
 Other keys are ignored. Sign-in is configured in agy and the service environment, not here: see the [runner reference](runners/antigravity/runner.md#sign-in-routes).
 
 === "untether config"
 
     ```sh
-    untether config set antigravity.model "gemini-3.8-flash"
+    untether config set antigravity.model "gemini-3.8-flash-medium"
     untether config set antigravity.permission_mode "workspace"
     ```
 
@@ -673,7 +673,7 @@ Other keys are ignored. Sign-in is configured in agy and the service environment
 
     ```toml
     [antigravity]
-    model = "gemini-3.8-flash"
+    model = "gemini-3.8-flash-medium"
     permission_mode = "workspace"
     ```
 

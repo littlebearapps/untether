@@ -62,7 +62,8 @@ Untether shells out to engine CLIs. Install them and make sure they’re on your
 ## Antigravity CLI
 
 Antigravity CLI (`agy`) is Google's successor to Gemini CLI. Untether supports agy 1.3.1 or newer as the
-`antigravity` engine ([#558](https://github.com/littlebearapps/untether/issues/558)). This section covers install and
+`antigravity` engine ([#558](https://github.com/littlebearapps/untether/issues/558)), separate from the deprecated
+`gemini` engine: select it with `/antigravity` or `/agent set antigravity`, never `/gemini`. This section covers install and
 sign-in; for day-to-day use (permission modes, effort, quota, scheduled runs) see [Use Antigravity CLI](antigravity.md).
 
 !!! warning "Read this before using Antigravity with a Google account sign-in"
@@ -84,6 +85,9 @@ sign-in; for day-to-day use (permission modes, effort, quota, scheduled runs) se
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
+The installer puts `agy` in `~/.local/bin`; make sure that folder is on the `PATH` Untether runs with, or the engine
+shows as not installed.
+
 **2. Choose how agy signs in.** Untether never signs in for you.
 
 - **Gemini API key (recommended).** Add `"modelProvider": "gemini"` to agy's settings file
@@ -101,16 +105,22 @@ one. Bind the chat with `/ctx set <project>` or use a chat that already routes t
 
 **5. Pick a permission mode** in `/config` → **Permission mode**. The default, **Workspace**, lets Antigravity read,
 create and edit files in the project. It has no shell, web or MCP tools, so it can't run commands, and can't delete or
-rename files (a "rename" is a copy; the original stays). **Full access** approves everything. See
-[Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+rename files (a "rename" is a copy; the original stays). **Plan first** writes a plan for you to approve first,
+**Ask me** asks in Telegram before each shell command or other risky tool, and **Full access** approves everything.
+See [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
 
-!!! warning "After switching to Full access, send `/new`"
+**6. Optional: install Untether's agy plugin** on the host with `untether agy-gate install`. It brings approval
+buttons (Ask me), question buttons and `/steer` to Antigravity chats; see
+[Telegram questions and steer](antigravity.md#telegram-questions-and-steer).
+
+!!! warning "After switching between Workspace / Plan first and Ask me / Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in Workspace still can't run
-    shell commands after you switch to Full access, even though the footer says `full access`. Send `/new`: Full
-    access applies from the next new conversation.
+    shell commands after you switch to Full access, even though the footer says `full access`, and one that began
+    in Full access keeps its shell after you switch back. Send `/new`: the new mode applies from the next new
+    conversation.
 
-Not available for Antigravity yet: approval buttons, plan approval, question buttons, `/steer` and live sessions.
-If something goes wrong, see [Troubleshooting](troubleshooting.md#antigravity-cli).
+Not available for Antigravity: live sessions (each message is its own agy run). If something goes wrong, see
+[Troubleshooting](troubleshooting.md#antigravity-cli).
 
 ## Feature differences
 

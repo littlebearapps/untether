@@ -189,7 +189,7 @@ Precedence: cron `permission_mode` > per-chat `/planmode` > engine config defaul
 
 ## Antigravity CLI: Plan first
 
-Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` are Claude-only. It works differently from Claude's plan mode, because agy can't stop mid-run to ask:
+Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` are Claude-only. It needs no plugin on the host, and works differently from Claude's plan mode:
 
 - Antigravity plans in one run and **stops**: the final shows the plan, followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss**. Nothing in the project changes until you approve.
 - **Approve Plan** starts a second run in the same conversation, in Workspace mode (file edits, no shell). Its answer starts `📋 Plan (approved)`.

@@ -294,8 +294,9 @@ case-folded at any depth (`_PROTECTED_DIR_NAMES` / `_PROTECTED_DIR_PAIRS` / `_PR
 `.pre-commit-config.yaml`, `lefthook.yml` / `.yaml` (and `.lefthook.*`, `lefthook-local.*`), `.envrc`, `mise.toml`,
 `.mise.toml`, `mise.local.toml`; the configured `files.outbox_dir` (from the project root); and Untether's default
 file deny globs (`.env*`, `*.pem`, `*.key`, SSH keys, `.netrc`, `.npmrc`, `.pypirc`). **Untether's own files**:
-its package, venv, `sys.base_prefix`, the plugin folder, and this instance's config file and its folder. With the
-chat's **Diff preview** set to on, in-project edits ask too.
+its package, venv, `sys.base_prefix`, the plugin folder, and this instance's config file and its folder. The gate
+also asks for in-project edits when the run's `diff_preview` option is on, but `/config` → **Diff preview** is
+Claude-only (`DIFF_PREVIEW_SUPPORTED_ENGINES`), so an Antigravity chat can't switch it on today.
 
 **The card** is registered in the engine-neutral registry (`kind="tool"`, the `ia:` callback prefix) and posted as a
 ⚠️ row with buttons: `Permission Request [agy] - <what>` (`shell command`, `write a file (outside this project)`,

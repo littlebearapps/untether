@@ -1,6 +1,6 @@
 # Interactive approval
 
-When Claude Code runs in permission mode, Untether shows inline buttons in Telegram so you can approve or deny tool calls from your phone.
+When Claude Code runs in permission mode, Untether shows inline buttons in Telegram so you can approve or deny tool calls from your phone. Antigravity CLI gets its own approval buttons in **Ask me** mode and a plan card in **Plan first**; see [Antigravity CLI — Permission mode](#antigravity-cli-permission-mode). Most of this page describes Claude Code.
 
 ## When buttons appear
 
@@ -142,7 +142,7 @@ To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.
 
 ## Engine-specific approval policies
 
-Claude Code is the only engine with interactive mid-run approval buttons. Other engines offer pre-run policies that control what the agent is allowed to do before it starts:
+Claude Code has the fullest set of mid-run approval buttons. Antigravity CLI has them in **Ask me** mode (with Untether's agy plugin on the host) and a plan card in **Plan first**. The other engines offer only pre-run policies that control what the agent is allowed to do before it starts:
 
 ### Codex CLI — Approval policy
 
@@ -184,7 +184,7 @@ Workspace, Plan first and Full access are pre-run policies: headless agy can't s
 **Ask me** ([#980](https://github.com/littlebearapps/untether/issues/980)) is the closest Antigravity gets to Claude Code's approval buttons. It needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: agy runs with all its tools (`--dangerously-skip-permissions`, its default agent), and the plugin holds every tool call until Untether answers. Untether never passes that flag for Ask me unless the plugin is installed, unedited and loaded by agy for the project.
 
 - **Runs without a card:** reading, listing and searching files inside the project, and creating or editing files there (plus agy's own notes for the conversation).
-- **Asks first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents and timers; files outside the project; protected files in it (`.agents/`, `.git/`, `.gemini/`, `.claude/`, `.github/workflows/`, `.husky/`, `.untether-outbox/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.env` files and keys); Untether's own files; and any tool Untether doesn't know yet. With **Diff preview** on, in-project edits ask too. A path that goes through a symlink, or a file with a second hard-linked name, always asks (the card says where it really resolves): approving a shell command can create links that change what a later "in-project" path means.
+- **Asks first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents and timers; files outside the project; protected files in it (`.agents/`, `.git/`, `.gemini/`, `.claude/`, `.github/workflows/`, `.husky/`, `.untether-outbox/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.env` files and keys); Untether's own files; and any tool Untether doesn't know yet. (`/config` → **Diff preview** is a Claude Code setting and isn't shown in Antigravity chats, so in-project edits don't ask.) A path that goes through a symlink, or a file with a second hard-linked name, always asks (the card says where it really resolves): approving a shell command can create links that change what a later "in-project" path means.
 
 The card reads like Claude's:
 
@@ -223,6 +223,9 @@ Pick **Plan first** in `/config` → **Permission mode** (or send `/planmode on`
       card.
 3. The chat stays in Plan first, so your next request is planned again first. Switch back with `/planmode off` or
    `/config`.
+
+<!-- TODO: capture screenshot: antigravity-plan-first-card — the end of an Antigravity Plan first answer (`📋 Plan — implementation_plan.md` and plan text) followed by the card with ✅ Approve Plan / ❌ Deny / 💬 Let's discuss -->
+<!-- <img src="../assets/screenshots/antigravity-plan-first-card.jpg" alt="Antigravity Plan first answer with the Approve Plan, Deny and Let's discuss card" width="360" loading="lazy" /> -->
 
 Good to know:
 

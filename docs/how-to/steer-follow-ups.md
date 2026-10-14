@@ -1,6 +1,6 @@
-# Steer a running Claude run
+# Steer a running agent
 
-When Claude Code is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
+When Claude Code (or Antigravity CLI) is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
 
 - **queue** (the default) — the message waits until Claude's current turn finishes, then runs as the next turn.
 - **steer** — the message goes straight into the run that is already working. Claude reads it at its next step (the next time a tool finishes) and folds it into the answer it is producing.

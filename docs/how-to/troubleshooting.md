@@ -90,7 +90,7 @@ npm install -g @google/gemini-cli
 npm install -g @sourcegraph/amp
 ```
 
-Verify with `which codex` (or `which claude`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH.
+Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether looks for every engine on `PATH` when it starts, so add that folder to the service's `PATH` (setting `[antigravity] cmd` alone doesn't make the engine available).
 
 The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
 
@@ -178,7 +178,7 @@ Switch to `claude`, `codex`, `opencode`, `pi` or `antigravity` via `/config → 
 
 ## Antigravity CLI
 
-Antigravity (`agy`) runs headless: it can't ask for approval or a sign-in mid-run, so Untether turns each of those cases into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli), and the user guide is [Use Antigravity CLI](antigravity.md).
+Antigravity (`agy`) runs headless: it can't ask for a sign-in mid-run, and it asks for approval only in **Ask me** mode through Untether's agy plugin. Untether turns each failure into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli), and the user guide is [Use Antigravity CLI](antigravity.md).
 
 ### Antigravity says it isn't signed in
 
@@ -203,11 +203,11 @@ Google has challenged or blocked the account. Run `agy` in a terminal on the hos
 !!! warning "Send `/new`"
     agy keeps a conversation on the tools it started with. This conversation began in **Workspace**, so it keeps its no-shell tools. Send `/new`, then your message again: Full access applies from the next new conversation.
 
-The `/config` toast says the same when you pick Full access (`Permission mode: full access — send /new to start using it`). See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+The `/config` toast says the same when you pick Full access (`Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)`). See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
 
 ### Antigravity says a shell command needs Full access
 
-The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access.
+The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, or to **Ask me** to approve each command from Telegram (needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)), then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access.
 
 ### Antigravity was blocked from using a shell command or a file outside the project
 
@@ -232,9 +232,15 @@ Ask me needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer
 
 - **"aren't set up on this host"**: run `untether agy-gate install` on the host.
 - **"aren't ready for this project"**: run `untether agy-gate status --project <folder>`. Common causes: `agy plugin disable untether-gate` was run (`agy plugin enable untether-gate`), the plugin is from another Untether version (`untether agy-gate install`), or agy isn't signed in.
-- **"isn't available in this project"**: the project contains Untether's own code (the dev bot's own checkout, for example), or agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage. Those run their own commands without asking, so Ask me would promise something it can't keep. Use Workspace or Full access there, or remove that config.
+- **"isn't available in this project"**: the project contains Untether's own code or config (a checkout of Untether itself, or the folder holding `untether.toml`), or agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage. Those run their own commands without asking, so Ask me would promise something it can't keep. Use Workspace or Full access there, or remove that config.
 
 Cron and webhook runs only use Ask me when the cron itself sets `permission_mode = "ask"`; a chat's Ask me runs them as Workspace.
+
+### Antigravity questions or steer stopped working after an upgrade
+
+**Symptoms:** a `⚠️ Untether's agy plugin (untether-gate) is from another Untether version …` row, questions are skipped, `/steer` queues instead, Ask me is refused and scheduled Antigravity runs are held.
+
+The new Untether version changed the plugin's files, so the copy on the host no longer matches. Run `untether agy-gate install` on the host (no restart needed), then `untether agy-gate status` to check. This happens once after upgrading from a 0.36.1 pre-release (rc1 to rc3).
 
 ### Antigravity Ask me: no card for a shell command
 
@@ -265,6 +271,12 @@ Antigravity models accept different effort levels. Open `/config` → **Effort**
 ### "The engine CLI rejected a command-line flag"
 
 The installed agy doesn't accept a flag this Untether version passes. agy updates itself often, so this usually means Untether is behind: update Untether, and report it if it persists.
+
+### Antigravity says its quota or AI credits are used up
+
+**Symptoms:** `This Antigravity quota is used up. /usage shows when each group resets; Untether won't retry.` or `Antigravity's AI credits balance is too low to continue.`
+
+agy reported that a quota group (for example a 5-hour or weekly limit for a model group) or your AI credits ran out. Untether stops the run straight away and doesn't retry, and the chat's saved conversation is kept. Send `/usage` to see each group's use and reset time and your remaining credits, then wait for the reset, top up, or switch the chat to a model in another quota group with `/model set <id>`. Cost budgets don't help here: they count dollars, which Antigravity doesn't report. See [Usage and quota](antigravity.md#usage-and-quota).
 
 ### "Antigravity CLI … is older than 1.3.1"
 

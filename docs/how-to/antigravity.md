@@ -4,9 +4,23 @@ Antigravity CLI (`agy`) is Google's successor to Gemini CLI. From v0.36.1 Unteth
 engine: send a task from Telegram, watch the progress, and resume the conversation later from chat or a terminal.
 
 It suits you if you want Google's Gemini models (and the Claude and GPT models some Antigravity plans include) next
-to your other engines, and you're happy to choose what the agent may do **before** a run starts. Antigravity has no
-approval buttons yet, so Untether runs it with a pre-run permission mode instead. If you need to approve each tool
-call from your phone, use Claude Code for that work.
+to your other engines. You choose what the agent may do with a **permission mode**: by default (**Workspace**) it
+edits files in the project and runs no commands. **Plan first** gives you a plan to approve before anything
+changes, and **Ask me** sends an Approve / Deny card to Telegram before each shell command or other risky tool.
+
+Antigravity CLI is a separate engine from the deprecated Gemini CLI (`gemini`): it has its own engine id, sign-in,
+flags and sessions, and a Gemini CLI setup doesn't carry over.
+
+**At a glance**
+
+| | Antigravity in Untether |
+|---|---|
+| Progress, resume line, `/continue`, voice notes, model and effort | Yes |
+| Permission modes | Workspace (default), Plan first, Ask me, Full access. Full access applies only when you choose it (in `/config`, `[antigravity] permission_mode` or a cron's own setting) |
+| Approval buttons (Ask me), question buttons, `/steer` | Yes, with [Untether's agy plugin](#telegram-questions-and-steer) installed on the host |
+| `/usage` | agy's quota groups and AI credits, at no token cost |
+| Cost | Tokens only, no dollar figure, so `[cost_budget]` never trips |
+| Live sessions | No: each message is its own agy run |
 
 ## Before you start
 
@@ -17,6 +31,9 @@ You need:
 - **agy signed in** on that machine. Untether never signs in for you.
 - **A project** for the chat. Antigravity edits files where it runs, so Untether won't run it in a chat with no
   project bound.
+- **Optional: Untether's agy plugin**, for approval buttons (Ask me), question buttons and `/steer`. Install it on
+  the host with `untether agy-gate install` once agy is signed in; see
+  [Telegram questions and steer](#telegram-questions-and-steer).
 
 Install agy:
 
@@ -24,7 +41,11 @@ Install agy:
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-Untether looks for `agy` on `PATH`, then at `~/.local/bin/agy`.
+The installer puts `agy` in `~/.local/bin`. Make sure that folder is on the `PATH` Untether runs with (for a
+systemd or launchd service, the service's own `PATH`): Untether's check for installed engines looks for `agy` on
+`PATH` only, so without it Antigravity shows as not installed and can't be selected, even when
+`[antigravity] cmd` points at the binary. The startup message's "installed engines" line shows whether it was
+found.
 
 !!! warning "Google's terms and Google account sign-ins"
     Google's [Antigravity terms](https://antigravity.google/terms) don't allow third-party tools to use a Google
@@ -106,6 +127,9 @@ agy starts as a daemon (a dev server, say) can keep running after the answer; Un
 check for it and stop it yourself when you're done. Details:
 [Background tasks and subagents](../reference/runners/antigravity/runner.md#background-tasks-and-subagents-in-the-status-panel).
 
+<!-- TODO: capture screenshot: antigravity-background-block — a Full access run's progress message with the `⏳ background (N)` block listing a 🐚 command and a 🤖 subagent row with elapsed times -->
+<!-- <img src="../assets/screenshots/antigravity-background-block.jpg" alt="Antigravity progress message with a background block listing a running command and a subagent" width="360" loading="lazy" /> -->
+
 **An answer held for background work.** agy sends its one answer only when its background work has finished (up to
 30 minutes), and nothing of it shows before then, so the block ends with `agy sends its answer when this work
 finishes (up to 30 min)`. If you `/cancel` during that wait, agy doesn't hand over the answer it was holding; the
@@ -121,8 +145,11 @@ clean start.
 
 ## Permission modes
 
-Headless agy can't stop mid-run to ask by itself, so you choose the mode before the run: `/config` →
-**Permission mode**. **Ask me** adds approval buttons through Untether's own agy plugin.
+Pick the chat's mode in `/config` → **Permission mode** (or `/planmode on` / `off` for Plan first). Workspace,
+Plan first and Full access decide up front what agy may do; **Ask me** asks you in Telegram while the run works,
+through Untether's own agy plugin. A chat that hasn't picked a mode runs in Workspace (or the
+`[antigravity] permission_mode` default): Untether never passes agy's `--dangerously-skip-permissions` unless you
+chose Full access, or Ask me with its plugin ready.
 
 | Mode | What Antigravity can do |
 |---|---|
@@ -147,8 +174,8 @@ same for plan first), and **Clear override** says `Permission mode: cleared — 
 Workspace / Plan first and Ask me / Full access`. Moving between Workspace and Plan first, or between Ask me and Full
 access, needs no `/new`: each pair uses the same tools.
 
-<!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity, with Workspace / Full access / Ask me / Plan first and the "send /new" warning line -->
-<!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with the send /new warning" width="360" loading="lazy" /> -->
+<!-- TODO: capture screenshot: antigravity-permission-mode — /config → Permission mode page for Antigravity on a host without the agy plugin: Workspace / Full access / 🔒 Ask me — set up / Plan first, the 🔐 Telegram approvals button and the "send /new" warning line -->
+<!-- <img src="../assets/screenshots/antigravity-permission-mode.jpg" alt="Antigravity Permission mode page with Workspace, Full access, 🔒 Ask me — set up, Plan first, the 🔐 Telegram approvals button and the send /new warning" width="360" loading="lazy" /> -->
 
 <!-- TODO: capture screenshot: antigravity-full-access-toast — the toast after picking Full access: "Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)" -->
 <!-- <img src="../assets/screenshots/antigravity-full-access-toast.jpg" alt="Toast after picking Full access telling you to send /new" width="360" loading="lazy" /> -->
@@ -243,8 +270,9 @@ More detail on modes, allow rules and agy's own settings:
 With **Untether's agy plugin** installed on the host, an Antigravity run can:
 
 - **Ask you a question.** When agy calls its `ask_question` tool, you get the same question card as Claude Code:
-  option buttons, or **Other (type reply)**, or just reply with text. agy carries on with your answer. Turn it off
-  per chat with `/config` → **Ask mode**.
+  option buttons, or **Other (type reply)**, or just reply with text. agy carries on with your answer, and the
+  progress row becomes `❓ answered: …`. With no answer within 15 minutes, agy is told to use its best judgement.
+  Turn it off per chat with `/config` → **Ask mode**.
 - **Take a message while it works.** With `/config` → **Follow-up** set to **steer** (or `/steer <text>`), a message
   you send during a run goes into that run before agy's next step, and the progress message shows
   `↪️ steer received: …`. If the run ends before agy takes another step, you get
@@ -255,6 +283,9 @@ changes. **Ask me** needs it: the plugin is what holds each tool call for your a
 Antigravity works as before: questions are skipped (agy carries on with its own default), follow-ups queue, and Ask
 me is refused.
 
+<!-- TODO: capture screenshot: antigravity-question-card — an Antigravity ask_question card in Telegram with option buttons and Other (type reply), and the progress row above it -->
+<!-- <img src="../assets/screenshots/antigravity-question-card.jpg" alt="Antigravity question card with option buttons and Other (type reply)" width="360" loading="lazy" /> -->
+
 **Install it on the host** (not from Telegram — it is shared by every agy on that machine):
 
 ```sh
@@ -264,6 +295,14 @@ untether agy-gate status --project ~/my-project   # does agy load it there? (agy
 untether agy-gate uninstall
 ```
 
+Useful options: `install --dry-run` prints the files and where they would go without writing anything;
+`install --wait-s <seconds>` sets how long a question or approval waits for an answer (900 by default);
+`status --canary` also sends one trivial agy turn (about 13k tokens) to check the hooks really reach Untether;
+`--agy <path>` points any of them at a particular agy binary (otherwise `[antigravity] cmd`, then `agy` on
+`PATH`). `status` exits with status 1 when the plugin isn't ready.
+
+<!-- TODO: capture screenshot: antigravity-agy-gate-status — terminal output of `untether agy-gate status --project <folder>` with the plugin installed and loaded (crop out the home folder path) -->
+<!-- <img src="../assets/screenshots/antigravity-agy-gate-status.jpg" alt="Terminal output of untether agy-gate status --project showing the plugin installed and loaded for the project" width="360" loading="lazy" /> -->
 Install writes only `~/.gemini/config/plugins/untether-gate/` (`plugin.json`, `hooks.json` and Untether's
 `.untether-managed` record). Its hooks start with a check for a marker that only Untether-started agy runs carry, so
 your own `agy` sessions never run any Untether code. Install and uninstall refuse to touch a plugin folder that
@@ -279,16 +318,19 @@ steer, and scheduled runs are held, because its hooks run their own commands in 
 Run `untether agy-gate status`, then `untether agy-gate install --force` if you didn't change it.
 
 **After upgrading Untether, run `untether agy-gate install` again** whenever the new version changes the plugin's
-files — 0.36.1rc4 does (its hooks now block a tool themselves when Untether's Python can't start). Until you do,
+files. If you installed the plugin with a 0.36.1 pre-release (rc1 to rc3), this applies to you: the plugin changed
+in 0.36.1 (its hooks now block a tool themselves when Untether's Python can't start). Until you do,
 `untether agy-gate status` says `plugin version 1 from an earlier Untether`, Ask me is refused
 ("the plugin is from another Untether version — run `untether agy-gate install` on the host to update it"), attended runs show `⚠️ Untether's agy plugin (untether-gate) is from another Untether version …` and run
 without questions or steer, and scheduled agy runs are held.
 
 ## Models and effort
 
-- **Model.** `/model set <id>` sets the chat's model and `/model clear` goes back to the default. Run `agy models`
-  on the host for the list of ids. Prefer a base id: one that already names its effort (ending `-low`, `-medium`
-  or `-high`) fixes the level.
+- **Model.** `/model set <id>` sets the chat's model and `/model clear` goes back to agy's default. Run
+  `agy models` on the host for the list of ids. An id that ends in its effort (`gemini-3.8-flash-medium`) fixes
+  the level, and Untether passes no `--effort` with it. The same id without the suffix (`gemini-3.8-flash`) lets
+  you pick the level in `/config` → **Effort**; with none picked, agy 1.3.4 and newer use the model's default
+  level (agy 1.3.1 to 1.3.3 refuse to start, and the run stops with `That model needs an effort level`).
 - **Effort.** `/config` → **Effort** offers Low, Medium and High, narrowed to what the chat's model accepts. A
   Gemini Pro id, for example, offers Low and High only, and a fixed-effort model shows no level buttons.
 
@@ -303,8 +345,8 @@ so a low figure doesn't mean compaction is far off. With no model set (agy's def
 published figure for, no percentage is shown. Details:
 [Context use](../reference/runners/antigravity/runner.md#context-use-n-ctx).
 
-<!-- TODO: capture screenshot: antigravity-effort-limited — /config → Effort page for a model with limited levels (a Gemini Pro id showing Low and High only) -->
-<!-- <img src="../assets/screenshots/antigravity-effort-limited.jpg" alt="Effort page for an Antigravity model that offers Low and High only" width="360" loading="lazy" /> -->
+<!-- TODO: capture screenshot: antigravity-effort-limited — /config → Effort page in an Antigravity chat whose model is set without an effort suffix, showing only the levels that model accepts -->
+<!-- <img src="../assets/screenshots/antigravity-effort-limited.jpg" alt="Effort page for an Antigravity model, showing only the levels the model accepts" width="360" loading="lazy" /> -->
 
 ## Usage and quota
 
@@ -321,22 +363,27 @@ session's token totals. Checking costs no tokens.
   straight after a restart). It doesn't start agy or test the sign-in.
 - `[cost_budget]` limits count dollars, so they never trip for Antigravity.
 - When a quota is used up, the run ends with `This Antigravity quota is used up. /usage shows when each group
-  resets`, and Untether doesn't retry.
+  resets`, and Untether doesn't retry. Running out of AI credits ends it with `Antigravity's AI credits balance is
+  too low to continue`.
 
 Sample output: [Cost budgets → Antigravity](cost-budgets.md#antigravity).
 
-<!-- TODO: capture screenshot: antigravity-usage-quota — /usage in an Antigravity chat showing the quota groups with bars and reset times, then the last session's tokens -->
-<!-- <img src="../assets/screenshots/antigravity-usage-quota.jpg" alt="/usage in an Antigravity chat showing agy quota groups" width="360" loading="lazy" /> -->
+<!-- TODO: capture screenshot: antigravity-usage-quota — /usage in an Antigravity chat showing the quota groups with bars and reset times, the "AI credits: … remaining" line, then the last session's tokens -->
+<!-- <img src="../assets/screenshots/antigravity-usage-quota.jpg" alt="/usage in an Antigravity chat showing agy quota groups, remaining AI credits and the last session's tokens" width="360" loading="lazy" /> -->
 
 ## Scheduled runs
 
-Cron and webhook runs work with Antigravity, with three rules that differ from chat:
+Cron and webhook runs work with Antigravity, with these rules that differ from chat:
 
 - **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode`
-  (`"full"` or `"ask"`). A webhook run never gets Full access. Otherwise the run is Workspace, whatever the chat or
-  `untether.toml` says. A cron with `permission_mode = "ask"` has nobody to tap Approve: reads and in-project edits
-  run, everything that would ask is denied at once, and the answer ends with a `🔒 unattended … nobody to approve`
-  footer.
+  (`"full"` or `"ask"`). A webhook run never gets Full access. A chat's (or `untether.toml`'s) Full access or Ask
+  me runs a scheduled run as Workspace. A cron with `permission_mode = "ask"` has nobody to tap Approve: reads
+  and in-project edits run, everything that would ask is denied at once, and the answer ends with a
+  `🔒 unattended … nobody to approve` footer. A scheduled run in **Plan first** (the chat's mode or the cron's own)
+  posts the plan and changes nothing, with a `🔒 unattended … denied plan approval` footer; set
+  `permission_mode = "workspace"` on a cron that should make the change.
+- **They never show a question card.** Cron and webhook runs answer agy's questions themselves and carry on with
+  reasonable defaults.
 - **They are held when the project's agy config changed** since someone last ran Antigravity in that chat (next
   section). The next message someone sends in the chat runs with the changed config and shows what changed in
   a ⚠️ row; the schedule runs again after that. An `/at` or `/loop` run doesn't release it. Check the files the
@@ -381,9 +428,14 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 
 ## Not supported yet
 
-- Ask me in a project with agy config Untether doesn't manage: there is no "trust this config" option yet.
-  Approval buttons (**Ask me**), question buttons and `/steer` need [Untether's agy plugin](#telegram-questions-and-steer).
-- Live sessions: each message is its own agy run (a steer goes into the run that is in flight).
+- Ask me in a project with agy hooks, plugins, agents or MCP servers that Untether doesn't manage: Ask me is
+  refused there, and there is no "trust this config" option yet. Workspace and Full access still work.
+- Approval buttons, question buttons and `/steer` without [Untether's agy plugin](#telegram-questions-and-steer)
+  on the host.
+- Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no
+  status message after the answer and no `🔔 Background task finished` follow-up.
+- Claude Code's extras: the Pause & Outline Plan button, the `/config` → **Diff preview** toggle, Loop mode and a
+  compaction notice (agy compacts a conversation without reporting it).
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: each subagent gets a row in the `⏳ background` block, but its own steps, output and token use
   aren't shown, and a subagent that failed looks the same as one that finished.
@@ -398,6 +450,9 @@ The full comparison with other engines is in the
 - [Antigravity says it isn't signed in](troubleshooting.md#antigravity-says-it-isnt-signed-in)
 - [Antigravity says it can't run shell commands after I switched to Full access](troubleshooting.md#antigravity-says-it-cant-run-shell-commands-after-i-switched-to-full-access)
 - [Antigravity was blocked from using a shell command or a file outside the project](troubleshooting.md#antigravity-was-blocked-from-using-a-shell-command-or-a-file-outside-the-project)
+- [Antigravity Ask me is refused](troubleshooting.md#antigravity-ask-me-is-refused) (plugin not installed, not loaded
+  for the project, or from another Untether version)
+- [Antigravity says its quota or AI credits are used up](troubleshooting.md#antigravity-says-its-quota-or-ai-credits-are-used-up)
 - [Antigravity seems stuck after answering](troubleshooting.md#antigravity-seems-stuck-after-answering)
 - [A scheduled Antigravity run was refused because its workspace config changed](troubleshooting.md#a-scheduled-antigravity-run-was-refused-because-its-workspace-config-changed)
 - [A scheduled Antigravity run says it couldn't read agy's tool-permission setting](troubleshooting.md#a-scheduled-antigravity-run-says-it-couldnt-read-agys-tool-permission-setting)
@@ -413,7 +468,7 @@ All four keys are optional.
 === "untether config"
 
     ```sh
-    untether config set antigravity.model "gemini-3.8-flash"
+    untether config set antigravity.model "gemini-3.8-flash-medium"
     untether config set antigravity.permission_mode "workspace"
     ```
 
@@ -421,15 +476,16 @@ All four keys are optional.
 
     ```toml
     [antigravity]
-    model = "gemini-3.8-flash"     # passed to agy as the model; ids from `agy models`
-    cmd = "~/.local/bin/agy"       # default: agy on PATH, then ~/.local/bin/agy
-    permission_mode = "workspace"  # workspace (default) | ask | plan | full
-    approval_timeout_s = 900       # Ask me: how long a card waits (60 s or more)
+    model = "gemini-3.8-flash-medium"  # passed to agy as the model; ids from `agy models`
+    cmd = "~/.local/bin/agy"           # path to agy (default: agy on PATH)
+    permission_mode = "workspace"      # workspace (default) | ask | plan | full
+    approval_timeout_s = 900           # Ask me: how long a card waits (60–3000 s)
     ```
 
 `permission_mode = "full"` makes Full access the default for every Antigravity chat that hasn't picked a mode.
-Chats with an existing Workspace conversation still need `/new`. Sign-in is configured in agy and the service
-environment, not here. Full key reference: [Config reference](../reference/config.md#antigravity).
+Chats with an existing Workspace conversation still need `/new`. There is no `untether.toml` key for the effort
+level: set it per chat in `/config` → **Effort**, or use a model id that names it. Sign-in is configured in agy and
+the service environment, not here. Full key reference: [Config reference](../reference/config.md#antigravity).
 
 ## Related
 

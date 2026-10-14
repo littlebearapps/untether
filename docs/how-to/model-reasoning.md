@@ -85,7 +85,7 @@ Antigravity models don't all take the same levels: some accept only two of the t
 
 - If a saved level isn't one the model accepts, that run drops it and shows `⚠️ Effort high isn't available for <model>, so agy used its default`.
 - Untether learns a model's levels only when the Effort page is opened. On a model you switched to without opening it, a level the model refuses makes the run fail with `That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix.` Open the page once, or clear the level with `/reasoning clear`.
-- Prefer a base model id. A model id that already names its effort (ending `-low`, `-medium` or `-high`) fixes the level, and Untether doesn't pass `--effort` with it. Run `agy models` on the host to list model ids.
+- A model id that already names its effort (ending `-low`, `-medium` or `-high`, as `agy models` lists them) fixes the level, and Untether doesn't pass `--effort` with it. The id without the suffix (for example `gemini-3.8-flash`) takes the level from `/config` → **Effort**; with no level set, agy 1.3.4 and newer use the model's default level. Older agy (1.3.1 to 1.3.3) refuses such a model without a level, and the run stops with `That model needs an effort level — agy offers low, medium, high. Set one with /reasoning set <level> or in /config → Effort, then send your message again.`
 - The footer shows what was used: model · effort · mode.
 
 ## Per-engine reasoning
