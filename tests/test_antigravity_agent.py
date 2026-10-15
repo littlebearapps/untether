@@ -77,11 +77,33 @@ def test_agent_advice_covers_cron_and_webhook_runs() -> None:
     so chat-only advice sent its reader to the wrong switch."""
     advice = agent.AGENT_MD.split("# Working without a shell", 1)[1]
     assert _RC3_ADVICE not in advice
-    assert "In a chat: /config, then Permission mode, then Full access" in advice
+    assert "/config, then Permission mode, then Full access" in advice
     assert '`permission_mode = "full"` on the cron itself' in advice
     assert "a webhook never does" in advice
     # Still a short agent: four bullets, no essay.
-    assert advice.count("\n- ") == 4 and len(advice) < 1000
+    assert advice.count("\n- ") == 4 and len(advice) < 1100
+
+
+# The rc5 chat route (#1055), which knew only Workspace and Full access.
+_RC5_CHAT_ADVICE = (
+    "In a chat: /config, then Permission mode, then Full access, and then /new"
+)
+
+
+def test_agent_advice_says_new_is_enough_in_ask_me_or_full_access() -> None:
+    """#1108 (AG-55, agy 1.3.5): a chat switched to Ask me without /new
+    resumes on this agent, and the model told the user to pick Full access,
+    then /new, where /new alone gives approval buttons. One file serves every
+    chat and agy has no per-run system prompt, so the route names both cases:
+    /new first, Full access only when the chat is still on Workspace."""
+    advice = agent.AGENT_MD.split("# Working without a shell", 1)[1]
+    assert _RC5_CHAT_ADVICE not in advice
+    chat = advice.split("In a chat:", 1)[1].split("Scheduled and webhook", 1)[0]
+    assert chat.lstrip().startswith("send /new")
+    assert "Ask me" in chat and "/new is all it takes" in chat
+    # A chat that really is on Workspace still hears about Full access.
+    assert "still on Workspace or Plan first" in chat
+    assert "/config, then Permission mode, then Full access" in chat
 
 
 def _sent_prompt(options: EngineRunOptions | None) -> str:

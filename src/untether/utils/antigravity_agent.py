@@ -27,8 +27,12 @@ the way agy does): ``project_defines_agent`` asks only whether the project
 can supply agents at all, and if so the run goes without ``--agent``.
 
 agy keeps a conversation on the agent it started with and ignores
-``--agent`` on a resume, so a chat switched to Full access keeps the
-no-shell toolset until ``/new``. The agent's own text and ``/config`` say so.
+``--agent`` on a resume, so a chat switched to Full access or Ask me keeps
+the no-shell toolset until ``/new``. The agent's own text and ``/config`` say
+so. #1108: the model can't tell which mode the chat is on now, and Untether
+keeps no record of a conversation's first agent (R3-3), so the text leads
+with ``/new`` and asks for Full access only of a chat still on Workspace or
+Plan first: in Ask me ``/new`` alone brings the approval buttons.
 The text also covers cron and webhook runs, which never take Full access
 from the chat (#1055): there is one file and no per-run system prompt, so
 it gives both routes rather than chat-only advice.
@@ -72,7 +76,7 @@ When you need the user's choice, ask with `ask_question`. If no answer comes bac
 # Working without a shell
 - To look around, use `list_dir`, `find_by_name`, `grep_search` and `view_file`.
 - To create, copy or change a file, use `write_to_file`, `replace_file_content` or `multi_replace_file_content`.
-- If a request needs something you cannot do here (running a command, deleting or renaming a file, fetching a URL), do the part you can, then say plainly what was left and that it needs Full access. In a chat: /config, then Permission mode, then Full access, and then /new, because a conversation that started in Workspace mode stays in it. Scheduled and webhook runs don't follow the chat's setting: a cron gets Full access only from `permission_mode = "full"` on the cron itself, and a webhook never does, so it has to be done from the chat.
+- If a request needs something you cannot do here (running a command, deleting or renaming a file, fetching a URL), do the part you can, then say plainly what was left and how to get it done. In a chat: send /new, because a conversation keeps the tools it started with. If the chat is already set to Ask me (approval buttons for each command) or Full access, /new is all it takes; if it is still on Workspace or Plan first, pick Full access before /new (/config, then Permission mode, then Full access). Scheduled and webhook runs don't follow the chat's setting: a cron gets Full access only from `permission_mode = "full"` on the cron itself, and a webhook never does, so it has to be done from the chat.
 - Answer simple questions directly without exploring the project first.
 """
 
