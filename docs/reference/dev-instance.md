@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # Dev Instance
 
 The release pipeline uses two isolated Untether instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.

@@ -74,7 +74,6 @@ nav = [
     { "Glossary" = "reference/glossary.md" },
     { "Context resolution" = "reference/context-resolution.md" },
     { "Triggers" = "reference/triggers/triggers.md" },
-    { "Dev instance" = "reference/dev-instance.md" },
     { "Telegram transport" = "reference/transports/telegram.md" },
     { "Runners" = [
       { "Overview" = "reference/runners/index.md" },
