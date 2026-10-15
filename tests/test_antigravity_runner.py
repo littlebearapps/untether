@@ -880,6 +880,18 @@ async def test_version_guard_fails_open_on_garbage(
     assert any(e["event"] == "antigravity.version.newer_than_probed" for e in logs)
 
 
+@pytest.mark.anyio
+async def test_version_guard_quiet_on_probed_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1091: the drift suite was re-derived on agy 1.3.5, so a 1.3.5 run no
+    longer logs ``newer_than_probed`` on every message."""
+    monkeypatch.setattr(agy, "agy_cli_version", lambda cmd: "1.3.5")
+    with structlog.testing.capture_logs() as logs:
+        assert await _runner()._unsupported_version_event(None) is None
+    assert not any(e["event"] == "antigravity.version.newer_than_probed" for e in logs)
+
+
 def test_version_probe_cached_per_mtime(tmp_path: Path) -> None:
     script = tmp_path / "agy"
     script.write_text("#!/bin/sh\necho 1.3.1\n")

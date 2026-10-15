@@ -188,6 +188,9 @@ def test_agy_flag_mode_is_accept_edits_or_plan_only() -> None:
         "plan ",
         "ACCEPT-EDITS",
         "accept-edits ",
+        # #1091: agy 1.3.5's own auto mode runs shell commands it judges
+        # safe, so it is never Workspace's mode.
+        "auto",
         "",
         None,
         agy.BYPASS_FLAG,

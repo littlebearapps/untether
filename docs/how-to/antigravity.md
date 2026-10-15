@@ -26,7 +26,7 @@ flags and sessions, and a Gemini CLI setup doesn't carry over.
 
 You need:
 
-- **agy 1.3.1 or newer** on the machine that runs Untether (tested on 1.3.4). An older agy is refused before
+- **agy 1.3.1 or newer** on the machine that runs Untether (tested on 1.3.5). An older agy is refused before
   anything starts. agy updates itself; `agy update` forces it.
 - **agy signed in** on that machine. Untether never signs in for you.
 - **A project** for the chat. Antigravity edits files where it runs, so Untether won't run it in a chat with no
@@ -326,7 +326,7 @@ without questions or steer, and scheduled agy runs are held.
 ## Models and effort
 
 - **Model.** `/model set <id>` sets the chat's model and `/model clear` goes back to agy's default. Run
-  `agy models` on the host for the list of ids. An id that ends in its effort (`gemini-3.8-flash-medium`) fixes
+  `agy models` on the host for the list of ids (it lists each one with its level as a suffix). An id that ends in its effort (`gemini-3.8-flash-medium`) fixes
   the level, and Untether passes no `--effort` with it. The same id without the suffix (`gemini-3.8-flash`) lets
   you pick the level in `/config` → **Effort**; with none picked, agy 1.3.4 and newer use the model's default
   level (agy 1.3.1 to 1.3.3 refuse to start, and the run stops with `That model needs an effort level`).
@@ -435,6 +435,10 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
   status message after the answer and no `🔔 Background task finished` follow-up.
 - Claude Code's extras: the Pause & Outline Plan button, the `/config` → **Diff preview** toggle, Loop mode and a
   compaction notice (agy compacts a conversation without reporting it).
+- agy's own `/compact` (agy 1.3.5): Untether doesn't pass it through, so `/compact` in an Antigravity chat reaches
+  the model as an ordinary message and compacts nothing, even if the answer says it did.
+- agy's own Auto mode (`--mode auto`, agy 1.3.5): none of the permission modes uses it. Workspace never runs shell
+  commands, and Auto runs the ones it judges safe.
 - Images as image input: a Telegram photo reaches agy as a saved file path.
 - Subagent detail: each subagent gets a row in the `⏳ background` block, but its own steps, output and token use
   aren't shown, and a subagent that failed looks the same as one that finished.
