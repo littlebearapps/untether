@@ -291,6 +291,28 @@ accessible immediately, and removed webhooks start returning 404.
     straight away (crons stop and webhook paths return 404). See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
     for the full list.
 
+### When a trigger entry is invalid
+
+Each `[[triggers.crons]]` and `[[triggers.webhooks]]` entry is checked on its own
+([#1117](https://github.com/littlebearapps/untether/issues/1117)). An entry with a
+mistake (a missing `prompt`, a typo in a key, or a key your installed version doesn't
+know yet) is skipped and the others keep running. Untether logs
+`triggers.trigger_invalid` and posts a notice in Telegram naming the skipped trigger
+and what's wrong with it. A skipped webhook is switched off, so its old secret stops
+working too.
+
+A mistake that affects every trigger still stops them all: a bad `[triggers.server]`
+value, an unknown key directly under `[triggers]`, or two entries with the same `id`
+(or webhooks with the same `path`). At startup nothing runs (`triggers.init_failed`).
+On a reload the previous crons and webhooks keep running (`config.reload.triggers_failed`),
+and the Telegram notice names every webhook whose **old secret is still accepted**, so
+a secret you were rotating doesn't stay live without you knowing.
+
+!!! tip "Upgrade first, then edit"
+    When a new version adds a trigger key, install it before you add the key to
+    `untether.toml`. An older version rejects a key it doesn't know (now only that one
+    trigger is skipped).
+
 ## One-shot crons with `run_once`
 
 Set `run_once = true` on a cron to fire once then auto-disable:
@@ -383,7 +405,8 @@ See the [Triggers reference — Trigger visibility](../reference/triggers/trigge
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.
 - All secret comparisons use timing-safe comparison.
 - Rate limiting prevents abuse (token-bucket, per-webhook and global).
-- Use a long random secret (for example `openssl rand -hex 32`). Untether requires a secret but does not enforce a minimum length.
+- Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning at startup and on each reload; it still works for now, but a future release will refuse it ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+- Untether never writes a webhook secret to its logs or error messages, including when the webhook's entry is invalid.
 - Failed auth attempts are budgeted per webhook and client address (`rate_limit` a minute). A sender that connects directly and goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected.
 - Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy. Untether ignores `X-Forwarded-For`. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
 - Webhook prompts are prefixed with an untrusted-payload marker.

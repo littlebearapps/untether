@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -469,6 +469,97 @@ async def _notify_reload_applied(
         restart_keys=restart_keys,
         targets=[list(target) for target in targets],
         sent_count=sent_count,
+    )
+
+
+async def _notify_trigger_config_problem(
+    cfg: TelegramBridgeConfig,
+    text: str,
+    *,
+    running_tasks: Mapping[MessageRef, object] | None = None,
+) -> None:
+    """#1117: post a trigger config problem (skipped entries, or a whole
+    ``[triggers]`` block that failed) to the reload-notice audience.
+
+    Rendered from markdown into entities (no parse mode), so validation text
+    full of ``_`` can't make the send fail. Never raises.
+    """
+    from ..markdown import MarkdownParts
+    from .render import prepare_telegram
+
+    try:
+        rendered, entities = prepare_telegram(MarkdownParts(header=text))
+        targets = _reload_notice_targets(cfg, running_tasks, restart_pending=False)
+    except Exception:  # noqa: BLE001 — a notice must never break startup/reload
+        logger.warning("triggers.config_notice.crashed", exc_info=True)
+        return
+    sent_count = 0
+    for chat_id, thread_id in targets:
+        try:
+            sent = await cfg.exec_cfg.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=rendered, extra={"entities": entities}),
+                options=SendOptions(notify=True, thread_id=thread_id),
+            )
+            if sent is not None:
+                sent_count += 1
+        except Exception as exc:  # noqa: BLE001 — logged then continue
+            logger.warning(
+                "triggers.config_notice.failed",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+    logger.info(
+        "triggers.config_notice.sent",
+        targets=[list(target) for target in targets],
+        sent_count=sent_count,
+    )
+
+
+async def _notify_new_invalid_triggers(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    invalid: Sequence[InvalidTrigger],
+) -> None:
+    """#1117: on reload, announce only entries not already announced (an
+    unrelated edit doesn't repeat the notice; a fixed entry is forgotten)."""
+    from ..config_reload_notification import format_invalid_triggers_notice
+
+    new = [item for item in invalid if item not in state.trigger_invalid_notified]
+    state.trigger_invalid_notified = set(invalid)
+    if new:
+        await _notify_trigger_config_problem(
+            cfg,
+            format_invalid_triggers_notice(new, phase="reload"),
+            running_tasks=state.running_tasks,
+        )
+
+
+async def _notify_trigger_block_failure_on_reload(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    trigger_manager: TriggerManager | None,
+    error: str,
+) -> None:
+    """#1117: a reload whose ``[triggers]`` block failed keeps the previous
+    triggers, so say so in Telegram, naming the webhooks whose old secret is
+    still accepted. Once per distinct error."""
+    from ..config_reload_notification import format_trigger_block_failure_notice
+
+    if state.trigger_block_error_notified == error:
+        return
+    state.trigger_block_error_notified = error
+    active = trigger_manager.secret_webhook_ids() if trigger_manager else []
+    await _notify_trigger_config_problem(
+        cfg,
+        format_trigger_block_failure_notice(
+            error,
+            phase="reload",
+            running=trigger_manager is not None,
+            active_secret_webhook_ids=active,
+        ),
+        running_tasks=state.running_tasks,
     )
 
 
@@ -1016,6 +1107,10 @@ class TelegramLoopState:
     # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
     # don't repeat the warning.
     trigger_chat_fallbacks_warned: set[TriggerChatFallback] = field(default_factory=set)
+    # #1117: invalid trigger entries / the block-level error already announced
+    # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
+    trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
+    trigger_block_error_notified: str | None = None
 
 
 def _triggers_enable_needs_restart(
@@ -1035,7 +1130,7 @@ def _triggers_enable_needs_restart(
 if TYPE_CHECKING:
     from ..runner_bridge import RunningTasks
     from ..triggers.manager import TriggerManager
-    from ..triggers.settings import TriggerChatFallback
+    from ..triggers.settings import InvalidTrigger, TriggerChatFallback
 
 
 _FORWARD_FIELDS = (
@@ -2204,24 +2299,44 @@ async def run_main_loop(
                         )
 
                 # --- Hot-reload trigger configuration ---
+                from ..triggers.settings import format_trigger_error
+
                 if triggers_read_error is not None:
                     if trigger_manager is not None:
+                        reload_error = format_trigger_error(triggers_read_error)
                         logger.warning(
                             "config.reload.triggers_failed",
-                            error=str(triggers_read_error),
+                            error=reload_error,
+                        )
+                        await _notify_trigger_block_failure_on_reload(
+                            cfg, state, trigger_manager, reload_error
                         )
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
                         from ..triggers.settings import (
                             TriggersSettings,
-                            parse_trigger_config,
+                            log_invalid_triggers,
+                            parse_trigger_config_isolated,
+                            warn_short_webhook_secrets,
                             warn_trigger_chat_fallbacks,
                         )
 
                         if isinstance(raw_triggers, dict) and triggers_enabled_now:
-                            new_settings = parse_trigger_config(raw_triggers)
+                            # #1117: a bad entry skips only that trigger.
+                            parsed_triggers = parse_trigger_config_isolated(
+                                raw_triggers
+                            )
+                            new_settings = parsed_triggers.settings
                             if trigger_manager is not None:
                                 trigger_manager.update(new_settings)
+                            state.trigger_block_error_notified = None
+                            log_invalid_triggers(
+                                parsed_triggers.invalid, phase="reload"
+                            )
+                            await _notify_new_invalid_triggers(
+                                cfg, state, parsed_triggers.invalid
+                            )
+                            warn_short_webhook_secrets(new_settings)
                             # #894: warn (once) about project-only triggers
                             # that will post to the default chat.
                             warn_trigger_chat_fallbacks(
@@ -2233,10 +2348,18 @@ async def run_main_loop(
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
+                            state.trigger_invalid_notified = set()
+                            state.trigger_block_error_notified = None
                     except (ValueError, TypeError, OSError) as exc:
+                        # #1117: secret-free summary, plus a Telegram notice
+                        # (the previous triggers — and secrets — stay live).
+                        reload_error = format_trigger_error(exc)
                         logger.warning(
                             "config.reload.triggers_failed",
-                            error=str(exc),
+                            error=reload_error,
+                        )
+                        await _notify_trigger_block_failure_on_reload(
+                            cfg, state, trigger_manager, reload_error
                         )
 
             if watch_enabled and config_path is not None:
@@ -2693,17 +2816,39 @@ async def run_main_loop(
             # --- Trigger system (webhooks + cron) ---
             trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
+                from ..config_reload_notification import (
+                    format_invalid_triggers_notice,
+                    format_trigger_block_failure_notice,
+                )
                 from ..triggers.cron import run_cron_scheduler
                 from ..triggers.dispatcher import TriggerDispatcher
                 from ..triggers.manager import TriggerManager
                 from ..triggers.server import run_webhook_server
                 from ..triggers.settings import (
-                    parse_trigger_config,
+                    format_trigger_error,
+                    log_invalid_triggers,
+                    parse_trigger_config_isolated,
+                    warn_short_webhook_secrets,
                     warn_trigger_chat_fallbacks,
                 )
 
                 try:
-                    trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    # #1117: a bad cron/webhook entry skips only that trigger.
+                    parsed_triggers = parse_trigger_config_isolated(cfg.trigger_config)
+                    trigger_settings = parsed_triggers.settings
+                    log_invalid_triggers(parsed_triggers.invalid, phase="startup")
+                    state.trigger_invalid_notified = set(parsed_triggers.invalid)
+                    if parsed_triggers.invalid:
+                        tg.start_soon(
+                            partial(
+                                _notify_trigger_config_problem,
+                                cfg,
+                                format_invalid_triggers_notice(
+                                    parsed_triggers.invalid, phase="startup"
+                                ),
+                            )
+                        )
+                    warn_short_webhook_secrets(trigger_settings)
                     # #894: a project-only trigger posts to the default chat,
                     # not the project's — warn once so it isn't a surprise.
                     warn_trigger_chat_fallbacks(
@@ -2754,10 +2899,23 @@ async def run_main_loop(
                         crons_configured=len(trigger_settings.crons),
                     )
                 except (ValueError, TypeError, OSError) as exc:
+                    # #1117: secret-free summary (no pydantic input repr) —
+                    # the issue-watcher copies ``error`` into GitHub issues.
+                    init_error = format_trigger_error(exc)
                     logger.error(
                         "triggers.init_failed",
-                        error=str(exc),
+                        error=init_error,
                         error_type=exc.__class__.__name__,
+                    )
+                    state.trigger_block_error_notified = init_error
+                    tg.start_soon(
+                        partial(
+                            _notify_trigger_config_problem,
+                            cfg,
+                            format_trigger_block_failure_notice(
+                                init_error, phase="startup", running=False
+                            ),
+                        )
                     )
                     # #894: nothing is running, so treat triggers as off —
                     # a reload that fixes the TOML is then flagged

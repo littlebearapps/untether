@@ -282,6 +282,8 @@ Available authentication modes:
 !!! warning "Never use `auth = \"none\"` in production"
     Without authentication, anyone who can reach the webhook endpoint can trigger arbitrary agent runs on your server.
 
+Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning; a future release will refuse it. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+
 ## Bind webhook server to localhost
 
 The webhook server should only listen on localhost. Put it behind a reverse proxy (nginx, Caddy) with TLS for external access:

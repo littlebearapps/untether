@@ -178,6 +178,21 @@ class TestTriggerManagerUpdate:
 # ── Webhook server with TriggerManager ──────────────────────────────
 
 
+def test_1117_secret_webhook_ids_skips_unauthenticated() -> None:
+    """What a failed reload leaves active with its old secret (#1117)."""
+    mgr = TriggerManager(
+        _settings(
+            webhooks=[
+                _webhook("gh", "/hooks/gh"),
+                _webhook("hmac", "/hooks/hmac", auth="hmac-sha256"),
+                {**_webhook("open", "/hooks/open", auth="none"), "secret": None},
+            ]
+        )
+    )
+    assert sorted(mgr.secret_webhook_ids()) == ["gh", "hmac"]
+    assert TriggerManager().secret_webhook_ids() == []
+
+
 class TestWebhookServerWithManager:
     @pytest.mark.anyio
     async def test_health_reflects_manager_count(self):

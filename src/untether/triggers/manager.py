@@ -211,6 +211,11 @@ class TriggerManager:
         """Return a snapshot list of all configured webhook ids."""
         return [wh.id for wh in self._webhooks_by_path.values()]
 
+    def secret_webhook_ids(self) -> list[str]:
+        """Ids of the live webhooks that accept a secret (bearer / HMAC) —
+        what a failed reload leaves active with its old secret (#1117)."""
+        return [wh.id for wh in self._webhooks_by_path.values() if wh.auth != "none"]
+
     def crons_for_chat(
         self, chat_id: int, default_chat_id: int | None = None
     ) -> list[CronConfig]:

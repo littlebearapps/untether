@@ -185,3 +185,68 @@ def test_empty_changed_keys_render_gracefully() -> None:
     text = format_hot_reload_only_notice(path="/tmp/x.toml", changed_keys=[])
     assert "Hot-reloaded" in text
     assert "(no keys)" in text
+
+
+# ── #1117: trigger config problem notices ──
+
+
+def test_1117_invalid_triggers_notice_names_each_skipped_trigger() -> None:
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [
+            InvalidTrigger("cron", "nightly", "prompt: required"),
+            InvalidTrigger("webhook", "gh", "auth: Input should be 'bearer'"),
+        ],
+        phase="startup",
+    )
+    assert text.startswith("⚠️ Trigger config: 2 triggers skipped")
+    assert "• cron nightly: prompt: required" in text
+    assert "• webhook gh:" in text
+    assert "started normally" in text
+    assert "no earlier secret for it stays active" in text
+
+
+def test_1117_invalid_triggers_notice_clips_long_errors() -> None:
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [InvalidTrigger("cron", "a", "x" * 1000)], phase="reload"
+    )
+    assert "x" * 300 not in text
+    assert "…" in text
+    assert "reloaded normally" in text
+    assert "webhook" not in text  # no secret line for crons only
+
+
+def test_1117_block_failure_notice_variants() -> None:
+    from untether.config_reload_notification import (
+        format_trigger_block_failure_notice,
+    )
+
+    startup = format_trigger_block_failure_notice(
+        "server.port: bad", phase="startup", running=False, restart_hint="restart"
+    )
+    assert "Triggers failed to start" in startup
+    assert "then restart." in startup
+
+    idle = format_trigger_block_failure_notice(
+        "server.port: bad", phase="reload", running=False
+    )
+    assert "no crons or webhooks are running" in idle
+
+    live = format_trigger_block_failure_notice(
+        "server.port: bad",
+        phase="reload",
+        running=True,
+        active_secret_webhook_ids=["stripe", "gh"],
+    )
+    assert "previous crons and webhooks are still running" in live
+    assert "old webhook secret is still active for: gh, stripe" in live
+
+    no_secret = format_trigger_block_failure_notice(
+        "server.port: bad", phase="reload", running=True
+    )
+    assert "secret" not in no_secret

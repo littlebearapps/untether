@@ -265,6 +265,8 @@ Run these in addition to the standard tiers for rc4.
 | R8 | **update_id persistence** | `systemctl --user restart untether-dev` mid-conversation | Startup log `startup.offset.resumed`; no duplicate processing of pre-restart messages |
 | R9 | **sd_notify READY=1** | `systemctl --user status untether-dev` after start | "Active: active (running)" only appears after READY=1 |
 | R10 | **sd_notify STOPPING=1 during drain** | `systemctl --user restart untether-dev` while a run is active | journalctl shows `sdnotify.stopping` before `shutdown.draining` |
+| R11 | **One invalid trigger ([#1117](https://github.com/littlebearapps/untether/issues/1117))** | Add a second cron with an unknown key (`future_key = 1`) next to a valid `* * * * *` cron; save (hot-reload) | Valid cron still fires; Telegram notice `⚠️ Trigger config: 1 trigger skipped (invalid)` naming the bad id; ERROR `triggers.trigger_invalid phase=reload`; no `triggers.init_failed` |
+| R12 | **Failed reload keeps old secret ([#1117](https://github.com/littlebearapps/untether/issues/1117))** | With a bearer webhook live, change its `secret` and set `[triggers.server] port = "x"` in the same save; curl with the old secret | Notice `⚠️ Trigger config reload failed: …` with `The old webhook secret is still active for: <id>`; old secret still returns 202; `config.reload.triggers_failed` logged; neither secret appears in `journalctl` |
 
 ---
 

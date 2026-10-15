@@ -121,7 +121,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.36.0 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
-| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. Untether only checks that it isn't empty — there is no minimum length, so make it long and random (for example `openssl rand -hex 32`). |
+| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. Make it long and random (for example `openssl rand -hex 32`): a `bearer` or HMAC secret under 32 characters logs WARNING `triggers.webhook.short_secret` (still accepted for now, [#1117](https://github.com/littlebearapps/untether/issues/1117)). Never logged or shown in errors. |
 | `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
 | `event_filter` | string\|null | `null` | Only process requests matching this event type header. |
 | `accept_multipart` | bool | `false` | Accept `multipart/form-data` uploads (see [Multipart file uploads](#multipart-file-uploads)). |
@@ -724,8 +724,9 @@ the filesystem context.
       `locked_out=true` on the failure that locks an address out. Past that,
       failures are debug-level, as are `triggers.webhook.auth_locked_out` and
       `triggers.webhook.auth_failed_over_limit` (the `429` answers).
-    - **Use a long random secret.** Untether requires a secret but does not
-      enforce a minimum length. Generate at least 32 random bytes (for
+    - **Use a long random secret.** Untether requires a secret and warns
+      (`triggers.webhook.short_secret`) when a `bearer` or HMAC secret is
+      under 32 characters. Generate at least 32 random bytes (for
       example `openssl rand -hex 32`); with that, the number of guesses an
       attacker gets does not matter.
     - **Known limitations.** Untether treats each non-loopback address as one
@@ -1019,8 +1020,16 @@ reads `manager.crons` on each tick, and the webhook server calls `manager.webhoo
 on each request. When the config file changes, `handle_reload()` re-parses the `[triggers]`
 TOML section and calls `manager.update()`, which atomically swaps the configuration. In-flight
 iterations over the old cron list are unaffected because `update()` creates new container objects.
-If the new `[triggers]` section fails validation, `config.reload.triggers_failed` is logged and
-the previous configuration stays in force.
+Each cron and webhook entry is validated on its own
+([#1117](https://github.com/littlebearapps/untether/issues/1117)): an invalid entry is
+skipped (ERROR `triggers.trigger_invalid` with `kind`, `trigger_id`, `phase`) and the rest
+load, at startup and on reload. A Telegram notice names the skipped entries (once per
+entry and error). If the block itself fails (`[triggers.server]`, an unknown `[triggers]`
+key, duplicate ids or paths), startup logs `triggers.init_failed` and nothing runs; a
+reload logs `config.reload.triggers_failed` and the previous configuration stays in force.
+Both post a Telegram notice, and the reload notice names the webhooks whose old secret is
+still accepted. Logged errors are summaries without pydantic's input values, so they never
+carry a secret.
 
 The `triggers.manager.updated` log line lists added/removed crons and webhooks after each reload.
 `last_fired` state is preserved across reloads so the same cron won't fire twice in the same minute.
