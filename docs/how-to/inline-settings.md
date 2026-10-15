@@ -20,7 +20,7 @@ The home page shows current values grouped under **Agent controls**, **Display**
 Agent controls (Claude Code)
 Permission mode: on  · approve the plan first
 Ask mode: on  · interactive questions
-Diff preview: off  · buttons only
+Diff preview: default  · diffs on cards
 
 Display
 Cost & usage: cost on, sub off
@@ -56,7 +56,7 @@ Effort: default  · high
 Tap any button to open that setting's page. Each sub-page shows:
 
 - A description of the setting
-- The current effective value (resolved from override or default — never shows a bare "default" label)
+- The current effective value (resolved from override or default — never shows a bare "default" label, except Diff preview, whose unset state is neither on nor off: see below)
 - Buttons to change the value
 - A **Clear override** button to revert to the global/engine default
 - A **← Back** button to return to the home page
@@ -110,7 +110,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |
 | Verbose | off, on | No (in memory, cleared on restart) |
-| Diff preview | off, on | Yes (chat prefs) |
+| Diff preview | default (not set), on, off | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
 | Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh; Antigravity: low, medium, high (only those the model accepts) | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
@@ -119,6 +119,8 @@ When you switch engines via the Engine & model page, the home page automatically
 | Follow-up | queue, steer | Yes (chat prefs) |
 | Budget | off, on | Yes (chat prefs) |
 | Stop at limit | off, on | Yes (chat prefs) |
+
+Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes edits wait for your approval, with the diff; **off** shows approval buttons only. With no setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 

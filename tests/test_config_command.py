@@ -3083,13 +3083,13 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_home(self, tmp_path):
-        """No override → home shows 'default'."""
+        """No override → home shows 'default', never 'off' (#1115)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Diff preview: <b>off</b>" in msg.text
+        assert "Diff preview: <b>default</b>  · diffs on cards" in msg.text
 
     @pytest.mark.anyio
     async def test_diff_preview_on_label_on_home(self, tmp_path):
@@ -3179,7 +3179,7 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_page(self, tmp_path):
-        """No override → page shows resolved 'off'."""
+        """No override → page shows 'default', not 'off' (#1115)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -3190,7 +3190,141 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
+        assert "Current: <b>default</b>" in msg.text
+        assert "Current: <b>off</b>" not in msg.text
+
+
+# ---------------------------------------------------------------------------
+# #1115: Diff preview unset is "default", not "off"
+# ---------------------------------------------------------------------------
+
+_DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
+
+
+class TestDiffPreviewUnsetLabel1115:
+    """Unset Diff preview still shows diffs on approval cards (Claude:
+    ``run_opts.diff_preview is not False``; agy: ``card_title(diff=...)``)
+    but holds no edits (both gate only on ``is True``). The page, the home
+    line and the toggle tick must all say "default", never "off"."""
+
+    @staticmethod
+    async def _setup(tmp_path, monkeypatch, engine: str, value: bool | None):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        if engine == "antigravity":
+            from untether.antigravity import gate_plugin
+
+            monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        pm = "ask" if engine == "antigravity" else None
+        if value is not None or pm is not None:
+            await prefs.set_engine_override(
+                123, engine, EngineOverrides(diff_preview=value, permission_mode=pm)
+            )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, engine: str, args: str = ""):
+        return _make_ctx(
+            args_text=args,
+            text=f"config:{args}" if args else "/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine=engine,
+        )
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_unset_shows_default(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, None)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert f"Current: <b>default</b> — {_DP_UNSET_TEXT}" in msg.text
+        # The option list no longer calls "off" the default.
+        assert "buttons only (default)" not in msg.text
+        assert f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}" in msg.text
+        labels = _buttons_labels(msg)
+        assert "On" in labels
+        assert "Off" in labels
+        assert "Clear" in labels
+        assert not any(label.startswith("✓") for label in labels)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_on(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, True)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Current: <b>on</b>" in msg.text
+        labels = _buttons_labels(msg)
+        assert "✓ On" in labels
+        assert "Off" in labels
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_off(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, False)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
         assert "Current: <b>off</b>" in msg.text
+        labels = _buttons_labels(msg)
+        assert "✓ Off" in labels
+        assert "On" in labels
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    @pytest.mark.parametrize(
+        ("value", "line"),
+        [
+            (None, "Diff preview: <b>default</b>  · diffs on cards"),
+            (True, "Diff preview: <b>on</b>  · edits ask first"),
+            (False, "Diff preview: <b>off</b>  · buttons only"),
+        ],
+    )
+    async def test_home_line(self, tmp_path, monkeypatch, engine, value, line):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, value)
+        ctx = self._ctx(state_path, engine)
+        await ConfigCommand().handle(ctx)
+        assert line in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_clear_returns_home_showing_default(
+        self, tmp_path, monkeypatch, engine
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, False)
+        ctx = self._ctx(state_path, engine, "dp:clr")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "Diff preview: <b>default</b>  · diffs on cards" in text
+        assert "Diff preview: <b>off</b>" not in text
+
+    def test_toggle_row_without_default_ticks_nothing(self):
+        from untether.telegram.commands.config import _toggle_row
+
+        row = _toggle_row(
+            "Diff",
+            current=None,
+            default=None,
+            on_data="a",
+            off_data="b",
+            clr_data="c",
+        )
+        assert [b["text"] for b in row] == ["On", "Off", "Clear"]
+        row = _toggle_row(
+            "Diff",
+            current=False,
+            default=None,
+            on_data="a",
+            off_data="b",
+            clr_data="c",
+        )
+        assert [b["text"] for b in row] == ["On", "✓ Off", "Clear"]
 
 
 # ---------------------------------------------------------------------------
