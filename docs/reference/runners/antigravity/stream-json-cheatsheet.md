@@ -20,6 +20,13 @@ Untether starts agy with `--input-format stream-json` and writes one line to std
 {"event":"user","message":{"content":"your prompt"}}
 ```
 
+agy runs one turn per line. With stdin left open it answers each line with its own `result` and then waits, idle,
+for the next; closing stdin ends it with exit code 0 (agy 1.3.5; the seam for live sessions,
+[#977](https://github.com/littlebearapps/untether/issues/977)). A `/compact` line, sent without
+`--disable-slash-commands` (Untether passes that flag, and escapes a leading `/` in Plan first), compacts the conversation: one
+`checkpoint` step, then a `SUCCESS` result with an empty `response` and no new tokens. Nothing in the stream says
+how much smaller the context got (agy 1.3.5).
+
 ## `init`
 
 ```json

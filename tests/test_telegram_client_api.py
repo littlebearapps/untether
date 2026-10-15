@@ -988,3 +988,195 @@ async def test_823_kind_on_http_api_and_network_errors() -> None:
     for name in ("telegram.http_error", "telegram.api_error", "telegram.network_error"):
         recs = _events(logs, name)
         assert recs and recs[0]["kind"] == "final", name
+
+
+# --- #1111: transient getUpdates failures are WARNING until persistent -------
+
+_BAD_GATEWAY = {"ok": False, "error_code": 502, "description": "Bad Gateway"}
+
+
+def _scripted_poll_client(
+    script: list[object], clock: _FakeClock
+) -> tuple[HttpBotClient, httpx.AsyncClient]:
+    """Each request takes the next step: an exception to raise, an HTTP
+    status to answer with a Bot API error body, or ``"ok"``."""
+    steps = iter(script)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        step = next(steps)
+        if isinstance(step, Exception):
+            raise step
+        if step == "ok":
+            return httpx.Response(200, json={"ok": True, "result": []})
+        assert isinstance(step, int)
+        body = {"ok": False, "error_code": step, "description": f"status {step}"}
+        if step == 502:
+            body = _BAD_GATEWAY
+        return httpx.Response(step, json=body, request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return HttpBotClient("123:abcDEF_ghij", http_client=http, clock=clock), http
+
+
+def _levels(logs: list[dict], name: str) -> list[str]:
+    return [r["log_level"] for r in _events(logs, name)]
+
+
+@pytest.mark.anyio
+async def test_1111_transient_502_on_get_updates_warns_then_recovers() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([502, 502, 502, 502, "ok"], clock)
+    try:
+        with capture_logs() as logs:
+            for t in (0, 2, 4, 6):
+                clock.now = float(t)
+                assert await api.get_updates(offset=None, timeout_s=1) is None
+            clock.now = 8.0
+            assert await api.get_updates(offset=None, timeout_s=1) == []
+    finally:
+        await http.aclose()
+    assert _levels(logs, "telegram.http_error") == ["warning"] * 4
+    assert not [r for r in logs if r["log_level"] == "error"]
+    warnings = _events(logs, "telegram.http_error")
+    assert [w["consecutive_failures"] for w in warnings] == [1, 2, 3, 4]
+    assert warnings[0]["status"] == 502
+    assert "Bad Gateway" in warnings[0]["body"]
+    assert "abcDEF" not in warnings[0]["url"]
+    recovered = _events(logs, "telegram.poll_recovered")
+    assert len(recovered) == 1 and recovered[0]["log_level"] == "info"
+    assert recovered[0]["consecutive_failures"] == 4
+    assert recovered[0]["outage_s"] == 8.0
+    assert recovered[0]["escalated"] is False
+
+
+@pytest.mark.anyio
+async def test_1111_persistent_get_updates_failure_errors_once() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    times = list(range(0, 202, 2))
+    api, http = _scripted_poll_client([502] * len(times) + ["ok"], clock)
+    try:
+        with capture_logs() as logs:
+            for t in times:
+                clock.now = float(t)
+                await api.get_updates(offset=None, timeout_s=1)
+            clock.now = 210.0
+            assert await api.get_updates(offset=None, timeout_s=1) == []
+    finally:
+        await http.aclose()
+    records = _events(logs, "telegram.http_error")
+    errors = [r for r in records if r["log_level"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["persistent"] is True
+    assert errors[0]["failing_for_s"] == 120.0
+    assert errors[0]["consecutive_failures"] == 61
+    assert len(records) - 1 == _levels(logs, "telegram.http_error").count("warning")
+    recovered = _events(logs, "telegram.poll_recovered")
+    assert len(recovered) == 1 and recovered[0]["escalated"] is True
+
+
+@pytest.mark.anyio
+async def test_1111_new_outage_after_recovery_can_error_again() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([502, 502, "ok", 502, 502], clock)
+    try:
+        with capture_logs() as logs:
+            for t in (0, 130, 131, 132, 300):
+                clock.now = float(t)
+                await api.get_updates(offset=None, timeout_s=1)
+    finally:
+        await http.aclose()
+    assert _levels(logs, "telegram.http_error") == [
+        "warning",
+        "error",
+        "warning",
+        "error",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("long poll hung"),
+        httpx.ReadError("reset"),
+        httpx.ConnectError("refused"),
+        httpx.RemoteProtocolError("dropped"),
+    ],
+)
+async def test_1111_get_updates_transport_error_is_transient(
+    error: Exception,
+) -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([error, error, error, "ok"], clock)
+    try:
+        with capture_logs() as logs:
+            for t in (0, 72, 150, 152):
+                clock.now = float(t)
+                await api.get_updates(offset=None, timeout_s=1)
+    finally:
+        await http.aclose()
+    records = _events(logs, "telegram.network_error")
+    assert [r["log_level"] for r in records] == ["warning", "warning", "error"]
+    assert records[0]["error_type"] == error.__class__.__name__
+    assert records[0]["delivery_unknown"] is False
+    assert records[2]["persistent"] is True
+    recovered = _events(logs, "telegram.poll_recovered")
+    assert len(recovered) == 1 and recovered[0]["consecutive_failures"] == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 409])
+async def test_1111_get_updates_4xx_stays_error(status: int) -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([status, status, "ok"], clock)
+    try:
+        with capture_logs() as logs:
+            for t in (0, 2, 4):
+                clock.now = float(t)
+                await api.get_updates(offset=None, timeout_s=1)
+    finally:
+        await http.aclose()
+    records = _events(logs, "telegram.http_error")
+    assert [r["log_level"] for r in records] == ["error", "error"]
+    assert "consecutive_failures" not in records[0]
+    assert not _events(logs, "telegram.poll_recovered")
+
+
+@pytest.mark.anyio
+async def test_1111_send_message_502_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([502, 502], clock)
+    try:
+        with capture_logs() as logs:
+            assert await api.send_message(chat_id=7, text="x") is None
+            assert await api.send_message(chat_id=7, text="x") is None
+    finally:
+        await http.aclose()
+    assert _levels(logs, "telegram.http_error") == ["error", "error"]
+    assert "consecutive_failures" not in _events(logs, "telegram.http_error")[0]
+
+
+@pytest.mark.anyio
+async def test_1111_send_message_read_timeout_stays_error() -> None:
+    from structlog.testing import capture_logs
+
+    clock = _FakeClock()
+    api, http = _scripted_poll_client([httpx.ReadTimeout("slow")], clock)
+    try:
+        with capture_logs() as logs:
+            assert await api.send_message(chat_id=7, text="x") is None
+    finally:
+        await http.aclose()
+    assert _levels(logs, "telegram.network_error") == ["error"]

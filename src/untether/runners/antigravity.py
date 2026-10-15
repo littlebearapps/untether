@@ -473,8 +473,8 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 # ── version guard (08 §4, #976) ─────────────────────────────────────────────
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
-# The newest agy the fixtures and drift notes were checked against.
-PROBED_CLI_VERSION = "1.3.4"
+# The newest agy the fixtures and drift notes were checked against (#1091).
+PROBED_CLI_VERSION = "1.3.5"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -1084,8 +1084,9 @@ class _RunPrecheck:
     scan: antigravity_scan.ScanResult | None = None
     first_sight: bool = False  # show the "hooks … Untether doesn't manage" row
     # #1083: the ``antigravity.gate.changed`` row covers Untether's own
-    # plugin folder, so the row above leaves those files out (the scan still
-    # tracks them: the digest and the cron hold are unchanged).
+    # plugin folder, so the row above and its log leave those files out
+    # (``_unmanaged_paths``, #1110; the scan still tracks them: the digest
+    # and the cron hold are unchanged).
     gate_plugin_row: bool = False
     # The planted-config scan failed or was truncated: show a ⚠️ row (never
     # record a digest as seen); unattended runs were already refused.
@@ -1120,6 +1121,17 @@ _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
     "untether_agy_decision", default=None
 )
+
+
+def _unmanaged_paths(pre: _RunPrecheck, scan: antigravity_scan.ScanResult) -> list[str]:
+    """What the "hooks … Untether doesn't manage" row and its
+    ``workspace_config_present`` log name. #1083: when the plugin-changed row
+    covers Untether's own plugin folder, both leave its files out (#1110)."""
+    paths = sorted(scan.agy)
+    if not pre.gate_plugin_row:
+        return paths
+    prefix = antigravity_scan.GATE_PLUGIN_DISPLAY_PREFIX
+    return [p for p in paths if not p.startswith(prefix)]
 
 
 def _conversation_gone_text(state: AntigravityStreamState) -> str:
@@ -1522,6 +1534,16 @@ def default_antigravity_cmd() -> str:
     if local_bin.exists():
         return str(local_bin)
     return "agy"
+
+
+def resolve_antigravity_cmd(config: EngineConfig) -> str:
+    """The agy ``build_runner`` spawns: ``[antigravity] cmd`` when set, else
+    ``default_antigravity_cmd()``. Also the startup availability check and the
+    setup wizard's lookup (#1089), so neither insists on agy being on PATH."""
+    raw_cmd = config.get("cmd")
+    if isinstance(raw_cmd, str) and raw_cmd:
+        return os.path.expanduser(raw_cmd)
+    return default_antigravity_cmd()
 
 
 @dataclass(slots=True)
@@ -2998,13 +3020,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
         if pre.first_sight and scan is not None:
             pre.first_sight = False
-            paths = sorted(scan.agy)
+            paths = _unmanaged_paths(pre, scan)
             # #1044: only a person's message acknowledges the config. An
             # ``/at`` or loop re-fire (``trigger_source`` set) still runs and
             # shows the row, but held crons stay held until someone has
             # been in the chat to see it.
             recorded = state.trigger_source is None and state.unattended is None
-            logger.warning(
+            # #1110: the log names what the row names. With only the plugin
+            # left (its own WARNING, ``antigravity.gate.plugin_changed``,
+            # covers it), this is INFO, not gone: it records the digest.
+            (logger.warning if paths else logger.info)(
                 "antigravity.workspace_config_present",
                 paths=paths[:20],
                 digest=scan.agy_digest[:12],
@@ -3014,13 +3039,6 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             if recorded:
                 self._seen().set(scan.root, scan.agy_digest)
-            if pre.gate_plugin_row:
-                # #1083: Untether's own plugin folder has its own row.
-                paths = [
-                    p
-                    for p in paths
-                    if not p.startswith(antigravity_scan.GATE_PLUGIN_DISPLAY_PREFIX)
-                ]
             if paths:
                 out.append(
                     self._warning_row(
@@ -3503,8 +3521,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             "kill_all",
         }:
             self._subagents_killed(state, params)
-        if idx in state.approval_steps:
-            # #1080: the card came before the step's ACTIVE line.
+        gate = state.gate
+        if idx in state.approval_steps or (
+            gate is not None and gate.awaiting_answer(idx)
+        ):
+            # #1080: the card came before the step's ACTIVE line. #1106: or
+            # Ask me's gate hasn't answered the step yet, so agy hasn't run
+            # it; the gate releases it when it does.
             state.note_approval_wait(idx, True)
 
     @staticmethod
@@ -4585,9 +4608,8 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
                 f"expected whole seconds from {gate_plugin.MIN_WAIT_S} to "
                 f"{gate_plugin.MAX_WAIT_S}."
             )
-    cmd = os.path.expanduser(raw_cmd) if raw_cmd else default_antigravity_cmd()
     return AntigravityRunner(
-        antigravity_cmd=cmd,
+        antigravity_cmd=resolve_antigravity_cmd(config),
         model=model or None,
         default_permission_mode=mode,
         config_path=config_path,
@@ -4600,4 +4622,5 @@ BACKEND = EngineBackend(
     build_runner=build_runner,
     cli_cmd="agy",
     install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    resolve_cli_cmd=resolve_antigravity_cmd,
 )

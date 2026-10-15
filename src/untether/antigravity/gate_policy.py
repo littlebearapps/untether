@@ -54,6 +54,7 @@ from typing import Any
 
 from ..background_status import escape_markdown
 from ..interactive import format_diff_preview
+from ..utils.paths import relativize_path
 
 # Read-only tools, matched by exact name. Every path they name must resolve
 # inside the project (or the conversation's artifact folder); a read
@@ -1145,9 +1146,11 @@ def _wait_text(value: Any) -> str | None:
     return f"moves to the background after {shown} if still running"
 
 
-def preview(tool: str, args: Any, *, root: Path | None) -> str:
+def preview(tool: str, args: Any, *, root: Path | None, diff: bool = True) -> str:
     """The diff / command lines under the card's title, built from agy's own
-    arguments (what will run), every string made :func:`visible`."""
+    arguments (what will run), every string made :func:`visible`. ``diff``
+    False (the chat's Diff preview switched off, #1090) names an edit's file
+    without the diff, as Claude's card does; commands always show."""
     if not isinstance(args, dict):
         return ""
     raw = args  # values below go through _block, which makes them visible
@@ -1176,7 +1179,12 @@ def preview(tool: str, args: Any, *, root: Path | None) -> str:
     if tool in EDIT_TOOLS:
         tail = [_resolves_to(target)] if target else ["⚠️ no target file in this call"]
         tail.extend(_other_args(tool, raw, _EDIT_SHOWN))
-        body = _edit_preview(tool, args, target)
+        if diff:
+            body = _edit_preview(tool, args, target)
+        elif target:
+            body = f"📝 {escape_markdown(_short(relativize_path(target), 200))}"
+        else:
+            body = ""
         return "\n".join(line for line in (body, *tail) if line)
     if tool == "invoke_subagent":
         return _subagents_preview(raw)
@@ -1292,10 +1300,11 @@ def card_title(
     root: Path | None,
     child_role: str | None = None,
     foreign: bool = False,
+    diff: bool = True,
 ) -> str:
-    """``Permission Request [agy] - <what>`` + the preview. agy's own
-    ``toolSummary`` is model-written: shown escaped, after the arguments,
-    labelled as agy's words."""
+    """``Permission Request [agy] - <what>`` + the preview (``diff``: see
+    :func:`preview`). agy's own ``toolSummary`` is model-written: shown
+    escaped, after the arguments, labelled as agy's words."""
     head = f"Permission Request [agy] - {tool_label(tool, _display(args))}"
     note = _WHY_NOTE.get(verdict.why)
     if note is not None and (tool in EDIT_TOOLS or tool in READ_TOOLS):
@@ -1303,7 +1312,7 @@ def card_title(
         # workspace isn't the project, or paths Untether can't check).
         head += f" ({note})"
     lines = [head]
-    body = preview(tool, args, root=root)
+    body = preview(tool, args, root=root, diff=diff)
     if body:
         lines.append(body)
     if child_role:

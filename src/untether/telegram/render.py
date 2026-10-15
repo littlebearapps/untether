@@ -579,9 +579,25 @@ def _number_ordered_lists(tokens: list[Token]) -> None:
                 break
 
 
+def _inline_loose_list_items(tokens: list[Token]) -> None:
+    """#1094: keep a loose list item's first paragraph on its marker's line.
+
+    In a loose list (blank lines between items, or an item holding a nested
+    block) markdown-it wraps each item's text in ``<p>``, and sulguk renders
+    that paragraph as a block — the bullet or number alone on one line, its
+    text after a blank line. Hiding the item's leading paragraph tags, as
+    markdown-it already does for tight lists, puts the text next to the
+    marker; later paragraphs and nested blocks keep their own lines."""
+    for idx, tok in enumerate(tokens[:-3]):
+        if tok.type == "list_item_open" and tokens[idx + 1].type == "paragraph_open":
+            tokens[idx + 1].hidden = True
+            tokens[idx + 3].hidden = True
+
+
 def _render_html(md: str) -> str:
     env: dict[str, Any] = {}
     tokens = _normalise_tokens(_MD_RENDERER.parse(md, env))
+    _inline_loose_list_items(tokens)
     _number_ordered_lists(tokens)
     return _MD_RENDERER.renderer.render(tokens, _MD_RENDERER.options, env)
 

@@ -325,7 +325,7 @@ untether runs these engines on your computer. switch anytime with /agent.
    codex
 ```
 
-Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI (`antigravity`, which is a separate engine from `gemini`). The wizard looks for each CLI on your `PATH`: agy's installer puts it in `~/.local/bin`, so open a new terminal (or add that folder to `PATH`) if `antigravity` shows as not found after installing it. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI (`antigravity`, which is a separate engine from `gemini`). The wizard looks for each CLI on your `PATH` (and for agy, also at `~/.local/bin/agy`, where its installer puts it, or at `[antigravity] cmd` if your config sets one). If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 

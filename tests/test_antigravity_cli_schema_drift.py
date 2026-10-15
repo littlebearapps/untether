@@ -42,10 +42,11 @@ from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas import antigravity as agy_schema
 
 # Last CLI these probes were re-derived against (the pack was written on
-# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09, to 1.3.3 on 2026-10-10
-# and to 1.3.4 on 2026-10-13, with no drift here any time; 1.3.4 added the
-# unknown-agent refusal pinned below).
-PROBED_CLI_VERSION = "1.3.4"
+# 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09, to 1.3.3 on 2026-10-10,
+# to 1.3.4 on 2026-10-13 and to 1.3.5 on 2026-10-14, with no drift here any
+# time; 1.3.4 added the unknown-agent refusal pinned below, 1.3.5 the
+# ``auto`` mode, #1091).
+PROBED_CLI_VERSION = "1.3.5"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
@@ -59,6 +60,11 @@ _VALID_RE = re.compile(r"\(valid: ([^)]*)\)")
 # run passes (without it agy refuses file writes inside the project); 09/15
 # use plan.
 _UNTETHER_AGY_MODES = {"accept-edits", "plan"}
+# Every --mode value agy offers, each one reviewed against Untether's modes
+# (#1091: ``auto`` is never passed; see the register in
+# docs/reference/runners/antigravity/runner.md). A new value fails here.
+_REVIEWED_AGY_MODES = {"accept-edits", "auto", "plan"}
+_HELP_MODES_RE = re.compile(r"^\s*--mode\b.*\(([a-z, -]+)\)\s*$", re.MULTILINE)
 _REQUIRED_EFFORTS = {"low", "medium", "high"}
 
 
@@ -156,6 +162,26 @@ def test_help_lists_untether_flags(tmp_path: Path) -> None:
         f for f in wanted if re.search(rf"^\s*{f}\b", text, re.MULTILINE) is None
     )
     assert not missing, f"agy --help no longer lists {missing}"
+
+
+def test_runner_probed_version_matches() -> None:
+    """The runner's ``newer_than_probed`` note and this suite name the same
+    agy, so a bump can't update one and forget the other (#1091)."""
+    assert agy.PROBED_CLI_VERSION == PROBED_CLI_VERSION
+
+
+def test_help_mode_values_reviewed(tmp_path: Path) -> None:
+    """agy lists its --mode values in --help. Untether passes only its own
+    two; every other value has been reviewed native-first (#1091)."""
+    match = _HELP_MODES_RE.search(_help(tmp_path))
+    assert match, "agy --help no longer lists --mode values in parentheses"
+    values = {v.strip() for v in match.group(1).split(",")}
+    assert values >= _UNTETHER_AGY_MODES, values
+    assert values == _REVIEWED_AGY_MODES, (
+        f"agy --mode now offers {sorted(values)}: review the new value against "
+        f"Workspace / Ask me / Plan first / Full access and record it in the "
+        f"register (last green on agy {PROBED_CLI_VERSION})"
+    )
 
 
 def test_help_print_timeout_default_zero(tmp_path: Path) -> None:

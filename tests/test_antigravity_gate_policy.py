@@ -245,6 +245,46 @@ def test_card_preview_replace_file_content(root: Path) -> None:
     assert "- hello" in text and "+ hello world" in text
 
 
+@pytest.mark.parametrize(
+    "tool, args",
+    [
+        ("write_to_file", {"CodeContent": "hello"}),
+        ("replace_file_content", {"TargetContent": "a", "ReplacementContent": "b"}),
+        (
+            "multi_replace_file_content",
+            {"ReplacementChunks": [{"TargetContent": "a", "ReplacementContent": "b"}]},
+        ),
+    ],
+)
+def test_1090_diff_preview_off_leaves_the_diff_off_edit_cards(
+    root: Path, tool: str, args: dict[str, object]
+) -> None:
+    """#1090: Diff preview switched off (Claude's semantics) — the card names
+    the file but shows no diff; unset (None) or on keeps the diff."""
+    outside = root.parent / "notes.txt"
+    full = {"TargetFile": str(outside), **args}
+    verdict = gate_policy.Verdict(False, "outside")
+    shown = gate_policy.card_title(tool, full, verdict, root=root)
+    assert "```diff" in shown
+    off = gate_policy.card_title(tool, full, verdict, root=root, diff=False)
+    assert "```" not in off and "+ " not in off
+    assert off.splitlines()[0] == shown.splitlines()[0]
+    assert f"📝 {gate_policy.escape_markdown(str(outside))}" in off
+
+
+def test_1090_diff_preview_off_keeps_the_command_on_shell_cards(root: Path) -> None:
+    """A command card shows what will run whatever the toggle says (Claude's
+    card keeps ``tool: Bash command=…`` too)."""
+    title = gate_policy.card_title(
+        "run_command",
+        {"CommandLine": "git status"},
+        gate_policy.Verdict(False),
+        root=root,
+        diff=False,
+    )
+    assert title.splitlines()[1] == "$ `git status`"
+
+
 def test_card_preview_multi_replace_chunks(root: Path) -> None:
     chunks = [
         {"TargetContent": f"a{n}", "ReplacementContent": f"b{n}"} for n in range(4)

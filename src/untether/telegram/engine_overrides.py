@@ -62,7 +62,13 @@ PERMISSION_MODE_SUPPORTED_ENGINES = frozenset(
     {"claude", "codex", "antigravity", "gemini"}
 )
 
-DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
+
+def diff_preview_supported(engine: str | None, cwd: object = None) -> bool:
+    """Claude always; Antigravity wherever Ask me can run (#1090): the toggle
+    only changes Ask me's approval cards, and Ask me needs the same agy
+    plugin as Ask mode."""
+    return ask_questions_supported(engine, cwd)
+
 
 # Engines with a subscription-usage footer. Each needs an entry in
 # ``runner_bridge.SUBSCRIPTION_FOOTERS`` (#979): this set also shows the

@@ -519,8 +519,11 @@ class GateRun:
         self._tripwire_logged: set[int] = set()
         self.on_fatal: Callable[[str], None] | None = None
         # #1080: (parent step, waiting) while an approval card is up, so the
-        # runner doesn't list a step agy hasn't run yet as background work.
+        # runner doesn't list a step agy hasn't run yet as background work;
+        # (step, False) once the gate lets a parent step run (#1106).
         self.on_approval_wait: Callable[[int, bool], None] | None = None
+        # #1106: parent steps this gate has answered.
+        self._answered_steps: set[int] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -625,6 +628,12 @@ class GateRun:
     def note_result(self) -> None:
         """agy's result arrived: nothing more can be injected."""
         self.steer_open = False
+
+    def awaiting_answer(self, step: int) -> bool:
+        """#1106: in Ask me agy runs no parent tool call before the gate's
+        answer, and its ACTIVE line comes ~0.1 s before the hook does
+        (0.36.1rc5, agy 1.3.5), so a step not answered yet isn't running."""
+        return self.required and not self.dead and step not in self._answered_steps
 
     def note_tool_step(self, step: int, tool: str) -> None:
         """A parent-stream tool step went ACTIVE (13 §7 tripwire)."""
@@ -901,17 +910,29 @@ class GateRun:
             if cid == self.conversation_id:
                 self._tool_steps.pop(step, None)
         if tool == "ask_question" and own:
-            return await self._ask(call.get("args"), step, stream)
-        if not self.required:
+            out = await self._ask(call.get("args"), step, stream)
+        elif not self.required:
             # No policy on other tools — agy's own check decides (Workspace /
             # Plan first: agy's permission check; Full access: the user
             # approved every tool).
-            return {}
-        # Ask me: agy runs with the bypass flag, so an empty reply would let
-        # the tool run. Every tool gets an explicit answer (D22.3).
-        return await self._policy(
-            tool, call.get("args"), payload, step, cid, own, stream
-        )
+            out = {}
+        else:
+            # Ask me: agy runs with the bypass flag, so an empty reply would
+            # let the tool run. Every tool gets an explicit answer (D22.3).
+            out = await self._policy(
+                tool, call.get("args"), payload, step, cid, own, stream
+            )
+        if own and cid == self.conversation_id and isinstance(step, int):
+            self._note_answered(step, out)
+        return out
+
+    def _note_answered(self, step: int, out: dict[str, Any] | None) -> None:
+        """#1106: the gate has answered parent step *step*. Only a step it
+        lets run is released; a denied one (or one whose hook went away,
+        which agy treats as a block) never runs."""
+        self._answered_steps.add(step)
+        if out is not None and out.get("decision") != "deny":
+            self._note_approval_wait(step, False)
 
     async def _policy(
         self,
@@ -1097,6 +1118,8 @@ class GateRun:
             root=self.project_root,
             child_role=child_role,
             foreign=not own,
+            # #1090: Diff preview off leaves the diff off (Claude's C4).
+            diff=self.diff_preview is not False,
         )
         offer_always = (
             tool == "run_command" and own and gate_policy.always_allowable(args)
@@ -1212,7 +1235,6 @@ class GateRun:
             return {"decision": "deny", "reason": timeout_text(self.wait_s)}
         finally:
             self._held.pop(request_id, None)
-            self._note_approval_wait(parent_step, False)
             if not settled:
                 # Cancelled (the run ended under it): no tap can land now.
                 withdraw(request_id)

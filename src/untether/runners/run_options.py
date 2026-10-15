@@ -108,9 +108,12 @@ LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 # (without it headless agy refuses file writes inside the project),
 # ``full`` = ``--dangerously-skip-permissions``; ``plan`` = agy's own
 # ``--mode=plan`` under the no-shell agent, approved by a Workspace resume
-# (#981); ``ask`` needs Untether's approval gate and is refused before spawn
-# until it ships, but stays valid so configs written now keep working. ``accept-edits`` is not an
-# Untether value: it is what Workspace already passes to agy. Unknown
+# (#981); ``ask`` (#980) runs with the bypass flag on agy's default agent only
+# when Untether's approval gate is ready for the project, and the gate then
+# answers every tool. Anything less refuses the run before spawn with what to
+# fix, never a silent downgrade (``decide_antigravity_mode``).
+# ``accept-edits`` is not an Untether value: it is what Workspace already
+# passes to agy. Unknown
 # stored values fail **closed** to Workspace — unlike Codex, whose unknown
 # mode fails open (``codex.py``).
 ANTIGRAVITY_PERMISSION_MODES: frozenset[str] = frozenset(

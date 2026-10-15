@@ -90,7 +90,7 @@ npm install -g @google/gemini-cli
 npm install -g @sourcegraph/amp
 ```
 
-Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether looks for every engine on `PATH` when it starts, so add that folder to the service's `PATH` (setting `[antigravity] cmd` alone doesn't make the engine available).
+Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether also looks for `~/.local/bin/agy`, and for an agy installed anywhere else, set `[antigravity] cmd` to its path.
 
 The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
 

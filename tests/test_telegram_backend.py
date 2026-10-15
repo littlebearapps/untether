@@ -855,10 +855,12 @@ def test_836_failure_never_breaks_startup(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.mark.anyio
 async def test_versions_line_probes_backend_cli_cmd(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """#993 (08 §3): the probe uses the backend's ``cli_cmd`` (agy for
     antigravity) while the label stays the engine id."""
+    # #1089: agy resolves like the runner's; keep the host's agy out of it.
+    _agy_off_path(monkeypatch, tmp_path)
     probed: list[str] = []
 
     def probe(cmd: str) -> str | None:
@@ -887,3 +889,62 @@ async def test_versions_line_existing_engines_unchanged(
         ("claude", "codex", "opencode", "pi", "not-an-engine")
     )
     assert sorted(probed) == ["claude", "codex", "not-an-engine", "opencode", "pi"]
+
+
+# --- #1089: the About probe runs the agy the runner spawns -------------------
+
+
+def _agy_off_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """PATH without agy and a home we control; returns that home."""
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(empty_bin))
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _fake_agy(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+async def _probed_agy_cmd(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return "1.3.5"
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    line = await telegram_backend._build_versions_line(("antigravity",))
+    assert line is not None and line.endswith("antigravity 1.3.5")
+    return probed
+
+
+@pytest.mark.anyio
+async def test_1089_versions_line_probes_local_bin_agy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _agy_off_path(monkeypatch, tmp_path)
+    agy = _fake_agy(home / ".local" / "bin" / "agy")
+    assert await _probed_agy_cmd(monkeypatch) == [str(agy)]
+
+
+@pytest.mark.anyio
+async def test_1089_versions_line_probes_configured_agy_cmd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _agy_off_path(monkeypatch, tmp_path)
+    agy = _fake_agy(tmp_path / "opt" / "agy")
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n[transports.telegram]\n'
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n\n'
+        f'[antigravity]\ncmd = "{agy}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(config_path))
+    assert await _probed_agy_cmd(monkeypatch) == [str(agy)]

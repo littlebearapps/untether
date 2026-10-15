@@ -73,6 +73,12 @@ _IDEMPOTENT_RETRY_ERRORS: tuple[type[httpx.HTTPError], ...] = (
 _BENIGN_BURST_THRESHOLD = 5  # rejections of one (method, reason_class) ...
 _BENIGN_BURST_WINDOW_S = 60.0  # ... within this many seconds
 
+# #1111: a 5xx or transport error on getUpdates is transient — the poll loop
+# retries and nothing user-visible is lost — so it logs WARNING, and ONE ERROR
+# once polling has gone this long without a success. Telegram blips of ~80 s
+# (a few 502s, then one hung long-poll) recover on their own.
+_POLL_OUTAGE_ERROR_AFTER_S = 120.0
+
 
 def classify_benign_rejection(
     method: str, description: object, message_id: object
@@ -277,6 +283,10 @@ class HttpBotClient:
         self._clock = clock
         self._benign_hits: dict[tuple[str, str], deque[tuple[float, Any, Any]]] = {}
         self._benign_burst_warned_at: dict[tuple[str, str], float] = {}
+        # #1111: the current run of transient getUpdates failures.
+        self._poll_failures = 0
+        self._poll_failing_since: float | None = None
+        self._poll_outage_escalated = False
 
     async def close(self) -> None:
         if self._owns_http_client:
@@ -340,6 +350,44 @@ class HttpBotClient:
             message_ids=sorted({m for _, _, m in hits})[:5],
             chat_ids=sorted({c for _, c, _ in hits if c is not None})[:5],
         )
+
+    def _poll_failure_log(self) -> tuple[Callable[..., Any], dict[str, Any]]:
+        """#1111: count a transient getUpdates failure; pick its log level.
+
+        WARNING, except ONE ERROR (``persistent=True``) the first time the
+        outage reaches ``_POLL_OUTAGE_ERROR_AFTER_S`` — the issue watcher and
+        ``/monitor`` still see a real outage. Reset by ``_note_poll_success``.
+        """
+        now = self._clock()
+        if self._poll_failing_since is None:
+            self._poll_failing_since = now
+        self._poll_failures += 1
+        failing_for_s = round(now - self._poll_failing_since, 1)
+        fields: dict[str, Any] = {
+            "consecutive_failures": self._poll_failures,
+            "failing_for_s": failing_for_s,
+        }
+        if (
+            not self._poll_outage_escalated
+            and failing_for_s >= _POLL_OUTAGE_ERROR_AFTER_S
+        ):
+            self._poll_outage_escalated = True
+            return logger.error, {**fields, "persistent": True}
+        return logger.warning, {**fields, "transient": True}
+
+    def _note_poll_success(self) -> None:
+        """#1111: one INFO when getUpdates works again after failing."""
+        if self._poll_failing_since is None:
+            return
+        logger.info(
+            "telegram.poll_recovered",
+            consecutive_failures=self._poll_failures,
+            outage_s=round(self._clock() - self._poll_failing_since, 1),
+            escalated=self._poll_outage_escalated,
+        )
+        self._poll_failures = 0
+        self._poll_failing_since = None
+        self._poll_outage_escalated = False
 
     def _parse_telegram_envelope(
         self,
@@ -468,7 +516,11 @@ class HttpBotClient:
                 self._unconfirmed_sends.add(chat_id)
                 while len(self._unconfirmed_sends) > 64:
                     self._unconfirmed_sends.pop()
-            logger.error(
+            log: Callable[..., Any] = logger.error
+            poll_fields: dict[str, Any] = {}
+            if method == "getUpdates" and isinstance(exc, httpx.TransportError):
+                log, poll_fields = self._poll_failure_log()
+            log(
                 "telegram.network_error",
                 method=method,
                 url=_safe_url(exc_url) if exc_url is not None else None,
@@ -478,6 +530,7 @@ class HttpBotClient:
                 message_id=message_id,
                 kind=current_message_kind(),
                 delivery_unknown=delivery_unknown,
+                **poll_fields,
             )
             self._record_api_error(
                 method, request_payload, f"network error: {exc.__class__.__name__}"
@@ -533,7 +586,11 @@ class HttpBotClient:
                 )
                 self._note_benign_rejection(method, benign, chat_id, message_id)
             else:
-                logger.error(
+                log = logger.error
+                poll_fields = {}
+                if method == "getUpdates" and resp.status_code >= 500:
+                    log, poll_fields = self._poll_failure_log()
+                log(
                     "telegram.http_error",
                     method=method,
                     status=resp.status_code,
@@ -545,6 +602,7 @@ class HttpBotClient:
                     chat_id=chat_id,
                     message_id=message_id,
                     kind=current_message_kind(),
+                    **poll_fields,
                 )
             # #746 D4: record the readable Telegram description when there is
             # one (matches the envelope path), else the raw body.
@@ -632,6 +690,7 @@ class HttpBotClient:
         result = await self._post("getUpdates", params, request_timeout=timeout_s + 20)
         if result is None or not isinstance(result, list):
             return None
+        self._note_poll_success()
         try:
             return msgspec.convert(result, type=list[Update])
         except Exception as exc:  # noqa: BLE001
