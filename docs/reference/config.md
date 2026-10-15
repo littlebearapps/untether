@@ -83,7 +83,7 @@ restart.
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
-| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
+| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); `[triggers.server]` `host`, `port`, `rate_limit`, `max_body_bytes` (read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, `[triggers.server]` `exposed` / `trusted_proxy_header` ([#1119](https://github.com/littlebearapps/untether/issues/1119)), per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
 To restart, send `/restart` in Telegram (when a service manager relaunches Untether), or restart the service
 directly. The restart notice names the unit or launchd label of the instance that's running; the default is:
@@ -777,7 +777,8 @@ routing details.
 
 !!! tip "Hot-reload"
     When `watch_config = true`, changes to webhooks, crons, schedules, and timezones
-    are applied automatically without restart. `[triggers.server]` settings (`host`,
+    are applied automatically without restart, as are `[triggers.server]` `exposed`
+    and `trusted_proxy_header`. The other `[triggers.server]` settings (`host`,
     `port`, `rate_limit`, `max_body_bytes`) and turning `enabled` on still require a
     restart.
     See the [Triggers reference — Hot-reload](triggers/triggers.md#hot-reload) for details.
@@ -790,6 +791,8 @@ routing details.
 | `port` | int | `9876` | Listen port (1–65535). |
 | `rate_limit` | int (≥ 1) | `60` | Max requests per minute (global + per-webhook). Also the failed-auth budget per webhook and client address per minute; a loopback peer (a reverse proxy on the same host) is never locked out by it — see [Triggers reference — Security](triggers/triggers.md#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1024–10485760). |
+| `exposed` | bool | `false` | ([#1119](https://github.com/littlebearapps/untether/issues/1119)) Set `true` when a tunnel or reverse proxy makes the server public even though it binds loopback. `auth = "none"` webhooks are then refused whatever the bind address (startup and reload), and `allow_unauthenticated_webhooks` no longer applies. |
+| `trusted_proxy_header` | string\|null | `null` | ([#1119](https://github.com/littlebearapps/untether/issues/1119)) Header your proxy sets to the real client address (e.g. `"CF-Connecting-IP"`, `"X-Real-IP"`), used for the failed-auth lockout and the `remote` log field. Honoured only with `exposed = true` and only from a loopback peer. Name a header the proxy overwrites on every request. Letters, digits and `-` only. |
 
 ### `[[triggers.webhooks]]`
 

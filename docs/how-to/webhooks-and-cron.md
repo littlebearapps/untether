@@ -65,7 +65,7 @@ Webhooks accept HTTP POST requests and turn them into agent runs. Example: trigg
 | `bearer` | `Authorization: Bearer <token>` | Simple shared secret |
 | `hmac-sha256` | `X-Hub-Signature-256` | GitHub webhooks |
 | `hmac-sha1` | `X-Hub-Signature` | Legacy GitHub webhooks |
-| `none` | (none) | Local testing only — since v0.35.4 **refused on non-loopback hosts** unless `[triggers] allow_unauthenticated_webhooks = true` ([#382](https://github.com/littlebearapps/untether/issues/382)) |
+| `none` | (none) | Local testing only — since v0.35.4 **refused on non-loopback hosts** unless `[triggers] allow_unauthenticated_webhooks = true` ([#382](https://github.com/littlebearapps/untether/issues/382)), and on any host when `[triggers.server] exposed = true` ([#1119](https://github.com/littlebearapps/untether/issues/1119)) |
 
 ### Prompt templating
 
@@ -253,6 +253,23 @@ Each webhook and cron can specify where the Telegram notification appears:
     max_body_bytes = 1048576  # 1 MB max payload
     ```
 
+### Behind a tunnel or reverse proxy
+
+A Cloudflare Tunnel, ngrok, nginx or Caddy in front of a `127.0.0.1` bind makes the server public, even though Untether only sees loopback connections. Tell Untether so ([#1119](https://github.com/littlebearapps/untether/issues/1119)):
+
+=== "toml"
+
+    ```toml
+    [triggers.server]
+    host = "127.0.0.1"
+    exposed = true                          # refuse auth = "none" webhooks
+    trusted_proxy_header = "CF-Connecting-IP"  # Cloudflare; "X-Real-IP" for nginx
+    ```
+
+- `exposed = true` refuses `auth = "none"` webhooks whatever the bind address (`allow_unauthenticated_webhooks` no longer opts back in).
+- `trusted_proxy_header` names the header your proxy sets to the real client address. Untether reads it only with `exposed = true` and only from a loopback connection, and uses it for the failed-auth lockout and the `remote` field in its logs, so one client sending bad secrets is locked out without locking out the others. Only name a header your proxy overwrites on every request (Cloudflare always sets `CF-Connecting-IP`; with nginx add `proxy_set_header X-Real-IP $remote_addr;`).
+- Both settings hot-reload. Rate limiting per client still belongs at the edge (your proxy or Cloudflare): Untether's own `rate_limit` can't tell clients apart without the header.
+
 The server includes a health endpoint at `GET /health` for uptime monitoring. While the master pause toggle is active (see [Pause and resume all triggers](#pause-and-resume-all-triggers)) it returns `{"status": "paused", "paused": true}` so external monitors can distinguish "paused but up" from "down".
 
 ## Pause and resume all triggers
@@ -287,7 +304,7 @@ accessible immediately, and removed webhooks start returning 404.
 
 !!! note
     Server settings (`host`, `port`, `rate_limit`, `max_body_bytes`) still require a
-    restart, and so does turning `enabled` from off to on. Turning `enabled` off applies
+    restart (`exposed` and `trusted_proxy_header` hot-reload), and so does turning `enabled` from off to on. Turning `enabled` off applies
     straight away (crons stop and webhook paths return 404). See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
     for the full list.
 
@@ -419,7 +436,7 @@ See the [Triggers reference — Trigger visibility](../reference/triggers/trigge
 - Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning at startup and on each reload; it still works for now, but a future release will refuse it ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
 - Untether never writes a webhook secret to its logs or error messages, including when the webhook's entry is invalid.
 - Failed auth attempts are budgeted per webhook and client address (`rate_limit` a minute). A sender that connects directly and goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected.
-- Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy. Untether ignores `X-Forwarded-For`. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
+- Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy, or set `exposed = true` and `trusted_proxy_header` so Untether counts each client behind the proxy separately (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)). Otherwise Untether ignores `X-Forwarded-For` and similar headers. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
 - Webhook prompts are prefixed with an untrusted-payload marker.
 
 ## Related

@@ -295,9 +295,12 @@ The webhook server should only listen on localhost. Put it behind a reverse prox
     [triggers.server]
     host = "127.0.0.1"
     port = 9876
+    exposed = true   # only when a tunnel or proxy makes it public
     ```
 
 The server includes rate limiting (token-bucket, per-webhook and global) and timing-safe secret comparison by default.
+
+A loopback bind stops being private once a tunnel or reverse proxy forwards to it. Set `[triggers.server] exposed = true` in that case: `auth = "none"` webhooks are then refused whatever the bind address. Behind a proxy every request reaches Untether from loopback, so per-client rate limiting has to happen at the edge, or set `trusted_proxy_header` (for example `"CF-Connecting-IP"`) so the failed-auth lockout counts each real client separately ([#1119](https://github.com/littlebearapps/untether/issues/1119)). See [Webhooks and cron — Behind a tunnel or reverse proxy](webhooks-and-cron.md#behind-a-tunnel-or-reverse-proxy).
 
 ## SSRF protection for outbound requests
 

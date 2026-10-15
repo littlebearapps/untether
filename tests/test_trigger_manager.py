@@ -567,6 +567,113 @@ class TestUnauthenticatedReloadGuard:
         assert refused[0]["webhook_ids"] == ["open"]
 
 
+# ── #1119: [triggers.server] exposed + trusted_proxy_header on reload ──
+
+
+class TestExposedReload1119:
+    def _open(self, **server: Any) -> TriggersSettings:
+        return _settings(
+            server={"host": "127.0.0.1", **server},
+            webhooks=[
+                _webhook("authed", "/hooks/authed"),
+                {
+                    "id": "open",
+                    "path": "/hooks/open",
+                    "auth": "none",
+                    "prompt_template": "Event: {{text}}",
+                },
+            ],
+        )
+
+    def test_exposed_drops_unauthenticated_route_on_loopback(self):
+        from structlog.testing import capture_logs
+
+        mgr = TriggerManager()
+        with capture_logs() as logs:
+            mgr.update(self._open(exposed=True))
+        assert mgr.webhook_for_path("/hooks/open") is None
+        assert mgr.webhook_for_path("/hooks/authed") is not None
+        refused = [
+            r for r in logs if r["event"] == "triggers.server.refused_unauthenticated"
+        ]
+        assert refused and refused[0]["webhook_ids"] == ["open"]
+        assert refused[0]["exposed"] is True
+
+    def test_exposed_overrides_the_local_demo_optin(self):
+        mgr = TriggerManager()
+        settings = self._open(exposed=True).model_copy(
+            update={"allow_unauthenticated_webhooks": True}
+        )
+        mgr.update(settings)
+        assert mgr.webhook_for_path("/hooks/open") is None
+
+    def test_reload_to_exposed_removes_a_live_route(self):
+        mgr = TriggerManager(self._open())
+        assert mgr.webhook_for_path("/hooks/open") is not None
+        mgr.update(self._open(exposed=True))
+        assert mgr.webhook_for_path("/hooks/open") is None
+
+    def test_trusted_proxy_header_only_in_effect_when_exposed(self):
+        mgr = TriggerManager(self._open(trusted_proxy_header="CF-Connecting-IP"))
+        assert mgr.trusted_proxy_header is None
+        mgr.update(
+            _settings(server={"exposed": True, "trusted_proxy_header": "X-Real-IP"})
+        )
+        assert mgr.trusted_proxy_header == "X-Real-IP"
+        mgr.update(_settings())
+        assert mgr.trusted_proxy_header is None
+
+    def test_header_without_exposed_warns(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            TriggerManager(_settings(server={"trusted_proxy_header": "X-Real-IP"}))
+        hits = [
+            r
+            for r in logs
+            if r["event"] == "triggers.server.trusted_proxy_header_ignored"
+        ]
+        assert hits and hits[0]["log_level"] == "warning"
+        assert hits[0]["header"] == "X-Real-IP"
+
+    @pytest.mark.anyio
+    async def test_trusted_header_hot_reloads_into_the_live_server(self):
+        settings = _settings(
+            server={"rate_limit": 2}, webhooks=[_webhook("a", "/hooks/a")]
+        )
+        mgr = TriggerManager(settings)
+        app = build_webhook_app(settings, _make_dispatcher(), manager=mgr)
+        bad = {"Authorization": "Bearer wrong"}
+
+        async def _flood(cl) -> list[int]:
+            return [
+                (
+                    await cl.post(
+                        "/hooks/a",
+                        headers=bad | {"CF-Connecting-IP": f"203.0.113.{i}"},
+                        json={},
+                    )
+                ).status
+                for i in range(3)
+            ]
+
+        async with TestClient(TestServer(app)) as cl:
+            # Not exposed: the header is ignored, one shared loopback bucket.
+            assert await _flood(cl) == [401, 401, 429]
+            mgr.update(
+                _settings(
+                    server={
+                        "rate_limit": 2,
+                        "exposed": True,
+                        "trusted_proxy_header": "CF-Connecting-IP",
+                    },
+                    webhooks=[_webhook("a", "/hooks/a")],
+                )
+            )
+            # The same IPs already spent nothing of their own buckets.
+            assert await _flood(cl) == [401, 401, 401]
+
+
 # ── #601: startup count alignment ────────────────────────────────────────
 
 

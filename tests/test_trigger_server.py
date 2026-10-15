@@ -1384,3 +1384,194 @@ async def test_906_chunked_oversized_body_is_413_not_500():
         assert resp.status == 413
     assert [r for r in logs if r["log_level"] in ("warning", "error")] == []
     assert transport.sent == []
+
+
+# ── #1119: [triggers.server] exposed + trusted_proxy_header ──────────────
+
+
+def _proxied_settings(**server: Any) -> TriggersSettings:
+    """Two bearer hooks behind a loopback bind (the tunnel / proxy shape)."""
+    settings = _two_hook_settings(2)
+    return settings.model_copy(
+        update={"server": settings.server.model_copy(update=server)}
+    )
+
+
+def test_1119_exposed_refuses_unauthenticated_on_loopback():
+    settings = _unauth_settings(
+        server={"host": "127.0.0.1", "port": 9876, "exposed": True}
+    )
+    assert _unauthenticated_on_public_bind(settings) == ["open"]
+
+
+def test_1119_exposed_overrides_the_local_demo_optin():
+    settings = _unauth_settings(
+        server={"host": "127.0.0.1", "exposed": True},
+        allow_unauthenticated_webhooks=True,
+    )
+    assert _unauthenticated_on_public_bind(settings) == ["open"]
+
+
+def test_1119_exposed_with_only_authed_webhooks_is_safe():
+    settings = _make_settings(server={"host": "127.0.0.1", "exposed": True})
+    assert _unauthenticated_on_public_bind(settings) == []
+
+
+@pytest.mark.anyio
+async def test_1119_run_webhook_server_refuses_exposed_loopback():
+    from structlog.testing import capture_logs
+
+    settings = _unauth_settings(server={"host": "127.0.0.1", "exposed": True})
+    dispatcher, _, _ = _make_dispatcher()
+    with capture_logs() as logs:
+        # Completing the await proves the refusal (a bind blocks forever).
+        await run_webhook_server(settings, dispatcher)
+    refused = [
+        r for r in logs if r["event"] == "triggers.server.refused_unauthenticated"
+    ]
+    assert refused and refused[0]["webhook_ids"] == ["open"]
+    assert refused[0]["exposed"] is True
+    assert "exposed" in refused[0]["hint"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("203.0.113.9", "203.0.113.9"),
+        (" 203.0.113.9 ", "203.0.113.9"),
+        # X-Forwarded-For: the right-most entry is the one our proxy added.
+        ("198.51.100.1, 203.0.113.9", "203.0.113.9"),
+        ("2001:db8:1:2::1", "2001:db8:1:2::/64"),
+        ("::ffff:203.0.113.9", "203.0.113.9"),
+        ("127.0.0.1", "loopback"),
+        ("", None),
+        ("not-an-ip", None),
+        ("203.0.113.9:443", None),
+    ],
+)
+def test_1119_forwarded_client(value, expected):
+    from types import SimpleNamespace
+
+    from multidict import CIMultiDict
+
+    from untether.triggers.server import _forwarded_client
+
+    request = SimpleNamespace(headers=CIMultiDict({"CF-Connecting-IP": value}))
+    assert _forwarded_client(request, "cf-connecting-ip") == expected
+
+
+def test_1119_forwarded_client_missing_header():
+    from types import SimpleNamespace
+
+    from multidict import CIMultiDict
+
+    from untether.triggers.server import _forwarded_client
+
+    request = SimpleNamespace(headers=CIMultiDict())
+    assert _forwarded_client(request, "CF-Connecting-IP") is None
+
+
+@pytest.mark.anyio
+async def test_1119_trusted_header_locks_out_one_client_behind_the_proxy():
+    """Behind a tunnel every peer is loopback; with the trusted header the
+    lockout is scoped to the real client again."""
+    from structlog.testing import capture_logs
+
+    settings = _proxied_settings(exposed=True, trusted_proxy_header="CF-Connecting-IP")
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    attacker = {"CF-Connecting-IP": "203.0.113.9"}
+    sender = {"CF-Connecting-IP": "198.51.100.7"}
+    async with TestClient(TestServer(app)) as cl:
+        with capture_logs() as logs:
+            statuses = [
+                (await cl.post("/hooks/a", headers=_BAD | attacker, json={})).status
+                for _ in range(4)
+            ]
+        assert statuses == [401, 401, 429, 429]
+        # Locked out even with the right secret…
+        resp = await cl.post("/hooks/a", headers=_GOOD | attacker, json={})
+        assert resp.status == 429
+        # …while another client behind the same proxy is not.
+        resp = await cl.post("/hooks/a", headers=_GOOD | sender, json={})
+        assert resp.status == 202
+    failed = [r for r in logs if r["event"] == "triggers.webhook.auth_failed"]
+    assert {r["remote"] for r in failed} == {"203.0.113.9"}
+    assert failed[-1]["locked_out"] is True
+
+
+@pytest.mark.anyio
+async def test_1119_spoofed_header_from_non_loopback_peer_is_ignored(monkeypatch):
+    _remote_from_test_header(monkeypatch)
+    settings = _proxied_settings(exposed=True, trusted_proxy_header="CF-Connecting-IP")
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    peer = {"X-Test-Remote": "198.51.100.50"}
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (
+                await cl.post(
+                    "/hooks/a",
+                    headers=_BAD | peer | {"CF-Connecting-IP": f"203.0.113.{i}"},
+                    json={},
+                )
+            ).status
+            for i in range(4)
+        ]
+    # One bucket — the TCP peer's — however the header rotates.
+    assert statuses == [401, 401, 429, 429]
+
+
+@pytest.mark.anyio
+async def test_1119_header_ignored_unless_exposed():
+    settings = _proxied_settings(trusted_proxy_header="CF-Connecting-IP")
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (
+                await cl.post(
+                    "/hooks/a",
+                    headers=_BAD | {"CF-Connecting-IP": f"203.0.113.{i}"},
+                    json={},
+                )
+            ).status
+            for i in range(4)
+        ]
+    # Shared loopback bucket, as before #1119.
+    assert statuses == [401, 401, 429, 429]
+
+
+@pytest.mark.anyio
+async def test_1119_rotating_trusted_header_gets_a_bucket_each():
+    settings = _proxied_settings(exposed=True, trusted_proxy_header="CF-Connecting-IP")
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        statuses = [
+            (
+                await cl.post(
+                    "/hooks/a",
+                    headers=_BAD | {"CF-Connecting-IP": f"203.0.113.{i}"},
+                    json={},
+                )
+            ).status
+            for i in range(4)
+        ]
+    assert statuses == [401, 401, 401, 401]
+
+
+@pytest.mark.anyio
+async def test_1119_missing_or_bad_header_falls_back_to_shared_loopback():
+    """A local process (or a proxy that dropped the header) is the shared
+    loopback peer: never locked out, so a correct credential still works."""
+    settings = _proxied_settings(exposed=True, trusted_proxy_header="CF-Connecting-IP")
+    dispatcher, _, _ = _make_dispatcher()
+    app = build_webhook_app(settings, dispatcher)
+    async with TestClient(TestServer(app)) as cl:
+        for headers in ({}, {"CF-Connecting-IP": "garbage"}, {}):
+            await cl.post("/hooks/a", headers=_BAD | headers, json={})
+        resp = await cl.post(
+            "/hooks/a", headers=_GOOD | {"CF-Connecting-IP": "garbage"}, json={}
+        )
+        assert resp.status == 202

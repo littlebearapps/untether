@@ -45,6 +45,7 @@ class TriggerManager:
         "_pending_run_once",
         "_run_once_pending_path",
         "_run_once_state_path",
+        "_trusted_proxy_header",
         "_webhooks_by_path",
     )
 
@@ -57,6 +58,8 @@ class TriggerManager:
         self._crons: list[CronConfig] = []
         self._webhooks_by_path: dict[str, WebhookConfig] = {}
         self._default_timezone: str | None = None
+        # #1119: the proxy header the webhook server trusts (exposed only).
+        self._trusted_proxy_header: str | None = None
         # #294: master pause flag — in-memory only (no persistence). Triggers
         # auto-resume on restart, which is the safe default. Set via
         # pause()/resume(); read by the cron scheduler each tick and by the
@@ -122,17 +125,20 @@ class TriggerManager:
                 del self._pending_run_once[cron_id]
             self._persist_pending_state()
 
-        # #382: on a non-loopback bind, drop auth="none" webhooks so a reload
-        # can't open an unauthenticated remote-agent-run hole on the live
-        # server (mirrors the initial-bind guard in server.run_webhook_server).
-        # Lazy import to avoid the server<->manager import cycle.
-        from .server import is_loopback_host
+        # #382: on a non-loopback bind — or, #1119, on any bind marked
+        # ``[triggers.server] exposed`` — drop auth="none" webhooks so a
+        # reload can't open an unauthenticated remote-agent-run hole on the
+        # live server (mirrors the initial-bind guard in
+        # server.run_webhook_server). Lazy import to avoid the server<->manager
+        # import cycle.
+        from .server import (
+            _unauthenticated_on_public_bind,
+            trusted_proxy_header_in_effect,
+            unauthenticated_refusal_hint,
+        )
 
-        refused_unauth: set[str] = set()
-        if not settings.allow_unauthenticated_webhooks and not is_loopback_host(
-            settings.server.host
-        ):
-            refused_unauth = {wh.id for wh in settings.webhooks if wh.auth == "none"}
+        refused_unauth = set(_unauthenticated_on_public_bind(settings))
+        self._trusted_proxy_header = trusted_proxy_header_in_effect(settings)
 
         self._webhooks_by_path = {
             wh.path: wh for wh in settings.webhooks if wh.id not in refused_unauth
@@ -164,11 +170,20 @@ class TriggerManager:
             logger.error(
                 "triggers.server.refused_unauthenticated",
                 host=settings.server.host,
+                exposed=settings.server.exposed,
                 webhook_ids=sorted(refused_unauth),
+                hint=unauthenticated_refusal_hint(settings),
+            )
+
+        # #1119: the header is only trusted on an exposed server; say so
+        # rather than silently ignoring it.
+        if settings.server.trusted_proxy_header and not settings.server.exposed:
+            logger.warning(
+                "triggers.server.trusted_proxy_header_ignored",
+                header=settings.server.trusted_proxy_header,
                 hint=(
-                    'Reload dropped auth="none" webhooks on a non-loopback '
-                    "bind. Add auth, bind 127.0.0.1, or set [triggers] "
-                    "allow_unauthenticated_webhooks = true (local demos only)."
+                    "trusted_proxy_header is only honoured with "
+                    "[triggers.server] exposed = true."
                 ),
             )
 
@@ -198,6 +213,12 @@ class TriggerManager:
     def webhook_for_path(self, path: str) -> WebhookConfig | None:
         """Look up a webhook by its HTTP path."""
         return self._webhooks_by_path.get(path)
+
+    @property
+    def trusted_proxy_header(self) -> str | None:
+        """#1119: header holding the real client address, or None (only set
+        when ``[triggers.server] exposed`` is on)."""
+        return self._trusted_proxy_header
 
     @property
     def webhook_count(self) -> int:

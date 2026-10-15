@@ -46,7 +46,8 @@ def _client_address(request: web.Request) -> str:
     This is the TCP peer aiohttp saw, never a forwarded header: a header is
     caller-supplied, so trusting one would let anyone choose their own bucket
     (or someone else's). Behind a reverse proxy every request therefore
-    carries the proxy's address.
+    carries the proxy's address — unless the operator names the proxy's
+    header with ``trusted_proxy_header`` (#1119, see ``_forwarded_client``).
 
     Every loopback address is reported as ``"loopback"`` and a missing peer
     as ``"unknown"`` (see ``_SHARED_PEERS``). IPv6 peers are grouped by /64 —
@@ -62,6 +63,11 @@ def _client_address(request: web.Request) -> str:
         addr = ipaddress.ip_address(remote.split("%", 1)[0])
     except ValueError:
         return remote
+    return _bucket_address(addr)
+
+
+def _bucket_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """The failed-auth bucket name for an address (see ``_client_address``)."""
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
     if addr.is_loopback:
@@ -69,6 +75,27 @@ def _client_address(request: web.Request) -> str:
     if isinstance(addr, ipaddress.IPv6Address) and addr not in _NAT64_WELL_KNOWN:
         return str(ipaddress.ip_network((addr, 64), strict=False))
     return str(addr)
+
+
+def _forwarded_client(request: web.Request, header: str) -> str | None:
+    """#1119: the client address a trusted proxy put in *header*, or None.
+
+    Only called for a loopback peer on an ``exposed`` server, where the
+    header was set (or overwritten) by the operator's proxy. The last
+    occurrence and its right-most comma-separated entry are used, so with
+    ``X-Forwarded-For`` it is the address the proxy itself appended. Anything
+    that is not a bare IP address gives None (the caller keeps the shared
+    loopback bucket).
+    """
+    values = request.headers.getall(header, [])
+    if not values:
+        return None
+    raw = values[-1].rsplit(",", 1)[-1].strip()
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return None
+    return _bucket_address(addr)
 
 
 def is_loopback_host(host: str) -> bool:
@@ -95,13 +122,46 @@ def is_loopback_host(host: str) -> bool:
 
 
 def _unauthenticated_on_public_bind(settings: TriggersSettings) -> list[str]:
-    """Return the ids of ``auth="none"`` webhooks that would be exposed on a
-    non-loopback bind without the explicit opt-in. Empty list = safe to bind."""
-    if settings.allow_unauthenticated_webhooks:
-        return []
-    if is_loopback_host(settings.server.host):
-        return []
+    """Return the ids of ``auth="none"`` webhooks that must not be served.
+    Empty list = safe to bind.
+
+    #382: on a non-loopback bind they're refused unless
+    ``allow_unauthenticated_webhooks`` opts in (local demos). #1119: with
+    ``[triggers.server] exposed = true`` (a tunnel or reverse proxy makes a
+    loopback bind public) they're refused whatever the bind address, and the
+    local-demo opt-in doesn't apply.
+    """
+    if not settings.server.exposed:
+        if settings.allow_unauthenticated_webhooks:
+            return []
+        if is_loopback_host(settings.server.host):
+            return []
     return [wh.id for wh in settings.webhooks if wh.auth == "none"]
+
+
+def trusted_proxy_header_in_effect(settings: TriggersSettings) -> str | None:
+    """#1119: the proxy header to trust, or None. Only on an exposed server."""
+    if settings.server.exposed:
+        return settings.server.trusted_proxy_header
+    return None
+
+
+def unauthenticated_refusal_hint(settings: TriggersSettings) -> str:
+    """The remediation text for ``triggers.server.refused_unauthenticated``."""
+    if settings.server.exposed:
+        return (
+            'Webhooks with auth="none" can\'t run on a server marked '
+            "[triggers.server] exposed = true (a tunnel or reverse proxy makes "
+            "it public). Add auth to these webhooks; "
+            "allow_unauthenticated_webhooks does not apply to an exposed server."
+        )
+    return (
+        'Webhooks with auth="none" on a non-loopback host are an '
+        "unauthenticated remote-agent-run primitive. Add auth to these "
+        "webhooks, bind [triggers.server] host to 127.0.0.1, or set "
+        "[triggers] allow_unauthenticated_webhooks = true to opt in "
+        "(local demos only)."
+    )
 
 
 class _MultipartError(Exception):
@@ -276,6 +336,13 @@ def build_webhook_app(
         assert _static_routes is not None
         return _static_routes.get(path)
 
+    def _proxy_header() -> str | None:
+        # #1119: read per request so a reload of ``exposed`` /
+        # ``trusted_proxy_header`` applies to the live server.
+        if manager is not None:
+            return manager.trusted_proxy_header
+        return trusted_proxy_header_in_effect(settings)
+
     def _webhook_count() -> int:
         if manager is not None:
             return manager.webhook_count
@@ -382,6 +449,13 @@ def build_webhook_app(
         # nothing itself. In both cases the credential is still checked;
         # only a failed attempt is refused (429 instead of 401).
         client = _client_address(request)
+        # #1119: behind a tunnel / reverse proxy on this host every peer is
+        # loopback. On an ``exposed`` server the operator can name the header
+        # their proxy sets to the real client; it is trusted only from a
+        # loopback peer (anyone else could forge it). A missing or malformed
+        # value keeps the shared loopback bucket.
+        if client == _LOOPBACK_PEER and (header := _proxy_header()):
+            client = _forwarded_client(request, header) or client
         auth_failed_key = f"{webhook.id}|{client}"
         # ``auth = "none"`` can't fail auth, so it has nothing to budget.
         budgeted = webhook.auth != "none"
@@ -567,7 +641,8 @@ async def run_webhook_server(
     ``triggers.server.bind_failed`` with remediation hints and returns without
     raising, so the rest of the bot (polling, commands, crons) stays up.
     """
-    # #382: refuse to expose unauthenticated webhooks on a non-loopback bind.
+    # #382: refuse to expose unauthenticated webhooks on a non-loopback bind
+    # (#1119: or on any bind when [triggers.server] exposed = true).
     # Like the bind-failure path below, this degrades gracefully — the webhook
     # server stays down but polling / commands / crons keep running.
     unauth = _unauthenticated_on_public_bind(settings)
@@ -575,14 +650,9 @@ async def run_webhook_server(
         logger.error(
             "triggers.server.refused_unauthenticated",
             host=settings.server.host,
+            exposed=settings.server.exposed,
             webhook_ids=unauth,
-            hint=(
-                'Webhooks with auth="none" on a non-loopback host are an '
-                "unauthenticated remote-agent-run primitive. Add auth to these "
-                "webhooks, bind [triggers.server] host to 127.0.0.1, or set "
-                "[triggers] allow_unauthenticated_webhooks = true to opt in "
-                "(local demos only)."
-            ),
+            hint=unauthenticated_refusal_hint(settings),
         )
         return
 

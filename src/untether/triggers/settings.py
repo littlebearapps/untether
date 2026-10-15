@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic.types import StrictInt
+from pydantic.types import StrictBool, StrictInt
 
 from ..logging import get_logger
 
@@ -40,6 +40,16 @@ class TriggerServerSettings(BaseModel):
     port: StrictInt = Field(default=9876, ge=1, le=65535)
     rate_limit: StrictInt = Field(default=60, ge=1)
     max_body_bytes: StrictInt = Field(default=1_048_576, ge=1024, le=10_485_760)
+    # #1119: the server is reachable from outside this host even though it
+    # binds loopback (a tunnel or reverse proxy in front). Turns the
+    # ``auth = "none"`` refusal back on, whatever the bind address.
+    exposed: StrictBool = False
+    # #1119: header the proxy sets to the real client address (e.g.
+    # ``CF-Connecting-IP``). Honoured only when ``exposed`` is on and the TCP
+    # peer is loopback, for the failed-auth lockout bucket and for logs.
+    trusted_proxy_header: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9-]{1,64}$"
+    )
 
 
 class WebhookConfig(BaseModel):

@@ -82,6 +82,9 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
     port = 9876
     rate_limit = 60
     max_body_bytes = 1_048_576
+    # Behind a Cloudflare Tunnel or reverse proxy (#1119):
+    # exposed = true
+    # trusted_proxy_header = "CF-Connecting-IP"
     ```
 
 | Key | Type | Default | Notes |
@@ -90,6 +93,8 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `port` | int | `9876` | Listen port (1--65535). |
 | `rate_limit` | int | `60` | Max requests per minute (≥ 1), applied per webhook and globally. Exceeding this returns HTTP 429. The same number is the failed-auth budget per webhook and client address per minute — see [Security](#security) ([#906](https://github.com/littlebearapps/untether/issues/906)). Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
+| `exposed` | bool | `false` | Set `true` when a tunnel or reverse proxy makes this server reachable from outside the host, even though it binds loopback. `auth = "none"` webhooks are then refused whatever the bind address, and `allow_unauthenticated_webhooks` no longer applies (see [Authentication](#authentication)). Hot-reloads ([#1119](https://github.com/littlebearapps/untether/issues/1119)). |
+| `trusted_proxy_header` | string\|null | `null` | Header your proxy sets to the real client address, e.g. `"CF-Connecting-IP"` (Cloudflare) or `"X-Real-IP"` (nginx). Used for the failed-auth lockout and the `remote` log field. Honoured only with `exposed = true` and only from a loopback peer; ignored (with a `triggers.server.trusted_proxy_header_ignored` warning) without `exposed`. Letters, digits and `-` only. Hot-reloads ([#1119](https://github.com/littlebearapps/untether/issues/1119)). |
 
 ### `[[triggers.webhooks]]`
 
@@ -337,6 +342,15 @@ way. Loopback binds (`127.0.0.0/8`, `::1`, `localhost`; `127.0.0.1` is the
 default) are always allowed; `0.0.0.0`, `::` and any other hostname count as
 non-loopback. To deliberately expose an unauthenticated webhook on a public
 host, set `[triggers] allow_unauthenticated_webhooks = true`.
+
+A loopback bind is only private while nothing forwards traffic to it. If a
+Cloudflare Tunnel, ngrok, nginx or Caddy in front makes the server public, set
+`[triggers.server] exposed = true`
+([#1119](https://github.com/littlebearapps/untether/issues/1119)): `auth = "none"`
+webhooks are then refused whatever the bind address (at startup the server
+doesn't start; on reload the routes are dropped), and
+`allow_unauthenticated_webhooks` no longer opts back in. The
+`triggers.server.refused_unauthenticated` error carries `exposed=true`.
 
 ### Bearer token
 
@@ -697,11 +711,14 @@ the filesystem context.
 ## Security
 
 - **Localhost binding**: The server binds to `127.0.0.1` by default. Use a
-  reverse proxy (nginx, Caddy) to expose it to the internet with TLS.
+  reverse proxy (nginx, Caddy) to expose it to the internet with TLS, and set
+  `[triggers.server] exposed = true` when you do
+  ([#1119](https://github.com/littlebearapps/untether/issues/1119)).
 - **Authentication**: Every webhook requires explicit auth configuration.
   `auth = "none"` must be set deliberately, and since v0.35.4 is **refused on a
   non-loopback bind host** unless `[triggers] allow_unauthenticated_webhooks = true`
-  ([#382](https://github.com/littlebearapps/untether/issues/382)).
+  ([#382](https://github.com/littlebearapps/untether/issues/382)) — and on any
+  bind host when `exposed = true`.
 - **Timing-safe comparison**: All secret comparisons use `hmac.compare_digest()`
   on bytes, so a token or signature with non-ASCII characters is a `401`, not a
   `500` ([#906](https://github.com/littlebearapps/untether/issues/906)).
@@ -725,10 +742,25 @@ the filesystem context.
       tokens and `429` once it is empty. **This does not cap guessing** — an
       attacker still gets an answer to every guess, exactly as before this
       limit existed. Behind a proxy, what protects a webhook is a long random
-      secret and a rate limit at the proxy.
-    - The client address is the address the connection came from. Untether
-      does not read `X-Forwarded-For`, `X-Real-IP` or `Forwarded`: a caller
-      can put anything in those, and there is no setting to trust a proxy's.
+      secret and a rate limit at the proxy (the edge), unless you set
+      `trusted_proxy_header` (below).
+    - The client address is the address the connection came from. By default
+      Untether does not read `X-Forwarded-For`, `X-Real-IP`, `Forwarded` or
+      `CF-Connecting-IP`: a caller can put anything in those.
+    - **Trusted proxy header** ([#1119](https://github.com/littlebearapps/untether/issues/1119)):
+      with `[triggers.server] exposed = true` and
+      `trusted_proxy_header = "CF-Connecting-IP"` (or the header your proxy
+      sets), a request **from a loopback peer** is counted against the
+      address in that header, so one client behind the proxy is locked out
+      like a direct sender and the others are not. The header's last
+      occurrence and its right-most comma-separated entry are used (for
+      `X-Forwarded-For`, the address your proxy appended). A non-loopback peer's
+      header is always ignored. A missing or malformed value (not a bare IP
+      address) keeps the shared loopback bucket. Only name a header your
+      proxy **overwrites** on every request — Cloudflare sets
+      `CF-Connecting-IP` itself; with nginx use
+      `proxy_set_header X-Real-IP $remote_addr;`. Otherwise a caller picks
+      their own bucket. Edge rate limiting is still recommended.
     - IPv6 clients are counted by `/64` network, not by single address
       (addresses under the NAT64 prefix `64:ff9b::/96` are counted singly).
     - For a directly connected address the limit holds for parallel requests
@@ -759,10 +791,10 @@ the filesystem context.
       at `rate_limit` bad requests a minute:
         - a reverse proxy or load balancer that reaches Untether on a
           non-loopback address (a container network such as `172.17.0.1`,
-          another host on a private network). Fixing this needs a
-          trusted-proxy setting, which Untether does not have yet. Until
-          then, run the proxy on the same host and bind Untether to
-          `127.0.0.1`, or rate-limit failed requests per client at the proxy;
+          another host on a private network). `trusted_proxy_header` only
+          applies to a loopback peer, so run the proxy on the same host and
+          bind Untether to `127.0.0.1`, or rate-limit failed requests per
+          client at the proxy;
         - senders behind one NAT, or a service that delivers webhooks for
           many customers from the same addresses.
 - **Body size limits**: `max_body_bytes` (default 1 MB) prevents memory
@@ -1025,6 +1057,8 @@ within seconds, and active runs are not interrupted.
 | Change `default_timezone` | Next minute tick |
 | Cron `permission_mode` | Next cron fire (the [audit warnings](#cron-permission-modes) are re-run on reload) |
 | `triggers.enabled` (on to off) | Immediately: all crons and webhooks are cleared (webhook paths return 404); the server stays bound until restart |
+| `triggers.server.exposed` | Immediately: turning it on drops any `auth = "none"` route ([#1119](https://github.com/littlebearapps/untether/issues/1119)) |
+| `triggers.server.trusted_proxy_header` | Next HTTP request ([#1119](https://github.com/littlebearapps/untether/issues/1119)) |
 
 ### What requires a restart
 

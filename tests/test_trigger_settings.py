@@ -1001,3 +1001,35 @@ class TestShortWebhookSecret1117:
         assert all(e["min_length"] == 32 for e in hits)
         for entry in hits:
             _assert_secret_absent(str(entry))
+
+
+class TestServerExposed1119:
+    """#1119: ``[triggers.server] exposed`` and ``trusted_proxy_header``."""
+
+    def test_defaults(self):
+        s = parse_trigger_config({})
+        assert s.server.exposed is False
+        assert s.server.trusted_proxy_header is None
+
+    def test_accepts_exposed_and_header(self):
+        s = parse_trigger_config(
+            {"server": {"exposed": True, "trusted_proxy_header": "CF-Connecting-IP"}}
+        )
+        assert s.server.exposed is True
+        assert s.server.trusted_proxy_header == "CF-Connecting-IP"
+
+    @pytest.mark.parametrize(
+        "header", ["", "CF Connecting IP", "X-Real-IP:", "a" * 65, "X_Real_IP"]
+    )
+    def test_bad_header_name_fails_the_whole_block(self, header):
+        with pytest.raises(ValidationError):
+            parse_trigger_config(
+                {
+                    "server": {"exposed": True, "trusted_proxy_header": header},
+                    "crons": [_cron("a")],
+                }
+            )
+
+    def test_exposed_must_be_a_real_bool(self):
+        with pytest.raises(ValidationError):
+            parse_trigger_config({"server": {"exposed": "yes"}})
