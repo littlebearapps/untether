@@ -954,6 +954,14 @@ def _apply_preamble(prompt: str, engine: str) -> str:
     get the plan-mode block. Claude's text is byte-identical to before; a
     ``[preamble] text`` override is used verbatim for every engine.
     """
+    if engine == "antigravity":
+        from .utils.antigravity_argv import native_compact_prompt
+
+        if native_compact_prompt(prompt) is not None:
+            # #1114: agy's own /compact must reach it as the command itself;
+            # the preamble in front would make it text for the model.
+            logger.info("preamble.skipped", reason="native_command")
+            return prompt
     cfg = _load_preamble_settings()
     if not cfg.enabled:
         logger.debug("preamble.disabled")
@@ -6694,7 +6702,8 @@ _STALE_RESUME_HINT = (
 # INFO, since nothing was meant to start. Antigravity's ``/continue`` with no
 # conversation of this project's own to resume (#1039) is an answer, not a
 # failure; so is an Antigravity "Ask me" run refused because Telegram
-# approvals aren't ready for the project (#980: the text says what to do).
+# approvals aren't ready for the project (#980: the text says what to do),
+# and so is Antigravity's /compact with no conversation to compact (#1114).
 # The other pre-spawn refusals (RAM, concurrency, OpenCode 2.x, Antigravity's
 # other blocks) still render as an error card.
 _PLAIN_PRESPAWN_BLOCKS = frozenset(
@@ -6704,6 +6713,7 @@ _PLAIN_PRESPAWN_BLOCKS = frozenset(
         "gate_not_ready",
         "gate_foreign_config",
         "gate_self_protect",
+        "compact_no_conversation",
     }
 )
 

@@ -213,6 +213,15 @@ async def maybe_steer(
         resume_token = await resolve_token()
 
     target_engine = resume_token.engine if resume_token is not None else engine
+    if target_engine == "antigravity":
+        from ..utils.antigravity_argv import native_compact_prompt
+
+        if native_compact_prompt(prompt_text) is not None:
+            # #1114: agy's /compact is a run of its own on the conversation;
+            # injected into a running turn it would be text for the model.
+            # It queues, like every command.
+            logger.info("steer.skipped", chat_id=chat_id, reason="native_command")
+            return False
     reason: FallbackReason | None = None
     session_id: str | None = None
     # #977: steering needs a live-session backend that can write mid-turn;

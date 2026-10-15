@@ -141,6 +141,32 @@ def check_slash_command(value: Any) -> str:
     return value
 
 
+# #1114: the one agy slash command a chat prompt may reach agy as. Every other
+# run keeps ``--disable-slash-commands`` (P22, D30); a run whose prompt is
+# this command goes without it, so agy compacts the conversation itself.
+# agy 1.3.5: ``/compact`` summarises and ends the turn; ``/compact <message>``
+# summarises, then answers the message. ``@botname`` is what Telegram adds in
+# groups. Lower case only, like every other slash word here.
+COMPACT_COMMAND = "/compact"
+_COMPACT_RE = re.compile(
+    r"/compact(?:@[A-Za-z0-9_]{1,64})?(?:\s+(?P<message>.*))?\Z", re.DOTALL
+)
+
+
+def native_compact_prompt(prompt: Any) -> str | None:
+    """The stdin line for agy's own ``/compact`` when *prompt* is that
+    command (``/compact`` or ``/compact <message>``), else None. The line is
+    never put on argv; only the absence of ``--disable-slash-commands``
+    depends on it."""
+    if not isinstance(prompt, str):
+        return None
+    match = _COMPACT_RE.match(prompt.strip())
+    if match is None:
+        return None
+    message = (match.group("message") or "").strip()
+    return f"{COMPACT_COMMAND} {message}" if message else COMPACT_COMMAND
+
+
 _CHECKS = {
     "--model": check_model,
     "--conversation": check_conversation,

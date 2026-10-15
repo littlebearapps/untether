@@ -1812,6 +1812,8 @@ async def test_1047_other_prespawn_blocks_keep_the_error_card(
         "gate_not_ready",
         "gate_foreign_config",
         "gate_self_protect",
+        # #1114: Antigravity /compact with no conversation to compact.
+        "compact_no_conversation",
     ],
 )
 async def test_1047_continue_refusal_is_plain_on_the_bridge(blocked: str) -> None:
@@ -12706,6 +12708,41 @@ async def test_819_manual_compaction_zero_turn_result_is_not_empty_result_anomal
     completed = [r for r in logs if r.get("event") == "runner.completed"]
     assert completed and completed[0]["compactions"] == 1
     assert completed[0]["compaction_trigger"] == "manual"
+
+
+@pytest.mark.anyio
+async def test_1114_agy_compaction_shows_the_confirmation(quarantine_store) -> None:
+    """Antigravity's /compact ends with an empty SUCCESS result and no token
+    figures; the runner marks it ``manual_success`` and the bridge shows
+    the same confirmation as Claude's, not an empty or error final."""
+    transport = FakeTransport()
+    usage = {
+        "compaction": {
+            "count": 1,
+            "trigger": "manual",
+            "result": "success",
+            "manual_success": True,
+        }
+    }
+    runner = ScriptRunner(
+        [Return(answer="", usage=usage)],
+        engine="antigravity",
+        resume_value="153ba40d-5f0b-4d81-b343-a31c89360d14",
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=False
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="/compact"),
+        resume_token=ResumeToken(
+            engine="antigravity", value="153ba40d-5f0b-4d81-b343-a31c89360d14"
+        ),
+    )
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("done")
+    assert "🗜️ Context compacted (manual)" in final_text
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.anyio

@@ -19,6 +19,7 @@ flags and sessions, and a Gemini CLI setup doesn't carry over.
 | Permission modes | Workspace (default), Plan first, Ask me, Full access. Full access applies only when you choose it (in `/config`, `[antigravity] permission_mode` or a cron's own setting) |
 | Approval buttons (Ask me), question buttons, `/steer` | Yes, with [Untether's agy plugin](#telegram-questions-and-steer) installed on the host |
 | `/usage` | agy's quota groups and AI credits, at no token cost |
+| `/compact` | Yes: agy's own compaction of the chat's conversation (agy 1.3.5 or newer). No other agy slash command is passed through |
 | Cost | Tokens only, no dollar figure, so `[cost_budget]` never trips |
 | Live sessions | No: each message is its own agy run |
 
@@ -345,12 +346,27 @@ If a saved level isn't one the model accepts, the run drops it and shows
 **Context use.** With a model set for the chat, the first line of a progress message and answer can end with
 `~3% ctx`: the tokens the model last read, as a share of the context window Google publishes for that model. It
 is an estimate. agy doesn't report a window, and it compacts a conversation on its own schedule without saying so,
-so a low figure doesn't mean compaction is far off. With no model set (agy's default), or a model Untether has no
-published figure for, no percentage is shown. Details:
+so a low figure doesn't mean compaction is far off ([`/compact`](#compact-the-conversation) compacts on demand).
+With no model set (agy's default), or a model Untether has no published figure for, no percentage is shown. Details:
 [Context use](../reference/runners/antigravity/runner.md#context-use-n-ctx).
 
 <!-- TODO: capture screenshot: antigravity-effort-limited — /config → Effort page in an Antigravity chat whose model is set without an effort suffix, showing only the levels that model accepts -->
 <!-- <img src="../assets/screenshots/antigravity-effort-limited.jpg" alt="Effort page for an Antigravity model, showing only the levels the model accepts" width="360" loading="lazy" /> -->
+
+## Compact the conversation
+
+Send `/compact` to have agy summarise the chat's conversation and free up its context window. Untether passes it
+to agy as agy's own command (it is the only agy slash command that gets through; anything else starting with `/`
+still reaches the model as text) and answers
+`🗜️ Context compacted (manual)` when agy reports the compaction. agy doesn't say how much smaller the context got,
+so there is no token figure: the `~N% ctx` on your next message shows the drop. `/compact <message>` compacts and
+then answers the message, under a `🗜️ Context compacted.` line.
+
+- In a new chat, or after `/new`, there is nothing to compact: Untether replies
+  `Nothing to compact: this chat has no Antigravity conversation yet.` and starts nothing.
+- Sent while a run is working, `/compact` waits its turn like any follow-up and runs when that run ends. It is
+  never steered into the running turn, even with `/steer` mode on.
+- It runs in the chat's permission mode. Compaction runs no tools, so it asks for no approvals.
 
 ## Usage and quota
 
@@ -439,9 +455,10 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 - Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no
   status message after the answer and no `🔔 Background task finished` follow-up.
 - Claude Code's extras: the Pause & Outline Plan button, Loop mode and a
-  compaction notice (agy compacts a conversation without reporting it).
-- agy's own `/compact` (agy 1.3.5): Untether doesn't pass it through, so `/compact` in an Antigravity chat reaches
-  the model as an ordinary message and compacts nothing, even if the answer says it did.
+  notice when the conversation is compacted automatically (agy doesn't report that; `/compact` is confirmed).
+- agy's other slash commands: only `/compact` is passed through (see
+  [Compact the conversation](#compact-the-conversation)); any other `/`-leading message reaches the model as
+  text.
 - agy's own Auto mode (`--mode auto`, agy 1.3.5): none of the permission modes uses it. Workspace never runs shell
   commands, and Auto runs the ones it judges safe.
 - Images as image input: a Telegram photo reaches agy as a saved file path.

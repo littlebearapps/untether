@@ -1670,6 +1670,20 @@ So the row is split. AG-12a (required) proves the user-visible half in 2 minutes
 | AG-14f export | `/export` after AG-14a | A transcript file with the turns this Untether process saw | — |
 | AG-14g Claude unchanged | In the Claude chat: `Reply with exactly: OK` | Any `% ctx` on the first line has **no** tilde | — |
 
+### #1114 — `/compact` passthrough
+
+Run in the Antigravity chat with a model set (`/model set gemini-3.8-flash`) so the footer shows `~N% ctx`. The
+rows need agy 1.3.5 or newer.
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-60a Workspace | `/config` → Permission mode → Clear override; `/new`; `Read README.md and summarise it in three bullets`; note the `~N% ctx`; then `/compact` | A final `🗜️ Context compacted (manual)` with status `done`, no token figure and the same resume line; no answer text from the model | `antigravity.compact.passthrough`, `preamble.skipped reason=native_command`, `antigravity.compact.done`; `runner.start` args contain `--conversation=<uuid>` and `--mode=accept-edits` and **no** `--disable-slash-commands` |
+| AG-60b conversation survives | Right after AG-60a: `repeat your last answer` | An answer that draws on the earlier summary, same conversation ID; its `~N% ctx` is lower than the figure before `/compact` | The usual `runner.start` with `--disable-slash-commands` again |
+| AG-60c Ask me | Plugin installed; `/config` → Permission mode → **Ask me**; `/new`; `Reply with exactly: ONE`; then `/compact` | The same `🗜️ Context compacted (manual)` final; no approval card | `runner.start` args contain the bypass flag and no `--disable-slash-commands`; `antigravity.compact.done` |
+| AG-60d nothing to compact | `/new`, then `/compact` | A plain reply (no error header): `Nothing to compact: this chat has no Antigravity conversation yet. Send a normal message to start one.` | `antigravity.compact.no_conversation`; `session.summary.no_events` with `prespawn_blocked=compact_no_conversation` at INFO; no `runner.start` |
+| AG-60e other slash commands still off | `/review the README` | An ordinary answer about the README | `runner.start` args contain `--disable-slash-commands`; no `antigravity.compact.*` |
+| AG-60f mid-run | `/config` → **Follow-up** → Steer (Ask me with the plugin). Send `Read every file in this project and summarise each one`, then `/compact` while it runs | No `↪️ Steered into the current run`; `/compact` waits as a queued follow-up, then answers `🗜️ Context compacted (manual)` after the first run's final | `steer.skipped reason=native_command`; a second `runner.start` on the same conversation after the first `runner.completed` |
+
 ### #1043 — planted-config layouts
 
 | ID | Steps | Expected in Telegram | Expected log signature |
