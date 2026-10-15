@@ -4,13 +4,14 @@ import subprocess
 import sys
 import time
 from collections.abc import Collection
+from contextlib import suppress
 from pathlib import Path
 
 import anyio
 
 from .. import __version__
-from ..backends import EngineBackend
-from ..config import read_config
+from ..backends import EngineBackend, EngineConfig
+from ..config import ConfigError, read_config
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter
 from ..runner_bridge import ExecBridgeConfig
@@ -18,6 +19,7 @@ from ..settings import (
     ProgressSettings,
     TelegramTopicsSettings,
     TelegramTransportSettings,
+    load_settings_if_exists,
 )
 from ..transport_runtime import TransportRuntime
 from ..transports import SetupResult, TransportBackend
@@ -127,14 +129,21 @@ async def _cli_version(cmd: str) -> str | None:
 
 
 def _engine_cli_cmd(engine: str) -> str:
-    """#993: the binary to ``--version`` for an engine — its backend's
-    ``cli_cmd`` (``agy`` for ``antigravity``), else the engine id."""
+    """#993: the binary to ``--version`` for an engine — the command its
+    runner spawns (#1089: ``[antigravity] cmd``, else agy on PATH, else
+    ``~/.local/bin/agy``), else the engine id."""
     try:
         from ..engines import get_backend
 
-        return get_backend(engine).cli_cmd or engine
+        backend = get_backend(engine)
     except Exception:  # noqa: BLE001 — a lookup failure must not hide the line
         return engine
+    config: EngineConfig = {}
+    with suppress(ConfigError):
+        loaded = load_settings_if_exists()
+        if loaded is not None:
+            config = loaded[0].engine_config(engine, config_path=loaded[1])
+    return backend.cli_command(config)
 
 
 async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
