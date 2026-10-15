@@ -993,6 +993,54 @@ def test_886_continuation_chunk_keeps_numbering() -> None:
     assert numbers == list(range(1, 21))
 
 
+# ── #1094: loose list items keep their text on the marker's line ────────────
+
+
+def test_1094_loose_ordered_list_with_code_block() -> None:
+    md = "1. First step:\n\n   ```bash\n   ls -la\n   ```\n\n2. Second step\n"
+    text, entities = render_markdown(md)
+    assert text == "1. First step:\n\n\xa0ls -la\n\n2. Second step"
+    pre = [e for e in entities if e["type"] == "pre"]
+    assert len(pre) == 1
+    assert pre[0]["language"] == "bash"
+    assert "ls -la" in _utf16_slice(text, pre[0]["offset"], pre[0]["length"])
+
+
+def test_1094_loose_bullet_list() -> None:
+    assert render_markdown("- alpha\n\n- beta\n\n- gamma")[0] == (
+        "- alpha\n- beta\n- gamma"
+    )
+
+
+def test_1094_loose_ordered_list_keeps_start_number() -> None:
+    assert render_markdown("3. three\n\n4. four")[0] == "3. three\n4. four"
+
+
+def test_1094_loose_item_with_nested_paragraph() -> None:
+    text, _ = render_markdown("- first\n\n  more about first\n\n- second")
+    assert text == "- first\n\n\xa0more about first\n\n- second"
+
+
+def test_1094_loose_nested_list() -> None:
+    text, _ = render_markdown("1. outer\n\n   - inner a\n\n   - inner b\n\n2. next")
+    assert text == "1. outer\n\xa0- inner a\n\xa0- inner b\n2. next"
+
+
+def test_1094_loose_item_formatting_entities() -> None:
+    text, entities = render_markdown("- **bold** lead\n\n- `code` lead")
+    assert text == "- bold lead\n- code lead"
+    spans = {e["type"]: _utf16_slice(text, e["offset"], e["length"]) for e in entities}
+    assert spans == {"bold": "bold", "code": "code"}
+
+
+def test_1094_tight_lists_unchanged() -> None:
+    assert render_markdown("- a\n- b")[0] == "- a\n- b"
+    assert render_markdown("1. a\n2. b")[0] == "1. a\n2. b"
+    assert render_markdown("before\n\n- a\n- b\n\nafter")[0] == (
+        "before\n\n- a\n- b\n\nafter"
+    )
+
+
 @pytest.mark.parametrize(
     ("md", "expected"),
     [
