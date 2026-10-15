@@ -39,7 +39,7 @@ Effort: default  · high
 [📝 Diff preview]  [🔍 Verbose]
 [💰 Cost & usage]  [↩️ Resume line]
 [📡 Listen]        [🔁 Loop mode]
-[🧠 Reasoning]     [⚙️ Engine & model]
+[🧠 Effort]        [⚙️ Engine & model]
 [↪️ Follow-up]     [ℹ️ About]
 [⏰ Triggers]      [⏸ Pause triggers]   ← only when [triggers] is enabled
 

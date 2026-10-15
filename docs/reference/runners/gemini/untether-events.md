@@ -48,9 +48,9 @@ Resume regex: `(?im)^\s*`?gemini\s+--resume\s+(?P<token>[A-Za-z0-9_-]+)`?\s*$`
 
 ---
 
-## 3. Session lifecycle + serialization
+## 3. Session lifecycle + serialisation
 
-Untether requires **serialization per session token**:
+Untether requires **serialisation per session token**:
 
 - For new runs (`resume=None`), do **not** acquire a lock until a `StartedEvent`
   is emitted (when the `init` event arrives with a session ID).

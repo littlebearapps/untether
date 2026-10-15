@@ -29,7 +29,7 @@ format. Built on [#766](https://github.com/littlebearapps/untether/pull/766) by
 
 | | |
 |---|---|
-| Tested against | agy **1.3.3** (fixtures captured on 1.3.1 and 1.3.2; the drift probes pass on 1.3.3) |
+| Tested against | agy **1.3.5** (fixtures captured on 1.3.1 to 1.3.5; the drift probes pass on 1.3.5) |
 | Minimum | agy **1.3.1**. An older agy is refused before anything starts: `🛑 Antigravity CLI <version> is older than 1.3.1, which this Untether version needs. Run agy update on the host, then retry.` |
 | Tested platform | Linux x86_64 with a file-stored sign-in token. macOS, Linux hosts with a desktop keyring, and ARM64 are untested |
 
@@ -90,21 +90,24 @@ see the notice once. Shown chats are remembered in `antigravity_notices.json` be
 One `agy` process per message:
 
 ```text
-agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
+agy --input-format stream-json --output-format stream-json --print-timeout 0 [--disable-slash-commands]
     [--conversation=<id>] [--model=<model>] [--effort=<level>]
-    (--mode=accept-edits --agent=untether-workspace | --dangerously-skip-permissions)
+    (--mode=accept-edits --agent=untether-workspace | --mode=plan --agent=untether-workspace
+     | --dangerously-skip-permissions)
 ```
 
 - **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
   It is never on the command line, so it can't be read from the process list or mistaken for a flag.
 - `--disable-slash-commands` makes a prompt that starts with `/` an ordinary message. Untether adds no prefix.
-  The one exception is agy's own `/compact` ([#1114](https://github.com/littlebearapps/untether/issues/1114)): that
-  run goes without the flag (see [`/compact`](#compact)).
+  Two runs go without the flag: Plan first, which escapes a `/`-leading prompt itself (see
+  [Permission modes](#permission-modes)), and agy's own `/compact`
+  ([#1114](https://github.com/littlebearapps/untether/issues/1114), see [`/compact`](#compact)).
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
   success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
 - The last arguments are the permission mode: `--mode=accept-edits --agent=untether-workspace` for Workspace,
-  `--dangerously-skip-permissions` only in Full access (see [Permission modes](#permission-modes)). Both Workspace
-  values are fixed; nothing a user types reaches `--mode` or `--agent`.
+  `--mode=plan --agent=untether-workspace` for Plan first, and `--dangerously-skip-permissions` only in Full access
+  or in Ask me once the gate is ready (see [Permission modes](#permission-modes)). The `--mode` and `--agent`
+  values are fixed; nothing a user types reaches them.
 - **Values are always joined to their flag** (`--model=<model>`, `--conversation=<id>`, `--effort=<level>`), and
   each is checked first. agy reads a separate value that starts with a dash as another flag, so Untether never
   passes one as its own argument. A model id may use ASCII letters, digits and `. _ - : / @ +`, must start with a
@@ -183,7 +186,8 @@ directory, `/` or the bot's own directory:
 
 ## Permission modes
 
-Headless agy can't stop mid-run to ask, so the mode is chosen before the run: `/config` → **Permission mode**, or
+Headless agy can't stop mid-run to ask by itself (Ask me does it through [Untether's agy gate](#untethers-agy-gate)),
+so the mode is chosen before the run: `/config` → **Permission mode**, or
 `permission_mode` under `[antigravity]`. See
 [Antigravity CLI — Permission mode](../../../how-to/interactive-approval.md#antigravity-cli-permission-mode) for the
 user guide.

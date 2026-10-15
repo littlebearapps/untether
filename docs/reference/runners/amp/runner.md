@@ -27,7 +27,7 @@ Provide the **`amp`** engine backend so Untether can:
 
 ---
 
-## UX and behavior
+## UX and behaviour
 
 ### Engine selection
 

@@ -4,7 +4,7 @@ This document describes how the Pi runner translates Pi CLI `--mode json` JSONL 
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/pi.py` and the translation logic is in `src/untether/runners/pi.py`. When in doubt, refer to the code.
 
-The goal is to make Pi feel identical to the Codex/Claude Code runners from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event). Pi runs non-interactively: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only.
+The goal is to make Pi feel identical to the Codex/Claude Code runners from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialisation, single completed event). Pi runs non-interactively: approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code-only.
 
 ---
 
@@ -46,9 +46,9 @@ Why not `--resume`?
 
 ---
 
-## 3. Session lifecycle + serialization
+## 3. Session lifecycle + serialisation
 
-Untether requires **serialization per session token**:
+Untether requires **serialisation per session token**:
 
 - For new runs (`resume=None`), do **not** acquire a lock until a `started`
   event is emitted (Untether emits this as soon as the session header or first

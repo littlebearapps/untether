@@ -172,6 +172,7 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
+| Antigravity CLI | Yes | In **Ask me**, a write into the outbox asks for approval first ([Security](security.md#antigravity-ask-me)) |
 | Gemini CLI (deprecated) | Yes | Untether runs it with `--approval-mode yolo` unless the chat picks **Edit files**, which can still write files |
 | AMP (deprecated) | Yes | — |
 

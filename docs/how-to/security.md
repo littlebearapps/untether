@@ -18,7 +18,7 @@ Untether runs on your machine as your user and bridges your agents to Telegram. 
 | **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, cost and usage stats (listed in [Uninstall](uninstall.md)) |
 | **Filesystem** | Project directories | `/file put` uploads, `/file get` and `/browse` reads, and `.untether-outbox/` delivery, all subject to [deny globs](#file-transfer-deny-globs) |
 | **Filesystem** | Webhook `file_write` and cron `file_read` | Only when configured; paths you set, deny globs apply |
-| **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
+| **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`, `agy`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
 | **Credentials** | Telegram bot token, voice API key | Stored in `untether.toml`; redacted from logs |
 | **Credentials** | Claude Code login (`~/.claude/.credentials.json` or the macOS Keychain) | Read only to call the usage endpoint above |
 | **Credentials** | Engine API keys | Read by the engine CLIs from their own config or the environment; Untether doesn't store them |
@@ -251,7 +251,7 @@ Add more patterns as needed:
 
 Deny globs are checked against both the path you type and the path it resolves to after following symlinks inside the project, so a symlink can't be used to reach a denied file (for example `cfg.txt → .env`, or `docs/x → .git/hooks`). Links that leave the project root are always refused ([#390](https://github.com/littlebearapps/untether/issues/390)).
 
-The same matcher applies everywhere a path crosses the Telegram boundary: `/file get` and `/file put`, outbox delivery, `/browse` listings and previews (which also hide dot-paths other than `.github` and `.gitignore`, and need a project-bound chat — [#389](https://github.com/littlebearapps/untether/issues/389)), and webhook `file_write` actions and cron `file_read` fetches ([#831](https://github.com/littlebearapps/untether/issues/831)). The two trigger paths use the same matcher with their own fixed list (`.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**`) rather than your `deny_globs`, so files such as `.env.local` or `id_rsa` are not refused there.
+The same matcher applies everywhere a path crosses the Telegram boundary: `/file get` and `/file put`, outbox delivery, `/browse` listings and previews (which also hide dot-paths other than `.github` and `.gitignore`, and need a project-bound chat — [#389](https://github.com/littlebearapps/untether/issues/389)), and webhook `file_write` actions and cron `file_read` fetches ([#831](https://github.com/littlebearapps/untether/issues/831)). The two trigger paths always use the full default list above rather than your `deny_globs`, so a `deny_globs` value you set yourself doesn't change what they refuse ([#906](https://github.com/littlebearapps/untether/issues/906)).
 
 !!! tip "Defence in depth"
     Deny globs protect against accidental file exfiltration via `/file get` and against uploads (`/file put`, auto-saved uploads and media groups) landing in sensitive places such as `.git/hooks`. They do not prevent the coding agent itself from reading files — the agent runs with full filesystem access in the project directory.
