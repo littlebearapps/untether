@@ -1122,6 +1122,34 @@ async def test_agy_steer_queues_into_the_running_gated_turn(
     assert item.command_uuid in rb._FOLLOWUP_ANCHORS
 
 
+async def test_agy_compact_is_never_steered(agy_gate_installed: None) -> None:
+    """#1114: agy's /compact is its own run on the conversation; steered
+    into a running turn it would reach the model as text. It queues."""
+    from untether.antigravity import gate_server
+    from untether.events import EventFactory
+
+    gate = gate_server.GateRun(config_path=None, factory=EventFactory("antigravity"))
+    gate.set_conversation(AGY_CID)
+    gate_server._RUNS[gate.session_key] = gate
+    cfg = _cfg("steer")
+    with structlog.testing.capture_logs() as logs:
+        ok = await _steer(
+            cfg,
+            engine="antigravity",
+            token=AGY_TOKEN,
+            override="steer",
+            text="/compact",
+        )
+    assert ok is False
+    assert not gate.steer_queue
+    assert _texts(cfg) == []
+    assert [log["reason"] for log in logs if log["event"] == "steer.skipped"] == [
+        "native_command"
+    ]
+    # Ordinary text still steers into the same turn.
+    assert await _steer(cfg, engine="antigravity", token=AGY_TOKEN) is True
+
+
 async def test_agy_steer_without_running_turn_queues(agy_gate_installed: None) -> None:
     cfg = _cfg("steer")
     running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}

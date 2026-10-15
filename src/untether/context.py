@@ -25,6 +25,9 @@ class RunContext:
 # prompt. `at:` is excluded on purpose: a human scheduled it from the chat and
 # is around to tap (#751 Decision 7). `loop:` re-fires follow a human's /loop.
 UNATTENDED_TRIGGER_PREFIXES: tuple[str, ...] = ("cron:", "webhook:")
+# #1142: a webhook's prompt is built from the request payload, so it never
+# inherits Claude's bypass mode (crons keep theirs; the audit flags them).
+WEBHOOK_TRIGGER_PREFIX = "webhook:"
 
 
 def unattended_trigger(context: RunContext | None) -> str | None:

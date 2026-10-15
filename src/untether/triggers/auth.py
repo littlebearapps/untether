@@ -32,13 +32,14 @@ def verify_auth(
         logger.warning("auth.no_secret", auth=config.auth)
         return False
 
+    secret = config.secret.get_secret_value()
     if config.auth == "bearer":
-        return _verify_bearer(config.secret, headers)
+        return _verify_bearer(secret, headers)
 
     if config.auth in ("hmac-sha256", "hmac-sha1"):
         algo = hashlib.sha256 if config.auth == "hmac-sha256" else hashlib.sha1
         sig_headers = _ALGO_HEADERS[config.auth]
-        return _verify_hmac(config.secret, body, headers, algo, sig_headers)
+        return _verify_hmac(secret, body, headers, algo, sig_headers)
 
     logger.warning("auth.unknown_mode", auth=config.auth)
     return False

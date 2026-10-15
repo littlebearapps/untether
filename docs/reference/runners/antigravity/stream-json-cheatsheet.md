@@ -23,9 +23,21 @@ Untether starts agy with `--input-format stream-json` and writes one line to std
 agy runs one turn per line. With stdin left open it answers each line with its own `result` and then waits, idle,
 for the next; closing stdin ends it with exit code 0 (agy 1.3.5; the seam for live sessions,
 [#977](https://github.com/littlebearapps/untether/issues/977)). A `/compact` line, sent without
-`--disable-slash-commands` (Untether passes that flag, and escapes a leading `/` in Plan first), compacts the conversation: one
-`checkpoint` step, then a `SUCCESS` result with an empty `response` and no new tokens. Nothing in the stream says
-how much smaller the context got (agy 1.3.5).
+`--disable-slash-commands`, compacts the conversation: a `system_message` step and a `checkpoint` step, then a
+`SUCCESS` result with an empty `response` and no new tokens. Nothing in the stream says how much smaller the context
+got (agy 1.3.5). Untether passes that flag (and escapes a leading `/` in Plan first) on every run except a
+`/compact` one ([#1114](https://github.com/littlebearapps/untether/issues/1114)):
+
+```json
+{"event":"user","message":{"content":"/compact"}}
+```
+
+```json
+{"event":"step_update","step_update":{"conversation_id":"153b…","step_index":2,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"153b…","step_index":3,"state":"DONE","step_type":"system_message","duration_seconds":0.000237673}}
+{"event":"step_update","step_update":{"conversation_id":"153b…","step_index":4,"state":"DONE","step_type":"checkpoint","duration_seconds":6.39104973}}
+{"event":"result","result":{"conversation_id":"153b…","status":"SUCCESS","response":"","duration_seconds":18.26,"num_turns":2,"usage":{"input_tokens":7803,"output_tokens":27,"thinking_tokens":26,"cache_read_tokens":0,"total_tokens":7830}}}
+```
 
 ## `init`
 

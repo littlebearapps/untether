@@ -62,7 +62,7 @@ Long lines are cut at 60 characters, and a `…(N more added)` line says how muc
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
-You can toggle diff previews on or off via `/config` → **Diff preview**. Approval messages include the diff unless you switch it off; when switched off they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
+You can toggle diff previews on or off via `/config` → **Diff preview**. With no setting, `/config` shows it as **default**: approval messages include the diff, but nothing waits for a tap just to show one. Switched off, they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
 
 Antigravity CLI has the same toggle for [Ask me](#antigravity-ask-me) once Untether's agy plugin is installed ([#1090](https://github.com/littlebearapps/untether/issues/1090)). It only changes Ask me's cards: **on** makes edits inside the project ask too, with the diff; **off** leaves the diff off (an edit card still names the file, and a shell command always shows).
 
@@ -186,18 +186,27 @@ Workspace, Plan first and Full access are pre-run policies: headless agy can't s
 **Ask me** ([#980](https://github.com/littlebearapps/untether/issues/980)) is the closest Antigravity gets to Claude Code's approval buttons. It needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: agy runs with all its tools (`--dangerously-skip-permissions`, its default agent), and the plugin holds every tool call until Untether answers. Untether never passes that flag for Ask me unless the plugin is installed, unedited and loaded by agy for the project.
 
 - **Runs without a card:** reading, listing and searching files inside the project, and creating or editing files there (plus agy's own notes for the conversation).
-- **Asks first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents and timers; files outside the project; protected files in it (`.agents/`, `.git/`, `.gemini/`, `.claude/`, `.github/workflows/`, `.husky/`, `.untether-outbox/`, `.mcp.json`, `.envrc`, `.vscode/tasks.json`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.env` files and keys); Untether's own files; and any tool Untether doesn't know yet. (With `/config` → **Diff preview** on, in-project edits ask too, with the diff; [#1090](https://github.com/littlebearapps/untether/issues/1090).) A path that goes through a symlink, or a file with a second hard-linked name, always asks (the card says where it really resolves): approving a shell command can create links that change what a later "in-project" path means.
+- **Asks first:** reading files outside the project, shell commands, web fetches and searches, MCP tools, browser actions, subagents and timers; files outside the project; protected files in it (`.agents/`, `.git/`, `.gemini/`, `.claude/`, `.github/workflows/`, `.husky/`, `.untether-outbox/`, `.mcp.json`, `.envrc`, `.vscode/`, `.pre-commit-config.yaml`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.env` files and keys); Untether's own files; and any tool Untether doesn't know yet. (With `/config` → **Diff preview** on, in-project edits ask too, with the diff; [#1090](https://github.com/littlebearapps/untether/issues/1090).) A path that goes through a symlink, or a file with a second hard-linked name, always asks (the card says where it really resolves): approving a shell command can create links that change what a later "in-project" path means.
 
 The card reads like Claude's:
 
+<div markdown>
+
 !!! untether "Untether"
-    ⚠️ Permission Request [agy] - shell command
+    ▸ Permission Request [agy] - shell command
     $ `npm test`
     in packages/api · moves to the background after 5 s if still running
     agy says: Run the test suite
 
-    [✅ Approve] [❌ Deny]
-    [✅ Always allow this command here]
+<div class="tg-buttons">
+<span class="tg-btn">✅ Approve</span>
+<span class="tg-btn">❌ Deny</span>
+</div>
+<div class="tg-buttons">
+<span class="tg-btn">✅ Always allow this command here</span>
+</div>
+
+</div>
 
 An edit shows the file and the lines added and removed (`📝 src/app.py`, `-` / `+`); a write or read outside the project says `(outside this project)`; a command that starts a daemon warns that it keeps running after the turn; a subagent's call says `from subagent: <role>`. agy's own description comes last and is only agy's words — the lines above it are what will actually run.
 

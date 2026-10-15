@@ -10,6 +10,7 @@ import msgspec
 
 from ..backends import EngineBackend, EngineConfig
 from ..config import ConfigError
+from ..context import WEBHOOK_TRIGGER_PREFIX
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import ActionPhase, EngineId, ResumeToken, UntetherEvent
@@ -36,7 +37,7 @@ from .extra_args_guard import (
     normalise_value,
     option_value,
 )
-from .run_options import get_run_options
+from .run_options import EngineRunOptions, get_run_options
 
 logger = get_logger(__name__)
 
@@ -103,6 +104,47 @@ _CODEX_SAFE_SANDBOX = "read-only"
 # button to "auto" (stored as None); engine_overrides documents it too.
 _CODEX_FULL_AUTO_MODES = frozenset({"auto"})
 _UNKNOWN_PM_WARNED: set[str] = set()
+# #1142: (trigger, mode) pairs whose webhook run was moved to ``safe``.
+_WEBHOOK_UNKNOWN_PM_WARNED: set[tuple[str, str]] = set()
+_WEBHOOK_UNKNOWN_PM_WARNED_MAX = 256
+
+
+def _is_unknown_permission_mode(mode: str | None) -> bool:
+    return (
+        mode is not None
+        and mode != CODEX_SAFE_PERMISSION_MODE
+        and mode not in _CODEX_FULL_AUTO_MODES
+    )
+
+
+def _webhook_safe_trigger(options: EngineRunOptions | None) -> str | None:
+    """#1142: the webhook trigger when an unknown mode must run ``safe``.
+
+    Unknown modes fail open (full auto) for attended runs and crons; a
+    webhook's prompt is built from its payload, so it fails closed instead.
+    """
+    if options is None or not _is_unknown_permission_mode(options.permission_mode):
+        return None
+    trigger = options.unattended_trigger
+    if trigger is None or not trigger.startswith(WEBHOOK_TRIGGER_PREFIX):
+        return None
+    return trigger
+
+
+def _warn_webhook_unknown_mode(trigger: str, mode: str) -> None:
+    key = (trigger, mode)
+    if key in _WEBHOOK_UNKNOWN_PM_WARNED:
+        return
+    if len(_WEBHOOK_UNKNOWN_PM_WARNED) >= _WEBHOOK_UNKNOWN_PM_WARNED_MAX:
+        _WEBHOOK_UNKNOWN_PM_WARNED.clear()
+    _WEBHOOK_UNKNOWN_PM_WARNED.add(key)
+    logger.warning(
+        "codex.webhook_unknown_mode_safe",
+        trigger=trigger,
+        mode=mode,
+        note="unknown Codex permission_mode on a webhook run runs as safe "
+        "(--sandbox read-only), not full auto",
+    )
 
 
 def _warn_unknown_permission_mode(mode: str) -> None:
@@ -826,11 +868,15 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "--color=never",
             ]
         )
-        mode = run_options.permission_mode if run_options is not None else None
+        raw_mode = run_options.permission_mode if run_options is not None else None
+        webhook = _webhook_safe_trigger(run_options)
+        if webhook is not None and raw_mode is not None:
+            _warn_webhook_unknown_mode(webhook, raw_mode)
+        mode = self._permission_mode()
         if mode == CODEX_SAFE_PERMISSION_MODE:
             # Must sit before `resume`: `codex exec resume` has no --sandbox.
             args.extend(["--sandbox", _CODEX_SAFE_SANDBOX])
-        elif mode is not None and mode not in _CODEX_FULL_AUTO_MODES:
+        elif mode is not None and _is_unknown_permission_mode(mode):
             _warn_unknown_permission_mode(mode)
         if resume:
             if resume.is_continue:
@@ -845,6 +891,14 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if isinstance(state, CodexRunState):
             state.argv = list(args)
         return args
+
+    def _permission_mode(self) -> str | None:
+        """The run's Codex mode: the per-chat (or cron) value, except that a
+        webhook with an unknown mode runs ``safe`` (#1142)."""
+        run_options = get_run_options()
+        if _webhook_safe_trigger(run_options) is not None:
+            return CODEX_SAFE_PERMISSION_MODE
+        return run_options.permission_mode if run_options is not None else None
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
@@ -977,10 +1031,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if meta is None:
                 meta = {}
             meta["effort"] = run_options.reasoning
-        if (
-            run_options is not None
-            and run_options.permission_mode == CODEX_SAFE_PERMISSION_MODE
-        ):
+        if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
             if meta is None:
                 meta = {}
             meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE

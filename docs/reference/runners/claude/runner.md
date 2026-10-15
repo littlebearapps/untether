@@ -15,7 +15,7 @@ Provide the **`claude`** engine backend so Untether can:
 
 ---
 
-## UX and behavior
+## UX and behaviour
 
 ### Engine selection
 
@@ -266,6 +266,8 @@ with the request (see "Requested vs effective mode" above).
 | Anything left before the outline gate (ExitPlanMode in `plan`, AskUserQuestion, prompting-mode tools, a #751-re-armed downgraded `auto`, other request types) | deny | `would_wait` |
 
 `plan-auto`'s ExitPlanMode stamp, the `ask_questions = false` deny and every attended path are unchanged. A denial goes on `auto_deny_queue` (`{"behavior":"deny","message":…}`, no `interrupt`), is never registered for a tap, logs WARN `permission.unattended_deny` (`tool_name`, `trigger_source`, `session_id`, `request_id`, `permission_mode`, `effective_permission_mode`, `reason`, `turn_denials`) and adds one `🔒 Unattended run — denied <tool>: nobody to approve it` note row per turn. The message tells Claude this is an unattended run and to continue without the action or stop and report (ExitPlanMode: give the complete plan as the final answer; AskUserQuestion: proceed on reasonable defaults). At the result, `usage["unattended"] = {"trigger", "mode", "denied": {tool: n}}` becomes the final's footer `🔒 unattended (cron:<id>) · denied Write ×2, ExitPlanMode — nobody to approve`, with a what-to-change hint once per trigger per process. `control_request.received` carries `unattended=`. **Live sessions:** the marker is part of the options equality, so a human reply into an idle cron process closes it (`options_changed`) and resumes attended. That includes a reply to a cron turn that is still running (its progress or a wake-turn message): the running task carries the trigger's `RunContext`, so `send_with_resume` passes it through `context.attended_context()`, which keeps project/branch and drops `trigger_source` / `permission_mode` / `model` / `reasoning` (log `trigger.reply_context_attended`); the reply waits on the session lock until the cron process closes (idle grace after its turn, or the background hold), then resumes in a fresh attended process; a `/steer` into a *busy* cron turn folds into the unattended process and that turn stays fail-closed. Background wake turns of the cron process stay unattended. Recovery re-runs (auto-continue, #631, #572) stay inside the run's options scope, so they stay unattended. `at:` / `loop:` runs are attended.
+
+**Webhooks never inherit bypass ([#1142](https://github.com/littlebearapps/untether/issues/1142)).** A `webhook:` run whose `bypassPermissions` would come from the chat, `[claude] permission_mode` or `dangerously_skip_permissions = true` runs with `--permission-mode default` instead (the skip flag is dropped), so the `would_wait` deny above refuses anything that would ask. WARN `claude.webhook_bypass_downgraded` (`trigger`, `origin` = `chat` / `toml` / `dangerously_skip_permissions`) once per trigger and origin per process. Crons are unchanged.
 
 #### The six-stage permission pipeline, and where Untether sits ([#749](https://github.com/littlebearapps/untether/issues/749))
 
@@ -643,11 +645,11 @@ Core invocation (permission mode):
 
 Resume:
 
-* add `--resume <session_id>` if resuming. ([Claude Code][1])
+* add `--resume=<session_id>` if resuming (`--continue` for `/continue`). ([Claude Code][1])
 
 Model:
 
-* add `--model <name>` if configured. ([Claude Code][1])
+* add `--model=<name>` if configured. ([Claude Code][1])
 
 Effort (reasoning depth):
 
@@ -656,7 +658,7 @@ Effort (reasoning depth):
 Permissions:
 
 * add `--allowedTools "<rules>"` (comma-joined) — `allowed_tools` or the `Bash,Read,Edit,Write` default — except in prompting modes, where only an explicit `allowed_tools` is sent ([#749](https://github.com/littlebearapps/untether/issues/749); see "Permission modes"). ([Claude Code][1])
-* add `--dangerously-skip-permissions` only if `dangerously_skip_permissions = true` (high risk; it overrides the permission mode).
+* add `--dangerously-skip-permissions` only if `dangerously_skip_permissions = true` (high risk; it overrides the permission mode), and never on a webhook run ([#1142](https://github.com/littlebearapps/untether/issues/1142)).
 
 Prompt passing:
 
@@ -749,7 +751,7 @@ Strategy:
 
   * Emit `ActionEvent(phase="completed")` for `tool_use_id`
   * `ok = not is_error`
-  * `content` may be a string or an array of content blocks; normalize to a string for summaries
+  * `content` may be a string or an array of content blocks; normalise to a string for summaries
   * `detail` includes a small summary (char count / first line / “(truncated)”)
 
 This mirrors CodexRunner’s “started → completed” item tracking and renders well in the existing `ProgressTracker` / `MarkdownFormatter` pipeline.
@@ -776,7 +778,7 @@ Not implemented: `result.permission_denials` is not decoded and no warning actio
 * title: “permission denied: <tool_name>”
   This preserves the “warnings before started/completed” ordering principle Untether already tests for CodexRunner.
 
-#### Session serialization / locks
+#### Session serialisation / locks
 
 Must match Untether runner contract:
 
@@ -794,7 +796,7 @@ Must match Untether runner contract:
     * acquire lock for that session id **before** yielding StartedEvent,
     * then continue yielding.
 
-This mirrors CodexRunner’s correct behavior and ensures “new run + resume run” serialize once the session is known.
+This mirrors CodexRunner’s correct behaviour and ensures “new run + resume run” serialise once the session is known.
 Only the **first** `system/init` produces the `StartedEvent` and the lock. Later
 `init` events are normal — a manual `/compact` and live-session turns re-emit
 one — and never re-lock or re-emit `started` (in a live session a later `init`

@@ -100,7 +100,7 @@ The prompt goes after `--`, so a prompt starting with `-` is never read as a fla
 
 Resume line format: `` `opencode --session ses_XXX` ``
 
-The runner recognizes both `--session` and `-s` flags (with or without `run`).
+The runner recognises both `--session` and `-s` flags (with or without `run`).
 
 Note: The resume line is meant to reopen the interactive TUI session. `opencode run` is headless and requires a message or command, so it is not the canonical resume command.
 

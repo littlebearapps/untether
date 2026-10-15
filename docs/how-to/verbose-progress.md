@@ -53,7 +53,7 @@ done · claude · 1m 36s · step 10 · 62% ctx
 
 It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known: for current Claude models it shows from the first step, and for any other model it appears by the final of the first run on that model. Learned windows are saved in `context_windows.json` next to your config, so the value survives a restart. It disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
 
-Antigravity chats can show an estimate instead, written `~3% ctx`: the tokens the model last read against the window Google publishes for that model. It appears only when the chat has a model set that Untether has a published figure for, and agy doesn't report compaction, so there is no compaction row. See [Use Antigravity CLI](antigravity.md#models-and-effort).
+Antigravity chats can show an estimate instead, written `~3% ctx`: the tokens the model last read against the window Google publishes for that model. It appears only when the chat has a model set that Untether has a published figure for, and agy doesn't report its own automatic compaction, so there is no compaction row for it; a [`/compact`](antigravity.md#compact-the-conversation) you send is answered `🗜️ Context compacted (manual)`. See [Use Antigravity CLI](antigravity.md#models-and-effort).
 
 When Claude compacts its context, the progress message shows one row for it (a single step):
 

@@ -18,7 +18,7 @@ Untether runs on your machine as your user and bridges your agents to Telegram. 
 | **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, cost and usage stats (listed in [Uninstall](uninstall.md)) |
 | **Filesystem** | Project directories | `/file put` uploads, `/file get` and `/browse` reads, and `.untether-outbox/` delivery, all subject to [deny globs](#file-transfer-deny-globs) |
 | **Filesystem** | Webhook `file_write` and cron `file_read` | Only when configured; paths you set, deny globs apply |
-| **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
+| **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`, `agy`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
 | **Credentials** | Telegram bot token, voice API key | Stored in `untether.toml`; redacted from logs |
 | **Credentials** | Claude Code login (`~/.claude/.credentials.json` or the macOS Keychain) | Read only to call the usage endpoint above |
 | **Credentials** | Engine API keys | Read by the engine CLIs from their own config or the environment; Untether doesn't store them |
@@ -141,7 +141,7 @@ Still allowed, and documented: Codex `-s read-only|workspace-write` (the way to 
 
 - Claude: `--settings` (a JSON or file with `permissions.allow` rules or `PreToolUse` hooks that return `allow`), `--setting-sources`, `--plugin-dir`/`--plugin-url` (plugin hooks), `--agents`/`--agent`, `--add-dir`, `--mcp-config`, `--bare`/`--safe-mode`; and the project's own `.claude/settings.json` / `settings.local.json`, which the agent itself can edit.
 - Codex: `--profile` (layers `$CODEX_HOME/<name>.config.toml`), `~/.codex/config.toml` (`sandbox_mode`, `approval_policy`, `shell_environment_policy`, `sandbox_workspace_write.*`, `bypass_hook_trust`), `CODEX_HOME` itself, `--enable`/`--disable` feature toggles, `--add-dir`.
-- The explicit Untether keys `[engines.claude] dangerously_skip_permissions = true` and `permission_mode = "bypassPermissions"` are intentional opt-ins and stay. `dangerously_skip_permissions = true` overrides `permission_mode` and every `/planmode` choice; Untether logs `claude.config.dangerously_skip_permissions` once at startup when it is set.
+- The explicit Untether keys `[engines.claude] dangerously_skip_permissions = true` and `permission_mode = "bypassPermissions"` are intentional opt-ins and stay. `dangerously_skip_permissions = true` overrides `permission_mode` and every `/planmode` choice (except on webhook runs, which never bypass, [#1142](https://github.com/littlebearapps/untether/issues/1142)); Untether logs `claude.config.dangerously_skip_permissions` once at startup when it is set.
 - The engine env allowlist admits the `CLAUDE_` and `CLAUDE_CODE_` prefixes, so a `CLAUDE_*` variable set in the service environment is another channel `extra_args` blocking can't see.
 
 Treat write access to `untether.toml`, the engines' config directories or the service environment as equivalent to choosing the permission mode.
@@ -161,6 +161,7 @@ The refusal and its `runner.argv.invalid_value` log line never repeat the raw va
 - **Prompting modes prompt.** In `acceptEdits` (`/planmode off`), `default` and `manual`, Untether no longer pre-approves `Bash`, `Read`, `Edit` and `Write` or silently approves other tools: anything Claude Code would ask about becomes an Approve / Deny message ([#749](https://github.com/littlebearapps/untether/issues/749)).
 - **A silent downgrade is caught.** If you ask for `auto` but Claude Code starts in another mode (auto mode isn't available on every model), Untether shows `⚠️ Asked for auto mode — Claude Code is running default`, logs `claude.permission_mode.mismatch`, and sends permission requests to Telegram instead of approving them ([#751](https://github.com/littlebearapps/untether/issues/751)). In that case `Bash`, `Read`, `Edit` and `Write` stay pre-approved, because `auto` keeps the default `allowed_tools`.
 - **Unattended triggers fail closed.** A cron or webhook run never waits on an approval nobody can give: requests it would have asked about are denied at once (`permission.unattended_deny`, listed in the run's final), and in `auto` / `dontAsk` / `bypassPermissions` every request that still reaches Untether is denied too ([#835](https://github.com/littlebearapps/untether/issues/835)). At startup and on a config reload, Untether logs `trigger.unattended_approval_risk` for crons whose mode would ask, and logs it again when such a cron or webhook fires. A cron `permission_mode` that Claude Code would reject is reported as `trigger.cron.permission_mode_invalid`. See [Plan mode → Per-cron override](plan-mode.md#cron-override).
+- **Webhooks never inherit bypass.** A webhook's prompt is built from the request it receives, so a Claude webhook run never takes `bypassPermissions` from the chat's permission mode, `[engines.claude] permission_mode` or `dangerously_skip_permissions = true`: it runs in `default` and logs `claude.webhook_bypass_downgraded` once per webhook. A Codex webhook with a mode Untether doesn't recognise runs `safe` rather than full auto ([#1142](https://github.com/littlebearapps/untether/issues/1142)). Crons keep their inherited mode for now; startup logs `trigger.cron.inherits_bypass` for each one that inherits a bypass mode, plus `trigger.webhook.no_project` and `trigger.webhook.preapproved_tools` for `agent_run` webhooks with no `project`, or whose Claude mode never asks while `Bash`, `Edit` or `Write` is pre-approved. See [Webhooks and cron](webhooks-and-cron.md#autonomous-crons-in-plan-mode-chats-claude).
 
 ## Antigravity permission modes and project config
 
@@ -250,7 +251,7 @@ Add more patterns as needed:
 
 Deny globs are checked against both the path you type and the path it resolves to after following symlinks inside the project, so a symlink can't be used to reach a denied file (for example `cfg.txt → .env`, or `docs/x → .git/hooks`). Links that leave the project root are always refused ([#390](https://github.com/littlebearapps/untether/issues/390)).
 
-The same matcher applies everywhere a path crosses the Telegram boundary: `/file get` and `/file put`, outbox delivery, `/browse` listings and previews (which also hide dot-paths other than `.github` and `.gitignore`, and need a project-bound chat — [#389](https://github.com/littlebearapps/untether/issues/389)), and webhook `file_write` actions and cron `file_read` fetches ([#831](https://github.com/littlebearapps/untether/issues/831)). The two trigger paths use the same matcher with their own fixed list (`.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**`) rather than your `deny_globs`, so files such as `.env.local` or `id_rsa` are not refused there.
+The same matcher applies everywhere a path crosses the Telegram boundary: `/file get` and `/file put`, outbox delivery, `/browse` listings and previews (which also hide dot-paths other than `.github` and `.gitignore`, and need a project-bound chat — [#389](https://github.com/littlebearapps/untether/issues/389)), and webhook `file_write` actions and cron `file_read` fetches ([#831](https://github.com/littlebearapps/untether/issues/831)). The two trigger paths always use the full default list above rather than your `deny_globs`, so a `deny_globs` value you set yourself doesn't change what they refuse ([#906](https://github.com/littlebearapps/untether/issues/906)).
 
 !!! tip "Defence in depth"
     Deny globs protect against accidental file exfiltration via `/file get` and against uploads (`/file put`, auto-saved uploads and media groups) landing in sensitive places such as `.git/hooks`. They do not prevent the coding agent itself from reading files — the agent runs with full filesystem access in the project directory.
@@ -282,6 +283,8 @@ Available authentication modes:
 !!! warning "Never use `auth = \"none\"` in production"
     Without authentication, anyone who can reach the webhook endpoint can trigger arbitrary agent runs on your server.
 
+Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning; a future release will refuse it. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+
 ## Bind webhook server to localhost
 
 The webhook server should only listen on localhost. Put it behind a reverse proxy (nginx, Caddy) with TLS for external access:
@@ -292,9 +295,12 @@ The webhook server should only listen on localhost. Put it behind a reverse prox
     [triggers.server]
     host = "127.0.0.1"
     port = 9876
+    exposed = true   # only when a tunnel or proxy makes it public
     ```
 
 The server includes rate limiting (token-bucket, per-webhook and global) and timing-safe secret comparison by default.
+
+A loopback bind stops being private once a tunnel or reverse proxy forwards to it. Set `[triggers.server] exposed = true` in that case: `auth = "none"` webhooks are then refused whatever the bind address. Behind a proxy every request reaches Untether from loopback, so per-client rate limiting has to happen at the edge, or set `trusted_proxy_header` (for example `"CF-Connecting-IP"`) so the failed-auth lockout counts each real client separately ([#1119](https://github.com/littlebearapps/untether/issues/1119)). See [Webhooks and cron — Behind a tunnel or reverse proxy](webhooks-and-cron.md#behind-a-tunnel-or-reverse-proxy).
 
 ## SSRF protection for outbound requests
 

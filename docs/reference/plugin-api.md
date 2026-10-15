@@ -208,7 +208,7 @@ Optional attributes, read with `getattr` so plugins without them keep working:
 
 | Attribute | Type | Effect |
 |-----------|------|--------|
-| `callback_only` | `bool` | The backend only answers inline-button taps (callback data `<id>:…`). It is left out of the bot's command menu, and a typed `/<id>` gets a short "only works through the buttons" reply without reaching `handle` ([#1068](https://github.com/littlebearapps/untether/issues/1068)). Must be exactly `True`. The built-in `agy_plan`, `aq` and `claude_control` backends set it. |
+| `callback_only` | `bool` | The backend only answers inline-button taps (callback data `<id>:…`). It is left out of the bot's command menu, and a typed `/<id>` gets a short "only works through the buttons" reply without reaching `handle` ([#1068](https://github.com/littlebearapps/untether/issues/1068)). Must be exactly `True`. The built-in `agy_plan`, `aq`, `claude_control` and `ia` backends set it. |
 | `answer_early` | `bool` | With `early_answer_toast(args_text, *, channel_id=None, claim_owner=None) -> str \| None`, the button tap is answered (spinner cleared, toast shown) before `handle` runs ([#247](https://github.com/littlebearapps/untether/issues/247)). |
 
 `untether.commands.is_callback_only(backend)` reports the first.

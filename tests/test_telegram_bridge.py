@@ -6644,9 +6644,11 @@ async def test_894_reload_fixing_failed_startup_triggers_flags_restart_required(
     """[triggers] enabled at startup but invalid → init fails and nothing
     runs. A reload that fixes the TOML still can't start the scheduler, so it
     must be flagged restart-required like an off→on flip."""
+    # #1117: only a block-level error (here [triggers.server]) still stops
+    # every trigger; a bad cron entry would only skip that cron.
     cfg = _894_cfg(
         tmp_path,
-        trigger_config={"enabled": True, "crons": [{"id": "broken"}]},
+        trigger_config={"enabled": True, "server": {"port": "not-a-port"}},
     )
     with capture_logs() as logs:
         await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
@@ -6664,6 +6666,235 @@ async def test_894_reload_fixing_failed_startup_triggers_flags_restart_required(
     assert "Restart required" in notices[0]
 
 
+# ── #1117: per-trigger isolation, failure notices, secrets out of logs ──
+
+_1117_SECRET = "s3cretVALUE123-rotate-me-please"
+
+
+def _1117_no_webhook_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    import untether.triggers.server as trigger_server
+
+    monkeypatch.setattr(trigger_server, "run_webhook_server", _noop)
+
+
+def _1117_texts(cfg: TelegramBridgeConfig) -> list[str]:
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    return [c["message"].text for c in transport.send_calls]
+
+
+def _1117_assert_no_secret(*blobs: object) -> None:
+    for blob in blobs:
+        text = str(blob)
+        for start in range(len(_1117_SECRET) - 5):
+            assert _1117_SECRET[start : start + 6] not in text
+
+
+def _1117_webhook_toml(secret_line: str) -> str:
+    return (
+        "[triggers]\nenabled = true\n\n"
+        "[[triggers.webhooks]]\n"
+        'id = "gh"\npath = "/hooks/gh"\n'
+        f"{secret_line}\n"
+        'prompt_template = "hi"\n'
+    )
+
+
+@pytest.mark.anyio
+async def test_1117_startup_skips_only_the_invalid_cron_and_notifies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: one invalid cron + two valid ones → the two start, and a
+    Telegram notice names the invalid id."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "good-a", "schedule": "0 9 * * *", "prompt": "a"},
+            {"id": "broken", "schedule": "0 9 * * *", "future_key": 1},
+            {"id": "good-b", "schedule": "0 10 * * *", "prompt": "b"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            "[triggers]\nenabled = true\n\n[[triggers.crons]]\n"
+            'id = "good-a"\nschedule = "0 9 * * *"\nprompt = "a"\n',
+        )
+
+    assert not [e for e in logs if e["event"] == "triggers.init_failed"]
+    enabled = [e for e in logs if e["event"] == "triggers.enabled"]
+    assert enabled[0]["crons"] == 2
+    invalid = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+    assert [(e["trigger_id"], e["phase"]) for e in invalid] == [("broken", "startup")]
+    assert invalid[0]["log_level"] == "error"
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "1 trigger skipped" in notices[0]
+    assert "cron broken" in notices[0]
+    assert "future_key" in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1117_startup_block_failure_notifies_and_hides_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "server": {"port": "nope"},
+        "webhooks": [
+            {"id": "gh", "path": "/hooks/gh", "secret": _1117_SECRET},  # invalid
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    failed = [e for e in logs if e["event"] == "triggers.init_failed"]
+    assert failed and "server.port" in failed[0]["error"]
+    assert "\n" not in failed[0]["error"]
+    texts = _1117_texts(cfg)
+    assert any("Triggers failed to start" in t for t in texts)
+    _1117_assert_no_secret(logs, texts)
+
+
+@pytest.mark.anyio
+async def test_1117_invalid_webhook_entry_leaks_no_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: the confirmed truncated-repr leak — a model-level error
+    on a webhook carrying a secret — reaches no log line or notice."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [{"id": "gh", "path": "/hooks/gh", "secret": _1117_SECRET}],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        # Same entry on reload, still without a prompt_template.
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            _1117_webhook_toml(f'secret = "{_1117_SECRET}"').replace(
+                'prompt_template = "hi"\n', ""
+            ),
+        )
+
+    invalid = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+    assert {e["phase"] for e in invalid} == {"startup", "reload"}
+    assert "prompt_template is required" in invalid[0]["error"]
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_reload_block_failure_says_old_secret_still_active(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    broken = (
+        _1117_webhook_toml(f'secret = "{_1117_SECRET}"')
+        + '\n[triggers.server]\nport = "nope"\n'
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, broken)
+
+    failed = [e for e in logs if e["event"] == "config.reload.triggers_failed"]
+    assert failed and "server.port" in failed[0]["error"]
+    notices = [t for t in _1117_texts(cfg) if "reload failed" in t]
+    assert len(notices) == 1
+    assert "old webhook secret is still active for: gh" in notices[0]
+    # The previous webhook (and its old secret) is still the live one.
+    manager = cfg.trigger_manager
+    assert manager is not None
+    live = manager.webhook_for_path("/hooks/gh")
+    assert live is not None and live.secret is not None
+    assert live.secret.get_secret_value() == "o" * 40
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_reload_invalid_webhook_switches_it_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reload that breaks one webhook drops that webhook (its old secret is
+    not left active) and says so."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            _1117_webhook_toml(f'secret = "{_1117_SECRET}"\nauth = "bogus"'),
+        )
+
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/gh") is None
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "webhook gh" in notices[0]
+    assert "no earlier secret for it stays active" in notices[0]
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_short_secret_warns_at_startup_and_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": _1117_SECRET[:12],
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch, cfg, _1117_webhook_toml(f'secret = "{_1117_SECRET[:12]}"')
+        )
+
+    short = [e for e in logs if e["event"] == "triggers.webhook.short_secret"]
+    assert [e["webhook_id"] for e in short] == ["gh", "gh"]  # startup + reload
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/gh") is not None  # still accepted
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
 def test_894_triggers_enable_needs_restart_truth_table() -> None:
     from untether.telegram.loop import _triggers_enable_needs_restart as f
 
@@ -6673,3 +6904,78 @@ def test_894_triggers_enable_needs_restart_truth_table() -> None:
     assert f(previous=False, current=True, running=True) is False  # hot re-enable
     assert f(previous=True, current=False, running=True) is False  # off is hot
     assert f(previous=False, current=False, running=False) is False
+
+
+# --- #1142: start-up trigger permission audit ------------------------------
+
+_1142_TRIGGERS_TOML = (
+    "[triggers]\nenabled = true\n\n"
+    "[[triggers.crons]]\n"
+    'id = "nightly"\nschedule = "0 3 * * *"\nprompt = "hi"\n\n'
+    "[[triggers.webhooks]]\n"
+    'id = "bare"\npath = "/hooks/bare"\nauth = "none"\n'
+    'prompt_template = "Payload: {{text}}"\n'
+)
+
+
+@pytest.mark.anyio
+async def test_1142_startup_audit_flags_bypass_cron_and_bare_webhook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: in a chat set to /planmode bypass, a cron with no mode of
+    its own is flagged at startup (it keeps the mode), and a project-less
+    agent_run webhook starts and is flagged too. A reload of the same
+    triggers doesn't repeat either warning."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [{"id": "nightly", "schedule": "0 3 * * *", "prompt": "hi"}],
+        "webhooks": [
+            {
+                "id": "bare",
+                "path": "/hooks/bare",
+                "auth": "none",
+                "prompt_template": "Payload: {{text}}",
+            }
+        ],
+    }
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_894_projects(),
+        config_path=tmp_path / "untether.toml",
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        trigger_config=trigger_config,
+    )
+    prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "untether.toml"))
+    await prefs.set_engine_override(
+        123, "claude", EngineOverrides(permission_mode="bypassPermissions")
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _1142_TRIGGERS_TOML)
+
+    cron = [e for e in logs if e["event"] == "trigger.cron.inherits_bypass"]
+    assert len(cron) == 1
+    assert cron[0]["cron_id"] == "nightly"
+    assert cron[0]["origin"] == "chat"
+    assert cron[0]["outcome"] == "runs_with_bypass"
+    # The startup audit runs as a task, so the test's immediate reload may
+    # log it first; either way it is logged once.
+    assert cron[0]["reason"] in {"startup", "reload"}
+    assert cron[0]["log_level"] == "warning"
+    bare = [e for e in logs if e["event"] == "trigger.webhook.no_project"]
+    assert [e["webhook_id"] for e in bare] == ["bare"]
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/bare") is not None  # still starts
+    assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]

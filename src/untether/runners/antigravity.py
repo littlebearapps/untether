@@ -80,6 +80,7 @@ from ..runner import (
 from ..schemas import antigravity as agy_schema
 from ..session_costs import RUN_TOKENS_KEY
 from ..utils import antigravity_context, antigravity_quota, antigravity_scan
+from ..utils.antigravity_argv import native_compact_prompt
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
@@ -180,6 +181,22 @@ CONTINUE_UNREADABLE_TEXT = (
     "reply to a resume line to carry on a particular conversation."
 )
 CONTINUE_BLOCK = "continue_unresolved"
+# /compact (#1114): agy's own compaction of the chat's conversation
+# (``antigravity_argv.native_compact_prompt``). With no conversation there is
+# nothing to compact, so nothing is started (a plain reply on the bridge).
+NOTHING_TO_COMPACT_TEXT = (
+    "Nothing to compact: this chat has no Antigravity conversation yet. "
+    "Send a normal message to start one."
+)
+COMPACT_NO_CONVERSATION_BLOCK = "compact_no_conversation"
+# The bridge's own confirmation (``runner_bridge._compaction_empty_body``)
+# covers an empty answer; ``/compact <message>`` keeps agy's answer under
+# this line.
+COMPACTED_TEXT = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted."
+COMPACT_UNCONFIRMED_TEXT = (
+    "Antigravity finished /compact without reporting a compaction, so the "
+    "conversation may not have been compacted."
+)
 INVALID_ARGUMENT_BLOCK = "invalid_argument"
 # A model or conversation id that agy could read as a flag
 # (``utils/antigravity_argv.py``): refused before anything spawns.
@@ -1399,6 +1416,11 @@ class AntigravityStreamState:
     approved_plan: str | None = None
     # #1074: plan cards this run's plan turn replaced (request ids).
     superseded_cards: list[str] = field(default_factory=list)
+    # #1114: the stdin line of agy's own ``/compact`` when this run is one
+    # (sent without ``--disable-slash-commands``), and whether agy reported
+    # its ``checkpoint`` step, the only sign in the stream that it compacted.
+    compact: str | None = None
+    checkpoint_seen: bool = False
     # #980/#981: this run's gate (``antigravity/gate_server.GateRun``) when
     # Untether's agy plugin is installed and ``-p /hooks`` lists it; None
     # otherwise (no marker env reaches agy, nothing changes).
@@ -1601,6 +1623,15 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if continue_block is not None:
                 yield continue_block
                 return
+        if resume is None and native_compact_prompt(prompt) is not None:
+            # #1114: no conversation, nothing to compact; never an empty run.
+            logger.info("antigravity.compact.no_conversation")
+            yield EventFactory(ENGINE).completed_error(
+                error=NOTHING_TO_COMPACT_TEXT,
+                resume=None,
+                usage={PRESPAWN_BLOCKED_KEY: COMPACT_NO_CONVERSATION_BLOCK},
+            )
+            return
         argv_block = self._invalid_argument_refusal(resume)
         if argv_block is not None:
             yield argv_block
@@ -2291,10 +2322,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             "--print-timeout",
             "0",
         ]
-        if mode != "plan":
+        if mode != "plan" and native_compact_prompt(prompt) is None:
             # C7: the flag turns ``--mode=plan`` into a no-op, so a plan run
             # goes without it and escapes a ``/``-leading prompt instead
-            # (``stdin_payload``, D30).
+            # (``stdin_payload``, D30). #1114: agy's own ``/compact`` is the
+            # one slash command let through (it needs the flag off).
             args.append("--disable-slash-commands")
         if resume is not None:
             # #1039: agy's own continue flag also resumes a parent or child
@@ -2402,6 +2434,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
+        compact = native_compact_prompt(prompt)
+        if compact is not None:
+            # #1114: the command alone — no D30 escape, no #1055 note, either
+            # of which would turn it back into text for the model.
+            line = {"event": "user", "message": {"content": compact}}
+            return (json.dumps(line, ensure_ascii=False) + "\n").encode()
         if isinstance(state, AntigravityStreamState) and state.effective_mode == "plan":
             from ..utils import antigravity_plan
 
@@ -2511,7 +2549,17 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         options = get_run_options()
         mode = self._effective_mode()
         label = _mode_label(mode)
-        approved, superseded = self._plan_bookkeeping(mode, prompt, expected)
+        compact = native_compact_prompt(prompt)
+        if compact is not None:
+            # #1114: agy's own /compact — no plan turn, no plan approval.
+            logger.info(
+                "antigravity.compact.passthrough",
+                session_id=expected,
+                with_message=" " in compact,
+            )
+            approved, superseded = None, []
+        else:
+            approved, superseded = self._plan_bookkeeping(mode, prompt, expected)
         if approved is not None:
             label += " · plan approved"
         if precheck is not None:
@@ -2549,6 +2597,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             trigger_source=get_run_trigger_source(),
             approved_plan=approved,
             superseded_cards=superseded,
+            compact=compact,
         )
 
     @staticmethod
@@ -3175,6 +3224,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return out
         if step_type == "system_message" and terminal:
             self._note_system_message(state)
+        if step_type == "checkpoint" and st == "DONE":
+            # #1114: agy wrote a compaction checkpoint (agy 1.3.5).
+            state.checkpoint_seen = True
         # user_input (incl. a hook-injected one: not a new run), system_message,
         # checkpoint, unknown, finish, anything newer.
         logger.debug("antigravity.step.ignored", step_type=step_type, state=st)
@@ -4008,7 +4060,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if state.gate is not None and (gated := state.gate.unattended_usage()):
             # #835 parity: an unattended Ask me run's gate denials → 🔒 footer.
             usage = {**usage, "unattended": gated}
-        if status == "SUCCESS" and state.effective_mode == "plan":
+        if status == "SUCCESS" and state.compact is not None:
+            answer, usage = self._compact_outcome(state, answer, usage)
+        elif status == "SUCCESS" and state.effective_mode == "plan":
             answer, usage = self._plan_review(state, answer, usage)
         elif status == "SUCCESS" and state.approved_plan is not None:
             from ..utils import antigravity_plan
@@ -4050,6 +4104,38 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             )
         return out
+
+    @staticmethod
+    def _compact_outcome(
+        state: AntigravityStreamState, answer: str, usage: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """#1114: a successful ``/compact`` run. agy ends it with an empty
+        ``SUCCESS`` result after a ``checkpoint`` step and reports no token
+        figures, so the confirmation is the checkpoint. ``manual_success`` is
+        the bridge's #819 marker: an empty answer then gets the same
+        ``🗜️ Context compacted`` final as a Claude chat. Without a checkpoint
+        nothing is claimed."""
+        if not state.checkpoint_seen:
+            logger.warning(
+                "antigravity.compact.unconfirmed", session_id=state.session_id
+            )
+            if not answer.strip():
+                answer = COMPACT_UNCONFIRMED_TEXT
+            return answer, usage
+        logger.info("antigravity.compact.done", session_id=state.session_id)
+        usage = {
+            **usage,
+            "compaction": {
+                "count": 1,
+                "trigger": "manual",
+                "result": "success",
+                "manual_success": True,
+            },
+        }
+        if answer.strip():
+            # ``/compact <message>``: agy answered the message too.
+            answer = _prepend_paragraph(answer, COMPACTED_TEXT)
+        return answer, usage
 
     def _resolve_denials(
         self,

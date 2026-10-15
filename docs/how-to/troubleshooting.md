@@ -252,7 +252,7 @@ Plan cards live in Untether's memory for 24 hours and only the newest card for a
 
 ### "That Antigravity conversation no longer exists"
 
-agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session. Send your message again to start fresh.
+agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session when that is the one that's gone (a stale resume line you replied to leaves the chat's saved session alone, [#1052](https://github.com/littlebearapps/untether/issues/1052)). Send your message again to start fresh.
 
 After `/continue` the message is `The conversation Antigravity had recorded for this project no longer exists, so nothing was resumed.` instead: agy's record of this project's last conversation pointed at one that has been deleted. Nothing is cleared, so a normal message carries on from the chat's own conversation (or starts a new one).
 
@@ -671,7 +671,7 @@ Claude Code's auto mode needs a model that supports it. On one that doesn't (for
 
 **Symptoms:** A scheduled or webhook-started Claude run ends with a plan or a short report instead of doing the work, and its final carries a line like `🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`.
 
-Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then `[engines.claude] permission_mode`, so a cron that lands on `plan` stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`. The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
+Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then `[engines.claude] permission_mode`, so a cron that lands on `plan` stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`, except that it never inherits `bypassPermissions`: it runs in `default` instead ([#1142](https://github.com/littlebearapps/untether/issues/1142)). The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
 
 ## "🛡️ safeguards stopped a response"
 

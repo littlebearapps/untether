@@ -52,6 +52,7 @@ _FIXTURE_SOURCES: dict[str, str] = {
     "task_killed_fast": "1.3.4/rc4-k2 manage_task kill ~5 s in, bypass (1.3.4; id synthetic, #1062)",
     "subagents_timer_any": "1.3.5/rc5-1086 two subagents + 60 s timer with TimerCondition any + kill_all, accept-edits (1.3.5; ids synthetic, agent text condensed, #1086)",
     "resume_kept_shell": "1.3.3/rc4-a3 Full access conversation resumed with --agent=untether-workspace (1.3.3; id synthetic, #1060)",
+    "compact": "1.3.5/rc7-1114 /compact on a resumed conversation, accept-edits + untether-workspace (1.3.5)",
     "synthetic_no_result": "synthetic: ok minus its result line",
     "synthetic_result_then_agy_error": "synthetic: ok + AGY_ERROR stderr after the result, rc 3",
     "synthetic_agy_error_rc3": "synthetic: partial deltas, no result, AGY_ERROR, rc 3",

@@ -159,8 +159,6 @@ This validates:
 
 It doesn't check engine CLIs; the startup message lists engines that are `not installed`, `misconfigured` or `failed to load`. `untether doctor` exits with status 1 if any check reports an error.
 
-It doesn't check engine CLIs or deny globs: the startup message lists engines that are missing, misconfigured or failed to load.
-
 Run this after any config change, after upgrading, or when something isn't working.
 
 ## Debug mode
@@ -201,7 +199,7 @@ When enabled, Untether watches the config file for changes and reloads most sett
 
 **Hot-reloadable** (applied immediately):
 
-- Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`, need a restart)
+- Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`/`max_body_bytes`, need a restart; `exposed` and `trusted_proxy_header` hot-reload)
 - Telegram bridge: `voice_transcription`, `[files]` (the `outbox_*` settings apply from the next delivery, [#924](https://github.com/littlebearapps/untether/issues/924); turning outbox delivery on when it was off at startup still needs a restart), `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
 - `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `heartbeat_interval`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481), [#777](https://github.com/littlebearapps/untether/issues/777), [#819](https://github.com/littlebearapps/untether/issues/819)); `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of an open Claude session ([#863](https://github.com/littlebearapps/untether/issues/863))

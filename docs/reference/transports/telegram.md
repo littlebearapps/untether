@@ -414,6 +414,11 @@ a few Telegram-specific rewrites:
   numbers: the start is set on the list's first item (`<li value>`), which
   the HTML-to-entities converter honours, where it ignored `<ol start>` and
   renumbered from 1 ([#886](https://github.com/littlebearapps/untether/issues/886)).
+- **Loose list items** — in a list with blank lines between its items, or an
+  item holding a code block or a second paragraph, the item's first paragraph
+  stays on the same line as its bullet or number; a code block or extra
+  paragraph still follows on its own lines
+  ([#1094](https://github.com/littlebearapps/untether/issues/1094)).
 - **Bare filenames** — `.md`, `.sh` and `.py` are also country-code TLDs, so a
   bare `CLAUDE.md`, `setup.sh` or `render.py:86` (paths and `:line[:col]`
   suffixes included) is rendered as inline code rather than auto-linked as a
@@ -467,8 +472,9 @@ deny_globs = [
   glob, and a link pointing outside the project is refused. Benign in-root
   symlinks keep working. Denials log `file_transfer.path_denied`.
 - **`/browse`** ([#389](https://github.com/littlebearapps/untether/issues/389))
-  browses the active run's directory, else the chat's bound project, else
-  `default_project`; with none of those it refuses and explains how to bind one
+  browses the active run's directory, else the chat's or topic's `/ctx`
+  binding ([#997](https://github.com/littlebearapps/untether/issues/997)), else
+  the chat's bound project, else `default_project`; with none of those it refuses and explains how to bind one
   (it no longer falls back to the process working directory). Listings,
   previews and direct paths apply the deny globs and also hide dot-paths except
   `.github` and `.gitignore`. Button ids are scoped per chat. Denials log
@@ -482,7 +488,10 @@ deny_globs = [
   (`outbox_stale_policy = "send"` restores the old behaviour).
   `outbox_deliver_directories = "zip"` bundles a directory's deliverable
   members into one `.zip`, never following symlinks and pruning deny-globbed
-  subdirectories.
+  subdirectories. Outbox files, `/file get` and command attachments are sent
+  with Telegram's content-type detection off, so a `.webp` image arrives as a
+  file rather than a sticker
+  ([#1056](https://github.com/littlebearapps/untether/issues/1056)).
 
 See [File transfer](../../how-to/file-transfer.md) and
 [Browse files](../../how-to/browse-files.md) for usage.

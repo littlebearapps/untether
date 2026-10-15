@@ -94,7 +94,7 @@ def _toggle_row(
     label: str,
     *,
     current: bool | None,
-    default: bool,
+    default: bool | None,
     on_data: str,
     off_data: str,
     clr_data: str,
@@ -104,14 +104,18 @@ def _toggle_row(
 
     When *compact* is False (single-toggle pages), buttons show just On/Off.
     When *compact* is True (multi-toggle pages), buttons include the label.
+    A *default* of None means "unset is neither on nor off" (#1115): with no
+    override, neither button is ticked.
     """
     effective = current if current is not None else default
+    on_active = effective is not None and bool(effective)
+    off_active = effective is not None and not effective
     if compact:
-        on_text = _check(f"{label}: on", active=effective)
-        off_text = _check(f"{label}: off", active=not effective)
+        on_text = _check(f"{label}: on", active=on_active)
+        off_text = _check(f"{label}: off", active=off_active)
     else:
-        on_text = _check("On", active=effective)
-        off_text = _check("Off", active=not effective)
+        on_text = _check("On", active=on_active)
+        off_text = _check("Off", active=off_active)
     return [
         {"text": on_text, "callback_data": on_data},
         {"text": off_text, "callback_data": off_data},
@@ -179,8 +183,11 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "off": "agent guesses",
     },
     "dp": {
-        "on": "show code changes",
+        # #1115: unset is its own state — cards show the diff, but nothing
+        # is held for a preview (Claude and agy gate only on ``is True``).
+        "on": "edits ask first",
         "off": "buttons only",
+        "default": "diffs on cards",
     },
     "vb": {
         "on": "detailed progress",
@@ -220,9 +227,10 @@ def _engine_model_hint(engine: str) -> str:
 
 
 # Map "default" to effective value for settings with known defaults.
+# Not "dp" (#1115): unset Diff preview is neither on nor off, so it stays
+# "default".
 _DEFAULT_EFFECTIVE: dict[str, str] = {
     "aq": "on",
-    "dp": "off",
     "vb": "off",
 }
 
@@ -2029,6 +2037,10 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
     await _respond(ctx, "\n".join(lines), buttons)
 
 
+# #1115: what an unset Diff preview does (page text and its "Current:" line).
+_DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
+
+
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import diff_preview_supported, with_override
@@ -2097,12 +2109,15 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
     override = await prefs.get_engine_override(chat_id, engine)
     dp = override.diff_preview if override else None
+    # #1115: unset isn't off — the cards that appear show the diff
+    # (``diff_preview is not False``), but no edit is held for a preview
+    # (``diff_preview is True``). Same for Claude and agy's Ask me.
     if dp is True:
-        current_label = "on"
+        current_label = "<b>on</b>"
     elif dp is False:
-        current_label = "off"
+        current_label = "<b>off</b>"
     else:
-        current_label = "off"
+        current_label = f"<b>default</b> — {_DP_UNSET_TEXT}"
 
     lines = [
         "<b>📝 Diff preview</b>",
@@ -2110,8 +2125,9 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "See what the agent wants to change before you approve it.",
         "Shows a compact diff of edits and commands.",
         "",
-        "• <b>on</b> — show code changes in approval messages",
-        "• <b>off</b> — show approval buttons only (default)",
+        "• <b>on</b> — edits wait for your approval, with the diff",
+        "• <b>off</b> — show approval buttons only, without the diff",
+        f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}",
         "",
     ]
     if engine == "antigravity":
@@ -2123,7 +2139,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             "",
         ]
     lines += [
-        f"Current: <b>{current_label}</b>",
+        f"Current: {current_label}",
         "",
         _learn_more("interactive-approval", "diff-previews"),
     ]
@@ -2132,7 +2148,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         _toggle_row(
             "Diff",
             current=dp,
-            default=False,
+            default=None,
             on_data="config:dp:on",
             off_data="config:dp:off",
             clr_data="config:dp:clr",

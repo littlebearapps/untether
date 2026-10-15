@@ -29,7 +29,7 @@ format. Built on [#766](https://github.com/littlebearapps/untether/pull/766) by
 
 | | |
 |---|---|
-| Tested against | agy **1.3.3** (fixtures captured on 1.3.1 and 1.3.2; the drift probes pass on 1.3.3) |
+| Tested against | agy **1.3.5** (fixtures captured on 1.3.1 to 1.3.5; the drift probes pass on 1.3.5) |
 | Minimum | agy **1.3.1**. An older agy is refused before anything starts: `🛑 Antigravity CLI <version> is older than 1.3.1, which this Untether version needs. Run agy update on the host, then retry.` |
 | Tested platform | Linux x86_64 with a file-stored sign-in token. macOS, Linux hosts with a desktop keyring, and ARM64 are untested |
 
@@ -90,19 +90,24 @@ see the notice once. Shown chats are remembered in `antigravity_notices.json` be
 One `agy` process per message:
 
 ```text
-agy --input-format stream-json --output-format stream-json --print-timeout 0 --disable-slash-commands
+agy --input-format stream-json --output-format stream-json --print-timeout 0 [--disable-slash-commands]
     [--conversation=<id>] [--model=<model>] [--effort=<level>]
-    (--mode=accept-edits --agent=untether-workspace | --dangerously-skip-permissions)
+    (--mode=accept-edits --agent=untether-workspace | --mode=plan --agent=untether-workspace
+     | --dangerously-skip-permissions)
 ```
 
 - **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
   It is never on the command line, so it can't be read from the process list or mistaken for a flag.
 - `--disable-slash-commands` makes a prompt that starts with `/` an ordinary message. Untether adds no prefix.
+  Two runs go without the flag: Plan first, which escapes a `/`-leading prompt itself (see
+  [Permission modes](#permission-modes)), and agy's own `/compact`
+  ([#1114](https://github.com/littlebearapps/untether/issues/1114), see [`/compact`](#compact)).
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
   success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
 - The last arguments are the permission mode: `--mode=accept-edits --agent=untether-workspace` for Workspace,
-  `--dangerously-skip-permissions` only in Full access (see [Permission modes](#permission-modes)). Both Workspace
-  values are fixed; nothing a user types reaches `--mode` or `--agent`.
+  `--mode=plan --agent=untether-workspace` for Plan first, and `--dangerously-skip-permissions` only in Full access
+  or in Ask me once the gate is ready (see [Permission modes](#permission-modes)). The `--mode` and `--agent`
+  values are fixed; nothing a user types reaches them.
 - **Values are always joined to their flag** (`--model=<model>`, `--conversation=<id>`, `--effort=<level>`), and
   each is checked first. agy reads a separate value that starts with a dash as another flag, so Untether never
   passes one as its own argument. A model id may use ASCII letters, digits and `. _ - : / @ +`, must start with a
@@ -181,7 +186,8 @@ directory, `/` or the bot's own directory:
 
 ## Permission modes
 
-Headless agy can't stop mid-run to ask, so the mode is chosen before the run: `/config` → **Permission mode**, or
+Headless agy can't stop mid-run to ask by itself (Ask me does it through [Untether's agy gate](#untethers-agy-gate)),
+so the mode is chosen before the run: `/config` → **Permission mode**, or
 `permission_mode` under `[antigravity]`. See
 [Antigravity CLI — Permission mode](../../../how-to/interactive-approval.md#antigravity-cli-permission-mode) for the
 user guide.
@@ -809,12 +815,43 @@ publishes for that model:
   gives a conversation.
 - agy compacts a conversation on its own schedule and doesn't say when. Its binary carries a checkpoint setting
   around 256,000 tokens, which is not verified. On a 1,048,576 window that would be about 24 %, so the figure may
-  never get high, and a low figure does not mean compaction is far off. Untether does not model compaction and
-  shows no compaction row for Antigravity; after one, the figure simply drops.
+  never get high, and a low figure does not mean compaction is far off. Untether does not model agy's automatic
+  compaction and shows no compaction row for it; after one, the figure simply drops. A [`/compact`](#compact) is
+  confirmed in its own final.
 - A trivial Workspace turn reads about 7,000 tokens, so most chats on a Gemini model show `~1% ctx`.
 - A subagent's own calls aren't in the parent's output, so they aren't counted.
 - The cache-read part comes from one agy 1.3.1 capture (7,312 input + 8,127 cached, between calls of 14,580 and
   15,860). Every 1.3.3 capture so far reports 0 cached tokens.
+
+## `/compact`
+
+`/compact` in an Antigravity chat runs agy's own compaction (agy 1.3.5) on the chat's conversation
+([#1114](https://github.com/littlebearapps/untether/issues/1114)). It is the only agy slash command Untether passes
+through; every other run keeps `--disable-slash-commands`.
+
+- **Which messages count.** `/compact`, `/compact@<bot>` (Telegram adds the bot name in groups) and
+  `/compact <message>`, after the reply context is added and before anything else
+  (`utils/antigravity_argv.native_compact_prompt`). Lower case only; `/compacting` or `please /compact` are ordinary
+  text.
+- **The run.** An ordinary resumed run (`--conversation=<id>`, the chat's model, effort and permission-mode flags)
+  without `--disable-slash-commands`. stdin carries `/compact` (or `/compact <message>`) alone: no preamble
+  (`preamble.skipped reason=native_command`), no #1055 scheduled-run note and no Plan first `Task:` escape, any of
+  which would make it text again. A Plan first run skips the plan bookkeeping and the plan review card.
+- **The confirmation.** agy writes a `system_message` step and a `checkpoint` step, then a `SUCCESS` result with an
+  empty `response` and no new tokens. A `checkpoint` step plus `SUCCESS` sets `usage["compaction"]`
+  (`trigger: manual`, `manual_success: true`), the marker Claude's `/compact` uses ([#819](https://github.com/littlebearapps/untether/issues/819)),
+  so the final is `🗜️ Context compacted (manual)` with status `done`. agy reports no before and after sizes, so
+  there is no token figure. With `/compact <message>` the answer follows a `🗜️ Context compacted.` line. A
+  `SUCCESS` with no `checkpoint` claims nothing (`antigravity.compact.unconfirmed`, WARNING): `Antigravity finished
+  /compact without reporting a compaction, so the conversation may not have been compacted.` A failed result is an
+  ordinary error.
+- **No conversation.** With no saved conversation (a new chat, or after `/new`) nothing starts:
+  `Nothing to compact: this chat has no Antigravity conversation yet. Send a normal message to start one.`, a
+  plain reply like `/continue`'s (`prespawn_blocked=compact_no_conversation`, `antigravity.compact.no_conversation`).
+- **While a run is working** it waits like any follow-up and runs on the same conversation when that run ends,
+  the way every command queues. It is never steered (`steer.skipped reason=native_command`), because a steered
+  `/compact` is injected into the running turn as text.
+- Logs: `antigravity.compact.passthrough` at the start of the run, `antigravity.compact.done` on the confirmation.
 
 ## `/export`
 
@@ -922,7 +959,7 @@ Turn the block off with `[progress] show_background_tasks = false`.
 - **Quota and MCP start-up hangs.** A used-up quota on a Google sign-in is stopped by the stderr match above. An
   MCP server that hangs at start-up is left to the ordinary stall warnings and watchdog.
 - **Context use is an estimate, and only with a model set.** See [Context use](#context-use-n-ctx). There is no
-  compaction row: agy doesn't report compaction.
+  compaction row for agy's automatic compaction: agy doesn't report it. `/compact` is confirmed in its final.
 - **`/export` is lost on restart** and has no terminal turns (see [`/export`](#export)).
 - **The quota line under an answer is only as fresh as your last `/usage`** (at most 15 minutes).
 
@@ -943,7 +980,7 @@ rows give their own version and date (latest: agy 1.3.5, 2026-10-15).
 | agy 1.3.4 (self-updated 2026-10-13) | — (no change needed) | `agy changelog` and `--help` re-read; the CLI drift suite is green and `PROBED_CLI_VERSION` is 1.3.4. Relevant changes: an unknown `--agent` name now ends a headless run (rc 1, `ERROR` result naming the available agents) instead of quietly running the default agent, so a missing Workspace agent fails closed (pinned by the drift suite); `--model` with a base model id and no `--effort` now runs at that model's default level, and `/effort --model=<base id>` answers with its levels instead of the 1.3.3 "requires --effort" refusal (Untether still reads either); model-request retries now wait at most 30 s. Stream events, flags and `manage_task` shapes unchanged. Checked 2026-10-13 |
 | agy 1.3.5 (self-updated 2026-10-14, [#1091](https://github.com/littlebearapps/untether/issues/1091)) | — (no change needed) | `agy changelog` and `--help` re-read; the CLI drift suite, gated tier included, is green and `PROBED_CLI_VERSION` is 1.3.5, so a 1.3.5 run no longer logs `antigravity.version.newer_than_probed`. Stream events, the `/effort`, `/usage` and `/model` payloads and the unknown-flag signature are unchanged. New: Auto mode and `/compact` (rows below). `agy models` lists every model only with its level as a suffix (`gemini-3.8-flash-medium`); the base id still works for `--model` and for `/effort --model=<id>`, which answers with `available` and the default `current` (high for `gemini-3.8-flash`, medium for `claude-sonnet-5-5`), so `/model set` and the Effort page work unchanged; `gpt-oss-120b`, with or without its suffix, answers `adjustable: false`. A subagent's `system_message` step still carries no sender (row "Which subagent a completion belongs to"). Checked 2026-10-15 |
 | agy's Auto mode (`--mode auto`, 1.3.5, [#1091](https://github.com/littlebearapps/untether/issues/1091)) | — (no Untether mode uses it) | agy's changelog: Auto "approves file edits and safe commands without asking and still prompts before irreversible actions", and a separate agent reviews commands that would leave the terminal sandbox. **Workspace** can't map onto it: Workspace promises no shell, and Auto runs commands it judges safe. **Full access** can't either: Auto is narrower, and Full access is the user's explicit choice of everything. **Ask me** is the only candidate (approval cards for the risky calls only), but print mode can't prompt, so whatever Auto would ask about is denied (agy's stderr says to add an allow rule or use the bypass flag), and a hook `allow` can't grant a tool without the bypass flag (E1; unprobed under Auto), while Ask me's bypass runs pass no `--mode`. On lba-1's account (Google AI Pro) agy prints `warning: --mode auto is not available for this account; continuing in the default mode.` and runs in its **default** mode (stricter than Workspace: a probe's `echo` was denied, `denied_actions: command`), and `init.permission_mode` still says `request-review`, so the stream can't tell Auto from the fallback; only stderr can. `--mode` takes one value, so Auto can't combine with plan. `check_mode` refuses `auto`, and the drift suite fails when agy offers a `--mode` value nobody has reviewed. Unprobed: Auto on an account that has it, and agy's `agentMode` setting (`-p /config`, empty on lba-1) set to `auto` under Full access or Ask me, which pass no `--mode`. Checked 2026-10-15, agy 1.3.5 |
-| `/compact` (agy 1.3.5, [#1091](https://github.com/littlebearapps/untether/issues/1091)) | — (**gap**: agy's own `/compact` is not passed through) | Usable headless: `agy -p /compact --conversation=<id>` and a stream-json `/compact` line both compact — a `checkpoint` step, then a `SUCCESS` result with an empty `response` and no new tokens; `-p` also prints `warning: run ended with no output and no recorded error`. Neither says how many steps were summarised or how much smaller the context got (that is TUI only). Untether passes `--disable-slash-commands` (and escapes a leading `/` in Plan first, D30), so `/compact` in an Antigravity chat reaches the model as text; in the probe the model answered "Context compacted. Ready for your next instruction." though nothing was compacted. Surfacing it means sending a bare `/compact` (or `/compact <message>`) to the chat's conversation without that flag and reading the empty result as a success: a design decision, not done. Checked 2026-10-15, agy 1.3.5 |
+| `/compact` (agy 1.3.5, [#1091](https://github.com/littlebearapps/untether/issues/1091), closed by [#1114](https://github.com/littlebearapps/untether/issues/1114)) | agy's own `/compact`: a `/compact` (or `/compact <message>`) prompt goes to the chat's conversation as the stream-json line itself, in a run without `--disable-slash-commands`; agy's `checkpoint` step plus its empty `SUCCESS` result is the confirmation (see [`/compact`](#compact)) | Usable headless: `agy -p /compact --conversation=<id>` and a stream-json `/compact` line both compact — a `checkpoint` step, then a `SUCCESS` result with an empty `response` and no new tokens; `-p` also prints `warning: run ended with no output and no recorded error`. Re-probed for #1114 with Untether's own Workspace argv (`--input-format stream-json --output-format stream-json --print-timeout 0 --conversation=<id> --mode=accept-edits --agent=untether-workspace`, no `--disable-slash-commands`): `user_input`, `system_message`, `checkpoint` (DONE, about 6 s), then `SUCCESS` with `response: ""`, rc 0, nothing on stderr (fixture `compact`). Neither route says how many steps were summarised or how much smaller the context got (TUI only), so the final has no token figure. Still custom: the no-conversation reply (agy would start a fresh conversation and compact nothing) and never steering it (the gate injects text). Not probed: `/compact` under `--mode=plan` and under the bypass flag (Ask me, Full access); compaction runs no tools, so neither mode should matter. Checked 2026-10-15, agy 1.3.5 |
 | Warm (live) sessions ([#977](https://github.com/littlebearapps/untether/issues/977)) | `--input-format stream-json`, already Untether's input format | — (deferred, not built: one process per run, `live_sessions.py` is the seam). Still the native seam on 1.3.5: with stdin left open, agy answers each `{"event":"user"}` line with one `result` and waits, idle, for the next (still alive 5 s after turn 1; turn 2 answered by the same process with the same conversation id); closing stdin ends it with rc 0. `num_turns` and `usage` are totals for the process's conversation, and `duration_seconds` is wall time since the process started, idle time included. A `/compact` line works there too, if `--disable-slash-commands` is left off. Mid-turn lines (G14) and the `queuedMessages` setting were not probed. Checked 2026-10-15, agy 1.3.5 ([#1091](https://github.com/littlebearapps/untether/issues/1091)) |
 | Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Showing an answer held for background work | Partly native: with the gate, the `Stop` hook's `fullyIdle: false` says the model has finished its turn and agy is waiting (the `⏳ background` note says so); the text itself is a **gap** | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; `Stop` carries no text (and a timer can still start another model call, probe pb2). The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3/1.3.4, [#1061](https://github.com/littlebearapps/untether/issues/1061) |

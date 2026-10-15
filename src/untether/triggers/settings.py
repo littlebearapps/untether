@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Annotated, Any, Literal, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -11,11 +11,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
-from pydantic.types import StrictInt
+from pydantic.types import StrictBool, StrictInt
 
 from ..logging import get_logger
 
@@ -29,18 +31,34 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 class TriggerServerSettings(BaseModel):
     """HTTP server settings for webhook reception."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # #1117: never echo raw input (secrets, auth headers) into errors.
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
 
     host: str = "127.0.0.1"
     port: StrictInt = Field(default=9876, ge=1, le=65535)
     rate_limit: StrictInt = Field(default=60, ge=1)
     max_body_bytes: StrictInt = Field(default=1_048_576, ge=1024, le=10_485_760)
+    # #1119: the server is reachable from outside this host even though it
+    # binds loopback (a tunnel or reverse proxy in front). Turns the
+    # ``auth = "none"`` refusal back on, whatever the bind address.
+    exposed: StrictBool = False
+    # #1119: header the proxy sets to the real client address (e.g.
+    # ``CF-Connecting-IP``). Honoured only when ``exposed`` is on and the TCP
+    # peer is loopback, for the failed-auth lockout bucket and for logs.
+    trusted_proxy_header: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9-]{1,64}$"
+    )
 
 
 class WebhookConfig(BaseModel):
     """Configuration for a single webhook endpoint."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # #1117: never echo raw input (secrets, auth headers) into errors.
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
 
     id: NonEmptyStr
     path: NonEmptyStr
@@ -63,7 +81,9 @@ class WebhookConfig(BaseModel):
     engine: NonEmptyStr | None = None
     chat_id: StrictInt | None = None
     auth: Literal["bearer", "hmac-sha256", "hmac-sha1", "none"] = "bearer"
-    secret: NonEmptyStr | None = None
+    # #1117: SecretStr so the value never reaches a repr, a log line or a
+    # validation error; read it with ``get_secret_value()`` at the auth check.
+    secret: SecretStr | None = Field(default=None, min_length=1)
     prompt_template: NonEmptyStr | None = None
     event_filter: NonEmptyStr | None = None
 
@@ -107,7 +127,10 @@ class WebhookConfig(BaseModel):
 class CronFetchConfig(BaseModel):
     """Configuration for a cron pre-fetch step."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # #1117: never echo raw input (secrets, auth headers) into errors.
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
 
     type: Literal["http_get", "http_post", "file_read"]
     url: NonEmptyStr | None = None
@@ -132,7 +155,10 @@ class CronFetchConfig(BaseModel):
 class CronConfig(BaseModel):
     """Configuration for a scheduled cron trigger."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # #1117: never echo raw input (secrets, auth headers) into errors.
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
 
     id: NonEmptyStr
     schedule: NonEmptyStr
@@ -242,7 +268,10 @@ class CronConfig(BaseModel):
 class TriggersSettings(BaseModel):
     """Top-level trigger system configuration."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # #1117: never echo raw input (secrets, auth headers) into errors.
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
 
     enabled: bool = False
     default_timezone: NonEmptyStr | None = None
@@ -281,9 +310,144 @@ class TriggersSettings(BaseModel):
         return self
 
 
+#: #1117: bearer / HMAC secrets shorter than this get a warning (0.36.1);
+#: a hard error is deferred to 0.36.2 (#1118) so existing configs still load.
+MIN_WEBHOOK_SECRET_LENGTH = 32
+
+
+class InvalidTrigger(NamedTuple):
+    """One ``[[triggers.crons]]`` / ``[[triggers.webhooks]]`` entry that
+    failed validation and was skipped (#1117)."""
+
+    kind: Literal["cron", "webhook"]
+    trigger_id: str
+    error: str
+
+
+class ParsedTriggerConfig(NamedTuple):
+    """The valid trigger settings plus the entries that were skipped."""
+
+    settings: TriggersSettings
+    invalid: tuple[InvalidTrigger, ...]
+
+
+def format_trigger_error(exc: BaseException) -> str:
+    """A one-line, secret-free summary of a trigger config error (#1117).
+
+    Built from pydantic's structured errors without their ``input`` (the
+    raw TOML values, which can hold a webhook secret or an auth header), so
+    it is safe for logs, the issue-watcher and Telegram.
+    """
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors(include_url=False, include_input=False):
+            loc = ".".join(str(part) for part in err.get("loc", ()))
+            msg = err.get("msg", "invalid value")
+            parts.append(f"{loc}: {msg}" if loc else msg)
+        return "; ".join(parts) or "invalid trigger config"
+    return str(exc)
+
+
+def _entry_label(kind: str, index: int, entry: object) -> str:
+    raw_id = entry.get("id") if isinstance(entry, dict) else None
+    if isinstance(raw_id, str) and raw_id.strip():
+        return raw_id.strip()[:64]
+    return f"{kind}s[{index}]"
+
+
+def parse_trigger_config_isolated(raw: dict[str, Any]) -> ParsedTriggerConfig:
+    """Parse trigger config, isolating each cron / webhook entry (#1117).
+
+    Each ``[[triggers.crons]]`` / ``[[triggers.webhooks]]`` entry is
+    validated on its own: a bad entry is skipped and reported in
+    ``invalid``, the rest still load. Block-level problems still raise
+    (``[triggers.server]``, unknown ``[triggers]`` keys, duplicate ids or
+    paths across the valid entries), as one bad value there affects every
+    trigger.
+    """
+    data = dict(raw)
+    invalid: list[InvalidTrigger] = []
+    models: tuple[tuple[Literal["cron", "webhook"], str, type[BaseModel]], ...] = (
+        ("cron", "crons", CronConfig),
+        ("webhook", "webhooks", WebhookConfig),
+    )
+    for kind, key, model in models:
+        entries = data.get(key)
+        if not isinstance(entries, list):
+            continue  # wrong type → the block-level parse reports it
+        valid: list[BaseModel] = []
+        for index, entry in enumerate(entries):
+            try:
+                valid.append(model.model_validate(entry))
+            except ValidationError as exc:
+                invalid.append(
+                    InvalidTrigger(
+                        kind,
+                        _entry_label(kind, index, entry),
+                        format_trigger_error(exc),
+                    )
+                )
+        data[key] = valid
+    return ParsedTriggerConfig(TriggersSettings.model_validate(data), tuple(invalid))
+
+
 def parse_trigger_config(raw: dict[str, Any]) -> TriggersSettings:
-    """Parse and validate a raw trigger config dict into settings."""
-    return TriggersSettings.model_validate(raw)
+    """Parse trigger config into settings, skipping invalid entries (#1117).
+
+    Use :func:`parse_trigger_config_isolated` to learn which entries were
+    skipped. Block-level errors still raise ``ValidationError``.
+    """
+    return parse_trigger_config_isolated(raw).settings
+
+
+def log_invalid_triggers(
+    invalid: Sequence[InvalidTrigger], *, phase: Literal["startup", "reload"]
+) -> None:
+    """Log ``triggers.trigger_invalid`` (ERROR) per skipped entry (#1117).
+
+    ``error`` is the secret-free :func:`format_trigger_error` summary.
+    """
+    for item in invalid:
+        logger.error(
+            "triggers.trigger_invalid",
+            kind=item.kind,
+            trigger_id=item.trigger_id,
+            error=item.error,
+            phase=phase,
+        )
+
+
+def find_short_webhook_secrets(settings: TriggersSettings) -> list[str]:
+    """Ids of bearer / HMAC webhooks whose secret is under
+    :data:`MIN_WEBHOOK_SECRET_LENGTH` characters (#1117)."""
+    return [
+        wh.id
+        for wh in settings.webhooks
+        if wh.auth != "none"
+        and wh.secret is not None
+        and len(wh.secret.get_secret_value()) < MIN_WEBHOOK_SECRET_LENGTH
+    ]
+
+
+def warn_short_webhook_secrets(settings: TriggersSettings) -> list[str]:
+    """Log ``triggers.webhook.short_secret`` for each short secret (#1117).
+
+    A warning only in 0.36.1 (the config still loads); never logs the
+    secret or its length. Returns the flagged webhook ids.
+    """
+    short = find_short_webhook_secrets(settings)
+    for webhook_id in short:
+        logger.warning(
+            "triggers.webhook.short_secret",
+            webhook_id=webhook_id,
+            min_length=MIN_WEBHOOK_SECRET_LENGTH,
+            hint=(
+                f"Use a random secret of at least {MIN_WEBHOOK_SECRET_LENGTH} "
+                "characters (e.g. `openssl rand -hex 32`). Short secrets will "
+                "be rejected in a future release."
+            ),
+        )
+    return short
 
 
 class TriggerChatFallback(NamedTuple):

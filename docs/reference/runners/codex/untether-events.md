@@ -1,6 +1,6 @@
 # Codex -> Untether event mapping
 
-This document describes how Codex exec --json events are translated to Untether's normalized event model.
+This document describes how Codex exec --json events are translated to Untether's normalised event model.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/codex.py` and the translation logic is in `src/untether/runners/codex.py`. When in doubt, refer to the code.
 
@@ -15,7 +15,7 @@ codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<lev
 ```
 
 * **`extra_args`** default to `["-c", "notify=[]"]` and sit at the root, before `exec`. A deny-list rejects managed flags (`--json`, `--skip-git-repo-check`, `--color`, `--output-schema`, `--output-last-message`, `--ask-for-approval`/`-a`, exec-only `--ignore-rules`/`--ignore-user-config`), bypass flags (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, `-c` values mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), workspace flags (`--cd`/`-C`, `--worktree`) and a bare `--`, in every spelling. A blocked flag stops the Codex engine loading, and the error names the flag ([#209](https://github.com/littlebearapps/untether/issues/209), see [Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). Root `--sandbox read-only|workspace-write` stays allowed.
-* **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto.
+* **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto, except on a webhook run, which runs safe instead and logs `codex.webhook_unknown_mode_safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)).
 * **Model and resume id** are validated before spawn (no leading dash, no control characters; `runner.argv.invalid_value`). The model is joined to its flag; the thread id is positional in `exec resume`, where clap (0.160.1) reads a dash-leading token as an option, so validation is the whole defence there ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 * **Resume value = thread UUID only** ([#1065](https://github.com/littlebearapps/untether/issues/1065), checked on codex-cli 0.162.1, 2026-10-13). `codex exec resume [SESSION_ID]` natively takes a thread id **or a thread name**, but an unknown name (or any other non-UUID value, such as a URL) silently starts a **new** thread instead of failing, while an unknown UUID fails cleanly (`no rollout found for thread id …`). Untether keys sessions on the `thread.started` UUID, so a name never resumed under Untether anyway (the run failed the "emitted session id … but expected …" check after the new thread was created). `CodexRunner.check_resume_value` therefore refuses anything but a UUID before spawning. Native gap recorded here: thread names are not available on Untether's surface; revisit if Codex adds a strict lookup (fail when the name is unknown) or reports the name with the thread id.
 * **Reasoning** (`/config` → Reasoning): `low`, `medium`, `high` or `xhigh`, passed as `-c model_reasoning_effort=<level>`. `minimal` is not offered ([#416](https://github.com/littlebearapps/untether/issues/416)).
@@ -83,7 +83,7 @@ The runner forwards `turn.completed.usage` unchanged: all five fields, as the th
 
 Why this fits Untether cleanly:
 
-* Your `started` corresponds to the old “session.started” concept (runner learns resume token; bridge can now safely serialize per thread). 
+* Your `started` corresponds to the old “session.started” concept (runner learns resume token; bridge can now safely serialise per thread). 
 * Your `action` is “everything that would have been action.started/action.completed/log/error” collapsed into one stream. 
 * Your `completed` corresponds to final `RunResult` + status, using Codex’s `agent_message` as the answer source.  
 
@@ -273,7 +273,7 @@ Codex fields include `command`, `status`, `aggregated_output` (often noisy), and
 * `phase` maps 1:1 to started/updated/completed
 * on completion: `detail={ exit_code, status }` and `ok = (item.status == "completed")` (and `exit_code == 0` when it is an int); `aggregated_output` is never copied
 
-Note: “failed” command becomes `ok=false` but it’s still just an `action` completion — the overall run might still succeed later, depending on agent behavior.
+Note: “failed” command becomes `ok=false` but it’s still just an `action` completion — the overall run might still succeed later, depending on agent behaviour.
 
 ---
 
@@ -448,7 +448,7 @@ for line in codex_jsonl_stream:
 # rc == 0 -> completed ok=True with final_answer (ok=False if no thread_id was seen)
 ```
 
-This design preserves the Untether ordering/serialization principles: `started` happens as soon as resume token is known, actions stream in order, and exactly one `completed` closes the run. 
+This design preserves the Untether ordering/serialisation principles: `started` happens as soon as resume token is known, actions stream in order, and exactly one `completed` closes the run. 
 
 ---
 
