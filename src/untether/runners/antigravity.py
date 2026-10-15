@@ -3513,8 +3513,13 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             "kill_all",
         }:
             self._subagents_killed(state, params)
-        if idx in state.approval_steps:
-            # #1080: the card came before the step's ACTIVE line.
+        gate = state.gate
+        if idx in state.approval_steps or (
+            gate is not None and gate.awaiting_answer(idx)
+        ):
+            # #1080: the card came before the step's ACTIVE line. #1106: or
+            # Ask me's gate hasn't answered the step yet, so agy hasn't run
+            # it; the gate releases it when it does.
             state.note_approval_wait(idx, True)
 
     @staticmethod

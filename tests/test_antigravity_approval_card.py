@@ -205,6 +205,48 @@ async def test_card_reports_the_parent_step_waiting(harness: Harness) -> None:
 
 
 @pytest.mark.anyio
+async def test_1106_gate_reports_the_parent_steps_it_lets_run(
+    harness: Harness, project: Path
+) -> None:
+    """#1106: agy's ACTIVE line comes before the hook, so until the gate
+    has answered a parent step, agy hasn't run it. A step the gate lets run
+    is reported (no card needed); a denied one never runs, so it isn't."""
+    seen: list[tuple[int, bool]] = []
+    harness.gate.on_approval_wait = lambda step, waiting: seen.append((step, waiting))
+    readme = {"AbsolutePath": str(project / "README.md")}
+    assert harness.gate.awaiting_answer(4)
+    out = await harness.call("PreToolUse", _call("view_file", readme, step=4))
+    assert out == {"decision": "allow"} and _cards(harness) == []
+    assert seen == [(4, False)] and not harness.gate.awaiting_answer(4)
+    seen.clear()
+    out = await _held_call(
+        harness, _call("run_command", SHELL, step=6), Decision(False, "deny")
+    )
+    assert out is not None and out["decision"] == "deny"
+    assert seen == [(6, True)] and not harness.gate.awaiting_answer(6)
+    # A subagent's own steps aren't the parent's.
+    seen.clear()
+    harness.gate.add_children([CHILD], role="Researcher")
+    await _held_call(
+        harness,
+        _call("run_command", SHELL, step=8, cid=CHILD),
+        Decision(True, "approve"),
+    )
+    assert seen == [] and harness.gate.awaiting_answer(8)
+
+
+def test_1106_only_ask_me_holds_a_step_for_the_gate() -> None:
+    """Workspace / Plan first / Full access: agy's own check decides, so the
+    gate never holds a step back; nor does a gate whose hooks don't run."""
+    factory = EventFactory("antigravity")
+    assert not GateRun(config_path=None, factory=factory).awaiting_answer(3)
+    gate = GateRun(config_path=None, factory=factory, required=True)
+    assert gate.awaiting_answer(3)
+    gate.mark_dead()
+    assert not gate.awaiting_answer(3)
+
+
+@pytest.mark.anyio
 async def test_deny_returns_reason_and_no_retry_text(harness: Harness) -> None:
     out = await _held_call(
         harness,

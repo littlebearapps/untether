@@ -15,6 +15,7 @@ from typing import Any
 
 import structlog.testing
 
+from untether.antigravity.gate_server import GateRun
 from untether.background_status import live_shown, render_background_block
 from untether.background_tasks import EngineBackgroundTask
 from untether.markdown import HARD_BREAK, STOPPED_STATUS, format_action_line
@@ -741,6 +742,56 @@ def test_card_before_the_step_line_still_hides_it() -> None:
     assert _rows(state) == []
     state.note_approval_wait(3, False)
     assert len(_rows(state)) == 2  # a subagent counts from the start
+
+
+def _gated(required: bool = True) -> tuple[AntigravityRunner, AntigravityStreamState]:
+    runner, state = _state("ask" if required else "full")
+    gate = GateRun(config_path=None, factory=state.factory, required=required)
+    gate.on_approval_wait = state.note_approval_wait
+    gate.preinvocation_seen = True  # the hooks run
+    state.gate = gate
+    return runner, state
+
+
+def test_1106_subagent_waits_for_the_gate_before_its_card() -> None:
+    """rc5 QA: ``⏳ background (1) 🤖 Shell Runner (self) · 0s`` showed for
+    ~2 s before the ``start subagents`` card rendered. agy's ACTIVE line
+    comes ~0.1 s before its hook reaches the gate, so in Ask me no row is
+    listed until the gate lets the step run."""
+    runner, state = _gated()
+    _feed(runner, state, [_spawn(3, "Shell Runner")])
+    assert _rows(state) == []
+    state.gate._note_answered(3, None)  # the card goes up: still held
+    state.note_approval_wait(3, True)
+    _age(state, "sub:3:0", 30.0)
+    assert _rows(state) == []
+    state.gate._note_answered(3, {"decision": "allow"})  # Approve
+    rows = _rows(state)
+    assert len(rows) == 2 and "Shell Runner" in rows[1] and "· 0s" in rows[1]
+
+
+def test_1106_denied_subagent_is_never_listed() -> None:
+    runner, state = _gated()
+    _feed(runner, state, [_spawn(3, "Shell Runner")])
+    state.gate._note_answered(3, {"decision": "deny", "reason": "no"})
+    assert _rows(state) == []
+    error = {"type": "TOOL_ERROR", "message": "tool call denied by pre-tool hook"}
+    _feed(runner, state, [_tool(3, "invoke_subagent", "ERROR", {}, error=error)])
+    assert _rows(state) == [] and _statuses(state) == {"sub:3:0": "failed"}
+
+
+def test_1106_step_the_gate_answered_first_is_listed_at_once() -> None:
+    runner, state = _gated()
+    state.gate._note_answered(3, {"decision": "allow"})
+    _feed(runner, state, [_spawn(3, "Alpha")])
+    assert len(_rows(state)) == 2
+
+
+def test_1106_without_ask_me_subagent_is_listed_at_once() -> None:
+    """Full access / Workspace: no gate answer to wait for (#1086's rows)."""
+    runner, state = _gated(required=False)
+    _feed(runner, state, [_spawn(3, "Alpha", "Beta")])
+    assert len(_rows(state)) == 3
 
 
 # ── #1061: the held answer ──────────────────────────────────────────────────
