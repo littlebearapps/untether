@@ -105,6 +105,9 @@ def build_router(
             engine_cfg = {}
             had_user_config = True  # they tried to configure it, just badly
 
+        # #1089: the config the runner was actually built from, so the PATH
+        # check below looks up the same command the runner will spawn.
+        runner_cfg = engine_cfg
         try:
             runner = backend.build_runner(engine_cfg, config_path)
         except Exception as exc:
@@ -133,13 +136,14 @@ def build_router(
                         (engine_id, issue or str(fallback_exc), had_user_config)
                     )
                     continue
+                runner_cfg = {}
                 status = "bad_config"
             else:
                 status = "load_error"
                 issues.append((engine_id, issue, had_user_config))
                 continue
 
-        cmd = backend.cli_cmd or backend.id
+        cmd = backend.cli_command(runner_cfg)
         if status != "load_error" and shutil.which(cmd) is None:
             status = "missing_cli"
             if issue:

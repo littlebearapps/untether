@@ -41,11 +41,10 @@ Install agy:
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-The installer puts `agy` in `~/.local/bin`. Make sure that folder is on the `PATH` Untether runs with (for a
-systemd or launchd service, the service's own `PATH`): Untether's check for installed engines looks for `agy` on
-`PATH` only, so without it Antigravity shows as not installed and can't be selected, even when
-`[antigravity] cmd` points at the binary. The startup message's "installed engines" line shows whether it was
-found.
+The installer puts `agy` in `~/.local/bin`. Untether looks for `agy` on the `PATH` it runs with, then at
+`~/.local/bin/agy`, so a systemd or launchd service whose `PATH` leaves that folder out still finds it. For an agy
+installed anywhere else, set `[antigravity] cmd` to its path (see [Configuration](#configuration)). The startup
+message's "installed engines" line shows whether it was found.
 
 !!! warning "Google's terms and Google account sign-ins"
     Google's [Antigravity terms](https://antigravity.google/terms) don't allow third-party tools to use a Google
@@ -477,7 +476,7 @@ All four keys are optional.
     ```toml
     [antigravity]
     model = "gemini-3.8-flash-medium"  # passed to agy as the model; ids from `agy models`
-    cmd = "~/.local/bin/agy"           # path to agy (default: agy on PATH)
+    cmd = "~/.local/bin/agy"           # path to agy (default: agy on PATH, then ~/.local/bin/agy)
     permission_mode = "workspace"      # workspace (default) | ask | plan | full
     approval_timeout_s = 900           # Ask me: how long a card waits (60–3000 s)
     ```

@@ -1524,6 +1524,16 @@ def default_antigravity_cmd() -> str:
     return "agy"
 
 
+def resolve_antigravity_cmd(config: EngineConfig) -> str:
+    """The agy ``build_runner`` spawns: ``[antigravity] cmd`` when set, else
+    ``default_antigravity_cmd()``. Also the startup availability check and the
+    setup wizard's lookup (#1089), so neither insists on agy being on PATH."""
+    raw_cmd = config.get("cmd")
+    if isinstance(raw_cmd, str) and raw_cmd:
+        return os.path.expanduser(raw_cmd)
+    return default_antigravity_cmd()
+
+
 @dataclass(slots=True)
 class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     """Runner for the Antigravity CLI (``agy``)."""
@@ -4585,9 +4595,8 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
                 f"expected whole seconds from {gate_plugin.MIN_WAIT_S} to "
                 f"{gate_plugin.MAX_WAIT_S}."
             )
-    cmd = os.path.expanduser(raw_cmd) if raw_cmd else default_antigravity_cmd()
     return AntigravityRunner(
-        antigravity_cmd=cmd,
+        antigravity_cmd=resolve_antigravity_cmd(config),
         model=model or None,
         default_permission_mode=mode,
         config_path=config_path,
@@ -4600,4 +4609,5 @@ BACKEND = EngineBackend(
     build_runner=build_runner,
     cli_cmd="agy",
     install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    resolve_cli_cmd=resolve_antigravity_cmd,
 )

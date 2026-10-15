@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Awaitable, Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -24,7 +24,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..backends import EngineBackend, SetupIssue
+from ..backends import EngineBackend, EngineConfig, SetupIssue
 from ..backends_helpers import install_issue
 from ..config import (
     ConfigError,
@@ -37,7 +37,9 @@ from ..logging import suppress_logs
 from ..settings import (
     HOME_CONFIG_PATH,
     TelegramTopicsSettings,
+    UntetherSettings,
     load_settings,
+    load_settings_if_exists,
     require_telegram,
 )
 from ..transports import SetupResult
@@ -199,6 +201,18 @@ def config_issue(path: Path, *, title: str) -> SetupIssue:
     return SetupIssue(title, (f"   {display_path(path)}",))
 
 
+def _cli_installed(
+    backend: EngineBackend, settings: UntetherSettings | None, config_path: Path
+) -> bool:
+    """#1089: look up the command the runner spawns (``[antigravity] cmd``,
+    ``~/.local/bin/agy``), not just the engine's bare name on PATH."""
+    config: EngineConfig = {}
+    if settings is not None:
+        with suppress(ConfigError):
+            config = settings.engine_config(backend.id, config_path=config_path)
+    return shutil.which(backend.cli_command(config)) is not None
+
+
 def check_setup(
     backend: EngineBackend,
     *,
@@ -207,20 +221,12 @@ def check_setup(
     issues: list[SetupIssue] = []
     config_path = _resolve_home_config()
     cmd = backend.cli_cmd or backend.id
-    backend_issues: list[SetupIssue] = []
-    if shutil.which(cmd) is None:
-        backend_issues.append(install_issue(cmd, backend.install_cmd))
 
     try:
         settings, config_path = load_settings()
-        if transport_override:
-            settings = settings.model_copy(update={"transport": transport_override})
-        try:
-            require_telegram(settings, config_path)
-        except ConfigError:
-            issues.append(config_issue(config_path, title=_CONFIGURE_TELEGRAM_TITLE))
     except ConfigError:
-        issues.extend(backend_issues)
+        if not _cli_installed(backend, None, config_path):
+            issues.append(install_issue(cmd, backend.install_cmd))
         title = (
             _CONFIGURE_TELEGRAM_TITLE
             if config_path.exists() and config_path.is_file()
@@ -229,7 +235,14 @@ def check_setup(
         issues.append(config_issue(config_path, title=title))
         return SetupResult(issues=issues, config_path=config_path)
 
-    issues.extend(backend_issues)
+    if transport_override:
+        settings = settings.model_copy(update={"transport": transport_override})
+    try:
+        require_telegram(settings, config_path)
+    except ConfigError:
+        issues.append(config_issue(config_path, title=_CONFIGURE_TELEGRAM_TITLE))
+    if not _cli_installed(backend, settings, config_path):
+        issues.append(install_issue(cmd, backend.install_cmd))
     return SetupResult(issues=issues, config_path=config_path)
 
 
@@ -672,10 +685,14 @@ class LiveServices:
         return await validate_topics_onboarding(token, chat_id, scope, ())
 
     def list_engines(self) -> list[tuple[str, bool, str | None]]:
+        try:
+            loaded = load_settings_if_exists()
+        except ConfigError:
+            loaded = None
+        settings, config_path = loaded or (None, _resolve_home_config())
         rows: list[tuple[str, bool, str | None]] = []
         for backend in list_backends():
-            cmd = backend.cli_cmd or backend.id
-            installed = shutil.which(cmd) is not None
+            installed = _cli_installed(backend, settings, config_path)
             rows.append((backend.id, installed, backend.install_cmd))
         return rows
 

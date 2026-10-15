@@ -387,3 +387,76 @@ def test_751_unparseable_triggers_do_not_break_spec(
     ]
     assert [e["entries"] for e in auto] == [["engines.claude"]]
     assert not [e for e in logs if e["event"] == "permission_audit.failed"]
+
+
+# ---------------------------------------------------------------------------
+# #1089: the availability check uses the command the runner will spawn
+# ([antigravity] cmd, else agy on PATH, else ~/.local/bin/agy), not a bare
+# `agy` PATH lookup.
+# ---------------------------------------------------------------------------
+
+
+def _fake_agy(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _1089_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engines: dict | None = None
+):
+    # PATH without agy, and a home directory we control.
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "untether.toml"
+    config_path.touch()
+    backends = runtime_loader.load_backends(
+        engine_ids=["antigravity"], allowlist=None, default_engine="antigravity"
+    )
+    return runtime_loader.build_router(
+        settings=_settings_with_engines(engines),
+        config_path=config_path,
+        backends=backends,
+        default_engine="antigravity",
+    )
+
+
+def test_1089_configured_cmd_off_path_is_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    agy = _fake_agy(tmp_path / "opt" / "agy" / "agy")
+    router = _1089_build(monkeypatch, tmp_path, {"antigravity": {"cmd": str(agy)}})
+    entry = router.entry_for_engine("antigravity")
+    assert entry.status == "ok"
+    assert entry.runner.command() == str(agy)
+
+
+def test_1089_local_bin_fallback_is_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    agy = _fake_agy(tmp_path / "home" / ".local" / "bin" / "agy")
+    router = _1089_build(monkeypatch, tmp_path)
+    entry = router.entry_for_engine("antigravity")
+    assert entry.status == "ok"
+    assert entry.runner.command() == str(agy)
+
+
+def test_1089_missing_agy_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(ConfigError, match="agy not found on PATH"):
+        _1089_build(monkeypatch, tmp_path)
+
+
+def test_1089_configured_cmd_that_does_not_exist_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A configured cmd wins over the ~/.local/bin fallback, so a wrong path is
+    # reported even when agy is installed there.
+    _fake_agy(tmp_path / "home" / ".local" / "bin" / "agy")
+    missing = tmp_path / "nowhere" / "agy"
+    with pytest.raises(ConfigError, match=f"{missing} not found"):
+        _1089_build(monkeypatch, tmp_path, {"antigravity": {"cmd": str(missing)}})

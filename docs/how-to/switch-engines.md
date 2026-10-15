@@ -85,8 +85,8 @@ sign-in; for day-to-day use (permission modes, effort, quota, scheduled runs) se
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
-The installer puts `agy` in `~/.local/bin`; make sure that folder is on the `PATH` Untether runs with, or the engine
-shows as not installed.
+The installer puts `agy` in `~/.local/bin`, where Untether finds it even when that folder isn't on its `PATH`. For an
+agy installed anywhere else, set `[antigravity] cmd` to its path, or the engine shows as not installed.
 
 **2. Choose how agy signs in.** Untether never signs in for you.
 
