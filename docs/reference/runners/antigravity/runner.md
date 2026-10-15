@@ -294,9 +294,16 @@ case-folded at any depth (`_PROTECTED_DIR_NAMES` / `_PROTECTED_DIR_PAIRS` / `_PR
 `.pre-commit-config.yaml`, `lefthook.yml` / `.yaml` (and `.lefthook.*`, `lefthook-local.*`), `.envrc`, `mise.toml`,
 `.mise.toml`, `mise.local.toml`; the configured `files.outbox_dir` (from the project root); and Untether's default
 file deny globs (`.env*`, `*.pem`, `*.key`, SSH keys, `.netrc`, `.npmrc`, `.pypirc`). **Untether's own files**:
-its package, venv, `sys.base_prefix`, the plugin folder, and this instance's config file and its folder. The gate
-also asks for in-project edits when the run's `diff_preview` option is on, but `/config` → **Diff preview** is
-Claude-only (`DIFF_PREVIEW_SUPPORTED_ENGINES`), so an Antigravity chat can't switch it on today.
+its package, venv, `sys.base_prefix`, the plugin folder, and this instance's config file and its folder.
+
+**Diff preview** ([#1090](https://github.com/littlebearapps/untether/issues/1090)): `/config` → **Diff preview** is
+offered in an Antigravity chat wherever Ask me can run (`diff_preview_supported()`, the same plugin check as Ask
+mode); it changes nothing in the other modes, which have no approval cards. The chat's override reaches the gate as the
+run's `diff_preview` option (`GateRun.diff_preview`) with Claude's semantics: **on** makes in-project edits ask too
+(verdict `preview`), with the diff; **off** keeps them on the safe list and leaves the diff off every card (an edit
+card names the file as `📝 <path>` instead; command, subagent and other previews always show); **not set** keeps
+in-project edits on the safe list and shows the diff on the cards that do appear. An unattended run with it on denies
+those edits like any other card (#835).
 
 **The card** is registered in the engine-neutral registry (`kind="tool"`, the `ia:` callback prefix) and posted as a
 ⚠️ row with buttons: `Permission Request [agy] - <what>` (`shell command`, `write a file (outside this project)`,

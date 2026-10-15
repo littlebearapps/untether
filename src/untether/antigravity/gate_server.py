@@ -1118,6 +1118,8 @@ class GateRun:
             root=self.project_root,
             child_role=child_role,
             foreign=not own,
+            # #1090: Diff preview off leaves the diff off (Claude's C4).
+            diff=self.diff_preview is not False,
         )
         offer_always = (
             tool == "run_command" and own and gate_policy.always_allowable(args)

@@ -3001,7 +3001,56 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code" in msg.text
+        assert "Available for Claude Code" in msg.text
+
+    @pytest.mark.anyio
+    async def test_1090_diff_preview_for_antigravity_with_gate(
+        self, tmp_path, monkeypatch
+    ):
+        """#1090: Antigravity gets Diff preview wherever Ask me can run
+        (Untether's agy plugin installed); the page says it only changes Ask
+        me's cards, and the override is stored for the antigravity engine."""
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+
+        def ctx_for(args: str) -> MagicMock:
+            return _make_ctx(
+                args_text=args,
+                text=f"config:{args}" if args else "/config",
+                config_path=state_path,
+                engine_ids=("codex", "claude", "antigravity"),
+                default_engine="antigravity",
+            )
+
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        assert "Diff preview:" not in _last_send_msg(home).text
+        assert "config:dp" not in _buttons_data(_last_send_msg(home))
+        ctx = ctx_for("dp")
+        await ConfigCommand().handle(ctx)
+        assert "untether agy-gate install" in _last_edit_msg(ctx).text
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        msg = _last_send_msg(home)
+        assert "Diff preview:" in msg.text
+        assert {"config:aq", "config:dp", "config:gt", "config:fu"} <= set(
+            _buttons_data(msg)
+        )
+        ctx = ctx_for("dp")
+        await ConfigCommand().handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "config:dp:on" in _buttons_data(page)
+        assert "Ask me" in page.text
+
+        ctx = ctx_for("dp:on")
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "antigravity")
+        assert override is not None and override.diff_preview is True
 
     @pytest.mark.anyio
     async def test_diff_preview_no_config_path(self):

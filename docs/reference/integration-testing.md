@@ -98,7 +98,7 @@ These tests were previously considered "manual" but can be automated via MCP and
 | Reasoning levels | Yes | Yes | - | - | Yes (per model) | - | - |
 | API cost tracking | Yes | - | Yes | - | - (tokens only) | Yes | Yes |
 | Subscription usage | Yes | - | - | - | Quota groups (`/usage`) | - | - |
-| Diff preview | Yes | - | - | - | - | - | - |
+| Diff preview | Yes | - | - | - | Yes (Ask me, agy plugin) | - | - |
 
 Antigravity in 0.36.1rc1 has two permission modes, picked before the run: **Workspace** (the default: `agy`'s own
 `--mode=accept-edits`, so file edits inside the project and no shell) and **Full access** (explicit). From

@@ -245,10 +245,10 @@ async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
-        DIFF_PREVIEW_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
         ask_questions_supported,
+        diff_preview_supported,
         get_engine_default_reasoning,
         get_reasoning_label,
         supports_reasoning,
@@ -343,7 +343,7 @@ async def _page_home(ctx: CommandContext) -> None:
     show_plan_mode = current_engine in PERMISSION_MODE_SUPPORTED_ENGINES
     show_reasoning = supports_reasoning(current_engine)
     show_ask_questions = ask_questions_supported(current_engine)
-    show_diff_preview = current_engine in DIFF_PREVIEW_SUPPORTED_ENGINES
+    show_diff_preview = diff_preview_supported(current_engine)
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -412,6 +412,11 @@ async def _page_home(ctx: CommandContext) -> None:
                 # #980: Untether's agy plugin is installed.
                 lines.append(
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
+                )
+            if show_diff_preview:
+                # #1090: Ask me's approval cards (same plugin predicate).
+                lines.append(
+                    f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
                 )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
@@ -609,12 +614,14 @@ async def _page_home(ctx: CommandContext) -> None:
             if show_ask_questions:
                 row4.insert(0, {"text": "❓ Ask mode", "callback_data": "config:aq"})
                 buttons.append(row4)
+                # #1090: Diff preview needs the same plugin.
                 buttons.append(
                     [
+                        {"text": "📝 Diff preview", "callback_data": "config:dp"},
                         {"text": "↪️ Follow-up", "callback_data": "config:fu"},
-                        {"text": "ℹ️ About", "callback_data": "config:ab"},
                     ]
                 )
+                buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
             else:
                 row4.append({"text": "ℹ️ About", "callback_data": "config:ab"})
                 buttons.append(row4)
@@ -2024,7 +2031,7 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, with_override
+    from ..engine_overrides import diff_preview_supported, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -2038,12 +2045,14 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude Code-only guard
+    # Claude Code, or Antigravity with Untether's agy plugin (#1090)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if current_engine not in DIFF_PREVIEW_SUPPORTED_ENGINES:
+    if not diff_preview_supported(current_engine):
         await _respond(
             ctx,
-            "<b>📝 Diff preview</b>\n\nOnly available for Claude Code.",
+            "<b>📝 Diff preview</b>\n\nAvailable for Claude Code, and for"
+            " Antigravity once Untether's agy plugin is installed on the host"
+            " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2104,6 +2113,16 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "• <b>on</b> — show code changes in approval messages",
         "• <b>off</b> — show approval buttons only (default)",
         "",
+    ]
+    if engine == "antigravity":
+        # #1090: the gate's cards exist only in Ask me.
+        lines += [
+            "Antigravity: only in <b>Ask me</b> (Permission mode). On, edits"
+            " inside the project ask too, with the diff; off, an edit card"
+            " names the file without the diff. Commands always show.",
+            "",
+        ]
+    lines += [
         f"Current: <b>{current_label}</b>",
         "",
         _learn_more("interactive-approval", "diff-previews"),

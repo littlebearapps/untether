@@ -51,7 +51,7 @@ Quick definitions for terms used throughout the Untether documentation.
 :   The Telegram message that Untether updates in real time as the agent works. It shows the engine, elapsed time, step count, and a list of recent tool calls. When the run finishes, it's replaced by the final answer.
 
 **Diff preview**
-:   A compact view of what Claude Code is about to change, shown alongside approval buttons. For file edits, it shows removed lines (`- old`) and added lines (`+ new`) in a fenced `diff` block. For shell commands, it shows the command to be run.
+:   A compact view of what Claude Code (or Antigravity CLI in Ask me) is about to change, shown alongside approval buttons. For file edits, it shows removed lines (`- old`) and added lines (`+ new`) in a fenced `diff` block. For shell commands, it shows the command to be run.
 
 **Live session**
 :   A Claude Code process that stays running after its reply while background work (background tasks, subagents, `Monitor`, `ScheduleWakeup`) is still going. Each later turn arrives as its own Telegram message (short acknowledgements fold into a background-status message instead), and a follow-up you send is written into the same process instead of resuming it. The session closes itself when idle; `[watchdog] live_sessions = false` turns it off.

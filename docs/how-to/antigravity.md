@@ -205,6 +205,11 @@ command, **✅ Always allow this command here** lets that exact command (in that
 rest of the conversation. A Deny, or no answer within 15 minutes, blocks the tool and agy is told not to retry it;
 the row reads `blocked: denied in Telegram`. A subagent's own tool calls ask too, labelled with the subagent's role.
 
+`/config` → **Diff preview** works here as it does for Claude Code
+([#1090](https://github.com/littlebearapps/untether/issues/1090)), and only matters in Ask me: **on** makes edits
+inside the project ask too, with the diff; **off** leaves the diff off the cards (an edit card still names the file,
+and commands always show). Left unset, in-project edits run on their own and the cards that do appear show the diff.
+
 <!-- TODO: capture screenshot: antigravity-ask-me-card — an Ask me approval card for `$ git status` with Approve / Deny / Always allow this command here -->
 <!-- <img src="../assets/screenshots/antigravity-ask-me-card.jpg" alt="Antigravity Ask me approval card for a shell command" width="360" loading="lazy" /> -->
 
@@ -433,7 +438,7 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
   on the host.
 - Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no
   status message after the answer and no `🔔 Background task finished` follow-up.
-- Claude Code's extras: the Pause & Outline Plan button, the `/config` → **Diff preview** toggle, Loop mode and a
+- Claude Code's extras: the Pause & Outline Plan button, Loop mode and a
   compaction notice (agy compacts a conversation without reporting it).
 - agy's own `/compact` (agy 1.3.5): Untether doesn't pass it through, so `/compact` in an Antigravity chat reaches
   the model as an ordinary message and compacts nothing, even if the answer says it did.

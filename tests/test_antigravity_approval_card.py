@@ -420,6 +420,39 @@ async def test_unattended_trigger_ask_denies_ask_list_and_counts_footer(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("diff_preview", [None, True, False])
+async def test_1090_diff_preview_reaches_the_ask_me_card(
+    project: Path, diff_preview: bool | None
+) -> None:
+    """#1090: the chat's Diff preview (the run's ``diff_preview`` option)
+    with Claude's semantics. On: an in-project edit asks, with the diff.
+    Unset or off: it runs without a card. Off: a card that does appear names
+    the file but leaves the diff out."""
+    inside = {"TargetFile": str(project / "a.txt"), "CodeContent": "hello"}
+    outside = {"TargetFile": str(project.parent / "b.txt"), "CodeContent": "hello"}
+    async for h in _harness(project, diff_preview=diff_preview):
+        if diff_preview is True:
+            out = await _held_call(
+                h, _call("write_to_file", inside), Decision(True, "approve")
+            )
+            assert out == {"decision": "allow"}
+            title = _cards(h)[0].action.title
+            assert "```diff\n📝 " in title and "a.txt\n+ hello" in title
+        else:
+            assert await h.call("PreToolUse", _call("write_to_file", inside)) == {
+                "decision": "allow"
+            }
+            assert _cards(h) == []
+        before = len(_cards(h))
+        await _held_call(
+            h, _call("write_to_file", outside, step=3), Decision(False, "deny")
+        )
+        title = _cards(h)[before].action.title
+        assert ("```diff" in title) is (diff_preview is not False)
+        assert "b.txt" in title
+
+
+@pytest.mark.anyio
 async def test_subagent_tool_card_names_the_child(harness: Harness) -> None:
     """P-H8: a child's tool call reaches the gate with its own id."""
     harness.gate.add_children([CHILD], role="Researcher")
