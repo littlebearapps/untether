@@ -299,9 +299,11 @@ async def test_edited_plugin_is_reported_by_its_own_row_only_1083(
         "~/.gemini/config/plugins/someone-elses/hooks.json"
     ]
     assert "untether-gate" not in present.title
-    # The scan still tracks the plugin's files (digest, log, cron hold).
+    # #1110: the log names what the row names (the scan still tracks the
+    # plugin's files: the digest and the cron hold are unchanged).
     (seen,) = [r for r in logs if r["event"] == "antigravity.workspace_config_present"]
-    assert any("plugins/untether-gate/" in p for p in seen["paths"])
+    assert seen["log_level"] == "warning"
+    assert seen["paths"] == present.detail["paths"]
     text, entities = render_markdown(done.answer)
     assert "`" not in text
     utf16 = text.encode("utf-16-le")
@@ -321,11 +323,36 @@ async def test_edited_plugin_alone_shows_no_generic_row_1083(
 
     (gate_plugin.plugin_dir() / gate_plugin.HOOKS_FILE).write_text("{}")
     monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
-    events = [evt async for evt in _runner().run("hi", None)]
+    with structlog.testing.capture_logs() as logs:
+        events = [evt async for evt in _runner().run("hi", None)]
     _contract(events)
     ids = [e.action.id for e in events if isinstance(e, ActionEvent)]
     assert "antigravity.gate.changed" in ids
     assert "antigravity.config.present" not in ids
+    # #1110: no WARNING naming the plugin's own files either; the INFO line
+    # keeps the digest Untether recorded as seen.
+    (seen,) = [r for r in logs if r["event"] == "antigravity.workspace_config_present"]
+    assert seen["log_level"] == "info"
+    assert seen["paths"] == [] and seen["recorded"] is True
+    changed = [r for r in logs if r["event"] == "antigravity.gate.plugin_changed"]
+    assert changed and changed[0]["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_unchanged_plugin_logs_no_config_present_1110(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1110 control: the plugin as installed and nothing else present —
+    no row and no ``workspace_config_present`` line, as before."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "ok")
+    with structlog.testing.capture_logs() as logs:
+        events = [evt async for evt in _runner().run("hi", None)]
+    assert _contract(events).ok
+    ids = [e.action.id for e in events if isinstance(e, ActionEvent)]
+    assert "antigravity.config.present" not in ids
+    assert "antigravity.gate.changed" not in ids
+    names = [r["event"] for r in logs]
+    assert "antigravity.workspace_config_present" not in names
 
 
 @pytest.mark.anyio

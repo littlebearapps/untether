@@ -508,7 +508,10 @@ for this, as a tripwire and not a sandbox:
   it can't release held crons while nobody is watching ([#1044](https://github.com/littlebearapps/untether/issues/1044)).
   When Untether's own agy plugin folder has changed, the row leaves its files out (the plugin-changed row reports
   them; the scan still tracks them) and is skipped when nothing else is left
-  ([#1083](https://github.com/littlebearapps/untether/issues/1083)).
+  ([#1083](https://github.com/littlebearapps/untether/issues/1083)). The `antigravity.workspace_config_present` log
+  line names the same paths as the row: a WARNING when anything else is listed, INFO with `paths=[]` when only the
+  plugin's files changed (`antigravity.gate.plugin_changed` is that run's WARNING)
+  ([#1110](https://github.com/littlebearapps/untether/issues/1110)).
 - **Changed since someone looked.** A cron or webhook run is refused while the config differs from what an
   attended run last showed: `agy's workspace config changed since someone last ran Antigravity in this chat's
   project (…), so this scheduled run is held. The next message someone sends in the chat will run with the

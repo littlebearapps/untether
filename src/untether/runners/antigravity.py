@@ -1084,8 +1084,9 @@ class _RunPrecheck:
     scan: antigravity_scan.ScanResult | None = None
     first_sight: bool = False  # show the "hooks … Untether doesn't manage" row
     # #1083: the ``antigravity.gate.changed`` row covers Untether's own
-    # plugin folder, so the row above leaves those files out (the scan still
-    # tracks them: the digest and the cron hold are unchanged).
+    # plugin folder, so the row above and its log leave those files out
+    # (``_unmanaged_paths``, #1110; the scan still tracks them: the digest
+    # and the cron hold are unchanged).
     gate_plugin_row: bool = False
     # The planted-config scan failed or was truncated: show a ⚠️ row (never
     # record a digest as seen); unattended runs were already refused.
@@ -1120,6 +1121,17 @@ _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
     "untether_agy_decision", default=None
 )
+
+
+def _unmanaged_paths(pre: _RunPrecheck, scan: antigravity_scan.ScanResult) -> list[str]:
+    """What the "hooks … Untether doesn't manage" row and its
+    ``workspace_config_present`` log name. #1083: when the plugin-changed row
+    covers Untether's own plugin folder, both leave its files out (#1110)."""
+    paths = sorted(scan.agy)
+    if not pre.gate_plugin_row:
+        return paths
+    prefix = antigravity_scan.GATE_PLUGIN_DISPLAY_PREFIX
+    return [p for p in paths if not p.startswith(prefix)]
 
 
 def _conversation_gone_text(state: AntigravityStreamState) -> str:
@@ -3008,13 +3020,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
         if pre.first_sight and scan is not None:
             pre.first_sight = False
-            paths = sorted(scan.agy)
+            paths = _unmanaged_paths(pre, scan)
             # #1044: only a person's message acknowledges the config. An
             # ``/at`` or loop re-fire (``trigger_source`` set) still runs and
             # shows the row, but held crons stay held until someone has
             # been in the chat to see it.
             recorded = state.trigger_source is None and state.unattended is None
-            logger.warning(
+            # #1110: the log names what the row names. With only the plugin
+            # left (its own WARNING, ``antigravity.gate.plugin_changed``,
+            # covers it), this is INFO, not gone: it records the digest.
+            (logger.warning if paths else logger.info)(
                 "antigravity.workspace_config_present",
                 paths=paths[:20],
                 digest=scan.agy_digest[:12],
@@ -3024,13 +3039,6 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             if recorded:
                 self._seen().set(scan.root, scan.agy_digest)
-            if pre.gate_plugin_row:
-                # #1083: Untether's own plugin folder has its own row.
-                paths = [
-                    p
-                    for p in paths
-                    if not p.startswith(antigravity_scan.GATE_PLUGIN_DISPLAY_PREFIX)
-                ]
             if paths:
                 out.append(
                     self._warning_row(
