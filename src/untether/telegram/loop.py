@@ -536,6 +536,97 @@ async def _notify_new_invalid_triggers(
         )
 
 
+def _allowed_tools_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if item is not None)
+    return ()
+
+
+async def _audit_trigger_permissions(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    settings: TriggersSettings,
+    *,
+    reason: str,
+) -> None:
+    """#1142: warn (once per finding) about crons that inherit a bypass mode
+    and risky ``agent_run`` webhooks. Reads each trigger chat's ``/planmode``
+    the way ``run_job`` does. Never raises: an audit must not stop triggers."""
+    from ..permission_audit import (
+        ANTIGRAVITY_ENGINE,
+        CLAUDE_ENGINE,
+        TriggerEngineDefaults,
+        audit_trigger_permission_risks,
+        log_trigger_permission_risks,
+        trigger_chat_engine_pairs,
+    )
+
+    try:
+        runtime = cfg.runtime
+
+        def resolve(engine: str | None, project: str | None) -> str:
+            return runtime.resolve_engine(
+                engine_override=engine, context=RunContext(project=project)
+            )
+
+        def runner_attr(engine: str, name: str) -> object:
+            if engine not in runtime.engine_ids:
+                return None
+            runner = runtime.resolve_runner(
+                resume_token=None, engine_override=engine
+            ).runner
+            return getattr(runner, name, None)
+
+        modes: dict[tuple[int, str], str | None] = {}
+        if state.chat_prefs is not None:
+            for chat_id, engine in trigger_chat_engine_pairs(
+                settings, default_chat_id=cfg.chat_id, resolve_engine=resolve
+            ):
+                override = await state.chat_prefs.get_engine_override(chat_id, engine)
+                modes[(chat_id, engine)] = (
+                    override.permission_mode if override is not None else None
+                )
+        spent: set[str] = set()
+        if runtime.config_path is not None and any(
+            cron.run_once for cron in settings.crons
+        ):
+            from ..triggers import run_once_state
+
+            spent = set(
+                run_once_state.load_fired_state(
+                    run_once_state.resolve_state_path(runtime.config_path)
+                )
+            )
+        claude_mode = runner_attr(CLAUDE_ENGINE, "permission_mode")
+        agy_mode = runner_attr(ANTIGRAVITY_ENGINE, "default_permission_mode")
+        defaults = TriggerEngineDefaults(
+            claude_mode=claude_mode if isinstance(claude_mode, str) else None,
+            claude_skip_permissions=runner_attr(
+                CLAUDE_ENGINE, "dangerously_skip_permissions"
+            )
+            is True,
+            claude_allowed_tools=_allowed_tools_tuple(
+                runner_attr(CLAUDE_ENGINE, "allowed_tools")
+            ),
+            antigravity_mode=agy_mode if isinstance(agy_mode, str) else None,
+        )
+        risks = audit_trigger_permission_risks(
+            settings,
+            default_chat_id=cfg.chat_id,
+            resolve_engine=resolve,
+            defaults=defaults,
+            chat_mode=lambda chat_id, engine: modes.get((chat_id, engine)),
+            spent_cron_ids=spent,
+        )
+        log_trigger_permission_risks(
+            risks, warned=state.trigger_permission_risks_warned, reason=reason
+        )
+    except Exception:  # noqa: BLE001 — a warning must never break triggers
+        logger.warning("trigger.permission_audit.failed", exc_info=True)
+
+
 async def _notify_trigger_block_failure_on_reload(
     cfg: TelegramBridgeConfig,
     state: TelegramLoopState,
@@ -1107,6 +1198,9 @@ class TelegramLoopState:
     # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
     # don't repeat the warning.
     trigger_chat_fallbacks_warned: set[TriggerChatFallback] = field(default_factory=set)
+    # #1142: ``trigger.cron.inherits_bypass`` / ``trigger.webhook.*`` audit
+    # findings already logged, so reloads don't repeat them.
+    trigger_permission_risks_warned: set[TriggerRisk] = field(default_factory=set)
     # #1117: invalid trigger entries / the block-level error already announced
     # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
     trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
@@ -1128,9 +1222,14 @@ def _triggers_enable_needs_restart(
 
 
 if TYPE_CHECKING:
+    from ..permission_audit import TriggerRisk
     from ..runner_bridge import RunningTasks
     from ..triggers.manager import TriggerManager
-    from ..triggers.settings import InvalidTrigger, TriggerChatFallback
+    from ..triggers.settings import (
+        InvalidTrigger,
+        TriggerChatFallback,
+        TriggersSettings,
+    )
 
 
 _FORWARD_FIELDS = (
@@ -2345,6 +2444,10 @@ async def run_main_loop(
                                 project_chat_id=cfg.runtime.project_chat_id,
                                 warned=state.trigger_chat_fallbacks_warned,
                             )
+                            # #1142: inherited bypass / risky webhooks.
+                            await _audit_trigger_permissions(
+                                cfg, state, new_settings, reason="reload"
+                            )
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
@@ -2856,6 +2959,19 @@ async def run_main_loop(
                         default_chat_id=cfg.chat_id,
                         project_chat_id=cfg.runtime.project_chat_id,
                         warned=state.trigger_chat_fallbacks_warned,
+                    )
+                    # #1142: crons inheriting a bypass mode, and agent_run
+                    # webhooks with no project or risky pre-approved tools.
+                    # A task, not an await: it reads chat prefs, and startup
+                    # must not yield before the trigger manager exists.
+                    tg.start_soon(
+                        partial(
+                            _audit_trigger_permissions,
+                            cfg,
+                            state,
+                            trigger_settings,
+                            reason="startup",
+                        )
                     )
                     # #317: pass config_path so the manager can load/save
                     # the run_once fired-state alongside untether.toml.

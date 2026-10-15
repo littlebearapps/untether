@@ -6904,3 +6904,78 @@ def test_894_triggers_enable_needs_restart_truth_table() -> None:
     assert f(previous=False, current=True, running=True) is False  # hot re-enable
     assert f(previous=True, current=False, running=True) is False  # off is hot
     assert f(previous=False, current=False, running=False) is False
+
+
+# --- #1142: start-up trigger permission audit ------------------------------
+
+_1142_TRIGGERS_TOML = (
+    "[triggers]\nenabled = true\n\n"
+    "[[triggers.crons]]\n"
+    'id = "nightly"\nschedule = "0 3 * * *"\nprompt = "hi"\n\n'
+    "[[triggers.webhooks]]\n"
+    'id = "bare"\npath = "/hooks/bare"\nauth = "none"\n'
+    'prompt_template = "Payload: {{text}}"\n'
+)
+
+
+@pytest.mark.anyio
+async def test_1142_startup_audit_flags_bypass_cron_and_bare_webhook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: in a chat set to /planmode bypass, a cron with no mode of
+    its own is flagged at startup (it keeps the mode), and a project-less
+    agent_run webhook starts and is flagged too. A reload of the same
+    triggers doesn't repeat either warning."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [{"id": "nightly", "schedule": "0 3 * * *", "prompt": "hi"}],
+        "webhooks": [
+            {
+                "id": "bare",
+                "path": "/hooks/bare",
+                "auth": "none",
+                "prompt_template": "Payload: {{text}}",
+            }
+        ],
+    }
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_894_projects(),
+        config_path=tmp_path / "untether.toml",
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        trigger_config=trigger_config,
+    )
+    prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "untether.toml"))
+    await prefs.set_engine_override(
+        123, "claude", EngineOverrides(permission_mode="bypassPermissions")
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _1142_TRIGGERS_TOML)
+
+    cron = [e for e in logs if e["event"] == "trigger.cron.inherits_bypass"]
+    assert len(cron) == 1
+    assert cron[0]["cron_id"] == "nightly"
+    assert cron[0]["origin"] == "chat"
+    assert cron[0]["outcome"] == "runs_with_bypass"
+    # The startup audit runs as a task, so the test's immediate reload may
+    # log it first; either way it is logged once.
+    assert cron[0]["reason"] in {"startup", "reload"}
+    assert cron[0]["log_level"] == "warning"
+    bare = [e for e in logs if e["event"] == "trigger.webhook.no_project"]
+    assert [e["webhook_id"] for e in bare] == ["bare"]
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/bare") is not None  # still starts
+    assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]

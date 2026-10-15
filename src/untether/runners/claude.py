@@ -32,6 +32,7 @@ import msgspec
 from ..backends import EngineBackend, EngineConfig
 from ..background_status import CONTINUED_SUFFIX, format_tokens
 from ..config import ConfigError
+from ..context import WEBHOOK_TRIGGER_PREFIX
 from ..events import EventFactory
 from ..interactive.preview import format_diff_preview
 
@@ -148,6 +149,7 @@ from .extra_args_guard import (
 )
 from .run_options import (
     VALID_PERMISSION_MODES_BY_ENGINE,
+    EngineRunOptions,
     claude_cli_permission_mode,
     get_run_options,
     is_claude_plan_auto,
@@ -5148,6 +5150,35 @@ def _normalize_tool_result(content: Any) -> str:
 # mode instead of once per run.
 _PROMPTING_MODE_ALLOWLIST_LOGGED: set[str] = set()
 
+# #1142: (trigger, origin) pairs already warned about by the webhook bypass
+# guard, per process. Bounded like agy's `_UNATTENDED_DOWNGRADE_WARNED`.
+_WEBHOOK_BYPASS_WARNED: set[tuple[str, str]] = set()
+_WEBHOOK_BYPASS_WARNED_MAX = 256
+_BYPASS_MODE = "bypassPermissions"
+# The mode a webhook runs in instead of an inherited bypass: it prompts, so
+# #835's unattended deny refuses anything that would wait for a tap.
+_WEBHOOK_BYPASS_FALLBACK_MODE = "default"
+
+
+def _warn_webhook_bypass_downgraded(trigger: str, origin: str) -> None:
+    key = (trigger, origin)
+    if key in _WEBHOOK_BYPASS_WARNED:
+        return
+    if len(_WEBHOOK_BYPASS_WARNED) >= _WEBHOOK_BYPASS_WARNED_MAX:
+        _WEBHOOK_BYPASS_WARNED.clear()
+    _WEBHOOK_BYPASS_WARNED.add(key)
+    logger.warning(
+        "claude.webhook_bypass_downgraded",
+        trigger=trigger,
+        origin=origin,
+        permission_mode=_WEBHOOK_BYPASS_FALLBACK_MODE,
+        note=(
+            "webhook runs never inherit bypassPermissions from the chat or "
+            "untether.toml; this run uses default mode, so anything that "
+            "would ask for approval is denied"
+        ),
+    )
+
 
 def _coerce_comma_list(value: Any) -> str | None:
     if value is None:
@@ -9698,11 +9729,52 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return f"`claude --resume {token.value}`"
 
     def _effective_permission_mode(self) -> str | None:
-        """Resolve effective permission mode from per-chat override or engine config."""
+        """Resolve effective permission mode from per-chat override or engine config.
+
+        #1142: a webhook run never inherits ``bypassPermissions`` (from the
+        chat, ``untether.toml`` or ``dangerously_skip_permissions``); it runs
+        in ``default`` instead, mirroring agy's REVIEW M3 guard.
+        """
         run_options = get_run_options()
-        return (
+        mode = (
             run_options.permission_mode if run_options else None
         ) or self.permission_mode
+        blocked = self._webhook_bypass_origin(run_options, mode)
+        if blocked is None:
+            return mode
+        _warn_webhook_bypass_downgraded(*blocked)
+        return _WEBHOOK_BYPASS_FALLBACK_MODE
+
+    def _webhook_bypass_origin(
+        self, run_options: EngineRunOptions | None, mode: str | None
+    ) -> tuple[str, str] | None:
+        """#1142: ``(trigger, origin)`` when a webhook run would inherit
+        bypass, else None. Only the trigger's own ``permission_mode`` may
+        grant it (webhooks gain one in #1122)."""
+        if run_options is None:
+            return None
+        trigger = run_options.unattended_trigger
+        if trigger is None or not trigger.startswith(WEBHOOK_TRIGGER_PREFIX):
+            return None
+        if run_options.trigger_permission_mode == _BYPASS_MODE:
+            return None
+        if self.dangerously_skip_permissions is True:
+            return trigger, "dangerously_skip_permissions"
+        if mode == _BYPASS_MODE:
+            origin = "chat" if run_options.permission_mode == _BYPASS_MODE else "toml"
+            return trigger, origin
+        return None
+
+    def _skips_permissions(self) -> bool:
+        """``--dangerously-skip-permissions`` for this run (never a webhook's
+        inherited one, #1142)."""
+        if self.dangerously_skip_permissions is not True:
+            return False
+        run_options = get_run_options()
+        mode = (
+            run_options.permission_mode if run_options else None
+        ) or self.permission_mode
+        return self._webhook_bypass_origin(run_options, mode) is None
 
     async def write_control_response(
         self,
@@ -9959,7 +10031,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 allowed_tools = None
         if allowed_tools is not None:
             args.extend(["--allowedTools", allowed_tools])
-        if self.dangerously_skip_permissions is True:
+        if self._skips_permissions():
             args.append("--dangerously-skip-permissions")
 
         if effective_mode is not None:
@@ -10109,7 +10181,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if requested_mode is not None:
             state.requested_permission_mode = (
                 "bypassPermissions"
-                if self.dangerously_skip_permissions is True
+                if self._skips_permissions()
                 else normalise_claude_cli_mode(requested_mode)
             )
         # #835: an unattended (cron / webhook) run denies anything that would
@@ -10123,9 +10195,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ):
             state.unattended_trigger = run_opts.unattended_trigger
             state.unattended_mode = (
-                "bypassPermissions"
-                if self.dangerously_skip_permissions is True
-                else requested_mode
+                "bypassPermissions" if self._skips_permissions() else requested_mode
             )
         # #383: a plan chat — the approval caption and the plan re-arm key
         # off the configured mode, never the CLI's current one.

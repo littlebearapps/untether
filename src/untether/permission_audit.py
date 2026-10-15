@@ -24,6 +24,11 @@ Three findings, each logged as one WARN per change:
   validator can't catch it (it doesn't know the default engine), and a
   ``ConfigError`` would disable every trigger, so this is a WARN (Decision 6).
 
+#1142 adds a trigger security audit (bottom of this module), run from the
+Telegram loop at startup and on each trigger reload because it needs each
+trigger chat's ``/planmode``: ``trigger.cron.inherits_bypass``,
+``trigger.webhook.no_project`` and ``trigger.webhook.preapproved_tools``.
+
 The audit function is pure; :func:`log_permission_audit` owns the dedupe: a
 finding set is logged when it differs from the last one logged, so an
 unrelated reload is silent, a reload that adds an entry re-emits the full
@@ -44,6 +49,7 @@ from .runners.run_options import (
     LEGACY_CLAUDE_PLAN_AUTO_MODE,
     VALID_PERMISSION_MODES_BY_ENGINE,
     claude_tap_waits_for,
+    is_claude_prompting_mode,
 )
 
 if TYPE_CHECKING:
@@ -292,3 +298,252 @@ def audit_runtime_permission_modes(
     )
     log_permission_audit(audit, config_path=config_path, reason=reason)
     return audit
+
+
+# ── #1142: trigger security audit (startup + every trigger reload) ──────────
+#
+# Run from ``telegram/loop.py`` beside #894's chat-fallback warning, where the
+# trigger's chat and that chat's ``/planmode`` are known. Warnings only: in
+# 0.36.1 nothing is rejected (the breaking half is #1118, 0.36.2).
+
+CLAUDE_BYPASS_MODE = "bypassPermissions"
+ANTIGRAVITY_ENGINE = "antigravity"
+ANTIGRAVITY_FULL_MODE = "full"
+# Pre-approving any of these on a webhook lets a payload-built prompt run
+# shell commands or change files with nobody asked.
+RISKY_PREAPPROVED_TOOLS: tuple[str, ...] = ("Bash", "Edit", "Write")
+
+CRON_INHERITS_BYPASS = "trigger.cron.inherits_bypass"
+WEBHOOK_NO_PROJECT = "trigger.webhook.no_project"
+WEBHOOK_PREAPPROVED_TOOLS = "trigger.webhook.preapproved_tools"
+
+_RISK_NOTES: dict[str, str] = {
+    CRON_INHERITS_BYPASS: (
+        "this cron inherits a mode that skips approvals from the chat's"
+        " permission mode or untether.toml (Claude keeps it; Antigravity runs it as"
+        " Workspace); set permission_mode on the cron to make the choice"
+        " explicit (a future release stops crons inheriting it, #1118)"
+    ),
+    WEBHOOK_NO_PROJECT: (
+        "this agent_run webhook has no project, so it runs in Untether's own"
+        " working directory; set project to the repo it should work in"
+        " (#1118 makes this an error)"
+    ),
+    WEBHOOK_PREAPPROVED_TOOLS: (
+        "this agent_run webhook runs in a mode that never asks while these"
+        " tools are pre-approved, so a prompt built from the request payload"
+        " can run commands or edit files; narrow [engines.claude]"
+        " allowed_tools or use a prompting mode"
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerEngineDefaults:
+    """Engine-config permission settings a trigger run falls back to."""
+
+    claude_mode: str | None = None
+    claude_skip_permissions: bool = False
+    claude_allowed_tools: tuple[str, ...] = ()
+    antigravity_mode: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerRisk:
+    """One #1142 finding; hashable so the caller can log each once."""
+
+    event: str
+    trigger: str  # "cron:<id>" / "webhook:<id>"
+    engine: str | None = None
+    mode: str | None = None
+    origin: str | None = None  # chat / engine_config / dangerously_skip_permissions
+    chat_id: int | None = None
+    tools: tuple[str, ...] = ()
+    outcome: str | None = None
+
+
+# (chat_id, engine) -> that chat's /planmode for the engine, or None
+ChatModeLookup = Callable[[int, str], str | None]
+
+
+def _agent_triggers(
+    triggers: TriggersSettings,
+) -> list[tuple[str, Any]]:
+    """Crons and ``agent_run`` webhooks, as ``(kind, config)``."""
+    found: list[tuple[str, Any]] = [("cron", cron) for cron in triggers.crons]
+    found += [
+        ("webhook", hook) for hook in triggers.webhooks if hook.action == "agent_run"
+    ]
+    return found
+
+
+def trigger_chat_engine_pairs(
+    triggers: TriggersSettings,
+    *,
+    default_chat_id: int,
+    resolve_engine: EngineResolver,
+) -> set[tuple[int, str]]:
+    """The ``(chat_id, engine)`` pairs whose chat preference the audit reads.
+
+    A trigger run has no topic, so only the chat-level ``/planmode`` applies
+    (``run_job`` passes ``thread_id=None``)."""
+    return {
+        (
+            trigger.chat_id or default_chat_id,
+            resolve_engine(trigger.engine, trigger.project),
+        )
+        for _kind, trigger in _agent_triggers(triggers)
+    }
+
+
+def _preapproved_risky_tools(allowed: tuple[str, ...]) -> tuple[str, ...]:
+    """Allowlist entries that pre-approve Bash/Edit/Write outright (a bare
+    name or ``Name(*)``; a command pattern like ``Bash(git:*)`` is narrower)."""
+    risky = {
+        spelling
+        for tool in RISKY_PREAPPROVED_TOOLS
+        for spelling in (tool, f"{tool}(*)")
+    }
+    return tuple(name for entry in allowed if (name := entry.strip()) in risky)
+
+
+def audit_trigger_permission_risks(
+    triggers: TriggersSettings | None,
+    *,
+    default_chat_id: int,
+    resolve_engine: EngineResolver,
+    defaults: TriggerEngineDefaults,
+    chat_mode: ChatModeLookup,
+    spent_cron_ids: Collection[str] = (),
+) -> tuple[TriggerRisk, ...]:
+    """Pure: no I/O, no logging. Nothing when triggers are disabled."""
+    if triggers is None or not triggers.enabled:
+        return ()
+    spent = set(spent_cron_ids)
+    risks: list[TriggerRisk] = []
+    for kind, trigger in _agent_triggers(triggers):
+        source = f"{kind}:{trigger.id}"
+        engine = resolve_engine(trigger.engine, trigger.project)
+        chat_id = trigger.chat_id or default_chat_id
+        pref = chat_mode(chat_id, engine)
+        if kind == "cron":
+            if trigger.run_once and trigger.id in spent:
+                continue
+            risk = _cron_bypass_risk(trigger, source, engine, chat_id, pref, defaults)
+            if risk is not None:
+                risks.append(risk)
+            continue
+        if trigger.project is None:
+            risks.append(
+                TriggerRisk(event=WEBHOOK_NO_PROJECT, trigger=source, engine=engine)
+            )
+        risk = _webhook_tools_risk(source, engine, chat_id, pref, defaults)
+        if risk is not None:
+            risks.append(risk)
+    return tuple(risks)
+
+
+def _cron_bypass_risk(
+    cron: Any,
+    source: str,
+    engine: str,
+    chat_id: int,
+    pref: str | None,
+    defaults: TriggerEngineDefaults,
+) -> TriggerRisk | None:
+    own = cron.permission_mode
+    if engine == CLAUDE_ENGINE:
+        if defaults.claude_skip_permissions:
+            # The opt-in key overrides every mode, the cron's own included.
+            mode, origin = CLAUDE_BYPASS_MODE, "dangerously_skip_permissions"
+        elif own is not None:
+            return None
+        elif pref is not None:
+            mode, origin = pref, "chat"
+        else:
+            mode, origin = defaults.claude_mode, "engine_config"
+        if mode != CLAUDE_BYPASS_MODE:
+            return None
+        outcome = "runs_with_bypass"
+    elif engine == ANTIGRAVITY_ENGINE:
+        if own is not None:
+            return None
+        if pref is not None:
+            mode, origin = pref, "chat"
+        else:
+            mode, origin = defaults.antigravity_mode, "engine_config"
+        if mode != ANTIGRAVITY_FULL_MODE:
+            return None
+        # agy's own guard (REVIEW M3) already runs it as Workspace.
+        outcome = "runs_as_workspace"
+    else:
+        return None
+    return TriggerRisk(
+        event=CRON_INHERITS_BYPASS,
+        trigger=source,
+        engine=engine,
+        mode=mode,
+        origin=origin,
+        chat_id=chat_id,
+        outcome=outcome,
+    )
+
+
+def _webhook_tools_risk(
+    source: str,
+    engine: str,
+    chat_id: int,
+    pref: str | None,
+    defaults: TriggerEngineDefaults,
+) -> TriggerRisk | None:
+    if engine != CLAUDE_ENGINE:
+        return None
+    if pref is not None:
+        mode, origin = pref, "chat"
+    else:
+        mode, origin = defaults.claude_mode, "engine_config"
+    if defaults.claude_skip_permissions or mode == CLAUDE_BYPASS_MODE:
+        # The runtime guard runs it in `default`, which prompts (#1142).
+        return None
+    if is_claude_prompting_mode(mode):
+        return None  # the allowlist isn't sent in prompting modes (#749)
+    tools = _preapproved_risky_tools(defaults.claude_allowed_tools)
+    if not tools:
+        return None
+    return TriggerRisk(
+        event=WEBHOOK_PREAPPROVED_TOOLS,
+        trigger=source,
+        engine=engine,
+        mode=mode,
+        origin=origin,
+        chat_id=chat_id,
+        tools=tools,
+    )
+
+
+def log_trigger_permission_risks(
+    risks: Collection[TriggerRisk], *, warned: set[TriggerRisk], reason: str
+) -> list[TriggerRisk]:
+    """Log each finding not already in *warned* (startup, then reloads that
+    change it); returns the newly logged ones."""
+    new: list[TriggerRisk] = []
+    for risk in risks:
+        if risk in warned:
+            continue
+        warned.add(risk)
+        new.append(risk)
+        kind, _, trigger_id = risk.trigger.partition(":")
+        fields: dict[str, Any] = {
+            f"{kind}_id": trigger_id,
+            "engine": risk.engine,
+            "reason": reason,
+            "note": _RISK_NOTES[risk.event],
+        }
+        if risk.event != WEBHOOK_NO_PROJECT:
+            fields.update(mode=risk.mode, origin=risk.origin, chat_id=risk.chat_id)
+        if risk.tools:
+            fields["tools"] = list(risk.tools)
+        if risk.outcome is not None:
+            fields["outcome"] = risk.outcome
+        logger.warning(risk.event, **fields)
+    return new
