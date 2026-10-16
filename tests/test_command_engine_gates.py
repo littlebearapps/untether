@@ -20,6 +20,7 @@ from untether.telegram.commands.usage import UsageCommand
 class FakeMessage:
     channel_id: int = 100
     message_id: int = 1
+    sender_id: int | None = None
 
 
 @dataclass

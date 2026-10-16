@@ -221,6 +221,7 @@ async def _handle_model_command(
         logger.info(
             "model.set",
             chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
             engine=engine,
             model=model,
             scope=scope,
@@ -297,7 +298,13 @@ async def _handle_model_command(
             return
         if scope is None:
             return
-        logger.info("model.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
+        logger.info(
+            "model.cleared",
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            engine=engine,
+            scope=scope,
+        )
         remaining = await _remaining_model(
             cfg, msg, engine, tkey=tkey, topic_store=topic_store, chat_prefs=chat_prefs
         )

@@ -123,6 +123,7 @@ async def handle_followup_default_command(
     logger.info(
         "followup.set",
         chat_id=msg.chat_id,
+        sender_id=msg.sender_id,
         thread_id=tkey[1] if tkey is not None else None,
         mode=mode,
     )
@@ -153,6 +154,13 @@ class FollowupCommand:
             )
         prefs = ChatPrefsStore(resolve_prefs_path(ctx.config_path))
         await prefs.set_followup_mode(ctx.message.channel_id, self._mode)
+        logger.info(
+            "followup.set",
+            chat_id=ctx.message.channel_id,
+            sender_id=ctx.message.sender_id,
+            thread_id=None,
+            mode=self._mode,
+        )
         resolved = await resolve_followup_mode(
             chat_id=ctx.message.channel_id,
             thread_id=None,
