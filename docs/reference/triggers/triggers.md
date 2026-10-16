@@ -286,7 +286,7 @@ and that chat's permission mode the way a run does, and logs each finding once:
 |---|---|
 | `trigger.cron.inherits_bypass` | a cron with no `permission_mode` inherits Claude's `bypassPermissions` (`outcome=runs_with_bypass`) or Antigravity's `full` (`outcome=runs_as_workspace`) from the chat (`origin=chat`) or `untether.toml` (`origin=engine_config`); also any Claude cron while `dangerously_skip_permissions = true` (`origin=dangerously_skip_permissions`). Spent `run_once` crons are skipped |
 | `trigger.webhook.no_project` | an `agent_run` webhook with no `project` (it runs in Untether's own working directory) |
-| `trigger.webhook.preapproved_tools` | an `agent_run` Claude webhook whose mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or unset) while `[engines.claude] allowed_tools` pre-approves bare `Bash`, `Edit` or `Write` (`tools=`); the default allowlist does |
+| `trigger.webhook.preapproved_tools` | an `agent_run` Claude webhook whose mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or unset) while `[engines.claude] allowed_tools` pre-approves bare `Bash`, `Edit` or `Write` (`tools=`); the default allowlist does. Also any `agent_run` Claude webhook, whatever its mode, when `allowed_tools` is set **explicitly** and pre-approves one of them: an explicit list is sent even in prompting modes ([#749](https://github.com/littlebearapps/untether/issues/749)), including the `default` a bypass webhook is downgraded to (`mode=bypassPermissions outcome=runs_as_default`) ([#1145](https://github.com/littlebearapps/untether/issues/1145)) |
 
 All three are warnings; nothing is rejected in 0.36.1 (stricter rules are
 [#1118](https://github.com/littlebearapps/untether/issues/1118)).

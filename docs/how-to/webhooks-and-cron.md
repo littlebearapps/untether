@@ -376,7 +376,7 @@ permission_mode = "auto"
 
     - `trigger.cron.inherits_bypass` — a cron with no `permission_mode` of its own that inherits Claude's `bypassPermissions` (it keeps it) or Antigravity's Full access (it runs as Workspace). Set `permission_mode` on the cron to make the choice explicit
     - `trigger.webhook.no_project` — an `agent_run` webhook with no `project`, which runs in Untether's own working directory
-    - `trigger.webhook.preapproved_tools` — an `agent_run` webhook whose Claude mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or no mode at all) while `[engines.claude] allowed_tools` pre-approves `Bash`, `Edit` or `Write` (the default list does). Use a prompting mode for the webhook's chat or narrow `allowed_tools`
+    - `trigger.webhook.preapproved_tools` — an `agent_run` webhook whose Claude mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or no mode at all) while `[engines.claude] allowed_tools` pre-approves `Bash`, `Edit` or `Write` (the default list does). Use a prompting mode for the webhook's chat or narrow `allowed_tools`. If you set `allowed_tools` yourself, it applies even in prompting modes, so this also fires for a webhook in a `default`, `manual` or `acceptEdits` chat, or one whose bypass mode was downgraded to `default`; remove `Bash`, `Edit` and `Write` from the list to stop those tools running without an approval
 
     These are warnings only; a later release makes them stricter ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
 

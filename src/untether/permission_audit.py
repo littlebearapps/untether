@@ -46,8 +46,10 @@ from typing import TYPE_CHECKING, Any
 from .logging import get_logger
 from .runners.run_options import (
     CLAUDE_PLAN_AUTO_MODE,
+    CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE,
     LEGACY_CLAUDE_PLAN_AUTO_MODE,
     VALID_PERMISSION_MODES_BY_ENGINE,
+    claude_sends_allowed_tools,
     claude_tap_waits_for,
     is_claude_prompting_mode,
 )
@@ -336,6 +338,17 @@ _RISK_NOTES: dict[str, str] = {
         " allowed_tools or use a prompting mode"
     ),
 }
+# #1145: the webhook runs in a prompting mode (its own, or `default` after
+# the #1142 bypass downgrade), but [engines.claude] allowed_tools was set
+# explicitly, so the runner still sends it (#749).
+WEBHOOK_EXPLICIT_ALLOWLIST_NOTE = (
+    "[engines.claude] allowed_tools was set explicitly, so it applies even in"
+    " prompting modes: these tools run without an approval on this agent_run"
+    " webhook, and a prompt built from the request payload can run commands"
+    " or edit files; remove them from allowed_tools (#1118 stops webhooks"
+    " inheriting the list)"
+)
+WEBHOOK_BYPASS_OUTCOME = "runs_as_default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +358,8 @@ class TriggerEngineDefaults:
     claude_mode: str | None = None
     claude_skip_permissions: bool = False
     claude_allowed_tools: tuple[str, ...] = ()
+    # #749/#1145: an explicit `allowed_tools` key is sent in prompting modes.
+    claude_allowed_tools_explicit: bool = False
     antigravity_mode: str | None = None
 
 
@@ -502,11 +517,20 @@ def _webhook_tools_risk(
         mode, origin = pref, "chat"
     else:
         mode, origin = defaults.claude_mode, "engine_config"
+    run_mode, outcome = mode, None
     if defaults.claude_skip_permissions or mode == CLAUDE_BYPASS_MODE:
         # The runtime guard runs it in `default`, which prompts (#1142).
+        if defaults.claude_skip_permissions:
+            mode, origin = CLAUDE_BYPASS_MODE, "dangerously_skip_permissions"
+        run_mode = CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE
+        outcome = WEBHOOK_BYPASS_OUTCOME
+    # #1145: the runner's own rule. The implicit default allowlist isn't sent
+    # in prompting modes (#749), but an explicit one is sent in every mode,
+    # the downgraded `default` included.
+    if not claude_sends_allowed_tools(
+        run_mode, explicit=defaults.claude_allowed_tools_explicit
+    ):
         return None
-    if is_claude_prompting_mode(mode):
-        return None  # the allowlist isn't sent in prompting modes (#749)
     tools = _preapproved_risky_tools(defaults.claude_allowed_tools)
     if not tools:
         return None
@@ -518,7 +542,17 @@ def _webhook_tools_risk(
         origin=origin,
         chat_id=chat_id,
         tools=tools,
+        outcome=outcome,
     )
+
+
+def _risk_note(risk: TriggerRisk) -> str:
+    if risk.event == WEBHOOK_PREAPPROVED_TOOLS and (
+        risk.outcome == WEBHOOK_BYPASS_OUTCOME or is_claude_prompting_mode(risk.mode)
+    ):
+        # Only an explicit allowlist reaches a run that prompts (#1145).
+        return WEBHOOK_EXPLICIT_ALLOWLIST_NOTE
+    return _RISK_NOTES[risk.event]
 
 
 def log_trigger_permission_risks(
@@ -537,7 +571,7 @@ def log_trigger_permission_risks(
             f"{kind}_id": trigger_id,
             "engine": risk.engine,
             "reason": reason,
-            "note": _RISK_NOTES[risk.event],
+            "note": _risk_note(risk),
         }
         if risk.event != WEBHOOK_NO_PROJECT:
             fields.update(mode=risk.mode, origin=risk.origin, chat_id=risk.chat_id)

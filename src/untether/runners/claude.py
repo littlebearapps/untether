@@ -148,9 +148,11 @@ from .extra_args_guard import (
     iter_option_tokens,
 )
 from .run_options import (
+    CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE,
     VALID_PERMISSION_MODES_BY_ENGINE,
     EngineRunOptions,
     claude_cli_permission_mode,
+    claude_sends_allowed_tools,
     get_run_options,
     is_claude_plan_auto,
     is_claude_prompting_mode,
@@ -5156,8 +5158,9 @@ _WEBHOOK_BYPASS_WARNED: set[tuple[str, str]] = set()
 _WEBHOOK_BYPASS_WARNED_MAX = 256
 _BYPASS_MODE = "bypassPermissions"
 # The mode a webhook runs in instead of an inherited bypass: it prompts, so
-# #835's unattended deny refuses anything that would wait for a tap.
-_WEBHOOK_BYPASS_FALLBACK_MODE = "default"
+# #835's unattended deny refuses anything that would wait for a tap. Shared
+# with the #1145 webhook audit.
+_WEBHOOK_BYPASS_FALLBACK_MODE = CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE
 
 
 def _warn_webhook_bypass_downgraded(trigger: str, origin: str) -> None:
@@ -10009,10 +10012,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # #749 stage 5 sits BEFORE the stage-6 prompt, so an allowlist covering
         # Bash/Read/Edit/Write pre-approves exactly the tools a prompting mode
         # exists to ask about — phase 01's gate would never see them.  Drop it
-        # for those modes unless the user asked for it by name.
+        # for those modes unless the user asked for it by name.  The rule
+        # lives in `claude_sends_allowed_tools` so the #1145 webhook audit
+        # (permission_audit.py) reads the same one.
         allowed_tools = _coerce_comma_list(self.allowed_tools)
         if allowed_tools is not None and is_claude_prompting_mode(effective_mode):
-            if self.allowed_tools_explicit:
+            if claude_sends_allowed_tools(
+                effective_mode, explicit=self.allowed_tools_explicit
+            ):
                 # An explicit choice is honoured, but the interaction is
                 # surprising enough to deserve one line in the log.
                 if effective_mode not in _PROMPTING_MODE_ALLOWLIST_LOGGED:

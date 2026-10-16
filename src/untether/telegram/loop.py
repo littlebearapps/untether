@@ -610,6 +610,10 @@ async def _audit_trigger_permissions(
             claude_allowed_tools=_allowed_tools_tuple(
                 runner_attr(CLAUDE_ENGINE, "allowed_tools")
             ),
+            claude_allowed_tools_explicit=runner_attr(
+                CLAUDE_ENGINE, "allowed_tools_explicit"
+            )
+            is True,
             antigravity_mode=agy_mode if isinstance(agy_mode, str) else None,
         )
         risks = audit_trigger_permission_risks(
