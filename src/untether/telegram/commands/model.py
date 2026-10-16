@@ -72,6 +72,12 @@ async def _remaining_model(
     return None
 
 
+# `/model set` and `/model clear` (#1155) offer the same way to a clean start:
+# a resumed session can keep the model it was using (Pi stores it in its
+# session file).
+_NEW_SESSION_HINT = "If you want a clean start on the new model, run `/new`."
+
+
 def _after_clear_line(engine: str, remaining: tuple[str, str] | None) -> str:
     """#998: what the next run gets. Every runner passes a model it knows on
     resumed runs too; with none, the engine decides and a resumed session can
@@ -79,7 +85,10 @@ def _after_clear_line(engine: str, remaining: tuple[str, str] | None) -> str:
     only sure way back to the engine's default is a fresh session."""
     if remaining is not None:
         label, model = remaining
-        return f"From the next run Untether passes the {label} `{model}`."
+        return (
+            f"From the next run Untether passes the {label} `{model}`.\n"
+            f"{_NEW_SESSION_HINT}"
+        )
     return (
         f"Untether no longer chooses a model for `{engine}`, and a resumed "
         "session may stay on the model it was using. Run `/new` to start a "
@@ -231,14 +240,14 @@ async def _handle_model_command(
             await reply(
                 text=(
                     f"topic model override **set to** `{model}` for `{engine}`.\n"
-                    "If you want a clean start on the new model, run `/new`."
+                    f"{_NEW_SESSION_HINT}"
                 )
             )
             return
         await reply(
             text=(
                 f"chat model override **set to** `{model}` for `{engine}`.\n"
-                "If you want a clean start on the new model, run `/new`."
+                f"{_NEW_SESSION_HINT}"
             )
         )
         return

@@ -774,6 +774,50 @@ class TestCodexApprovalPolicy:
         assert override is None or override.permission_mode is None
 
     @pytest.mark.anyio
+    async def test_clear_button_is_the_pages_own_1155(self, tmp_path):
+        """#1155: the Codex page's Clear override has its own action, so its
+        toast names the page ("Approval policy"), not "Permission mode"."""
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await ConfigCommand().handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:pm:cxc" in data
+        assert "config:pm:clr" not in data
+        assert ConfigCommand.early_answer_toast("pm:cxc") == (
+            "Approval policy: cleared"
+        )
+        # Claude's (shared) Clear toast is unchanged.
+        assert ConfigCommand.early_answer_toast("pm:clr") == (
+            "Permission mode: cleared"
+        )
+
+    @pytest.mark.anyio
+    async def test_clear_action_clears_override_1155(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        for action in ("cxc", "clr"):  # typed `/config pm:clr` still works
+            await prefs.set_engine_override(
+                123, "codex", EngineOverrides(permission_mode="safe")
+            )
+            ctx = _make_ctx(
+                args_text=f"pm:{action}",
+                text=f"config:pm:{action}",
+                config_path=state_path,
+                default_engine="codex",
+            )
+            await ConfigCommand().handle(ctx)
+            override = await prefs.get_engine_override(123, "codex")
+            assert override is None or override.permission_mode is None
+
+    @pytest.mark.anyio
     async def test_home_page_shows_codex_permission(self, tmp_path):
         """Home page shows approval policy for codex engine."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path

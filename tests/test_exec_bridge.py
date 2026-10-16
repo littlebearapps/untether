@@ -490,6 +490,137 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
     assert session_id in last_edit
 
 
+@contextlib.contextmanager
+def _run_model(model: str | None):
+    from untether.runners.run_options import (
+        EngineRunOptions,
+        reset_run_options,
+        set_run_options,
+    )
+
+    token = set_run_options(EngineRunOptions(model=model))
+    try:
+        yield
+    finally:
+        reset_run_options(token)
+
+
+@pytest.mark.anyio
+async def test_1155_cancelled_final_names_the_override_model() -> None:
+    """#1155: a run cancelled before the engine reported its model (Pi
+    before its first message_end) still names the model Untether passed."""
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner([Wait(hold)], engine="pi", resume_value="sess-1155")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+
+    async def run_handle_message() -> None:
+        with _run_model("gpt-5.5"):
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+                resume_token=None,
+                running_tasks=running_tasks,
+            )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_handle_message)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        running_task = running_tasks[next(iter(running_tasks))]
+        with anyio.fail_after(1):
+            await running_task.resume_ready.wait()
+        running_task.cancel_requested.set()
+
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last_edit.lower()
+    assert "gpt-5.5" in last_edit
+
+
+@pytest.mark.anyio
+async def test_1155_error_before_started_names_the_configured_model() -> None:
+    """#1155: OpenCode's "Model not found" error arrives before its first
+    StartedEvent; the error card still names the model."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="Model not found: deepseek/deepseek-v4-flash.")],
+        engine="opencode",
+        resume_value="ses-1155",
+        emit_session_start=False,
+    )
+    runner.model = "deepseek/deepseek-v4-pro"  # type: ignore[attr-defined]
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    with _run_model("deepseek/deepseek-v4-flash"):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    final_text = transport.send_calls[-1]["message"].text
+    assert "error" in final_text.lower()
+    # The override wins over the configured model.
+    assert "\N{LABEL}" in final_text
+    footer = final_text.split("\N{LABEL}", 1)[1]
+    assert "deepseek/deepseek-v4-flash" in footer
+    assert "deepseek-v4-pro" not in footer
+
+
+@pytest.mark.anyio
+async def test_1155_engine_reported_model_wins_and_none_seeds_nothing() -> None:
+    transport = FakeTransport()
+    started = StartedEvent(
+        engine=CODEX_ENGINE,
+        resume=ResumeToken(engine=CODEX_ENGINE, value="s-1155"),
+        title="codex",
+        meta={"model": "engine-reported"},
+    )
+    runner = ScriptRunner(
+        [Emit(started), Return(answer="done")],
+        engine=CODEX_ENGINE,
+        resume_value="s-1155",
+        emit_session_start=False,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with _run_model("passed-model"):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+    final_text = transport.send_calls[-1]["message"].text
+    assert "engine-reported" in final_text
+    assert "passed-model" not in final_text
+
+    # No override and no configured model: nothing is invented.
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    runner = ScriptRunner([Return(answer="done")], engine=CODEX_ENGINE)
+    with _run_model(None):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=11, text="go"),
+            resume_token=None,
+        )
+    assert "\N{LABEL}" not in transport.send_calls[-1]["message"].text
+
+
 @pytest.mark.anyio
 async def test_826_running_task_records_incoming_thread() -> None:
     """#826: the RunningTask carries the originating message's thread so

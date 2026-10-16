@@ -793,8 +793,13 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         await _page_home(ctx)
         return
 
-    # --- Clear (all engines; ``agc`` is the agy page's own, #1060) ---
-    if action == "clr" or (engine == "antigravity" and action == "agc"):
+    # --- Clear (all engines; ``agc`` / ``cxc`` are the agy / Codex pages'
+    # own, so their toasts name the page: #1060, #1155) ---
+    if (
+        action == "clr"
+        or (engine == "antigravity" and action == "agc")
+        or (engine == "codex" and action == "cxc")
+    ):
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
@@ -894,7 +899,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                 },
             ],
             [
-                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                # #1155: the page's own clear, so the toast says
+                # "Approval policy" (``clr`` still clears when typed).
+                {"text": "Clear override", "callback_data": "config:pm:cxc"},
                 {"text": "← Back", "callback_data": "config:home"},
             ],
         ]
@@ -2889,6 +2896,7 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
             "ro",
             "clr",
             "agc",  # #1060: the Antigravity page's own Clear override
+            "cxc",  # #1155: the Codex page's own Clear override
         }
     ),
     "vb": _ON_OFF_CLR,
@@ -2986,6 +2994,7 @@ class ConfigCommand:
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
+                "cxc": "Approval policy: cleared",  # #1155
                 # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
                 # conversation keeps the agent it started with, so a switch
                 # across Workspace / Plan first ↔ Ask me / Full access

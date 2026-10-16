@@ -2668,7 +2668,8 @@ async def _clear_model(
 @pytest.mark.anyio
 async def test_model_clear_names_the_configured_default(tmp_path: Path) -> None:
     """#998: with `[<engine>] model` set, Untether passes it on the next run
-    (resumed or not), so the reply names it and needs no `/new`."""
+    (resumed or not), so the reply names it; like `/model set` it offers
+    `/new` for a clean start (#1155)."""
     transport = FakeTransport()
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
     runner.model = "gpt-5.5"  # type: ignore[attr-defined]
@@ -2685,7 +2686,9 @@ async def test_model_clear_names_the_configured_default(tmp_path: Path) -> None:
     text = transport.send_calls[-1]["message"].text
     assert "chat model override cleared for codex." in text
     assert "configured default gpt-5.5" in text
-    assert "/new" not in text
+    # #1155: like `/model set`, the reply offers `/new` for a clean start —
+    # a resumed Pi session can keep the model it was using.
+    assert "If you want a clean start on the new model, run /new." in text
 
 
 @pytest.mark.anyio
@@ -2730,7 +2733,7 @@ async def test_model_clear_topic_names_the_chat_override(tmp_path: Path) -> None
     text = transport.send_calls[-1]["message"].text
     assert "topic model override cleared for codex." in text
     assert "chat override gpt-4.1-mini" in text
-    assert "/new" not in text
+    assert "If you want a clean start on the new model, run /new." in text  # #1155
 
 
 @pytest.mark.anyio

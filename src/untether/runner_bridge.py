@@ -129,6 +129,19 @@ def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
     return {"model": model, "model_display": _short_model_name(model)}
 
 
+def _passed_model(runner: Any) -> str | None:
+    """#1155: the model this run hands the engine — the chat/topic override
+    (run options), else the runner's configured ``model`` — or None when
+    Untether passes none and the engine decides."""
+    from .runners.run_options import get_run_options
+
+    run_options = get_run_options()
+    if run_options is not None and run_options.model:
+        return run_options.model
+    model = getattr(runner, "model", None)
+    return model if isinstance(model, str) and model else None
+
+
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
 # ---------------------------------------------------------------------------
@@ -7113,6 +7126,12 @@ async def handle_message(
             else "\N{HIGH VOLTAGE SIGN}"
         )
         progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}
+    # #1155: seed the model Untether passes the engine, so a final that
+    # comes before the engine's first StartedEvent (an OpenCode "Model not
+    # found" error, a Pi run cancelled before any output) still names it in
+    # the footer. The engine's own StartedEvent.meta merges over this.
+    if passed_model := _passed_model(runner):
+        progress_tracker.meta = {**(progress_tracker.meta or {}), "model": passed_model}
 
     # #269: refresh progress settings on the default presenter so edits
     # to [progress].max_actions / [progress].verbosity in untether.toml
