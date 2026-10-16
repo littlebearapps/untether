@@ -884,19 +884,23 @@ async def test_version_guard_fails_open_on_garbage(
 async def test_version_guard_quiet_on_probed_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091, #1156: the drift suite was re-derived on agy 1.3.6, so neither a
-    1.3.6 run nor an older one logs ``newer_than_probed`` on every message."""
-    for version in ("1.3.5", "1.3.6"):
+    """#1091, #1156, #1160: the drift suite was re-derived on agy 1.4.0, so
+    neither a 1.4.0 run nor an older one logs ``newer_than_probed`` on every
+    message."""
+    for version in ("1.3.5", "1.3.6", "1.4.0"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None
         assert not any(
             e["event"] == "antigravity.version.newer_than_probed" for e in logs
         ), version
-    monkeypatch.setattr(agy, "agy_cli_version", lambda cmd: "1.3.7")
-    with structlog.testing.capture_logs() as logs:
-        assert await _runner()._unsupported_version_event(None) is None
-    assert any(e["event"] == "antigravity.version.newer_than_probed" for e in logs)
+    for version in ("1.4.1", "1.5.0"):
+        monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
+        with structlog.testing.capture_logs() as logs:
+            assert await _runner()._unsupported_version_event(None) is None
+        assert any(
+            e["event"] == "antigravity.version.newer_than_probed" for e in logs
+        ), version
 
 
 def test_version_probe_cached_per_mtime(tmp_path: Path) -> None:
