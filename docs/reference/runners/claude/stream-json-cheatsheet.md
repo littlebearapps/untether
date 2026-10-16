@@ -173,7 +173,7 @@ emitter still gets a precise countdown ([#518](https://github.com/littlebearapps
 
 | Snapshot | Untether |
 |---|---|
-| `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. |
+| `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. (Every status stashes the snapshot; the final's ≥70 % 5h warning reads it when the usage footer is off — [#1150](https://github.com/littlebearapps/untether/issues/1150).) |
 | `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
 | `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
 | `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage / `seven_day_overage_included` → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title naming the cap kind (`⛔ Fable limit reached — …`, `⛔ Usage credits used up — …`, `⛔ Monthly spend limit reached — …`, `⛔ Team budget reached — …`; [#922](https://github.com/littlebearapps/untether/issues/922)) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |

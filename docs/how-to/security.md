@@ -10,7 +10,7 @@ Untether runs on your machine as your user and bridges your agents to Telegram. 
 |----------|------|---------|
 | **Network** | Telegram Bot API (`api.telegram.org`) | The transport: messages, buttons and file transfers. Always on |
 | **Network** | Agent APIs (Anthropic, OpenAI, …) | Called by the engine CLIs Untether spawns, not by Untether itself |
-| **Network** | Anthropic usage endpoint (`api.anthropic.com`) | Only for `/usage` and the opt-in subscription-usage footer (`[footer] show_subscription_usage`, off by default), using your local Claude Code login |
+| **Network** | Anthropic usage endpoint (`api.anthropic.com`) | Only for `/usage` and the opt-in subscription-usage footer (`[footer] show_subscription_usage` or the chat's **Subscription usage** toggle, both off by default), using your local Claude Code login. With the footer off, a Claude run makes no usage call: near-limit warnings come from the rate-limit data Claude Code itself streams (since v0.36.1, [#1150](https://github.com/littlebearapps/untether/issues/1150)) |
 | **Network** | Whisper-compatible transcription endpoint | Only when `voice_transcription = true` (off by default) |
 | **Network** | Webhook server | Only when `[triggers] enabled = true`; listens on `127.0.0.1:9876` by default (see [Bind webhook server to localhost](#bind-webhook-server-to-localhost)) |
 | **Network** | Cron `fetch` and webhook `http_forward` | Only when configured; outbound to URLs you set, [SSRF-protected](#ssrf-protection-for-outbound-requests) |
@@ -20,7 +20,7 @@ Untether runs on your machine as your user and bridges your agents to Telegram. 
 | **Filesystem** | Webhook `file_write` and cron `file_read` | Only when configured; paths you set, deny globs apply |
 | **Processes** | Engine CLIs (`claude`, `codex`, `opencode`, `pi`, `agy`) | Spawned with your user's permissions; an agent can reach anything your user can, within its own permission or sandbox settings |
 | **Credentials** | Telegram bot token, voice API key | Stored in `untether.toml`; redacted from logs |
-| **Credentials** | Claude Code login (`~/.claude/.credentials.json` or the macOS Keychain) | Read only to call the usage endpoint above |
+| **Credentials** | Claude Code login (`~/.claude/.credentials.json` or the macOS Keychain) | Read only to call the usage endpoint above — for `/usage` and the opt-in footer, never after an ordinary run |
 | **Credentials** | Engine API keys | Read by the engine CLIs from their own config or the environment; Untether doesn't store them |
 
 Untether sends no telemetry or analytics, doesn't phone home or update itself, and doesn't need root. Spawned agents, `/file put`, the outbox and webhook actions can all reach paths outside `~/.untether/` — that's the point — so use [`allowed_user_ids`](#restrict-access), deny globs and webhook auth to control who can trigger them.

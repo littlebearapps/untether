@@ -967,7 +967,7 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 
 | Untether feature | Why native doesn't count |
 |---|---|
-| `/usage` (OAuth usage endpoint + credentials file) | on-demand `usage_report` is TypeScript-only and experimental; `rate_limit_event` fires on status change only. Existing exception to the "no undocumented endpoints" tier — don't extend it |
+| `/usage` and the opt-in `[footer] show_subscription_usage` line (OAuth usage endpoint + credentials file) | on-demand `usage_report` is TypeScript-only and experimental; `rate_limit_event` fires on status change only. Existing exception to the "no undocumented endpoints" tier — don't extend it. The default near-limit warning on finals is native: built from the run's `rate_limit_event` snapshot, no token read ([#1150](https://github.com/littlebearapps/untether/issues/1150)) |
 | Loop mode owning the schedule | `CronCreate` / `ScheduleWakeup` fire only while the process is alive and idle, with no catch-up |
 | Outbox file delivery | `SendUserFile` needs a Remote Control client or cloud session |
 

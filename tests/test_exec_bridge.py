@@ -1224,20 +1224,13 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert rb.get_usage_schema_mismatch_count() == 3
 
     @pytest.mark.anyio
-    async def test_always_show_false_hides_below_threshold(self, monkeypatch):
+    async def test_always_show_false_never_fetches(self, monkeypatch):
+        """#1150: with the footer off the usage endpoint is never called (and
+        the login token never read), however high the account's usage."""
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _fake_fetch():
-            return {
-                "five_hour": {
-                    "utilization": 25.0,
-                    "resets_at": "2026-02-25T20:00:00+00:00",
-                },
-                "seven_day": {
-                    "utilization": 10.0,
-                    "resets_at": "2026-03-01T00:00:00+00:00",
-                },
-            }
+            raise AssertionError("footer off must not fetch usage")
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
@@ -1248,28 +1241,33 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert result.text == "Done."
 
     @pytest.mark.anyio
-    async def test_always_show_false_shows_above_threshold(self, monkeypatch):
+    async def test_always_show_false_warns_from_rate_limit_snapshot(self, monkeypatch):
+        """#1150: the near-limit warning comes from the run's
+        ``rate_limit_event`` snapshot, not from a usage fetch."""
+        import time
+        from types import SimpleNamespace
+
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _fake_fetch():
-            return {
-                "five_hour": {
-                    "utilization": 85.0,
-                    "resets_at": "2026-02-25T20:00:00+00:00",
-                },
-                "seven_day": {
-                    "utilization": 40.0,
-                    "resets_at": "2026-03-01T00:00:00+00:00",
-                },
-            }
+            raise AssertionError("footer off must not fetch usage")
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
         )
+        state = SimpleNamespace(
+            rate_limit_windows={
+                "five_hour": {"utilization": 0.85, "resets_at": time.time() + 3600},
+                "seven_day": {"utilization": 0.4, "resets_at": time.time() + 86400},
+            }
+        )
 
         msg = RenderedMessage(text="Done.", extra={})
-        result = await _maybe_append_usage_footer(msg, always_show=False)
+        result = await _maybe_append_usage_footer(
+            msg, always_show=False, engine_state=state
+        )
         assert "5h: 85%" in result.text
+        assert "7d: 40%" in result.text
 
     @pytest.mark.anyio
     async def test_missing_credentials_returns_original_message(self, monkeypatch):
@@ -2652,14 +2650,15 @@ def _last_final_text(transport: "FakeTransport", *, error: bool) -> str:
 async def test_subscription_footer_dispatch_claude_identical(
     monkeypatch, show: bool, error: bool
 ) -> None:
-    """Claude's footer is the same function with the same arguments as
-    before the dispatch, on a success and on an error final."""
+    """Claude's footer is called once per final with the resolved
+    ``always_show``, on a success and on an error final (#979; the run's
+    engine state rides along for the #1150 warning)."""
     import untether.runner_bridge as rb
 
     calls: list[tuple[str, bool]] = []
 
     async def recorder(
-        msg: RenderedMessage, *, always_show: bool = False
+        msg: RenderedMessage, *, always_show: bool = False, engine_state: Any = None
     ) -> RenderedMessage:
         calls.append((msg.text, always_show))
         return RenderedMessage(text=msg.text + "\nFOOTER", extra=msg.extra)
@@ -2690,7 +2689,7 @@ async def test_subscription_footer_run_option_overrides_the_setting(
     seen: list[bool] = []
 
     async def recorder(
-        msg: RenderedMessage, *, always_show: bool = False
+        msg: RenderedMessage, *, always_show: bool = False, engine_state: Any = None
     ) -> RenderedMessage:
         seen.append(always_show)
         return msg

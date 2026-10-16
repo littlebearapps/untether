@@ -112,7 +112,7 @@ Use your existing Claude or ChatGPT subscription — no extra API keys needed un
 
 ## 🔒 Privacy and security
 
-Untether runs entirely on your machine: no telemetry, no analytics, no phone-home, no auto-updates. Its own outbound calls are the Telegram Bot API, Anthropic's subscription-usage endpoint for Claude (using Claude Code's existing login) and, only if you enable it, a voice-transcription endpoint; agent CLIs call their own vendors' APIs. Config lives in `~/.untether/untether.toml` — it holds your bot token, so never commit it. Lock the bot to your Telegram user ID and read [security hardening](https://littlebearapps.com/help/untether/security/) and [where your data goes](https://littlebearapps.com/help/untether/faq/#where-does-my-code-and-data-go).
+Untether runs entirely on your machine: no telemetry, no analytics, no phone-home, no auto-updates. Its own outbound calls are the Telegram Bot API, Anthropic's subscription-usage endpoint for Claude (using Claude Code's existing login, only for `/usage` and the opt-in usage footer) and, only if you enable it, a voice-transcription endpoint; agent CLIs call their own vendors' APIs. Config lives in `~/.untether/untether.toml` — it holds your bot token, so never commit it. Lock the bot to your Telegram user ID and read [security hardening](https://littlebearapps.com/help/untether/security/) and [where your data goes](https://littlebearapps.com/help/untether/faq/#where-does-my-code-and-data-go).
 
 ---
 
