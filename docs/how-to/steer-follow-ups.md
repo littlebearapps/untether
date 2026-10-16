@@ -80,7 +80,7 @@ In either mode, one notice can appear on a follow-up after the run ends:
 
 Cancelling a run doesn't drop a follow-up already queued behind it: it runs next, so you don't need to send it again.
 
-A message you send while the chat's first run is still starting (a new chat, or straight after `/new`, before the engine has opened its conversation) waits for that run and then continues the same conversation, whether the chat is set to Queue or Steer. It never starts a second conversation alongside the first ([#1157](https://github.com/littlebearapps/untether/issues/1157)). If the first run fails before it starts a conversation, the waiting message starts one.
+A message you send while the chat's first run is still starting (a new chat, or straight after `/new`, before the engine has opened its conversation) waits for that run and then continues the same conversation, whether the chat is set to Queue or Steer. It never starts a second conversation alongside the first ([#1157](https://github.com/littlebearapps/untether/issues/1157)). If the first run fails before it starts a conversation, the waiting message starts one. If you `/cancel` the first run or send `/new` before it has started its conversation, the waiting message is dropped too, and you get `🗑️ Dropped 1 message sent just before /cancel — send it again if you still need it.`
 
 ## Related
 

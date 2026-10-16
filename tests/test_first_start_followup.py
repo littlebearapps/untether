@@ -106,6 +106,10 @@ def _msg(
     )
 
 
+def _dropped_notices(transport: FakeTransport) -> list[dict[str, Any]]:
+    return [c for c in transport.send_calls if "Dropped" in c["message"].text]
+
+
 def _tail(prompt: str) -> str:
     """The user's text, without the preamble the bridge prepends."""
     return prompt.rsplit("\n", 1)[-1]
@@ -126,6 +130,8 @@ async def _drive(
     messages: tuple[TelegramIncomingMessage, ...] | None = None,
     expected_runs: int = 2,
     fail_first: bool = False,
+    stop: TelegramIncomingMessage | None = None,
+    until: Any = None,
 ) -> tuple[StartGatedRunner, ChatSessionStore, FakeTransport]:
     state_path = tmp_path / "untether.toml"
     store = ChatSessionStore(resolve_sessions_path(state_path))
@@ -161,7 +167,17 @@ async def _drive(
             yield m
         # Give every follow-up time to dispatch while the first is starting.
         await anyio.sleep(0.3)
+        if stop is not None:
+            # /cancel or /new while the first run is still starting.
+            yield stop
+            await _wait_for(lambda: _dropped_notices(transport))
+            await anyio.sleep(0.3)  # a released waiter would have run by now
+            runner.gate.set()
+            return
         runner.gate.set()
+        if until is not None:
+            await _wait_for(lambda: until(runner, transport), timeout=3.0)
+            return
         await _wait_for(lambda: runner.finished >= expected_runs)
 
     await telegram_loop.run_main_loop(cfg, poller)
@@ -264,3 +280,71 @@ async def test_stateless_mode_still_runs_messages_independently(
     runner, _, _ = await _drive(tmp_path, engine="codex", session_mode="stateless")
     assert [resume for _, resume in runner.calls] == [None, None]
     assert runner.max_active == 2
+
+
+@pytest.mark.parametrize(
+    ("command", "notice"),
+    [
+        ("/cancel", "🗑️ Dropped 1 message sent just before /cancel"),
+        ("/new", "🗑️ Dropped 1 message sent just before /new"),
+    ],
+)
+async def test_cancel_or_new_before_the_session_drops_the_waiting_message(
+    tmp_path: Path, command: str, notice: str
+) -> None:
+    """The waiting message has no queued card, so /cancel (no-reply
+    fallback) or /new stopping the starting run drops it too, with a reply,
+    instead of releasing it as a fresh run nobody saw queued."""
+    runner, store, transport = await _drive(
+        tmp_path,
+        engine="antigravity",
+        followup_mode="steer",
+        stop=_msg(command, 12),
+    )
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["first"]
+    (dropped,) = _dropped_notices(transport)
+    assert dropped["message"].text.startswith(notice)
+    assert dropped["options"].reply_to.message_id == 11
+    assert await store.get_session_resume(CHAT, None, "antigravity") is None
+
+
+async def test_cancel_reply_to_the_starting_run_drops_the_waiting_message(
+    tmp_path: Path,
+) -> None:
+    """Same through a /cancel that replies to the first run's card."""
+    stop = replace(_msg("/cancel", 12), reply_to_message_id=1)
+    runner, _, transport = await _drive(tmp_path, engine="codex", stop=stop)
+    assert len(runner.calls) == 1
+    (dropped,) = _dropped_notices(transport)
+    assert dropped["options"].reply_to.message_id == 11
+
+
+async def test_a_failed_session_save_still_releases_the_waiter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving the first run's session raising must not hold the waiting
+    message until that run ends (for a live Claude session, its whole idle
+    hold): it is released with the reported token straight away and gets
+    its queued card while the first run is still winding down."""
+
+    async def broken_save(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ChatSessionStore, "set_session_resume", broken_save)
+
+    def queued_card_sent(runner: StartGatedRunner, transport: FakeTransport) -> bool:
+        return any(
+            "queued" in c["message"].text
+            and c["options"] is not None
+            and c["options"].reply_to is not None
+            and c["options"].reply_to.message_id == 11
+            for c in transport.send_calls
+        )
+
+    runner, _, transport = await _drive(
+        tmp_path, engine="codex", until=queued_card_sent
+    )
+    assert queued_card_sent(runner, transport)
+    assert runner.max_active == 1
+    if len(runner.calls) > 1:
+        assert runner.calls[1][1] == ResumeToken(engine="codex", value="conv-1")

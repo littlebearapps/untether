@@ -26,6 +26,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
+from . import first_start
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -62,6 +63,7 @@ from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
+from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
@@ -1400,15 +1402,7 @@ def _apply_command_barrier(
 
 def _dropped_prompt_notice(pending: _PendingPrompt, *, command: str) -> str:
     count = len(pending.merged_message_ids) + 1 + len(pending.forwards)
-    if count == 1:
-        return (
-            f"🗑️ Dropped 1 message sent just before /{command} — "
-            "send it again if you still need it."
-        )
-    return (
-        f"🗑️ Dropped {count} messages sent just before /{command} — "
-        "send them again if you still need them."
-    )
+    return dropped_notice(count, command=command)
 
 
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
@@ -1644,40 +1638,6 @@ class ForwardCoalescer:
             debounce_s=self._debounce_s,
         )
         await self._dispatch(pending)
-
-
-type FirstStartKey = tuple[
-    tuple[int, int] | None, tuple[int, int | None] | None, EngineId
-]
-
-
-@dataclass(slots=True)
-class _PendingStart:
-    """#1157: a chat's first run that hasn't reported its session yet.
-
-    With no saved session the run has no resume token until its engine sends
-    ``StartedEvent``, so nothing can queue behind it by token. A prompt for
-    the same session scope that arrives meanwhile waits on ``settled`` and
-    then queues behind ``resume`` like any follow-up, instead of starting a
-    second conversation in parallel (which then replaced the saved session).
-    ``settled`` is set once the session is saved, or when the run ends
-    (``resume`` stays ``None`` if it never reported one).
-    """
-
-    resume: ResumeToken | None = None
-    settled: anyio.Event = field(default_factory=anyio.Event)
-
-
-def _first_start_key(
-    topic_key: tuple[int, int] | None,
-    chat_session_key: tuple[int, int | None] | None,
-    engine: EngineId,
-) -> FirstStartKey | None:
-    """The saved-session scope a tokenless run starts (#1157); ``None`` in
-    stateless mode, where every message is its own run by design."""
-    if topic_key is None and chat_session_key is None:
-        return None
-    return (topic_key, chat_session_key, engine)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2760,21 +2720,25 @@ async def run_main_loop(
                     return None
 
                 async def _wrapped(token: ResumeToken, done: anyio.Event) -> None:
-                    if base_cb is not None:
-                        await base_cb(token, done)
-                    if state.topic_store is not None and topic_key is not None:
-                        await state.topic_store.set_session_resume(
-                            topic_key[0], topic_key[1], token
-                        )
-                    if (
-                        state.chat_session_store is not None
-                        and chat_session_key is not None
-                    ):
-                        await state.chat_session_store.set_session_resume(
-                            chat_session_key[0], chat_session_key[1], token
-                        )
-                    if on_saved is not None:
-                        on_saved()
+                    try:
+                        if base_cb is not None:
+                            await base_cb(token, done)
+                        if state.topic_store is not None and topic_key is not None:
+                            await state.topic_store.set_session_resume(
+                                topic_key[0], topic_key[1], token
+                            )
+                        if (
+                            state.chat_session_store is not None
+                            and chat_session_key is not None
+                        ):
+                            await state.chat_session_store.set_session_resume(
+                                chat_session_key[0], chat_session_key[1], token
+                            )
+                    finally:
+                        # #1157: the token is known even if saving it
+                        # failed — never hold waiters for the whole run.
+                        if on_saved is not None:
+                            on_saved()
 
                 return _wrapped
 
@@ -3280,8 +3244,6 @@ async def run_main_loop(
                 topic_store=state.topic_store,
                 chat_session_store=state.chat_session_store,
             )
-            # #1157: tokenless first runs per saved-session scope + engine.
-            pending_starts: dict[FirstStartKey, _PendingStart] = {}
 
             async def dispatch_prompt_run(
                 *,
@@ -3358,13 +3320,13 @@ async def run_main_loop(
                         is_resume_line=cfg.runtime.is_resume_line,
                     ),
                 )
-                start_key = _first_start_key(
+                start_key = first_start.first_start_key(
                     topic_key, chat_session_key, engine_resolution.engine
                 )
                 while resume_token is None and start_key is not None:
                     # #1157: no check-then-register gap — nothing awaits
                     # between the stored-session lookup and this.
-                    first = pending_starts.get(start_key)
+                    first = first_start.get(start_key)
                     if first is None:
                         break
                     logger.info(
@@ -3373,7 +3335,17 @@ async def run_main_loop(
                         user_msg_id=user_msg_id,
                         engine=engine_resolution.engine,
                     )
-                    await first.settled.wait()
+                    first.waiting += 1
+                    try:
+                        await first.settled.wait()
+                    finally:
+                        first.waiting -= 1
+                    if first.dropped_by is not None:
+                        # /cancel or /new stopped the run it waited for.
+                        await make_reply(cfg, msg)(
+                            text=dropped_notice(1, command=first.dropped_by)
+                        )
+                        return
                     resume_token = first.resume
                     if resume_token is None:
                         # It ended without a session: look again, then
@@ -3398,15 +3370,13 @@ async def run_main_loop(
                             engine_override,
                         )
                         return
-                    starting = _PendingStart()
-                    pending_starts[start_key] = starting
-
                     key = start_key
+                    starting = first_start.register(
+                        key, chat_id=chat_id, thread_id=msg.thread_id
+                    )
 
                     def settle() -> None:
-                        starting.settled.set()
-                        if pending_starts.get(key) is starting:
-                            del pending_starts[key]
+                        first_start.release(key, starting)
 
                     async def note_first_known(
                         token: ResumeToken, done: anyio.Event

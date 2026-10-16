@@ -5,10 +5,15 @@ from typing import TYPE_CHECKING
 
 from ...logging import get_logger
 from ...progress import ProgressTracker
-from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
+from ...runner_bridge import (
+    RunningTask,
+    RunningTasks,
+    running_task_is_idle_after_result,
+)
 from ...scheduler import ThreadJob, ThreadScheduler
 from ...transport import MessageRef, message_kind
-from ..topics import thread_filter_for, thread_scope_label
+from .. import first_start
+from ..topics import _norm_thread, thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
 
@@ -50,6 +55,21 @@ def _claim_cancel(chat_id: int, message_id: int) -> bool:
         return False
     _RECENT_CANCELS[key] = now
     return True
+
+
+def _drop_first_start_waiters(chat_id: int, task: RunningTask) -> int:
+    """#1157: cancelling a run that hasn't reported its session yet also
+    drops the messages waiting on it (they have no queued card to cancel
+    from); each is told so. A run that has its session leaves its queued
+    follow-ups to run, as before."""
+    if task.resume is not None:
+        return 0
+    own = _norm_thread(task.thread_id)
+    return first_start.drop_waiting(
+        chat_id,
+        thread_filter=lambda thread_id: _norm_thread(thread_id) == own,
+        command="cancel",
+    )
 
 
 async def handle_cancel(
@@ -135,6 +155,7 @@ async def handle_cancel(
                 progress_message_id=ref.message_id,
             )
             task.cancel_requested.set()
+            _drop_first_start_waiters(chat_id, task)
             return
         if len(matches) > 1:
             logger.debug("cancel.ambiguous", chat_id=chat_id, active_runs=len(matches))
@@ -260,6 +281,7 @@ async def handle_cancel(
         progress_message_id=reply_id,
     )
     running_task.cancel_requested.set()
+    _drop_first_start_waiters(chat_id, running_task)
 
 
 async def _reply_nothing_running(
@@ -353,6 +375,7 @@ async def handle_callback_cancel(
         progress_message_id=query.message_id,
     )
     running_task.cancel_requested.set()
+    _drop_first_start_waiters(query.chat_id, running_task)
     await cfg.bot.answer_callback_query(
         callback_query_id=query.callback_query_id,
         text=f"{_idle_closed_label(1)}." if idle else "cancelling...",
