@@ -62,7 +62,7 @@ Long lines are cut at 60 characters, and a `…(N more added)` line says how muc
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
-You can toggle diff previews on or off via `/config` → **Diff preview**. With no setting, `/config` shows it as **default**: approval messages include the diff, but nothing waits for a tap just to show one. Switched off, they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
+You can toggle diff previews on or off via `/config` → **Diff preview**. With no setting, `/config` shows it as **default**: approval messages include the diff, but nothing waits for a tap just to show one. Switched off, they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Off is useful on slow connections or when you trust the agent enough to skim by tool name alone. In Accept edits (`/planmode off`) and manual, On adds no wait: Claude Code asks you itself about the tools it doesn't run on its own, and in Accept edits, edits inside the project still run without a tap; `/config` says so for those chats ([#1147](https://github.com/littlebearapps/untether/issues/1147)).
 
 Antigravity CLI has the same toggle for [Ask me](#antigravity-ask-me) once Untether's agy plugin is installed ([#1090](https://github.com/littlebearapps/untether/issues/1090)). It only changes Ask me's cards: **on** makes edits inside the project ask too, with the diff; **off** leaves the diff off (an edit card still names the file, and a shell command always shows).
 

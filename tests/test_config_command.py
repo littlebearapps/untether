@@ -3277,13 +3277,20 @@ class TestDiffPreviewUnsetLabel1115:
         assert "On" in labels
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
     @pytest.mark.parametrize(
-        ("value", "line"),
+        ("engine", "value", "line"),
         [
-            (None, "Diff preview: <b>default</b>  · diffs on cards"),
-            (True, "Diff preview: <b>on</b>  · edits ask first"),
-            (False, "Diff preview: <b>off</b>  · buttons only"),
+            ("claude", None, "Diff preview: <b>default</b>  · diffs on cards"),
+            # #1147: no Claude mode resolves here, so On is qualified.
+            (
+                "claude",
+                True,
+                "Diff preview: <b>on</b>  · edits ask in autonomous modes",
+            ),
+            ("claude", False, "Diff preview: <b>off</b>  · buttons only"),
+            ("antigravity", None, "Diff preview: <b>default</b>  · diffs on cards"),
+            ("antigravity", True, "Diff preview: <b>on</b>  · edits ask first"),
+            ("antigravity", False, "Diff preview: <b>off</b>  · buttons only"),
         ],
     )
     async def test_home_line(self, tmp_path, monkeypatch, engine, value, line):
@@ -3325,6 +3332,176 @@ class TestDiffPreviewUnsetLabel1115:
             clr_data="c",
         )
         assert [b["text"] for b in row] == ["On", "✓ Off", "Clear"]
+
+
+# ---------------------------------------------------------------------------
+# #1147: Diff preview On wording follows the chat's Claude permission mode
+# ---------------------------------------------------------------------------
+
+_DP_ON_PLAIN = "• <b>on</b> — edits wait for your approval, with the diff"
+_DP_ON_QUALIFIED = (
+    "• <b>on</b> — in the autonomous permission modes (plan, plan-auto, auto),"
+    " edits also wait for your approval, with the diff"
+)
+_DP_HOME_ON_PLAIN = "Diff preview: <b>on</b>  · edits ask first"
+_DP_HOME_ON_QUALIFIED = "Diff preview: <b>on</b>  · edits ask in autonomous modes"
+
+
+class TestDiffPreviewOnWording1147:
+    """Claude's diff gate only runs outside the prompting modes (``claude.py``
+    ``not state.prompting_mode``), so in ``default``/``manual``/``acceptEdits``
+    On holds nothing extra. The page and home line must say so per chat."""
+
+    @staticmethod
+    async def _setup(tmp_path, chat_mode: str | None):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "claude",
+            EngineOverrides(diff_preview=True, permission_mode=chat_mode),
+        )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, args: str = "", toml_mode: str | None = None):
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}" if args else "/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude"),
+            default_engine="claude",
+        )
+        ctx.runtime.resolve_runner.return_value.runner.permission_mode = toml_mode
+        return ctx
+
+    @pytest.mark.anyio
+    async def test_page_on_in_accept_edits_is_qualified(self, tmp_path):
+        state_path = await self._setup(tmp_path, "acceptEdits")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_QUALIFIED in text
+        assert _DP_ON_PLAIN not in text
+        assert (
+            "In this chat's Permission mode (<b>off</b>), Claude Code asks you"
+            " itself and its cards show the diff, so On holds nothing extra:"
+            " edits inside the project still run without asking."
+        ) in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", ["default", "manual"])
+    async def test_page_on_in_manual_is_qualified(self, tmp_path, mode):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_QUALIFIED in text
+        assert (
+            "In this chat's Permission mode (<b>manual</b>), Claude Code asks"
+            " you itself and its cards show the diff, so On holds nothing extra."
+        ) in text
+        assert "edits inside the project still run" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", ["auto", "plan", "plan-auto"])
+    async def test_page_on_in_autonomous_mode_is_plain(self, tmp_path, mode):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_PLAIN in text
+        assert "autonomous permission modes" not in text
+        assert "holds nothing extra" not in text
+
+    @pytest.mark.anyio
+    async def test_page_on_with_no_mode_is_qualified_without_note(self, tmp_path):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_QUALIFIED in text
+        assert "holds nothing extra" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("toml_mode", "bullet", "note"),
+        [
+            ("acceptEdits", _DP_ON_QUALIFIED, True),
+            ("auto", _DP_ON_PLAIN, False),
+        ],
+    )
+    async def test_page_uses_toml_mode_when_chat_has_none(
+        self, tmp_path, toml_mode, bullet, note
+    ):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp", toml_mode=toml_mode)
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert bullet in text
+        assert ("holds nothing extra" in text) is note
+
+    @pytest.mark.anyio
+    async def test_chat_mode_wins_over_toml(self, tmp_path):
+        state_path = await self._setup(tmp_path, "auto")
+        ctx = self._ctx(state_path, "dp", toml_mode="acceptEdits")
+        await ConfigCommand().handle(ctx)
+        assert _DP_ON_PLAIN in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("mode", "line"),
+        [
+            ("acceptEdits", _DP_HOME_ON_QUALIFIED),
+            ("default", _DP_HOME_ON_QUALIFIED),
+            (None, _DP_HOME_ON_QUALIFIED),
+            ("auto", _DP_HOME_ON_PLAIN),
+            ("plan-auto", _DP_HOME_ON_PLAIN),
+        ],
+    )
+    async def test_home_line_on(self, tmp_path, mode, line):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        assert line in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_resolve_runner_failure_falls_back_to_qualified(self, tmp_path):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp")
+        ctx.runtime.resolve_runner.side_effect = RuntimeError("boom")
+        await ConfigCommand().handle(ctx)
+        assert _DP_ON_QUALIFIED in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_antigravity_on_unchanged(self, tmp_path, monkeypatch):
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "antigravity",
+            EngineOverrides(diff_preview=True, permission_mode="ask"),
+        )
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="antigravity",
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_PLAIN in text
+        assert "autonomous permission modes" not in text
+        assert "holds nothing extra" not in text
 
 
 # ---------------------------------------------------------------------------

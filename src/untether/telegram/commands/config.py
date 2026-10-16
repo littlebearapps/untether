@@ -11,7 +11,7 @@ import anyio
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
-from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, is_claude_prompting_mode
 from ...transport import RenderedMessage
 from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
@@ -276,6 +276,7 @@ async def _page_home(ctx: CommandContext) -> None:
     rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
+    dp_on_scope: _DpOnScope = "autonomous"
     cu_label = "default"
     _cu_ac: bool | None = None
     _cu_su: bool | None = None
@@ -335,6 +336,8 @@ async def _page_home(ctx: CommandContext) -> None:
         # Diff preview override for current engine
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
+        if current_engine == "claude" and dp_label == "on":
+            dp_on_scope = _claude_dp_on_scope(engine_override, ctx.runtime)
 
         # Cost & usage overrides — resolution deferred until has_api_cost is known
         _cu_ac = engine_override.show_api_cost if engine_override else None
@@ -402,9 +405,13 @@ async def _page_home(ctx: CommandContext) -> None:
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
                 )
             if show_diff_preview:
-                lines.append(
-                    f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
+                # #1147: On only holds edits in the autonomous modes.
+                dp_hint = (
+                    f"  · {_DP_ON_QUALIFIED_HINT}"
+                    if dp_on_scope != "autonomous"
+                    else _home_hint("dp", dp_label)
                 )
+                lines.append(f"Diff preview: <b>{dp_display}</b>{dp_hint}")
         elif current_engine == "codex":
             lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
             lines.append(
@@ -2040,6 +2047,43 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
 # #1115: what an unset Diff preview does (page text and its "Current:" line).
 _DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
 
+# #1147: Claude's diff gate only runs outside the prompting modes
+# (``claude.py``: ``not state.prompting_mode``), so On's wording depends on
+# the chat's resolved permission mode. Antigravity keeps the plain wording
+# (its page carries its own Ask me note).
+_DpOnScope = Literal["autonomous", "prompting", "unknown"]
+_DP_ON_TEXT = "edits wait for your approval, with the diff"
+_DP_ON_QUALIFIED_TEXT = (
+    "in the autonomous permission modes (plan, plan-auto, auto), edits also"
+    " wait for your approval, with the diff"
+)
+_DP_ON_QUALIFIED_HINT = "edits ask in autonomous modes"
+
+
+def _claude_resolved_mode(engine_override: Any, runtime: Any) -> str | None:
+    """The permission mode a plain Claude message in this chat runs with:
+    the chat's override, then ``[engines.claude] permission_mode`` (the
+    runner's own precedence in ``_effective_permission_mode``)."""
+    mode = getattr(engine_override, "permission_mode", None)
+    if isinstance(mode, str) and mode:
+        return mode
+    if runtime is None:
+        return None
+    try:
+        resolved = runtime.resolve_runner(resume_token=None, engine_override="claude")
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None
+    value = getattr(resolved.runner, "permission_mode", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _claude_dp_on_scope(engine_override: Any, runtime: Any) -> _DpOnScope:
+    """#1147: whether Claude's Diff preview On holds edits in this chat."""
+    mode = _claude_resolved_mode(engine_override, runtime)
+    if mode is None:
+        return "unknown"
+    return "prompting" if is_claude_prompting_mode(mode) else "autonomous"
+
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -2119,17 +2163,38 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     else:
         current_label = f"<b>default</b> — {_DP_UNSET_TEXT}"
 
+    on_text = _DP_ON_TEXT
+    prompting_mode: str | None = None
+    if engine == "claude":
+        claude_mode = _claude_resolved_mode(override, ctx.runtime)
+        if claude_mode is None or is_claude_prompting_mode(claude_mode):
+            on_text = _DP_ON_QUALIFIED_TEXT
+            prompting_mode = claude_mode
+
     lines = [
         "<b>📝 Diff preview</b>",
         "",
         "See what the agent wants to change before you approve it.",
         "Shows a compact diff of edits and commands.",
         "",
-        "• <b>on</b> — edits wait for your approval, with the diff",
+        f"• <b>on</b> — {on_text}",
         "• <b>off</b> — show approval buttons only, without the diff",
         f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}",
         "",
     ]
+    if prompting_mode is not None:
+        # #1147: a prompting mode asks through Claude Code itself; the diff
+        # gate never runs there, so On adds no wait.
+        ui_name = html.escape(mode_display(prompting_mode)[0])
+        note = (
+            f"In this chat's Permission mode (<b>{ui_name}</b>), Claude Code asks"
+            " you itself and its cards show the diff, so On holds nothing extra"
+        )
+        if prompting_mode == "acceptEdits":
+            note += ": edits inside the project still run without asking."
+        else:
+            note += "."
+        lines += [note, ""]
     if engine == "antigravity":
         # #1090: the gate's cards exist only in Ask me.
         lines += [

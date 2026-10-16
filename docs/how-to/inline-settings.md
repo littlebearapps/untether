@@ -120,7 +120,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Budget | off, on | Yes (chat prefs) |
 | Stop at limit | off, on | Yes (chat prefs) |
 
-Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes edits wait for your approval, with the diff; **off** shows approval buttons only. With no setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
+Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes edits wait for your approval, with the diff, in the autonomous permission modes (plan, plan-auto, auto); **off** shows approval buttons only. In a Claude chat whose permission mode prompts (**off** = acceptEdits, or manual), Claude Code asks you itself, so On holds nothing extra: the page says so and the home line reads `edits ask in autonomous modes` ([#1147](https://github.com/littlebearapps/untether/issues/1147)). With no setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
