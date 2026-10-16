@@ -1646,6 +1646,40 @@ class ForwardCoalescer:
         await self._dispatch(pending)
 
 
+type FirstStartKey = tuple[
+    tuple[int, int] | None, tuple[int, int | None] | None, EngineId
+]
+
+
+@dataclass(slots=True)
+class _PendingStart:
+    """#1157: a chat's first run that hasn't reported its session yet.
+
+    With no saved session the run has no resume token until its engine sends
+    ``StartedEvent``, so nothing can queue behind it by token. A prompt for
+    the same session scope that arrives meanwhile waits on ``settled`` and
+    then queues behind ``resume`` like any follow-up, instead of starting a
+    second conversation in parallel (which then replaced the saved session).
+    ``settled`` is set once the session is saved, or when the run ends
+    (``resume`` stays ``None`` if it never reported one).
+    """
+
+    resume: ResumeToken | None = None
+    settled: anyio.Event = field(default_factory=anyio.Event)
+
+
+def _first_start_key(
+    topic_key: tuple[int, int] | None,
+    chat_session_key: tuple[int, int | None] | None,
+    engine: EngineId,
+) -> FirstStartKey | None:
+    """The saved-session scope a tokenless run starts (#1157); ``None`` in
+    stateless mode, where every message is its own run by design."""
+    if topic_key is None and chat_session_key is None:
+        return None
+    return (topic_key, chat_session_key, engine)
+
+
 @dataclass(frozen=True, slots=True)
 class ResumeDecision:
     resume_token: ResumeToken | None
@@ -2720,6 +2754,7 @@ async def run_main_loop(
                 base_cb: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
                 topic_key: tuple[int, int] | None,
                 chat_session_key: tuple[int, int | None] | None,
+                on_saved: Callable[[], None] | None = None,
             ) -> Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None:
                 if base_cb is None and topic_key is None and chat_session_key is None:
                     return None
@@ -2738,6 +2773,8 @@ async def run_main_loop(
                         await state.chat_session_store.set_session_resume(
                             chat_session_key[0], chat_session_key[1], token
                         )
+                    if on_saved is not None:
+                        on_saved()
 
                 return _wrapped
 
@@ -2772,6 +2809,7 @@ async def run_main_loop(
                 | None = None,
                 engine_override: EngineId | None = None,
                 progress_ref: MessageRef | None = None,
+                on_session_saved: Callable[[], None] | None = None,
             ) -> None:
                 topic_key = (
                     (chat_id, thread_id)
@@ -2837,7 +2875,10 @@ async def run_main_loop(
                     context=context,
                     reply_ref=reply_ref,
                     on_thread_known=wrap_on_thread_known(
-                        on_thread_known, topic_key, chat_session_key
+                        on_thread_known,
+                        topic_key,
+                        chat_session_key,
+                        on_saved=on_session_saved,
                     ),
                     on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
                     # Run the engine the options and the approval audit were
@@ -3239,6 +3280,8 @@ async def run_main_loop(
                 topic_store=state.topic_store,
                 chat_session_store=state.chat_session_store,
             )
+            # #1157: tokenless first runs per saved-session scope + engine.
+            pending_starts: dict[FirstStartKey, _PendingStart] = {}
 
             async def dispatch_prompt_run(
                 *,
@@ -3315,19 +3358,78 @@ async def run_main_loop(
                         is_resume_line=cfg.runtime.is_resume_line,
                     ),
                 )
-                if resume_token is None:
-                    await run_job(
-                        chat_id,
-                        user_msg_id,
-                        prompt_text,
-                        None,
-                        context,
-                        msg.thread_id,
-                        chat_session_key,
-                        reply_ref,
-                        scheduler.note_thread_known,
-                        engine_override,
+                start_key = _first_start_key(
+                    topic_key, chat_session_key, engine_resolution.engine
+                )
+                while resume_token is None and start_key is not None:
+                    # #1157: no check-then-register gap — nothing awaits
+                    # between the stored-session lookup and this.
+                    first = pending_starts.get(start_key)
+                    if first is None:
+                        break
+                    logger.info(
+                        "prompt.waiting_first_start",
+                        chat_id=chat_id,
+                        user_msg_id=user_msg_id,
+                        engine=engine_resolution.engine,
                     )
+                    await first.settled.wait()
+                    resume_token = first.resume
+                    if resume_token is None:
+                        # It ended without a session: look again, then
+                        # start one ourselves unless another waiter did.
+                        resume_token = await resume_resolver.stored_token(
+                            chat_session_key=chat_session_key,
+                            topic_key=topic_key,
+                            engine_for_session=engine_resolution.engine,
+                        )
+                if resume_token is None:
+                    if start_key is None:
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            scheduler.note_thread_known,
+                            engine_override,
+                        )
+                        return
+                    starting = _PendingStart()
+                    pending_starts[start_key] = starting
+
+                    key = start_key
+
+                    def settle() -> None:
+                        starting.settled.set()
+                        if pending_starts.get(key) is starting:
+                            del pending_starts[key]
+
+                    async def note_first_known(
+                        token: ResumeToken, done: anyio.Event
+                    ) -> None:
+                        starting.resume = token
+                        await scheduler.note_thread_known(token, done)
+
+                    try:
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            note_first_known,
+                            engine_override,
+                            on_session_saved=settle,
+                        )
+                    finally:
+                        settle()
                     return
                 progress_ref = await _send_queued_progress(
                     cfg,
