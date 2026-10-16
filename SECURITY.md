@@ -40,7 +40,7 @@ Include:
 - Subprocess management and session handling
 
 **Out of scope:**
-- Upstream agent CLIs (Claude Code, Codex, OpenCode, Pi) — report to their respective maintainers
+- Upstream agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI) — report to their respective maintainers
 - Telegram Bot API — report to [Telegram](https://telegram.org/blog/bug-bounty)
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine

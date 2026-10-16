@@ -55,7 +55,7 @@ npm install -g @anthropic-ai/claude-code
 Untether uses the official Claude Code CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Untether defaults to subscription billing unless you opt into API billing in config.
 
 !!! note "macOS credentials"
-    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
+    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether reads them from either place, and only for `/usage` and the opt-in subscription-usage footer — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
 
 ### OpenCode
 

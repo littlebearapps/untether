@@ -111,7 +111,7 @@ The version is checked again whenever the `opencode` binary changes, so the next
 **Symptoms:** Engine starts but fails with authentication or permission errors.
 
 - **Codex:** Run `codex` in a terminal and sign in with your ChatGPT account
-- **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
+- **Claude Code:** Run `claude auth login` (or `claude`, then `/login`) to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
 - **Antigravity CLI:** see [Antigravity says it isn't signed in](#antigravity-says-it-isnt-signed-in) — a Gemini API key or Enterprise sign-in is recommended over a Google account sign-in
@@ -759,7 +759,7 @@ Budgets are checked when a result arrives, so on their own they alert rather tha
 | Linux | Plain-text JSON file | `~/.claude/.credentials.json` |
 | macOS | macOS Keychain | Entry: `Claude Code-credentials` |
 
-Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude login` to refresh credentials.
+For `/usage` and the opt-in subscription-usage footer (the only things that read them), Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude auth login` to refresh credentials.
 
 ## Using debug mode
 
@@ -878,9 +878,9 @@ Untether recognises **86 error patterns**, grouped like this:
 | Category | Examples | Engines |
 |----------|----------|---------|
 | Unsupported client | Engine refuses this client version, Gemini individual-tier end-of-life | AMP, Gemini |
-| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex |
+| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex, Antigravity |
 | Authentication | API key missing/invalid, token refresh, login required | All |
-| Subscription & billing | Usage limits, quota exceeded, billing hard limit | Claude, Codex, OpenCode, Gemini |
+| Subscription & billing | Usage limits, quota exceeded, billing hard limit, AI credits | Claude, Codex, OpenCode, Antigravity, Gemini |
 | API overload & server | 500/502/503/504, overloaded | All |
 | Rate limits | Rate limited, too many requests | All |
 | Model errors | Model not found, invalid model | All |
@@ -892,7 +892,7 @@ Untether recognises **86 error patterns**, grouped like this:
 | CLI & filesystem | Command not found, disk full, permission denied | All |
 | Signals | SIGTERM, SIGKILL, SIGABRT | All |
 | Process & session | No result event, no session ID, execution errors | All |
-| Engine-specific | AMP credits/login, Gemini result status | AMP, Gemini |
+| Engine-specific | Antigravity upstream cancel, AMP credits/login, Gemini result status | Antigravity, AMP, Gemini |
 | Account & proxy | Account suspended, proxy auth, request timeout | All |
 
 For the full list of patterns and hints, see the [Error Reference](../reference/errors.md).

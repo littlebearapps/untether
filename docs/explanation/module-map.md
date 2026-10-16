@@ -66,6 +66,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/commands/*` | In-chat command handlers (`/agent`, `/file`, `/topic`, `/ctx`, `/new`, …). |
 | `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
 | `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
+| `telegram/first_start.py` | Holds a message sent while a chat's first run hasn't reported its session yet, so it resumes that conversation instead of starting a second; `/cancel` and `/new` drop it ([#1157](https://github.com/littlebearapps/untether/issues/1157)). |
 | `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
 | `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
 | `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
