@@ -332,6 +332,14 @@ On a reload the previous crons and webhooks keep running (`config.reload.trigger
 and the Telegram notice names every webhook whose **old secret is still accepted**, so
 a secret you were rotating doesn't stay live without you knowing.
 
+The notices only say the other triggers "started normally" or "reloaded normally"
+when they really are running
+([#1146](https://github.com/littlebearapps/untether/issues/1146)). If the triggers
+failed at startup, or the webhook server didn't start, saving a fix can't start them:
+the notice says to restart instead, and the restart notice names the reason
+(`triggers failed at start-up`). An `auth = "none"` webhook refused by `exposed = true`
+is announced the same way (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)).
+
 !!! tip "Upgrade first, then edit"
     When a new version adds a trigger key, install it before you add the key to
     `untether.toml`. An older version rejects a key it doesn't know (now only that one

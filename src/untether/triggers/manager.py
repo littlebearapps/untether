@@ -43,6 +43,7 @@ class TriggerManager:
         "_fired_run_once",
         "_paused",
         "_pending_run_once",
+        "_refused_webhook_ids",
         "_run_once_pending_path",
         "_run_once_state_path",
         "_trusted_proxy_header",
@@ -57,6 +58,9 @@ class TriggerManager:
     ) -> None:
         self._crons: list[CronConfig] = []
         self._webhooks_by_path: dict[str, WebhookConfig] = {}
+        # #1146: auth="none" webhooks the last update() refused, so a reload
+        # can announce them in Telegram (not just the log).
+        self._refused_webhook_ids: tuple[str, ...] = ()
         self._default_timezone: str | None = None
         # #1119: the proxy header the webhook server trusts (exposed only).
         self._trusted_proxy_header: str | None = None
@@ -138,6 +142,7 @@ class TriggerManager:
         )
 
         refused_unauth = set(_unauthenticated_on_public_bind(settings))
+        self._refused_webhook_ids = tuple(sorted(refused_unauth))
         self._trusted_proxy_header = trusted_proxy_header_in_effect(settings)
 
         self._webhooks_by_path = {
@@ -219,6 +224,12 @@ class TriggerManager:
         """#1119: header holding the real client address, or None (only set
         when ``[triggers.server] exposed`` is on)."""
         return self._trusted_proxy_header
+
+    @property
+    def refused_webhook_ids(self) -> tuple[str, ...]:
+        """#1146: ids of the ``auth="none"`` webhooks the last update refused
+        (``[triggers.server] exposed`` or a non-loopback host), sorted."""
+        return self._refused_webhook_ids
 
     @property
     def webhook_count(self) -> int:

@@ -250,3 +250,153 @@ def test_1117_block_failure_notice_variants() -> None:
         "server.port: bad", phase="reload", running=True
     )
     assert "secret" not in no_secret
+
+
+# ── #1146: notices tell the truth about what is actually running ──
+
+_HINT = "run `systemctl --user restart untether-dev` (or send `/restart`)"
+
+
+def test_1146_server_refused_notice_exposed() -> None:
+    """Start-up refusal: name the refused webhooks, say NO webhook is served
+    (bearer ones too), and how to fix it."""
+    from untether.config_reload_notification import (
+        format_webhook_server_refused_notice,
+    )
+
+    text = format_webhook_server_refused_notice(
+        ["open-b", "open-a"], exposed=True, restart_hint=_HINT
+    )
+    assert text.startswith("⚠️ Webhook server not started")
+    assert "no webhooks are being served" in text
+    assert "open-a, open-b" in text
+    assert "exposed server" in text
+    assert "add auth to those webhooks or remove exposed = true" in text
+    assert f"then {_HINT}." in text
+    assert "Crons started normally." in text
+    assert "other triggers started normally" not in text
+    assert "without a restart" not in text
+
+
+def test_1146_server_refused_notice_non_loopback_and_invalid() -> None:
+    from untether.config_reload_notification import (
+        format_webhook_server_refused_notice,
+    )
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_webhook_server_refused_notice(
+        ["open"],
+        exposed=False,
+        invalid=[InvalidTrigger("cron", "nightly", "prompt: required")],
+        restart_hint=_HINT,
+    )
+    assert "non-loopback host" in text
+    assert "allow_unauthenticated_webhooks" in text
+    assert "Also skipped (invalid):\n• cron nightly: prompt: required" in text
+    assert "The other crons started normally." in text
+    assert "Fix the skipped entries too." in text
+
+
+def test_1146_invalid_notice_when_triggers_not_running() -> None:
+    """After a start-up block failure nothing runs: never 'reloaded normally'
+    or 'applies without a restart'."""
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [InvalidTrigger("cron", "a", "prompt: required")],
+        phase="reload",
+        running=False,
+        restart_hint=_HINT,
+    )
+    assert "normally" not in text
+    assert "without a restart" not in text
+    assert "No triggers are running" in text
+    assert f"then {_HINT}." in text
+
+
+def test_1146_invalid_notice_when_webhook_server_down() -> None:
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [InvalidTrigger("webhook", "gh", "auth: bad")],
+        phase="reload",
+        webhook_server_running=False,
+        restart_hint=_HINT,
+    )
+    assert "other triggers reloaded normally" not in text
+    assert "Crons reloaded normally" in text
+    assert "the webhook server isn't running" in text
+    assert "no webhooks are being served" in text
+    assert "without a restart" not in text
+    assert f"to start the webhook server, {_HINT}." in text
+
+
+def test_1146_invalid_notice_lists_refused_webhooks_on_reload() -> None:
+    """A reload refusing an auth = "none" webhook gets the same short notice
+    as a skipped invalid webhook."""
+    from untether.config_reload_notification import format_invalid_triggers_notice
+
+    text = format_invalid_triggers_notice(
+        [], phase="reload", refused_webhook_ids=["open"], exposed=True
+    )
+    assert text.startswith("⚠️ Trigger config: 1 trigger skipped\n")
+    assert "(invalid)" not in text
+    assert '• webhook open: refused, auth = "none" isn\'t allowed on an exposed' in text
+    assert "The other triggers reloaded normally." in text
+    assert "remove exposed = true" in text
+    assert "applies without a restart" in text
+
+
+def test_1146_block_failure_not_running_says_restart() -> None:
+    from untether.config_reload_notification import (
+        format_trigger_block_failure_notice,
+    )
+
+    text = format_trigger_block_failure_notice(
+        "crons: duplicate id", phase="reload", running=False, restart_hint=_HINT
+    )
+    assert "no crons or webhooks are running" in text
+    assert f"then {_HINT}." in text
+
+
+def test_1146_restart_notice_names_reason_not_key() -> None:
+    reason = "triggers failed at start-up, so no crons or webhooks are running"
+    text = format_reload_notification(
+        path="/tmp/untether.toml",
+        hot_keys=[],
+        restart_keys=[],
+        restart_reasons=[reason],
+        restart_hint=_HINT,
+    )
+    assert "**Restart required" in text
+    assert reason in text
+    assert "Restart-only keys touched" not in text
+    assert "triggers.enabled" not in text
+    assert f"To apply, {_HINT}." in text
+
+
+def test_1146_restart_reason_with_keys_and_hot_keys() -> None:
+    reason = "triggers failed at start-up"
+    with_keys = format_reload_notification(
+        path="/tmp/untether.toml",
+        hot_keys=[],
+        restart_keys=["session_mode"],
+        restart_reasons=[reason],
+        restart_hint=_HINT,
+    )
+    assert "Restart-only keys touched: `session_mode`" in with_keys
+    assert f"Also needs a restart: {reason}" in with_keys
+
+    partial = format_reload_notification(
+        path="/tmp/untether.toml",
+        hot_keys=["progress.verbose"],
+        restart_keys=[],
+        restart_reasons=[reason],
+        restart_hint=_HINT,
+    )
+    assert "Partial reload" in partial
+    assert "Need restart to apply" not in partial
+    assert f"Still needs a restart: {reason}" in partial
+    assert _HINT in partial

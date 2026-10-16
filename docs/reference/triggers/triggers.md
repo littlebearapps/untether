@@ -354,6 +354,14 @@ doesn't start; on reload the routes are dropped), and
 `allow_unauthenticated_webhooks` no longer opts back in. The
 `triggers.server.refused_unauthenticated` error carries `exposed=true`.
 
+Either refusal is also posted in Telegram
+([#1146](https://github.com/littlebearapps/untether/issues/1146)). At startup the
+notice reads `⚠️ Webhook server not started: no webhooks are being served, not
+even ones with auth.`, names the refused webhooks and says how to fix them (then
+restart, because a reload can't start the server). On a reload the refused
+webhook is listed in the `⚠️ Trigger config: … skipped` notice like an invalid
+entry.
+
 ### Bearer token
 
 ```toml
