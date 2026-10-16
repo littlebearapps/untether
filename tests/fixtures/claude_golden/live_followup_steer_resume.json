@@ -508,7 +508,6 @@
    "step": "emit:command_lifecycle"
   },
   {
-   "result": "⏳ Queued — sent as soon as Claude's current turn ends.",
    "step": "do:queued_note"
   },
   {

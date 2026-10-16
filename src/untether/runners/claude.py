@@ -1432,6 +1432,19 @@ def session_linger_info(session_id: str) -> tuple[bool, int] | None:
     return post_result, session_live_bg_count(session_id)
 
 
+def session_turn_pending(session_id: str) -> bool:
+    """#1154: True when a follow-up queued for the live session
+    ``session_id`` will wait behind a turn — one is open, or an earlier
+    injected follow-up hasn't started its turn yet. False for a session
+    idle between turns (:func:`inject_when_idle` writes straight away) and
+    for no live session. Read-only: unlike :func:`_awaiting_injected` it
+    never expires entries."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    return not live.idle or bool(live.state.awaiting_injected)
+
+
 SESSION_HANDOFF_POLL_S: float = 0.25
 
 

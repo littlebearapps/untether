@@ -1922,6 +1922,13 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     process exits. The live note omits "/cancel to drop it": once the
     scheduler hands the job to the injector it is no longer in the
     cancellable queue.
+
+    #1154: the live note shows only when the follow-up really waits behind
+    a turn (an earlier follow-up written but not started yet). A live
+    session idle between turns takes it straight away — the old check
+    (post-result + accepting) is exactly that idle state, so a media group
+    sent to an idle chat flashed "Queued … current turn ends" with nothing
+    running.
     """
     backend = live_backend(resume_token.engine)
     if backend is None:
@@ -1929,6 +1936,7 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     try:
         info = backend.linger_info(resume_token.value)
         live = info is not None and backend.is_accepting(resume_token.value)
+        waits_for_turn = live and backend.turn_pending(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1939,6 +1947,8 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     if not post_result:
         return None
     if live:
+        if not waits_for_turn:
+            return None
         if bg_count > 0:
             return (
                 f"⏳ Queued — sent as soon as {backend.display_name}'s current "

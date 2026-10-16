@@ -1250,6 +1250,10 @@ class TestQueuedWaitNote:
         monkeypatch.setattr(
             "untether.runners.claude.is_session_accepting", lambda sid: accepting
         )
+        # #1154: the live wording needs a turn to wait behind.
+        monkeypatch.setattr(
+            "untether.runners.claude.session_turn_pending", lambda sid: True
+        )
         assert _queued_wait_note(self._token()) == expected
 
     def test_queued_note_engine_without_backend_never_asks_claude(
@@ -1329,6 +1333,73 @@ class TestQueuedWaitNote:
         monkeypatch.setattr("untether.runners.claude.session_linger_info", _boom)
         assert _queued_wait_note(self._token()) is None
 
+    # #1154: a live session sitting idle between turns takes a follow-up
+    # straight away — no turn to wait behind, so no "Queued" note. The note
+    # shows only while an earlier follow-up's turn is still to run first.
+
+    @staticmethod
+    def _install_live(
+        monkeypatch, *, idle: bool, awaiting: bool = False, bg_count: int = 0
+    ) -> None:
+        import time
+
+        from untether.runners import claude as claude_mod
+        from untether.runners.claude import ClaudeStreamState, LiveSession
+
+        sid = "sess-654"
+        state = ClaudeStreamState()
+        state.completed_turns = 1
+        state.turn_open = not idle
+        if idle:
+            # The turn-closing result: what makes ``post_result`` true.
+            state.result_received_at = time.monotonic()
+        if awaiting:
+            state.awaiting_injected["cmd-earlier"] = time.monotonic()
+        monkeypatch.setitem(
+            claude_mod._LIVE_SESSIONS,
+            sid,
+            LiveSession(session_id=sid, state=state, stdin=None),
+        )
+        monkeypatch.setattr(claude_mod, "is_session_alive", lambda s: s == sid)
+        monkeypatch.setattr(claude_mod, "session_live_bg_count", lambda s: bg_count)
+        monkeypatch.setitem(claude_mod._SESSION_BG_STATE, sid, state)
+
+    @pytest.mark.parametrize("bg_count", [0, 2])
+    def test_idle_live_session_has_no_note_1154(self, monkeypatch, bg_count) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        self._install_live(monkeypatch, idle=True, bg_count=bg_count)
+        assert _queued_wait_note(self._token()) is None
+
+    @pytest.mark.parametrize(
+        ("bg_count", "expected"),
+        [
+            (0, "⏳ Queued — sent as soon as Claude's current turn ends."),
+            (
+                2,
+                "⏳ Queued — sent as soon as Claude's current turn ends "
+                "(background tasks keep running).",
+            ),
+        ],
+    )
+    def test_live_session_with_turn_pending_keeps_note_1154(
+        self, monkeypatch, bg_count, expected
+    ) -> None:
+        """An earlier follow-up was written but its turn hasn't started:
+        this one really waits behind that turn."""
+        from untether.telegram.loop import _queued_wait_note
+
+        self._install_live(monkeypatch, idle=True, awaiting=True, bg_count=bg_count)
+        assert _queued_wait_note(self._token()) == expected
+
+    def test_live_session_mid_turn_unchanged_1154(self, monkeypatch) -> None:
+        """Mid-turn the running turn's own progress message explains the
+        wait (#781) — unchanged by #1154."""
+        from untether.telegram.loop import _queued_wait_note
+
+        self._install_live(monkeypatch, idle=False)
+        assert _queued_wait_note(self._token()) is None
+
     # #781: under live sessions (#776) a follow-up is written into the live
     # process when its current turn ends — it does NOT wait for background
     # tasks. The note must say so, and must not promise the old wait.
@@ -1341,6 +1412,9 @@ class TestQueuedWaitNote:
         )
         monkeypatch.setattr(
             "untether.runners.claude.is_session_accepting", lambda sid: True
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.session_turn_pending", lambda sid: True
         )
         note = _queued_wait_note(self._token())
         assert note is not None
@@ -1357,6 +1431,9 @@ class TestQueuedWaitNote:
         )
         monkeypatch.setattr(
             "untether.runners.claude.is_session_accepting", lambda sid: True
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.session_turn_pending", lambda sid: True
         )
         note = _queued_wait_note(self._token())
         assert note is not None

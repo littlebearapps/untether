@@ -420,7 +420,6 @@
    ]
   },
   {
-   "result": "⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).",
    "step": "do:queued_note"
   },
   {

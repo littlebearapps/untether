@@ -72,6 +72,10 @@ class LiveSessionBackend(Protocol):
         """``(post_result, live_bg_count)`` of the owning process, or None."""
         ...
 
+    def turn_pending(self, session_id: str) -> bool:
+        """A follow-up written now would wait behind a turn (#1154)."""
+        ...
+
     def live_bg_count(self, session_id: str) -> int:
         """Live background handles held by the owning process (#647)."""
         ...
@@ -146,6 +150,9 @@ class _ClaudeLive:
 
     def linger_info(self, session_id: str) -> tuple[bool, int] | None:
         return self._claude().session_linger_info(session_id)
+
+    def turn_pending(self, session_id: str) -> bool:
+        return self._claude().session_turn_pending(session_id)
 
     def live_bg_count(self, session_id: str) -> int:
         return self._claude().session_live_bg_count(session_id)

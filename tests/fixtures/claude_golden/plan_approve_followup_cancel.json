@@ -797,7 +797,6 @@
    "step": "emit:system/status"
   },
   {
-   "result": "⏳ Queued — sent as soon as Claude's current turn ends.",
    "step": "do:queued_note"
   },
   {
