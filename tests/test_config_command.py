@@ -3281,11 +3281,11 @@ class TestDiffPreviewUnsetLabel1115:
         ("engine", "value", "line"),
         [
             ("claude", None, "Diff preview: <b>default</b>  · diffs on cards"),
-            # #1147: no Claude mode resolves here, so On is qualified.
+            # #1147: no Claude mode resolves here, so On is generic.
             (
                 "claude",
                 True,
-                "Diff preview: <b>on</b>  · edits ask in autonomous modes",
+                "Diff preview: <b>on</b>  · edits sent for approval wait",
             ),
             ("claude", False, "Diff preview: <b>off</b>  · buttons only"),
             ("antigravity", None, "Diff preview: <b>default</b>  · diffs on cards"),
@@ -3339,18 +3339,68 @@ class TestDiffPreviewUnsetLabel1115:
 # ---------------------------------------------------------------------------
 
 _DP_ON_PLAIN = "• <b>on</b> — edits wait for your approval, with the diff"
-_DP_ON_QUALIFIED = (
-    "• <b>on</b> — in the autonomous permission modes (plan, plan-auto, auto),"
-    " edits also wait for your approval, with the diff"
+_DP_ON_CLAUDE = (
+    "• <b>on</b> — an edit or command that reaches Untether for approval"
+    " waits for your tap, with the diff"
 )
 _DP_HOME_ON_PLAIN = "Diff preview: <b>on</b>  · edits ask first"
-_DP_HOME_ON_QUALIFIED = "Diff preview: <b>on</b>  · edits ask in autonomous modes"
+_DP_NOTE_PROMPTING_ACCEPT_EDITS = (
+    "In this chat's Permission mode (<b>off</b>), Claude Code asks you"
+    " itself and its cards show the diff, so On holds nothing extra:"
+    " edits inside the project still run without asking."
+)
+# Per-mode truth (rc8 live QA, issue #1147): auto's in-project edits never
+# reach Untether, and plan-auto's rubber-stamped plan lifts the gate (#283).
+_DP_NOTES = {
+    "plan": (
+        "In this chat's Permission mode (<b>on</b>), that's an edit or command"
+        " Claude tries before you approve its plan. Once you approve the plan,"
+        " or one held edit, the rest of that reply runs without asking."
+    ),
+    "plan-auto": (
+        "In this chat's Permission mode (<b>plan-auto</b>), the plan is"
+        " approved for you, so only an edit or command Claude tries before its"
+        " plan is held; the edits that carry out the plan run without asking."
+    ),
+    "auto": (
+        "In this chat's Permission mode (<b>auto</b>), Claude Code approves"
+        " edits inside the project itself and sends other actions to its"
+        " classifier, so only what it still asks about reaches Untether:"
+        " protected files, or actions after repeated classifier blocks."
+    ),
+    "dontAsk": (
+        "In this chat's Permission mode (<b>dontAsk</b>), edits and commands"
+        " are pre-approved and anything else is refused, so On rarely holds"
+        " anything."
+    ),
+    "bypassPermissions": (
+        "In this chat's Permission mode (<b>bypassPermissions</b>), Claude Code"
+        " skips its permission checks, so On rarely holds anything."
+    ),
+}
+_DP_HOME_HINTS = {
+    "plan": "edits before plan approval wait",
+    "plan-auto": "rarely holds: plans auto-approved",
+    "auto": "only edits Claude Code asks about",
+    "dontAsk": "rarely holds in this mode",
+    "bypassPermissions": "rarely holds in this mode",
+    "acceptEdits": "nothing extra in this mode",
+    "default": "nothing extra in this mode",
+    "manual": "nothing extra in this mode",
+    None: "edits sent for approval wait",
+}
+
+
+def _dp_home_on(mode: str | None) -> str:
+    return f"Diff preview: <b>on</b>  · {_DP_HOME_HINTS[mode]}"
 
 
 class TestDiffPreviewOnWording1147:
     """Claude's diff gate only runs outside the prompting modes (``claude.py``
-    ``not state.prompting_mode``), so in ``default``/``manual``/``acceptEdits``
-    On holds nothing extra. The page and home line must say so per chat."""
+    ``not state.prompting_mode``), skips a session whose plan (or a held
+    edit) was approved this reply (``_PLAN_EXIT_APPROVED``, #283/#369), and
+    only ever sees what Claude Code sends to stage 6. The page and home line
+    must say what On actually holds, per chat mode."""
 
     @staticmethod
     async def _setup(tmp_path, chat_mode: str | None):
@@ -3379,27 +3429,24 @@ class TestDiffPreviewOnWording1147:
         return ctx
 
     @pytest.mark.anyio
-    async def test_page_on_in_accept_edits_is_qualified(self, tmp_path):
+    async def test_page_on_in_accept_edits_keeps_rc8_note(self, tmp_path):
         state_path = await self._setup(tmp_path, "acceptEdits")
         ctx = self._ctx(state_path, "dp")
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
-        assert _DP_ON_QUALIFIED in text
+        assert _DP_ON_CLAUDE in text
         assert _DP_ON_PLAIN not in text
-        assert (
-            "In this chat's Permission mode (<b>off</b>), Claude Code asks you"
-            " itself and its cards show the diff, so On holds nothing extra:"
-            " edits inside the project still run without asking."
-        ) in text
+        assert "autonomous permission modes" not in text
+        assert _DP_NOTE_PROMPTING_ACCEPT_EDITS in text
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("mode", ["default", "manual"])
-    async def test_page_on_in_manual_is_qualified(self, tmp_path, mode):
+    async def test_page_on_in_manual_keeps_rc8_note(self, tmp_path, mode):
         state_path = await self._setup(tmp_path, mode)
         ctx = self._ctx(state_path, "dp")
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
-        assert _DP_ON_QUALIFIED in text
+        assert _DP_ON_CLAUDE in text
         assert (
             "In this chat's Permission mode (<b>manual</b>), Claude Code asks"
             " you itself and its cards show the diff, so On holds nothing extra."
@@ -3407,74 +3454,95 @@ class TestDiffPreviewOnWording1147:
         assert "edits inside the project still run" not in text
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("mode", ["auto", "plan", "plan-auto"])
-    async def test_page_on_in_autonomous_mode_is_plain(self, tmp_path, mode):
+    @pytest.mark.parametrize("mode", list(_DP_NOTES))
+    async def test_page_on_in_autonomous_mode_says_what_is_held(self, tmp_path, mode):
         state_path = await self._setup(tmp_path, mode)
         ctx = self._ctx(state_path, "dp")
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
-        assert _DP_ON_PLAIN in text
-        assert "autonomous permission modes" not in text
+        assert _DP_ON_CLAUDE in text
+        # The rc8 plain bullet overstated auto and plan-auto (#1147 rc8 QA).
+        assert _DP_ON_PLAIN not in text
+        assert _DP_NOTES[mode] in text
         assert "holds nothing extra" not in text
 
     @pytest.mark.anyio
-    async def test_page_on_with_no_mode_is_qualified_without_note(self, tmp_path):
+    async def test_page_on_in_auto_does_not_promise_in_project_edits(self, tmp_path):
+        state_path = await self._setup(tmp_path, "auto")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "edits wait for your approval" not in text
+        assert "approves edits inside the project itself" in text
+
+    @pytest.mark.anyio
+    async def test_page_on_in_plan_auto_says_plan_edits_run(self, tmp_path):
+        state_path = await self._setup(tmp_path, "plan-auto")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "edits wait for your approval" not in text
+        assert "the edits that carry out the plan run without asking" in text
+
+    @pytest.mark.anyio
+    async def test_page_on_with_no_mode_has_no_note(self, tmp_path):
         state_path = await self._setup(tmp_path, None)
         ctx = self._ctx(state_path, "dp")
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
-        assert _DP_ON_QUALIFIED in text
-        assert "holds nothing extra" not in text
+        assert _DP_ON_CLAUDE in text
+        assert "In this chat's Permission mode" not in text
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize(
-        ("toml_mode", "bullet", "note"),
-        [
-            ("acceptEdits", _DP_ON_QUALIFIED, True),
-            ("auto", _DP_ON_PLAIN, False),
-        ],
-    )
-    async def test_page_uses_toml_mode_when_chat_has_none(
-        self, tmp_path, toml_mode, bullet, note
-    ):
+    @pytest.mark.parametrize("toml_mode", ["acceptEdits", "auto"])
+    async def test_page_uses_toml_mode_when_chat_has_none(self, tmp_path, toml_mode):
         state_path = await self._setup(tmp_path, None)
         ctx = self._ctx(state_path, "dp", toml_mode=toml_mode)
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
-        assert bullet in text
-        assert ("holds nothing extra" in text) is note
+        assert _DP_ON_CLAUDE in text
+        if toml_mode == "auto":
+            assert _DP_NOTES["auto"] in text
+        else:
+            assert _DP_NOTE_PROMPTING_ACCEPT_EDITS in text
 
     @pytest.mark.anyio
     async def test_chat_mode_wins_over_toml(self, tmp_path):
         state_path = await self._setup(tmp_path, "auto")
         ctx = self._ctx(state_path, "dp", toml_mode="acceptEdits")
         await ConfigCommand().handle(ctx)
-        assert _DP_ON_PLAIN in _last_edit_msg(ctx).text
+        text = _last_edit_msg(ctx).text
+        assert _DP_NOTES["auto"] in text
+        assert "holds nothing extra" not in text
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize(
-        ("mode", "line"),
-        [
-            ("acceptEdits", _DP_HOME_ON_QUALIFIED),
-            ("default", _DP_HOME_ON_QUALIFIED),
-            (None, _DP_HOME_ON_QUALIFIED),
-            ("auto", _DP_HOME_ON_PLAIN),
-            ("plan-auto", _DP_HOME_ON_PLAIN),
-        ],
-    )
-    async def test_home_line_on(self, tmp_path, mode, line):
+    @pytest.mark.parametrize("mode", list(_DP_HOME_HINTS))
+    async def test_home_line_on(self, tmp_path, mode):
         state_path = await self._setup(tmp_path, mode)
         ctx = self._ctx(state_path)
         await ConfigCommand().handle(ctx)
-        assert line in _last_send_msg(ctx).text
+        text = _last_send_msg(ctx).text
+        assert _dp_home_on(mode) in text
+        assert "edits ask in autonomous modes" not in text
+        assert _DP_HOME_ON_PLAIN not in text
 
     @pytest.mark.anyio
-    async def test_resolve_runner_failure_falls_back_to_qualified(self, tmp_path):
+    async def test_resolve_runner_failure_falls_back_to_generic(self, tmp_path):
         state_path = await self._setup(tmp_path, None)
         ctx = self._ctx(state_path, "dp")
         ctx.runtime.resolve_runner.side_effect = RuntimeError("boom")
         await ConfigCommand().handle(ctx)
-        assert _DP_ON_QUALIFIED in _last_edit_msg(ctx).text
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        assert "In this chat's Permission mode" not in text
+
+    def test_every_claude_mode_has_home_hint(self):
+        from untether.runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
+        from untether.telegram.commands.config import _claude_dp_on_hint
+
+        for mode in VALID_PERMISSION_MODES_BY_ENGINE["claude"]:
+            assert _claude_dp_on_hint(mode) == _DP_HOME_HINTS[mode]
+        assert _claude_dp_on_hint(None) == _DP_HOME_HINTS[None]
 
     @pytest.mark.anyio
     async def test_antigravity_on_unchanged(self, tmp_path, monkeypatch):
@@ -3500,8 +3568,8 @@ class TestDiffPreviewOnWording1147:
         await ConfigCommand().handle(ctx)
         text = _last_edit_msg(ctx).text
         assert _DP_ON_PLAIN in text
-        assert "autonomous permission modes" not in text
-        assert "holds nothing extra" not in text
+        assert "reaches Untether for approval" not in text
+        assert "In this chat's Permission mode" not in text
 
 
 # ---------------------------------------------------------------------------
