@@ -181,9 +181,12 @@ chat's settings (a live session spawned with the cron's model closes with
 `options_changed` and resumes). Logged as `trigger.cron.model_override` /
 `trigger.cron.reasoning_override` when the value differs from the chat's.
 
-`schedule` is not validated at config load: an expression without exactly five
-fields never fires, and one with an unparseable field logs
-`triggers.cron.match_failed` on each tick.
+`schedule` is validated at config load with the same grammar the scheduler matches
+with ([#1144](https://github.com/littlebearapps/untether/issues/1144)). A bad schedule
+(not exactly five fields, a value out of range, a step of 0, a range that runs
+backwards, or a name like `MON`) skips that cron like any other invalid entry: ERROR
+`triggers.trigger_invalid` and a Telegram notice naming the cron and the bad field
+(see [Hot-reload: How it works](#how-it-works)). See [Cron expressions](#cron-expressions) for what's accepted.
 
 ### Cron permission modes
 
@@ -448,6 +451,17 @@ Supported syntax:
 | Weekday range | `0 9 * * 1-5` | At 9:00 AM, Monday--Friday |
 
 **Note:** Both 0 and 7 represent Sunday, matching standard cron conventions.
+
+Steps also work on a range (`0-30/10 * * * *` = :00, :10, :20 and :30). Names such
+as `MON` or `JAN`, and extensions like `L`, `W`, `?` or `@daily`, aren't supported.
+A step on a single value (`5/10`) matches only that value.
+
+An invalid schedule is caught when the config loads, not at fire time
+([#1144](https://github.com/littlebearapps/untether/issues/1144)): the cron is
+skipped and reported (ERROR `triggers.trigger_invalid`, plus the
+`⚠️ Trigger config: N triggers skipped (invalid)` Telegram notice), and the error
+names the field, e.g. `schedule: Value error, invalid cron schedule '99 99 * * *':
+minute field: 99 is out of range (0–59)`. The other crons keep running.
 
 The scheduler ticks once per minute. Each cron fires at most once per minute
 (deduplication prevents double-firing if the tick loop runs fast).
@@ -1103,7 +1117,8 @@ The `triggers.manager.updated` log line lists added/removed crons and webhooks a
 | `src/untether/triggers/templating.py` | `{{field.path}}` prompt substitution with untrusted prefix. |
 | `src/untether/triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global; failed auth per webhook and client address, with a cap on tracked addresses). |
 | `src/untether/triggers/server.py` | aiohttp webhook server (`build_webhook_app`, `run_webhook_server`). |
-| `src/untether/triggers/cron.py` | 5-field cron expression parser and tick-per-minute scheduler. |
+| `src/untether/triggers/cron.py` | `cron_matches()` and the tick-per-minute scheduler. |
+| `src/untether/triggers/cron_expr.py` | 5-field cron grammar (`parse_cron_expression()`), shared by the matcher, the `CronConfig.schedule` validator and the loop scheduler ([#1144](https://github.com/littlebearapps/untether/issues/1144)). |
 | `src/untether/triggers/fetch.py` | Cron data-fetch step: HTTP GET/POST, file read, response parsing, prompt building. |
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
 | `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. Shared with voice transcription. |

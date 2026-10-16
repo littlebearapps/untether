@@ -171,6 +171,12 @@ Common patterns:
 | `0 */2 * * *` | Every 2 hours |
 | `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
 
+Use numbers only: names like `MON` or `JAN` aren't supported. A schedule with a
+mistake (the wrong number of fields, a value out of range such as minute `99`, a
+step of `0`, or a range that runs backwards such as `5-1`) is caught when the config
+loads: that cron is skipped and the Telegram notice names the bad field (see
+[When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)).
+
 ### Data-fetch crons
 
 Crons can pull data from external sources before rendering the prompt:
@@ -312,8 +318,9 @@ accessible immediately, and removed webhooks start returning 404.
 
 Each `[[triggers.crons]]` and `[[triggers.webhooks]]` entry is checked on its own
 ([#1117](https://github.com/littlebearapps/untether/issues/1117)). An entry with a
-mistake (a missing `prompt`, a typo in a key, or a key your installed version doesn't
-know yet) is skipped and the others keep running. Untether logs
+mistake (a missing `prompt`, a typo in a key, a bad cron `schedule`
+([#1144](https://github.com/littlebearapps/untether/issues/1144)), or a key your
+installed version doesn't know yet) is skipped and the others keep running. Untether logs
 `triggers.trigger_invalid` and posts a notice in Telegram naming the skipped trigger
 and what's wrong with it. A skipped webhook is switched off, so its old secret stops
 working too.

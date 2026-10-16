@@ -448,6 +448,18 @@ class TestNextCronFire:
         assert loop_scheduler._next_cron_fire("") is None
         assert loop_scheduler._next_cron_fire("* * *") is None
 
+    def test_out_of_range_rejected_without_scanning(self, monkeypatch):
+        """#1144: a well-shaped but invalid expression is rejected by the
+        shared grammar up front, not by walking a year of minutes."""
+
+        def _no_scan(*_a, **_k):
+            raise AssertionError("cron_matches should not be called")
+
+        monkeypatch.setattr(loop_scheduler, "cron_matches", _no_scan)
+        assert loop_scheduler._next_cron_fire("99 99 * * *") is None
+        assert loop_scheduler._next_cron_fire("a b c d e") is None
+        assert loop_scheduler._next_cron_fire("*/0 * * * *") is None
+
     def test_every_5_minutes(self):
         result = loop_scheduler._next_cron_fire("*/5 * * * *")
         assert result is not None
