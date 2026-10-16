@@ -2174,7 +2174,7 @@ def _webhook_unattended_hint(source: object) -> str:
         return f"this webhook uses this chat's permission mode \N{EM DASH} {fix}"
     if source == "engine_config":
         return (
-            "this webhook uses [claude] permission_mode in untether.toml "
+            "this webhook uses [engines.claude] permission_mode in untether.toml "
             f"(this chat has none set) \N{EM DASH} change it there, {fix}"
         )
     if source == "trigger":
@@ -2188,7 +2188,7 @@ def _webhook_unattended_hint(source: object) -> str:
             f"default mode \N{EM DASH} {fix}"
         )
     return (
-        "webhooks use the chat's /planmode, else [claude] permission_mode in "
+        "webhooks use the chat's /planmode, else [engines.claude] permission_mode in "
         f"untether.toml \N{EM DASH} {fix}"
     )
 

@@ -13092,7 +13092,7 @@ def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
         {"trigger": "webhook:w", "mode": "default", "denied": {"Write": 1}}
     )
     # #1159: no mode source on the payload -> name both possible sources.
-    assert "the chat's /planmode, else [claude] permission_mode" in hook
+    assert "the chat's /planmode, else [engines.claude] permission_mode" in hook
     assert rb._unattended_usage({"unattended": {"denied": {}}}) is None
 
 
@@ -13110,7 +13110,7 @@ def test_1159_webhook_hint_names_where_the_mode_came_from(monkeypatch) -> None:
     assert "uses this chat's permission mode" in chat
     assert "untether.toml" not in chat
     toml = hint(2, "engine_config")
-    assert "[claude] permission_mode in untether.toml" in toml
+    assert "[engines.claude] permission_mode in untether.toml" in toml
     assert "chat's permission mode" not in toml
     trigger = hint(3, "trigger")
     assert "sets its own permission_mode" in trigger

@@ -1253,3 +1253,39 @@ def test_684_watchdog_detect_unanswerable_default_true_and_toggle() -> None:
     assert WatchdogSettings().detect_unanswerable_control_requests is True
     off = WatchdogSettings(detect_unanswerable_control_requests=False)
     assert off.detect_unanswerable_control_requests is False
+
+
+def test_engine_config_flat_table_alongside_nested_engines(tmp_path: Path) -> None:
+    """A flat [antigravity] table still applies when other engines use
+    [engines.*]; when both layouts name the same engine the nested one wins."""
+    config_path = tmp_path / "untether.toml"
+    base = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
+    }
+    settings = UntetherSettings.model_validate(
+        {
+            **base,
+            "engines": {"claude": {"permission_mode": "plan"}},
+            "antigravity": {"cmd": "/opt/agy"},
+        }
+    )
+    assert settings.engine_config("antigravity", config_path=config_path) == {
+        "cmd": "/opt/agy"
+    }
+    assert settings.engine_config("claude", config_path=config_path) == {
+        "permission_mode": "plan"
+    }
+
+    both = UntetherSettings.model_validate(
+        {
+            **base,
+            "engines": {"antigravity": {"cmd": "/nested/agy"}},
+            "antigravity": {"cmd": "/flat/agy"},
+        }
+    )
+    assert both.engine_config("antigravity", config_path=config_path) == {
+        "cmd": "/nested/agy"
+    }
