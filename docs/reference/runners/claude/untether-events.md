@@ -171,7 +171,9 @@ The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
 throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
 `note` per window (`⚠️ 5h limit N% used — resets HH:MM`, rendered without a ✓ prefix, #868); only `rejected` not
 covered by overage emits a `⏳ Rate limited until …` note and latches the wait
-until `resetsAt`. Bare events emit nothing. Decision table:
+until `resetsAt`. Bare events emit nothing. Every snapshot is stashed on `ClaudeStreamState.rate_limit_windows`; with
+the usage footer off, the final's ≥70 % 5h warning is built from it, with no login-token read
+([#1150](https://github.com/littlebearapps/untether/issues/1150)). Decision table:
 [stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).
 
 ### 4.2 `assistant` / `user` message events

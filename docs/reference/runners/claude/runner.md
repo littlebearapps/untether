@@ -667,7 +667,7 @@ Prompt passing:
 
 Other flags:
 
-* `extra_args` are inserted right after the stream-json I/O flags, before resume / model / effort / allowlist / permission flags, so they can never displace the prompt. Flags Untether manages, and the approval bypasses, are refused at config load ([#209](https://github.com/littlebearapps/untether/issues/209)).
+* `extra_args` are inserted right after the stream-json I/O flags, before resume / model / effort / allowlist / permission flags, so they can never displace the prompt. Flags Untether manages, and the approval bypasses, are refused at config load ([#209](https://github.com/littlebearapps/untether/issues/209)). `tests/test_claude_cli_schema_drift.py` classifies every long flag in the installed CLI's `--help` (`CLAUDE_FLAGS_CLASSIFIED_2_1_301`, re-snapshotted on CLI 2.1.301, [#1156](https://github.com/littlebearapps/untether/issues/1156)), so a new flag fails the suite until it is classified. Flags that left `--help` but are still parsed (`--permission-prompt-tool`, and `--client-data-url` since 2.1.301) stay classified and are pinned in `_209_HIDDEN`, whose test fails once the parser drops one.
 
 #### Stream parsing
 

@@ -108,6 +108,9 @@ path only, or an error final gets delivered and then recovered (or held and neve
   step to `_on_run_completed`: a send that uses up the delivery bound cancels everything after it in that callback.
 - Before any final / cancelled edit of a progress message, `await edits.stop_repaints()` — never set `_finalizing`
   by hand. A debounced repaint already past its check would otherwise land after (and over) the final.
+- An engine's own error text shown on a card (the final's error block, an answer that is the error, a warning row on
+  the progress card) goes through `utils/error_display.redact_url_secrets()` (#1151): it can quote a URL with a
+  token in its query. Hints, resume checks and logs read the raw text (logs have their own redaction).
 
 ## Resume auto-clear (#45, #952)
 

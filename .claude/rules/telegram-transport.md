@@ -132,6 +132,11 @@ not a "running" task for wording or ambiguity: `/new` says `closed the idle sess
 (`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
 Never return early from `/cancel` after closing an idle session.
 
+A message sent while a chat's first run hasn't reported its session yet waits on that run (`telegram/first_start.py`,
+#1157) and has no queued card, so the job-queue cancel paths never see it. Every way `/cancel` or `/new` stops a
+starting run must also call `first_start.drop_waiting(...)` (each woken waiter then replies with the #807-style dropped
+notice) — never let a waiter start a fresh conversation nobody saw queued.
+
 ## After changes
 
 If this change will be released, run integration tests T1-T10 (Telegram transport), S7 (rapid-fire), S8 (long prompt) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps `telegram/*.py` changes to required tests.

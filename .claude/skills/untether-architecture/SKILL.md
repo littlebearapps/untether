@@ -227,7 +227,7 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | `dispatch.py` | Callback dispatch, early answering, ephemeral registration |
 | `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring |
 | `planmode.py` | `/planmode` toggle |
-| `usage.py` | `/usage` — Claude subscription quota; token totals for other engines (#417) |
+| `usage.py` | `/usage` — Claude subscription quota; Antigravity quota groups + AI credits (#979); token totals for other engines (#417) |
 | `model.py` | `/model` override |
 | `reasoning.py` | `/reasoning` override |
 | `listen.py` | `/listen` (formerly `/trigger`, still accepted) — all-messages vs mentions-only |
@@ -323,7 +323,8 @@ caps; Loop off → denied with Loop mode / `/at` guidance. `[loop] own_schedule 
 
 ### Key files
 
-- `triggers/cron.py` — cron parser, timezone-aware scheduler
+- `triggers/cron.py` — cron matcher, timezone-aware scheduler
+- `triggers/cron_expr.py` — the 5-field cron grammar shared by the matcher and `schedule` config validation (#1144), so a schedule that loads is one the matcher understands
 - `triggers/settings.py` — `CronConfig`, `WebhookConfig`, `TriggersSettings` (pydantic)
 - `triggers/dispatcher.py` — notification + `run_job()` bridge
 - `triggers/server.py` — aiohttp webhook server
