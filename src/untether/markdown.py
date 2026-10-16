@@ -11,6 +11,7 @@ from typing import Any, Literal
 from .model import Action, ActionEvent, StartedEvent, UntetherEvent
 from .progress import ProgressState, keyboard_actions
 from .transport import RenderedMessage
+from .utils.error_display import redact_url_secrets
 from .utils.paths import relativize_path
 
 STATUS = {"running": "▸", "update": "↻", "done": "✓", "fail": "✗"}
@@ -637,7 +638,9 @@ def format_meta_line(meta: dict[str, Any]) -> str | None:
     parts: list[str] = []
     model = meta.get("model")
     if isinstance(model, str) and model:
-        parts.append(_short_model_name(model))
+        # #1161: a URL-shaped model id (``/model set`` takes any value) never
+        # shows its login details or query values on a card.
+        parts.append(_short_model_name(redact_url_secrets(model)))
     effort = meta.get("effort")
     if isinstance(effort, str) and effort:
         parts.append(effort)

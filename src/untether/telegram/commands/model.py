@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...logging import get_logger
 from ...utils.engine_argv import model_problem, safe_preview
+from ...utils.error_display import redact_url_secrets
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import resolve_override_value, with_override
 from ..files import split_command_args
@@ -86,7 +87,8 @@ def _after_clear_line(engine: str, remaining: tuple[str, str] | None) -> str:
     if remaining is not None:
         label, model = remaining
         return (
-            f"From the next run Untether passes the {label} `{model}`.\n"
+            f"From the next run Untether passes the {label} "
+            f"`{redact_url_secrets(model)}`.\n"
             f"{_NEW_SESSION_HINT}"
         )
     return (
@@ -143,15 +145,19 @@ async def _handle_model_command(
             field="model",
         )
         engine_line = f"engine: {engine} ({ENGINE_SOURCE_LABELS[engine_source]})"
-        model_value = resolution.value or "default"
+        # #1161: a URL-shaped model is shown without its secrets (the stored
+        # value is unchanged).
+        model_value = redact_url_secrets(resolution.value or "default")
         model_line = (
             f"model: **{model_value}** ({OVERRIDE_SOURCE_LABELS[resolution.source]})"
         )
-        topic_label = resolution.topic_value or "none"
+        topic_label = redact_url_secrets(resolution.topic_value or "none")
         if tkey is None:
             topic_label = "none"
         chat_label = (
-            "unavailable" if chat_prefs is None else resolution.chat_value or "none"
+            "unavailable"
+            if chat_prefs is None
+            else redact_url_secrets(resolution.chat_value or "none")
         )
         defaults_line = f"defaults: topic: {topic_label}, chat: {chat_label}"
         available_line = f"available engines: {', '.join(cfg.runtime.engine_ids)}"
@@ -236,17 +242,10 @@ async def _handle_model_command(
             scope=scope,
             command="model",
         )
-        if scope == "topic":
-            await reply(
-                text=(
-                    f"topic model override **set to** `{model}` for `{engine}`.\n"
-                    f"{_NEW_SESSION_HINT}"
-                )
-            )
-            return
+        shown = redact_url_secrets(model)  # #1161
         await reply(
             text=(
-                f"chat model override **set to** `{model}` for `{engine}`.\n"
+                f"{scope} model override **set to** `{shown}` for `{engine}`.\n"
                 f"{_NEW_SESSION_HINT}"
             )
         )

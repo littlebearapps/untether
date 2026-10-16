@@ -13,6 +13,7 @@ from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, is_claude_prompting_mode
 from ...transport import RenderedMessage
+from ...utils.error_display import redact_url_secrets
 from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
@@ -215,14 +216,20 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
 }
 
 
+def _shown_model(model: str) -> str:
+    """A model id as an HTML page shows it: a URL's login details and query
+    values masked (#1161), then escaped."""
+    return html.escape(redact_url_secrets(model))
+
+
 def _engine_model_hint(engine: str) -> str:
     """#475: the engine's resolved default model (matching the run footer),
-    falling back to the static placeholder when unresolvable."""
+    falling back to the static placeholder when unresolvable. HTML-safe."""
     from ..engine_overrides import get_engine_default_model
 
     resolved = get_engine_default_model(engine)
     if resolved is not None:
-        return resolved
+        return _shown_model(resolved)
     return _ENGINE_MODEL_HINTS.get(engine, "from CLI settings")
 
 
@@ -473,7 +480,7 @@ async def _page_home(ctx: CommandContext) -> None:
     if model_label == "default":
         engine_hint = _engine_model_hint(current_engine)
         model_hint = f"  · {engine_hint}"
-    lines.append(f"Model: <b>{model_label}</b>{model_hint}")
+    lines.append(f"Model: <b>{_shown_model(model_label)}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
     if current_engine == "claude" or (
         current_engine == "antigravity" and show_ask_questions
@@ -1292,7 +1299,9 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     engine_override = await prefs.get_engine_override(chat_id, current_engine)
     model_override = engine_override.model if engine_override else None
     engine_hint = _engine_model_hint(current_engine)
-    model_label = model_override or f"default ({engine_hint})"
+    model_label = (
+        _shown_model(model_override) if model_override else f"default ({engine_hint})"
+    )
 
     lines = [
         "<b>⚙️ Engine & model</b>",
@@ -1751,7 +1760,11 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             ctx, override.model if override else None
         )
         available = await _antigravity_model_efforts(agy_runner, agy_model)
-        model_label = html.escape(agy_model[:80]) if agy_model else "agy default"
+        model_label = (
+            html.escape(redact_url_secrets(agy_model)[:80])
+            if agy_model
+            else "agy default"
+        )
         if available is None:
             agy_lines = [
                 f"Model: <b>{model_label}</b>",
@@ -2771,7 +2784,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     last = _format_trigger_relative(get_last_fired(cron.id))
                     # #743: free-form, so escaped (only shown when set).
                     model_seg = (
-                        f"model=<i>{html.escape(_truncate_field(cron.model))}</i> · "
+                        f"model=<i>{html.escape(_truncate_field(redact_url_secrets(cron.model)))}</i> · "
                         if cron.model
                         else ""
                     )

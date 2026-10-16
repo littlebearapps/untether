@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...directives import DirectiveError
 from ...logging import get_logger
+from ...utils.error_display import redact_url_secrets
 from ..chat_prefs import ChatPrefsStore
 from ..engine_defaults import resolve_engine_for_message
 from ..engine_overrides import resolve_override_value
@@ -117,7 +118,8 @@ async def _handle_agent_command(
             chat_override=chat_override,
             field="reasoning",
         )
-        model_value = model_resolution.value or "default"
+        # #1161: never echo a URL-shaped model's secrets.
+        model_value = redact_url_secrets(model_resolution.value or "default")
         model_line = (
             f"model: **{model_value}** ({override_labels[model_resolution.source]})"
         )
