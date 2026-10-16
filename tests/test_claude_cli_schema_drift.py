@@ -30,7 +30,7 @@ from untether.schemas.claude import (
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.299"
+PROBED_CLI_VERSION = "2.1.301"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -681,11 +681,51 @@ def test_exit_plan_mode_restores_pre_plan_mode(cli_blob: mmap.mmap) -> None:
             )
 
 
+# Minified identifiers can contain ``$`` (CLI 2.1.301 names the auto-refusal
+# helper ``$lr``), which ``\w`` doesn't match (#1148).
+_JS_ID = rb"[\w$]"
+
 _SET_MODE_VALIDATOR_RE = re.compile(
-    rb"function \w{1,4}\(\w,\w\)\{let \w=\w{1,4}\(\w\);if\(\w===void 0\)"
-    rb'return\{ok:!1,error:\w{1,4},code:"invalid_mode"\}(.{0,1500}?)'
+    rb"function " + _JS_ID + rb"{1,4}\(\w,\w\)\{let \w=" + _JS_ID + rb"{1,4}\(\w\);"
+    rb"if\(\w===void 0\)"
+    rb"return\{ok:!1,error:" + _JS_ID + rb'{1,4},code:"invalid_mode"\}(.{0,1500}?)'
     rb"return\{ok:!0,mode:\w\}\}"
 )
+
+# The CLI's own list of set_permission_mode refusal codes (the SDK's ``code``
+# union), e.g. ``xH=["invalid_mode","bypass_restricted",…]`` on CLI 2.1.301.
+# Read first: it doesn't depend on how the validator builds each refusal, which
+# is what broke the helper-follow below on 2.1.301 (#1148).
+_REFUSAL_CODE_ARRAY_RE = re.compile(
+    rb'\[("invalid_mode","bypass_restricted"(?:,"[a-z_]+"){0,30})\]'
+)
+
+
+def _refusal_codes_from_validator(cli_blob: mmap.mmap, body: bytes) -> set[str]:
+    """Fallback for a CLI without the code-list array (the 2.1.299 layout):
+    the codes the validator body returns, its auto-refusal helper's, and the
+    auto-mode reason map's."""
+    codes = {"invalid_mode"}
+    codes.update(c.decode() for c in re.findall(rb'code:"([a-z_]+)"', body))
+    codes.update(c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', body))
+    # Since CLI 2.1.299 the auto refusal is built by a helper the validator
+    # returns (``return err(nP())``); read that helper's codes too.
+    for helper in set(re.findall(rb"return (" + _JS_ID + rb"{1,4})\(", body)):
+        helper_re = (
+            rb"function "
+            + re.escape(helper)
+            + rb"\(\w\)\{return\{ok:!1,(.{0,300}?)\}\}"
+        )
+        if helper_match := re.search(helper_re, cli_blob):
+            codes.update(
+                c.decode() for c in re.findall(rb'"([a-z_]+)"', helper_match.group(1))
+            )
+    auto_map = re.search(rb'\{settings:"auto_mode_settings",[^}]*\}', cli_blob)
+    if auto_map is not None:
+        codes.update(
+            c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', auto_map.group(0))
+        )
+    return codes
 
 
 def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
@@ -700,27 +740,23 @@ def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
     if match is None:
         pytest.fail(f"set_permission_mode validator not found — {hint}")
     body = match.group(1)
-    codes = {"invalid_mode"}
-    codes.update(c.decode() for c in re.findall(rb'code:"([a-z_]+)"', body))
-    codes.update(c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', body))
-    # Since CLI 2.1.299 the auto refusal is built by a helper the validator
-    # returns (``return err(nP())``); read that helper's codes too.
-    for helper in set(re.findall(rb"return (\w{1,4})\(", body)):
-        helper_re = (
-            rb"function "
-            + re.escape(helper)
-            + rb"\(\w\)\{return\{ok:!1,(.{0,300}?)\}\}"
-        )
-        if helper_match := re.search(helper_re, cli_blob):
-            codes.update(
-                c.decode() for c in re.findall(rb'"([a-z_]+)"', helper_match.group(1))
+    lists = {
+        frozenset(c.decode() for c in re.findall(rb'"([a-z_]+)"', m.group(1)))
+        for m in _REFUSAL_CODE_ARRAY_RE.finditer(cli_blob)
+    }
+    if len(lists) > 1:
+        pytest.fail(f"{len(lists)} different refusal-code lists — {hint}")
+    if lists:
+        codes = set(next(iter(lists)))
+        # Every code the validator returns inline must be in the list.
+        inline = {c.decode() for c in re.findall(rb'code:"([a-z_]+)"', body)}
+        if not inline <= codes:
+            pytest.fail(
+                f"validator codes {sorted(inline - codes)} missing from the "
+                f"refusal-code list — {hint}"
             )
-    auto_map = re.search(rb'\{settings:"auto_mode_settings",[^}]*\}', cli_blob)
-    if auto_map is None:
-        pytest.fail(f"auto-mode refusal-code map not found — {hint}")
-    codes.update(
-        c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', auto_map.group(0))
-    )
+    else:
+        codes = _refusal_codes_from_validator(cli_blob, body)
     expected = {
         "invalid_mode",
         "bypass_restricted",

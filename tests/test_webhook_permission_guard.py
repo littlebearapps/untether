@@ -5,8 +5,9 @@ chat's (or ``untether.toml``'s) bypass mode must not reach it: Claude is
 downgraded to ``default`` (so #835's unattended deny applies) and a warning
 is logged once per trigger and origin. Crons keep today's behaviour and are
 flagged by the start-up trigger audit instead, alongside two webhook audit
-warnings (no ``project``; a non-prompting mode with Bash/Edit/Write
-pre-approved). A Codex webhook whose mode is unknown runs ``safe``.
+warnings (no ``project``; Bash/Edit/Write pre-approved in a mode that never
+asks, or by an explicit ``allowed_tools`` in any mode, #1145). A Codex webhook
+whose mode is unknown runs ``safe``.
 """
 
 from __future__ import annotations
@@ -448,9 +449,10 @@ def test_audit_webhook_chat_mode_wins_over_engine_config() -> None:
 @pytest.mark.parametrize(
     ("defaults", "chat_mode", "engine"),
     [
-        # prompting mode: the allowlist isn't sent (#749)
+        # prompting mode: the implicit allowlist isn't sent (#749)
         (TriggerEngineDefaults(claude_allowed_tools=("Bash",)), "default", "claude"),
-        # bypass is downgraded to default on webhooks (#1142)
+        # bypass is downgraded to default on webhooks (#1142), which drops
+        # the implicit allowlist (an explicit one is flagged, #1145)
         (
             TriggerEngineDefaults(claude_allowed_tools=("Bash",)),
             "bypassPermissions",
@@ -536,3 +538,274 @@ def test_log_trigger_permission_risks_once() -> None:
     hook = events["trigger.webhook.no_project"]
     assert hook["webhook_id"] == "bare"
     assert hook["log_level"] == "warning"
+
+
+# --- #1145: an explicit allowlist is sent in prompting modes too ------------
+#
+# #749 drops the *implicit* default allowlist in prompting modes but sends an
+# explicit `[engines.claude] allowed_tools` in every mode, so a webhook in a
+# `default` / `acceptEdits` chat, or one downgraded from bypass (#1142), still
+# has Bash pre-approved. The audit must flag those, and only those.
+
+EXPLICIT_BASH = ("Bash", "Read")
+
+
+@pytest.mark.parametrize(
+    ("chat_mode", "claude_mode", "skip", "mode", "origin", "outcome"),
+    [
+        (
+            "bypassPermissions",
+            None,
+            False,
+            "bypassPermissions",
+            "chat",
+            "runs_as_default",
+        ),
+        (
+            None,
+            "bypassPermissions",
+            False,
+            "bypassPermissions",
+            "engine_config",
+            "runs_as_default",
+        ),
+        (
+            "auto",
+            None,
+            True,
+            "bypassPermissions",
+            "dangerously_skip_permissions",
+            "runs_as_default",
+        ),
+        ("acceptEdits", None, False, "acceptEdits", "chat", None),
+        ("default", None, False, "default", "chat", None),
+        (None, "default", False, "default", "engine_config", None),
+        ("manual", None, False, "manual", "chat", None),
+    ],
+    ids=[
+        "bypass-chat-downgraded",
+        "bypass-toml-downgraded",
+        "skip-downgraded",
+        "acceptEdits",
+        "default",
+        "default-toml",
+        "manual",
+    ],
+)
+def test_audit_webhook_explicit_allowlist_flagged_in_prompting_modes(
+    chat_mode: str | None,
+    claude_mode: str | None,
+    skip: bool,
+    mode: str,
+    origin: str,
+    outcome: str | None,
+) -> None:
+    risks = _audit(
+        _triggers(webhooks=[_hook(project="myapp")]),
+        defaults=TriggerEngineDefaults(
+            claude_mode=claude_mode,
+            claude_skip_permissions=skip,
+            claude_allowed_tools=EXPLICIT_BASH,
+            claude_allowed_tools_explicit=True,
+        ),
+        chat_modes={(DEFAULT_CHAT, "claude"): chat_mode},
+    )
+    (risk,) = _events(risks, "trigger.webhook.preapproved_tools")
+    assert risk.trigger == WEBHOOK
+    assert risk.tools == ("Bash",)
+    assert risk.mode == mode
+    assert risk.origin == origin
+    assert risk.outcome == outcome
+    assert risk.chat_id == DEFAULT_CHAT
+
+
+@pytest.mark.parametrize(
+    ("chat_mode", "claude_mode", "skip"),
+    [
+        ("bypassPermissions", None, False),
+        (None, "bypassPermissions", False),
+        ("auto", None, True),
+        ("acceptEdits", None, False),
+        ("default", None, False),
+        ("manual", None, False),
+    ],
+    ids=["bypass-chat", "bypass-toml", "skip", "acceptEdits", "default", "manual"],
+)
+def test_audit_webhook_implicit_allowlist_quiet_in_prompting_modes(
+    chat_mode: str | None, claude_mode: str | None, skip: bool
+) -> None:
+    risks = _audit(
+        _triggers(webhooks=[_hook(project="myapp")]),
+        defaults=TriggerEngineDefaults(
+            claude_mode=claude_mode,
+            claude_skip_permissions=skip,
+            claude_allowed_tools=("Bash", "Read", "Edit", "Write"),
+            claude_allowed_tools_explicit=False,
+        ),
+        chat_modes={(DEFAULT_CHAT, "claude"): chat_mode},
+    )
+    assert _events(risks, "trigger.webhook.preapproved_tools") == []
+
+
+def test_audit_webhook_explicit_allowlist_without_risky_tools_quiet() -> None:
+    risks = _audit(
+        _triggers(webhooks=[_hook(project="myapp")]),
+        defaults=TriggerEngineDefaults(
+            claude_allowed_tools=("Read", "Bash(git:*)"),
+            claude_allowed_tools_explicit=True,
+        ),
+        chat_modes={(DEFAULT_CHAT, "claude"): "acceptEdits"},
+    )
+    assert _events(risks, "trigger.webhook.preapproved_tools") == []
+
+
+def test_log_webhook_preapproved_tools_note_names_explicit_allowlist() -> None:
+    explicit = TriggerEngineDefaults(
+        claude_allowed_tools=EXPLICIT_BASH, claude_allowed_tools_explicit=True
+    )
+    prompting_risks = _audit(
+        _triggers(webhooks=[_hook("edits", project="a")]),
+        defaults=explicit,
+        chat_modes={(DEFAULT_CHAT, "claude"): "acceptEdits"},
+    )
+    auto_risks = _audit(
+        _triggers(webhooks=[_hook("auto", project="b")]),
+        defaults=explicit,
+        chat_modes={(DEFAULT_CHAT, "claude"): "auto"},
+    )
+    with capture_logs() as logs:
+        log_trigger_permission_risks(prompting_risks, warned=set(), reason="startup")
+        log_trigger_permission_risks(auto_risks, warned=set(), reason="startup")
+    prompting, autonomous = (
+        e for e in logs if e["event"] == "trigger.webhook.preapproved_tools"
+    )
+    assert prompting["log_level"] == "warning"
+    assert prompting["webhook_id"] == "edits"
+    assert prompting["mode"] == "acceptEdits"
+    assert prompting["tools"] == ["Bash"]
+    assert "explicitly" in prompting["note"]
+    assert "even in prompting modes" in prompting["note"]
+    # A mode that never asks keeps the original wording.
+    assert autonomous["mode"] == "auto"
+    assert "never asks" in autonomous["note"]
+    assert "explicitly" not in autonomous["note"]
+
+
+def test_log_webhook_downgraded_bypass_reports_outcome() -> None:
+    risks = _audit(
+        _triggers(webhooks=[_hook(project="a")]),
+        defaults=TriggerEngineDefaults(
+            claude_allowed_tools=EXPLICIT_BASH, claude_allowed_tools_explicit=True
+        ),
+        chat_modes={(DEFAULT_CHAT, "claude"): "bypassPermissions"},
+    )
+    with capture_logs() as logs:
+        log_trigger_permission_risks(risks, warned=set(), reason="reload")
+    (event,) = (e for e in logs if e["event"] == "trigger.webhook.preapproved_tools")
+    assert event["mode"] == "bypassPermissions"
+    assert event["origin"] == "chat"
+    assert event["outcome"] == "runs_as_default"
+    assert event["reason"] == "reload"
+    assert "explicitly" in event["note"]
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["implicit", "explicit"])
+@pytest.mark.parametrize("skip", [False, True], ids=["noskip", "skip"])
+@pytest.mark.parametrize(
+    "claude_mode", [None, "default", "plan", "bypassPermissions"], ids=str
+)
+@pytest.mark.parametrize(
+    "chat_mode",
+    [None, "default", "manual", "acceptEdits", "plan", "auto", "bypassPermissions"],
+    ids=str,
+)
+def test_audit_matches_runner_allowlist(
+    chat_mode: str | None, claude_mode: str | None, skip: bool, explicit: bool
+) -> None:
+    """The audit flags a webhook exactly when the runner sends a risky
+    ``--allowedTools`` for that webhook's run (#1145: the two can't drift)."""
+    runner = _claude(
+        permission_mode=claude_mode,
+        allowed_tools=list(EXPLICIT_BASH),
+        allowed_tools_explicit=explicit,
+        dangerously_skip_permissions=skip,
+    )
+    opts = EngineRunOptions(permission_mode=chat_mode, unattended_trigger=WEBHOOK)
+    with capture_logs(), apply_run_options(opts):
+        args = runner._build_args("hi", None)
+    risks = _audit(
+        _triggers(webhooks=[_hook(project="myapp")]),
+        defaults=TriggerEngineDefaults(
+            claude_mode=claude_mode,
+            claude_skip_permissions=skip,
+            claude_allowed_tools=EXPLICIT_BASH,
+            claude_allowed_tools_explicit=explicit,
+        ),
+        chat_modes={(DEFAULT_CHAT, "claude"): chat_mode},
+    )
+    flagged = bool(_events(risks, "trigger.webhook.preapproved_tools"))
+    assert flagged == ("--allowedTools" in args)
+
+
+@pytest.mark.parametrize(
+    ("mode", "explicit", "expected"),
+    [
+        (None, False, True),
+        ("plan", False, True),
+        ("auto", False, True),
+        ("bypassPermissions", False, True),
+        ("default", False, False),
+        ("manual", False, False),
+        ("acceptEdits", False, False),
+        ("default", True, True),
+        ("manual", True, True),
+        ("acceptEdits", True, True),
+    ],
+)
+def test_claude_sends_allowed_tools(
+    mode: str | None, explicit: bool, expected: bool
+) -> None:
+    from untether.runners.run_options import claude_sends_allowed_tools
+
+    assert claude_sends_allowed_tools(mode, explicit=explicit) is expected
+
+
+@pytest.mark.anyio
+async def test_loop_audit_reads_runner_allowed_tools_explicit() -> None:
+    """``_audit_trigger_permissions`` passes the runner's explicit flag, so an
+    explicit list in an acceptEdits chat is flagged at startup (#1145)."""
+    from types import SimpleNamespace
+
+    from untether.telegram.loop import _audit_trigger_permissions
+
+    runner = _claude(
+        permission_mode="plan",
+        allowed_tools=list(EXPLICIT_BASH),
+        allowed_tools_explicit=True,
+    )
+
+    class _Prefs:
+        async def get_engine_override(self, chat_id: int, engine: str) -> Any:
+            return EngineOverrides(permission_mode="acceptEdits")
+
+    runtime = SimpleNamespace(
+        engine_ids=("claude",),
+        config_path=None,
+        resolve_engine=lambda engine_override, context: engine_override or "claude",
+        resolve_runner=lambda resume_token, engine_override: SimpleNamespace(
+            runner=runner
+        ),
+    )
+    cfg = SimpleNamespace(runtime=runtime, chat_id=DEFAULT_CHAT)
+    state = SimpleNamespace(chat_prefs=_Prefs(), trigger_permission_risks_warned=set())
+    with capture_logs() as logs:
+        await _audit_trigger_permissions(
+            cfg,  # type: ignore[arg-type]
+            state,  # type: ignore[arg-type]
+            _triggers(webhooks=[_hook(project="myapp")]),
+            reason="startup",
+        )
+    assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]
+    (event,) = (e for e in logs if e["event"] == "trigger.webhook.preapproved_tools")
+    assert event["mode"] == "acceptEdits"
+    assert event["tools"] == ["Bash"]

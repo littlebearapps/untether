@@ -20,6 +20,7 @@ from pydantic import (
 from pydantic.types import StrictBool, StrictInt
 
 from ..logging import get_logger
+from .cron_expr import CronExpressionError, parse_cron_expression
 
 logger = get_logger(__name__)
 
@@ -201,6 +202,17 @@ class CronConfig(BaseModel):
                 raise ValueError(
                     f"unknown timezone {v!r}; use IANA names like 'Australia/Melbourne'"
                 ) from None
+        return v
+
+    @field_validator("schedule")
+    @classmethod
+    def _validate_schedule(cls, v: str) -> str:
+        # #1144: the matcher's own grammar, so a schedule that loads is one
+        # that can fire; a bad one is skipped and reported per entry (#1117).
+        try:
+            parse_cron_expression(v)
+        except CronExpressionError as exc:
+            raise ValueError(f"invalid cron schedule {v!r}: {exc}") from None
         return v
 
     @model_validator(mode="after")

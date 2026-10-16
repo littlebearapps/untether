@@ -613,6 +613,15 @@ class TestExposedReload1119:
         mgr.update(self._open(exposed=True))
         assert mgr.webhook_for_path("/hooks/open") is None
 
+    def test_1146_refused_webhook_ids_track_each_update(self):
+        """#1146: the refused ids are exposed so the reload can announce them."""
+        mgr = TriggerManager(self._open())
+        assert mgr.refused_webhook_ids == ()
+        mgr.update(self._open(exposed=True))
+        assert mgr.refused_webhook_ids == ("open",)
+        mgr.update(self._open())
+        assert mgr.refused_webhook_ids == ()
+
     def test_trusted_proxy_header_only_in_effect_when_exposed(self):
         mgr = TriggerManager(self._open(trusted_proxy_header="CF-Connecting-IP"))
         assert mgr.trusted_proxy_header is None

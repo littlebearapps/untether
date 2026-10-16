@@ -6655,13 +6655,13 @@ async def test_894_reload_fixing_failed_startup_triggers_flags_restart_required(
 
     assert [e for e in logs if e["event"] == "triggers.init_failed"]
     restart = [e for e in logs if e["event"] == "config.reload.restart_required"]
-    assert [e["key"] for e in restart] == ["triggers.enabled"]
+    # #1146: the real reason, not an untouched ``triggers.enabled`` key.
+    assert [e.get("reason") for e in restart] == ["triggers_init_failed"]
+    assert "key" not in restart[0]
     transport = cast(FakeTransport, cfg.exec_cfg.transport)
-    notices = [
-        c["message"].text
-        for c in transport.send_calls
-        if "triggers.enabled" in c["message"].text
-    ]
+    texts = [c["message"].text for c in transport.send_calls]
+    assert not [t for t in texts if "triggers.enabled" in t]
+    notices = [t for t in texts if "triggers failed at start-up" in t]
     assert len(notices) == 1
     assert "Restart required" in notices[0]
 
@@ -6893,6 +6893,230 @@ async def test_1117_short_secret_warns_at_startup_and_reload(
     assert manager is not None
     assert manager.webhook_for_path("/hooks/gh") is not None  # still accepted
     _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+# ── #1146: trigger notices match what is actually running ──
+
+
+def _1146_open_webhooks(**server: object) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "server": dict(server),
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            },
+            {
+                "id": "open",
+                "path": "/hooks/open",
+                "auth": "none",
+                "prompt_template": "hi",
+            },
+        ],
+    }
+
+
+_1146_OPEN_TOML = (
+    "[triggers]\nenabled = true\n\n"
+    "[triggers.server]\n{server}\n"
+    "[[triggers.webhooks]]\n"
+    'id = "gh"\npath = "/hooks/gh"\nsecret = "{secret}"\n'
+    'prompt_template = "hi"\n\n'
+    "[[triggers.webhooks]]\n"
+    'id = "open"\npath = "/hooks/open"\nauth = "none"\n'
+    'prompt_template = "hi"\n'
+    "{extra}"
+)
+
+_1146_BROKEN_CRON = (
+    '\n[[triggers.crons]]\nid = "broken"\nschedule = "0 9 * * *"\nfuture_key = 1\n'
+)
+
+
+@pytest.mark.anyio
+async def test_1146_startup_refused_server_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario A at start-up: exposed + an auth = "none" webhook keeps the
+    whole webhook server down. One notice names the refused webhook and says
+    no webhook is served; it never claims the other triggers started
+    normally. An unchanged reload doesn't repeat it."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = _1146_open_webhooks(exposed=True)
+    trigger_config["crons"] = [
+        {"id": "broken", "schedule": "0 9 * * *", "future_key": 1}
+    ]
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=_1146_BROKEN_CRON
+        ),
+    )
+
+    texts = _1117_texts(cfg)
+    refused = [t for t in texts if "Webhook server not started" in t]
+    assert len(refused) == 1
+    assert "no webhooks are being served" in refused[0]
+    assert "Refused: open" in refused[0]
+    assert "cron broken" in refused[0]
+    assert "remove exposed = true" in refused[0]
+    assert not [t for t in texts if "other triggers started normally" in t]
+    assert not [t for t in texts if "Trigger config" in t]  # no second notice
+
+
+@pytest.mark.anyio
+async def test_1146_reload_after_refused_startup_says_server_is_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A later reload notice mustn't say 'reloaded normally' while the
+    webhook server refused at start-up is still down."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks(exposed=True))
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=_1146_BROKEN_CRON
+        ),
+    )
+
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "cron broken" in notices[0]
+    assert "webhook open" not in notices[0]  # already announced at start-up
+    assert "the webhook server isn't running" in notices[0]
+    assert "reloaded normally, but" in notices[0]
+    assert "without a restart" not in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_refusing_open_webhook_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario A on reload: turning on exposed drops only the auth = "none"
+    route, and says so in Telegram like a skipped invalid webhook."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks())
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(server="exposed = true", secret="o" * 40, extra=""),
+    )
+
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/open") is None
+    assert manager.webhook_for_path("/hooks/gh") is not None
+    texts = _1117_texts(cfg)
+    assert not [t for t in texts if "Webhook server not started" in t]
+    notices = [t for t in texts if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "1 trigger skipped" in notices[0]
+    assert "webhook open: refused" in notices[0]
+    assert "The other triggers reloaded normally." in notices[0]
+    assert "remove exposed = true" in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_after_startup_block_failure_needs_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario B: duplicate cron ids stop every trigger at start-up. Saving
+    a fix (with one entry still invalid) can't start them: the restart notice
+    names the real reason and the skipped-entries notice says a restart is
+    still needed."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "dup", "schedule": "0 9 * * *", "prompt": "a"},
+            {"id": "dup", "schedule": "0 10 * * *", "prompt": "b"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            "[triggers]\nenabled = true\n\n[[triggers.crons]]\n"
+            'id = "dup"\nschedule = "0 9 * * *"\nprompt = "a"\n' + _1146_BROKEN_CRON,
+        )
+
+    assert [e for e in logs if e["event"] == "triggers.init_failed"]
+    texts = _1117_texts(cfg)
+    assert not [t for t in texts if "triggers.enabled" in t]
+    restart = [t for t in texts if "Restart required" in t]
+    assert len(restart) == 1
+    assert "triggers failed at start-up" in restart[0]
+    skipped = [t for t in texts if "Trigger config" in t]
+    assert len(skipped) == 1
+    assert "cron broken" in skipped[0]
+    assert "normally" not in skipped[0]
+    assert "without a restart" not in skipped[0]
+    assert "No triggers are running" in skipped[0]
+
+
+@pytest.mark.anyio
+async def test_1144_startup_notice_keeps_cron_asterisks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 defect: with two invalid schedules in one notice, Telegram
+    turned the asterisks between them into italics ('99 99 * * ' and ' *')."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "bad-range", "schedule": "99 99 * * *", "prompt": "a"},
+            {"id": "two-fields", "schedule": "* *", "prompt": "b"},
+            {"id": "good", "schedule": "17 3 * * *", "prompt": "c"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    calls = [c for c in transport.send_calls if "Trigger config" in c["message"].text]
+    assert len(calls) == 1
+    message = calls[0]["message"]
+    assert "'99 99 * * *'" in message.text
+    assert "'* *'" in message.text
+    entities = message.extra.get("entities", [])
+    assert not [e for e in entities if e["type"] in {"italic", "bold"}]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_block_failure_with_server_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 edge case: the webhook server was refused at start-up, then a
+    reload broke the whole [triggers] block. No webhook is served, so the
+    notice mustn't say webhooks still run or an old secret is active."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks(exposed=True))
+    dup_crons = (
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 9 * * *"\nprompt = "a"\n'
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 10 * * *"\nprompt = "b"\n'
+    )
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=dup_crons
+        ),
+    )
+
+    notices = [t for t in _1117_texts(cfg) if "reload failed" in t]
+    assert len(notices) == 1
+    assert "previous crons are still running unchanged" in notices[0]
+    assert "no webhooks are being served" in notices[0]
+    assert "crons and webhooks are still running" not in notices[0]
+    assert "secret" not in notices[0]
+    assert "to start the webhook server" in notices[0]
 
 
 def test_894_triggers_enable_needs_restart_truth_table() -> None:

@@ -190,6 +190,23 @@ def is_claude_prompting_mode(mode: str | None) -> bool:
     return mode in _CLAUDE_PROMPTING_MODES
 
 
+# #1142: the mode a Claude webhook runs in instead of an inherited bypass.
+# Read by `ClaudeRunner` and the #1145 webhook audit.
+CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE = "default"
+
+
+def claude_sends_allowed_tools(mode: str | None, *, explicit: bool) -> bool:
+    """True when a Claude run in *mode* sends ``--allowedTools`` (#749).
+
+    The implicit default allowlist is dropped in prompting modes, so it can't
+    pre-approve the tools those modes exist to ask about; an explicit
+    ``[engines.claude] allowed_tools`` is the user's choice and is sent in
+    every mode. ``ClaudeRunner._build_args`` and the #1145 webhook audit both
+    use this, so the warning can't drift from what the runner does.
+    """
+    return explicit or not is_claude_prompting_mode(mode)
+
+
 # Modes in which an unattended run (cron / webhook) stops and waits for a
 # Telegram tap nobody is there to give (#751): the prompting modes wait for a
 # tool approval, and ``plan`` waits for the ``ExitPlanMode`` approval, which

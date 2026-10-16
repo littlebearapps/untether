@@ -54,6 +54,7 @@ from .logging import get_logger
 from .model import EngineId, ResumeToken
 from .transport import ChannelId, RenderedMessage, SendOptions, Transport
 from .triggers.cron import cron_matches
+from .triggers.cron_expr import CronExpressionError, parse_cron_expression
 from .utils.json_state import atomic_write_json
 
 logger = get_logger(__name__)
@@ -1232,10 +1233,11 @@ def _next_cron_fire(expression: str) -> float | None:
     the current minute) up to a 366-day horizon.  Returns ``None`` if the
     expression never matches in that window (almost certainly malformed).
     """
-    if not expression or not expression.strip():
-        return None
-    fields = expression.strip().split()
-    if len(fields) != 5:
+    # #1144: reject a malformed expression up front with the matcher's own
+    # grammar, rather than walking a year of minutes that can never match.
+    try:
+        parse_cron_expression(expression)
+    except CronExpressionError:
         return None
     now_monotonic = time.monotonic()
     now_wallclock_dt = datetime.datetime.now().replace(second=0, microsecond=0)

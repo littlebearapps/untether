@@ -1033,3 +1033,105 @@ class TestServerExposed1119:
     def test_exposed_must_be_a_real_bool(self):
         with pytest.raises(ValidationError):
             parse_trigger_config({"server": {"exposed": "yes"}})
+
+
+class TestCronScheduleValidation1144:
+    """#1144: ``schedule`` is validated at parse time with the matcher's own
+    grammar, so a bad one is skipped and reported like any other bad entry."""
+
+    @pytest.mark.parametrize(
+        ("schedule", "needle"),
+        [
+            ("99 99 * * *", "minute field: 99 is out of range (0–59)"),
+            ("* *", "needs 5 fields"),
+            ("*/0 * * * *", "minute field: step must be a whole number of 1 or more"),
+            ("a b c d e", "minute field: 'a' isn't a number"),
+            ("5-1 * * * *", "minute field: range 5-1 runs backwards"),
+        ],
+    )
+    def test_cron_config_rejects_bad_schedule(self, schedule, needle):
+        with pytest.raises(ValidationError) as excinfo:
+            CronConfig(id="x", schedule=schedule, prompt="hi")
+        assert needle in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [
+            "0 3 * * 1-5",
+            "*/15 * * * *",
+            "0 0 1,15 * *",
+            "* * * * *",
+            "0 9 * * *",
+            "0 0 1 1 *",
+            "0 10 * * 7",
+            "30 13 * * *",
+        ],
+    )
+    def test_cron_config_accepts_good_schedule(self, schedule):
+        assert CronConfig(id="x", schedule=schedule, prompt="hi").schedule == schedule
+
+    def test_bad_schedule_is_isolated_and_reported(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {
+                "enabled": True,
+                "crons": [
+                    _cron("good"),
+                    _cron("bad-sched", schedule="99 99 * * *"),
+                    _cron("bad-count", schedule="* *"),
+                    _cron("bad-step", schedule="*/0 * * * *"),
+                    _cron("bad-token", schedule="a b c d e"),
+                ],
+            }
+        )
+        assert [c.id for c in parsed.settings.crons] == ["good"]
+        assert [(i.kind, i.trigger_id) for i in parsed.invalid] == [
+            ("cron", "bad-sched"),
+            ("cron", "bad-count"),
+            ("cron", "bad-step"),
+            ("cron", "bad-token"),
+        ]
+        first = parsed.invalid[0].error
+        assert first.startswith("schedule:")
+        assert "minute field: 99 is out of range (0–59)" in first
+
+    def test_bad_schedule_appears_in_telegram_notice(self):
+        from untether.config_reload_notification import (
+            format_invalid_triggers_notice,
+        )
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {"crons": [_cron("good"), _cron("it7-bad-sched", schedule="99 99 * * *")]}
+        )
+        from untether.markdown import MarkdownParts
+        from untether.telegram.render import prepare_telegram
+
+        notice = format_invalid_triggers_notice(parsed.invalid, phase="reload")
+        assert notice.startswith("⚠️ Trigger config: 1 trigger skipped (invalid)")
+        assert "• cron it7-bad-sched: schedule:" in notice
+        # The notice is markdown with user text escaped (#1144): check what
+        # Telegram shows.
+        rendered, _entities = prepare_telegram(MarkdownParts(header=notice))
+        assert "'99 99 * * *'" in rendered
+        assert "minute field: 99 is out of range (0–59)" in rendered
+
+    def test_bad_schedule_logs_trigger_invalid(self):
+        from structlog.testing import capture_logs
+
+        from untether.triggers.settings import (
+            log_invalid_triggers,
+            parse_trigger_config_isolated,
+        )
+
+        parsed = parse_trigger_config_isolated(
+            {"crons": [_cron("bad-sched", schedule="a b c d e")]}
+        )
+        with capture_logs() as logs:
+            log_invalid_triggers(parsed.invalid, phase="reload")
+        hits = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+        assert len(hits) == 1
+        assert hits[0]["trigger_id"] == "bad-sched"
+        assert hits[0]["kind"] == "cron"
+        assert "minute field: 'a' isn't a number" in hits[0]["error"]

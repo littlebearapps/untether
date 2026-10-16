@@ -103,7 +103,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `triggers/manager.py` | Mutable holder for crons + webhooks; hot-reload on TOML change; master `pause()` / `resume()` / `is_paused` toggle. |
 | `triggers/server.py` | Webhook HTTP server (aiohttp); returns `503 triggers paused` while master pause is active; `/health` reflects paused state. |
 | `triggers/dispatcher.py` | Routes webhook/cron fires to `run_job()` or non-agent action handlers. |
-| `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop. |
+| `triggers/cron.py` | Cron matcher, timezone-aware scheduler loop. |
+| `triggers/cron_expr.py` | 5-field cron grammar shared by the matcher and config validation. |
 | `triggers/history.py` | Persistent JSON history of cron/webhook fire times for `/stats` triggered/manual breakdown. |
 | `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → ⏰ Triggers`. |
 | `triggers/actions.py`, `triggers/fetch.py` | Non-agent webhook actions (`file_write`, `http_forward`, `notify_only`) and cron `fetch` steps. |

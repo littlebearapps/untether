@@ -171,6 +171,12 @@ Common patterns:
 | `0 */2 * * *` | Every 2 hours |
 | `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
 
+Use numbers only: names like `MON` or `JAN` aren't supported. A schedule with a
+mistake (the wrong number of fields, a value out of range such as minute `99`, a
+step of `0`, or a range that runs backwards such as `5-1`) is caught when the config
+loads: that cron is skipped and the Telegram notice names the bad field (see
+[When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)).
+
 ### Data-fetch crons
 
 Crons can pull data from external sources before rendering the prompt:
@@ -312,8 +318,9 @@ accessible immediately, and removed webhooks start returning 404.
 
 Each `[[triggers.crons]]` and `[[triggers.webhooks]]` entry is checked on its own
 ([#1117](https://github.com/littlebearapps/untether/issues/1117)). An entry with a
-mistake (a missing `prompt`, a typo in a key, or a key your installed version doesn't
-know yet) is skipped and the others keep running. Untether logs
+mistake (a missing `prompt`, a typo in a key, a bad cron `schedule`
+([#1144](https://github.com/littlebearapps/untether/issues/1144)), or a key your
+installed version doesn't know yet) is skipped and the others keep running. Untether logs
 `triggers.trigger_invalid` and posts a notice in Telegram naming the skipped trigger
 and what's wrong with it. A skipped webhook is switched off, so its old secret stops
 working too.
@@ -324,6 +331,14 @@ value, an unknown key directly under `[triggers]`, or two entries with the same 
 On a reload the previous crons and webhooks keep running (`config.reload.triggers_failed`),
 and the Telegram notice names every webhook whose **old secret is still accepted**, so
 a secret you were rotating doesn't stay live without you knowing.
+
+The notices only say the other triggers "started normally" or "reloaded normally"
+when they really are running
+([#1146](https://github.com/littlebearapps/untether/issues/1146)). If the triggers
+failed at startup, or the webhook server didn't start, saving a fix can't start them:
+the notice says to restart instead, and the restart notice names the reason
+(`triggers failed at start-up`). An `auth = "none"` webhook refused by `exposed = true`
+is announced the same way (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)).
 
 !!! tip "Upgrade first, then edit"
     When a new version adds a trigger key, install it before you add the key to
@@ -376,7 +391,7 @@ permission_mode = "auto"
 
     - `trigger.cron.inherits_bypass` — a cron with no `permission_mode` of its own that inherits Claude's `bypassPermissions` (it keeps it) or Antigravity's Full access (it runs as Workspace). Set `permission_mode` on the cron to make the choice explicit
     - `trigger.webhook.no_project` — an `agent_run` webhook with no `project`, which runs in Untether's own working directory
-    - `trigger.webhook.preapproved_tools` — an `agent_run` webhook whose Claude mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or no mode at all) while `[engines.claude] allowed_tools` pre-approves `Bash`, `Edit` or `Write` (the default list does). Use a prompting mode for the webhook's chat or narrow `allowed_tools`
+    - `trigger.webhook.preapproved_tools` — an `agent_run` webhook whose Claude mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or no mode at all) while `[engines.claude] allowed_tools` pre-approves `Bash`, `Edit` or `Write` (the default list does). Use a prompting mode for the webhook's chat or narrow `allowed_tools`. If you set `allowed_tools` yourself, it applies even in prompting modes, so this also fires for a webhook in a `default`, `manual` or `acceptEdits` chat, or one whose bypass mode was downgraded to `default`; remove `Bash`, `Edit` and `Write` from the list to stop those tools running without an approval
 
     These are warnings only; a later release makes them stricter ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
 

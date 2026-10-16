@@ -419,6 +419,7 @@ async def _notify_reload_applied(
     path: Path,
     hot_keys: list[str],
     restart_keys: list[str],
+    restart_reasons: Sequence[str] = (),
     running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
     """#547 axis 2 / #548: send a reload confirmation so agents and users
@@ -431,16 +432,23 @@ async def _notify_reload_applied(
     pings. Recipients come from :func:`_reload_notice_targets`. Per-chat
     failures are logged and skipped — one bad chat can't mask the notice
     from the rest.
+
+    ``restart_reasons`` (#1146) are restarts no edited key explains, e.g.
+    triggers that failed at start-up.
     """
-    if not hot_keys and not restart_keys:
+    restart_pending = bool(restart_keys) or bool(restart_reasons)
+    if not hot_keys and not restart_pending:
         return
     from ..config_reload_notification import format_reload_notification
 
     text = format_reload_notification(
-        path=path, hot_keys=hot_keys, restart_keys=restart_keys
+        path=path,
+        hot_keys=hot_keys,
+        restart_keys=restart_keys,
+        restart_reasons=restart_reasons,
     )
     targets = _reload_notice_targets(
-        cfg, running_tasks, restart_pending=bool(restart_keys)
+        cfg, running_tasks, restart_pending=restart_pending
     )
     sent_count = 0
     for chat_id, thread_id in targets:
@@ -452,7 +460,7 @@ async def _notify_reload_applied(
                     extra={"parse_mode": "Markdown"},
                 ),
                 # A pending restart needs action; a confirmation doesn't.
-                options=SendOptions(notify=bool(restart_keys), thread_id=thread_id),
+                options=SendOptions(notify=restart_pending, thread_id=thread_id),
             )
             if sent is not None:
                 sent_count += 1
@@ -467,6 +475,7 @@ async def _notify_reload_applied(
         "config.reload.applied_notify.sent",
         hot_keys=hot_keys,
         restart_keys=restart_keys,
+        restart_reasons=list(restart_reasons),
         targets=[list(target) for target in targets],
         sent_count=sent_count,
     )
@@ -482,7 +491,8 @@ async def _notify_trigger_config_problem(
     ``[triggers]`` block that failed) to the reload-notice audience.
 
     Rendered from markdown into entities (no parse mode), so validation text
-    full of ``_`` can't make the send fail. Never raises.
+    full of ``_`` can't make the send fail; the formatters escape user text
+    (#1144), so a schedule's ``*`` shows as typed. Never raises.
     """
     from ..markdown import MarkdownParts
     from .render import prepare_telegram
@@ -521,17 +531,34 @@ async def _notify_new_invalid_triggers(
     cfg: TelegramBridgeConfig,
     state: TelegramLoopState,
     invalid: Sequence[InvalidTrigger],
+    *,
+    trigger_manager: TriggerManager | None,
+    exposed: bool,
 ) -> None:
     """#1117: on reload, announce only entries not already announced (an
-    unrelated edit doesn't repeat the notice; a fixed entry is forgotten)."""
+    unrelated edit doesn't repeat the notice; a fixed entry is forgotten).
+
+    #1146: ``auth="none"`` webhooks the reload refused are announced the same
+    way, and the notice only says "reloaded normally" when the triggers (and
+    the webhook server) are really running."""
     from ..config_reload_notification import format_invalid_triggers_notice
 
+    refused = trigger_manager.refused_webhook_ids if trigger_manager else ()
     new = [item for item in invalid if item not in state.trigger_invalid_notified]
+    new_refused = [i for i in refused if i not in state.trigger_refused_notified]
     state.trigger_invalid_notified = set(invalid)
-    if new:
+    state.trigger_refused_notified = set(refused)
+    if new or new_refused:
         await _notify_trigger_config_problem(
             cfg,
-            format_invalid_triggers_notice(new, phase="reload"),
+            format_invalid_triggers_notice(
+                new,
+                phase="reload",
+                refused_webhook_ids=new_refused,
+                exposed=exposed,
+                running=trigger_manager is not None,
+                webhook_server_running=not state.webhook_server_refused,
+            ),
             running_tasks=state.running_tasks,
         )
 
@@ -610,6 +637,10 @@ async def _audit_trigger_permissions(
             claude_allowed_tools=_allowed_tools_tuple(
                 runner_attr(CLAUDE_ENGINE, "allowed_tools")
             ),
+            claude_allowed_tools_explicit=runner_attr(
+                CLAUDE_ENGINE, "allowed_tools_explicit"
+            )
+            is True,
             antigravity_mode=agy_mode if isinstance(agy_mode, str) else None,
         )
         risks = audit_trigger_permission_risks(
@@ -635,7 +666,10 @@ async def _notify_trigger_block_failure_on_reload(
 ) -> None:
     """#1117: a reload whose ``[triggers]`` block failed keeps the previous
     triggers, so say so in Telegram, naming the webhooks whose old secret is
-    still accepted. Once per distinct error."""
+    still accepted. Once per distinct error.
+
+    #1146: if start-up refused the webhook server, only the crons are still
+    running and no webhook secret is being accepted."""
     from ..config_reload_notification import format_trigger_block_failure_notice
 
     if state.trigger_block_error_notified == error:
@@ -649,6 +683,7 @@ async def _notify_trigger_block_failure_on_reload(
             phase="reload",
             running=trigger_manager is not None,
             active_secret_webhook_ids=active,
+            webhook_server_running=not state.webhook_server_refused,
         ),
         running_tasks=state.running_tasks,
     )
@@ -1205,6 +1240,20 @@ class TelegramLoopState:
     # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
     trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
     trigger_block_error_notified: str | None = None
+    # #1146: refused ``auth="none"`` webhook ids already announced; whether
+    # that refusal kept the webhook server down at start-up (it stays down
+    # until a restart); and whether the whole [triggers] block failed at
+    # start-up (a reload then needs a restart for that reason, not because
+    # ``triggers.enabled`` was touched).
+    trigger_refused_notified: set[str] = field(default_factory=set)
+    webhook_server_refused: bool = False
+    triggers_init_failed: bool = False
+
+
+# #1146: the restart reason a reload names after [triggers] failed at start-up.
+_TRIGGERS_INIT_FAILED_RESTART_REASON = (
+    "triggers failed at start-up, so no crons or webhooks are running"
+)
 
 
 def _triggers_enable_needs_restart(
@@ -2273,6 +2322,7 @@ async def run_main_loop(
                 # in next-turn context) whether a restart is required.
                 _reload_hot_keys: list[str] = []
                 _reload_restart_keys: list[str] = []
+                _reload_restart_reasons: list[str] = []
                 if state.transport_snapshot is not None:
                     new_snapshot = reload.settings.transports.telegram.model_dump()
                     changed = _diff_keys(state.transport_snapshot, new_snapshot)
@@ -2362,16 +2412,29 @@ async def run_main_loop(
                         current=triggers_enabled_now,
                         running=trigger_manager is not None,
                     ):
-                        logger.warning(
-                            "config.reload.restart_required",
-                            key="triggers.enabled",
-                            hint=(
-                                "The cron scheduler and webhook server only "
-                                "start at startup; restart Untether to run "
-                                "the configured triggers."
-                            ),
+                        enable_hint = (
+                            "The cron scheduler and webhook server only "
+                            "start at startup; restart Untether to run "
+                            "the configured triggers."
                         )
-                        _reload_restart_keys.append("triggers.enabled")
+                        if state.triggers_init_failed:
+                            # #1146: [triggers] failed at start-up, so the
+                            # key wasn't touched — name the real reason.
+                            logger.warning(
+                                "config.reload.restart_required",
+                                reason="triggers_init_failed",
+                                hint=enable_hint,
+                            )
+                            _reload_restart_reasons.append(
+                                _TRIGGERS_INIT_FAILED_RESTART_REASON
+                            )
+                        else:
+                            logger.warning(
+                                "config.reload.restart_required",
+                                key="triggers.enabled",
+                                hint=enable_hint,
+                            )
+                            _reload_restart_keys.append("triggers.enabled")
                     state.triggers_enabled = triggers_enabled_now
 
                 # #547 axis 2 / #548: send the affirmative
@@ -2383,13 +2446,14 @@ async def run_main_loop(
                 # this message in next-turn context and adapt. #1030: to
                 # the admin DMs and the chats with a run in flight, not
                 # every project chat (a pending restart still goes wide).
-                if _reload_hot_keys or _reload_restart_keys:
+                if _reload_hot_keys or _reload_restart_keys or _reload_restart_reasons:
                     try:
                         await _notify_reload_applied(
                             cfg,
                             path=reload.config_path,
                             hot_keys=_reload_hot_keys,
                             restart_keys=_reload_restart_keys,
+                            restart_reasons=_reload_restart_reasons,
                             running_tasks=state.running_tasks,
                         )
                     except Exception:  # noqa: BLE001 — never break reload
@@ -2433,7 +2497,11 @@ async def run_main_loop(
                                 parsed_triggers.invalid, phase="reload"
                             )
                             await _notify_new_invalid_triggers(
-                                cfg, state, parsed_triggers.invalid
+                                cfg,
+                                state,
+                                parsed_triggers.invalid,
+                                trigger_manager=trigger_manager,
+                                exposed=new_settings.server.exposed,
                             )
                             warn_short_webhook_secrets(new_settings)
                             # #894: warn (once) about project-only triggers
@@ -2452,6 +2520,7 @@ async def run_main_loop(
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
                             state.trigger_invalid_notified = set()
+                            state.trigger_refused_notified = set()
                             state.trigger_block_error_notified = None
                     except (ValueError, TypeError, OSError) as exc:
                         # #1117: secret-free summary, plus a Telegram notice
@@ -2922,6 +2991,7 @@ async def run_main_loop(
                 from ..config_reload_notification import (
                     format_invalid_triggers_notice,
                     format_trigger_block_failure_notice,
+                    format_webhook_server_refused_notice,
                 )
                 from ..triggers.cron import run_cron_scheduler
                 from ..triggers.dispatcher import TriggerDispatcher
@@ -2941,16 +3011,6 @@ async def run_main_loop(
                     trigger_settings = parsed_triggers.settings
                     log_invalid_triggers(parsed_triggers.invalid, phase="startup")
                     state.trigger_invalid_notified = set(parsed_triggers.invalid)
-                    if parsed_triggers.invalid:
-                        tg.start_soon(
-                            partial(
-                                _notify_trigger_config_problem,
-                                cfg,
-                                format_invalid_triggers_notice(
-                                    parsed_triggers.invalid, phase="startup"
-                                ),
-                            )
-                        )
                     warn_short_webhook_secrets(trigger_settings)
                     # #894: a project-only trigger posts to the default chat,
                     # not the project's — warn once so it isn't a surprise.
@@ -2982,6 +3042,27 @@ async def run_main_loop(
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
                     cfg.trigger_manager = trigger_manager
+                    # #1146: an auth="none" webhook refused here keeps the
+                    # whole webhook server down (run_webhook_server applies
+                    # the same check), so say that, not "started normally".
+                    refused = trigger_manager.refused_webhook_ids
+                    state.trigger_refused_notified = set(refused)
+                    state.webhook_server_refused = bool(refused)
+                    startup_notice: str | None = None
+                    if refused:
+                        startup_notice = format_webhook_server_refused_notice(
+                            refused,
+                            exposed=trigger_settings.server.exposed,
+                            invalid=parsed_triggers.invalid,
+                        )
+                    elif parsed_triggers.invalid:
+                        startup_notice = format_invalid_triggers_notice(
+                            parsed_triggers.invalid, phase="startup"
+                        )
+                    if startup_notice is not None:
+                        tg.start_soon(
+                            partial(_notify_trigger_config_problem, cfg, startup_notice)
+                        )
                     trigger_dispatcher = TriggerDispatcher(
                         run_job=run_job,
                         transport=cfg.exec_cfg.transport,
@@ -3035,8 +3116,10 @@ async def run_main_loop(
                     )
                     # #894: nothing is running, so treat triggers as off —
                     # a reload that fixes the TOML is then flagged
-                    # restart-required like an off→on flip.
+                    # restart-required (#1146: naming this failure, not
+                    # ``triggers.enabled``).
                     state.triggers_enabled = False
+                    state.triggers_init_failed = True
 
             def resolve_topic_key(
                 msg: TelegramIncomingMessage,
