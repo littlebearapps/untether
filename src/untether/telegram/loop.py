@@ -3261,6 +3261,22 @@ async def run_main_loop(
 
             async def dispatch_prompt_run(
                 *,
+                route: first_start.Route | None = None,
+                **kwargs: Any,
+            ) -> None:
+                # #1157: the prompt counts as routed toward the first-start
+                # wait from here (or from its caller's earlier route), before
+                # any await, so a /new or /cancel that drops the first start
+                # while it is still on its way drops it too.
+                route = route if route is not None else first_start.route()
+                try:
+                    await _dispatch_prompt_run(route=route, **kwargs)
+                finally:
+                    first_start.close_route(route)
+
+            async def _dispatch_prompt_run(
+                *,
+                route: first_start.Route,
                 msg: TelegramIncomingMessage,
                 prompt_text: str,
                 resolved: ResolvedMessage,
@@ -3342,6 +3358,23 @@ async def run_main_loop(
                     # between the stored-session lookup and this.
                     first = first_start.get(start_key)
                     if first is None:
+                        dropped_by = first_start.dropped_since(route, start_key)
+                        if dropped_by is not None:
+                            # It was on its way here (e.g. sending its steer
+                            # fallback notice) when /cancel or /new dropped
+                            # the first start it would have waited on.
+                            logger.info(
+                                "prompt.first_start_dropped",
+                                chat_id=chat_id,
+                                user_msg_id=user_msg_id,
+                                command=dropped_by,
+                                dropped=1,
+                                in_flight=True,
+                            )
+                            await make_reply(cfg, msg)(
+                                text=dropped_notice(1, command=dropped_by)
+                            )
+                            return
                         break
                     logger.info(
                         "prompt.waiting_first_start",
@@ -3369,6 +3402,9 @@ async def run_main_loop(
                             topic_key=topic_key,
                             engine_for_session=engine_resolution.engine,
                         )
+                # Past the wait: the scheduler / a registered first start
+                # covers this message from here.
+                first_start.close_route(route)
                 if resume_token is None:
                     if start_key is None:
                         await run_job(
@@ -3534,6 +3570,16 @@ async def run_main_loop(
                 )
 
             async def _dispatch_pending_prompt(pending: _PendingPrompt) -> None:
+                # #1157: routed from the moment the coalescer hands it over.
+                route = first_start.route()
+                try:
+                    await _dispatch_pending_prompt_routed(pending, route)
+                finally:
+                    first_start.close_route(route)
+
+            async def _dispatch_pending_prompt_routed(
+                pending: _PendingPrompt, route: first_start.Route
+            ) -> None:
                 msg = pending.msg
                 reply = make_reply(cfg, msg)
                 try:
@@ -3579,6 +3625,7 @@ async def run_main_loop(
                 if not ok:
                     return
                 await dispatch_prompt_run(
+                    route=route,
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,

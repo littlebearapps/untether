@@ -132,6 +132,9 @@ async def _drive(
     fail_first: bool = False,
     stop: TelegramIncomingMessage | None = None,
     until: Any = None,
+    transport: FakeTransport | None = None,
+    before_stop: Any = None,
+    after_stop: Any = None,
 ) -> tuple[StartGatedRunner, ChatSessionStore, FakeTransport]:
     state_path = tmp_path / "untether.toml"
     store = ChatSessionStore(resolve_sessions_path(state_path))
@@ -139,7 +142,7 @@ async def _drive(
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         await prefs.set_followup_mode(CHAT, followup_mode)
     runner = StartGatedRunner(engine, fail_first=fail_first)
-    transport = FakeTransport()
+    transport = transport if transport is not None else FakeTransport()
     runtime = TransportRuntime(
         router=_make_router(runner),
         projects=_empty_projects(),
@@ -166,10 +169,15 @@ async def _drive(
         for m in rest:
             yield m
         # Give every follow-up time to dispatch while the first is starting.
-        await anyio.sleep(0.3)
+        if before_stop is not None:
+            await before_stop()
+        else:
+            await anyio.sleep(0.3)
         if stop is not None:
             # /cancel or /new while the first run is still starting.
             yield stop
+            if after_stop is not None:
+                await after_stop(runner)
             await _wait_for(lambda: _dropped_notices(transport))
             await anyio.sleep(0.3)  # a released waiter would have run by now
             runner.gate.set()
@@ -348,3 +356,113 @@ async def test_a_failed_session_save_still_releases_the_waiter(
     assert runner.max_active == 1
     if len(runner.calls) > 1:
         assert runner.calls[1][1] == ResumeToken(engine="codex", value="conv-1")
+
+
+class NoticeGatedTransport(FakeTransport):
+    """Holds the steer fallback notice ("… queued instead") for message 11
+    in flight until ``release`` is set — the window #1157's qa9 run hit."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.notice_in_flight = anyio.Event()
+        self.release = anyio.Event()
+
+    async def send(self, *, channel_id: Any, message: Any, options: Any = None) -> Any:
+        if (
+            message.text.startswith("\N{RIGHTWARDS ARROW WITH HOOK}")
+            and options is not None
+            and options.reply_to is not None
+            and options.reply_to.message_id == 11
+        ):
+            self.notice_in_flight.set()
+            await self.release.wait()
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "notice"),
+    [
+        ("/cancel", "🗑️ Dropped 1 message sent just before /cancel"),
+        ("/new", "🗑️ Dropped 1 message sent just before /new"),
+    ],
+)
+@pytest.mark.parametrize("engine", ["claude", "antigravity"])
+async def test_cancel_or_new_drops_a_followup_still_sending_its_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    command: str,
+    notice: str,
+) -> None:
+    """qa9: ``/new`` ~0.5 s after M2, while M2 was still posting its steer
+    fallback notice and so not yet waiting on the first start, missed it — M2
+    then ran in the new conversation. It is routed from the start, so the
+    drop reaches it: the 🗑️ reply, and it never runs."""
+    from collections import OrderedDict
+
+    from untether.telegram import first_start, steer
+
+    monkeypatch.setattr(steer, "_NOTICED", OrderedDict())
+    transport = NoticeGatedTransport()
+
+    async def before_stop() -> None:
+        with anyio.fail_after(5):
+            await transport.notice_in_flight.wait()
+
+    async def after_stop(runner: StartGatedRunner) -> None:
+        # The command has stopped the first run; only now does M2's notice
+        # send finish and M2 carry on toward the first-start wait.
+        await _wait_for(lambda: runner.finished >= 1)
+        transport.release.set()
+
+    runner, store, _ = await _drive(
+        tmp_path,
+        engine=engine,
+        followup_mode="steer",
+        stop=_msg(command, 12),
+        transport=transport,
+        before_stop=before_stop,
+        after_stop=after_stop,
+    )
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["first"]
+    (dropped,) = _dropped_notices(transport)
+    assert dropped["message"].text.startswith(notice)
+    assert dropped["options"].reply_to.message_id == 11
+    assert await store.get_session_resume(CHAT, None, engine) is None
+    # Nothing is left behind for later messages.
+    assert first_start._DROPPED == {}
+    assert first_start._OPEN_ROUTES == {}
+
+
+async def test_a_message_routed_after_the_drop_runs_normally() -> None:
+    """Only messages routed before the drop are dropped; a later one (sent
+    after /new) is not, and the record goes once no earlier route is open."""
+    from untether.telegram import first_start
+
+    key = first_start.first_start_key(None, (CHAT, None), "codex")
+    assert key is not None
+    early = first_start.route()
+    first_start.register(key, chat_id=CHAT, thread_id=None)
+    assert first_start.drop_waiting(CHAT, thread_filter=None, command="new") == 0
+    late = first_start.route()
+    assert first_start.dropped_since(early, key) == "new"
+    assert first_start.dropped_since(late, key) is None
+    first_start.close_route(late)
+    assert first_start.dropped_since(early, key) == "new"
+    first_start.close_route(early)
+    first_start.close_route(early)  # idempotent
+    assert first_start._DROPPED == {}
+    assert first_start._OPEN_ROUTES == {}
+
+
+async def test_a_drop_with_nothing_in_flight_records_nothing() -> None:
+    from untether.telegram import first_start
+
+    key = first_start.first_start_key(None, (CHAT, None), "codex")
+    assert key is not None
+    first_start.register(key, chat_id=CHAT, thread_id=None)
+    first_start.drop_waiting(CHAT, thread_filter=None, command="cancel")
+    assert first_start._DROPPED == {}
+    assert first_start.get(key) is None

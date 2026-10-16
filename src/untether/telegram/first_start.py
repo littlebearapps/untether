@@ -11,6 +11,13 @@ Such a message has no ``queued`` card yet, so ``/cancel`` and ``/new`` reach
 it here: cancelling the starting run (or ``/new`` in its thread) drops the
 messages waiting on it (:func:`drop_waiting`) — each is told so — rather
 than letting them start a fresh run nobody saw queued.
+
+A message is held from the moment it is routed, not only once it waits: it
+takes a :class:`Route` before its first await (engine defaults, a steer
+attempt and its "queued instead" notice can take a second), and a first
+start dropped after that point drops it too when it gets to the wait
+(:func:`dropped_since`). Otherwise a ``/new`` sent just after it would miss
+it and it would start the new conversation instead.
 """
 
 from __future__ import annotations
@@ -53,6 +60,55 @@ class PendingStart:
 
 _PENDING: dict[FirstStartKey, PendingStart] = {}
 
+# Drops that a message still on its way to the wait must see: key →
+# (generation of the drop, command). Kept only while a route taken before the
+# drop is open, so it stays empty when nothing is in flight.
+_generation = 0
+_DROPPED: dict[FirstStartKey, tuple[int, str]] = {}
+_OPEN_ROUTES: dict[int, int] = {}
+
+
+@dataclass(slots=True, eq=False)
+class Route:
+    """A prompt on its way to the first-start wait (see the module doc)."""
+
+    generation: int
+    closed: bool = False
+
+
+def route() -> Route:
+    """Mark a prompt routed. Call it before the prompt's first await and
+    :func:`close_route` once it has passed the wait (or given up)."""
+    _OPEN_ROUTES[_generation] = _OPEN_ROUTES.get(_generation, 0) + 1
+    return Route(generation=_generation)
+
+
+def close_route(route_: Route) -> None:
+    """Forget ``route_`` (idempotent) and the drops no open route predates."""
+    if route_.closed:
+        return
+    route_.closed = True
+    count = _OPEN_ROUTES.get(route_.generation, 0) - 1
+    if count > 0:
+        _OPEN_ROUTES[route_.generation] = count
+    else:
+        _OPEN_ROUTES.pop(route_.generation, None)
+    oldest = min(_OPEN_ROUTES, default=None)
+    for key, (generation, _) in list(_DROPPED.items()):
+        if oldest is None or generation <= oldest:
+            del _DROPPED[key]
+
+
+def dropped_since(route_: Route, key: FirstStartKey) -> str | None:
+    """The command (``"cancel"`` / ``"new"``) that dropped ``key``'s first
+    start after ``route_`` was taken, or None. A message that finds no first
+    start to wait on checks this: had it got there sooner it would have been
+    waiting, and dropped with the others."""
+    record = _DROPPED.get(key)
+    if record is not None and record[0] > route_.generation:
+        return record[1]
+    return None
+
 
 def first_start_key(
     topic_key: tuple[int, int] | None,
@@ -92,7 +148,9 @@ def drop_waiting(
 
     Called when ``/cancel`` or ``/new`` stops the starting run. Each woken
     waiter replies to its own message and never runs. Returns how many
-    messages were dropped."""
+    messages were dropped (a message still on its way to the wait is not
+    counted here: it finds the drop through :func:`dropped_since`)."""
+    global _generation
     dropped = 0
     for key, start in list(_PENDING.items()):
         if start.chat_id != chat_id:
@@ -102,6 +160,9 @@ def drop_waiting(
         if start.waiting:
             start.dropped_by = command
             dropped += start.waiting
+        if _OPEN_ROUTES:
+            _generation += 1
+            _DROPPED[key] = (_generation, command)
         release(key, start)
     if dropped:
         logger.info(
