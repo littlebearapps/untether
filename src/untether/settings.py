@@ -878,10 +878,21 @@ class UntetherSettings(BaseSettings):
         extra = self.model_extra or {}
         # Support both [engines.claude] (nested) and [claude] (flat) TOML layouts
         engines = extra.get("engines")
-        if isinstance(engines, dict):
+        flat = extra.get(engine_id)
+        if isinstance(engines, dict) and engine_id in engines:
             raw = engines.get(engine_id)
+            if flat is not None:
+                logger.warning(
+                    "config.engine_table.duplicate",
+                    engine=engine_id,
+                    used=f"engines.{engine_id}",
+                    ignored=engine_id,
+                    path=str(config_path),
+                )
         else:
-            raw = extra.get(engine_id)
+            # A flat [engine] table still applies when [engines.*] is used
+            # for other engines.
+            raw = flat
         if raw is None:
             return {}
         if not isinstance(raw, dict):

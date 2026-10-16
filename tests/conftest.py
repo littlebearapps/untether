@@ -234,9 +234,10 @@ def _no_live_network(
 ) -> Iterator[None]:
     """#808: block every non-loopback httpx request.
 
-    Every Claude final runs ``_maybe_append_usage_footer``, which fetched
-    ``https://api.anthropic.com/api/oauth/usage`` with the host's real OAuth
-    token (and could 429 the live bots). Patching the real transports means
+    A Claude final with the subscription-usage footer on (and ``/usage``)
+    fetches ``https://api.anthropic.com/api/oauth/usage`` with the host's
+    real OAuth token (and could 429 the live bots); before #1150 every
+    Claude final did. Patching the real transports means
     ``httpx.MockTransport`` and loopback servers (trigger webhook tests) keep
     working; anything else raises ``httpx.ConnectError``, which the usage
     path already swallows. Opt out with ``@pytest.mark.allow_network``.

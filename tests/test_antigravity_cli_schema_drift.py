@@ -8,8 +8,9 @@ here before it fails in a chat.
 Two tiers (08 §5, REVIEW m1):
 
 - **ungated** — ``agy --version``, ``agy --help`` and the unknown-flag rc 2
-  probe parse argv locally: no network, no sign-in. They run whenever ``agy``
-  is on PATH.
+  probe parse argv locally, and ``agy plugin validate`` checks the staged
+  gate plugin on disk: no network, no sign-in. They run whenever ``agy`` is
+  on PATH.
 - **gated** (``UNTETHER_AGY_DRIFT=1``) — ``-p /model``, ``/effort``,
   ``/usage`` answer from Google's servers (zero tokens, zero turns, but a
   network round trip on the host's sign-in). A module probe skips them with a
@@ -35,6 +36,7 @@ from typing import Any
 
 import pytest
 
+from untether.antigravity import gate_plugin
 from untether.model import ResumeToken
 from untether.runners import antigravity as agy
 from untether.runners.antigravity import AntigravityRunner
@@ -43,10 +45,12 @@ from untether.schemas import antigravity as agy_schema
 
 # Last CLI these probes were re-derived against (the pack was written on
 # 1.3.1; lba-1 self-updated to 1.3.2 on 2026-10-09, to 1.3.3 on 2026-10-10,
-# to 1.3.4 on 2026-10-13 and to 1.3.5 on 2026-10-14, with no drift here any
-# time; 1.3.4 added the unknown-agent refusal pinned below, 1.3.5 the
-# ``auto`` mode, #1091).
-PROBED_CLI_VERSION = "1.3.5"
+# to 1.3.4 on 2026-10-13, to 1.3.5 on 2026-10-14, to 1.3.6 and to 1.4.0 on
+# 2026-10-16, with no drift here any time; 1.3.4 added the unknown-agent
+# refusal pinned below, 1.3.5 the ``auto`` mode, #1091; 1.3.6 changed no
+# flag, #1156; 1.4.0 neither, but its ``plugin validate`` now applies the
+# loader's own rules, pinned below, #1160).
+PROBED_CLI_VERSION = "1.4.0"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
@@ -205,6 +209,35 @@ def test_unknown_flag_rc2_signature(tmp_path: Path) -> None:
     # The stderr-hook/argv diagnostic keys on that wording (phase 03).
     first = proc.stderr.splitlines()[0]
     assert first.startswith("flags provided but not defined")
+
+
+def test_gate_plugin_passes_plugin_validate(tmp_path: Path) -> None:
+    """``untether agy-gate install`` stages the plugin and refuses to install
+    it unless ``agy plugin validate`` passes (R3-1). agy 1.4.0 made validate
+    apply the loader's own rules and warn about unknown ``plugin.json``
+    fields and misplaced files, so pin that the staged gate has no finding
+    at all, ``--strict`` included (#1160). Local only: no network."""
+    staged = tmp_path / gate_plugin.PLUGIN_NAME
+    staged.mkdir()
+    files = gate_plugin.template_files(gate_plugin.DEFAULT_WAIT_S)
+    for name, data in files.items():
+        (staged / name).write_bytes(data)
+    (staged / gate_plugin.MANIFEST_FILE).write_bytes(
+        gate_plugin._manifest_bytes(files, gate_plugin.DEFAULT_WAIT_S)
+    )
+    proc = _run_agy(["plugin", "validate", str(staged)], tmp_path)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[:500]
+    version = agy.parse_agy_version(_run_agy(["--version"], tmp_path).stdout)
+    if version is None or version < (1, 4, 0):
+        return  # --strict / --json arrived in 1.4.0
+    strict = _run_agy(
+        ["plugin", "validate", "--strict", "--json", str(staged)], tmp_path
+    )
+    assert strict.returncode == 0, (strict.stdout + strict.stderr)[:500]
+    report = json.loads(strict.stdout)
+    assert report["name"] == gate_plugin.PLUGIN_NAME
+    assert report["findings"] == [], report["findings"]
+    assert report["components"]["hooks"] == 1, report["components"]
 
 
 # ── gated: zero-token network probes ────────────────────────────────────────

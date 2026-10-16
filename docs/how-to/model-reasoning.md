@@ -58,7 +58,7 @@ To clear the override for a specific engine:
 
 The reply tells you what the next run gets:
 
-- **A model is configured for the engine** (`model` in its `untether.toml` table, or a chat override under the topic override you cleared): Untether passes that model on every run, resumed ones included, and the reply names it.
+- **A model is configured for the engine** (`model` in its `untether.toml` table, or a chat override under the topic override you cleared): Untether passes that model on every run, resumed ones included, and the reply names it. Like `/model set`, it also offers `/new` for a clean start, since a resumed session can keep the model it was using (Pi stores it in its session file) ([#1155](https://github.com/littlebearapps/untether/issues/1155)).
 - **Nothing is configured:** Untether passes no model and the engine decides. A resumed session may stay on the model it was using — Claude Code and Pi keep the session's model, while Codex resumes on its own configured model. Run `/new` to start a fresh session on the engine's default ([#998](https://github.com/littlebearapps/untether/issues/998)).
 
 ## Set reasoning level

@@ -251,7 +251,7 @@ Controls what appears in the message footer after a run completes.
 | `show_api_cost` | bool | `true` | Show the API cost/tokens line (💰). |
 | `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude Code and Antigravity. |
 
-When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude Code run. Threshold-based warnings (≥70%) appear regardless of this setting. An Antigravity run gets a line per quota group (`⚡ Gemini Models 5h: 12% | wk: 3%`), built only from what your last `/usage` fetched in the past 15 minutes; a run never fetches the quota itself ([#979](https://github.com/littlebearapps/untether/issues/979)).
+When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude Code run. Threshold-based warnings (≥70% of the 5-hour window) appear regardless of this setting; with it off they come from the `rate_limit_event` snapshot Claude Code streams during the run, so Untether doesn't read the Claude login token or call the usage endpoint ([#1150](https://github.com/littlebearapps/untether/issues/1150)). An Antigravity run gets a line per quota group (`⚡ Gemini Models 5h: 12% | wk: 3%`), built only from what your last `/usage` fetched in the past 15 minutes; a run never fetches the quota itself ([#979](https://github.com/littlebearapps/untether/issues/979)).
 
 ## `preamble`
 

@@ -427,6 +427,103 @@ def test_render_markdown_www_host_with_md_tld_stays_link() -> None:
     assert _link_urls(entities) == ["http://www.example.md"]
 
 
+def _entity_spans(text: str, entities: list[dict], kind: str) -> list[str]:
+    return [
+        text[e["offset"] : e["offset"] + e["length"]]
+        for e in entities
+        if e.get("type") == kind
+    ]
+
+
+@pytest.mark.parametrize(
+    ("md", "text_out", "url", "kind"),
+    [
+        ("**https://x.org/a**: y", "https://x.org/a: y", "https://x.org/a", "bold"),
+        ("**https://x.org/a**. y", "https://x.org/a. y", "https://x.org/a", "bold"),
+        ("__https://x.org/a__; y", "https://x.org/a; y", "https://x.org/a", "bold"),
+        ("_https://x.org/a_, y", "https://x.org/a, y", "https://x.org/a", "italic"),
+        ("*https://x.org/a*) y", "https://x.org/a) y", "https://x.org/a", "italic"),
+        (
+            "See **https://www.iana.org/about**:",
+            "See https://www.iana.org/about:",
+            "https://www.iana.org/about",
+            "bold",
+        ),
+        (
+            "_https://x.org/a_b_c_, y",
+            "https://x.org/a_b_c, y",
+            "https://x.org/a_b_c",
+            "italic",
+        ),
+        (
+            "**https://x.org/a_b**: y",
+            "https://x.org/a_b: y",
+            "https://x.org/a_b",
+            "bold",
+        ),
+    ],
+)
+def test_render_markdown_emphasis_wrapped_url_closes_outside_link(
+    md: str, text_out: str, url: str, kind: str
+) -> None:
+    """#1152: the closing emphasis markers (and any punctuation after them)
+    are not part of a bare URL that the markers wrap."""
+    text, entities = render_markdown(md)
+
+    assert text == text_out
+    assert "*" not in text and "__" not in text
+    assert _link_urls(entities) == [url]
+    assert _entity_spans(text, entities, kind) == [url]
+    assert _entity_spans(text, entities, "text_link") == [url]
+
+
+def test_render_markdown_url_at_end_of_longer_emphasis_closes_outside_link() -> None:
+    text, entities = render_markdown("**Source: https://x.org/a**: y")
+
+    assert text == "Source: https://x.org/a: y"
+    assert _link_urls(entities) == ["https://x.org/a"]
+    assert _entity_spans(text, entities, "bold") == ["Source: https://x.org/a"]
+
+
+def test_render_markdown_closed_emphasis_does_not_trim_later_url() -> None:
+    """An emphasis that already closed before the URL leaves its `_` alone."""
+    text, entities = render_markdown("__a__ https://x.org/wiki/Foo_, y")
+
+    assert text == "a https://x.org/wiki/Foo_, y"
+    assert _link_urls(entities) == ["https://x.org/wiki/Foo_"]
+
+
+@pytest.mark.parametrize(
+    ("md", "url"),
+    [
+        ("see https://x.org/a_b_c here", "https://x.org/a_b_c"),
+        ("see https://x.org/a_b_c.", "https://x.org/a_b_c"),
+        (
+            "see https://x.org/snake_case_name/x_y now",
+            "https://x.org/snake_case_name/x_y",
+        ),
+        ("see https://x.org/a*b now", "https://x.org/a*b"),
+        (
+            "see https://en.wikipedia.org/wiki/Foo_ now",
+            "https://en.wikipedia.org/wiki/Foo_",
+        ),
+        ("see https://x.org/a.", "https://x.org/a"),
+        ("see https://x.org/a, then go", "https://x.org/a"),
+    ],
+)
+def test_render_markdown_bare_url_underscores_and_punctuation(
+    md: str, url: str
+) -> None:
+    """#1152: a bare URL not wrapped in emphasis keeps its own `_` / `*`
+    characters, and trailing sentence punctuation stays outside the link."""
+    text, entities = render_markdown(md)
+
+    assert text == md
+    assert _link_urls(entities) == [url]
+    assert _entity_spans(text, entities, "italic") == []
+    assert _entity_spans(text, entities, "bold") == []
+
+
 @pytest.mark.parametrize(
     "md",
     [

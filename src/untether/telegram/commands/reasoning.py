@@ -173,6 +173,7 @@ async def _handle_reasoning_command(
         logger.info(
             "reasoning.set",
             chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
             engine=engine,
             reasoning_level=normalized_level,
             scope=scope,
@@ -251,7 +252,11 @@ async def _handle_reasoning_command(
         if scope is None:
             return
         logger.info(
-            "reasoning.cleared", chat_id=msg.chat_id, engine=engine, scope=scope
+            "reasoning.cleared",
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            engine=engine,
+            scope=scope,
         )
         if scope == "topic":
             await reply(

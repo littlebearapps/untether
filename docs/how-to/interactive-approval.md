@@ -12,7 +12,14 @@ What raises a button depends on the permission mode:
 - **`dontAsk`** — nothing: only pre-approved tools run, and anything that would ask (questions included) is denied.
 - **Accept edits** (`/planmode off`) and `default` / `manual` — any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
 
-With **Diff preview** turned on in `/config`, Edit, Write and Bash requests in the autonomous modes also wait for a tap so you see the change first (except during the reply that follows a plan you approved).
+With **Diff preview** turned on in `/config`, an Edit, Write or Bash request that reaches Untether in one of these autonomous modes waits for a tap, with the diff, instead of being approved for you. Which requests reach Untether is up to Claude Code and the mode ([#1147](https://github.com/littlebearapps/untether/issues/1147)):
+
+- **`plan`** — an edit or command Claude tries before you approve its plan.
+- **`plan-auto`** — only one tried before the plan is approved for you; the edits that carry out the plan run.
+- **`auto`** — only what Claude Code still asks about: protected files, or actions after its classifier has blocked several in a row. It approves edits inside the project itself.
+- **`dontAsk`**, **`bypassPermissions`** — almost nothing.
+
+Once you approve a plan, or one held edit, the rest of that reply runs without asking.
 
 A **background agent** can ask for approval after Claude has already replied — for example when a hook asks you to confirm one of its commands. That request arrives as its own message, with the same buttons, the agent's task and the reason it's asking. It's sent again after 10 minutes and then every 30 minutes while it waits (each copy replaces the last), and it's removed once you answer.
 
@@ -62,7 +69,7 @@ Long lines are cut at 60 characters, and a `…(N more added)` line says how muc
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
-You can toggle diff previews on or off via `/config` → **Diff preview**. With no setting, `/config` shows it as **default**: approval messages include the diff, but nothing waits for a tap just to show one. Switched off, they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Off is useful on slow connections or when you trust the agent enough to skim by tool name alone. In Accept edits (`/planmode off`) and manual, On adds no wait: Claude Code asks you itself about the tools it doesn't run on its own, and in Accept edits, edits inside the project still run without a tap; `/config` says so for those chats ([#1147](https://github.com/littlebearapps/untether/issues/1147)).
+You can toggle diff previews on or off via `/config` → **Diff preview**. With no setting, `/config` shows it as **default**: approval messages include the diff, but nothing waits for a tap just to show one. Switched off, they show the tool name and buttons only — no inline diffs. Switching it on also makes an Edit, Write or Bash that reaches Untether in an autonomous mode wait for a tap; [When buttons appear](#when-buttons-appear) lists which ones do in each mode. Off is useful on slow connections or when you trust the agent enough to skim by tool name alone. In Accept edits (`/planmode off`) and manual, On adds no wait: Claude Code asks you itself about the tools it doesn't run on its own, and in Accept edits, edits inside the project still run without a tap. `/config` says what On holds in the chat's permission mode ([#1147](https://github.com/littlebearapps/untether/issues/1147)).
 
 Antigravity CLI has the same toggle for [Ask me](#antigravity-ask-me) once Untether's agy plugin is installed ([#1090](https://github.com/littlebearapps/untether/issues/1090)). It only changes Ask me's cards: **on** makes edits inside the project ask too, with the diff; **off** leaves the diff off (an edit card still names the file, and a shell command always shows).
 

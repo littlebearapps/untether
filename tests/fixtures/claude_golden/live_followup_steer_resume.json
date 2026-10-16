@@ -469,7 +469,6 @@
     "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug runner.started.seen reason=\"unknown\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
     "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
-    "debug usage_footer.failed +[exc_info,logger_name]",
     "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"new_session\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
     "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
    ],
@@ -508,7 +507,6 @@
    "step": "emit:command_lifecycle"
   },
   {
-   "result": "⏳ Queued — sent as soon as Claude's current turn ends.",
    "step": "do:queued_note"
   },
   {
@@ -609,7 +607,6 @@
     "debug cost_tracker.recorded +[cost,daily_total,logger_name]",
     "debug handle.final.rendered status=\"done\" +[logger_name,rendered]",
     "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
-    "debug usage_footer.failed +[exc_info,logger_name]",
     "info claude.turn.completed ok=true reason=\"followup\" session_id=\"golden-session-1\" turn=2 +[logger_name,num_turns,origin_kind]",
     "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"ledger\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
     "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
@@ -741,7 +738,6 @@
     "debug cost_tracker.recorded +[cost,daily_total,logger_name]",
     "debug handle.final.rendered status=\"done\" +[logger_name,rendered]",
     "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
-    "debug usage_footer.failed +[exc_info,logger_name]",
     "info claude.turn.completed ok=true reason=\"followup\" session_id=\"golden-session-1\" turn=3 +[logger_name,num_turns,origin_kind]",
     "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"ledger\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
     "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
@@ -1060,7 +1056,6 @@
     "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug runner.started.seen reason=\"unknown\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
     "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
-    "debug usage_footer.failed +[exc_info,logger_name]",
     "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"ledger\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
     "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
    ],

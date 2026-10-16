@@ -430,6 +430,30 @@ def test_unattended_plan_turn_posts_the_plan_and_changes_nothing(home: Path) -> 
     assert plan_mod._PENDING == {}
 
 
+def test_1159_unattended_webhook_plan_hint_names_the_chat(home: Path) -> None:
+    _write_plan(home)
+    options = EngineRunOptions(permission_mode="plan", unattended_trigger="webhook:w")
+    events, _ = _replay(_lines("context_turn"), options=options)
+    unattended = (_completed(events).usage or {})["unattended"]
+    assert unattended["mode_source"] == "chat"
+    assert "uses this chat's permission mode" in unattended["hint"]
+
+
+def test_1159_unattended_hint_names_the_modes_source() -> None:
+    chat = plan_mod.unattended_hint("webhook:w", "chat")
+    assert "uses this chat's permission mode" in chat
+    toml = plan_mod.unattended_hint("webhook:w", "engine_config")
+    assert "[antigravity] permission_mode in untether.toml" in toml
+    assert "chat's permission mode" not in toml
+    trigger = plan_mod.unattended_hint("webhook:w", "trigger")
+    assert "sets its own permission_mode" in trigger
+    assert "chat's permission mode" not in trigger
+    unknown = plan_mod.unattended_hint("webhook:w")
+    assert "the chat's /planmode, else [antigravity] permission_mode" in unknown
+    # Crons keep their own remedy whatever the source.
+    assert "on the cron" in plan_mod.unattended_hint("cron:c", "engine_config")
+
+
 def test_a_new_plan_turn_supersedes_the_conversations_cards() -> None:
     old = _register()
     runner = AntigravityRunner(antigravity_cmd="agy")

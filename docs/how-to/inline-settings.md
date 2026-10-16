@@ -120,7 +120,18 @@ When you switch engines via the Engine & model page, the home page automatically
 | Budget | off, on | Yes (chat prefs) |
 | Stop at limit | off, on | Yes (chat prefs) |
 
-Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes edits wait for your approval, with the diff, in the autonomous permission modes (plan, plan-auto, auto); **off** shows approval buttons only. In a Claude chat whose permission mode prompts (**off** = acceptEdits, or manual), Claude Code asks you itself, so On holds nothing extra: the page says so and the home line reads `edits ask in autonomous modes` ([#1147](https://github.com/littlebearapps/untether/issues/1147)). With no setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
+Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes an edit or command that reaches Untether for approval wait for your tap, with the diff; **off** shows approval buttons only. Which edits reach Untether depends on the Claude permission mode, so the page adds a note for the chat's mode and the home line says what On holds there ([#1147](https://github.com/littlebearapps/untether/issues/1147)):
+
+| Permission mode | Home line after `on` | What On holds |
+|---|---|---|
+| on (plan) | `edits before plan approval wait` | an edit or command Claude tries before you approve its plan; once you approve the plan, or one held edit, the rest of that reply runs |
+| plan-auto | `rarely holds: plans auto-approved` | only an edit tried before the plan is approved for you; the plan's edits run |
+| auto | `only edits Claude Code asks about` | protected files, or actions after repeated classifier blocks; Claude Code approves in-project edits itself |
+| dontAsk, bypassPermissions | `rarely holds in this mode` | almost nothing |
+| off (acceptEdits), manual | `nothing extra in this mode` | nothing extra: Claude Code asks you itself and its cards show the diff (in off, in-project edits still run) |
+| engine default, no mode in `untether.toml` | `edits sent for approval wait` | nothing: Claude Code runs without approval buttons |
+
+With no Diff preview setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 

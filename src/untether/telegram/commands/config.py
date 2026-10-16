@@ -13,6 +13,7 @@ from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, is_claude_prompting_mode
 from ...transport import RenderedMessage
+from ...utils.error_display import redact_url_secrets
 from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
@@ -215,14 +216,20 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
 }
 
 
+def _shown_model(model: str) -> str:
+    """A model id as an HTML page shows it: a URL's login details and query
+    values masked (#1161), then escaped."""
+    return html.escape(redact_url_secrets(model))
+
+
 def _engine_model_hint(engine: str) -> str:
     """#475: the engine's resolved default model (matching the run footer),
-    falling back to the static placeholder when unresolvable."""
+    falling back to the static placeholder when unresolvable. HTML-safe."""
     from ..engine_overrides import get_engine_default_model
 
     resolved = get_engine_default_model(engine)
     if resolved is not None:
-        return resolved
+        return _shown_model(resolved)
     return _ENGINE_MODEL_HINTS.get(engine, "from CLI settings")
 
 
@@ -276,7 +283,7 @@ async def _page_home(ctx: CommandContext) -> None:
     rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
-    dp_on_scope: _DpOnScope = "autonomous"
+    dp_on_hint: str | None = None
     cu_label = "default"
     _cu_ac: bool | None = None
     _cu_su: bool | None = None
@@ -337,7 +344,9 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
         if current_engine == "claude" and dp_label == "on":
-            dp_on_scope = _claude_dp_on_scope(engine_override, ctx.runtime)
+            dp_on_hint = _claude_dp_on_hint(
+                _claude_resolved_mode(engine_override, ctx.runtime)
+            )
 
         # Cost & usage overrides — resolution deferred until has_api_cost is known
         _cu_ac = engine_override.show_api_cost if engine_override else None
@@ -405,10 +414,10 @@ async def _page_home(ctx: CommandContext) -> None:
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
                 )
             if show_diff_preview:
-                # #1147: On only holds edits in the autonomous modes.
+                # #1147: what On holds depends on the permission mode.
                 dp_hint = (
-                    f"  · {_DP_ON_QUALIFIED_HINT}"
-                    if dp_on_scope != "autonomous"
+                    f"  · {dp_on_hint}"
+                    if dp_on_hint is not None
                     else _home_hint("dp", dp_label)
                 )
                 lines.append(f"Diff preview: <b>{dp_display}</b>{dp_hint}")
@@ -471,7 +480,7 @@ async def _page_home(ctx: CommandContext) -> None:
     if model_label == "default":
         engine_hint = _engine_model_hint(current_engine)
         model_hint = f"  · {engine_hint}"
-    lines.append(f"Model: <b>{model_label}</b>{model_hint}")
+    lines.append(f"Model: <b>{_shown_model(model_label)}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
     if current_engine == "claude" or (
         current_engine == "antigravity" and show_ask_questions
@@ -791,8 +800,13 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         await _page_home(ctx)
         return
 
-    # --- Clear (all engines; ``agc`` is the agy page's own, #1060) ---
-    if action == "clr" or (engine == "antigravity" and action == "agc"):
+    # --- Clear (all engines; ``agc`` / ``cxc`` are the agy / Codex pages'
+    # own, so their toasts name the page: #1060, #1155) ---
+    if (
+        action == "clr"
+        or (engine == "antigravity" and action == "agc")
+        or (engine == "codex" and action == "cxc")
+    ):
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
@@ -892,7 +906,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                 },
             ],
             [
-                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                # #1155: the page's own clear, so the toast says
+                # "Approval policy" (``clr`` still clears when typed).
+                {"text": "Clear override", "callback_data": "config:pm:cxc"},
                 {"text": "← Back", "callback_data": "config:home"},
             ],
         ]
@@ -1283,7 +1299,9 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     engine_override = await prefs.get_engine_override(chat_id, current_engine)
     model_override = engine_override.model if engine_override else None
     engine_hint = _engine_model_hint(current_engine)
-    model_label = model_override or f"default ({engine_hint})"
+    model_label = (
+        _shown_model(model_override) if model_override else f"default ({engine_hint})"
+    )
 
     lines = [
         "<b>⚙️ Engine & model</b>",
@@ -1742,7 +1760,11 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             ctx, override.model if override else None
         )
         available = await _antigravity_model_efforts(agy_runner, agy_model)
-        model_label = html.escape(agy_model[:80]) if agy_model else "agy default"
+        model_label = (
+            html.escape(redact_url_secrets(agy_model)[:80])
+            if agy_model
+            else "agy default"
+        )
         if available is None:
             agy_lines = [
                 f"Model: <b>{model_label}</b>",
@@ -2047,17 +2069,58 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
 # #1115: what an unset Diff preview does (page text and its "Current:" line).
 _DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
 
-# #1147: Claude's diff gate only runs outside the prompting modes
-# (``claude.py``: ``not state.prompting_mode``), so On's wording depends on
-# the chat's resolved permission mode. Antigravity keeps the plain wording
-# (its page carries its own Ask me note).
-_DpOnScope = Literal["autonomous", "prompting", "unknown"]
+# #1147: Claude's diff gate (``claude.py`` stage 6) only sees an Edit, Write
+# or Bash that Claude Code itself sends for approval, only runs outside the
+# prompting modes (``not state.prompting_mode``), and stands down for the
+# rest of a reply once a plan or a held edit is approved
+# (``_PLAN_EXIT_APPROVED``, #283/#369). What On really holds therefore
+# depends on the chat's resolved permission mode. Antigravity keeps the
+# plain wording (its page carries its own Ask me note).
 _DP_ON_TEXT = "edits wait for your approval, with the diff"
-_DP_ON_QUALIFIED_TEXT = (
-    "in the autonomous permission modes (plan, plan-auto, auto), edits also"
-    " wait for your approval, with the diff"
+_DP_ON_CLAUDE_TEXT = (
+    "an edit or command that reaches Untether for approval waits for your"
+    " tap, with the diff"
 )
-_DP_ON_QUALIFIED_HINT = "edits ask in autonomous modes"
+# Per-mode note tails, after "In this chat's Permission mode (<b>X</b>), ".
+# plan / plan-auto: the CLI sends a non-plan-file write to stage 6
+# (``decision_reason_type: "mode"``, CLI 2.1.285+) only before the plan is
+# approved; plan-auto's rubber stamp approves it for you. auto: in-project
+# edits are approved by the CLI itself and the rest go to its classifier;
+# only protected paths and the classifier's fallback prompt reach stage 6.
+_DP_ON_MODE_NOTES: dict[str, str] = {
+    "plan": (
+        "that's an edit or command Claude tries before you approve its plan."
+        " Once you approve the plan, or one held edit, the rest of that reply"
+        " runs without asking."
+    ),
+    CLAUDE_PLAN_AUTO_MODE: (
+        "the plan is approved for you, so only an edit or command Claude tries"
+        " before its plan is held; the edits that carry out the plan run"
+        " without asking."
+    ),
+    "auto": (
+        "Claude Code approves edits inside the project itself and sends other"
+        " actions to its classifier, so only what it still asks about reaches"
+        " Untether: protected files, or actions after repeated classifier"
+        " blocks."
+    ),
+    "dontAsk": (
+        "edits and commands are pre-approved and anything else is refused, so"
+        " On rarely holds anything."
+    ),
+    "bypassPermissions": (
+        "Claude Code skips its permission checks, so On rarely holds anything."
+    ),
+}
+_DP_ON_MODE_HINTS: dict[str, str] = {
+    "plan": "edits before plan approval wait",
+    CLAUDE_PLAN_AUTO_MODE: "rarely holds: plans auto-approved",
+    "auto": "only edits Claude Code asks about",
+    "dontAsk": "rarely holds in this mode",
+    "bypassPermissions": "rarely holds in this mode",
+}
+_DP_ON_PROMPTING_HINT = "nothing extra in this mode"
+_DP_ON_UNKNOWN_HINT = "edits sent for approval wait"
 
 
 def _claude_resolved_mode(engine_override: Any, runtime: Any) -> str | None:
@@ -2077,12 +2140,34 @@ def _claude_resolved_mode(engine_override: Any, runtime: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _claude_dp_on_scope(engine_override: Any, runtime: Any) -> _DpOnScope:
-    """#1147: whether Claude's Diff preview On holds edits in this chat."""
-    mode = _claude_resolved_mode(engine_override, runtime)
+def _claude_dp_on_hint(mode: str | None) -> str:
+    """#1147: the home-line hint for Claude's Diff preview On in *mode*."""
     if mode is None:
-        return "unknown"
-    return "prompting" if is_claude_prompting_mode(mode) else "autonomous"
+        return _DP_ON_UNKNOWN_HINT
+    if is_claude_prompting_mode(mode):
+        return _DP_ON_PROMPTING_HINT
+    return _DP_ON_MODE_HINTS.get(mode, _DP_ON_UNKNOWN_HINT)
+
+
+def _claude_dp_on_note(mode: str | None) -> str | None:
+    """#1147: the page note saying what Claude's Diff preview On holds in
+    *mode*, or None when the mode is unknown."""
+    if mode is None:
+        return None
+    ui_name = html.escape(mode_display(mode)[0])
+    lead = f"In this chat's Permission mode (<b>{ui_name}</b>), "
+    if is_claude_prompting_mode(mode):
+        # A prompting mode asks through Claude Code itself; the diff gate
+        # never runs there, so On adds no wait.
+        note = (
+            f"{lead}Claude Code asks you itself and its cards show the diff,"
+            " so On holds nothing extra"
+        )
+        if mode == "acceptEdits":
+            return note + ": edits inside the project still run without asking."
+        return note + "."
+    tail = _DP_ON_MODE_NOTES.get(mode)
+    return None if tail is None else lead + tail
 
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
@@ -2164,12 +2249,10 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         current_label = f"<b>default</b> — {_DP_UNSET_TEXT}"
 
     on_text = _DP_ON_TEXT
-    prompting_mode: str | None = None
+    on_note: str | None = None
     if engine == "claude":
-        claude_mode = _claude_resolved_mode(override, ctx.runtime)
-        if claude_mode is None or is_claude_prompting_mode(claude_mode):
-            on_text = _DP_ON_QUALIFIED_TEXT
-            prompting_mode = claude_mode
+        on_text = _DP_ON_CLAUDE_TEXT
+        on_note = _claude_dp_on_note(_claude_resolved_mode(override, ctx.runtime))
 
     lines = [
         "<b>📝 Diff preview</b>",
@@ -2182,19 +2265,8 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}",
         "",
     ]
-    if prompting_mode is not None:
-        # #1147: a prompting mode asks through Claude Code itself; the diff
-        # gate never runs there, so On adds no wait.
-        ui_name = html.escape(mode_display(prompting_mode)[0])
-        note = (
-            f"In this chat's Permission mode (<b>{ui_name}</b>), Claude Code asks"
-            " you itself and its cards show the diff, so On holds nothing extra"
-        )
-        if prompting_mode == "acceptEdits":
-            note += ": edits inside the project still run without asking."
-        else:
-            note += "."
-        lines += [note, ""]
+    if on_note is not None:
+        lines += [on_note, ""]  # #1147
     if engine == "antigravity":
         # #1090: the gate's cards exist only in Ask me.
         lines += [
@@ -2712,7 +2784,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     last = _format_trigger_relative(get_last_fired(cron.id))
                     # #743: free-form, so escaped (only shown when set).
                     model_seg = (
-                        f"model=<i>{html.escape(_truncate_field(cron.model))}</i> · "
+                        f"model=<i>{html.escape(_truncate_field(redact_url_secrets(cron.model)))}</i> · "
                         if cron.model
                         else ""
                     )
@@ -2837,6 +2909,7 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
             "ro",
             "clr",
             "agc",  # #1060: the Antigravity page's own Clear override
+            "cxc",  # #1155: the Codex page's own Clear override
         }
     ),
     "vb": _ON_OFF_CLR,
@@ -2934,6 +3007,7 @@ class ConfigCommand:
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
+                "cxc": "Approval policy: cleared",  # #1155
                 # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
                 # conversation keeps the agent it started with, so a switch
                 # across Workspace / Plan first ↔ Ask me / Full access

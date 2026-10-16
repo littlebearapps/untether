@@ -27,6 +27,9 @@ This is enforced both by scheduling and by per-resume-token runner locks.
   a `/continue` token is never used as a lock key ([#817](https://github.com/littlebearapps/untether/issues/817)).
 - Follow-ups for a live Claude session are injected into the running process rather than
   started as a second run; the CLI serialises the turns.
+- A message for a chat whose first run hasn't reported its session yet waits for that run
+  instead of starting a second conversation; `/cancel` and `/new` drop such waiting messages
+  ([#1157](https://github.com/littlebearapps/untether/issues/1157), `telegram/first_start.py`).
 
 ## Per-run state
 

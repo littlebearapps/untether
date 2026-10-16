@@ -15,7 +15,7 @@ Different engines have different strengths:
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
 | **Antigravity CLI** | Google's Gemini models (plus Claude and GPT models on some plans) | Permission modes (Workspace, Plan first, Ask me, Full access), effort levels per model, quota groups and AI credits in `/usage`; approval and question buttons and steer with Untether's agy plugin |
-| **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
+| **Gemini CLI** ⚠️ | Deprecated — no longer supported | Approval mode (edit files or full access; its Read-only button still runs with full access), auto Pro/Flash routing, extensions |
 | **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
 Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, is supported as its own `antigravity` engine from v0.36.1 — see [Use Antigravity CLI](../how-to/antigravity.md) and, for install and sign-in, [Switch engines](../how-to/switch-engines.md#antigravity-cli). See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.

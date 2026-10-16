@@ -71,7 +71,7 @@ uv run pytest tests/test_*.py -x # specific file
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
 | `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off) |
-| `/usage` | Claude subscription quota; token totals for Codex/OpenCode |
+| `/usage` | Claude subscription quota; Antigravity quota groups and AI credits; other engines: the last session's tokens |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
 | `/export` | Export session transcript |

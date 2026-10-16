@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -146,10 +147,8 @@ def build_router(
         cmd = backend.cli_command(runner_cfg)
         if status != "load_error" and shutil.which(cmd) is None:
             status = "missing_cli"
-            if issue:
-                issue = f"{issue}; {cmd} not found on PATH"
-            else:
-                issue = f"{cmd} not found on PATH"
+            missing = _missing_cli_issue(cmd)
+            issue = f"{issue}; {missing}" if issue else missing
 
         if status != "ok" and engine_id == default_engine:
             raise ConfigError(f"Default engine {engine_id!r} unavailable: {issue}")
@@ -171,6 +170,15 @@ def build_router(
     return AutoRouter(entries=entries, default_engine=default_engine)
 
 
+def _missing_cli_issue(cmd: str) -> str:
+    """Why ``shutil.which(cmd)`` found nothing. A ``cmd`` with a directory
+    part (``[antigravity] cmd = "/opt/agy"``) is checked as that path and
+    never looked up on PATH, so say so (#1159)."""
+    if os.path.dirname(cmd):
+        return f"{cmd} not found or not executable"
+    return f"{cmd} not found on PATH"
+
+
 def _log_setup_summary(
     entries: list[RunnerEntry],
     issues: list[tuple[str, str, bool]],
@@ -186,12 +194,11 @@ def _log_setup_summary(
     state.
     """
     found = sorted(e.engine for e in entries if e.status == "ok")
-    missing_on_path = sorted(
-        engine for engine, issue, _ in issues if "not found on PATH" in issue
-    )
-    bad_config = sorted(
-        engine for engine, issue, _ in issues if "not found on PATH" not in issue
-    )
+    # #1159: by status, not wording — a bad absolute `cmd` says "not found or
+    # not executable", never "on PATH", and still counts as a missing CLI.
+    missing_cli = {e.engine for e in entries if e.status == "missing_cli"}
+    missing_on_path = sorted(engine for engine, _, _ in issues if engine in missing_cli)
+    bad_config = sorted(engine for engine, _, _ in issues if engine not in missing_cli)
 
     # Always emit the summary — single line, INFO, intentional state.
     logger.info(

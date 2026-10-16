@@ -66,7 +66,9 @@ Final messages (and progress messages once the engine reports it) end with a `�
 `format_meta_line` in `src/untether/markdown.py`: the context (`dir: project @branch`, when bound), then
 `|`, then model · effort · permission mode · trigger source, joined with ` · `. For example
 `🏷 opus 5 · medium · plan` or `🏷 dir: api @main | gpt-5.5 · high · safe`. Model comes from each
-engine's `StartedEvent.meta`; effort only from Claude, Codex and Antigravity overrides; the mode only from
+engine's `StartedEvent.meta`, seeded with the model Untether passes (chat or topic override, else the engine's
+configured `model`), so a run that ends before the engine reports one (cancelled early, or a model-not-found error)
+still shows it ([#1155](https://github.com/littlebearapps/untether/issues/1155)); effort only from Claude, Codex and Antigravity overrides; the mode only from
 Claude (`system/init.permissionMode`), Codex safe mode, Antigravity (`workspace` / `plan first` / `ask me` / `full access`) and Gemini's approval tiers. Triggered runs add
 their source: `⏰ cron:<id>` / `⏰ at:<token>` for crons and `/at`, `⚡ webhook:<id>` for webhooks.
 

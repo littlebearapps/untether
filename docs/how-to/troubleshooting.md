@@ -111,7 +111,7 @@ The version is checked again whenever the `opencode` binary changes, so the next
 **Symptoms:** Engine starts but fails with authentication or permission errors.
 
 - **Codex:** Run `codex` in a terminal and sign in with your ChatGPT account
-- **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
+- **Claude Code:** Run `claude auth login` (or `claude`, then `/login`) to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
 - **Antigravity CLI:** see [Antigravity says it isn't signed in](#antigravity-says-it-isnt-signed-in) — a Gemini API key or Enterprise sign-in is recommended over a Google account sign-in
@@ -619,7 +619,7 @@ Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under
 
 **Symptoms:** You send a follow-up (or voice note) and it shows a `queued` notice instead of running immediately.
 
-A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.36.0, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). The notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
+A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.36.0, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). If the session is sitting idle between turns, the message goes in straight away and its card shows no queued note ([#1154](https://github.com/littlebearapps/untether/issues/1154)); when it has to wait behind a turn that hasn't started yet, the notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
 
 ## Messages arrive after the run finished (🔔 / 📡 / ⏰)
 
@@ -759,7 +759,7 @@ Budgets are checked when a result arrives, so on their own they alert rather tha
 | Linux | Plain-text JSON file | `~/.claude/.credentials.json` |
 | macOS | macOS Keychain | Entry: `Claude Code-credentials` |
 
-Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude login` to refresh credentials.
+For `/usage` and the opt-in subscription-usage footer (the only things that read them), Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude auth login` to refresh credentials.
 
 ## Using debug mode
 
@@ -878,9 +878,9 @@ Untether recognises **86 error patterns**, grouped like this:
 | Category | Examples | Engines |
 |----------|----------|---------|
 | Unsupported client | Engine refuses this client version, Gemini individual-tier end-of-life | AMP, Gemini |
-| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex |
+| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex, Antigravity |
 | Authentication | API key missing/invalid, token refresh, login required | All |
-| Subscription & billing | Usage limits, quota exceeded, billing hard limit | Claude, Codex, OpenCode, Gemini |
+| Subscription & billing | Usage limits, quota exceeded, billing hard limit, AI credits | Claude, Codex, OpenCode, Antigravity, Gemini |
 | API overload & server | 500/502/503/504, overloaded | All |
 | Rate limits | Rate limited, too many requests | All |
 | Model errors | Model not found, invalid model | All |
@@ -892,7 +892,7 @@ Untether recognises **86 error patterns**, grouped like this:
 | CLI & filesystem | Command not found, disk full, permission denied | All |
 | Signals | SIGTERM, SIGKILL, SIGABRT | All |
 | Process & session | No result event, no session ID, execution errors | All |
-| Engine-specific | AMP credits/login, Gemini result status | AMP, Gemini |
+| Engine-specific | Antigravity upstream cancel, AMP credits/login, Gemini result status | Antigravity, AMP, Gemini |
 | Account & proxy | Account suspended, proxy auth, request timeout | All |
 
 For the full list of patterns and hints, see the [Error Reference](../reference/errors.md).

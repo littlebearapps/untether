@@ -1,10 +1,10 @@
-# Untether Specification v0.36.0 [2026-10-08]
+# Untether Specification v0.36.1 [unreleased]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.36.0 specifies:
+Untether v0.36.1 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -334,6 +334,7 @@ Required behaviour:
 Runs that start as new threads:
 
 * If a job starts with `resume=None` and later yields `started(resume=token)`, the bridge MUST treat that run as the in-flight job for `ThreadKey(token)` until it completes (for scheduling and cancellation routing).
+* While such a run has not yet yielded `started`, a job for the same saved-session scope and engine MUST NOT start a second thread: it MUST wait until the run's token is known (then enqueue behind `ThreadKey(token)`) or the run ends without one (then start the thread itself). A command that cancels the starting run (`/cancel`, `/new`) MUST drop the jobs waiting on it and tell the sender; it MUST NOT let them start a thread nobody saw queued ([#1157](https://github.com/littlebearapps/untether/issues/1157)). Stateless chats (no saved session) are exempt: every message is its own thread.
 
 Live sessions:
 
@@ -551,6 +552,11 @@ When `outbox_cleanup` is `true` (default), the bridge SHOULD delete delivered fi
 The bridge SHOULD deliver only entries that entered or changed in the outbox during the run (the later of the entry's modification and status-change times, against the run's start with a small grace). Older entries SHOULD NOT be sent; they SHOULD be quarantined once and reported in a single notice. A live session's run starts when the session started.
 
 ## 13. Changelog
+
+### v0.36.1 (unreleased)
+
+- Add `antigravity` (Antigravity CLI) to the EngineIds (§2) with its `agy --conversation <id>` resume line (§3.1); steering works on Antigravity with Untether's agy plugin (§6.2).
+- A job for a saved-session scope whose first run hasn't reported its token yet waits for that token instead of starting a parallel thread; cancelling the starting run drops the waiting jobs (§6.2, [#1157](https://github.com/littlebearapps/untether/issues/1157)).
 
 ### v0.36.0 (2026-10-08)
 

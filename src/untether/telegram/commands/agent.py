@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...directives import DirectiveError
 from ...logging import get_logger
+from ...utils.error_display import redact_url_secrets
 from ..chat_prefs import ChatPrefsStore
 from ..engine_defaults import resolve_engine_for_message
 from ..engine_overrides import resolve_override_value
@@ -117,7 +118,8 @@ async def _handle_agent_command(
             chat_override=chat_override,
             field="reasoning",
         )
-        model_value = model_resolution.value or "default"
+        # #1161: never echo a URL-shaped model's secrets.
+        model_value = redact_url_secrets(model_resolution.value or "default")
         model_line = (
             f"model: **{model_value}** ({override_labels[model_resolution.source]})"
         )
@@ -172,14 +174,24 @@ async def _handle_agent_command(
                 await reply(text="topic defaults are unavailable.")
                 return
             await topic_store.set_default_engine(tkey[0], tkey[1], engine)
-            logger.info("agent.set.topic", chat_id=msg.chat_id, engine=engine)
+            logger.info(
+                "agent.set.topic",
+                chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
+                engine=engine,
+            )
             await reply(text=f"topic default engine **set to** `{engine}`")
             return
         if chat_prefs is None:
             await reply(text="chat defaults are unavailable (no config path).")
             return
         await chat_prefs.set_default_engine(msg.chat_id, engine)
-        logger.info("agent.set.chat", chat_id=msg.chat_id, engine=engine)
+        logger.info(
+            "agent.set.chat",
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            engine=engine,
+        )
         await reply(text=f"chat default engine **set to** `{engine}`")
         return
 
@@ -191,14 +203,16 @@ async def _handle_agent_command(
                 await reply(text="topic defaults are unavailable.")
                 return
             await topic_store.clear_default_engine(tkey[0], tkey[1])
-            logger.info("agent.clear.topic", chat_id=msg.chat_id)
+            logger.info(
+                "agent.clear.topic", chat_id=msg.chat_id, sender_id=msg.sender_id
+            )
             await reply(text="topic default engine **cleared**.")
             return
         if chat_prefs is None:
             await reply(text="chat defaults are unavailable (no config path).")
             return
         await chat_prefs.clear_default_engine(msg.chat_id)
-        logger.info("agent.clear.chat", chat_id=msg.chat_id)
+        logger.info("agent.clear.chat", chat_id=msg.chat_id, sender_id=msg.sender_id)
         await reply(text="chat default engine **cleared**.")
         return
 

@@ -479,6 +479,8 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
             await anyio.lowlevel.checkpoint()
         assert running_tasks
         running_task = running_tasks[next(iter(running_tasks))]
+        # #1159: the drain-timeout notice names this engine.
+        assert running_task.engine == CODEX_ENGINE
         with anyio.fail_after(1):
             await running_task.resume_ready.wait()
         running_task.cancel_requested.set()
@@ -488,6 +490,137 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
     last_edit = transport.edit_calls[-1]["message"].text
     assert "cancelled" in last_edit.lower()
     assert session_id in last_edit
+
+
+@contextlib.contextmanager
+def _run_model(model: str | None):
+    from untether.runners.run_options import (
+        EngineRunOptions,
+        reset_run_options,
+        set_run_options,
+    )
+
+    token = set_run_options(EngineRunOptions(model=model))
+    try:
+        yield
+    finally:
+        reset_run_options(token)
+
+
+@pytest.mark.anyio
+async def test_1155_cancelled_final_names_the_override_model() -> None:
+    """#1155: a run cancelled before the engine reported its model (Pi
+    before its first message_end) still names the model Untether passed."""
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner([Wait(hold)], engine="pi", resume_value="sess-1155")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+
+    async def run_handle_message() -> None:
+        with _run_model("gpt-5.5"):
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+                resume_token=None,
+                running_tasks=running_tasks,
+            )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_handle_message)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        running_task = running_tasks[next(iter(running_tasks))]
+        with anyio.fail_after(1):
+            await running_task.resume_ready.wait()
+        running_task.cancel_requested.set()
+
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last_edit.lower()
+    assert "gpt-5.5" in last_edit
+
+
+@pytest.mark.anyio
+async def test_1155_error_before_started_names_the_configured_model() -> None:
+    """#1155: OpenCode's "Model not found" error arrives before its first
+    StartedEvent; the error card still names the model."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="Model not found: deepseek/deepseek-v4-flash.")],
+        engine="opencode",
+        resume_value="ses-1155",
+        emit_session_start=False,
+    )
+    runner.model = "deepseek/deepseek-v4-pro"  # type: ignore[attr-defined]
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    with _run_model("deepseek/deepseek-v4-flash"):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    final_text = transport.send_calls[-1]["message"].text
+    assert "error" in final_text.lower()
+    # The override wins over the configured model.
+    assert "\N{LABEL}" in final_text
+    footer = final_text.split("\N{LABEL}", 1)[1]
+    assert "deepseek/deepseek-v4-flash" in footer
+    assert "deepseek-v4-pro" not in footer
+
+
+@pytest.mark.anyio
+async def test_1155_engine_reported_model_wins_and_none_seeds_nothing() -> None:
+    transport = FakeTransport()
+    started = StartedEvent(
+        engine=CODEX_ENGINE,
+        resume=ResumeToken(engine=CODEX_ENGINE, value="s-1155"),
+        title="codex",
+        meta={"model": "engine-reported"},
+    )
+    runner = ScriptRunner(
+        [Emit(started), Return(answer="done")],
+        engine=CODEX_ENGINE,
+        resume_value="s-1155",
+        emit_session_start=False,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with _run_model("passed-model"):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+    final_text = transport.send_calls[-1]["message"].text
+    assert "engine-reported" in final_text
+    assert "passed-model" not in final_text
+
+    # No override and no configured model: nothing is invented.
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    runner = ScriptRunner([Return(answer="done")], engine=CODEX_ENGINE)
+    with _run_model(None):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=11, text="go"),
+            resume_token=None,
+        )
+    assert "\N{LABEL}" not in transport.send_calls[-1]["message"].text
 
 
 @pytest.mark.anyio
@@ -1224,20 +1357,13 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert rb.get_usage_schema_mismatch_count() == 3
 
     @pytest.mark.anyio
-    async def test_always_show_false_hides_below_threshold(self, monkeypatch):
+    async def test_always_show_false_never_fetches(self, monkeypatch):
+        """#1150: with the footer off the usage endpoint is never called (and
+        the login token never read), however high the account's usage."""
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _fake_fetch():
-            return {
-                "five_hour": {
-                    "utilization": 25.0,
-                    "resets_at": "2026-02-25T20:00:00+00:00",
-                },
-                "seven_day": {
-                    "utilization": 10.0,
-                    "resets_at": "2026-03-01T00:00:00+00:00",
-                },
-            }
+            raise AssertionError("footer off must not fetch usage")
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
@@ -1248,28 +1374,33 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert result.text == "Done."
 
     @pytest.mark.anyio
-    async def test_always_show_false_shows_above_threshold(self, monkeypatch):
+    async def test_always_show_false_warns_from_rate_limit_snapshot(self, monkeypatch):
+        """#1150: the near-limit warning comes from the run's
+        ``rate_limit_event`` snapshot, not from a usage fetch."""
+        import time
+        from types import SimpleNamespace
+
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _fake_fetch():
-            return {
-                "five_hour": {
-                    "utilization": 85.0,
-                    "resets_at": "2026-02-25T20:00:00+00:00",
-                },
-                "seven_day": {
-                    "utilization": 40.0,
-                    "resets_at": "2026-03-01T00:00:00+00:00",
-                },
-            }
+            raise AssertionError("footer off must not fetch usage")
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
         )
+        state = SimpleNamespace(
+            rate_limit_windows={
+                "five_hour": {"utilization": 0.85, "resets_at": time.time() + 3600},
+                "seven_day": {"utilization": 0.4, "resets_at": time.time() + 86400},
+            }
+        )
 
         msg = RenderedMessage(text="Done.", extra={})
-        result = await _maybe_append_usage_footer(msg, always_show=False)
+        result = await _maybe_append_usage_footer(
+            msg, always_show=False, engine_state=state
+        )
         assert "5h: 85%" in result.text
+        assert "7d: 40%" in result.text
 
     @pytest.mark.anyio
     async def test_missing_credentials_returns_original_message(self, monkeypatch):
@@ -2652,14 +2783,15 @@ def _last_final_text(transport: "FakeTransport", *, error: bool) -> str:
 async def test_subscription_footer_dispatch_claude_identical(
     monkeypatch, show: bool, error: bool
 ) -> None:
-    """Claude's footer is the same function with the same arguments as
-    before the dispatch, on a success and on an error final."""
+    """Claude's footer is called once per final with the resolved
+    ``always_show``, on a success and on an error final (#979; the run's
+    engine state rides along for the #1150 warning)."""
     import untether.runner_bridge as rb
 
     calls: list[tuple[str, bool]] = []
 
     async def recorder(
-        msg: RenderedMessage, *, always_show: bool = False
+        msg: RenderedMessage, *, always_show: bool = False, engine_state: Any = None
     ) -> RenderedMessage:
         calls.append((msg.text, always_show))
         return RenderedMessage(text=msg.text + "\nFOOTER", extra=msg.extra)
@@ -2690,7 +2822,7 @@ async def test_subscription_footer_run_option_overrides_the_setting(
     seen: list[bool] = []
 
     async def recorder(
-        msg: RenderedMessage, *, always_show: bool = False
+        msg: RenderedMessage, *, always_show: bool = False, engine_state: Any = None
     ) -> RenderedMessage:
         seen.append(always_show)
         return msg
@@ -12959,8 +13091,35 @@ def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
     hook = rb._unattended_footer(
         {"trigger": "webhook:w", "mode": "default", "denied": {"Write": 1}}
     )
-    assert "webhooks use the chat's permission mode" in hook
+    # #1159: no mode source on the payload -> name both possible sources.
+    assert "the chat's /planmode, else [engines.claude] permission_mode" in hook
     assert rb._unattended_usage({"unattended": {"denied": {}}}) is None
+
+
+def test_1159_webhook_hint_names_where_the_mode_came_from(monkeypatch) -> None:
+    import untether.runner_bridge as rb
+
+    def hint(n: int, source: str | None) -> str:
+        payload = {"trigger": f"webhook:w{n}", "mode": "default", "denied": {"W": 1}}
+        if source is not None:
+            payload["mode_source"] = source
+        return rb._unattended_footer(payload)
+
+    monkeypatch.setattr(rb, "_UNATTENDED_HINTED", {})
+    chat = hint(1, "chat")
+    assert "uses this chat's permission mode" in chat
+    assert "untether.toml" not in chat
+    toml = hint(2, "engine_config")
+    assert "[engines.claude] permission_mode in untether.toml" in toml
+    assert "chat's permission mode" not in toml
+    trigger = hint(3, "trigger")
+    assert "sets its own permission_mode" in trigger
+    assert "chat's permission mode" not in trigger
+    guard = hint(4, "webhook_guard")
+    assert "never inherit bypassPermissions" in guard
+    assert "ran in default mode" in guard
+    for text in (chat, toml, trigger, guard):
+        assert "pre-approve the tools" in text
     assert rb._unattended_usage(None) is None
 
 

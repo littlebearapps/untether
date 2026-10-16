@@ -426,13 +426,16 @@ _209_MANAGED = (
     "--permission-prompt-tool",
 )
 
-# Every long flag `claude --help` lists on 2.1.285, classified for #209.
+# Every long flag `claude --help` lists on 2.1.301 (plus the hidden ones in
+# _209_HIDDEN, which the parser still accepts), classified for #209.
+# Re-snapshotted on 2.1.301 (#1156): no new flag since 2.1.285;
+# `--client-data-url` left --help but is still parsed.
 # blocked  — refused in extra_args (bypass / approval wiring)
 # managed  — Untether sets it; refused in extra_args
 # allowed  — passes through; documented in docs/how-to/security.md
 # d10      — allowed today but replaces/breaks the stream-json run (interactive,
 #            cloud, background, TUI); candidates for the v0.36.2 follow-up #851
-CLAUDE_FLAGS_CLASSIFIED_2_1_285: dict[str, str] = {
+CLAUDE_FLAGS_CLASSIFIED_2_1_301: dict[str, str] = {
     **dict.fromkeys(_209_BLOCKED, "blocked"),
     **dict.fromkeys(_209_MANAGED, "managed"),
     # allowed (documented; some can't be fully denylisted — security.md)
@@ -445,7 +448,7 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_285: dict[str, str] = {
     "--betas": "allowed",
     "--brief": "allowed",
     "--chrome": "allowed",
-    "--client-data-url": "allowed",
+    "--client-data-url": "allowed",  # hidden from --help since 2.1.301 (#1156)
     "--debug": "allowed",
     "--debug-file": "allowed",
     "--disable-slash-commands": "allowed",
@@ -498,6 +501,14 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_285: dict[str, str] = {
     "--tmux": "d10",
 }
 
+# Classified flags `claude --help` no longer lists but the parser still
+# accepts (so a user's extra_args can still pass them). Each is pinned by
+# test_209_hidden_flags_still_parsed: once the parser drops one, drop its row.
+_209_HIDDEN = {
+    "--permission-prompt-tool": "hidden since before 2.1.228 (#750)",
+    "--client-data-url": "hidden since 2.1.301 (#1156)",
+}
+
 _HELP_FLAG_RE = re.compile(
     r"^  (?:-\w, )?(--[A-Za-z][\w-]*)(?:, (--[A-Za-z][\w-]*))?", re.MULTILINE
 )
@@ -528,6 +539,25 @@ def test_209_blocked_flags_listed_in_help() -> None:
         )
 
 
+def _parse_flag_alone(flag: str, tmp_path) -> str:
+    """`claude -p <flag>` with no value or prompt: stderr + stdout."""
+    claude = shutil.which("claude")
+    assert claude is not None
+    try:
+        proc = subprocess.run(
+            [claude, "-p", flag],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+            cwd=tmp_path,
+            env=_probe_env(),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"`claude -p {flag}` did not exit within 60 s")
+    return f"{proc.stderr}\n{proc.stdout}"
+
+
 @pytest.mark.parametrize(
     "flag",
     [
@@ -544,21 +574,7 @@ def test_209_blocked_flags_recognised_by_parser(flag: str, tmp_path) -> None:
     `argument missing`; gone → `unknown option`. Never a prompt (that bills).
     `--resume`/`--continue` are excluded: without a value they look up a
     session instead of failing at parse time."""
-    claude = shutil.which("claude")
-    assert claude is not None
-    try:
-        proc = subprocess.run(
-            [claude, "-p", flag],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-            cwd=tmp_path,
-            env=_probe_env(),
-        )
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"`claude -p {flag}` did not exit within 60 s")
-    blob = f"{proc.stderr}\n{proc.stdout}"
+    blob = _parse_flag_alone(flag, tmp_path)
     if f"unknown option '{flag}'" in blob:
         pytest.fail(
             f"flag {flag} is gone upstream — drop it from the #209 deny-list or "
@@ -614,29 +630,54 @@ def test_209_claude_flag_snapshot() -> None:
     for m in _HELP_FLAG_RE.finditer(text):
         listed.update(f for f in m.groups() if f)
     assert listed, "parsed no flags from `claude --help` — the help layout moved"
-    unclassified = sorted(listed - CLAUDE_FLAGS_CLASSIFIED_2_1_285.keys())
+    unclassified = sorted(listed - CLAUDE_FLAGS_CLASSIFIED_2_1_301.keys())
     assert not unclassified, (
         f"new Claude flag(s) {unclassified} on the installed CLI — classify each "
         "for #209 (block / allow + document in docs/how-to/security.md) and add "
-        f"it to CLAUDE_FLAGS_CLASSIFIED_2_1_285 (last green on CLI "
+        f"it to CLAUDE_FLAGS_CLASSIFIED_2_1_301 (last green on CLI "
         f"{PROBED_CLI_VERSION})"
     )
-    removed = sorted(CLAUDE_FLAGS_CLASSIFIED_2_1_285.keys() - listed)
-    hidden_ok = {"--permission-prompt-tool"}  # hidden since before 2.1.228 (#750)
-    if set(removed) - hidden_ok:
+    removed = set(CLAUDE_FLAGS_CLASSIFIED_2_1_301.keys() - listed) - _209_HIDDEN.keys()
+    if removed:
         import warnings
 
         warnings.warn(
-            f"Claude flags no longer in --help: {sorted(set(removed) - hidden_ok)}",
+            f"Claude flags no longer in --help: {sorted(removed)} — check "
+            "`claude -p <flag>`: still parsed → add to _209_HIDDEN; `unknown "
+            "option` → drop from the snapshot (and the #209 deny-list if "
+            f"blocked/managed) (last green on CLI {PROBED_CLI_VERSION})",
             stacklevel=1,
         )
+
+
+@pytest.mark.parametrize("flag", sorted(_209_HIDDEN))
+def test_209_hidden_flags_still_parsed(flag: str, tmp_path) -> None:
+    """A flag hidden from --help keeps its classification only while the
+    parser still accepts it: extra_args can still pass it, so a `blocked` /
+    `managed` one must stay refused and an `allowed` one still reaches the
+    CLI (#1156). Once it's gone, a passed one fails at parse time with
+    `unknown option`, which the run surfaces as an error."""
+    assert flag in CLAUDE_FLAGS_CLASSIFIED_2_1_301
+    blob = _parse_flag_alone(flag, tmp_path)
+    if f"unknown option '{flag}'" in blob:
+        pytest.fail(
+            f"hidden flag {flag} is gone from the parser — drop it from "
+            "_209_HIDDEN and CLAUDE_FLAGS_CLASSIFIED_2_1_301 (and the #209 "
+            f"deny-list if blocked/managed) (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    if "Input must be provided" in blob or "argument missing" in blob:
+        return
+    pytest.skip(
+        f"unexpected wording for {flag}: {blob.strip()[:200]!r} — re-derive the "
+        f"probe (last green on CLI {PROBED_CLI_VERSION})"
+    )
 
 
 def test_209_snapshot_matches_the_deny_list() -> None:
     """The snapshot's blocked/managed rows are exactly what the guard refuses."""
     from untether.runners.claude import find_blocked_claude_args
 
-    for flag, cls in CLAUDE_FLAGS_CLASSIFIED_2_1_285.items():
+    for flag, cls in CLAUDE_FLAGS_CLASSIFIED_2_1_301.items():
         refused = bool(find_blocked_claude_args([flag]))
         assert refused is (cls in {"blocked", "managed"}), (flag, cls)
 

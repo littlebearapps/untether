@@ -157,6 +157,7 @@ from .run_options import (
     is_claude_plan_auto,
     is_claude_prompting_mode,
     normalise_claude_cli_mode,
+    permission_mode_source,
 )
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -1432,6 +1433,19 @@ def session_linger_info(session_id: str) -> tuple[bool, int] | None:
     return post_result, session_live_bg_count(session_id)
 
 
+def session_turn_pending(session_id: str) -> bool:
+    """#1154: True when a follow-up queued for the live session
+    ``session_id`` will wait behind a turn — one is open, or an earlier
+    injected follow-up hasn't started its turn yet. False for a session
+    idle between turns (:func:`inject_when_idle` writes straight away) and
+    for no live session. Read-only: unlike :func:`_awaiting_injected` it
+    never expires entries."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    return not live.idle or bool(live.state.awaiting_injected)
+
+
 SESSION_HANDOFF_POLL_S: float = 0.25
 
 
@@ -1785,6 +1799,10 @@ class ClaudeStreamState:
     # (`plan-auto` kept distinct from `plan`; `bypassPermissions` under
     # --dangerously-skip-permissions) — drives which approvals are denied.
     unattended_mode: str | None = None
+    # #1159 where that mode came from — `trigger` / `chat` / `engine_config`,
+    # or `webhook_guard` when #1142 replaced an inherited bypass — so the
+    # footer's hint names the setting to change.
+    unattended_mode_source: str | None = None
     # #835 tools denied in the current turn (reset per turn, one entry per
     # denial); finalised into `usage["unattended"]` at the result.
     unattended_denials: list[str] = field(default_factory=list)
@@ -3738,6 +3756,7 @@ def _unattended_usage_payload(state: ClaudeStreamState) -> dict[str, Any] | None
     return {
         "trigger": state.unattended_trigger,
         "mode": state.unattended_mode,
+        "mode_source": state.unattended_mode_source,  # #1159
         "denied": denied,
     }
 
@@ -10203,6 +10222,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.unattended_trigger = run_opts.unattended_trigger
             state.unattended_mode = (
                 "bypassPermissions" if self._skips_permissions() else requested_mode
+            )
+            inherited = run_opts.permission_mode or self.permission_mode
+            state.unattended_mode_source = (
+                "webhook_guard"
+                if self._webhook_bypass_origin(run_opts, inherited) is not None
+                else permission_mode_source(run_opts)
             )
         # #383: a plan chat — the approval caption and the plan re-arm key
         # off the configured mode, never the CLI's current one.

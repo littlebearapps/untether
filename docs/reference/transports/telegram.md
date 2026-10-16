@@ -424,6 +424,11 @@ a few Telegram-specific rewrites:
   suffixes included) is rendered as inline code rather than auto-linked as a
   domain. Explicit link text and real URLs keep their links
   ([#788](https://github.com/littlebearapps/untether/issues/788)).
+- **Bare URLs inside bold or italic** — in `**https://example.org/about**:` or
+  `_https://example.org_,` the closing markers (and any punctuation after them)
+  are not part of the link, so the emphasis closes around the URL. A URL that
+  isn't wrapped in emphasis keeps its own `_` and `*` characters
+  ([#1152](https://github.com/littlebearapps/untether/issues/1152)).
 - **Line breaks** — CommonMark turns a single newline inside a paragraph into
   a space, which collapsed one-item-per-line digests into a single paragraph.
   A single newline is now kept as a line break when the next line is indented

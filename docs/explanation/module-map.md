@@ -28,6 +28,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `session_costs.py` | Per-session cost and token ledger, so a resumed session's running totals are recorded per run. |
 | `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
 | `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
+| `telegram/first_start.py` | Holds a follow-up sent while a chat's first run hasn't reported its session yet, so it resumes that conversation instead of starting a second one; `/cancel` and `/new` drop such messages ([#1157](https://github.com/littlebearapps/untether/issues/1157)). |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
 | `loop_scheduler.py` | Loop mode: runs Claude's `/loop` schedules (declined `CronCreate` calls) and long `ScheduleWakeup`s with the `[loop]` caps, plus the cancel and cron-suppression records; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
 | `orphan_approvals.py` | Pushed standalone Approve / Deny message for a background agent's approval request that arrives while a Claude session is idle; re-sent after 10 min, then every 30 min, and removed once answered. |
@@ -65,6 +66,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/commands/*` | In-chat command handlers (`/agent`, `/file`, `/topic`, `/ctx`, `/new`, …). |
 | `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
 | `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
+| `telegram/first_start.py` | Holds a message sent while a chat's first run hasn't reported its session yet, so it resumes that conversation instead of starting a second; `/cancel` and `/new` drop it ([#1157](https://github.com/littlebearapps/untether/issues/1157)). |
 | `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
 | `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
 | `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
@@ -131,10 +133,10 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `utils/env_policy.py` | Engine subprocess environment allowlist (`[security] env_extra_allow` / `env_extra_prefix_allow`). |
 | `utils/env_audit.py` | Checks a running engine's real environment against that allowlist. |
-| `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the quota footer. |
+| `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the opt-in usage footer (the default near-limit warning reads the run's `rate_limit_event` instead, [#1150](https://github.com/littlebearapps/untether/issues/1150)). |
 | `utils/antigravity_continue.py` | Finds the Antigravity conversation `/continue` may resume: the one agy last ran from the exact project directory ([#1039](https://github.com/littlebearapps/untether/issues/1039)). |
 | `utils/antigravity_context.py` | Published context windows per Antigravity model, used for the estimated `~N% ctx` in the header ([#979](https://github.com/littlebearapps/untether/issues/979)). |
-| `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation; atomic JSON writes for state files. |
+| `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation, incl. `redact_url_secrets` for engine error cards ([#1151](https://github.com/littlebearapps/untether/issues/1151)); atomic JSON writes for state files. |
 | `utils/paths.py` | Path/command relativisation helpers, and the per-run context variables (base directory, thread, sender, trigger source). |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |

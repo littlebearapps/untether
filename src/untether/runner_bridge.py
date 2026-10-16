@@ -76,6 +76,7 @@ from .transport import (
     message_kind,
 )
 from .utils import engine_argv
+from .utils.error_display import redact_url_secrets
 
 logger = get_logger(__name__)
 
@@ -126,6 +127,19 @@ def _model_log_fields(meta: dict[str, Any] | None) -> dict[str, object]:
     if not isinstance(model, str) or not model:
         return {}
     return {"model": model, "model_display": _short_model_name(model)}
+
+
+def _passed_model(runner: Any) -> str | None:
+    """#1155: the model this run hands the engine — the chat/topic override
+    (run options), else the runner's configured ``model`` — or None when
+    Untether passes none and the engine decides."""
+    from .runners.run_options import get_run_options
+
+    run_options = get_run_options()
+    if run_options is not None and run_options.model:
+        return run_options.model
+    model = getattr(runner, "model", None)
+    return model if isinstance(model, str) and model else None
 
 
 # ---------------------------------------------------------------------------
@@ -1122,52 +1136,99 @@ def _validate_usage_schema(data: dict[str, Any]) -> None:
         )
 
 
+def _rate_limit_warning_line(engine_state: Any) -> str | None:
+    """#1150: the near-limit warning for a Claude final, built from Claude
+    Code's own ``rate_limit_event`` snapshot (``unifiedWindows``, stashed on
+    ``ClaudeStreamState.rate_limit_windows`` by the runner). Reads no login
+    token and makes no HTTP call.
+
+    ``None`` when there is nothing to warn about: no snapshot this run (the
+    CLI sends one only when a rounded utilization or reset moves, and never
+    for API-key / Bedrock / Vertex logins), the 5-hour window is under 70 %,
+    or its ``resetsAt`` has already passed (the snapshot no longer applies).
+    """
+    windows = getattr(engine_state, "rate_limit_windows", None)
+    if not isinstance(windows, dict):
+        return None
+    five_hour = windows.get("five_hour")
+    if not isinstance(five_hour, dict):
+        return None
+    utilization = five_hour.get("utilization")
+    if not isinstance(utilization, (int, float)):
+        return None
+    now = time.time()
+    resets_at = five_hour.get("resets_at")
+    if not isinstance(resets_at, (int, float)):
+        resets_at = None
+    elif resets_at <= now:
+        return None
+    pct_5h = utilization * 100
+    if pct_5h < _USAGE_WARN_PCT:
+        return None
+
+    from datetime import UTC, datetime
+
+    from .telegram.commands.usage import _time_until
+
+    reset = (
+        _time_until(datetime.fromtimestamp(resets_at, UTC).isoformat())
+        if resets_at is not None
+        else None
+    )
+    seven_day = windows.get("seven_day")
+    pct_7d = 0.0
+    if isinstance(seven_day, dict):
+        util_7d = seven_day.get("utilization")
+        reset_7d = seven_day.get("resets_at")
+        if isinstance(util_7d, (int, float)) and not (
+            isinstance(reset_7d, (int, float)) and reset_7d <= now
+        ):
+            pct_7d = util_7d * 100
+    seven_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
+    reset_part = f" ({reset})" if reset else ""
+
+    if pct_5h >= 100:
+        return (
+            f"\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
+            if reset
+            else "\n\U0001f6d1 5h limit hit"
+        )
+    if pct_5h >= _USAGE_CRITICAL_PCT:
+        return f"\n\u26a0\ufe0f 5h: {pct_5h:.0f}%{reset_part}{seven_part}"
+    return f"\n\u26a15h: {pct_5h:.0f}%{reset_part}{seven_part}"
+
+
 async def _maybe_append_usage_footer(
     msg: RenderedMessage,
     *,
     always_show: bool = False,
+    engine_state: Any = None,
 ) -> RenderedMessage:
-    """Fetch Claude Code usage and append a footer.
+    """Claude's subscription-usage footer.
 
-    When *always_show* is True, always appends a compact usage line.
-    When False (default), only appends warnings at >=70% threshold.
+    *always_show* (the opt-in ``[footer] show_subscription_usage``, or the
+    chat's override) fetches usage from Anthropic with the local Claude Code
+    login and appends a compact line. Otherwise (the default) only a
+    near-limit warning is added, taken from the run's ``rate_limit_event``
+    snapshot in *engine_state*: no token read, no HTTP call (#1150).
     """
+    if not always_show:
+        try:
+            line = _rate_limit_warning_line(engine_state)
+        except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
+            logger.debug("usage_footer.failed", exc_info=True)
+            return msg
+        return _insert_footer_line(msg, line) if line else msg
     try:
-        from .telegram.commands.usage import _time_until, format_usage_compact
+        from .telegram.commands.usage import format_usage_compact
         from .utils.usage_cache import fetch_claude_usage_cached
 
         data = await fetch_claude_usage_cached()
         _validate_usage_schema(data)
-
-        if always_show:
-            compact = format_usage_compact(data)
-            if compact:
-                return _insert_footer_line(msg, f"\n\u26a1 {compact}")
-            return msg
-
-        # Threshold-based warning (existing behaviour)
-        five_hour = data.get("five_hour")
-        seven_day = data.get("seven_day")
-        if not five_hour:
-            return msg
-
-        pct_5h = five_hour["utilization"]
-        if pct_5h < _USAGE_WARN_PCT:
-            return msg
-
-        pct_7d = seven_day["utilization"] if seven_day else 0
-        reset = _time_until(five_hour["resets_at"])
-
-        if pct_5h >= 100:
-            footer = f"\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
-        elif pct_5h >= _USAGE_CRITICAL_PCT:
-            _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
-            footer = f"\n\u26a0\ufe0f 5h: {pct_5h:.0f}% ({reset}){_7d_part}"
-        else:
-            _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
-            footer = f"\n\u26a15h: {pct_5h:.0f}% ({reset}){_7d_part}"
-
-        return _insert_footer_line(msg, footer)
+        compact = format_usage_compact(data)
+        if compact:
+            return _insert_footer_line(msg, f"\n\u26a1 {compact}")
+        return msg
     except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
@@ -1209,14 +1270,16 @@ async def _maybe_append_antigravity_quota_footer(
 
 # #979: engine → its subscription-usage footer. The keys are
 # ``SUBSCRIPTION_USAGE_SUPPORTED_ENGINES`` (which also shows the /config
-# toggle). Each entry looks its function up when called, so Claude's is the
-# same call as before the dispatch: ``_maybe_append_usage_footer(msg,
-# always_show=…)``.
+# toggle). Each entry looks its function up when called. ``engine_state`` is
+# the run's stream engine state: Claude's warning reads its
+# ``rate_limit_event`` snapshot (#1150); Antigravity ignores it.
 SUBSCRIPTION_FOOTERS: dict[str, Callable[..., Awaitable[RenderedMessage]]] = {
-    "claude": lambda msg, *, always_show, runner: _maybe_append_usage_footer(
-        msg, always_show=always_show
+    "claude": lambda msg, *, always_show, runner, engine_state=None: (
+        _maybe_append_usage_footer(
+            msg, always_show=always_show, engine_state=engine_state
+        )
     ),
-    "antigravity": lambda msg, *, always_show, runner: (
+    "antigravity": lambda msg, *, always_show, runner, engine_state=None: (
         _maybe_append_antigravity_quota_footer(
             msg, always_show=always_show, runner=runner
         )
@@ -1225,12 +1288,18 @@ SUBSCRIPTION_FOOTERS: dict[str, Callable[..., Awaitable[RenderedMessage]]] = {
 
 
 async def _append_subscription_footer(
-    runner: Any, msg: RenderedMessage, footer_cfg: Any = None
+    runner: Any,
+    msg: RenderedMessage,
+    footer_cfg: Any = None,
+    *,
+    engine_state: Any = None,
 ) -> RenderedMessage:
     """Append the engine's subscription-usage footer, if it has one.
 
     ``[footer] show_subscription_usage`` (then the chat's override) picks
-    the always-on compact line; without it only the warnings show."""
+    the always-on compact line; without it only the warnings show — for
+    Claude from the run's own ``rate_limit_event`` data, with no login-token
+    read or usage call (#1150)."""
     footer = SUBSCRIPTION_FOOTERS.get(runner.engine)
     if footer is None:
         return msg
@@ -1242,7 +1311,9 @@ async def _append_subscription_footer(
     show_sub = footer_cfg.show_subscription_usage
     if run_opts and run_opts.show_subscription_usage is not None:
         show_sub = run_opts.show_subscription_usage
-    return await footer(msg, always_show=show_sub, runner=runner)
+    return await footer(
+        msg, always_show=show_sub, runner=runner, engine_state=engine_state
+    )
 
 
 def _apply_cost_delta(
@@ -2095,6 +2166,33 @@ def _unattended_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+def _webhook_unattended_hint(source: object) -> str:
+    """#1159: a Claude webhook's remedy, naming where its mode came from
+    (``usage["unattended"]["mode_source"]``, set by the runner)."""
+    fix = "set /planmode plan-auto or auto in this chat, or pre-approve the tools"
+    if source == "chat":
+        return f"this webhook uses this chat's permission mode \N{EM DASH} {fix}"
+    if source == "engine_config":
+        return (
+            "this webhook uses [engines.claude] permission_mode in untether.toml "
+            f"(this chat has none set) \N{EM DASH} change it there, {fix}"
+        )
+    if source == "trigger":
+        return (
+            "this webhook sets its own permission_mode \N{EM DASH} change it on "
+            "the webhook in untether.toml, or pre-approve the tools"
+        )
+    if source == "webhook_guard":
+        return (
+            "webhooks never inherit bypassPermissions, so this one ran in "
+            f"default mode \N{EM DASH} {fix}"
+        )
+    return (
+        "webhooks use the chat's /planmode, else [engines.claude] permission_mode in "
+        f"untether.toml \N{EM DASH} {fix}"
+    )
+
+
 def _unattended_footer(unattended: Mapping[str, Any]) -> str:
     """``🔒 unattended (cron:x) · denied Write (x2), ExitPlanMode — nobody to
     approve`` plus, the first time a trigger hits it, what to change."""
@@ -2124,10 +2222,7 @@ def _unattended_footer(unattended: Mapping[str, Any]) -> str:
             "change the rule or run it attended"
         )
     elif trigger.startswith("webhook:"):
-        hint = (
-            "webhooks use the chat's permission mode \N{EM DASH} set /planmode "
-            "plan-auto or auto in this chat, or pre-approve the tools"
-        )
+        hint = _webhook_unattended_hint(unattended.get("mode_source"))
     else:
         hint = (
             "set permission_mode on the cron (plan-auto, auto or "
@@ -2259,6 +2354,9 @@ class RunningTask:
     edits: ProgressEdits | None = None
     # #826: the originating message's thread (topic) — scopes /new and /cancel
     thread_id: ThreadId | None = None
+    # #1159: the run's engine, known before its session is — the drain-timeout
+    # notice names it ("starting /codex"), never a hardcoded /claude.
+    engine: str | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -7055,6 +7153,12 @@ async def handle_message(
             else "\N{HIGH VOLTAGE SIGN}"
         )
         progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}
+    # #1155: seed the model Untether passes the engine, so a final that
+    # comes before the engine's first StartedEvent (an OpenCode "Model not
+    # found" error, a Pi run cancelled before any output) still names it in
+    # the footer. The engine's own StartedEvent.meta merges over this.
+    if passed_model := _passed_model(runner):
+        progress_tracker.meta = {**(progress_tracker.meta or {}), "model": passed_model}
 
     # #269: refresh progress settings on the default presenter so edits
     # to [progress].max_actions / [progress].verbosity in untether.toml
@@ -7078,7 +7182,9 @@ async def handle_message(
     running_task: RunningTask | None = None
     starting_ref: MessageRef | None = None
     if running_tasks is not None:
-        running_task = RunningTask(context=context, thread_id=incoming.thread_id)
+        running_task = RunningTask(
+            context=context, thread_id=incoming.thread_id, engine=runner.engine
+        )
         starting_ref = progress_ref or MessageRef(
             channel_id=incoming.channel_id,
             message_id=incoming.message_id,
@@ -7513,9 +7619,14 @@ async def handle_message(
             and _plain_prespawn_refusal(completed.usage) is not None
         )
         if plain_refusal:
-            final_answer = str(run_error)
+            final_answer = redact_url_secrets(str(run_error))
         elif run_ok is False and run_error:
             raw_error = str(run_error)
+            # #1151: the card shows the engine's error text with URL userinfo
+            # and query values masked (a model id the user set, a provider's
+            # callback link). The hint and the resume checks read the raw
+            # text; the ``runner.completed`` log has its own redaction.
+            shown_error = redact_url_secrets(raw_error)
             # #887: the hint depends on why the session ended and on whether
             # the run had any turns, not just on the error text.
             hint = (
@@ -7540,8 +7651,10 @@ async def handle_message(
                 error_head = raw_error.split("\n", 1)[0].strip()
                 answer_head = final_answer.strip().split("\n", 1)[0].strip()
                 if error_head and error_head == answer_head:
-                    _, _, remainder = raw_error.partition("\n")
-                    parts: list[str] = [final_answer]
+                    # #1151: here the answer IS the error text (OpenCode with
+                    # no assistant text, a Claude error result) — mask it too.
+                    _, _, remainder = shown_error.partition("\n")
+                    parts: list[str] = [redact_url_secrets(final_answer)]
                     if hint:
                         parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
                     if remainder.strip():
@@ -7550,18 +7663,18 @@ async def handle_message(
                 else:
                     if hint:
                         error_text = (
-                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{shown_error}\n```"
                         )
                     else:
-                        error_text = f"```\n{raw_error}\n```"
+                        error_text = f"```\n{shown_error}\n```"
                     final_answer = f"{final_answer}\n\n{error_text}"
             else:
                 if hint:
                     final_answer = (
-                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{shown_error}\n```"
                     )
                 else:
-                    final_answer = f"```\n{raw_error}\n```"
+                    final_answer = f"```\n{shown_error}\n```"
         if _session_auto_cleared:
             # #952: say so — the card's resume line still names the old session.
             final_answer = f"{final_answer}\n\n{_SESSION_CLEARED_NOTICE}".lstrip()
@@ -7869,7 +7982,10 @@ async def handle_message(
         else:
             # Append the engine's subscription-usage footer (Claude, Antigravity)
             final_rendered = await _append_subscription_footer(
-                runner, final_rendered, footer_cfg
+                runner,
+                final_rendered,
+                footer_cfg,
+                engine_state=getattr(edits.stream, "engine_state", None),
             )
 
         logger.debug(
@@ -8914,7 +9030,11 @@ async def handle_message(
             )
 
             # Append the engine's subscription-usage footer (even on error)
-            final_rendered = await _append_subscription_footer(runner, final_rendered)
+            final_rendered = await _append_subscription_footer(
+                runner,
+                final_rendered,
+                engine_state=getattr(edits.stream, "engine_state", None),
+            )
 
             logger.debug(
                 "handle.error.rendered",

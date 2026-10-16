@@ -142,31 +142,41 @@ def _format_export_markdown(
         counts = token_counts(usage) or {}
         input_tokens = counts.get("input_tokens")
         output_tokens = counts.get("output_tokens")
-        parts: list[str] = []
+        # The transcript spans every run of the session, but cost, turns and
+        # duration are the latest run's (rc15 integration finding).
+        run_parts: list[str] = []
         if cost is not None:
-            parts.append(f"${cost:.4f}")
+            run_parts.append(f"${cost:.4f}")
         if turns:
-            parts.append(f"{turns} turns")
+            run_parts.append(f"{turns} turns")
         if duration_ms:
             secs = duration_ms / 1000
-            parts.append(f"{secs:.1f}s")
+            run_parts.append(f"{secs:.1f}s")
+        token_part: str | None = None
         if cost is None and input_tokens is not None:
             token_parts = [f"{input_tokens} in"]
             if output_tokens is not None:
                 token_parts.append(f"{output_tokens} out")
-            parts.append(" / ".join(token_parts) + " tokens")
-        if parts:
-            # The transcript spans every run of the session but the recorded
-            # usage is the latest run's (rc15 integration finding), except
-            # for engines that report a running thread total (Codex).
-            from ...runner_bridge import _TOKEN_LEDGER_SCOPES
+            token_part = " / ".join(token_parts) + " tokens"
+        # Tokens are the latest run's too, except for engines that report a
+        # running thread total (Codex, Antigravity).
+        from ...runner_bridge import _TOKEN_LEDGER_SCOPES
 
-            engine = _session_engine(events)
-            thread_total = _TOKEN_LEDGER_SCOPES.get(engine or "") == (
-                "thread_cumulative"
-            )
+        engine = _session_engine(events)
+        thread_total = token_part is not None and (
+            _TOKEN_LEDGER_SCOPES.get(engine or "") == "thread_cumulative"
+        )
+        header = ""
+        if thread_total and run_parts:
+            # #1158: agy's last-run duration sits beside thread-total
+            # tokens, so each figure names its own scope.
+            header = f"{' · '.join(run_parts)} (last run) · {token_part} (thread total)"
+        elif run_parts or token_part:
+            parts = [*run_parts, *([token_part] if token_part else [])]
             parts.append("thread total" if thread_total else "last run")
-            lines.append(f"**Usage:** {' · '.join(parts)}\n")
+            header = " · ".join(parts)
+        if header:
+            lines.append(f"**Usage:** {header}\n")
 
     lines.append("---\n")
 

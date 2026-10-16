@@ -76,7 +76,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 !!! untether "Untether"
     done · codex · 11s · step 5
     
-    Untether is a Telegram bridge for AI coding agents (Codex, Claude Code, OpenCode, Pi). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
+    Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi, Antigravity CLI). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
 
     `codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714`
 

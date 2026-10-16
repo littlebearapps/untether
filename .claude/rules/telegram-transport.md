@@ -93,7 +93,7 @@ the topic/chat `/agent` default and can fire on a different engine than a plain 
 
 ## Markdown rendering (`telegram/render.py`)
 
-`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797). Single newlines in line-structured text are kept as line breaks while wrapped prose reflows (#870); an ordered list keeps its own start number (#886, sulguk ignores `<ol start>`, so it goes on the first `<li value>`), and a loose list item's first paragraph is unwrapped so its text stays on the marker's line (#1094).
+`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. Closing `*`/`_` emphasis markers never end up inside a bare URL's link (#1152, `_linkify_inline` replaces markdown-it's inline linkify rule). A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797). Single newlines in line-structured text are kept as line breaks while wrapped prose reflows (#870); an ordered list keeps its own start number (#886, sulguk ignores `<ol start>`, so it goes on the first `<li value>`), and a loose list item's first paragraph is unwrapped so its text stays on the marker's line (#1094).
 
 ## Forward-coalesce command barrier (#807)
 
@@ -131,6 +131,11 @@ An idle Claude live session (answered, no in-flight turn or background task; `ru
 not a "running" task for wording or ambiguity: `/new` says `closed the idle session` (#895), and `/cancel` closes it
 (`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
 Never return early from `/cancel` after closing an idle session.
+
+A message sent while a chat's first run hasn't reported its session yet waits on that run (`telegram/first_start.py`,
+#1157) and has no queued card, so the job-queue cancel paths never see it. Every way `/cancel` or `/new` stops a
+starting run must also call `first_start.drop_waiting(...)` (each woken waiter then replies with the #807-style dropped
+notice) — never let a waiter start a fresh conversation nobody saw queued.
 
 ## After changes
 

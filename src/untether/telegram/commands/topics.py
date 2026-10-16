@@ -96,6 +96,11 @@ def _cancel_chat_tasks_counted(
             idle=idle,
             skipped_other_threads=len(skipped),
         )
+    # #1157: messages waiting on a first run that hasn't reported its
+    # session yet would otherwise start a fresh run once it is cancelled.
+    from .. import first_start
+
+    first_start.drop_waiting(chat_id, thread_filter=thread_filter, command="new")
     # #289: drop pending loop entries for the chat too.  Mirror the at
     # scheduler integration in handle_cancel — /new should leave no trace.
     from ... import loop_scheduler
@@ -199,6 +204,15 @@ async def _handle_ctx_command(
             )
             return
         await store.set_context(*tkey, context)
+        logger.info(
+            "ctx.set",
+            chat_id=tkey[0],
+            thread_id=tkey[1],
+            sender_id=msg.sender_id,
+            scope="topic",
+            project=context.project,
+            branch=context.branch,
+        )
         await _maybe_rename_topic(
             cfg,
             store,
@@ -212,6 +226,13 @@ async def _handle_ctx_command(
         return
     if action == "clear":
         await store.clear_context(*tkey)
+        logger.info(
+            "ctx.cleared",
+            chat_id=tkey[0],
+            thread_id=tkey[1],
+            sender_id=msg.sender_id,
+            scope="topic",
+        )
         await reply(text="topic binding cleared.")
         return
     await reply(
@@ -305,12 +326,28 @@ async def _handle_chat_ctx_command(
             await reply(text=f"error:\n{_usage_ctx_set(chat_project=None)}")
             return
         await chat_prefs.set_context(msg.chat_id, context)
+        logger.info(
+            "ctx.set",
+            chat_id=msg.chat_id,
+            thread_id=None,
+            sender_id=msg.sender_id,
+            scope="chat",
+            project=context.project,
+            branch=context.branch,
+        )
         await reply(
             text=f"chat bound to `{_format_context(cfg.runtime, context)}`",
         )
         return
     if action == "clear":
         await chat_prefs.clear_context(msg.chat_id)
+        logger.info(
+            "ctx.cleared",
+            chat_id=msg.chat_id,
+            thread_id=None,
+            sender_id=msg.sender_id,
+            scope="chat",
+        )
         await reply(text="chat context cleared.")
         return
     await reply(
@@ -455,6 +492,14 @@ async def _handle_topic_command(
         thread_id,
         context,
         topic_title=title,
+    )
+    logger.info(
+        "topic.created",
+        chat_id=msg.chat_id,
+        thread_id=thread_id,
+        sender_id=msg.sender_id,
+        project=context.project,
+        branch=context.branch,
     )
     await reply(text=f"created topic `{title}`.")
     bound_text = f"topic bound to `{_format_context(cfg.runtime, context)}`"

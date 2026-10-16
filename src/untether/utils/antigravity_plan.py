@@ -225,11 +225,27 @@ def approved_header(name: str) -> str:
 UNATTENDED_DENIED_LABEL = "plan approval"
 
 
-def unattended_hint(trigger: str) -> str:
+def unattended_hint(trigger: str, source: str | None = None) -> str:
+    """The 🔒 footer's remedy for an unattended Plan first run. *source* is
+    where the mode came from (#1159, ``permission_mode_source``)."""
     if trigger.startswith("webhook:"):
+        fix = "pick Workspace in /config for webhook runs that should make changes"
+        if source == "chat":
+            return f"this webhook uses this chat's permission mode \N{EM DASH} {fix}"
+        if source == "engine_config":
+            return (
+                "this webhook uses [antigravity] permission_mode in untether.toml "
+                '(this chat has none set) \N{EM DASH} set it to "workspace" '
+                f"there, or {fix}"
+            )
+        if source == "trigger":
+            return (
+                "this webhook sets its own permission_mode \N{EM DASH} set it to "
+                '"workspace" on the webhook to let it make changes'
+            )
         return (
-            "webhooks use the chat's permission mode \N{EM DASH} pick Workspace "
-            "in /config for webhook runs that should make changes"
+            "webhooks use the chat's /planmode, else [antigravity] "
+            f"permission_mode in untether.toml \N{EM DASH} {fix}"
         )
     return (
         'set permission_mode = "workspace" on the cron to let it make the '

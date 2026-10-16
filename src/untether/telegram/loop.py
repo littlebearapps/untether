@@ -26,6 +26,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
+from . import first_start
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -62,6 +63,7 @@ from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
+from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
@@ -1400,15 +1402,7 @@ def _apply_command_barrier(
 
 def _dropped_prompt_notice(pending: _PendingPrompt, *, command: str) -> str:
     count = len(pending.merged_message_ids) + 1 + len(pending.forwards)
-    if count == 1:
-        return (
-            f"🗑️ Dropped 1 message sent just before /{command} — "
-            "send it again if you still need it."
-        )
-    return (
-        f"🗑️ Dropped {count} messages sent just before /{command} — "
-        "send them again if you still need them."
-    )
+    return dropped_notice(count, command=command)
 
 
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
@@ -1922,6 +1916,13 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     process exits. The live note omits "/cancel to drop it": once the
     scheduler hands the job to the injector it is no longer in the
     cancellable queue.
+
+    #1154: the live note shows only when the follow-up really waits behind
+    a turn (an earlier follow-up written but not started yet). A live
+    session idle between turns takes it straight away — the old check
+    (post-result + accepting) is exactly that idle state, so a media group
+    sent to an idle chat flashed "Queued … current turn ends" with nothing
+    running.
     """
     backend = live_backend(resume_token.engine)
     if backend is None:
@@ -1929,6 +1930,7 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     try:
         info = backend.linger_info(resume_token.value)
         live = info is not None and backend.is_accepting(resume_token.value)
+        waits_for_turn = live and backend.turn_pending(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1939,6 +1941,8 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     if not post_result:
         return None
     if live:
+        if not waits_for_turn:
+            return None
         if bg_count > 0:
             return (
                 f"⏳ Queued — sent as soon as {backend.display_name}'s current "
@@ -2106,27 +2110,41 @@ async def _notify_drain_timeout(
     remaining: int,
 ) -> None:
     """Send a timeout notice to each unique chat/topic still running after
-    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``."""
+    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``.
+
+    #1159: the hint names each chat's own engine (the run's session engine,
+    else the engine it was started on), or none when neither is known —
+    never a hardcoded ``/claude`` in a Codex or Pi chat.
+    """
     from ..transport import RenderedMessage, SendOptions
 
-    hint = (
-        "Untether was restarted. Your session is saved"
-        " \N{EM DASH} resume by sending a new message"
-        " or starting /claude."
-    )
-    msg = RenderedMessage(
-        text=(
-            f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
-            f" {remaining} run(s) interrupted."
-            f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
-        ),
-        extra={},
-    )
+    def _message(engine: str | None) -> RenderedMessage:
+        restart = f" or starting /{engine}." if engine else "."
+        hint = (
+            "Untether was restarted. Your session is saved"
+            f" \N{EM DASH} resume by sending a new message{restart}"
+        )
+        return RenderedMessage(
+            text=(
+                f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
+                f" {remaining} run(s) interrupted."
+                f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+            ),
+            extra={},
+        )
+
+    engines: dict[tuple[int | str, object], str] = {}
+    for ref, task in list(running_tasks.items()):
+        resume = getattr(task, "resume", None)
+        engine = getattr(resume, "engine", None) or getattr(task, "engine", None)
+        if isinstance(engine, str) and engine:
+            engines.setdefault((ref.channel_id, ref.thread_id), engine)
     notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
         target = (ref.channel_id, ref.thread_id)
         if target not in notified:
             notified.add(target)
+            msg = _message(engines.get(target))
             try:
                 await transport.send(  # type: ignore[attr-defined]
                     channel_id=ref.channel_id,
@@ -2710,24 +2728,31 @@ async def run_main_loop(
                 base_cb: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
                 topic_key: tuple[int, int] | None,
                 chat_session_key: tuple[int, int | None] | None,
+                on_saved: Callable[[], None] | None = None,
             ) -> Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None:
                 if base_cb is None and topic_key is None and chat_session_key is None:
                     return None
 
                 async def _wrapped(token: ResumeToken, done: anyio.Event) -> None:
-                    if base_cb is not None:
-                        await base_cb(token, done)
-                    if state.topic_store is not None and topic_key is not None:
-                        await state.topic_store.set_session_resume(
-                            topic_key[0], topic_key[1], token
-                        )
-                    if (
-                        state.chat_session_store is not None
-                        and chat_session_key is not None
-                    ):
-                        await state.chat_session_store.set_session_resume(
-                            chat_session_key[0], chat_session_key[1], token
-                        )
+                    try:
+                        if base_cb is not None:
+                            await base_cb(token, done)
+                        if state.topic_store is not None and topic_key is not None:
+                            await state.topic_store.set_session_resume(
+                                topic_key[0], topic_key[1], token
+                            )
+                        if (
+                            state.chat_session_store is not None
+                            and chat_session_key is not None
+                        ):
+                            await state.chat_session_store.set_session_resume(
+                                chat_session_key[0], chat_session_key[1], token
+                            )
+                    finally:
+                        # #1157: the token is known even if saving it
+                        # failed — never hold waiters for the whole run.
+                        if on_saved is not None:
+                            on_saved()
 
                 return _wrapped
 
@@ -2762,6 +2787,7 @@ async def run_main_loop(
                 | None = None,
                 engine_override: EngineId | None = None,
                 progress_ref: MessageRef | None = None,
+                on_session_saved: Callable[[], None] | None = None,
             ) -> None:
                 topic_key = (
                     (chat_id, thread_id)
@@ -2827,7 +2853,10 @@ async def run_main_loop(
                     context=context,
                     reply_ref=reply_ref,
                     on_thread_known=wrap_on_thread_known(
-                        on_thread_known, topic_key, chat_session_key
+                        on_thread_known,
+                        topic_key,
+                        chat_session_key,
+                        on_saved=on_session_saved,
                     ),
                     on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
                     # Run the engine the options and the approval audit were
@@ -3232,6 +3261,22 @@ async def run_main_loop(
 
             async def dispatch_prompt_run(
                 *,
+                route: first_start.Route | None = None,
+                **kwargs: Any,
+            ) -> None:
+                # #1157: the prompt counts as routed toward the first-start
+                # wait from here (or from its caller's earlier route), before
+                # any await, so a /new or /cancel that drops the first start
+                # while it is still on its way drops it too.
+                route = route if route is not None else first_start.route()
+                try:
+                    await _dispatch_prompt_run(route=route, **kwargs)
+                finally:
+                    first_start.close_route(route)
+
+            async def _dispatch_prompt_run(
+                *,
+                route: first_start.Route,
                 msg: TelegramIncomingMessage,
                 prompt_text: str,
                 resolved: ResolvedMessage,
@@ -3305,19 +3350,106 @@ async def run_main_loop(
                         is_resume_line=cfg.runtime.is_resume_line,
                     ),
                 )
-                if resume_token is None:
-                    await run_job(
-                        chat_id,
-                        user_msg_id,
-                        prompt_text,
-                        None,
-                        context,
-                        msg.thread_id,
-                        chat_session_key,
-                        reply_ref,
-                        scheduler.note_thread_known,
-                        engine_override,
+                start_key = first_start.first_start_key(
+                    topic_key, chat_session_key, engine_resolution.engine
+                )
+                while resume_token is None and start_key is not None:
+                    # #1157: no check-then-register gap — nothing awaits
+                    # between the stored-session lookup and this.
+                    first = first_start.get(start_key)
+                    if first is None:
+                        dropped_by = first_start.dropped_since(route, start_key)
+                        if dropped_by is not None:
+                            # It was on its way here (e.g. sending its steer
+                            # fallback notice) when /cancel or /new dropped
+                            # the first start it would have waited on.
+                            logger.info(
+                                "prompt.first_start_dropped",
+                                chat_id=chat_id,
+                                user_msg_id=user_msg_id,
+                                command=dropped_by,
+                                dropped=1,
+                                in_flight=True,
+                            )
+                            await make_reply(cfg, msg)(
+                                text=dropped_notice(1, command=dropped_by)
+                            )
+                            return
+                        break
+                    logger.info(
+                        "prompt.waiting_first_start",
+                        chat_id=chat_id,
+                        user_msg_id=user_msg_id,
+                        engine=engine_resolution.engine,
                     )
+                    first.waiting += 1
+                    try:
+                        await first.settled.wait()
+                    finally:
+                        first.waiting -= 1
+                    if first.dropped_by is not None:
+                        # /cancel or /new stopped the run it waited for.
+                        await make_reply(cfg, msg)(
+                            text=dropped_notice(1, command=first.dropped_by)
+                        )
+                        return
+                    resume_token = first.resume
+                    if resume_token is None:
+                        # It ended without a session: look again, then
+                        # start one ourselves unless another waiter did.
+                        resume_token = await resume_resolver.stored_token(
+                            chat_session_key=chat_session_key,
+                            topic_key=topic_key,
+                            engine_for_session=engine_resolution.engine,
+                        )
+                # Past the wait: the scheduler / a registered first start
+                # covers this message from here.
+                first_start.close_route(route)
+                if resume_token is None:
+                    if start_key is None:
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            scheduler.note_thread_known,
+                            engine_override,
+                        )
+                        return
+                    key = start_key
+                    starting = first_start.register(
+                        key, chat_id=chat_id, thread_id=msg.thread_id
+                    )
+
+                    def settle() -> None:
+                        first_start.release(key, starting)
+
+                    async def note_first_known(
+                        token: ResumeToken, done: anyio.Event
+                    ) -> None:
+                        starting.resume = token
+                        await scheduler.note_thread_known(token, done)
+
+                    try:
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            note_first_known,
+                            engine_override,
+                            on_session_saved=settle,
+                        )
+                    finally:
+                        settle()
                     return
                 progress_ref = await _send_queued_progress(
                     cfg,
@@ -3438,6 +3570,16 @@ async def run_main_loop(
                 )
 
             async def _dispatch_pending_prompt(pending: _PendingPrompt) -> None:
+                # #1157: routed from the moment the coalescer hands it over.
+                route = first_start.route()
+                try:
+                    await _dispatch_pending_prompt_routed(pending, route)
+                finally:
+                    first_start.close_route(route)
+
+            async def _dispatch_pending_prompt_routed(
+                pending: _PendingPrompt, route: first_start.Route
+            ) -> None:
                 msg = pending.msg
                 reply = make_reply(cfg, msg)
                 try:
@@ -3483,6 +3625,7 @@ async def run_main_loop(
                 if not ok:
                     return
                 await dispatch_prompt_run(
+                    route=route,
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,

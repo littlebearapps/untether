@@ -367,6 +367,8 @@ def test_835_usage_payload_counts_denials() -> None:
     assert completed.usage["unattended"] == {
         "trigger": "cron:c1",
         "mode": "default",
+        # #1159: the mode came from [claude] permission_mode (no chat pref).
+        "mode_source": "engine_config",
         "denied": {"Write": 2},
     }
 

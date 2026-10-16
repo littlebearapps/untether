@@ -195,6 +195,24 @@ def is_claude_prompting_mode(mode: str | None) -> bool:
 CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE = "default"
 
 
+def permission_mode_source(options: EngineRunOptions | None) -> str:
+    """#1159: where a run's permission mode came from, for the unattended
+    footer's hint.
+
+    ``"trigger"`` — the trigger's own ``permission_mode`` (a cron's);
+    ``"chat"`` — the chat/topic preference (``/planmode``, ``/config``);
+    ``"engine_config"`` — neither, so the engine's ``untether.toml`` section
+    (or its built-in default). ``_apply_trigger_overrides`` writes a trigger's
+    own mode into ``permission_mode`` too, so ``trigger_permission_mode`` is
+    checked first.
+    """
+    if options is not None and options.trigger_permission_mode is not None:
+        return "trigger"
+    if options is not None and options.permission_mode is not None:
+        return "chat"
+    return "engine_config"
+
+
 def claude_sends_allowed_tools(mode: str | None, *, explicit: bool) -> bool:
     """True when a Claude run in *mode* sends ``--allowedTools`` (#749).
 

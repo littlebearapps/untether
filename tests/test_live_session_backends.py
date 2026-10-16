@@ -86,6 +86,7 @@ async def test_claude_adapter_resolves_functions_at_call_time(
     monkeypatch.setattr(claude_mod, "session_live_bg_count", _sync("bg", 3))
     monkeypatch.setattr(claude_mod, "session_linger_info", _sync("linger", (True, 2)))
     monkeypatch.setattr(claude_mod, "is_session_accepting", _sync("accepting", True))
+    monkeypatch.setattr(claude_mod, "session_turn_pending", _sync("pending", True))
     monkeypatch.setattr(claude_mod, "add_live_session_listener", _sync("listen", True))
     monkeypatch.setattr(claude_mod, "idle_live_session_count", _sync("idle", 4))
 
@@ -104,6 +105,7 @@ async def test_claude_adapter_resolves_functions_at_call_time(
     assert backend.live_bg_count(SID) == 3
     assert backend.linger_info(SID) == (True, 2)
     assert backend.is_accepting(SID) is True
+    assert backend.turn_pending(SID) is True
     assert backend.add_listener(SID, listener) is True
     assert backend.idle_count() == 4
 
@@ -119,6 +121,7 @@ async def test_claude_adapter_resolves_functions_at_call_time(
         ("bg", (SID,), {}),
         ("linger", (SID,), {}),
         ("accepting", (SID,), {}),
+        ("pending", (SID,), {}),
         ("listen", (SID, listener), {}),
         ("idle", (), {}),
     ]

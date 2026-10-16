@@ -93,7 +93,11 @@ from ..utils.paths import (
     get_run_channel_id,
     get_run_trigger_source,
 )
-from .run_options import ANTIGRAVITY_PERMISSION_MODES, get_run_options
+from .run_options import (
+    ANTIGRAVITY_PERMISSION_MODES,
+    get_run_options,
+    permission_mode_source,
+)
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
@@ -490,8 +494,9 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 # ── version guard (08 §4, #976) ─────────────────────────────────────────────
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
-# The newest agy the fixtures and drift notes were checked against (#1091).
-PROBED_CLI_VERSION = "1.3.5"
+# The newest agy the fixtures and drift notes were checked against (#1091,
+# #1156, #1160).
+PROBED_CLI_VERSION = "1.4.0"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -1382,6 +1387,9 @@ class AntigravityStreamState:
     effective_mode: str = "workspace"
     mode_label: str = "workspace"
     unattended: str | None = None
+    # #1159: where the run's mode came from (chat / engine_config / trigger),
+    # so an unattended plan turn's hint names the setting to change.
+    unattended_mode_source: str | None = None
     precheck: _RunPrecheck | None = None
     # D22.7: init reported always-proceed without our bypass flag → the run
     # was stopped; every later line is ignored.
@@ -2585,6 +2593,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             effective_mode=mode,
             mode_label=label,
             unattended=options.unattended_trigger if options is not None else None,
+            unattended_mode_source=(
+                permission_mode_source(options)
+                if options is not None and options.unattended_trigger is not None
+                else None
+            ),
             precheck=precheck,
             permission_unknown=(
                 precheck.permission_unknown if precheck is not None else None
@@ -3952,8 +3965,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "unattended": {
                     "trigger": state.unattended,
                     "mode": "plan",
+                    "mode_source": state.unattended_mode_source,  # #1159
                     "denied": {label: 1},
-                    "hint": antigravity_plan.unattended_hint(state.unattended),
+                    "hint": antigravity_plan.unattended_hint(
+                        state.unattended, state.unattended_mode_source
+                    ),
                 },
             }
             return answer, usage
