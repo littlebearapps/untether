@@ -573,7 +573,7 @@ class UsageCommand:
         except FileNotFoundError:
             return CommandResult(
                 text="No Claude Code credentials found (checked ~/.claude/.credentials.json"
-                " and macOS Keychain). Run 'claude login' to authenticate.",
+                " and macOS Keychain). Run 'claude auth login' to authenticate.",
                 notify=True,
             )
         except httpx.HTTPStatusError as exc:
