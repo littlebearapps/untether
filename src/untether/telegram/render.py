@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 from sulguk import transform_html
 
@@ -15,10 +16,88 @@ from ..markdown import MarkdownParts, assemble_markdown_parts, starts_with_picto
 
 MAX_BODY_CHARS = 3500
 
+# #1152: markdown-it's inline linkify rule takes linkify-it's match as is,
+# trimming only a trailing `*`. For `**https://x.org/a**:` linkify-it matches
+# `https://x.org/a**:` (`:` isn't trailing punctuation to it when more chars
+# precede), so the closing `**` landed inside the link and the bold never
+# closed; `_https://x.org/a_,` kept the closing `_` the same way.
+#
+# The rule below replaces it: while an emphasis opened with `*` / `_` is
+# still unclosed, a trailing run of that marker in the match — plus any
+# punctuation after it — is the emphasis closing, not part of the URL. The
+# shortened text is re-matched so linkify-it still trims sentence punctuation
+# (`**https://x.org/a.**`). A URL outside such emphasis is untouched, so
+# `https://x.org/a_b_c` and `…/wiki/Foo_` keep their underscores.
+#
+# `_SCHEME_RE.match` (not search) mirrors markdown-it-py, so the rule fires in
+# exactly the places it did before; other URLs reach the core linkify pass,
+# which runs after emphasis is resolved and never sees the markers.
+_SCHEME_RE = re.compile(r"(?:^|[^a-z0-9.+-])([a-z][a-z0-9.+-]*)$", re.IGNORECASE)
+_EMPHASIS_CLOSE_RE = {
+    ord(marker): re.compile(re.escape(marker) + r"+[^\w/]*$") for marker in "*_"
+}
+
+
+def _open_emphasis_markers(state: StateInline) -> list[int]:
+    """Markers (`*` / `_` char codes) with an opener not yet closed, as far
+    as the delimiters scanned so far show."""
+    depth = dict.fromkeys(_EMPHASIS_CLOSE_RE, 0)
+    for delim in state.delimiters:
+        if delim.marker not in depth:
+            continue
+        if delim.close and depth[delim.marker]:
+            depth[delim.marker] -= 1
+        elif delim.open:
+            depth[delim.marker] += 1
+    return [marker for marker, count in depth.items() if count]
+
+
+def _linkify_inline(state: StateInline, silent: bool) -> bool:
+    """markdown-it's inline ``linkify`` rule, emphasis-aware (#1152)."""
+    if not state.md.options.linkify or state.linkLevel > 0:
+        return False
+    linkify = state.md.linkify
+    pos = state.pos
+    if pos + 3 > state.posMax or state.src[pos : pos + 3] != "://":
+        return False
+    if not (scheme := _SCHEME_RE.match(state.pending)):
+        return False
+    proto = scheme.group(1)
+    if not (link := linkify.match_at_start(state.src[pos - len(proto) :])):
+        return False
+    url: str = link.url
+    for marker in _open_emphasis_markers(state):
+        if close := _EMPHASIS_CLOSE_RE[marker].search(url):
+            trimmed = linkify.match_at_start(url[: close.start()])
+            if trimmed is None:
+                return False
+            url = trimmed.url
+    # disallow '*' at the end of the link (conflicts with emphasis)
+    url = url.rstrip("*")
+
+    full_url = state.md.normalizeLink(url)
+    if not state.md.validateLink(full_url):
+        return False
+    if not silent:
+        state.pending = state.pending[: -len(proto)]
+        token = state.push("link_open", "a", 1)
+        token.attrs = {"href": full_url}
+        token.markup = "linkify"
+        token.info = "auto"
+        token = state.push("text", "", 0)
+        token.content = state.md.normalizeLinkText(url)
+        token = state.push("link_close", "a", -1)
+        token.markup = "linkify"
+        token.info = "auto"
+    state.pos += len(url) - len(proto)
+    return True
+
+
 if importlib.util.find_spec("linkify_it"):
     _MD_RENDERER = MarkdownIt("commonmark", {"html": False, "linkify": True}).enable(
         "linkify"
     )
+    _MD_RENDERER.inline.ruler.at("linkify", _linkify_inline)
 else:
     logging.getLogger(__name__).warning(
         "linkify-it-py not available — URLs will not be auto-linked"
