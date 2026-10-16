@@ -400,3 +400,147 @@ def test_1146_restart_reason_with_keys_and_hot_keys() -> None:
     assert "Need restart to apply" not in partial
     assert f"Still needs a restart: {reason}" in partial
     assert _HINT in partial
+
+
+# ── #1144 / #1117: trigger notices render user text literally ──
+#
+# The notices go to Telegram through prepare_telegram (markdown → entities),
+# so a schedule like '99 99 * * *' next to '* *' must not become italics.
+
+
+def _render(text: str) -> tuple[str, list[dict[str, object]]]:
+    from untether.markdown import MarkdownParts
+    from untether.telegram.render import prepare_telegram
+
+    return prepare_telegram(MarkdownParts(header=text))
+
+
+_TRICKY = "schedule: '99 99 * * *' or '* *', _a_ `tick` [x](y) <b> **z**"
+_TRICKY_ID = "it8_bad*sched`"
+
+
+def _assert_literal(rendered: str, entities: list[dict[str, object]]) -> None:
+    assert _TRICKY in rendered
+    assert _TRICKY_ID in rendered
+    # Only the restart hint's code spans (and linkify, which Telegram clients
+    # apply to 'crons.0.id' anyway) may format anything.
+    assert {e["type"] for e in entities} <= {"code", "text_link"}
+    for entity in entities:
+        offset, length = int(entity["offset"]), int(entity["length"])  # type: ignore[call-overload]
+        assert "*" not in rendered[offset : offset + length]
+
+
+def test_1144_invalid_notice_renders_schedules_literally() -> None:
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [
+            InvalidTrigger("cron", _TRICKY_ID, _TRICKY),
+            InvalidTrigger("cron", "two", "schedule: '* *' needs 5 fields"),
+        ],
+        phase="reload",
+        refused_webhook_ids=["open_*_hook"],
+        exposed=True,
+        webhook_server_running=False,
+        restart_hint=_HINT,
+    )
+    rendered, entities = _render(text)
+    _assert_literal(rendered, entities)
+    assert "schedule: '* *' needs 5 fields" in rendered
+    assert "webhook open_*_hook: refused" in rendered
+    assert "systemctl --user restart untether-dev" in rendered  # hint still code
+
+
+def test_1144_server_refused_notice_renders_user_text_literally() -> None:
+    from untether.config_reload_notification import (
+        format_webhook_server_refused_notice,
+    )
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_webhook_server_refused_notice(
+        ["open_*_a", "open_*_b"],
+        exposed=True,
+        invalid=[InvalidTrigger("cron", _TRICKY_ID, _TRICKY)],
+        restart_hint=_HINT,
+    )
+    rendered, entities = _render(text)
+    _assert_literal(rendered, entities)
+    assert "Refused: open_*_a, open_*_b" in rendered
+
+
+def test_1144_block_failure_notices_render_error_literally() -> None:
+    from untether.config_reload_notification import (
+        format_trigger_block_failure_notice,
+    )
+
+    error = f"crons.0.id {_TRICKY_ID}: {_TRICKY}"
+    for kwargs in (
+        {"phase": "startup", "running": False},
+        {"phase": "reload", "running": False},
+        {
+            "phase": "reload",
+            "running": True,
+            "active_secret_webhook_ids": [_TRICKY_ID, "gh_*_x"],
+        },
+        {"phase": "reload", "running": True, "webhook_server_running": False},
+    ):
+        text = format_trigger_block_failure_notice(
+            error,
+            restart_hint=_HINT,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        rendered, entities = _render(text)
+        _assert_literal(rendered, entities)
+    assert (
+        "gh_*_x"
+        in _render(
+            format_trigger_block_failure_notice(
+                "x", phase="reload", running=True, active_secret_webhook_ids=["gh_*_x"]
+            )
+        )[0]
+    )
+
+
+def test_1144_user_text_newlines_cannot_start_markdown_blocks() -> None:
+    """A newline inside an id or error would let '- ' / '1. ' / '# ' start a
+    list or heading; user text is kept on its own line."""
+    from untether.config_reload_notification import format_invalid_triggers_notice
+    from untether.triggers.settings import InvalidTrigger
+
+    text = format_invalid_triggers_notice(
+        [InvalidTrigger("cron", "a\n- b", "bad\n# heading\n1. item")],
+        phase="reload",
+    )
+    rendered, entities = _render(text)
+    assert "cron a - b: bad # heading 1. item" in rendered
+    assert entities == []
+
+
+# ── #1146: block-failure notice when the webhook server never started ──
+
+
+def test_1146_block_failure_with_webhook_server_down() -> None:
+    """The server refused at start-up stays down: the notice mustn't claim
+    webhooks still run or that an old secret is still active."""
+    from untether.config_reload_notification import (
+        format_trigger_block_failure_notice,
+    )
+
+    text = format_trigger_block_failure_notice(
+        "crons: ids must be unique",
+        phase="reload",
+        running=True,
+        active_secret_webhook_ids=["it8-bearer"],
+        webhook_server_running=False,
+        restart_hint=_HINT,
+    )
+    assert "previous crons are still running unchanged" in text
+    assert "crons and webhooks are still running" not in text
+    assert "no webhooks are being served" in text
+    assert "the webhook server isn't running" in text
+    assert "secret" not in text
+    assert "it8-bearer" not in text
+    assert "Error: crons: ids must be unique" in text
+    assert "a cron fix applies on save" in text
+    assert f"to start the webhook server, {_HINT}." in text

@@ -491,7 +491,8 @@ async def _notify_trigger_config_problem(
     ``[triggers]`` block that failed) to the reload-notice audience.
 
     Rendered from markdown into entities (no parse mode), so validation text
-    full of ``_`` can't make the send fail. Never raises.
+    full of ``_`` can't make the send fail; the formatters escape user text
+    (#1144), so a schedule's ``*`` shows as typed. Never raises.
     """
     from ..markdown import MarkdownParts
     from .render import prepare_telegram
@@ -665,7 +666,10 @@ async def _notify_trigger_block_failure_on_reload(
 ) -> None:
     """#1117: a reload whose ``[triggers]`` block failed keeps the previous
     triggers, so say so in Telegram, naming the webhooks whose old secret is
-    still accepted. Once per distinct error."""
+    still accepted. Once per distinct error.
+
+    #1146: if start-up refused the webhook server, only the crons are still
+    running and no webhook secret is being accepted."""
     from ..config_reload_notification import format_trigger_block_failure_notice
 
     if state.trigger_block_error_notified == error:
@@ -679,6 +683,7 @@ async def _notify_trigger_block_failure_on_reload(
             phase="reload",
             running=trigger_manager is not None,
             active_secret_webhook_ids=active,
+            webhook_server_running=not state.webhook_server_refused,
         ),
         running_tasks=state.running_tasks,
     )

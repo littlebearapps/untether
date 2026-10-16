@@ -1105,10 +1105,17 @@ class TestCronScheduleValidation1144:
         parsed = parse_trigger_config_isolated(
             {"crons": [_cron("good"), _cron("it7-bad-sched", schedule="99 99 * * *")]}
         )
+        from untether.markdown import MarkdownParts
+        from untether.telegram.render import prepare_telegram
+
         notice = format_invalid_triggers_notice(parsed.invalid, phase="reload")
         assert notice.startswith("⚠️ Trigger config: 1 trigger skipped (invalid)")
         assert "• cron it7-bad-sched: schedule:" in notice
-        assert "minute field: 99 is out of range (0–59)" in notice
+        # The notice is markdown with user text escaped (#1144): check what
+        # Telegram shows.
+        rendered, _entities = prepare_telegram(MarkdownParts(header=notice))
+        assert "'99 99 * * *'" in rendered
+        assert "minute field: 99 is out of range (0–59)" in rendered
 
     def test_bad_schedule_logs_trigger_invalid(self):
         from structlog.testing import capture_logs

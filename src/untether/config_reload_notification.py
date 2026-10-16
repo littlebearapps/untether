@@ -48,8 +48,10 @@ __all__ = [
     "format_webhook_server_refused_notice",
 ]
 
-# #1117: trigger notices are plain text (no parse mode) — validation
-# messages are full of ``_`` and ``*`` that would break Telegram Markdown.
+# #1117: trigger notices are rendered from markdown into entities (no parse
+# mode), so a send can't fail on the ``_`` and ``*`` in validation messages.
+# #1144: every user-supplied piece (ids, errors quoting a schedule) goes
+# through :func:`_user_text`, so '99 99 * * *' never turns into italics.
 _TRIGGER_ERROR_MAX_CHARS = 300
 
 
@@ -203,8 +205,29 @@ def _clip(text: str, limit: int = _TRIGGER_ERROR_MAX_CHARS) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _user_text(text: str) -> str:
+    """#1144: a config id or error, made literal for the markdown renderer.
+
+    Kept on one line (a newline could start a list or heading) and
+    backslash-escaped, so ``*``, ``_`` and backticks show as typed."""
+    from .background_status import escape_markdown
+
+    return escape_markdown(" ".join(text.splitlines()))
+
+
+def _error_text(error: str) -> str:
+    return _user_text(_clip(error))
+
+
+def _ids_text(ids: Sequence[str]) -> str:
+    return ", ".join(_user_text(i) for i in sorted(ids))
+
+
 def _invalid_lines(invalid: Sequence[InvalidTrigger]) -> list[str]:
-    return [f"• {item.kind} {item.trigger_id}: {_clip(item.error)}" for item in invalid]
+    return [
+        f"• {item.kind} {_user_text(item.trigger_id)}: {_error_text(item.error)}"
+        for item in invalid
+    ]
 
 
 def _refusal_where(exposed: bool) -> str:
@@ -243,7 +266,7 @@ def format_invalid_triggers_notice(
     header = f"⚠️ Trigger config: {count} {noun} skipped"
     lines = [header if refused else f"{header} (invalid)", *_invalid_lines(invalid)]
     lines.extend(
-        f'• webhook {webhook_id}: refused, auth = "none" isn\'t allowed '
+        f'• webhook {_user_text(webhook_id)}: refused, auth = "none" isn\'t allowed '
         f"{_refusal_where(exposed)}"
         for webhook_id in refused
     )
@@ -300,7 +323,7 @@ def format_webhook_server_refused_notice(
     on a non-loopback host) keeps the whole webhook server down, so even the
     webhooks with auth aren't served; crons still run. Skipped invalid
     entries are folded in so start-up sends one notice."""
-    ids = ", ".join(sorted(refused_webhook_ids))
+    ids = _ids_text(refused_webhook_ids)
     paragraphs = [
         "⚠️ Webhook server not started: no webhooks are being served, not "
         "even ones with auth.\n"
@@ -330,6 +353,7 @@ def format_trigger_block_failure_notice(
     phase: Literal["startup", "reload"],
     running: bool,
     active_secret_webhook_ids: Sequence[str] = (),
+    webhook_server_running: bool = True,
     restart_hint: str | None = None,
 ) -> str:
     """#1117: the whole ``[triggers]`` block failed (server settings,
@@ -338,26 +362,39 @@ def format_trigger_block_failure_notice(
     At startup nothing runs. On reload the previous triggers keep running,
     and the notice says so explicitly when that leaves old webhook secrets
     active (a rotated, leaked secret would otherwise keep working silently).
+
+    #1146: when start-up refused the webhook server
+    (``webhook_server_running`` false), only the crons are still running and
+    no webhook secret is being accepted, so neither is claimed.
     """
     if phase == "startup":
         return (
             "⚠️ Triggers failed to start: no crons or webhooks are running.\n"
-            f"Error: {_clip(error)}\n"
+            f"Error: {_error_text(error)}\n"
             f"Fix [triggers] in untether.toml, then {_resolve_hint(restart_hint)}."
         )
     if not running:
         # #1146: nothing started, so even a fixed config needs a restart.
         return (
             "⚠️ Trigger config is invalid: no crons or webhooks are running.\n"
-            f"Error: {_clip(error)}\n"
+            f"Error: {_error_text(error)}\n"
             f"Fix [triggers] in untether.toml, then {_resolve_hint(restart_hint)}."
+        )
+    if not webhook_server_running:
+        # A reload can't start the webhook server that start-up refused.
+        return (
+            "⚠️ Trigger config reload failed: the previous crons are still "
+            "running unchanged, but the webhook server isn't running, so no "
+            f"webhooks are being served.\nError: {_error_text(error)}\n\n"
+            "Fix [triggers] in untether.toml: a cron fix applies on save; "
+            f"to start the webhook server, {_resolve_hint(restart_hint)}."
         )
     paragraphs = [
         "⚠️ Trigger config reload failed: the previous crons and webhooks "
-        f"are still running unchanged.\nError: {_clip(error)}",
+        f"are still running unchanged.\nError: {_error_text(error)}",
     ]
     if active_secret_webhook_ids:
-        ids = ", ".join(sorted(active_secret_webhook_ids))
+        ids = _ids_text(active_secret_webhook_ids)
         paragraphs.append(
             f"The old webhook secret is still active for: {ids}. If you were "
             "rotating a leaked secret, the old one keeps working until "

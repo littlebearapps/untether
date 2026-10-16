@@ -7061,6 +7061,64 @@ async def test_1146_reload_after_startup_block_failure_needs_restart(
     assert "No triggers are running" in skipped[0]
 
 
+@pytest.mark.anyio
+async def test_1144_startup_notice_keeps_cron_asterisks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 defect: with two invalid schedules in one notice, Telegram
+    turned the asterisks between them into italics ('99 99 * * ' and ' *')."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "bad-range", "schedule": "99 99 * * *", "prompt": "a"},
+            {"id": "two-fields", "schedule": "* *", "prompt": "b"},
+            {"id": "good", "schedule": "17 3 * * *", "prompt": "c"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    calls = [c for c in transport.send_calls if "Trigger config" in c["message"].text]
+    assert len(calls) == 1
+    message = calls[0]["message"]
+    assert "'99 99 * * *'" in message.text
+    assert "'* *'" in message.text
+    entities = message.extra.get("entities", [])
+    assert not [e for e in entities if e["type"] in {"italic", "bold"}]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_block_failure_with_server_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 edge case: the webhook server was refused at start-up, then a
+    reload broke the whole [triggers] block. No webhook is served, so the
+    notice mustn't say webhooks still run or an old secret is active."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks(exposed=True))
+    dup_crons = (
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 9 * * *"\nprompt = "a"\n'
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 10 * * *"\nprompt = "b"\n'
+    )
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=dup_crons
+        ),
+    )
+
+    notices = [t for t in _1117_texts(cfg) if "reload failed" in t]
+    assert len(notices) == 1
+    assert "previous crons are still running unchanged" in notices[0]
+    assert "no webhooks are being served" in notices[0]
+    assert "crons and webhooks are still running" not in notices[0]
+    assert "secret" not in notices[0]
+    assert "to start the webhook server" in notices[0]
+
+
 def test_894_triggers_enable_needs_restart_truth_table() -> None:
     from untether.telegram.loop import _triggers_enable_needs_restart as f
 
