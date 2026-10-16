@@ -863,6 +863,8 @@ through; every other run keeps `--disable-slash-commands`.
 session (the commands, file changes and answers), kept in memory for the 20 most recently active sessions. Its
 `Model:` line is the model the chat set (`--model`, which agy echoes as `init.model`), or `agy default` when none
 was set: agy names no model in its stream then ([#1058](https://github.com/littlebearapps/untether/issues/1058)).
+Its `**Usage:**` line labels each figure's scope: the duration is the last run's, the tokens are agy's running
+conversation total, e.g. `38.4s (last run) · 24263 in / 303 out tokens (thread total)` ([#1158](https://github.com/littlebearapps/untether/issues/1158)).
 
 - **It is empty after Untether restarts**, and it never includes turns you ran in a terminal. See
   [Export sessions](../../../how-to/export-sessions.md).
