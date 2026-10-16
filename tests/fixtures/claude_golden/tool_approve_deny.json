@@ -971,7 +971,6 @@
     "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug runner.started.seen reason=\"unknown\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
     "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
-    "debug usage_footer.failed +[exc_info,logger_name]",
     "info cost.turn_delta engine=\"claude\" session_id=\"golden-session-1\" source=\"new_session\" +[bg_agents,cumulative_usd,delta_usd,logger_name]",
     "info runner.completed ok=true +[action_count,answer_len,duration_api_ms,elapsed_s,error,logger_name,model,model_display,num_turns,resume,total_cost_usd,turn_cost_usd]"
    ],
