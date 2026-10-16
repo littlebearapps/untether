@@ -220,6 +220,66 @@ async def test_webhook_in_planmode_bypass_chat_spawns_default(tmp_path: Path) ->
     assert len(_downgrades(logs)) == 1
 
 
+# --- #1159: where an unattended run's mode came from -----------------------
+
+
+@pytest.mark.parametrize(
+    ("runner_kwargs", "opts", "source"),
+    [
+        (
+            {},
+            EngineRunOptions(permission_mode="acceptEdits", unattended_trigger=WEBHOOK),
+            "chat",
+        ),
+        (
+            {"permission_mode": "acceptEdits"},
+            EngineRunOptions(unattended_trigger=WEBHOOK),
+            "engine_config",
+        ),
+        (
+            {"permission_mode": "acceptEdits"},
+            EngineRunOptions(
+                permission_mode="plan",
+                trigger_permission_mode="plan",
+                unattended_trigger=CRON,
+            ),
+            "trigger",
+        ),
+        (
+            {},
+            EngineRunOptions(
+                permission_mode="bypassPermissions", unattended_trigger=WEBHOOK
+            ),
+            "webhook_guard",
+        ),
+        (
+            {"permission_mode": "bypassPermissions"},
+            EngineRunOptions(unattended_trigger=WEBHOOK),
+            "webhook_guard",
+        ),
+        (
+            {"permission_mode": "plan", "dangerously_skip_permissions": True},
+            EngineRunOptions(unattended_trigger=WEBHOOK),
+            "webhook_guard",
+        ),
+    ],
+)
+def test_1159_new_state_records_the_modes_source(
+    runner_kwargs: dict[str, Any], opts: EngineRunOptions, source: str
+) -> None:
+    runner = _claude(**runner_kwargs)
+    with apply_run_options(opts):
+        state = runner.new_state("hi", None)
+    assert state.unattended_mode_source == source
+
+
+def test_1159_attended_run_has_no_mode_source() -> None:
+    runner = _claude(permission_mode="acceptEdits")
+    with apply_run_options(EngineRunOptions(permission_mode="plan")):
+        state = runner.new_state("hi", None)
+    assert state.unattended_mode_source is None
+
+
 # --- Codex: unknown mode on a webhook runs safe ----------------------------
 
 

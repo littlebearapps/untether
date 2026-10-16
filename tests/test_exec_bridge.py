@@ -479,6 +479,8 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
             await anyio.lowlevel.checkpoint()
         assert running_tasks
         running_task = running_tasks[next(iter(running_tasks))]
+        # #1159: the drain-timeout notice names this engine.
+        assert running_task.engine == CODEX_ENGINE
         with anyio.fail_after(1):
             await running_task.resume_ready.wait()
         running_task.cancel_requested.set()
@@ -13089,8 +13091,35 @@ def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
     hook = rb._unattended_footer(
         {"trigger": "webhook:w", "mode": "default", "denied": {"Write": 1}}
     )
-    assert "webhooks use the chat's permission mode" in hook
+    # #1159: no mode source on the payload -> name both possible sources.
+    assert "the chat's /planmode, else [claude] permission_mode" in hook
     assert rb._unattended_usage({"unattended": {"denied": {}}}) is None
+
+
+def test_1159_webhook_hint_names_where_the_mode_came_from(monkeypatch) -> None:
+    import untether.runner_bridge as rb
+
+    def hint(n: int, source: str | None) -> str:
+        payload = {"trigger": f"webhook:w{n}", "mode": "default", "denied": {"W": 1}}
+        if source is not None:
+            payload["mode_source"] = source
+        return rb._unattended_footer(payload)
+
+    monkeypatch.setattr(rb, "_UNATTENDED_HINTED", {})
+    chat = hint(1, "chat")
+    assert "uses this chat's permission mode" in chat
+    assert "untether.toml" not in chat
+    toml = hint(2, "engine_config")
+    assert "[claude] permission_mode in untether.toml" in toml
+    assert "chat's permission mode" not in toml
+    trigger = hint(3, "trigger")
+    assert "sets its own permission_mode" in trigger
+    assert "chat's permission mode" not in trigger
+    guard = hint(4, "webhook_guard")
+    assert "never inherit bypassPermissions" in guard
+    assert "ran in default mode" in guard
+    for text in (chat, toml, trigger, guard):
+        assert "pre-approve the tools" in text
     assert rb._unattended_usage(None) is None
 
 

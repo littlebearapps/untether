@@ -2166,6 +2166,33 @@ def _unattended_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+def _webhook_unattended_hint(source: object) -> str:
+    """#1159: a Claude webhook's remedy, naming where its mode came from
+    (``usage["unattended"]["mode_source"]``, set by the runner)."""
+    fix = "set /planmode plan-auto or auto in this chat, or pre-approve the tools"
+    if source == "chat":
+        return f"this webhook uses this chat's permission mode \N{EM DASH} {fix}"
+    if source == "engine_config":
+        return (
+            "this webhook uses [claude] permission_mode in untether.toml "
+            f"(this chat has none set) \N{EM DASH} change it there, {fix}"
+        )
+    if source == "trigger":
+        return (
+            "this webhook sets its own permission_mode \N{EM DASH} change it on "
+            "the webhook in untether.toml, or pre-approve the tools"
+        )
+    if source == "webhook_guard":
+        return (
+            "webhooks never inherit bypassPermissions, so this one ran in "
+            f"default mode \N{EM DASH} {fix}"
+        )
+    return (
+        "webhooks use the chat's /planmode, else [claude] permission_mode in "
+        f"untether.toml \N{EM DASH} {fix}"
+    )
+
+
 def _unattended_footer(unattended: Mapping[str, Any]) -> str:
     """``🔒 unattended (cron:x) · denied Write (x2), ExitPlanMode — nobody to
     approve`` plus, the first time a trigger hits it, what to change."""
@@ -2195,10 +2222,7 @@ def _unattended_footer(unattended: Mapping[str, Any]) -> str:
             "change the rule or run it attended"
         )
     elif trigger.startswith("webhook:"):
-        hint = (
-            "webhooks use the chat's permission mode \N{EM DASH} set /planmode "
-            "plan-auto or auto in this chat, or pre-approve the tools"
-        )
+        hint = _webhook_unattended_hint(unattended.get("mode_source"))
     else:
         hint = (
             "set permission_mode on the cron (plan-auto, auto or "
@@ -2330,6 +2354,9 @@ class RunningTask:
     edits: ProgressEdits | None = None
     # #826: the originating message's thread (topic) — scopes /new and /cancel
     thread_id: ThreadId | None = None
+    # #1159: the run's engine, known before its session is — the drain-timeout
+    # notice names it ("starting /codex"), never a hardcoded /claude.
+    engine: str | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -7155,7 +7182,9 @@ async def handle_message(
     running_task: RunningTask | None = None
     starting_ref: MessageRef | None = None
     if running_tasks is not None:
-        running_task = RunningTask(context=context, thread_id=incoming.thread_id)
+        running_task = RunningTask(
+            context=context, thread_id=incoming.thread_id, engine=runner.engine
+        )
         starting_ref = progress_ref or MessageRef(
             channel_id=incoming.channel_id,
             message_id=incoming.message_id,

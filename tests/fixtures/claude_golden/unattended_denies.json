@@ -779,6 +779,7 @@
         "ExitPlanMode": 1
        },
        "mode": "plan",
+       "mode_source": "engine_config",
        "trigger": "cron:nightly"
       },
       "usage": {

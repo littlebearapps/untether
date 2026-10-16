@@ -460,3 +460,55 @@ def test_1089_configured_cmd_that_does_not_exist_is_missing(
     missing = tmp_path / "nowhere" / "agy"
     with pytest.raises(ConfigError, match=f"{missing} not found"):
         _1089_build(monkeypatch, tmp_path, {"antigravity": {"cmd": str(missing)}})
+
+
+def test_1159_absolute_cmd_says_not_found_or_not_executable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #1159: an absolute `cmd` is never looked up on PATH, so don't say PATH.
+    missing = tmp_path / "bogus" / "agy"
+    with pytest.raises(ConfigError) as excinfo:
+        _1089_build(monkeypatch, tmp_path, {"antigravity": {"cmd": str(missing)}})
+    message = str(excinfo.value)
+    assert f"{missing} not found or not executable" in message
+    assert "PATH" not in message
+
+
+def test_1159_non_executable_cmd_says_not_executable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    agy = _fake_agy(tmp_path / "opt" / "agy")
+    agy.chmod(0o644)
+    with pytest.raises(ConfigError, match="not found or not executable"):
+        _1089_build(monkeypatch, tmp_path, {"antigravity": {"cmd": str(agy)}})
+
+
+def test_1159_setup_warning_for_absolute_cmd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A configured non-default engine with a bad absolute `cmd`: the WARN names
+    the path, not PATH, and the summary still counts it as a missing CLI."""
+    from structlog.testing import capture_logs
+
+    claude = _fake_agy(tmp_path / "bin" / "claude")
+    monkeypatch.setenv("PATH", str(claude.parent))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "untether.toml"
+    config_path.touch()
+    missing = tmp_path / "bogus" / "agy"
+    backends = runtime_loader.load_backends(
+        engine_ids=["claude", "antigravity"], allowlist=None, default_engine="claude"
+    )
+    with capture_logs() as logs:
+        runtime_loader.build_router(
+            settings=_settings_with_engines({"antigravity": {"cmd": str(missing)}}),
+            config_path=config_path,
+            backends=backends,
+            default_engine="claude",
+        )
+    (summary,) = [e for e in logs if e.get("event") == "setup.summary"]
+    assert summary["missing_on_path"] == ["antigravity"]
+    assert summary["bad_config"] == []
+    (warning,) = [e for e in logs if e.get("event") == "setup.warning"]
+    assert warning["engine"] == "antigravity"
+    assert warning["issue"] == f"{missing} not found or not executable"

@@ -184,7 +184,7 @@ GOLDEN_SHA256: dict[str, str] = {
     "resume_waits_for_background_owner.jsonl": "2a52fd6cb208882b289c27d8a73411cf02b2874ed7daa6a0429a54339c4a9acf",
     "tool_approve_deny.json": "dc2be9d459c94c570e1799f91d4b49b63fa6bd71757e3786b095f38abcdbbc4b",
     "tool_approve_deny.jsonl": "88e09163371958159ebae06eee84d937790786147989be76ec9a4756c12646ed",
-    "unattended_denies.json": "3e4ef938f511fedef9bb6b7f201159cf6ad10e91af068b892f321732273b436e",
+    "unattended_denies.json": "2b26ff670e03fb8470dc6c1177defa6b9c24eae4996064888435f9e978931e86",
     "unattended_denies.jsonl": "3e9b8e31c3208dd0574fb3e9b140d9962f77212fb03c56cc7e8ae2782476ddac",
 }
 

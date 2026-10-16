@@ -2110,27 +2110,41 @@ async def _notify_drain_timeout(
     remaining: int,
 ) -> None:
     """Send a timeout notice to each unique chat/topic still running after
-    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``."""
+    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``.
+
+    #1159: the hint names each chat's own engine (the run's session engine,
+    else the engine it was started on), or none when neither is known —
+    never a hardcoded ``/claude`` in a Codex or Pi chat.
+    """
     from ..transport import RenderedMessage, SendOptions
 
-    hint = (
-        "Untether was restarted. Your session is saved"
-        " \N{EM DASH} resume by sending a new message"
-        " or starting /claude."
-    )
-    msg = RenderedMessage(
-        text=(
-            f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
-            f" {remaining} run(s) interrupted."
-            f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
-        ),
-        extra={},
-    )
+    def _message(engine: str | None) -> RenderedMessage:
+        restart = f" or starting /{engine}." if engine else "."
+        hint = (
+            "Untether was restarted. Your session is saved"
+            f" \N{EM DASH} resume by sending a new message{restart}"
+        )
+        return RenderedMessage(
+            text=(
+                f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
+                f" {remaining} run(s) interrupted."
+                f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+            ),
+            extra={},
+        )
+
+    engines: dict[tuple[int | str, object], str] = {}
+    for ref, task in list(running_tasks.items()):
+        resume = getattr(task, "resume", None)
+        engine = getattr(resume, "engine", None) or getattr(task, "engine", None)
+        if isinstance(engine, str) and engine:
+            engines.setdefault((ref.channel_id, ref.thread_id), engine)
     notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
         target = (ref.channel_id, ref.thread_id)
         if target not in notified:
             notified.add(target)
+            msg = _message(engines.get(target))
             try:
                 await transport.send(  # type: ignore[attr-defined]
                     channel_id=ref.channel_id,

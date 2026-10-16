@@ -157,6 +157,7 @@ from .run_options import (
     is_claude_plan_auto,
     is_claude_prompting_mode,
     normalise_claude_cli_mode,
+    permission_mode_source,
 )
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -1798,6 +1799,10 @@ class ClaudeStreamState:
     # (`plan-auto` kept distinct from `plan`; `bypassPermissions` under
     # --dangerously-skip-permissions) — drives which approvals are denied.
     unattended_mode: str | None = None
+    # #1159 where that mode came from — `trigger` / `chat` / `engine_config`,
+    # or `webhook_guard` when #1142 replaced an inherited bypass — so the
+    # footer's hint names the setting to change.
+    unattended_mode_source: str | None = None
     # #835 tools denied in the current turn (reset per turn, one entry per
     # denial); finalised into `usage["unattended"]` at the result.
     unattended_denials: list[str] = field(default_factory=list)
@@ -3751,6 +3756,7 @@ def _unattended_usage_payload(state: ClaudeStreamState) -> dict[str, Any] | None
     return {
         "trigger": state.unattended_trigger,
         "mode": state.unattended_mode,
+        "mode_source": state.unattended_mode_source,  # #1159
         "denied": denied,
     }
 
@@ -10216,6 +10222,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             state.unattended_trigger = run_opts.unattended_trigger
             state.unattended_mode = (
                 "bypassPermissions" if self._skips_permissions() else requested_mode
+            )
+            inherited = run_opts.permission_mode or self.permission_mode
+            state.unattended_mode_source = (
+                "webhook_guard"
+                if self._webhook_bypass_origin(run_opts, inherited) is not None
+                else permission_mode_source(run_opts)
             )
         # #383: a plan chat — the approval caption and the plan re-arm key
         # off the configured mode, never the CLI's current one.

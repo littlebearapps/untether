@@ -82,7 +82,7 @@ This means `systemctl --user stop untether` (Linux) also drains gracefully, as s
 Untether persists the last Telegram `update_id` to `last_update_id.json` in the config directory. On startup, polling resumes from the saved offset — no messages are dropped or re-processed within Telegram's 24-hour retention window. Pending `/at` delays are cancelled during drain and not persisted (they are lost on restart).
 
 !!! note "Drain timeout"
-    The default drain timeout is 120 seconds. If active runs don't complete within this window, they are cancelled and each affected chat or topic gets `⚠️ Restart timed out — N run(s) interrupted.` with a hint that the session is saved and can be resumed.
+    The default drain timeout is 120 seconds. If active runs don't complete within this window, they are cancelled and each affected chat or topic gets `⚠️ Restart timed out — N run(s) interrupted.` with a hint that the session is saved and can be resumed by sending a new message or starting that chat's engine (for example `/codex`).
 
 ## Orphan progress cleanup
 
