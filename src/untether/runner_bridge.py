@@ -76,6 +76,7 @@ from .transport import (
     message_kind,
 )
 from .utils import engine_argv
+from .utils.error_display import redact_url_secrets
 
 logger = get_logger(__name__)
 
@@ -7570,9 +7571,14 @@ async def handle_message(
             and _plain_prespawn_refusal(completed.usage) is not None
         )
         if plain_refusal:
-            final_answer = str(run_error)
+            final_answer = redact_url_secrets(str(run_error))
         elif run_ok is False and run_error:
             raw_error = str(run_error)
+            # #1151: the card shows the engine's error text with URL userinfo
+            # and query values masked (a model id the user set, a provider's
+            # callback link). The hint and the resume checks read the raw
+            # text; the ``runner.completed`` log has its own redaction.
+            shown_error = redact_url_secrets(raw_error)
             # #887: the hint depends on why the session ended and on whether
             # the run had any turns, not just on the error text.
             hint = (
@@ -7597,8 +7603,10 @@ async def handle_message(
                 error_head = raw_error.split("\n", 1)[0].strip()
                 answer_head = final_answer.strip().split("\n", 1)[0].strip()
                 if error_head and error_head == answer_head:
-                    _, _, remainder = raw_error.partition("\n")
-                    parts: list[str] = [final_answer]
+                    # #1151: here the answer IS the error text (OpenCode with
+                    # no assistant text, a Claude error result) — mask it too.
+                    _, _, remainder = shown_error.partition("\n")
+                    parts: list[str] = [redact_url_secrets(final_answer)]
                     if hint:
                         parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
                     if remainder.strip():
@@ -7607,18 +7615,18 @@ async def handle_message(
                 else:
                     if hint:
                         error_text = (
-                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{shown_error}\n```"
                         )
                     else:
-                        error_text = f"```\n{raw_error}\n```"
+                        error_text = f"```\n{shown_error}\n```"
                     final_answer = f"{final_answer}\n\n{error_text}"
             else:
                 if hint:
                     final_answer = (
-                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{shown_error}\n```"
                     )
                 else:
-                    final_answer = f"```\n{raw_error}\n```"
+                    final_answer = f"```\n{shown_error}\n```"
         if _session_auto_cleared:
             # #952: say so — the card's resume line still names the old session.
             final_answer = f"{final_answer}\n\n{_SESSION_CLEARED_NOTICE}".lstrip()

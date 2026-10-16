@@ -29,6 +29,7 @@ from .model import (
     StartedEvent,
     UntetherEvent,
 )
+from .utils.error_display import redact_url_secrets
 from .utils.paths import get_run_base_dir
 from .utils.streams import drain_stderr, iter_bytes_lines
 from .utils.subprocess import (
@@ -891,6 +892,10 @@ class JsonlSubprocessRunner(BaseRunner):
         detail: dict[str, Any] | None = None,
     ) -> UntetherEvent:
         note_id = self.next_note_id(state)
+        # #1151: a warning / error row is engine text shown on the progress
+        # card (Codex's ``error`` event is the API-error JSON) — mask URL
+        # userinfo and query values, as on the final error card.
+        message = redact_url_secrets(message)
         action = Action(
             id=note_id,
             kind="warning",

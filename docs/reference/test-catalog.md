@@ -6,7 +6,7 @@ session. **When you add or substantially change a test file, update its entry he
 
 ## Test files
 
-9680 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+9700 unit tests (collected cases, parametrised ones counted individually), 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Every `test_*.py` file in `tests/` is listed below. Counts come from `uv run pytest --collect-only -q`. The detailed entries come first in their original order; the remaining files follow, grouped by area, under **Other test files**.
 
@@ -219,6 +219,7 @@ Helpers (not collected): `conftest.py` (shared fixtures plus the #808 isolation 
 - `test_env_policy.py` — 25 tests: engine-subprocess env allowlist — exact/prefix allow, secrets stripped, user extras and their one-time log (#198/#409)
 - `test_env_audit.py` — 11 tests: `/proc/<pid>/environ` audit of disallowed names, with expected and user extras, non-Linux/unreadable handling (#361)
 - `test_error_display.py` — 11 tests: `user_safe_error()` strips paths, URLs, API keys, bearer tokens and class names, and caps length
+- `test_engine_error_redaction.py` — 20 tests: [#1151](https://github.com/littlebearapps/untether/issues/1151) `redact_url_secrets()` masks URL userinfo and every query / fragment value (any scheme, trailing punctuation kept, JSON `\u0026` separator, idempotent, `[url]` markers and ordinary text untouched); each engine's real error event (OpenCode `error`, Codex `error` + `turn.failed` API JSON incl. the warning row, Claude error `result`, Pi `errorMessage`, Antigravity `[url]` not double-redacted) rendered through `handle_message` shows no query value or password on the card; a failed run's own assistant text is kept
 - `test_cli_commands.py` — 7 tests: `untether init`, `plugins`, onboarding paths, `config path`, `doctor` non-Telegram transport
 - `test_cli_config.py` — 6 tests: `untether config list/get/set/unset` incl. schema validation errors
 - `test_cli_helpers.py` — 12 tests: CLI helpers — key-path/value parsing, config flattening, interactive detection, doctor file/voice checks, config lock errors
