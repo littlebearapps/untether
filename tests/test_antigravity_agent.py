@@ -98,12 +98,48 @@ def test_agent_advice_says_new_is_enough_in_ask_me_or_full_access() -> None:
     /new first, Full access only when the chat is still on Workspace."""
     advice = agent.AGENT_MD.split("# Working without a shell", 1)[1]
     assert _RC5_CHAT_ADVICE not in advice
-    chat = advice.split("In a chat:", 1)[1].split("Scheduled and webhook", 1)[0]
-    assert chat.lstrip().startswith("send /new")
+    chat = _chat_route(advice)
+    assert chat.startswith("Send /new")
     assert "Ask me" in chat and "/new is all it takes" in chat
     # A chat that really is on Workspace still hears about Full access.
     assert "still on Workspace or Plan first" in chat
     assert "/config, then Permission mode, then Full access" in chat
+
+
+def _chat_route(advice: str) -> str:
+    """The quoted reply the agent is told to give in a chat."""
+    lead = "In a chat, give this route in this order: "
+    assert lead in advice
+    route = advice.split(lead, 1)[1]
+    assert route.startswith('"')
+    return route[1:].split('"', 1)[0]
+
+
+# The rc6 chat route (#1108): right, but loose enough that the model put
+# the conditional Full access switch first in an Ask me chat (rc8 run).
+_RC6_CHAT_ADVICE = (
+    "In a chat: send /new, because a conversation keeps the tools it started with."
+)
+
+
+def test_agent_chat_route_puts_new_alone_before_the_switch() -> None:
+    """#1108 (rc8 PARTIAL, agy 1.3.6): in an Ask me chat the model listed
+    "switch to Full access (or Ask me)" as step 1 and /new as step 2. The
+    route is now a quoted reply with its order fixed: /new, then "/new is all
+    it takes" for Ask me / Full access, and the switch only after that,
+    marked as applying to a Workspace or Plan first chat alone."""
+    advice = agent.AGENT_MD.split("# Working without a shell", 1)[1]
+    assert _RC6_CHAT_ADVICE not in advice
+    chat = _chat_route(advice)
+    enough = chat.index("/new is all it takes")
+    switch = chat.index("pick Full access")
+    assert chat.index("Ask me") < enough < switch
+    assert "Only if it is still on Workspace or Plan first" in chat
+    # The switch sentence is about Workspace / Plan first only.
+    assert "Ask me" not in chat[chat.index("Only if") :]
+    # Cron and webhook routes are untouched and stay outside the chat reply.
+    assert "permission_mode" not in chat
+    assert '`permission_mode = "full"` on the cron itself' in advice
 
 
 def _sent_prompt(options: EngineRunOptions | None) -> str:
