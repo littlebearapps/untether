@@ -615,21 +615,11 @@ class QueuedCardGatedTransport(FakeTransport):
         )
 
 
-@pytest.mark.parametrize(
-    ("command", "notice"),
-    [
-        ("/cancel", "🗑️ Dropped 1 message sent just before /cancel"),
-        ("/new", "🗑️ Dropped 1 message sent just before /new"),
-    ],
-)
-async def test_cancel_or_new_drops_a_followup_still_in_line(
-    tmp_path: Path, command: str, notice: str
-) -> None:
-    """#1164 review: with a session already running, C holds the turn while
-    its queued card is sent and D waits in line behind it. D has no queued
-    card and isn't waiting on a first start, so /cancel or /new used to miss
-    it: it then queued (or, after /new, started the new conversation). It is
-    dropped with the 🗑️ reply and never runs."""
+async def _drive_in_line_with_session(
+    command: str, tmp_path: Path
+) -> tuple[HeldResumeRunner, FakeTransport]:
+    """A session is already running (A on conv-0). C holds the turn while its
+    queued card is sent and D waits in line behind it; then ``command``."""
     from untether.telegram import arrival_order
 
     engine = "codex"
@@ -671,16 +661,68 @@ async def test_cancel_or_new_drops_a_followup_still_in_line(
         await anyio.sleep(0.2)  # the command has run
         transport.release.set()
         runner.release.set()
-        await _wait_for(lambda: _dropped_notices(transport))
+        await _wait_for(
+            lambda: (
+                _dropped_notices(transport)
+                or "D" in [_tail(prompt) for prompt, _ in runner.calls]
+            )
+        )
         await anyio.sleep(0.5)  # a released D would have run by now
 
     await telegram_loop.run_main_loop(cfg, poller)
+    assert arrival_order._LINES == {}
+    return runner, transport
 
+
+async def test_new_drops_a_followup_still_in_line(tmp_path: Path) -> None:
+    """#1164 review: D, in line behind C (sending its queued card), has no
+    queued card and isn't waiting on a first start, so /new missed it and
+    it started the new conversation. It is dropped with the 🗑️ reply and
+    never runs (the #1157 rule)."""
+    runner, transport = await _drive_in_line_with_session("/new", tmp_path)
     assert "D" not in [_tail(prompt) for prompt, _ in runner.calls]
     (dropped,) = _dropped_notices(transport)
-    assert dropped["message"].text.startswith(notice)
+    assert dropped["message"].text.startswith(
+        "🗑️ Dropped 1 message sent just before /new"
+    )
     assert dropped["options"].reply_to.message_id == 12
-    assert arrival_order._LINES == {}
+
+
+async def test_cancel_of_a_run_with_its_session_leaves_followups_in_line(
+    tmp_path: Path,
+) -> None:
+    """#1157 semantics: /cancel stopping a run that has its session leaves
+    its follow-ups to run. D, still in line behind C, is no exception: it
+    queues and runs after C, on the same conversation."""
+    runner, transport = await _drive_in_line_with_session("/cancel", tmp_path)
+    assert not _dropped_notices(transport)
+    tails = [_tail(prompt) for prompt, _ in runner.calls]
+    assert tails == ["A", "C", "D"]
+    token = ResumeToken(engine="codex", value="conv-0")
+    assert [resume for _, resume in runner.calls] == [token, token, token]
+
+
+@pytest.mark.parametrize("command", ["/cancel", "/new"])
+async def test_cancel_or_new_during_first_start_drops_followups_in_line(
+    tmp_path: Path, command: str
+) -> None:
+    """#1164: while the first run starts, 11 waits on it (holding the turn)
+    and 12 waits in line behind 11. /cancel or /new drops both, each with
+    its own 🗑️ reply; only the first message ever ran."""
+    runner, store, transport = await _drive(
+        tmp_path,
+        engine="codex",
+        messages=(_msg("first", 10), _msg("second", 11), _msg("third", 12)),
+        stop=_msg(command, 13),
+    )
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["first"]
+    dropped = _dropped_notices(transport)
+    assert sorted(c["options"].reply_to.message_id for c in dropped) == [11, 12]
+    assert all(
+        c["message"].text.startswith(f"🗑️ Dropped 1 message sent just before {command}")
+        for c in dropped
+    )
+    assert await store.get_session_resume(CHAT, None, "codex") is None
 
 
 async def test_arrival_order_drop_skips_started_prompts_and_other_threads() -> None:
