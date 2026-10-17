@@ -26,7 +26,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
-from . import first_start
+from . import arrival_order, first_start
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -1345,6 +1345,15 @@ def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | 
 # notice) instead of flushing it — flushing would only start the prompt for
 # the command to kill it, or run it in the session the user is leaving.
 _SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
+
+
+def _arrival_scope(
+    msg: TelegramIncomingMessage, chat_session_key: tuple[int, int | None] | None
+) -> arrival_order.Scope:
+    """#1164: prompts that can share a session keep their arrival order: the
+    chat and thread, plus the per-sender key in groups (so another member's
+    first message is never held behind this one's follow-ups)."""
+    return (msg.chat_id, msg.thread_id, chat_session_key)
 
 
 def _reply_targets_running_progress(
@@ -3262,21 +3271,26 @@ async def run_main_loop(
             async def dispatch_prompt_run(
                 *,
                 route: first_start.Route | None = None,
+                ticket: arrival_order.Ticket | None = None,
                 **kwargs: Any,
             ) -> None:
                 # #1157: the prompt counts as routed toward the first-start
                 # wait from here (or from its caller's earlier route), before
                 # any await, so a /new or /cancel that drops the first start
                 # while it is still on its way drops it too.
+                # #1164: ``ticket`` keeps it in arrival order (None: /continue,
+                # which runs inline in the update loop and must never wait).
                 route = route if route is not None else first_start.route()
                 try:
-                    await _dispatch_prompt_run(route=route, **kwargs)
+                    await _dispatch_prompt_run(route=route, ticket=ticket, **kwargs)
                 finally:
+                    arrival_order.done(ticket)
                     first_start.close_route(route)
 
             async def _dispatch_prompt_run(
                 *,
                 route: first_start.Route,
+                ticket: arrival_order.Ticket | None,
                 msg: TelegramIncomingMessage,
                 prompt_text: str,
                 resolved: ResolvedMessage,
@@ -3287,6 +3301,11 @@ async def run_main_loop(
                 steerable: bool = False,
                 followup_override: str | None = None,
             ) -> None:
+                # #1164: everything from here until the prompt has its place
+                # (queued, waiting on the first start, steered or started)
+                # awaits — the steer notice and the queued card are Telegram
+                # sends — so it runs one prompt at a time, in arrival order.
+                await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
                 context = resolved.context
@@ -3407,6 +3426,7 @@ async def run_main_loop(
                 first_start.close_route(route)
                 if resume_token is None:
                     if start_key is None:
+                        arrival_order.done(ticket)
                         await run_job(
                             chat_id,
                             user_msg_id,
@@ -3424,6 +3444,9 @@ async def run_main_loop(
                     starting = first_start.register(
                         key, chat_id=chat_id, thread_id=msg.thread_id
                     )
+
+                    # Later prompts now wait on this start: let them go.
+                    arrival_order.done(ticket)
 
                     def settle() -> None:
                         first_start.release(key, starting)
@@ -3469,6 +3492,7 @@ async def run_main_loop(
                     chat_session_key,
                     progress_ref,
                 )
+                arrival_order.done(ticket)
 
             async def _try_steer(
                 *,
@@ -3560,6 +3584,7 @@ async def run_main_loop(
                 )
                 topic_key = resolve_topic_key(msg)
                 await dispatch_prompt_run(
+                    ticket=arrival_order.take(_arrival_scope(msg, chat_session_key)),
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,
@@ -3570,15 +3595,22 @@ async def run_main_loop(
                 )
 
             async def _dispatch_pending_prompt(pending: _PendingPrompt) -> None:
-                # #1157: routed from the moment the coalescer hands it over.
+                # #1157: routed from the moment the coalescer hands it over;
+                # #1164: and in line, in the order the coalescer hands over.
                 route = first_start.route()
+                ticket = arrival_order.take(
+                    _arrival_scope(pending.msg, pending.chat_session_key)
+                )
                 try:
-                    await _dispatch_pending_prompt_routed(pending, route)
+                    await _dispatch_pending_prompt_routed(pending, route, ticket)
                 finally:
+                    arrival_order.done(ticket)
                     first_start.close_route(route)
 
             async def _dispatch_pending_prompt_routed(
-                pending: _PendingPrompt, route: first_start.Route
+                pending: _PendingPrompt,
+                route: first_start.Route,
+                ticket: arrival_order.Ticket,
             ) -> None:
                 msg = pending.msg
                 reply = make_reply(cfg, msg)
@@ -3626,6 +3658,7 @@ async def run_main_loop(
                     return
                 await dispatch_prompt_run(
                     route=route,
+                    ticket=ticket,
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,
