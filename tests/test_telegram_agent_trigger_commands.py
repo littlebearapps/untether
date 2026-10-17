@@ -3,16 +3,20 @@ from pathlib import Path
 
 import pytest
 
+import untether.runtime_loader as runtime_loader
 from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
-from untether.settings import TelegramTopicsSettings
+from untether.config import ProjectsConfig
+from untether.settings import TelegramTopicsSettings, UntetherSettings
 from untether.telegram.api_models import ChatMember
 from untether.telegram.chat_prefs import ChatPrefsStore
 from untether.telegram.commands.agent import _handle_agent_command
 from untether.telegram.commands.listen import (
     _handle_listen_command as _handle_trigger_command,
 )
+from untether.telegram.commands.model import _handle_model_command
 from untether.telegram.topic_state import TopicStateStore
 from untether.telegram.types import TelegramIncomingMessage
+from untether.transport_runtime import TransportRuntime
 
 
 def _msg(
@@ -138,6 +142,140 @@ async def test_agent_set_invalid_engine(tmp_path: Path) -> None:
     text = _last_text(transport)
     assert "unknown engine" in text
     assert "available engines" in text
+
+
+# ---------------------------------------------------------------------------
+# #1165: engine lists only name engines that can run; a known engine whose CLI
+# isn't on PATH is reported as "not installed", the startup message's wording.
+# ---------------------------------------------------------------------------
+
+
+def _runtime_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, missing: set[str]
+) -> TransportRuntime:
+    """A runtime built by the real availability check (`build_router`), with
+    `shutil.which` finding every engine CLI except those in ``missing``."""
+
+    def fake_which(cmd: str) -> str | None:
+        return None if cmd in missing else f"/usr/bin/{cmd}"
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", fake_which)
+    config_path = tmp_path / "untether.toml"
+    config_path.touch()
+    settings = UntetherSettings.model_validate(
+        {
+            "transport": "telegram",
+            "transports": {
+                "telegram": {"bot_token": "t", "chat_id": 123, "allow_any_user": True}
+            },
+        }
+    )
+    backends = runtime_loader.load_backends(
+        engine_ids=["codex", "claude", "pi"], allowlist=None, default_engine="codex"
+    )
+    router = runtime_loader.build_router(
+        settings=settings,
+        config_path=config_path,
+        backends=backends,
+        default_engine="codex",
+    )
+    return TransportRuntime(
+        router=router, projects=ProjectsConfig(projects={}, default_project=None)
+    )
+
+
+@pytest.mark.anyio
+async def test_1165_agent_show_omits_not_installed_engines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime_missing(monkeypatch, tmp_path, missing={"claude"}),
+    )
+
+    await _handle_agent_command(
+        cfg,
+        _msg("/agent", chat_type="private"),
+        args_text="",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+    )
+
+    text = _last_text(transport)
+    assert "available: codex, pi (not installed: claude)" in text
+
+
+@pytest.mark.anyio
+async def test_1165_agent_show_all_installed_has_no_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime_missing(monkeypatch, tmp_path, missing=set()),
+    )
+
+    await _handle_agent_command(
+        cfg,
+        _msg("/agent", chat_type="private"),
+        args_text="",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+    )
+
+    text = _last_text(transport)
+    assert "available: codex, claude, pi" in text
+    assert "not installed" not in text
+
+
+@pytest.mark.anyio
+async def test_1165_agent_set_unknown_lists_installed_engines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime_missing(monkeypatch, tmp_path, missing={"claude"}),
+    )
+
+    await _handle_agent_command(
+        cfg,
+        _msg("/agent set nope", chat_type="private"),
+        args_text="set nope",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=ChatPrefsStore(tmp_path / "prefs.json"),
+    )
+
+    text = _last_text(transport)
+    # Rendered text: the backticks become a code entity.
+    assert "available engines: codex, pi (not installed: claude)" in text
+
+
+@pytest.mark.anyio
+async def test_1165_model_show_omits_not_installed_engines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime_missing(monkeypatch, tmp_path, missing={"claude"}),
+    )
+
+    await _handle_model_command(
+        cfg,
+        _msg("/model", chat_type="private"),
+        args_text="",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+    )
+
+    text = _last_text(transport)
+    assert "available engines: codex, pi (not installed: claude)" in text
 
 
 @pytest.mark.anyio

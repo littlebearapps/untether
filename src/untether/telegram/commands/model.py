@@ -160,7 +160,8 @@ async def _handle_model_command(
             else redact_url_secrets(resolution.chat_value or "none")
         )
         defaults_line = f"defaults: topic: {topic_label}, chat: {chat_label}"
-        available_line = f"available engines: {', '.join(cfg.runtime.engine_ids)}"
+        # #1165: only engines that can run; missing ones as "not installed".
+        available_line = f"available engines: {cfg.runtime.available_engines_text()}"
         await reply(
             text="\n\n".join([engine_line, model_line, defaults_line, available_line])
         )
@@ -206,9 +207,9 @@ async def _handle_model_command(
         else:
             engine = engine_arg
             if engine not in engine_ids:
-                available = ", ".join(cfg.runtime.engine_ids)
+                available = cfg.runtime.available_engines_text(code=True)
                 await reply(
-                    text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                    text=f"unknown engine `{engine}`.\navailable engines: {available}"
                 )
                 return
         try:
@@ -279,9 +280,9 @@ async def _handle_model_command(
                 return
             engine, _ = selection
         if engine not in engine_ids:
-            available = ", ".join(cfg.runtime.engine_ids)
+            available = cfg.runtime.available_engines_text(code=True)
             await reply(
-                text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                text=f"unknown engine `{engine}`.\navailable engines: {available}"
             )
             return
         try:

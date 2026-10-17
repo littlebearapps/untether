@@ -131,9 +131,9 @@ async def _handle_reasoning_command(
         else:
             engine = engine_arg
             if engine not in engine_ids:
-                available = ", ".join(cfg.runtime.engine_ids)
+                available = cfg.runtime.available_engines_text(code=True)
                 await reply(
-                    text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                    text=f"unknown engine `{engine}`.\navailable engines: {available}"
                 )
                 return
         normalized_level = level.strip().lower()
@@ -224,9 +224,9 @@ async def _handle_reasoning_command(
                 return
             engine, _ = selection
         if engine not in engine_ids:
-            available = ", ".join(cfg.runtime.engine_ids)
+            available = cfg.runtime.available_engines_text(code=True)
             await reply(
-                text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                text=f"unknown engine `{engine}`.\navailable engines: {available}"
             )
             return
         try:
