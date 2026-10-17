@@ -466,3 +466,108 @@ async def test_a_drop_with_nothing_in_flight_records_nothing() -> None:
     first_start.drop_waiting(CHAT, thread_filter=None, command="cancel")
     assert first_start._DROPPED == {}
     assert first_start.get(key) is None
+
+
+class SlowNoticeTransport(FakeTransport):
+    """#1164: the steer fallback notice for message 11 is slow to send (in a
+    group, 1-3 s behind the outbox's pacing). It is held until a later
+    follow-up has joined the first-start wait — what the unfixed code let
+    happen — or, once ordering holds them back, until a short timeout."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.released = anyio.Event()
+
+    async def send(self, *, channel_id: Any, message: Any, options: Any = None) -> Any:
+        if (
+            message.text.startswith("\N{RIGHTWARDS ARROW WITH HOOK}")
+            and options is not None
+            and options.reply_to is not None
+            and options.reply_to.message_id == 11
+        ):
+            from untether.telegram import first_start
+
+            with anyio.move_on_after(0.5):
+                while not any(s.waiting for s in first_start._PENDING.values()):
+                    await anyio.sleep(0.01)
+            self.released.set()
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+@pytest.mark.parametrize("engine", ["claude", "antigravity"])
+async def test_followups_keep_arrival_order_while_one_sends_its_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """#1164: B, C and D sent while the first run starts (Follow-up = Steer).
+    Only B gets the "queued" notice (once per run); while it was still being
+    sent, C and D joined the queue first, so the finals came out A C D B.
+    They run in the order they were sent."""
+    from collections import OrderedDict
+
+    from untether.telegram import steer
+
+    monkeypatch.setattr(steer, "_NOTICED", OrderedDict())
+    transport = SlowNoticeTransport()
+
+    async def before_stop() -> None:
+        with anyio.fail_after(5):
+            await transport.released.wait()
+        await anyio.sleep(0.3)
+
+    runner, store, _ = await _drive(
+        tmp_path,
+        engine=engine,
+        followup_mode="steer",
+        messages=(
+            _msg("first", 10),
+            _msg("second", 11),
+            _msg("third", 12),
+            _msg("fourth", 13),
+        ),
+        expected_runs=4,
+        transport=transport,
+        before_stop=before_stop,
+    )
+    notices = [
+        c["options"].reply_to.message_id
+        for c in transport.send_calls
+        if c["message"].text.startswith("\N{RIGHTWARDS ARROW WITH HOOK}")
+    ]
+    assert notices == [11]
+    assert [_tail(prompt) for prompt, _ in runner.calls] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]
+    token = ResumeToken(engine=engine, value="conv-1")
+    assert [resume for _, resume in runner.calls] == [None, token, token, token]
+    assert runner.max_active == 1
+
+
+async def test_arrival_order_line_hands_the_turn_on_in_order() -> None:
+    """#1164: the line itself — first in goes first, a prompt that gives up
+    before its turn doesn't hold the others, and an empty line is dropped."""
+    from untether.telegram import arrival_order
+
+    scope = (CHAT, None, (CHAT, None))
+    a = arrival_order.take(scope)
+    b = arrival_order.take(scope)
+    c = arrival_order.take(scope)
+    other = arrival_order.take((CHAT, 7, None))
+    assert a.turn.is_set() and other.turn.is_set()
+    assert not b.turn.is_set() and not c.turn.is_set()
+
+    arrival_order.done(b)  # gave up before its turn (e.g. cancelled)
+    assert not c.turn.is_set()
+    arrival_order.done(a)
+    arrival_order.done(a)  # idempotent
+    with anyio.fail_after(1):
+        await arrival_order.wait_turn(c)
+    await arrival_order.wait_turn(None)  # unordered (/continue): no wait
+    arrival_order.done(None)
+    arrival_order.done(c)
+    arrival_order.done(other)
+    assert arrival_order._LINES == {}
