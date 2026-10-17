@@ -137,8 +137,10 @@ A message sent while a chat's first run hasn't reported its session yet waits on
 starting run must also call `first_start.drop_waiting(...)` (each woken waiter then replies with the #807-style dropped
 notice) — never let a waiter start a fresh conversation nobody saw queued. Likewise a prompt still in its arrival line
 (`telegram/arrival_order.py`, #1164: it waits behind an earlier prompt that is sending its notice or queued card) has
-neither a card nor a first-start wait: `/new` and every `/cancel` that stops a run (with or without a session) call
-`arrival_order.drop_waiting(...)` too, and the dropped prompt replies with the same notice when its turn comes.
+neither a card nor a first-start wait: `/new` always calls `arrival_order.drop_waiting(...)` too, and so does a
+`/cancel` that stops a run which hasn't reported its session (the same condition as `first_start.drop_waiting`); the
+dropped prompt replies with the same notice when its turn comes. A `/cancel` of a run that has its session leaves
+in-line prompts to queue and run, like its queued follow-ups.
 
 ## After changes
 

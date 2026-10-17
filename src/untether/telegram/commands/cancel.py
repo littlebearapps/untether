@@ -63,21 +63,19 @@ def _drop_first_start_waiters(chat_id: int, task: RunningTask) -> int:
     from); each is told so. A run that has its session leaves its queued
     follow-ups to run, as before.
 
-    #1164: either way, messages in its thread still in line behind an
-    earlier one (no queued card yet either) are dropped too."""
+    #1164: the same goes for messages in its thread still in line behind an
+    earlier one (no queued card yet either): dropped with a starting run,
+    left to queue and run behind a run that has its session."""
+    if task.resume is not None:
+        return 0
     own = _norm_thread(task.thread_id)
 
     def same_thread(thread_id: int | None) -> bool:
         return _norm_thread(thread_id) == own
 
-    dropped = arrival_order.drop_waiting(
+    return first_start.drop_waiting(
         chat_id, thread_filter=same_thread, command="cancel"
-    )
-    if task.resume is not None:
-        return dropped
-    return dropped + first_start.drop_waiting(
-        chat_id, thread_filter=same_thread, command="cancel"
-    )
+    ) + arrival_order.drop_waiting(chat_id, thread_filter=same_thread, command="cancel")
 
 
 async def handle_cancel(
