@@ -18,7 +18,7 @@ Quick pointers for navigating the Untether codebase.
 - Runner protocol, `BaseRunner` locking, `JsonlSubprocessRunner`, per-run `RunStreamHandle`: `src/untether/runner.py`
 - Directives and `dir:` context lines: `src/untether/directives.py`, `src/untether/context.py`, `src/untether/worktrees.py`
 - Router selection and resume polling: `src/untether/router.py`
-- Per-thread scheduling: `src/untether/scheduler.py`; follow-ups held while a chat's first run is still starting: `src/untether/telegram/first_start.py`
+- Per-thread scheduling: `src/untether/scheduler.py`; follow-ups held while a chat's first run is still starting: `src/untether/telegram/first_start.py`; follow-up arrival order: `src/untether/telegram/arrival_order.py`
 - Progress reduction and rendering: `src/untether/progress.py`, `src/untether/markdown.py`
 
 ## Engines and streaming

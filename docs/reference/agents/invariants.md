@@ -30,6 +30,10 @@ This is enforced both by scheduling and by per-resume-token runner locks.
 - A message for a chat whose first run hasn't reported its session yet waits for that run
   instead of starting a second conversation; `/cancel` and `/new` drop such waiting messages
   ([#1157](https://github.com/littlebearapps/untether/issues/1157), `telegram/first_start.py`).
+- Follow-ups in one chat, topic or session scope keep their arrival order: each takes a ticket in
+  `telegram/arrival_order.py` before its first await, and a default steer never overtakes an earlier
+  follow-up that is still queued (`ThreadScheduler.has_unstarted`). `/new`, and `/cancel` while the first
+  run is starting, drop prompts still waiting their turn ([#1164](https://github.com/littlebearapps/untether/issues/1164)).
 
 ## Per-run state
 
