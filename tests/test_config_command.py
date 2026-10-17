@@ -3617,6 +3617,155 @@ class TestDiffPreviewOnWording1147:
 
 
 # ---------------------------------------------------------------------------
+# #1167: Antigravity's Diff preview home hint follows the Permission mode
+# ---------------------------------------------------------------------------
+
+# Ask me keeps the shared hints (#1090, #1115).
+_AGY_DP_ASK_HINTS = {
+    True: "Diff preview: <b>on</b>  · edits ask first",
+    False: "Diff preview: <b>off</b>  · buttons only",
+    None: "Diff preview: <b>default</b>  · diffs on cards",
+}
+# Outside Ask me the gate shows no cards, so no value changes anything.
+_AGY_DP_OTHER_HINTS = {
+    True: "Diff preview: <b>on</b>  · only in Ask me",
+    False: "Diff preview: <b>off</b>  · only in Ask me",
+    None: "Diff preview: <b>default</b>  · only in Ask me",
+}
+
+
+class TestAgyDiffPreviewHomeHint1167:
+    """agy's gate holds an edit for a card only in Ask me (``GateRun.required``);
+    in Workspace, Plan first and Full access it gives no decision. The home
+    line must not say "edits ask first" (or promise cards) there."""
+
+    @staticmethod
+    async def _setup(tmp_path, monkeypatch, value: bool | None, chat_mode: str | None):
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        state_path = tmp_path / "prefs.json"
+        if value is not None or chat_mode is not None:
+            prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+            await prefs.set_engine_override(
+                123,
+                "antigravity",
+                EngineOverrides(diff_preview=value, permission_mode=chat_mode),
+            )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, toml_mode: str | None = None):
+        ctx = _make_ctx(
+            args_text="",
+            text="/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="antigravity",
+        )
+        ctx.runtime.resolve_runner.return_value.runner.default_permission_mode = (
+            toml_mode
+        )
+        return ctx
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("value", [True, False, None])
+    @pytest.mark.parametrize("mode", ["workspace", "full", "plan", None])
+    async def test_outside_ask_me_says_only_in_ask_me(
+        self, tmp_path, monkeypatch, mode, value
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, value, mode)
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert _AGY_DP_OTHER_HINTS[value] in text
+        assert "edits ask first" not in text
+        assert "diffs on cards" not in text
+        assert "buttons only" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("value", [True, False, None])
+    async def test_ask_me_keeps_shared_hints(self, tmp_path, monkeypatch, value):
+        state_path = await self._setup(tmp_path, monkeypatch, value, "ask")
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert _AGY_DP_ASK_HINTS[value] in text
+        assert "only in Ask me" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("toml_mode", "expected"),
+        [("full", _AGY_DP_OTHER_HINTS[True]), ("ask", _AGY_DP_ASK_HINTS[True])],
+    )
+    async def test_untether_toml_mode_when_chat_has_none(
+        self, tmp_path, monkeypatch, toml_mode, expected
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, True, None)
+        ctx = self._ctx(state_path, toml_mode=toml_mode)
+        await ConfigCommand().handle(ctx)
+        assert expected in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_chat_mode_wins_over_toml(self, tmp_path, monkeypatch):
+        state_path = await self._setup(tmp_path, monkeypatch, True, "workspace")
+        ctx = self._ctx(state_path, toml_mode="ask")
+        await ConfigCommand().handle(ctx)
+        assert _AGY_DP_OTHER_HINTS[True] in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_unknown_stored_mode_fails_closed_to_workspace(
+        self, tmp_path, monkeypatch
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, True, "bogus")
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        assert _AGY_DP_OTHER_HINTS[True] in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("value", "chat_mode", "line"),
+        [
+            (True, "acceptEdits", "Diff preview: <b>on</b>  · nothing extra"),
+            (True, "auto", "Diff preview: <b>on</b>  · only edits Claude Code asks"),
+            (False, "auto", "Diff preview: <b>off</b>  · buttons only"),
+            (None, "auto", "Diff preview: <b>default</b>  · diffs on cards"),
+        ],
+    )
+    async def test_claude_unchanged(self, tmp_path, value, chat_mode, line):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "claude",
+            EngineOverrides(diff_preview=value, permission_mode=chat_mode),
+        )
+        ctx = _make_ctx(
+            args_text="",
+            text="/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert line in text
+        assert "only in Ask me" not in text
+
+    def test_hint_matches_page_wording(self):
+        from untether.telegram.commands.config import _agy_dp_hint
+
+        assert _agy_dp_hint("ask") is None
+        for mode in ("workspace", "plan", "full", None, "bogus"):
+            assert _agy_dp_hint(mode) == "only in Ask me"
+
+
+# ---------------------------------------------------------------------------
 # Diff preview toasts
 # ---------------------------------------------------------------------------
 

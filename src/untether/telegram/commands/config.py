@@ -283,7 +283,8 @@ async def _page_home(ctx: CommandContext) -> None:
     rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
-    dp_on_hint: str | None = None
+    dp_hint_text: str | None = None
+    agy_value: str | None = None
     cu_label = "default"
     _cu_ac: bool | None = None
     _cu_su: bool | None = None
@@ -344,9 +345,11 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
         if current_engine == "claude" and dp_label == "on":
-            dp_on_hint = _claude_dp_on_hint(
+            dp_hint_text = _claude_dp_on_hint(
                 _claude_resolved_mode(engine_override, ctx.runtime)
             )
+        elif current_engine == "antigravity":
+            dp_hint_text = _agy_dp_hint(agy_value)
 
         # Cost & usage overrides — resolution deferred until has_api_cost is known
         _cu_ac = engine_override.show_api_cost if engine_override else None
@@ -415,12 +418,10 @@ async def _page_home(ctx: CommandContext) -> None:
                 )
             if show_diff_preview:
                 # #1147: what On holds depends on the permission mode.
-                dp_hint = (
-                    f"  · {dp_on_hint}"
-                    if dp_on_hint is not None
-                    else _home_hint("dp", dp_label)
+                lines.append(
+                    f"Diff preview: <b>{dp_display}</b>"
+                    f"{_dp_home_suffix(dp_hint_text, dp_label)}"
                 )
-                lines.append(f"Diff preview: <b>{dp_display}</b>{dp_hint}")
         elif current_engine == "codex":
             lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
             lines.append(
@@ -438,9 +439,11 @@ async def _page_home(ctx: CommandContext) -> None:
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
                 )
             if show_diff_preview:
-                # #1090: Ask me's approval cards (same plugin predicate).
+                # #1090: Ask me's approval cards (same plugin predicate);
+                # #1167: the hint follows the chat's Permission mode.
                 lines.append(
-                    f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
+                    f"Diff preview: <b>{dp_display}</b>"
+                    f"{_dp_home_suffix(dp_hint_text, dp_label)}"
                 )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
@@ -2074,8 +2077,9 @@ _DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
 # prompting modes (``not state.prompting_mode``), and stands down for the
 # rest of a reply once a plan or a held edit is approved
 # (``_PLAN_EXIT_APPROVED``, #283/#369). What On really holds therefore
-# depends on the chat's resolved permission mode. Antigravity keeps the
-# plain wording (its page carries its own Ask me note).
+# depends on the chat's resolved permission mode. Antigravity's page keeps
+# the plain wording plus its own Ask me note; its home hint follows the
+# mode (#1167, :func:`_agy_dp_hint`).
 _DP_ON_TEXT = "edits wait for your approval, with the diff"
 _DP_ON_CLAUDE_TEXT = (
     "an edit or command that reaches Untether for approval waits for your"
@@ -2121,6 +2125,28 @@ _DP_ON_MODE_HINTS: dict[str, str] = {
 }
 _DP_ON_PROMPTING_HINT = "nothing extra in this mode"
 _DP_ON_UNKNOWN_HINT = "edits sent for approval wait"
+
+
+# #1167: agy's gate shows cards only in Ask me (``GateRun.required``); in
+# Workspace, Plan first and Full access it gives no decision and agy's own
+# check (or the bypass flag) decides, so Diff preview — on, off or unset —
+# changes nothing there. Same wording as the Diff preview page's agy note.
+_DP_AGY_OTHER_MODE_HINT = "only in Ask me"
+
+
+def _agy_dp_hint(mode: str | None) -> str | None:
+    """The agy home hint for Diff preview outside Ask me, whatever its value;
+    ``None`` in Ask me, where the shared ``dp`` hints are true. *mode* is the
+    chat's effective stored mode (unknown → Workspace, as the runner)."""
+    if agy_mode.canonical_mode(mode) == "ask":
+        return None
+    return _DP_AGY_OTHER_MODE_HINT
+
+
+def _dp_home_suffix(hint: str | None, dp_label: str) -> str:
+    """The home-page Diff preview hint: the engine/mode-specific *hint* when
+    there is one (#1147, #1167), else the shared ``dp`` hint."""
+    return f"  · {hint}" if hint is not None else _home_hint("dp", dp_label)
 
 
 def _claude_resolved_mode(engine_override: Any, runtime: Any) -> str | None:
