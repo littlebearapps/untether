@@ -44,7 +44,7 @@ FOLLOWUP_COMMAND_IDS: frozenset[str] = frozenset({"steer", "queue"})
 
 STEERED_ACK = "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Steered into the current run."
 
-FallbackReason = Literal["engine", "no_live", "closing", "starting"]
+FallbackReason = Literal["engine", "no_live", "closing", "starting", "queued"]
 
 # Default-mode fallback notices are sent once per (chat, thread, reason, run)
 # so a chat set to steer isn't nagged on every message (#775).
@@ -85,6 +85,11 @@ def fallback_notice(reason: FallbackReason, engine: str) -> str:
         return f"{arrow} Steer isn't supported on {engine} — queued instead."
     if reason == "closing":
         return f"{arrow} The current run is ending — queued instead."
+    if reason == "queued":
+        # #1164: an earlier follow-up is still waiting to run.
+        return (
+            f"{arrow} Earlier messages are still waiting to run — queued behind them."
+        )
     if reason == "starting":
         # #1077: agy binds its gate to the conversation only once the run
         # reports its session, so nothing can be steered in before that.
@@ -190,13 +195,18 @@ async def maybe_steer(
     run_options: Callable[[ResumeToken], Awaitable[object]] | None = None,
     run_cwd: Callable[[], Awaitable[Path | None]] | None = None,
     thread_filter: ThreadFilter | None = None,
+    queued_ahead: Callable[[ResumeToken], bool] | None = None,
 ) -> bool:
     """Steer ``prompt_text`` into the chat's live Claude session if the
     resolved follow-up mode says so. Returns True when it was written (the
     caller must not also queue it); False → carry on queueing.
 
     ``thread_filter`` scopes the "is a run busy here?" check behind the
-    fallback notice to the sender's thread (#990); ``None`` = the whole chat."""
+    fallback notice to the sender's thread (#990); ``None`` = the whole chat.
+
+    ``queued_ahead(token)`` (#1164): an earlier follow-up for that session is
+    queued or held and hasn't run yet. Steering would put this one ahead of
+    it, so (unless ``/steer`` asked for it explicitly) it queues behind."""
     explicit = normalize_followup_mode(override)
     mode = explicit or await resolve_followup_mode(
         chat_id=chat_id,
@@ -247,6 +257,16 @@ async def maybe_steer(
         live = backend.get(session_id)
         if live is None:
             reason = "no_live"
+        elif (
+            explicit is None
+            and queued_ahead is not None
+            and resume_token is not None
+            and queued_ahead(resume_token)
+        ):
+            # #1164: an earlier follow-up for this session is queued (or
+            # held) and hasn't run; steering into the live run would put
+            # this one ahead of it, so it queues behind it instead.
+            reason = "queued"
         else:
             options: object = None
             has_options = run_options is not None

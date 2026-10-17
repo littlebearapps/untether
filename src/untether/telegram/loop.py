@@ -3575,6 +3575,7 @@ async def run_main_loop(
                     run_options=run_options_for,
                     run_cwd=run_cwd_for,
                     thread_filter=thread_filter_for(msg),
+                    queued_ahead=scheduler.has_unstarted,
                 )
 
             async def run_prompt_from_upload(

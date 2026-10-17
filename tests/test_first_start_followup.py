@@ -759,3 +759,145 @@ def test_arrival_scope_is_per_sender_without_a_session_scope() -> None:
     topic_a = replace(a, thread_id=5)
     topic_b = replace(b, thread_id=5)
     assert scope(topic_a, None, (CHAT, 5)) == scope(topic_b, None, (CHAT, 5))
+
+
+class HeldFirstRunRunner(StartGatedRunner):
+    """Like :class:`StartGatedRunner`, but the first run stays running after
+    it reports its session until ``hold`` is set — a live run C and D could
+    be steered into."""
+
+    def __init__(self, engine: str) -> None:
+        super().__init__(engine)
+        self.hold = anyio.Event()
+        self.first_live = False
+
+    async def run(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[UntetherEvent]:
+        first = not self.calls
+        async for event in super().run(prompt, resume):
+            if first and isinstance(event, StartedEvent):
+                self.first_live = True
+            if first and isinstance(event, CompletedEvent):
+                await self.hold.wait()
+                self.first_live = False
+            yield event
+
+
+class FakeSteerBackend:
+    """A steer target that accepts a steer while the first run is live and
+    records it. agy's one-step turn never runs such a line (#1164 live QA):
+    here the runner never sees it either."""
+
+    supports_steer = True
+
+    def __init__(self, engine: str, runner: HeldFirstRunRunner) -> None:
+        self.engine = engine
+        self.display_name = engine
+        self.runner = runner
+        self.steered: list[str] = []
+
+    def get(self, session_id: str) -> Any:
+        if not self.runner.first_live:
+            return None
+        from types import SimpleNamespace
+
+        return SimpleNamespace(closing=False)
+
+    async def steer(self, session_id: str, text: str, **kwargs: Any) -> str:
+        self.steered.append(text)
+        return "steered"
+
+
+@pytest.mark.parametrize("engine", ["claude", "antigravity"])
+async def test_later_followups_queue_behind_an_earlier_one_instead_of_steering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """#1164 live QA (Steer): B waits on the first start and keeps its turn,
+    so C and D get theirs only once A has reported its session. A is live by
+    then, and C and D were steered into it ahead of B (agy then lost them;
+    Claude ran C+D before B). While B is queued and hasn't run, they queue
+    behind it: runs A B C D, nothing steered into A."""
+    from collections import OrderedDict
+
+    from untether.telegram import arrival_order, steer
+
+    monkeypatch.setattr(steer, "_NOTICED", OrderedDict())
+    state_path = tmp_path / "untether.toml"
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    await prefs.set_followup_mode(CHAT, "steer")
+    runner = HeldFirstRunRunner(engine)
+    backend = FakeSteerBackend(engine, runner)
+    monkeypatch.setattr(steer, "steer_backend", lambda _engine: backend)
+    transport = FakeTransport()
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_empty_projects(),
+        config_path=state_path,
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=CHAT,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=0.0,
+        media_group_debounce_s=0.0,
+        session_mode="chat",
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _msg("A", 10)
+        await _wait_for(lambda: len(runner.calls) == 1)
+        for message_id, text in ((11, "B"), (12, "C"), (13, "D")):
+            yield _msg(text, message_id)
+        await anyio.sleep(0.3)  # B waits on the start; C and D in line
+        runner.gate.set()  # A reports its session and stays live
+        await _wait_for(lambda: runner.first_live)
+        # C and D get their turns while A is still live.
+        await _wait_for(lambda: not arrival_order._LINES)
+        await anyio.sleep(0.2)
+        runner.hold.set()
+        # A steered line never runs (agy's one-step turn): count it as done.
+        await _wait_for(lambda: runner.finished + len(backend.steered) >= 4)
+        await anyio.sleep(0.1)
+
+    await telegram_loop.run_main_loop(cfg, poller)
+
+    assert backend.steered == []
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["A", "B", "C", "D"]
+    token = ResumeToken(engine=engine, value="conv-1")
+    assert [resume for _, resume in runner.calls] == [None, token, token, token]
+    assert runner.max_active == 1
+
+
+async def test_scheduler_has_unstarted_tracks_queued_and_held_jobs() -> None:
+    """#1164: ``has_unstarted`` is true while a job is queued or held behind
+    the previous run, and false again once it runs — it never sticks."""
+    from untether.scheduler import ThreadScheduler
+
+    token = ResumeToken(engine="codex", value="s1")
+    started = anyio.Event()
+    finish = anyio.Event()
+
+    async def run_job(job: Any) -> None:
+        started.set()
+        await finish.wait()
+
+    async with anyio.create_task_group() as tg:
+        scheduler = ThreadScheduler(task_group=tg, run_job=run_job)
+        previous = anyio.Event()
+        await scheduler.note_thread_known(token, previous)
+        assert not scheduler.has_unstarted(token)
+        await scheduler.enqueue_resume(CHAT, 1, "x", token)
+        assert scheduler.has_unstarted(token)
+        await anyio.sleep(0.05)  # taken by the worker, held behind previous
+        assert scheduler.has_unstarted(token)
+        previous.set()
+        with anyio.fail_after(2):
+            await started.wait()
+        assert not scheduler.has_unstarted(token)
+        finish.set()
+    assert scheduler._unstarted == {}
