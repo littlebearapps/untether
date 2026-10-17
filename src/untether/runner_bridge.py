@@ -6794,6 +6794,15 @@ _STALE_RESUME_HINT = (
     " have been archived or expired. This chat's saved session isn't affected:"
     " send your next message without the resume line to carry on."
 )
+# #1168: the #228 hint for a failed resume whose saved session was just
+# cleared. The card also shows ``_SESSION_CLEARED_NOTICE``, so "Send /new"
+# would be a second, unneeded step; the plain #228 hint stays for runs where
+# nothing was cleared.
+_SESSION_NOT_LOADED_CLEARED_HINT = (
+    "The session could not be loaded \N{EM DASH} Claude Code may have"
+    " archived or expired it. Just send your message again to start a fresh"
+    " session."
+)
 # #1047: pre-spawn refusals (``usage[PRESPAWN_BLOCKED_KEY]``) that are
 # answered with their own text alone, in place of the progress card: no
 # error header, code block or footers, and ``session.summary.no_events`` at
@@ -7642,6 +7651,10 @@ async def handle_message(
                     ),
                 )
             )
+            # #1168: the saved session was cleared, and the card says so —
+            # don't also tell the user to send /new.
+            if _session_auto_cleared and hint == _SESSION_NOT_LOADED_HINT:
+                hint = _SESSION_NOT_LOADED_CLEARED_HINT
             if final_answer.strip():
                 # Deduplicate: if the answer already starts with the error's
                 # first line (common when runner sets both answer and error
