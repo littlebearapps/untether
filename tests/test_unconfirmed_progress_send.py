@@ -456,3 +456,84 @@ async def test_tracked_run_is_still_cancelled_from_its_own_message() -> None:
 
     assert run.cancel_requested.is_set() is True
     assert bot.delete_calls == []
+
+
+# --- #1166: a final whose send lost its response ---------------------------
+
+
+async def _run_with_final(outcome: str, *, final_notify: bool = True) -> _FlakyBot:
+    """A run whose progress message is confirmed (100) and whose final send
+    ends with ``outcome``."""
+    bot = _FlakyBot(["ok", outcome])
+    cfg = ExecBridgeConfig(
+        transport=TelegramTransport(bot),
+        presenter=TelegramPresenter(),
+        final_notify=final_notify,
+    )
+    await handle_message(
+        cfg,
+        runner=ScriptRunner([Return(answer="the answer")], engine="codex"),
+        incoming=IncomingMessage(channel_id=CHAT, message_id=10, text="hi"),
+        resume_token=None,
+        running_tasks={},
+    )
+    return bot
+
+
+def _last_edit(bot: FakeBot, message_id: int) -> dict[str, Any] | None:
+    edits = [c for c in bot.edit_calls if c["message_id"] == message_id]
+    return edits[-1] if edits else None
+
+
+async def test_lost_final_finalises_the_progress_message_in_place() -> None:
+    """Telegram posted the final but the response was lost: the progress
+    message must not keep a live cancel button on a finished run."""
+    bot = await _run_with_final("lost")
+    progress_id, final_id = 100, 101
+
+    # The final is in the chat once — never sent again.
+    assert [p["message_id"] for p in bot.posted] == [progress_id, final_id]
+    assert "the answer" in bot.posted[1]["text"]
+    # The progress message is finished in place, not deleted: had the final
+    # really gone missing, this card is all the user would have.
+    assert bot.delete_calls == []
+    last = _last_edit(bot, progress_id)
+    assert last is not None
+    assert last["reply_markup"] == {"inline_keyboard": []}
+    assert "working" not in last["text"]
+    assert "didn't confirm" in last["text"]
+    # Never the answer itself: that would duplicate a delivered final.
+    assert "the answer" not in last["text"]
+
+
+async def test_failed_final_finalises_the_progress_message_in_place() -> None:
+    """A final Telegram refused: the card says the reply wasn't sent instead
+    of showing a run that is still working."""
+    bot = await _run_with_final("failed")
+    progress_id = 100
+
+    assert [p["message_id"] for p in bot.posted] == [progress_id]
+    assert bot.delete_calls == []
+    last = _last_edit(bot, progress_id)
+    assert last is not None
+    assert last["reply_markup"] == {"inline_keyboard": []}
+    assert "working" not in last["text"]
+    assert "couldn't be sent" in last["text"]
+
+
+async def test_delivered_final_still_replaces_the_progress_message() -> None:
+    bot = await _run_with_final("ok")
+    # The client deletes the replaced progress message once the send lands.
+    assert bot.send_calls[-1]["replace_message_id"] == 100
+    last = _last_edit(bot, 100)
+    assert last is None or "didn't confirm" not in last["text"]
+
+
+async def test_final_edited_into_the_progress_message_is_unchanged() -> None:
+    """With pushes off the final is an edit of the progress message; no
+    send, so nothing to confirm."""
+    bot = await _run_with_final("lost", final_notify=False)
+    last = _last_edit(bot, 100)
+    assert last is not None
+    assert "the answer" in last["text"]
+    assert [p["message_id"] for p in bot.posted] == [100]
