@@ -246,27 +246,9 @@ def _build_startup_message(
     header = f"\N{DOG} **untether is ready** (v{__version__})"
 
     # engines — separate default and installed lines
-    available_engines = list(runtime.available_engine_ids())
-    missing_engines = list(runtime.missing_engine_ids())
-    misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
-    failed_engines = list(runtime.engine_ids_with_status("load_error"))
-    engine_notes: list[str] = []
-    if missing_engines:
-        engine_notes.append(f"not installed: {', '.join(missing_engines)}")
-    if misconfigured_engines:
-        engine_notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
-    if failed_engines:
-        engine_notes.append(f"failed to load: {', '.join(failed_engines)}")
-    engine_list = ", ".join(available_engines) if available_engines else "none"
-
     details: list[str] = []
     details.append(f"_default engine:_ `{runtime.default_engine}`")
-    if engine_notes:
-        details.append(
-            f"_installed engines:_ `{engine_list}` ({'; '.join(engine_notes)})"
-        )
-    else:
-        details.append(f"_installed engines:_ `{engine_list}`")
+    details.append(f"_installed engines:_ {runtime.available_engines_text(code=True)}")
 
     # mode — derived from session_mode + topics
     mode = _resolve_mode_label(session_mode, topics.enabled)

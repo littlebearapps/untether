@@ -1259,7 +1259,8 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
-    available = list(ctx.runtime.engine_ids)
+    # #1165: offer only engines that can run (the startup message's list).
+    available = list(ctx.runtime.available_engine_ids())
 
     if action == "md_clr":
         # Clear model override (handled here for the merged page)
@@ -1324,6 +1325,10 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
             f"⚠️ <b>{deprecated_shown}</b> — deprecated, no longer supported,"
             " may be removed in a future release. Prefer another engine.",
         ]
+
+    unavailable_notes = ctx.runtime.engine_availability_notes()
+    if unavailable_notes:
+        lines += ["", f"<i>{html.escape('; '.join(unavailable_notes))}</i>"]
 
     lines += [
         "",

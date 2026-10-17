@@ -94,6 +94,8 @@ Example response:
 
 <img src="../assets/screenshots/agent-resolution.jpg" alt="/agent command output showing engine resolution layers" width="360" loading="lazy" />
 
+`available:` lists the engines that can run on this machine. Engines Untether supports but can't find are named after the list, as in the startup message, for example `available: claude, codex (not installed: amp, gemini)`.
+
 Clear it:
 
 !!! user "You"

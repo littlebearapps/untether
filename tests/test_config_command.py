@@ -30,14 +30,23 @@ def _make_ctx(
     config_path: Path | None = None,
     engine_ids: tuple[str, ...] = ("codex", "claude"),
     default_engine: str = "codex",
+    missing: tuple[str, ...] = (),
 ) -> MagicMock:
-    """Build a minimal CommandContext-like object for testing."""
+    """Build a minimal CommandContext-like object for testing.
+
+    ``missing`` engines are known but not installed (#1165)."""
     ctx = MagicMock()
     ctx.args_text = args_text
     ctx.text = text
     ctx.message.channel_id = chat_id
     ctx.config_path = config_path
     ctx.runtime.engine_ids = engine_ids
+    ctx.runtime.available_engine_ids.return_value = tuple(
+        e for e in engine_ids if e not in missing
+    )
+    ctx.runtime.engine_availability_notes.return_value = (
+        (f"not installed: {', '.join(missing)}",) if missing else ()
+    )
     ctx.runtime.default_engine = default_engine
     ctx.runtime.default_context_for_chat.return_value = None
     ctx.runtime.project_default_engine.return_value = None
@@ -1448,6 +1457,48 @@ class TestEngine:
         assert "config:ag:amp" in data
         # explanatory line present
         assert "deprecated" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_1165_engine_page_omits_not_installed_engines(self, tmp_path):
+        """A known engine whose CLI isn't installed gets no button, and the
+        page says so in the startup message's wording."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag",
+            text="config:ag",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "amp"),
+            missing=("claude", "amp"),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        data = _buttons_data(msg)
+        assert "config:ag:codex" in data
+        assert "config:ag:claude" not in data
+        assert "config:ag:amp" not in data
+        assert "not installed: claude, amp" in msg.text
+        # amp isn't offered, so there's no deprecation notice for it either.
+        assert "deprecated" not in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_1165_engine_set_refuses_not_installed_engine(self, tmp_path):
+        """A stale button for an engine that's no longer installed doesn't set
+        it as the chat default; the picker is shown again."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
+            missing=("claude",),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "engine:" in msg.text.lower()
+        from untether.telegram.chat_prefs import ChatPrefsStore
+
+        assert await ChatPrefsStore(state_path).get_default_engine(123) is None
 
     @pytest.mark.anyio
     async def test_engine_page_no_deprecation_notice_when_none_present(self, tmp_path):
