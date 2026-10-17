@@ -1348,12 +1348,18 @@ _SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
 
 
 def _arrival_scope(
-    msg: TelegramIncomingMessage, chat_session_key: tuple[int, int | None] | None
+    msg: TelegramIncomingMessage,
+    chat_session_key: tuple[int, int | None] | None,
+    topic_key: tuple[int, int] | None,
 ) -> arrival_order.Scope:
     """#1164: prompts that can share a session keep their arrival order: the
     chat and thread, plus the per-sender key in groups (so another member's
-    first message is never held behind this one's follow-ups)."""
-    return (msg.chat_id, msg.thread_id, chat_session_key)
+    first message is never held behind this one's follow-ups). With no
+    session scope at all (stateless) each sender keeps their own order."""
+    owner: object = chat_session_key
+    if chat_session_key is None and topic_key is None:
+        owner = ("sender", msg.sender_id)
+    return (msg.chat_id, msg.thread_id, owner)
 
 
 def _reply_targets_running_progress(
@@ -3305,9 +3311,16 @@ async def run_main_loop(
                 # (queued, waiting on the first start, steered or started)
                 # awaits — the steer notice and the queued card are Telegram
                 # sends — so it runs one prompt at a time, in arrival order.
-                await arrival_order.wait_turn(ticket)
+                dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if dropped_in_line is not None:
+                    # /cancel or /new while it waited behind an earlier
+                    # prompt: no queued card or first-start wait had it yet.
+                    await make_reply(cfg, msg)(
+                        text=dropped_notice(1, command=dropped_in_line)
+                    )
+                    return
                 context = resolved.context
                 reply_quote_text = msg.reply_quote_text
                 reply_reference_text = (
@@ -3584,7 +3597,9 @@ async def run_main_loop(
                 )
                 topic_key = resolve_topic_key(msg)
                 await dispatch_prompt_run(
-                    ticket=arrival_order.take(_arrival_scope(msg, chat_session_key)),
+                    ticket=arrival_order.take(
+                        _arrival_scope(msg, chat_session_key, topic_key)
+                    ),
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,
@@ -3599,7 +3614,9 @@ async def run_main_loop(
                 # #1164: and in line, in the order the coalescer hands over.
                 route = first_start.route()
                 ticket = arrival_order.take(
-                    _arrival_scope(pending.msg, pending.chat_session_key)
+                    _arrival_scope(
+                        pending.msg, pending.chat_session_key, pending.topic_key
+                    )
                 )
                 try:
                     await _dispatch_pending_prompt_routed(pending, route, ticket)

@@ -97,10 +97,12 @@ def _cancel_chat_tasks_counted(
             skipped_other_threads=len(skipped),
         )
     # #1157: messages waiting on a first run that hasn't reported its
-    # session yet would otherwise start a fresh run once it is cancelled.
-    from .. import first_start
+    # session yet would otherwise start a fresh run once it is cancelled;
+    # #1164: so would one still in line behind an earlier message.
+    from .. import arrival_order, first_start
 
     first_start.drop_waiting(chat_id, thread_filter=thread_filter, command="new")
+    arrival_order.drop_waiting(chat_id, thread_filter=thread_filter, command="new")
     # #289: drop pending loop entries for the chat too.  Mirror the at
     # scheduler integration in handle_cancel — /new should leave no trace.
     from ... import loop_scheduler
