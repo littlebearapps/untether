@@ -3350,7 +3350,10 @@ def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
 @pytest.mark.parametrize(
     ("text", "latched"),
     [
-        ("You've hit your session limit · resets 5:30pm (Australia/Melbourne)", True),
+        # A reset two hours ahead, built at run time: a fixed
+        # "5:30pm" fell inside the parser's 90 s just-expired window when
+        # CI ran at 17:30 Melbourne time.
+        ("<reset in 2h>", True),
         (
             "You've reached your Fable 5 limit. Run /usage-credits to continue "
             "or switch models with /model.",
@@ -3371,7 +3374,12 @@ def test_890_usage_limit_error_marks_the_turn_usage(
 ) -> None:
     """#890: a result error that (re-)arms a usage-limit latch says so on the
     turn's usage, so the bridge can coalesce repeats from later wakes."""
+    from datetime import UTC, datetime, timedelta
+
     from untether.model import TurnEvent
+
+    if text == "<reset in 2h>":
+        text = _reset_text_at(datetime.now(UTC) + timedelta(hours=2))
 
     monkeypatch.setattr(claude_runner, "_RATE_LIMIT_RESET_LATCH", {})
     monkeypatch.setattr(claude_runner, "_RATE_LIMIT_ACTION_LATCH", {})

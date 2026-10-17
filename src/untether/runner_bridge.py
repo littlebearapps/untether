@@ -49,7 +49,7 @@ from .model import (
 )
 from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
-from .progress import ProgressTracker, keyboard_action, keyboard_actions
+from .progress import ProgressState, ProgressTracker, keyboard_action, keyboard_actions
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
@@ -5889,6 +5889,66 @@ async def send_result_message(
     return final_msg
 
 
+# #1166: the run's progress card after its final send came back empty.
+_FINAL_UNCONFIRMED_NOTICE = (
+    "\N{WARNING SIGN} Telegram didn't confirm that the reply arrived. If it "
+    "isn't below this message, reply here to ask for it again."
+)
+_FINAL_FAILED_NOTICE = (
+    "\N{WARNING SIGN} The reply couldn't be sent to Telegram. Reply here to "
+    "ask for it again."
+)
+
+
+async def finalise_progress_after_lost_final(
+    cfg: ExecBridgeConfig,
+    *,
+    channel_id: ChannelId,
+    progress_ref: MessageRef,
+    presenter: Presenter,
+    state: ProgressState,
+    elapsed_s: float,
+    status: str,
+) -> bool:
+    """#1166: finish the progress card in place when the final's send
+    returned nothing, so a finished run never keeps a live cancel button.
+
+    The final's ``sendMessage`` either failed or lost its response (#1029:
+    Telegram may have posted it all the same, and a send can't be repeated
+    or looked up). Deleting the card would leave the user with nothing if
+    the final is really missing, and resending could post it twice. So the
+    card gets the final's header and footer (status, resume line) with a
+    one-line notice instead of the answer, and no keyboard — an idempotent
+    edit. Returns whether the edit landed.
+    """
+    unconfirmed = _pop_unconfirmed_send(cfg.transport, channel_id)
+    rendered = presenter.render_final(
+        state,
+        elapsed_s=elapsed_s,
+        status=status,
+        answer=_FINAL_UNCONFIRMED_NOTICE if unconfirmed else _FINAL_FAILED_NOTICE,
+    )
+    # A short notice is one message; never send follow-up chunks from here.
+    extra = {k: v for k, v in rendered.extra.items() if k != "followups"}
+    extra.setdefault("reply_markup", {"inline_keyboard": []})
+    edited: MessageRef | None = None
+    try:
+        with message_kind("progress"):
+            edited = await cfg.transport.edit(
+                ref=progress_ref,
+                message=RenderedMessage(text=rendered.text, extra=extra),
+            )
+    except Exception:  # noqa: BLE001 — never fail the run after its final
+        logger.debug("final.progress_finalise_failed", exc_info=True)
+    logger.warning(
+        "final.send_unconfirmed" if unconfirmed else "final.send_failed",
+        channel_id=channel_id,
+        progress_message_id=progress_ref.message_id,
+        progress_finalised=edited is not None,
+    )
+    return edited is not None
+
+
 def unique_running_tasks(
     running_tasks: Mapping[MessageRef, RunningTask],
 ) -> list[tuple[MessageRef, RunningTask]]:
@@ -6794,6 +6854,15 @@ _STALE_RESUME_HINT = (
     " have been archived or expired. This chat's saved session isn't affected:"
     " send your next message without the resume line to carry on."
 )
+# #1168: the #228 hint for a failed resume whose saved session was just
+# cleared. The card also shows ``_SESSION_CLEARED_NOTICE``, so "Send /new"
+# would be a second, unneeded step; the plain #228 hint stays for runs where
+# nothing was cleared.
+_SESSION_NOT_LOADED_CLEARED_HINT = (
+    "The session could not be loaded \N{EM DASH} Claude Code may have"
+    " archived or expired it. Just send your message again to start a fresh"
+    " session."
+)
 # #1047: pre-spawn refusals (``usage[PRESPAWN_BLOCKED_KEY]``) that are
 # answered with their own text alone, in place of the progress card: no
 # error header, code block or footers, and ``session.summary.no_events`` at
@@ -7642,6 +7711,10 @@ async def handle_message(
                     ),
                 )
             )
+            # #1168: the saved session was cleared, and the card says so —
+            # don't also tell the user to send /new.
+            if _session_auto_cleared and hint == _SESSION_NOT_LOADED_HINT:
+                hint = _SESSION_NOT_LOADED_CLEARED_HINT
             if final_answer.strip():
                 # Deduplicate: if the answer already starts with the error's
                 # first line (common when runner sets both answer and error
@@ -8087,6 +8160,19 @@ async def handle_message(
         except Exception:
             delivery["sent"] = False
             raise
+        if final_ref is None and t_progress_ref is not None:
+            # #1166: the final may or may not be in the chat, and the
+            # replace-delete only runs on a confirmed send — so without this
+            # the card keeps "working" and a live cancel button for good.
+            await finalise_progress_after_lost_final(
+                cfg,
+                channel_id=incoming.channel_id,
+                progress_ref=t_progress_ref,
+                presenter=effective_presenter,
+                state=state,
+                elapsed_s=elapsed_final,
+                status=status,
+            )
         await _retire_review_cards(cfg.transport, completed.usage)
         if (
             capped_head is not None

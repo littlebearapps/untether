@@ -1230,3 +1230,31 @@ def test_agy_is_a_steer_target_not_a_live_session() -> None:
     assert target is not None and target.engine == "antigravity"
     assert live_sessions.steer_backend("claude") is live_sessions.live_backend("claude")
     assert live_sessions.steer_backend("codex") is None
+
+
+async def test_1164_queued_ahead_defers_a_default_steer_but_not_an_explicit_one() -> (
+    None
+):
+    """#1164: while an earlier follow-up for the session is queued and hasn't
+    run, a default-mode steer queues behind it (with a notice while a run is
+    busy) instead of jumping ahead into the live run. ``/steer`` still
+    steers."""
+    _live, pipe = _install()
+    cfg = _cfg("steer")
+    seen: list[ResumeToken] = []
+
+    def queued_ahead(token: ResumeToken) -> bool:
+        seen.append(token)
+        return True
+
+    running = {MessageRef(channel_id=CHAT, message_id=1): _Busy()}
+    assert await _steer(cfg, running=running, queued_ahead=queued_ahead) is False
+    assert pipe.sent == []
+    assert seen == [TOKEN]
+    assert _texts(cfg) == [
+        "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Earlier messages "
+        "are still waiting to run — queued behind them."
+    ]
+
+    assert await _steer(cfg, override="steer", queued_ahead=queued_ahead) is True
+    assert len(pipe.sent) == 1

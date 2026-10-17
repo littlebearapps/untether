@@ -321,3 +321,117 @@ async def test_failed_resume_of_the_saved_session_keeps_its_hint(
     assert "could not be loaded" in final
     assert CLEARED_TEXT in final
     assert "saved session isn't affected" not in final
+
+
+# -- #1168: the cleared card doesn't also say "Send /new" ---------------------
+
+CLAUDE_NOT_LOADED = "Claude Code run failed (error_during_execution)"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("engine", "error"),
+    [
+        *RESUME_FAILURES,
+        # The live repro (lba-1 seo-plugin, msg 142325).
+        ("claude", CLAUDE_NOT_LOADED),
+    ],
+)
+async def test_cleared_card_does_not_also_ask_for_new(
+    tmp_path: Path, engine: str, error: str
+) -> None:
+    """#1168: when the saved session was cleared, the card already says the
+    next message starts a new session — its hint must not also tell the user
+    to send /new."""
+    _store, texts, _logs = await _failed_resume(
+        tmp_path, engine, error, ResumeToken(engine=engine, value=SAVED)
+    )
+    final = texts[-1]
+    assert CLEARED_TEXT in final
+    assert "/new" not in final
+
+
+@pytest.mark.anyio
+async def test_cleared_claude_card_says_send_your_message_again(
+    tmp_path: Path,
+) -> None:
+    """#1168: the Claude card still explains why (the #228 hint), and its
+    advice matches the cleared notice."""
+    _store, texts, _logs = await _failed_resume(
+        tmp_path, "claude", CLAUDE_NOT_LOADED, ResumeToken(engine="claude", value=SAVED)
+    )
+    final = texts[-1]
+    assert "could not be loaded" in final
+    assert "send your message again" in final
+    assert "Send /new" not in final
+
+
+async def _failed_claude_run(
+    *,
+    resume: ResumeToken | None,
+    on_resume_failed: Any = None,
+) -> list[str]:
+    """A Claude run that fails before its first turn, with no saved-session
+    store behind it."""
+    transport = _Transport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    runner = ScriptRunner(
+        [ErrorReturn(error=CLAUDE_NOT_LOADED, usage={"num_turns": 0})],
+        engine="claude",
+        resume_value=resume.value if resume is not None else None,
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=42, message_id=10, text="continue"),
+        resume_token=resume,
+        on_resume_failed=on_resume_failed,
+    )
+    return transport.texts
+
+
+@pytest.mark.anyio
+async def test_not_cleared_fresh_run_keeps_the_new_advice() -> None:
+    """#1168: with nothing cleared (a fresh run, no saved session to drop),
+    "Send /new" is still the useful advice."""
+    texts = await _failed_claude_run(resume=None)
+    final = texts[-1]
+    assert "could not be loaded" in final
+    assert "Send /new" in final
+    assert CLEARED_TEXT not in final
+
+
+@pytest.mark.anyio
+async def test_not_cleared_when_the_clear_fails_keeps_the_new_advice() -> None:
+    """#1168: an auto-clear that raised removed nothing, so the card keeps
+    telling the user to send /new."""
+
+    async def on_resume_failed(token: ResumeToken) -> bool:
+        raise RuntimeError("store unavailable")
+
+    texts = await _failed_claude_run(
+        resume=ResumeToken(engine="claude", value=SAVED),
+        on_resume_failed=on_resume_failed,
+    )
+    final = texts[-1]
+    assert "could not be loaded" in final
+    assert "Send /new" in final
+    assert CLEARED_TEXT not in final
+
+
+@pytest.mark.anyio
+async def test_antigravity_stale_resume_card_unchanged(tmp_path: Path) -> None:
+    """#1070 regression: Antigravity's stale resume line still gets the
+    "saved session isn't affected" hint, not the #1168 cleared wording."""
+    engine, error = RESUME_FAILURES[-1]
+    assert engine == "antigravity"
+    _store, texts, _logs = await _failed_resume(
+        tmp_path, engine, error, ResumeToken(engine=engine, value=STALE)
+    )
+    final = texts[-1]
+    assert "saved session isn't affected" in final
+    assert "send your message again" not in final
+    assert "/new" not in final
+    assert CLEARED_TEXT not in final

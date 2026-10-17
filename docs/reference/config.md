@@ -540,10 +540,16 @@ Runtime security knobs. Defaults are safe — operators only flip these when inv
 
 Each engine reads a table keyed by its id, written either as `[engines.<id>]`
 (e.g. `[engines.claude]`) or as a top-level `[<id>]` (e.g. `[claude]`). The two
-layouts don't mix: once an `[engines]` table exists (even an empty one, or a
-single `[engines.<id>]`), every flat `[claude]` / `[codex]`-style table is ignored
-(`UntetherSettings.engine_config`). Built-in engines are listed here; plugin engines should document
-their own keys.
+layouts can be mixed: each engine reads `[engines.<id>]` if that table exists,
+otherwise its top-level `[<id>]`, even when other engines use `[engines.*]`
+tables ([#1162](https://github.com/littlebearapps/untether/issues/1162)). If
+both exist for the same engine, `[engines.<id>]` wins, the top-level table is
+ignored and Untether logs a `config.engine_table.duplicate` warning
+(`UntetherSettings.engine_config`). That warning is logged each time the engine's
+settings are read: once per hot-reload, once each time `/config` → About is
+opened, and at startup twice for the default engine (the setup check plus the
+runtime build) and once for any other engine. Built-in engines are listed here;
+plugin engines should document their own keys.
 
 An invalid engine table stops Untether from starting when it belongs to the
 default engine. For any other engine the table is ignored with a `setup.warning`

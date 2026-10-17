@@ -60,10 +60,28 @@ class ThreadScheduler:
         self._held: set[tuple[ChannelId, MessageId]] = set()
         self._active_threads: set[str] = set()
         self._busy_until: dict[str, anyio.Event] = {}
+        # #1164: jobs taken off the queue that haven't started yet (being
+        # offered to the live session, or held behind the previous run).
+        self._unstarted: dict[str, int] = {}
 
     @staticmethod
     def thread_key(token: ResumeToken) -> str:
         return f"{token.engine}:{token.value}"
+
+    def has_unstarted(self, token: ResumeToken) -> bool:
+        """#1164: a job for ``token``'s session is queued or taken but not
+        yet running. A later follow-up must queue behind it, not steer into
+        the current run ahead of it. Derived from the queue itself, so it
+        can't stick."""
+        key = self.thread_key(token)
+        return bool(self._pending_by_thread.get(key)) or bool(self._unstarted.get(key))
+
+    def _mark_unstarted(self, key: str, delta: int) -> None:
+        count = self._unstarted.get(key, 0) + delta
+        if count > 0:
+            self._unstarted[key] = count
+        else:
+            self._unstarted.pop(key, None)
 
     async def note_thread_known(self, token: ResumeToken, done: anyio.Event) -> None:
         key = self.thread_key(token)
@@ -202,23 +220,31 @@ class ThreadScheduler:
                     self._queued_by_progress.pop(
                         (job.chat_id, job.progress_ref.message_id), None
                     )
+                self._mark_unstarted(key, 1)
             # Shielded: once a job is taken off the queue it is either written
             # into the live session or put back — never lost, never run twice.
             with anyio.CancelScope(shield=True):
                 try:
-                    injected = await inject(job)
-                except Exception:  # noqa: BLE001
-                    logger.warning("scheduler.inject_failed", key=key, exc_info=True)
-                    injected = False
-                if not injected:
-                    async with self._lock:
-                        self._pending_by_thread.setdefault(key, deque()).appendleft(job)
-                        if job.progress_ref is not None:
-                            self._queued_by_progress[
-                                (job.chat_id, job.progress_ref.message_id)
-                            ] = job
-                    # Not injectable right now (not live yet / closing):
-                    # keep FIFO order and look again next tick.
+                    try:
+                        injected = await inject(job)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "scheduler.inject_failed", key=key, exc_info=True
+                        )
+                        injected = False
+                    if not injected:
+                        async with self._lock:
+                            self._pending_by_thread.setdefault(key, deque()).appendleft(
+                                job
+                            )
+                            if job.progress_ref is not None:
+                                self._queued_by_progress[
+                                    (job.chat_id, job.progress_ref.message_id)
+                                ] = job
+                        # Not injectable right now (not live yet / closing):
+                        # keep FIFO order and look again next tick.
+                finally:
+                    self._mark_unstarted(key, -1)
 
     async def _hold_until(self, job: ThreadJob, done: anyio.Event) -> bool:
         """Wait for the session's previous run, keeping ``job`` cancellable
@@ -261,27 +287,31 @@ class ThreadScheduler:
                     if job.progress_ref is not None:
                         progress_key = (job.chat_id, job.progress_ref.message_id)
                         self._queued_by_progress.pop(progress_key, None)
+                    self._mark_unstarted(key, 1)
 
-                # #776: a follow-up for a session whose process is still
-                # live goes into that process (queued until its turn ends)
-                # instead of waiting for it to exit and resuming.
-                if self._inject_job is not None:
-                    try:
-                        injected = await self._inject_job(job)
-                    except Exception:  # noqa: BLE001 — fall back to resume
-                        logger.warning(
-                            "scheduler.inject_failed", key=key, exc_info=True
-                        )
-                        injected = False
-                    if injected:
-                        continue
+                try:
+                    # #776: a follow-up for a session whose process is still
+                    # live goes into that process (queued until its turn
+                    # ends) instead of waiting for it to exit and resuming.
+                    if self._inject_job is not None:
+                        try:
+                            injected = await self._inject_job(job)
+                        except Exception:  # noqa: BLE001 — fall back to resume
+                            logger.warning(
+                                "scheduler.inject_failed", key=key, exc_info=True
+                            )
+                            injected = False
+                        if injected:
+                            continue
 
-                if (
-                    done is not None
-                    and not done.is_set()
-                    and not await self._hold_until(job, done)
-                ):
-                    continue  # #1082: cancelled from its queued card
+                    if (
+                        done is not None
+                        and not done.is_set()
+                        and not await self._hold_until(job, done)
+                    ):
+                        continue  # #1082: cancelled from its queued card
+                finally:
+                    self._mark_unstarted(key, -1)
 
                 try:
                     await self._run_job_with_live_pump(key, job)

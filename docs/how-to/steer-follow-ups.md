@@ -65,6 +65,7 @@ The message is queued as normal and Untether tells you why:
 | `↪️ No running Antigravity turn to steer — queued instead.` | Antigravity: nothing is running, the run has already sent its answer, or its hooks aren't reaching Untether. |
 | `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
+| `↪️ Earlier messages are still waiting to run — queued behind them.` | A message you sent earlier is still queued for this session, so this one waits its turn behind it instead of jumping ahead into the current run (`/steer <text>` still steers) ([#1164](https://github.com/littlebearapps/untether/issues/1164)). |
 
 In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)).
 

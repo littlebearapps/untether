@@ -466,3 +466,438 @@ async def test_a_drop_with_nothing_in_flight_records_nothing() -> None:
     first_start.drop_waiting(CHAT, thread_filter=None, command="cancel")
     assert first_start._DROPPED == {}
     assert first_start.get(key) is None
+
+
+class SlowNoticeTransport(FakeTransport):
+    """#1164: the steer fallback notice for message 11 is slow to send (in a
+    group, 1-3 s behind the outbox's pacing). It is held until a later
+    follow-up has joined the first-start wait — what the unfixed code let
+    happen — or, once ordering holds them back, until a short timeout."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.released = anyio.Event()
+
+    async def send(self, *, channel_id: Any, message: Any, options: Any = None) -> Any:
+        if (
+            message.text.startswith("\N{RIGHTWARDS ARROW WITH HOOK}")
+            and options is not None
+            and options.reply_to is not None
+            and options.reply_to.message_id == 11
+        ):
+            from untether.telegram import first_start
+
+            with anyio.move_on_after(0.5):
+                while not any(s.waiting for s in first_start._PENDING.values()):
+                    await anyio.sleep(0.01)
+            self.released.set()
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+@pytest.mark.parametrize("engine", ["claude", "antigravity"])
+async def test_followups_keep_arrival_order_while_one_sends_its_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """#1164: B, C and D sent while the first run starts (Follow-up = Steer).
+    Only B gets the "queued" notice (once per run); while it was still being
+    sent, C and D joined the queue first, so the finals came out A C D B.
+    They run in the order they were sent."""
+    from collections import OrderedDict
+
+    from untether.telegram import steer
+
+    monkeypatch.setattr(steer, "_NOTICED", OrderedDict())
+    transport = SlowNoticeTransport()
+
+    async def before_stop() -> None:
+        with anyio.fail_after(5):
+            await transport.released.wait()
+        await anyio.sleep(0.3)
+
+    runner, store, _ = await _drive(
+        tmp_path,
+        engine=engine,
+        followup_mode="steer",
+        messages=(
+            _msg("first", 10),
+            _msg("second", 11),
+            _msg("third", 12),
+            _msg("fourth", 13),
+        ),
+        expected_runs=4,
+        transport=transport,
+        before_stop=before_stop,
+    )
+    notices = [
+        c["options"].reply_to.message_id
+        for c in transport.send_calls
+        if c["message"].text.startswith("\N{RIGHTWARDS ARROW WITH HOOK}")
+    ]
+    assert notices == [11]
+    assert [_tail(prompt) for prompt, _ in runner.calls] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]
+    token = ResumeToken(engine=engine, value="conv-1")
+    assert [resume for _, resume in runner.calls] == [None, token, token, token]
+    assert runner.max_active == 1
+
+
+async def test_arrival_order_line_hands_the_turn_on_in_order() -> None:
+    """#1164: the line itself — first in goes first, a prompt that gives up
+    before its turn doesn't hold the others, and an empty line is dropped."""
+    from untether.telegram import arrival_order
+
+    scope = (CHAT, None, (CHAT, None))
+    a = arrival_order.take(scope)
+    b = arrival_order.take(scope)
+    c = arrival_order.take(scope)
+    other = arrival_order.take((CHAT, 7, None))
+    assert a.turn.is_set() and other.turn.is_set()
+    assert not b.turn.is_set() and not c.turn.is_set()
+
+    arrival_order.done(b)  # gave up before its turn (e.g. cancelled)
+    assert not c.turn.is_set()
+    arrival_order.done(a)
+    arrival_order.done(a)  # idempotent
+    with anyio.fail_after(1):
+        await arrival_order.wait_turn(c)
+    await arrival_order.wait_turn(None)  # unordered (/continue): no wait
+    arrival_order.done(None)
+    arrival_order.done(c)
+    arrival_order.done(other)
+    assert arrival_order._LINES == {}
+
+
+class HeldResumeRunner(MockRunner):
+    """Every run reports its session at once; the first one then stays
+    running until ``release`` is set (or it is cancelled)."""
+
+    def __init__(self, engine: str) -> None:
+        super().__init__(engine=engine)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self.release = anyio.Event()
+
+    async def run(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[UntetherEvent]:
+        self.calls.append((prompt, resume))
+        token = resume or ResumeToken(engine=self.engine, value="fresh")
+        yield StartedEvent(engine=self.engine, resume=token, title="t")
+        if len(self.calls) == 1:
+            await self.release.wait()
+        yield CompletedEvent(engine=self.engine, resume=token, ok=True, answer="ok")
+
+
+class QueuedCardGatedTransport(FakeTransport):
+    """Holds message 11's ``queued`` card in flight until ``release``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.card_in_flight = anyio.Event()
+        self.release = anyio.Event()
+
+    async def send(self, *, channel_id: Any, message: Any, options: Any = None) -> Any:
+        if (
+            "queued" in message.text
+            and options is not None
+            and options.reply_to is not None
+            and options.reply_to.message_id == 11
+        ):
+            self.card_in_flight.set()
+            await self.release.wait()
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+
+async def _drive_in_line_with_session(
+    command: str, tmp_path: Path
+) -> tuple[HeldResumeRunner, FakeTransport]:
+    """A session is already running (A on conv-0). C holds the turn while its
+    queued card is sent and D waits in line behind it; then ``command``."""
+    from untether.telegram import arrival_order
+
+    engine = "codex"
+    state_path = tmp_path / "untether.toml"
+    store = ChatSessionStore(resolve_sessions_path(state_path))
+    await store.set_session_resume(
+        CHAT, None, ResumeToken(engine=engine, value="conv-0")
+    )
+    runner = HeldResumeRunner(engine)
+    transport = QueuedCardGatedTransport()
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_empty_projects(),
+        config_path=state_path,
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=CHAT,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=0.0,
+        media_group_debounce_s=0.0,
+        session_mode="chat",
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _msg("A", 10)
+        await _wait_for(lambda: len(runner.calls) == 1)
+        yield _msg("C", 11)
+        with anyio.fail_after(5):
+            await transport.card_in_flight.wait()
+        yield _msg("D", 12)
+        await _wait_for(lambda: bool(arrival_order._LINES))
+        await anyio.sleep(0.1)  # D is in line behind C
+        yield _msg(command, 13)
+        await anyio.sleep(0.2)  # the command has run
+        transport.release.set()
+        runner.release.set()
+        await _wait_for(
+            lambda: (
+                _dropped_notices(transport)
+                or "D" in [_tail(prompt) for prompt, _ in runner.calls]
+            )
+        )
+        await anyio.sleep(0.5)  # a released D would have run by now
+
+    await telegram_loop.run_main_loop(cfg, poller)
+    assert arrival_order._LINES == {}
+    return runner, transport
+
+
+async def test_new_drops_a_followup_still_in_line(tmp_path: Path) -> None:
+    """#1164 review: D, in line behind C (sending its queued card), has no
+    queued card and isn't waiting on a first start, so /new missed it and
+    it started the new conversation. It is dropped with the 🗑️ reply and
+    never runs (the #1157 rule)."""
+    runner, transport = await _drive_in_line_with_session("/new", tmp_path)
+    assert "D" not in [_tail(prompt) for prompt, _ in runner.calls]
+    (dropped,) = _dropped_notices(transport)
+    assert dropped["message"].text.startswith(
+        "🗑️ Dropped 1 message sent just before /new"
+    )
+    assert dropped["options"].reply_to.message_id == 12
+
+
+async def test_cancel_of_a_run_with_its_session_leaves_followups_in_line(
+    tmp_path: Path,
+) -> None:
+    """#1157 semantics: /cancel stopping a run that has its session leaves
+    its follow-ups to run. D, still in line behind C, is no exception: it
+    queues and runs after C, on the same conversation."""
+    runner, transport = await _drive_in_line_with_session("/cancel", tmp_path)
+    assert not _dropped_notices(transport)
+    tails = [_tail(prompt) for prompt, _ in runner.calls]
+    assert tails == ["A", "C", "D"]
+    token = ResumeToken(engine="codex", value="conv-0")
+    assert [resume for _, resume in runner.calls] == [token, token, token]
+
+
+@pytest.mark.parametrize("command", ["/cancel", "/new"])
+async def test_cancel_or_new_during_first_start_drops_followups_in_line(
+    tmp_path: Path, command: str
+) -> None:
+    """#1164: while the first run starts, 11 waits on it (holding the turn)
+    and 12 waits in line behind 11. /cancel or /new drops both, each with
+    its own 🗑️ reply; only the first message ever ran."""
+    runner, store, transport = await _drive(
+        tmp_path,
+        engine="codex",
+        messages=(_msg("first", 10), _msg("second", 11), _msg("third", 12)),
+        stop=_msg(command, 13),
+    )
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["first"]
+    dropped = _dropped_notices(transport)
+    assert sorted(c["options"].reply_to.message_id for c in dropped) == [11, 12]
+    assert all(
+        c["message"].text.startswith(f"🗑️ Dropped 1 message sent just before {command}")
+        for c in dropped
+    )
+    assert await store.get_session_resume(CHAT, None, "codex") is None
+
+
+async def test_arrival_order_drop_skips_started_prompts_and_other_threads() -> None:
+    """#1164 review: only prompts that haven't started their turn are dropped,
+    and only in the matching chat/thread."""
+    from untether.telegram import arrival_order
+
+    head = arrival_order.take((CHAT, None, (CHAT, None)))
+    behind = arrival_order.take((CHAT, None, (CHAT, None)))
+    other_thread = arrival_order.take((CHAT, 7, None))
+    other_chat = arrival_order.take((CHAT + 1, None, None))
+    assert await arrival_order.wait_turn(head) is None  # started
+
+    dropped = arrival_order.drop_waiting(
+        CHAT, thread_filter=lambda thread_id: thread_id is None, command="new"
+    )
+    assert dropped == 1
+    assert head.dropped_by is None
+    assert other_thread.dropped_by is None and other_chat.dropped_by is None
+    arrival_order.done(head)
+    assert await arrival_order.wait_turn(behind) == "new"
+    for ticket in (behind, other_thread, other_chat):
+        arrival_order.done(ticket)
+    assert arrival_order._LINES == {}
+
+
+def test_arrival_scope_is_per_sender_without_a_session_scope() -> None:
+    """Stateless: nothing to keep in one session's order, so another member's
+    messages never wait behind this one's. A forum topic shares one line."""
+    a = _msg("a", 1, chat_type="group")
+    b = replace(a, sender_id=456)
+    scope = telegram_loop._arrival_scope
+    assert scope(a, None, None) != scope(b, None, None)
+    topic_a = replace(a, thread_id=5)
+    topic_b = replace(b, thread_id=5)
+    assert scope(topic_a, None, (CHAT, 5)) == scope(topic_b, None, (CHAT, 5))
+
+
+class HeldFirstRunRunner(StartGatedRunner):
+    """Like :class:`StartGatedRunner`, but the first run stays running after
+    it reports its session until ``hold`` is set — a live run C and D could
+    be steered into."""
+
+    def __init__(self, engine: str) -> None:
+        super().__init__(engine)
+        self.hold = anyio.Event()
+        self.first_live = False
+
+    async def run(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[UntetherEvent]:
+        first = not self.calls
+        async for event in super().run(prompt, resume):
+            if first and isinstance(event, StartedEvent):
+                self.first_live = True
+            if first and isinstance(event, CompletedEvent):
+                await self.hold.wait()
+                self.first_live = False
+            yield event
+
+
+class FakeSteerBackend:
+    """A steer target that accepts a steer while the first run is live and
+    records it. agy's one-step turn never runs such a line (#1164 live QA):
+    here the runner never sees it either."""
+
+    supports_steer = True
+
+    def __init__(self, engine: str, runner: HeldFirstRunRunner) -> None:
+        self.engine = engine
+        self.display_name = engine
+        self.runner = runner
+        self.steered: list[str] = []
+
+    def get(self, session_id: str) -> Any:
+        if not self.runner.first_live:
+            return None
+        from types import SimpleNamespace
+
+        return SimpleNamespace(closing=False)
+
+    async def steer(self, session_id: str, text: str, **kwargs: Any) -> str:
+        self.steered.append(text)
+        return "steered"
+
+
+@pytest.mark.parametrize("engine", ["claude", "antigravity"])
+async def test_later_followups_queue_behind_an_earlier_one_instead_of_steering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """#1164 live QA (Steer): B waits on the first start and keeps its turn,
+    so C and D get theirs only once A has reported its session. A is live by
+    then, and C and D were steered into it ahead of B (agy then lost them;
+    Claude ran C+D before B). While B is queued and hasn't run, they queue
+    behind it: runs A B C D, nothing steered into A."""
+    from collections import OrderedDict
+
+    from untether.telegram import arrival_order, steer
+
+    monkeypatch.setattr(steer, "_NOTICED", OrderedDict())
+    state_path = tmp_path / "untether.toml"
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    await prefs.set_followup_mode(CHAT, "steer")
+    runner = HeldFirstRunRunner(engine)
+    backend = FakeSteerBackend(engine, runner)
+    monkeypatch.setattr(steer, "steer_backend", lambda _engine: backend)
+    transport = FakeTransport()
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_empty_projects(),
+        config_path=state_path,
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=CHAT,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=0.0,
+        media_group_debounce_s=0.0,
+        session_mode="chat",
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _msg("A", 10)
+        await _wait_for(lambda: len(runner.calls) == 1)
+        for message_id, text in ((11, "B"), (12, "C"), (13, "D")):
+            yield _msg(text, message_id)
+        await anyio.sleep(0.3)  # B waits on the start; C and D in line
+        runner.gate.set()  # A reports its session and stays live
+        await _wait_for(lambda: runner.first_live)
+        # C and D get their turns while A is still live.
+        await _wait_for(lambda: not arrival_order._LINES)
+        await anyio.sleep(0.2)
+        runner.hold.set()
+        # A steered line never runs (agy's one-step turn): count it as done.
+        await _wait_for(lambda: runner.finished + len(backend.steered) >= 4)
+        await anyio.sleep(0.1)
+
+    await telegram_loop.run_main_loop(cfg, poller)
+
+    assert backend.steered == []
+    assert [_tail(prompt) for prompt, _ in runner.calls] == ["A", "B", "C", "D"]
+    token = ResumeToken(engine=engine, value="conv-1")
+    assert [resume for _, resume in runner.calls] == [None, token, token, token]
+    assert runner.max_active == 1
+
+
+async def test_scheduler_has_unstarted_tracks_queued_and_held_jobs() -> None:
+    """#1164: ``has_unstarted`` is true while a job is queued or held behind
+    the previous run, and false again once it runs — it never sticks."""
+    from untether.scheduler import ThreadScheduler
+
+    token = ResumeToken(engine="codex", value="s1")
+    started = anyio.Event()
+    finish = anyio.Event()
+
+    async def run_job(job: Any) -> None:
+        started.set()
+        await finish.wait()
+
+    async with anyio.create_task_group() as tg:
+        scheduler = ThreadScheduler(task_group=tg, run_job=run_job)
+        previous = anyio.Event()
+        await scheduler.note_thread_known(token, previous)
+        assert not scheduler.has_unstarted(token)
+        await scheduler.enqueue_resume(CHAT, 1, "x", token)
+        assert scheduler.has_unstarted(token)
+        await anyio.sleep(0.05)  # taken by the worker, held behind previous
+        assert scheduler.has_unstarted(token)
+        previous.set()
+        with anyio.fail_after(2):
+            await started.wait()
+        assert not scheduler.has_unstarted(token)
+        finish.set()
+    assert scheduler._unstarted == {}

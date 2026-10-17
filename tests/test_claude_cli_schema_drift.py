@@ -15,7 +15,9 @@ import os
 import re
 import shutil
 import subprocess
+import tokenize
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -30,7 +32,63 @@ from untether.schemas.claude import (
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.301"
+PROBED_CLI_VERSION = "2.1.302"
+
+# A minified JS identifier character. Names can contain ``$`` (CLI 2.1.301
+# names the auto-refusal helper ``$lr``; 2.1.302 names the aborted predicate
+# ``$D`` and the command-hook spawner ``$H``), which ``\w`` doesn't match
+# (#1148, #1170). Every probe below spells identifiers ``[\w$]``;
+# ``test_probes_allow_dollar_identifiers`` keeps it that way.
+
+
+def test_probes_allow_dollar_identifiers() -> None:
+    """#1170: no probe in this file matches a minified name with a bare
+    ``\\w`` (which misses ``$``). Bytes literals are the JS probes; a
+    character class that already holds it (``[\\w$]``) is fine."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    bare: list[str] = []
+    for tok in tokenize.generate_tokens(iter(source.splitlines(True)).__next__):
+        if tok.type != tokenize.STRING:
+            continue
+        prefix = tok.string[: len(tok.string) - len(tok.string.lstrip("rbRB"))]
+        if "b" in prefix.lower() and re.search(r"(?<!\[)\\w", tok.string):
+            bare.append(f"line {tok.start[0]}: {tok.string}")
+    assert not bare, "probes with a bare \\w identifier class:\n" + "\n".join(bare)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "snippet"),
+    [
+        pytest.param(
+            "_ABORTED_PREDICATE_RE",
+            b'function $D(e){return e==="aborted_streaming"||e==="aborted_tools"}',
+            id="aborted-predicate-2.1.302",
+        ),
+        pytest.param(
+            "_ABORTED_PREDICATE_RE",
+            b'function $D($){return $==="aborted_streaming"||$==="aborted_tools"}',
+            id="aborted-predicate-dollar-param",
+        ),
+        pytest.param(
+            "_HOOK_STARTED_EMITTER_RE",
+            b'function $me(e,$,r){if(!$pme(r))return;$ki({type:"system",'
+            b'subtype:"hook_started"',
+            id="hook-emitter-dollar",
+        ),
+    ],
+)
+def test_probes_match_dollar_names(pattern: str, snippet: bytes) -> None:
+    """#1170: the probes that missed CLI 2.1.302's ``$``-prefixed names
+    match synthetic copies of its minified code."""
+    assert globals()[pattern].search(snippet) is not None
+
+
+def test_hook_spawn_call_matches_dollar_spawner() -> None:
+    """#1170: the ``$H`` command-hook spawner call site is found."""
+    snippet = b";hme(Kr,ot,tt);let gr=await $H("
+    m = re.search(_hook_spawn_call_re(re.escape(b"hme")), snippet)
+    assert m is not None and m.group(1) == b"$H"
+
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -61,7 +119,7 @@ def _zod_enum(blob: mmap.mmap, pattern: bytes) -> tuple[str, ...] | None:
     """Values of the first ``<key>:<fn>([...])`` zod enum matching *pattern*.
 
     Minified function names change every release, so the call name is
-    matched loosely (``\\w{1,4}``); the key and the literal list are what
+    matched loosely (``[\\w$]{1,4}``); the key and the literal list are what
     matter.
     """
     m = re.search(pattern, blob)
@@ -82,7 +140,7 @@ def _require(values: tuple[str, ...] | None, what: str) -> tuple[str, ...]:
 
 def test_rate_limit_status_enum_matches(cli_blob: mmap.mmap) -> None:
     declared = _require(
-        _zod_enum(cli_blob, rb"status:\w{1,4}\(\[([^\]]*)\]\),resetsAt:"),
+        _zod_enum(cli_blob, rb"status:[\w$]{1,4}\(\[([^\]]*)\]\),resetsAt:"),
         "rate_limit_info.status",
     )
     assert set(declared) == set(CLAUDE_RATE_LIMIT_STATUSES), (
@@ -95,7 +153,7 @@ def test_rate_limit_status_enum_matches(cli_blob: mmap.mmap) -> None:
 
 def test_rate_limit_type_enum_matches(cli_blob: mmap.mmap) -> None:
     declared = _require(
-        _zod_enum(cli_blob, rb"rateLimitType:\w{1,4}\(\[([^\]]*)\]\)"),
+        _zod_enum(cli_blob, rb"rateLimitType:[\w$]{1,4}\(\[([^\]]*)\]\)"),
         "rate_limit_info.rateLimitType",
     )
     assert set(declared) == set(CLAUDE_RATE_LIMIT_TYPES), (
@@ -106,7 +164,7 @@ def test_rate_limit_type_enum_matches(cli_blob: mmap.mmap) -> None:
 
 def test_overage_status_enum_matches(cli_blob: mmap.mmap) -> None:
     declared = _require(
-        _zod_enum(cli_blob, rb"overageStatus:\w{1,4}\(\[([^\]]*)\]\)"),
+        _zod_enum(cli_blob, rb"overageStatus:[\w$]{1,4}\(\[([^\]]*)\]\)"),
         "rate_limit_info.overageStatus",
     )
     assert set(declared) == set(CLAUDE_OVERAGE_STATUSES)
@@ -143,7 +201,7 @@ API_RETRY_KEYS = (
 def test_api_retry_subtype_and_counter_keys_present(cli_blob: mmap.mmap) -> None:
     """The keys `_translate_api_retry` reads must still be declared on the
     CLI's ``system/api_retry`` schema."""
-    m = re.search(rb'subtype:\w{1,4}\("api_retry"\)', cli_blob)
+    m = re.search(rb'subtype:[\w$]{1,4}\("api_retry"\)', cli_blob)
     if m is None:
         pytest.fail(
             'installed CLI no longer declares subtype "api_retry" — #792 '
@@ -170,7 +228,7 @@ def test_api_retry_subtype_and_counter_keys_present(cli_blob: mmap.mmap) -> None
 def _schema_window(blob: mmap.mmap, subtype: str, size: int = 4000) -> bytes:
     """The zod object following ``subtype:<fn>("<subtype>")``, with its
     ``.describe("…")`` strings stripped, up to its ``session_id`` key."""
-    m = re.search(rb'subtype:\w{1,4}\("' + subtype.encode() + rb'"\)', blob)
+    m = re.search(rb'subtype:[\w$]{1,4}\("' + subtype.encode() + rb'"\)', blob)
     if m is None:
         pytest.fail(
             f'installed CLI no longer declares system subtype "{subtype}" '
@@ -191,7 +249,7 @@ def test_informational_notice_present(cli_blob: mmap.mmap) -> None:
     window = _schema_window(cli_blob, "informational")
     assert b"content:" in window
     level = _require(
-        _zod_enum(window, rb"level:\w{1,4}\(\[([^\]]*)\]\)"), "informational.level"
+        _zod_enum(window, rb"level:[\w$]{1,4}\(\[([^\]]*)\]\)"), "informational.level"
     )
     assert set(level) == {"info", "notice", "suggestion", "warning"}, (
         f"informational.level is now {level} — review the row/log-only split "
@@ -253,13 +311,17 @@ def test_model_refusal_subtypes_present(
     )
 
 
+# ``function $D(e){return e==="aborted_streaming"||e==="aborted_tools"}`` on
+# CLI 2.1.302.
+_ABORTED_PREDICATE_RE = re.compile(
+    rb'function [\w$]{1,4}\(([\w$])\)\{return ((?:\1==="aborted_[a-z_]+"(?:\|\|)?)+)\}'
+)
+
+
 def test_terminal_reason_aborted_values_present(cli_blob: mmap.mmap) -> None:
     """#806 (phase 03): the CLI's own "was this turn aborted?" predicate
     names exactly CLAUDE_ABORTED_TERMINAL_REASONS."""
-    m = re.search(
-        rb'function \w{1,4}\((\w)\)\{return ((?:\1==="aborted_[a-z_]+"(?:\|\|)?)+)\}',
-        cli_blob,
-    )
+    m = _ABORTED_PREDICATE_RE.search(cli_blob)
     if m is None:
         pytest.fail(
             "the CLI's aborted-terminal predicate moved — re-derive the probe "
@@ -301,8 +363,8 @@ def test_hook_event_flag_and_subtypes_present(cli_blob: mmap.mmap) -> None:
             f"it (last green on CLI {PROBED_CLI_VERSION})"
         )
     started = re.search(
-        rb'subtype:"hook_started",hook_id:\w{1,4},hook_name:\w{1,4},'
-        rb"hook_event:\w{1,4}",
+        rb'subtype:"hook_started",hook_id:[\w$]{1,4},hook_name:[\w$]{1,4},'
+        rb"hook_event:[\w$]{1,4}",
         cli_blob,
     )
     progress = cli_blob.find(b'subtype:"hook_progress",hook_id:')
@@ -319,14 +381,14 @@ def test_hook_event_flag_and_subtypes_present(cli_blob: mmap.mmap) -> None:
     for key in (b"hook_name:", b"hook_event:", b"exit_code:", b"outcome:"):
         assert key in body, f"hook_response lost {key!r}"
     outcome = _require(
-        _zod_enum(cli_blob, rb'outcome:\w{1,4}\((\[[^\]]*"cancelled"[^\]]*\])\)'),
+        _zod_enum(cli_blob, rb'outcome:[\w$]{1,4}\((\[[^\]]*"cancelled"[^\]]*\])\)'),
         "hook_response.outcome",
     )
     assert set(outcome) == {"success", "error", "cancelled"}, (
         f"hook_response.outcome is now {outcome} — review the rewake / "
         "cancelled branches in _apply_hook_event"
     )
-    if re.search(rb'kind:\w{1,4}\("task-notification"\)', cli_blob) is None:
+    if re.search(rb'kind:[\w$]{1,4}\("task-notification"\)', cli_blob) is None:
         pytest.fail(
             "result origin kind 'task-notification' moved — hook_rewake "
             f"retro-attribution is dead code (last green on CLI {PROBED_CLI_VERSION})"
@@ -347,6 +409,22 @@ def test_help_probe_detects_hook_events_flag(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
+# ``function hme(e,n,r){if(!pme(r))return;ki({type:"system",subtype:
+# "hook_started"…`` on CLI 2.1.302.
+_HOOK_STARTED_EMITTER_RE = re.compile(
+    rb"function ([\w$]+)\([\w$]+,[\w$]+,[\w$]+\)\{if\(![\w$]+\([\w$]+\)\)return;"
+    rb'[\w$]+\(\{type:"system",subtype:"hook_started"'
+)
+
+
+def _hook_spawn_call_re(emitter: bytes) -> bytes:
+    """An emit-then-await call site of the escaped *emitter*: ``;hme(Kr,ot,tt);
+    let gr=await $H(`` on CLI 2.1.302 (``$H`` spawns command hooks)."""
+    return (
+        rb"[;,{}]" + emitter + rb"\([\w$]+,[\w$]+,[\w$]+\);let [\w$]+=await ([\w$]+)\("
+    )
+
+
 def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> None:
     """#812: the hook-process evidence rests on two CLI facts — the CLI
     emits ``hook_started`` *before* spawning the hook (so a hook's process
@@ -354,11 +432,7 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
     hooks ``detached`` off Windows (own process group: the baseline and the
     MCP/LSP-name exemptions only apply to the CLI's own group). If either
     moves, those exemptions could release a running ``asyncRewake`` hook."""
-    emitter = re.search(
-        rb"function (\w+)\(\w+,\w+,\w+\)\{if\(!\w+\(\w+\)\)return;"
-        rb'\w+\(\{type:"system",subtype:"hook_started"',
-        cli_blob,
-    )
+    emitter = _HOOK_STARTED_EMITTER_RE.search(cli_blob)
     if emitter is None:
         pytest.skip(
             "hook_started emitter not found — re-derive the probe "
@@ -366,9 +440,7 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
         )
     name = re.escape(emitter.group(1))
     command_spawns: list[tuple[bytes, bytes]] = []
-    for call in re.finditer(
-        rb"[;,{}]" + name + rb"\(\w+,\w+,\w+\);let \w+=await (\w+)\(", cli_blob
-    ):
+    for call in re.finditer(_hook_spawn_call_re(name), cli_blob):
         fn = re.search(
             rb"async function " + re.escape(call.group(1)) + rb"\(", cli_blob
         )
@@ -377,7 +449,7 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
         window = cli_blob[fn.start() : fn.start() + 12000]
         command_spawns.extend(
             (detached, window)
-            for detached in set(re.findall(rb"detached:(\w+)", window))
+            for detached in set(re.findall(rb"detached:([\w$]+)", window))
         )
     if not command_spawns:
         pytest.skip(
@@ -400,8 +472,11 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
             rb"[,;\s]" + windows + rb'=[\w$]+\(\)==="windows"[,;]', window
         ), "the hook spawn's detached flag is no longer `!(platform === windows)`"
         assert re.search(
-            windows + rb"\?\w+\(\):null;if\(" + windows + rb"&&!\w+\)throw Error\("
-            rb'`Hook "\$\{\w+\.command\}" requires bash but Git Bash',
+            windows
+            + rb"\?[\w$]+\(\):null;if\("
+            + windows
+            + rb"&&![\w$]+\)throw Error\("
+            rb'`Hook "\$\{[\w$]+\.command\}" requires bash but Git Bash',
             window,
         ), "hook spawn detached flag no longer keyed on the Windows/Git Bash check"
 
@@ -722,15 +797,11 @@ def test_exit_plan_mode_restores_pre_plan_mode(cli_blob: mmap.mmap) -> None:
             )
 
 
-# Minified identifiers can contain ``$`` (CLI 2.1.301 names the auto-refusal
-# helper ``$lr``), which ``\w`` doesn't match (#1148).
-_JS_ID = rb"[\w$]"
-
 _SET_MODE_VALIDATOR_RE = re.compile(
-    rb"function " + _JS_ID + rb"{1,4}\(\w,\w\)\{let \w=" + _JS_ID + rb"{1,4}\(\w\);"
-    rb"if\(\w===void 0\)"
-    rb"return\{ok:!1,error:" + _JS_ID + rb'{1,4},code:"invalid_mode"\}(.{0,1500}?)'
-    rb"return\{ok:!0,mode:\w\}\}"
+    rb"function [\w$]{1,4}\([\w$],[\w$]\)\{let [\w$]=[\w$]{1,4}\([\w$]\);"
+    rb"if\([\w$]===void 0\)"
+    rb'return\{ok:!1,error:[\w$]{1,4},code:"invalid_mode"\}(.{0,1500}?)'
+    rb"return\{ok:!0,mode:[\w$]\}\}"
 )
 
 # The CLI's own list of set_permission_mode refusal codes (the SDK's ``code``
@@ -751,11 +822,11 @@ def _refusal_codes_from_validator(cli_blob: mmap.mmap, body: bytes) -> set[str]:
     codes.update(c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', body))
     # Since CLI 2.1.299 the auto refusal is built by a helper the validator
     # returns (``return err(nP())``); read that helper's codes too.
-    for helper in set(re.findall(rb"return (" + _JS_ID + rb"{1,4})\(", body)):
+    for helper in set(re.findall(rb"return ([\w$]{1,4})\(", body)):
         helper_re = (
             rb"function "
             + re.escape(helper)
-            + rb"\(\w\)\{return\{ok:!1,(.{0,300}?)\}\}"
+            + rb"\([\w$]\)\{return\{ok:!1,(.{0,300}?)\}\}"
         )
         if helper_match := re.search(helper_re, cli_blob):
             codes.update(
@@ -811,7 +882,7 @@ def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
     }
     if codes != expected:
         pytest.fail(f"refusal codes {sorted(codes)} != {sorted(expected)} — {hint}")
-    guarded = {m.decode() for m in re.findall(rb'if\(\w==="(\w+)"', body)}
+    guarded = {m.decode() for m in re.findall(rb'if\([\w$]==="([A-Za-z]+)"', body)}
     if guarded != {"bypassPermissions", "auto"}:
         pytest.fail(f"guarded target modes {sorted(guarded)} — {hint}")
 
@@ -843,7 +914,7 @@ def test_compaction_frames_present(cli_blob: mmap.mmap) -> None:
             )
     status = _schema_window(cli_blob, "status")
     result = _require(
-        _zod_enum(status, rb"compact_result:\w{1,4}\(\[([^\]]*)\]\)"),
+        _zod_enum(status, rb"compact_result:[\w$]{1,4}\(\[([^\]]*)\]\)"),
         "system/status compact_result",
     )
     assert set(result) == {"success", "failed"}, (
@@ -853,7 +924,7 @@ def test_compaction_frames_present(cli_blob: mmap.mmap) -> None:
     assert b"permissionMode:" in status, "system/status lost permissionMode (#383)"
     boundary = _schema_window(cli_blob, "compact_boundary")
     trigger = _require(
-        _zod_enum(boundary, rb"trigger:\w{1,4}\(\[([^\]]*)\]\)"),
+        _zod_enum(boundary, rb"trigger:[\w$]{1,4}\(\[([^\]]*)\]\)"),
         "compact_metadata.trigger",
     )
     assert set(trigger) == {"manual", "auto"}, (
@@ -884,7 +955,7 @@ def test_context_window_literals_present(cli_blob: mmap.mmap) -> None:
                 f"the #819 context maths (last green on CLI {PROBED_CLI_VERSION})"
             )
     if not re.search(
-        rb"costUSD:\w{1,4}\(\),contextWindow:\w{1,4}\(\)\.int\(\)", cli_blob
+        rb"costUSD:[\w$]{1,4}\(\),contextWindow:[\w$]{1,4}\(\)\.int\(\)", cli_blob
     ):
         pytest.fail(
             "result.modelUsage no longer declares an int contextWindow — the "
@@ -912,9 +983,9 @@ def test_compact_heartbeat_interval_present(cli_blob: mmap.mmap) -> None:
     compaction runs — the #819 liveness latch is sized from it (four missed
     heartbeats)."""
     m = re.search(
-        rb"(\w{1,4})=(\d+);function \w{1,4}\(\w\)\{let \w=setInterval\("
-        rb"\w{1,4},\1,\w\);return\(\)=>clearInterval\(\w\)\}"
-        rb'function \w{1,4}\(\w\)\{[^}]{0,80}type:"sdk_status",status:"compacting"',
+        rb"([\w$]{1,4})=(\d+);function [\w$]{1,4}\([\w$]\)\{let [\w$]=setInterval\("
+        rb"[\w$]{1,4},\1,[\w$]\);return\(\)=>clearInterval\([\w$]\)\}"
+        rb'function [\w$]{1,4}\([\w$]\)\{[^}]{0,80}type:"sdk_status",status:"compacting"',
         cli_blob,
     )
     if m is None:
@@ -1123,9 +1194,9 @@ def test_743_effort_choices_match_untether_levels() -> None:
 # The headless builder's templates: `<cap sentence> Switch to another model${K}
 # to continue.` — the cap sentence is a literal or a `${g}` / `${h}` placeholder.
 _922_HEADLESS_TEMPLATE_RE = re.compile(
-    rb"`([^`]{0,90}?) Switch to another model\$\{\w{1,4}\} to continue\.`"
+    rb"`([^`]{0,90}?) Switch to another model\$\{[\w$]{1,4}\} to continue\.`"
 )
-_922_PLACEHOLDER_RE = re.compile(r"\$\{\w{1,4}\}")
+_922_PLACEHOLDER_RE = re.compile(r"\$\{[\w$]{1,4}\}")
 # What the builder's `${g}` / `${h}` expand to (each literal is asserted present).
 _922_CAP_SENTENCES = (
     "You've reached your Fable limit.",
@@ -1194,12 +1265,12 @@ def test_922_result_schema_carries_api_error_fields(cli_blob: mmap.mmap) -> None
         assert cli_blob.find(key) != -1, f"{key!r} missing from the installed CLI"
     if (
         re.search(
-            rb"api_error_status:\w{1,4}\(\)\.int\(\)\.nullable\(\)\.optional\(\),"
+            rb"api_error_status:[\w$]{1,4}\(\)\.int\(\)\.nullable\(\)\.optional\(\),"
             rb"api_error_code:",
             cli_blob,
         )
         is None
-        or re.search(rb"\{api_error:\w{1,4}\.api_error\}", cli_blob) is None
+        or re.search(rb"\{api_error:[\w$]{1,4}\.api_error\}", cli_blob) is None
     ):
         pytest.skip(
             "result api_error_* schema / spread shape moved; re-derive the probe "
@@ -1214,7 +1285,7 @@ def test_922_api_error_enum_keeps_credit_kinds(cli_blob: mmap.mmap) -> None:
     )
 
     declared = _require(
-        _zod_enum(cli_blob, rb"api_error:\w{1,4}\(\[([^\]]*)\]\)"), "api_error"
+        _zod_enum(cli_blob, rb"api_error:[\w$]{1,4}\(\[([^\]]*)\]\)"), "api_error"
     )
     missing = (_ACTION_REQUIRED_API_ERRORS | _NOT_ACTION_API_ERRORS) - set(declared)
     assert not missing, (

@@ -141,8 +141,32 @@ class TransportRuntime:
             entry.engine for entry in self._router.entries if entry.status == status
         )
 
-    def missing_engine_ids(self) -> tuple[EngineId, ...]:
-        return self.engine_ids_with_status("missing_cli")
+    def engine_availability_notes(self) -> tuple[str, ...]:
+        """``not installed: …`` / ``misconfigured: …`` / ``failed to load: …``.
+
+        The one wording for engines Untether knows but can't run cleanly,
+        shared by the startup message and every command that lists engines
+        (#1165)."""
+        notes: list[str] = []
+        for status, label in (
+            ("missing_cli", "not installed"),
+            ("bad_config", "misconfigured"),
+            ("load_error", "failed to load"),
+        ):
+            engines = self.engine_ids_with_status(status)
+            if engines:
+                notes.append(f"{label}: {', '.join(engines)}")
+        return tuple(notes)
+
+    def available_engines_text(self, *, code: bool = False) -> str:
+        """The engines that can run, then any availability notes:
+        ``codex, pi (not installed: amp, claude)`` (#1165). ``code`` wraps the
+        engine list (not the notes) in backticks."""
+        engines = ", ".join(self.available_engine_ids()) or "none"
+        if code:
+            engines = f"`{engines}`"
+        notes = self.engine_availability_notes()
+        return f"{engines} ({'; '.join(notes)})" if notes else engines
 
     def project_aliases(self) -> tuple[str, ...]:
         return tuple(project.alias for project in self._projects.projects.values())
