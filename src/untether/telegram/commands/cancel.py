@@ -12,7 +12,7 @@ from ...runner_bridge import (
 )
 from ...scheduler import ThreadJob, ThreadScheduler
 from ...transport import MessageRef, message_kind
-from .. import first_start
+from .. import arrival_order, first_start
 from ..topics import _norm_thread, thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
@@ -61,14 +61,22 @@ def _drop_first_start_waiters(chat_id: int, task: RunningTask) -> int:
     """#1157: cancelling a run that hasn't reported its session yet also
     drops the messages waiting on it (they have no queued card to cancel
     from); each is told so. A run that has its session leaves its queued
-    follow-ups to run, as before."""
-    if task.resume is not None:
-        return 0
+    follow-ups to run, as before.
+
+    #1164: either way, messages in its thread still in line behind an
+    earlier one (no queued card yet either) are dropped too."""
     own = _norm_thread(task.thread_id)
-    return first_start.drop_waiting(
-        chat_id,
-        thread_filter=lambda thread_id: _norm_thread(thread_id) == own,
-        command="cancel",
+
+    def same_thread(thread_id: int | None) -> bool:
+        return _norm_thread(thread_id) == own
+
+    dropped = arrival_order.drop_waiting(
+        chat_id, thread_filter=same_thread, command="cancel"
+    )
+    if task.resume is not None:
+        return dropped
+    return dropped + first_start.drop_waiting(
+        chat_id, thread_filter=same_thread, command="cancel"
     )
 
 

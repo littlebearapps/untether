@@ -18,16 +18,30 @@ message or another topic is never held.
 A prompt keeps its turn while it waits on a first start (``first_start``):
 the ones behind it would wait on the same start, and keeping the turn wakes
 them in arrival order.
+
+A prompt still in line has no ``queued`` card and isn't waiting on a first
+start, so ``/cancel`` and ``/new`` reach it here (:func:`drop_waiting`): every
+prompt that hasn't started its turn yet is dropped and told so when its turn
+comes, like the #807 barrier's and ``first_start``'s dropped messages. One
+that has started (sending its ``queued`` card, say) carries on as before.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ..logging import get_logger
+
+if TYPE_CHECKING:
+    from .topics import ThreadFilter
+
+logger = get_logger(__name__)
+
+# ``(chat_id, thread_id, owner)``: ``drop_waiting`` matches the first two.
 type Scope = tuple[Any, ...]
 
 
@@ -35,7 +49,9 @@ type Scope = tuple[Any, ...]
 class Ticket:
     scope: Scope
     turn: anyio.Event = field(default_factory=anyio.Event)
+    started: bool = False
     finished: bool = False
+    dropped_by: str | None = None
 
 
 _LINES: dict[Scope, deque[Ticket]] = {}
@@ -51,11 +67,15 @@ def take(scope: Scope) -> Ticket:
     return ticket
 
 
-async def wait_turn(ticket: Ticket | None) -> None:
+async def wait_turn(ticket: Ticket | None) -> str | None:
     """Wait until every prompt that arrived earlier in the scope is done
-    (no-op for an unordered prompt)."""
-    if ticket is not None:
-        await ticket.turn.wait()
+    (no-op for an unordered prompt). Returns the command (``"cancel"`` /
+    ``"new"``) that dropped the prompt while it was in line, else None."""
+    if ticket is None:
+        return None
+    await ticket.turn.wait()
+    ticket.started = True
+    return ticket.dropped_by
 
 
 def done(ticket: Ticket | None) -> None:
@@ -75,3 +95,29 @@ def done(ticket: Ticket | None) -> None:
         del _LINES[ticket.scope]
     elif head:
         line[0].turn.set()
+
+
+def drop_waiting(
+    chat_id: int, *, thread_filter: ThreadFilter | None, command: str
+) -> int:
+    """Drop the prompts in this chat's (or thread's) lines that haven't
+    started their turn yet; each replies when its turn comes and never runs.
+    Returns how many were dropped."""
+    dropped = 0
+    for scope, line in _LINES.items():
+        if scope[0] != chat_id:
+            continue
+        if thread_filter is not None and not thread_filter(scope[1]):
+            continue
+        for ticket in line:
+            if not ticket.started and ticket.dropped_by is None:
+                ticket.dropped_by = command
+                dropped += 1
+    if dropped:
+        logger.info(
+            "prompt.dropped_in_line",
+            chat_id=chat_id,
+            command=command,
+            dropped=dropped,
+        )
+    return dropped
