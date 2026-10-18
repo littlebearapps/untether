@@ -76,8 +76,10 @@ When you tap a setting button:
 Some settings have more than two states and use a different layout:
 
 - **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
+- **Permission mode** (Antigravity CLI) — `[Workspace] [Full access]` on the first row, `[Ask me] [Plan first]` on the second (Ask me reads `🔒 Ask me — set up` until Untether's agy plugin is installed), then `[🔐 Telegram approvals]` and `[Clear override] [← Back]`
 - **Approval mode** (Gemini, deprecated) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
+- **Effort** (Antigravity CLI) — low / medium / high, narrowed to the levels the chat's model accepts (none for a fixed-effort model)
 - **Reasoning** (Codex) — low / medium / high / xhigh
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
@@ -97,6 +99,9 @@ Settings are engine-specific and only appear when relevant:
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.
+
+<!-- TODO: capture screenshot: antigravity-telegram-approvals-page — /config → 🔐 Telegram approvals (Antigravity) page with the plugin installed: "Plugin: …", "Approval and question wait: 900 s", "This chat's project: ready (agy lists the hooks)", the three untether agy-gate host commands and the 🔄 Re-check / ← Back buttons -->
+<!-- <img src="../assets/screenshots/antigravity-telegram-approvals-page.jpg" alt="Telegram approvals page for Antigravity showing the agy plugin installed and ready for the chat's project" width="360" loading="lazy" /> -->
 
 !!! warning "Antigravity: after switching between Workspace / Plan first and Ask me / Full access, send `/new`"
     agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you pick **Full access** or **Ask me**, even though the footer says `full access`; the new mode applies from the next new conversation. Switching back needs `/new` too: a conversation that began in Full access or Ask me keeps its shell, which Workspace and Plan first then block. Moving between Workspace and Plan first, or between Ask me and Full access, needs no `/new`.
@@ -133,7 +138,9 @@ Diff preview has three states. **default** (not set) shows the diff on the appro
 
 With no Diff preview setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
 
-Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
+In an Antigravity chat, Diff preview only changes [Ask me](interactive-approval.md#antigravity-ask-me)'s approval cards, so the home line reads `only in Ask me` while the chat is in Workspace, Plan first or Full access, whatever the setting. In Ask me it reads `edits ask first` (on), `buttons only` (off) or `diffs on cards` (default) ([#1167](https://github.com/littlebearapps/untether/issues/1167)).
+
+Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is the deprecated Gemini CLI.
 
 ### Triggers page {#triggers-page}
 

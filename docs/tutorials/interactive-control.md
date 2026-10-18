@@ -2,10 +2,10 @@
 
 This tutorial walks you through Untether's interactive permission system — approving, denying, and shaping agent actions from [Telegram](https://telegram.org) on whatever device is in your hand. Stay in control while you're away from the terminal.
 
-**What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, and how to answer agent questions from anywhere.
+**What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, how to answer agent questions from anywhere, and how the same works with Antigravity CLI.
 
 !!! note "Claude Code and Antigravity CLI"
-    This tutorial uses Claude Code, which has the full set of buttons (Approve / Deny / Pause & Outline Plan). Antigravity CLI has its own [permission modes](../how-to/interactive-approval.md#antigravity-cli-permission-mode): **Plan first** posts a plan with Approve Plan / Deny / Let's discuss, and **Ask me** sends Approve / Deny cards before shell commands and other risky tools (it needs Untether's agy plugin on the host); see [Use Antigravity CLI](../how-to/antigravity.md). Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox), and the deprecated Gemini CLI has an [approval mode](../how-to/interactive-approval.md#gemini-cli-approval-mode); neither has per-tool buttons, and OpenCode and Pi run non-interactively.
+    This tutorial uses Claude Code, which has the full set of buttons (Approve / Deny / Pause & Outline Plan). Antigravity CLI has its own [permission modes](../how-to/interactive-approval.md#antigravity-cli-permission-mode): **Plan first** posts a plan with Approve Plan / Deny / Let's discuss, and **Ask me** sends Approve / Deny cards before shell commands and other risky tools (it needs Untether's agy plugin on the host); step 11 tries both, and [Use Antigravity CLI](../how-to/antigravity.md) has the details. Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox), and the deprecated Gemini CLI has an [approval mode](../how-to/interactive-approval.md#gemini-cli-approval-mode); neither has per-tool buttons, and OpenCode and Pi run non-interactively.
 
 ## 1. Understand permission modes
 
@@ -185,7 +185,7 @@ Untether routes your reply back to Claude Code, which reads it and continues.
 There's no Deny button on a question with options: if none of them fit, pick **Other (type reply)** and say so.
 
 !!! tip "Ask mode toggle"
-    Control whether Claude Code asks interactive questions via `/config` → **Ask mode**. When off, Claude Code proceeds with reasonable defaults instead of asking.
+    Control whether Claude Code asks interactive questions via `/config` → **Ask mode**. When off, Claude Code proceeds with reasonable defaults instead of asking. Antigravity CLI's questions get the same buttons when Untether's agy plugin is installed (step 11), and the same toggle turns them off per chat.
 
 ## 9. Switch to plan-auto mode
 
@@ -228,6 +228,44 @@ To check your current mode at any time:
 
 <img src="../assets/screenshots/planmode-show.jpg" alt="/planmode show output showing current mode" width="360" loading="lazy" />
 
+## 11. Try it with Antigravity CLI
+
+Antigravity CLI has its own buttons, picked per chat in `/config` → **Permission mode**. Switch the chat to Antigravity first:
+
+```
+/agent set antigravity
+```
+
+**Plan first.** Send `/planmode on` (or pick Plan first in `/config`), then ask for a change as usual. Antigravity reads the project, writes a plan and stops without changing anything. The answer shows the plan, followed by a card:
+
+<div class="tg-buttons">
+<span class="tg-btn">✅ Approve Plan</span>
+<span class="tg-btn">❌ Deny</span>
+<span class="tg-btn">💬 Let's discuss</span>
+</div>
+
+<!-- TODO: capture screenshot: antigravity-plan-first-card — the end of an Antigravity Plan first answer (`📋 Plan — implementation_plan.md` and plan text) followed by the card with ✅ Approve Plan / ❌ Deny / 💬 Let's discuss (same capture as in interactive-approval.md) -->
+<!-- <img src="../assets/screenshots/antigravity-plan-first-card.jpg" alt="Antigravity Plan first answer with the Approve Plan, Deny and Let's discuss card" width="360" loading="lazy" /> -->
+
+- **Approve Plan** carries the plan out in the same conversation, in Workspace mode (file edits in the project, no shell). The chat stays in Plan first, so your next request is planned again; `/planmode off` goes back to Workspace
+- **Deny** runs nothing; **Let's discuss** runs nothing either — reply with what to change and Antigravity posts a new plan and card
+
+**Ask me.** For Approve / Deny buttons on individual tools, add Untether's agy plugin on the host first:
+
+```sh
+untether agy-gate install
+```
+
+Then pick **Ask me** in `/config` → Permission mode (until the plugin is installed, the button reads `🔒 Ask me — set up`) and send `/new`. Antigravity reads and edits files in the project on its own, and sends a card with the command or a diff before shell commands, web and MCP tools, subagents, and files outside the project. For a shell command, **✅ Always allow this command here** lets that exact command run without asking for the rest of the conversation.
+
+<!-- TODO: capture screenshot: antigravity-ask-me-card — an Ask me approval card for `$ git status` with Approve / Deny / Always allow this command here (same capture as in antigravity.md) -->
+<!-- <img src="../assets/screenshots/antigravity-ask-me-card.jpg" alt="Antigravity Ask me approval card for a shell command" width="360" loading="lazy" /> -->
+
+!!! warning "Send `/new` after switching between Workspace / Plan first and Ask me / Full access"
+    agy keeps a conversation on the tools it started with, so the new mode applies from the next new conversation. The `/config` toast reminds you.
+
+The full guide is [Use Antigravity CLI](../how-to/antigravity.md#permission-modes).
+
 ## What just happened
 
 Key concepts:
@@ -241,6 +279,7 @@ Key concepts:
 - **AskUserQuestion** lets you answer Claude Code's questions with option buttons or a text reply
 - **Push notifications** ensure you don't miss approval requests, even from another app
 - **Ephemeral cleanup** automatically removes button messages when the run finishes
+- **Antigravity CLI** has Plan first (a plan card with Approve Plan / Deny / Let's discuss) and, with Untether's agy plugin, Ask me approval cards and question buttons
 
 ## Troubleshooting
 

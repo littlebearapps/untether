@@ -132,7 +132,7 @@ Required:
 Optional:
 
 * `title: str`
-* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude Code also populates `meta.permissionMode` (plus `cwd`, `tools`, `mcp_servers` and similar `system/init` fields), and `meta.effort` when a reasoning level is set. The bridge MAY add `meta.trigger` (cron/webhook provenance) and `meta.complete` (the `✓ turn complete` marker). `model`, `effort`, `permissionMode`, `trigger` and `complete` feed the `🏷` footer line on final messages.
+* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude Code also populates `meta.permissionMode` (plus `cwd`, `tools`, `mcp_servers` and similar `system/init` fields), and `meta.effort` when a reasoning level is set. Antigravity populates `meta.permissionMode` (`workspace`, `plan first`, `ask me` or `full access`) and `meta.effort`; Codex sets `meta.permissionMode` only in safe mode, and the deprecated Gemini runner sets its approval tier. The bridge MAY add `meta.trigger` (cron/webhook provenance) and `meta.complete` (the `✓ turn complete` marker). `model`, `effort`, `permissionMode`, `trigger` and `complete` feed the `🏷` footer line on final messages.
 
 #### 4.3.2 `action`
 
@@ -555,7 +555,7 @@ The bridge SHOULD deliver only entries that entered or changed in the outbox dur
 
 ### v0.36.1 (unreleased)
 
-- Add `antigravity` (Antigravity CLI) to the EngineIds (§2) with its `agy --conversation <id>` resume line (§3.1); steering works on Antigravity with Untether's agy plugin (§6.2).
+- Add `antigravity` (Antigravity CLI) to the EngineIds (§2) with its `agy --conversation <id>` resume line (§3.1); steering works on Antigravity with Untether's agy plugin (§6.2); Antigravity's `started` carries `meta.permissionMode` and `meta.effort` (§4.3.1).
 - A job for a saved-session scope whose first run hasn't reported its token yet waits for that token instead of starting a parallel thread; cancelling the starting run drops the waiting jobs (§6.2, [#1157](https://github.com/littlebearapps/untether/issues/1157)).
 
 ### v0.36.0 (2026-10-08)

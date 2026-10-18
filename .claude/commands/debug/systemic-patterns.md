@@ -49,7 +49,7 @@ For each pattern:
 ### 7. Cron/webhook run denied an approval (`permission.unattended_deny`)
 - **Sig**: `permission.unattended_deny` / a `🔒 unattended (cron:<id>) · denied <Tool> ×N` row on a run with `trigger=cron:<id>` or `webhook:<id>`; a `plan` or prompting-mode cron ends with a plan or a report instead of acting
 - **Class**: control-channel
-- **Canonical**: #835 (0.35.5rc17, shipping in v0.36.0) — unattended runs deny at once instead of waiting on a button nobody can tap. Before #835 the same runs sat waiting (long `peak_idle` + repeat `stall_warning`, #526; MEMORY.md `feedback_cron_plan_mode_stalls`)
+- **Canonical**: #835 (0.35.5rc17, shipped in v0.36.0) — unattended runs deny at once instead of waiting on a button nobody can tap. Before #835 the same runs sat waiting (long `peak_idle` + repeat `stall_warning`, #526; MEMORY.md `feedback_cron_plan_mode_stalls`)
 - **Posture**: **by-design** — the fix is config, not code: give the cron an explicit autonomous `permission_mode` (`plan-auto`, `auto`, `dontAsk`). A cron/webhook run that is still *waiting* on an approval is a `bug` (an #835 regression).
 
 ### 8. CLI-style Telegram summary brevity drift
@@ -109,7 +109,7 @@ For each pattern:
 ### 17. `_clear_background_handle` racing watchdog read (#374, #333, #507 redux)
 - **Sig**: background-handle scalar wiped before watchdog reads it; "dead wakeup" symptom
 - **Class**: stall-liveness-watchdog
-- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux`; fixed by #374 (handle cleared on terminal signal) and #573 (lifecycle v2), both closed in the 0.35.5rc line (ships as v0.36.0)
+- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux`; fixed by #374 (handle cleared on terminal signal) and #573 (lifecycle v2), both closed in the 0.35.5rc line (shipped as v0.36.0)
 - **Posture**: regression-watch — was a known defect in the v0.35.3 line.
 
 ### 18. Integration-test attestation gate bypass
@@ -133,7 +133,7 @@ For each pattern:
 ### 21. Claude's own schedule refused (`loop.cli_job_denied`)
 - **Sig**: `loop.cli_job_denied loop_mode=off`; Claude says it can't schedule a recurring/timed task and points at Loop mode or `/at`; a self-paced wake chain closes with reason `wake_cap`; `ℹ️ Claude's scheduling is off in this session`
 - **Class**: control-channel
-- **Canonical**: #925 / #926 (0.35.5rc20, shipping in v0.36.0, `### breaking`) — Untether owns `CronCreate`/`CronDelete` via `PreToolUse` hooks; `.claude/rules/control-channel.md` §Scheduling hooks
+- **Canonical**: #925 / #926 (0.35.5rc20, shipped in v0.36.0, `### breaking`) — Untether owns `CronCreate`/`CronDelete` via `PreToolUse` hooks; `.claude/rules/control-channel.md` §Scheduling hooks
 - **Posture**: **by-design** with Loop mode off or past `[loop] max_iterations`. `loop_mode=on` that still denies without registering a loop, or a CronCreate hook left unanswered (tool blocks ~30 s), is a `bug`. Kill switch: `[loop] own_schedule = false`.
 
 ### 22. Prompting-mode approval prompts (`acceptEdits` / `default` / `manual`)
@@ -149,9 +149,9 @@ For each pattern:
 - **Posture**: regression-watch. Shared root to look for: any "was it sent?" flag set only after the awaited send returns — the outbox still delivers an op whose waiter was cancelled. Known gaps (rc2): when the bound fires, the rest of `_on_run_completed` (outbox files, budget stop) is skipped, and a timeout mid split-final can leave later chunks unsent.
 
 ### 24. Non-Claude session cleared (or kept) after a failed resume (#952)
-- **Sig**: `session.auto_cleared engine=codex|opencode|pi` after a bad model / missing key / rate limit, and the next message starts a new session; or the inverse — a resume that keeps failing with "session not found" while `session.auto_clear_skipped reason=not_resume_failure` repeats
+- **Sig**: `session.auto_cleared engine=codex|opencode|pi|antigravity` after a bad model / missing key / rate limit, and the next message starts a new session; or the inverse — a resume that keeps failing with "session not found" while `session.auto_clear_skipped reason=not_resume_failure` repeats
 - **Class**: session-resume-lock
-- **Canonical**: #952 (0.36.0rc2) — the `num_turns == 0` gate (#45) is **Claude/AMP-only** (`_TURN_COUNT_ENGINES`); Codex/OpenCode/Pi never report turns and clear only when the error matches `_RESUME_FAILURE_RE`. A cleared session adds `ℹ️ The saved session couldn't be resumed, so it was cleared` to the error card. Pre-spawn blocks (`session.auto_clear_skipped reason=prespawn_blocked`, #838) never clear
+- **Canonical**: #952 (0.36.0rc2) — the `num_turns == 0` gate (#45) is **Claude/AMP-only** (`_TURN_COUNT_ENGINES`); Codex/OpenCode/Pi never report turns (Antigravity's `num_turns` is a conversation total Untether doesn't pass on) and clear only when the error matches `_RESUME_FAILURE_RE`. A cleared session adds `ℹ️ The saved session couldn't be resumed, so it was cleared` to the error card. Pre-spawn blocks (`session.auto_clear_skipped reason=prespawn_blocked`, #838) never clear
 - **Posture**: `auto_clear_skipped reason=not_resume_failure` on a non-resume error is **by-design**. A non-resume error that clears, or a genuine "not found" that never clears (the engine's wording missing from `_RESUME_FAILURE_RE` — check after a CLI upgrade), is a `bug`.
 
 ### 25. Permanent child processes forcing the 15-min stall threshold (#953)
@@ -171,6 +171,18 @@ For each pattern:
 - **Class**: telegram-transport (progress)
 - **Canonical**: #948 (0.36.0rc2) — a debounced repaint could be enqueued after the `cancelled` edit and coalesce over it; `ProgressEdits.stop_repaints()` now orders every final edit after any in-flight repaint
 - **Posture**: regression-watch — a new final/cancel path that sets `_finalizing` directly instead of awaiting `stop_repaints()` reintroduces it.
+
+### 28. Antigravity run refused before spawning (`prespawn_blocked=…`)
+- **Sig**: a plain reply and no agy process; `session.summary.no_events prespawn_blocked=no_project|invalid_argument|gate_missing|gate_not_ready|gate_self_protect|gate_foreign_config|unsupported_version|config_changed|config_unchecked|agy_always_proceed|tool_permission_unknown|continue_unresolved|compact_no_conversation`; `antigravity.permission_mode.gate_refused`, `antigravity.version.unsupported`, `antigravity.workspace_config_changed`
+- **Class**: runner-subprocess (antigravity only)
+- **Canonical**: #558 / #980 / #1044 — every refusal keeps the chat's saved session; the full table is `docs/reference/runners/antigravity/untether-events.md` → "Refused before agy starts"
+- **Posture**: **by-design** — the fix is on the host or in the chat (bind a project, `untether agy-gate install`, `agy update`, review the changed agy config, set `toolPermission` back to `request-review`). A refusal whose stated cause is false is a `bug`.
+
+### 29. Antigravity tool blocked, or no shell after a mode switch
+- **Sig**: `⚠️ Blocked: shell command (RunCommand) — …` rows and a closing paragraph; `antigravity.denied_actions`; the Workspace agent replying that it needs Full access; Full access chosen but the model still has no shell
+- **Class**: runner-subprocess (antigravity only)
+- **Canonical**: #1037 / #1060 — Workspace and Plan first run the no-shell agent; agy blocks what its policy denies and ends the turn at the first block; a conversation keeps the agent it started with (agy ignores `--agent` on resume), so switching to or from Full access / Ask me needs `/new`
+- **Posture**: **by-design**. A block in Full access (agy's own `permissions.deny`), or a shell block on a resumed Workspace run that never had the default agent, is worth a look.
 
 ## How to use this list
 

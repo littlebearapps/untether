@@ -36,7 +36,7 @@ You need:
   the host with `untether agy-gate install` once agy is signed in; see
   [Telegram questions and steer](#telegram-questions-and-steer).
 
-Install agy:
+### Install agy
 
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash
@@ -45,7 +45,10 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 The installer puts `agy` in `~/.local/bin`. Untether looks for `agy` on the `PATH` it runs with, then at
 `~/.local/bin/agy`, so a systemd or launchd service whose `PATH` leaves that folder out still finds it. For an agy
 installed anywhere else, set `[antigravity] cmd` to its path (see [Configuration](#configuration)). The startup
-message's "installed engines" line shows whether it was found.
+message's "installed engines" line shows whether it was found; if it lists `antigravity` under `not installed`, see
+[Antigravity shows as not installed](troubleshooting.md#antigravity-shows-as-not-installed).
+
+### Sign in
 
 !!! warning "Google's terms and Google account sign-ins"
     Google's [Antigravity terms](https://antigravity.google/terms) don't allow third-party tools to use a Google
@@ -64,7 +67,9 @@ Pick one sign-in route:
 | **Gemini Enterprise / Google Cloud** (recommended) | `AGY_ADC_AUTH=true`, `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_CLOUD_LOCATION` in Untether's environment, with Application Default Credentials on the host |
 | **Google account** | Run `agy` once in a terminal on the host and finish the sign-in. Chats on this route get a one-time notice about Google's terms on their first Antigravity answer |
 
-The steps for each route are in [Switch engines](switch-engines.md#antigravity-cli), and the detail (keyrings,
+"Untether's environment" means the service's, not your shell's: on a systemd install put the variables in
+`~/.untether/.env` (see [Systemd service](operations.md#systemd-service-linux)). The steps for each route are in
+[Switch engines](switch-engines.md#antigravity-cli), and the detail (keyrings,
 environment allowlist, proxies) is in the
 [runner reference](../reference/runners/antigravity/runner.md#sign-in-routes).
 
@@ -130,11 +135,10 @@ check for it and stop it yourself when you're done. Details:
 <!-- TODO: capture screenshot: antigravity-background-block — a Full access run's progress message with the `⏳ background (N)` block listing a 🐚 command and a 🤖 subagent row with elapsed times -->
 <!-- <img src="../assets/screenshots/antigravity-background-block.jpg" alt="Antigravity progress message with a background block listing a running command and a subagent" width="360" loading="lazy" /> -->
 
-**An answer held for background work.** agy sends its one answer only when its background work has finished (up to
-30 minutes), and nothing of it shows before then, so the block ends with `agy sends its answer when this work
-finishes (up to 30 min)`. If you `/cancel` during that wait, agy doesn't hand over the answer it was holding; the
-cancelled message says so. The conversation keeps it, though: send a message such as "repeat your last answer" to see
-it.
+**An answer held for background work.** Nothing of the held answer shows until the background work has finished, so
+the block ends with `agy sends its answer when this work finishes (up to 30 min)`. If you `/cancel` during that
+wait, agy doesn't hand over the answer it was holding; the cancelled message says so. The conversation keeps it,
+though: send a message such as "repeat your last answer" to see it.
 
 **After `/cancel`.** The output of a turn you cancelled can appear at the start of agy's next reply in the same
 conversation. That is how agy behaves (seen on agy 1.3.3), not something Untether adds; send `/new` if you want a
@@ -395,12 +399,12 @@ Sample output: [Cost budgets → Antigravity](cost-budgets.md#antigravity).
 
 Cron and webhook runs work with Antigravity, with these rules that differ from chat:
 
-- **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode`
-  (`"full"` or `"ask"`). A webhook run never gets Full access. A chat's (or `untether.toml`'s) Full access or Ask
-  me runs a scheduled run as Workspace. A cron with `permission_mode = "ask"` has nobody to tap Approve: reads
-  and in-project edits run, everything that would ask is denied at once, and the answer ends with a
-  `🔒 unattended … nobody to approve` footer. A scheduled run in **Plan first** (the chat's mode or the cron's own)
-  posts the plan and changes nothing, with a `🔒 unattended … denied plan approval` footer; set
+- **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode` (`"full"` or
+  `"ask"`). A webhook run never gets either: webhooks have no `permission_mode` of their own. A chat's (or
+  `untether.toml`'s) Full access or Ask me runs a scheduled run as Workspace. A cron with `permission_mode = "ask"`
+  has nobody to tap Approve: reads and in-project edits run, everything that would ask is denied at once, and the
+  answer ends with a `🔒 unattended … nobody to approve` footer. A scheduled run in **Plan first** (the chat's mode or
+  the cron's own) posts the plan and changes nothing, with a `🔒 unattended … denied plan approval` footer; set
   `permission_mode = "workspace"` on a cron that should make the change.
 - **They never show a question card.** Cron and webhook runs answer agy's questions themselves and carry on with
   reasonable defaults.
@@ -472,6 +476,7 @@ The full comparison with other engines is in the
 
 ## If something goes wrong
 
+- [Antigravity shows as not installed](troubleshooting.md#antigravity-shows-as-not-installed)
 - [Antigravity says it isn't signed in](troubleshooting.md#antigravity-says-it-isnt-signed-in)
 - [Antigravity says it can't run shell commands after I switched to Full access](troubleshooting.md#antigravity-says-it-cant-run-shell-commands-after-i-switched-to-full-access)
 - [Antigravity was blocked from using a shell command or a file outside the project](troubleshooting.md#antigravity-was-blocked-from-using-a-shell-command-or-a-file-outside-the-project)

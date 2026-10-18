@@ -4,6 +4,8 @@ paths:
   - "src/untether/runner.py"
   - "src/untether/runner_bridge.py"
   - "src/untether/schemas/**"
+  - "src/untether/antigravity/**"
+  - "src/untether/utils/antigravity_*.py"
   - "docs/reference/runners/**"
 ---
 
@@ -117,13 +119,14 @@ path only, or an error final gets delivered and then recovered (or held and neve
 A failed resumed run clears the chat's saved session only through `_resume_failure_clears_session()`: a reported
 `num_turns` decides (0 → clear); with none, only the turn-count engines in `_TURN_COUNT_ENGINES` (Claude, AMP) clear,
 and every other engine clears only when the error matches `_RESUME_FAILURE_RE` (the CLI's own "session not found"
-wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x) never clears.
+wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x, Antigravity's
+project/argv/gate refusals) never clears.
 Neither does a failed `/continue` (`resume_token.is_continue`, #1039): the token names no session. The clear itself
 compares session ids (#1052): `on_resume_failed` returns whether it removed anything, and the stores'
 `clear_engine_session(..., resume=token.value)` keeps a saved session that isn't the one that failed (a stale resume
 line), so the bridge shows no cleared notice (`reason=not_saved_session`).
-Never treat a missing `num_turns` as 0 again: Codex/OpenCode/Pi never report turns, so a bad model id or missing
-API key would wipe a healthy session.
+Never treat a missing `num_turns` as 0 again: Codex/OpenCode/Pi never report turns (Antigravity's is a conversation
+total, not passed on), so a bad model id or missing API key would wipe a healthy session.
 
 ## Stall threshold (#953)
 
@@ -213,10 +216,12 @@ Do not delete their tests while the engines still ship — they run against fake
 CLIs, cost nothing, and deleting ~100 tests would flatter the 80% coverage gate
 while reducing compatibility coverage.
 
+## Antigravity CLI (`agy`)
+
 Antigravity CLI ([#558](https://github.com/littlebearapps/untether/issues/558))
 is a **separate, supported engine** (`antigravity`, from v0.36.1), not a `gemini`
 rename — it must not reuse the `gemini` engine id, because its auth, flags, and
-session semantics differ. Two rules specific to it:
+session semantics differ. Rules specific to it:
 
 - `agy` parses a dash-leading token after a value-taking flag as another flag
   (`--model --version` prints the version). Build every user-influenced argv
@@ -224,13 +229,19 @@ session semantics differ. Two rules specific to it:
   `--flag=value`); never append a separate value token.
 - Text that came from `agy` (stderr, `result.error`, `AGY_ERROR`) is surfaced
   only through `utils/antigravity_redact.redact_agy_text()`.
+- `decide_antigravity_mode()` (`runners/antigravity.py`) is the only place that
+  grants `--dangerously-skip-permissions`; `build_args` only reads its decision.
+  Ask me gets it only once the agy gate is ready, and refuses otherwise (never a
+  silent downgrade).
 
-Reference: `docs/reference/runners/antigravity/`.
+Reference: `docs/reference/runners/antigravity/`; protocol notes in the
+`antigravity-cli` skill.
 
 ## After changes
 
 ```bash
 uv run pytest tests/test_*_runner.py tests/test_claude_control.py -x
+uv run pytest tests/test_antigravity_*.py -x   # Antigravity changes (runner, gate, argv, scan)
 ```
 
 If this change will be released, also run integration tests U1-U4, U6, U7 (all 5 supported engines) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps runner changes to required tests.

@@ -9,6 +9,9 @@ Steer works on **Claude Code** and **Antigravity**. Claude needs a live session,
 
 **Antigravity differences.** There is no live session: a steer only reaches a run that is still working. If agy has already started writing its final answer (no further step), the steer doesn't reach it and you get `⚠️ The session ended before this message ran — please send it again.` after the run.
 
+<!-- TODO: capture screenshot: antigravity-steer-received — an Antigravity chat with Follow-up set to steer: a message sent mid-run answered "↪️ Steered into the current run.", and the run's progress message showing the `↪️ steer received: …` row -->
+<!-- <img src="../assets/screenshots/antigravity-steer-received.jpg" alt="Antigravity run taking a steered message, with the steer received row in its progress message" width="360" loading="lazy" /> -->
+
 ## Steer one message
 
 Send `/steer` followed by your text while a run is working:

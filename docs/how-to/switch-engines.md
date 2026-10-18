@@ -103,6 +103,9 @@ one. Bind the chat with `/ctx set <project>` or use a chat that already routes t
 
 **4. Select it:** `/agent set antigravity`, or `/antigravity <prompt>` for one message.
 
+<!-- TODO: capture screenshot: antigravity-engine-switch — a chat where `/agent set antigravity` is answered "chat default engine set to antigravity", followed by the next message's `working · antigravity` progress message -->
+<!-- <img src="../assets/screenshots/antigravity-engine-switch.jpg" alt="Switching a chat to Antigravity with /agent set antigravity, then its first progress message" width="360" loading="lazy" /> -->
+
 **5. Pick a permission mode** in `/config` → **Permission mode**. The default, **Workspace**, lets Antigravity read,
 create and edit files in the project. It has no shell, web or MCP tools, so it can't run commands, and can't delete or
 rename files (a "rename" is a copy; the original stays). **Plan first** writes a plan for you to approve first,
@@ -124,7 +127,7 @@ Not available for Antigravity: live sessions (each message is its own agy run). 
 
 ## Feature differences
 
-Not all features are available on every engine. See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md) for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
+Not all features are available on every engine. See the [engine compatibility matrix](../reference/runners/index.md) for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
 
 ## Related
 

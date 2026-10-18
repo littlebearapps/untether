@@ -167,7 +167,7 @@ Deployment-specific nouns (your project names, hostnames, third-party tools) are
 deliberately **not** in the default — add them yourself. Setting the key
 **replaces** the default rather than extending it, so include the engine names
 you care about in your own value (the default no longer lists Gemini, Amp or Pi,
-[#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
+[#789](https://github.com/littlebearapps/untether/issues/789), and doesn't list Antigravity or agy). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
 After transcription, Untether rewrites the known mishears of the name Claude, whatever the prompt ([#789](https://github.com/littlebearapps/untether/issues/789)): `Clawde` / `Clawd` / `Clode` → `Claude`; `Clawde|Clawd|Clawed|Corde|Clode|Clod` + `Code` → `Claude Code`; `Clawde|Clawd|Clawed|Claw|Corde|Clode|Clod` + `.md` → `CLAUDE.md` (whole words, case-insensitive; a bare "clawed" or "clod" is a real word and is kept). A rewrite logs INFO `voice.transcript.corrected` with the `corrections` count, never the text.
@@ -583,7 +583,8 @@ responses to Claude's PTY, editing feedback messages, etc.) happens
 independently — answering just clears the spinner.
 
 Callbacks are accepted only from allowed senders (`allowed_user_ids`, #377).
-A Claude approval callback (`claude_control:…`) is also bound to the chat whose
+An approval callback (`claude_control:…`, or the engine-neutral `ia:…` that
+Antigravity's Ask me cards and questions use, #960) is also bound to the chat whose
 message carries the button: the same callback data sent from another chat (a
 modified client can attach any callback data to any bot message it can see)
 reads as expired and answers nothing
@@ -591,15 +592,16 @@ reads as expired and answers nothing
 families already act only on the tapping chat.
 
 With `approval_originator_only = true` (opt-in, hot-reloads), `_dispatch_callback`
-also refuses a `claude_control:` or `aq:` tap from anyone but the run's
-originator, **before** the early answer reserves a claim: toast
+also refuses a `claude_control:`, `ia:`, `aq:` or `agy_plan:` (Antigravity plan
+card, #981) tap from anyone but the run's originator, **before** the early answer reserves a claim: toast
 `Only the person who started this run can answer this.`, WARNING
 `callback.not_originator` (`chat_id`, `request_id`, `sender_id`,
 `originator_id`). The originator comes from the triggering message: the loop
 notes `(chat_id, message_id) → sender_id` for every allowed message
 (`telegram/approval_originator.py`, bounded), `_run_engine` sets the run's
-sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the Claude
-runner records it per request in `_REQUEST_TO_ORIGINATOR`. Cron, webhook, `/at`
+sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the
+approval registry records it per request in `_REQUEST_TO_ORIGINATOR` (`interactive/registry.py`; an
+Antigravity plan card records its plan run's originator in `utils/antigravity_plan.py`). Cron, webhook, `/at`
 and loop fires start from a bot notice, so they have no originator and any
 allowed user may answer. A typed AskUserQuestion answer is gated the same way
 (`ask_user_question.not_originator`, reply instead of answering).

@@ -72,8 +72,8 @@ release). Key points:
   `<!-- Status … -->` comment, keep `### breaking` first (each with its
   **Migration:** line), then `fixes/changes/docs/tests`; every entry keeps its
   `[#N](…)` issue link and duplicate rc-era entries are merged.
-- If the line was renumbered mid-cycle (the 0.35.5rc1–rc20 line ships as v0.36.0,
-  #947), confirm the heading, `pyproject.toml`, the milestone and the attestation
+- If the line was renumbered mid-cycle (precedent: the 0.35.5rc1–rc20 line shipped as
+  v0.36.0, #947), confirm the heading, `pyproject.toml`, the milestone and the attestation
   marker all use the new version, and keep the one-line note naming the rc range it
   went through.
 - Run `python3 scripts/validate_release.py` until clean (section exists, ISO

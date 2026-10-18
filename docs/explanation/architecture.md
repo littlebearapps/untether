@@ -390,7 +390,7 @@ flowchart LR
     subgraph Config["~/.untether/"]
         toml[untether.toml]
         lock[untether.lock]
-        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history"]
+        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history,<br/>antigravity_seen_config / antigravity_notices"]
     end
 
     subgraph toml_contents["untether.toml"]
@@ -401,6 +401,7 @@ flowchart LR
         plugins_extra["[plugins.mycommand]<br/>setting = ..."]
         claude_cfg["[engines.claude]<br/>model = ...<br/>permission_mode = ..."]
         codex_cfg["[engines.codex]<br/>model = ..."]
+        agy_cfg["[engines.antigravity]<br/>model = ...<br/>permission_mode = workspace / ask / plan / full"]
         runtime_cfg["[progress] [watchdog] [footer]<br/>[cost_budget] [loop] [security]"]
         triggers_cfg["[triggers]<br/>[[triggers.crons]]<br/>[[triggers.webhooks]]"]
         projects_cfg["[projects.alias]<br/>path = ...<br/>worktrees_dir = ...<br/>default_engine = ..."]

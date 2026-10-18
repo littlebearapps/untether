@@ -81,7 +81,11 @@ bars, no keyboard, no notification tray.
 - [ ] `continue-command.jpg` — `/continue` picking up a CLI session from Telegram.
 - [ ] `config-cost-budget.jpg` — Cost & Usage sub-page with budget and auto-cancel toggles.
 
-## Tier 6: v0.36.1 Antigravity CLI (12 images)
+## Tier 6: v0.36.1 Antigravity CLI (17 images)
+
+This is the single list of Antigravity screenshots still to capture. Each one has a
+`<!-- TODO: capture screenshot: antigravity-… -->` placeholder in the page named after it; replace the
+placeholder with the `<img>` tag when the file lands ([#1178](https://github.com/littlebearapps/untether/issues/1178)).
 
 Capture these in an Antigravity chat bound to a test project, with Untether's agy plugin installed on the host
 unless the entry says otherwise. Crop out home-folder paths, conversation ids you don't want public, and any
@@ -98,7 +102,12 @@ account email in `/usage` or `/stats auth`.
 - [ ] `antigravity-agy-gate-status.jpg` — Terminal output of `untether agy-gate status --project <folder>` with the plugin installed and loaded (crop the home-folder path). (`how-to/antigravity.md`)
 - [ ] `antigravity-effort-limited.jpg` — `/config` → Effort in a chat whose model is set without an effort suffix, showing only the levels that model accepts. (`how-to/antigravity.md`)
 - [ ] `antigravity-usage-quota.jpg` — `/usage` showing the quota groups with bars and reset times, the `AI credits: … remaining` line, then the last session's tokens. (`how-to/antigravity.md`)
-- [ ] `antigravity-plan-first-card.jpg` — End of a Plan first answer (`📋 Plan — implementation_plan.md` and plan text) followed by the ✅ Approve Plan / ❌ Deny / 💬 Let's discuss card. (`how-to/interactive-approval.md`)
+- [ ] `antigravity-plan-first-card.jpg` — End of a Plan first answer (`📋 Plan — implementation_plan.md` and plan text) followed by the ✅ Approve Plan / ❌ Deny / 💬 Let's discuss card. (`how-to/interactive-approval.md`, `tutorials/interactive-control.md`)
+- [ ] `antigravity-telegram-approvals-page.jpg` — `/config` → 🔐 Telegram approvals with the plugin installed: Plugin, "Approval and question wait: 900 s", "This chat's project: ready (agy lists the hooks)", the three `untether agy-gate` commands and the 🔄 Re-check / ← Back buttons. (`how-to/inline-settings.md`)
+- [ ] `antigravity-ask-me-refused.jpg` — The plain reply in an Ask me chat on a host **without** the plugin: "Ask me needs Telegram approvals, which aren't set up on this host. Run untether agy-gate install on the host …", ending "Nothing was run. Workspace and Full access still work here." (`how-to/troubleshooting.md`)
+- [ ] `antigravity-steer-received.jpg` — Follow-up set to steer: a message sent mid-run answered "↪️ Steered into the current run.", and the progress message showing the `↪️ steer received: …` row. (`how-to/steer-follow-ups.md`)
+- [ ] `antigravity-engine-switch.jpg` — `/agent set antigravity` answered "chat default engine set to antigravity", then the next message's `working · antigravity` progress message. (`how-to/switch-engines.md`)
+- [ ] `antigravity-quota-footer.jpg` — The end of a final answer with Subscription usage on: the footer and the `⚡ Gemini Models 5h: 12% | wk: 3%` quota line. (`how-to/subscription-usage.md`)
 
 ## Reuse map
 
@@ -115,6 +124,8 @@ file to use; docs reference the same image via relative paths.
 | `verbose-progress.jpg` | how-to/verbose-progress | Docs use this name, not `verbose-vs-compact` |
 | `browse-directory.jpg` | how-to/browse-files (Tier 1 and Tier 3 share) | |
 | `usage-command.jpg` | how-to/cost-budgets (Tier 1 and Tier 3 share) | |
+| `antigravity-plan-first-card.jpg` | how-to/interactive-approval, tutorials/interactive-control | |
+| `antigravity-ask-me-card.jpg` | how-to/antigravity, tutorials/interactive-control | |
 
 ## Retired
 

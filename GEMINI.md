@@ -14,7 +14,7 @@ Website: https://untether.cc · Help centre (user docs, synced flat from `docs/`
 ## Architecture
 
 ```
-Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
+Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/antigravity/gemini/amp)
                                        |
                                   ProgressTracker
 ```
@@ -44,6 +44,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
+- runners/antigravity.py — Antigravity CLI (`agy`) runner; argv values only via utils/antigravity_argv.py (`--flag=value`), agy text only via utils/antigravity_redact.py
+- antigravity/ — Untether's agy plugin gate (Ask me approvals, questions, steer)
 - runners/gemini.py — Gemini CLI runner (deprecated, unsupported — xfail/skip on sweeps, don't fix)
 - runners/amp.py — AMP CLI runner (deprecated, unsupported — xfail/skip on sweeps, don't fix)
 - runner_bridge.py — Runner-to-transport bridge

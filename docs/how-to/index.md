@@ -26,8 +26,8 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 
 ## Interactive control
 
-- [Interactive approval](interactive-approval.md) (approve/deny tool calls from Telegram)
-- [Plan mode](plan-mode.md) (require a written plan before execution)
+- [Interactive approval](interactive-approval.md) (approve/deny tool calls from Telegram: Claude Code, and Antigravity in Ask me)
+- [Plan mode](plan-mode.md) (require a written plan before execution: Claude Code plan mode, Antigravity Plan first)
 - [Model and reasoning overrides](model-reasoning.md) (customise model and reasoning level)
 - [Verbose progress](verbose-progress.md) (control progress message detail)
 - [Inline settings menu](inline-settings.md) (`/config` — toggle settings with buttons)

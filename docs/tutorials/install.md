@@ -83,6 +83,14 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 Antigravity CLI (`agy`, 1.3.1 or newer) is Google's successor to Gemini CLI. Untether recommends signing it in with a **Gemini API key** or a **Gemini Enterprise** sign-in: Google's terms don't allow third-party tools to use a Google account sign-in, and Google may suspend the account. Setup steps and the full note are in [Switch engines → Antigravity CLI](../how-to/switch-engines.md#antigravity-cli); once it's installed, see [Use Antigravity CLI](../how-to/antigravity.md).
 
+For approval buttons (**Ask me**), question buttons and `/steer` in Antigravity chats, also add Untether's agy plugin once Untether is installed (step 2):
+
+```sh
+untether agy-gate install
+```
+
+It installs through agy's own `agy plugin install`, writes only `~/.gemini/config/plugins/untether-gate/`, and does nothing in your own `agy` sessions. Without it, Antigravity still runs in Workspace, Plan first and Full access. See [Telegram questions and steer](../how-to/antigravity.md#telegram-questions-and-steer).
+
 ### Gemini CLI ⚠️ deprecated
 
 !!! warning "Deprecated — don't install for new setups"
@@ -482,7 +490,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         scope = "auto"
         ```
 
-The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that.
+The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that. Antigravity CLI starts in **Workspace** mode (it edits files in the project, with no shell, web or MCP tools) until you pick another mode in `/config` → Permission mode; see [Use Antigravity CLI](../how-to/antigravity.md#permission-modes).
 
 This config file controls all of Untether's behaviour. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 

@@ -37,6 +37,11 @@ Prefix any message with `/<engine>`:
 !!! user "You"
     /pi explain how the event loop works in this codebase
 
+!!! user "You"
+    /antigravity summarise what changed in the last commit
+
+Antigravity CLI only runs where there is a project, because it edits files where it runs: bind the chat with `/ctx set <project>` or add a project directive (section 2).
+
 <img src="../assets/screenshots/multi-engine-switch.jpg" alt="Engine switching — /claude then /codex in the same chat" width="360" loading="lazy" />
 
 The engine only applies to that message. The response will have a resume line for that engine:
@@ -45,7 +50,7 @@ The engine only applies to that message. The response will have a resume line fo
     done · claude · 8s<br>
     `claude --resume abc123`
 
-When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`.
+When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`. Each engine has its own resume line: Codex shows `codex resume …` and Antigravity CLI shows `agy --conversation …`.
 
 ## 2. Engine + project + branch
 

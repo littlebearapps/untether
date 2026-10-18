@@ -8,7 +8,7 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 
 - [Install and onboard](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/install.md): Setup wizard walkthrough — create a bot, pick a workflow, generate config
 - [First run](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/first-run.md): Send your first task, watch progress stream, continue conversations
-- [Interactive control](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/interactive-control.md): Approve, deny and plan Claude Code actions with Telegram buttons
+- [Interactive control](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/interactive-control.md): Approve, deny and plan Claude Code actions with Telegram buttons (Antigravity CLI: Plan first and Ask me)
 - [Projects and branches](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/projects-and-branches.md): Register repos, target them from chat, run on feature branches
 - [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md): Switch between Claude Code, Codex, OpenCode, Pi and Antigravity CLI
 - [Conversation modes](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/conversation-modes.md): Assistant, workspace, and handoff modes
@@ -17,14 +17,14 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 
 - [Choose a mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/choose-a-mode.md): Assistant, workspace or handoff workflow
 - [Chat sessions](https://github.com/littlebearapps/untether/blob/master/docs/how-to/chat-sessions.md): Auto-resume and stateless session management
-- [Steer follow-ups](https://github.com/littlebearapps/untether/blob/master/docs/how-to/steer-follow-ups.md): Steer a message into a running Claude session, or queue it
+- [Steer follow-ups](https://github.com/littlebearapps/untether/blob/master/docs/how-to/steer-follow-ups.md): Steer a message into a running Claude Code or Antigravity CLI run, or queue it
 - [Cross-environment resume](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cross-environment-resume.md): Pick up terminal sessions from Telegram with /continue
 - [Voice notes](https://github.com/littlebearapps/untether/blob/master/docs/how-to/voice-notes.md): Dictate tasks with Whisper-compatible transcription
 - [File transfer](https://github.com/littlebearapps/untether/blob/master/docs/how-to/file-transfer.md): Upload files to repos, download results back
 - [Forum topics](https://github.com/littlebearapps/untether/blob/master/docs/how-to/topics.md): Map Telegram topics to projects and branches
 - [Projects](https://github.com/littlebearapps/untether/blob/master/docs/how-to/projects.md): Register and manage project aliases
 - [Worktrees](https://github.com/littlebearapps/untether/blob/master/docs/how-to/worktrees.md): Isolated git worktrees for parallel branch work
-- [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md): Approve, deny, and discuss tool calls from Telegram
+- [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md): Approve, deny, and discuss tool calls from Telegram (Claude Code; Antigravity CLI's Ask me and Plan first)
 - [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md): Permission modes (on / plan-auto / auto / off) and plan-outline approval
 - [Model and reasoning](https://github.com/littlebearapps/untether/blob/master/docs/how-to/model-reasoning.md): Per-chat model and effort overrides
 - [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md): Per-run and daily budget limits, warnings, and Stop at limit
@@ -35,7 +35,7 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 - [Schedule tasks](https://github.com/littlebearapps/untether/blob/master/docs/how-to/schedule-tasks.md): Telegram scheduling, cron triggers, and webhook triggers
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md): Automated runs from external events and schedules
 - [Switch engines](https://github.com/littlebearapps/untether/blob/master/docs/how-to/switch-engines.md): Change engines per chat, topic, or message
-- [Use Antigravity CLI](https://github.com/littlebearapps/untether/blob/master/docs/how-to/antigravity.md): Set up and use Google's Antigravity CLI (agy): sign-in routes, Workspace and Full access modes, effort, quota
+- [Use Antigravity CLI](https://github.com/littlebearapps/untether/blob/master/docs/how-to/antigravity.md): Set up and use Google's Antigravity CLI (agy): Google terms note and sign-in routes, permission modes (Workspace, Plan first, Ask me, Full access), the agy plugin for approvals, questions and steer, effort, quota and credits
 - [Route by chat](https://github.com/littlebearapps/untether/blob/master/docs/how-to/route-by-chat.md): Route messages to projects by chat or topic
 - [Verbose progress](https://github.com/littlebearapps/untether/blob/master/docs/how-to/verbose-progress.md): Tool detail display in progress messages
 - [Browse files](https://github.com/littlebearapps/untether/blob/master/docs/how-to/browse-files.md): /browse inline file navigation
@@ -66,6 +66,7 @@ Website: [untether.cc](https://untether.cc) · User guides: [help centre](https:
 
 ## Engine references
 
+- [Runners overview](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md): Engine compatibility matrix for the five supported engines and the deprecated Gemini CLI and Amp
 - [Claude Code runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/runner.md): Permission modes, plan mode, cost tracking, interactive approvals
 - [Claude stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/stream-json-cheatsheet.md): JSONL event shapes for Claude Code
 - [Claude event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/untether-events.md): Claude JSONL to Untether event translation

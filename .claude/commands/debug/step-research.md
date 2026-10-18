@@ -14,6 +14,7 @@ documented config gotcha.
 | `docs/reference/runners/codex/*.md` | Codex runner spec + JSONL + translation |
 | `docs/reference/runners/opencode/*.md` | OpenCode runner spec + JSONL + translation |
 | `docs/reference/runners/pi/*.md` | Pi runner spec + JSONL + translation |
+| `docs/reference/runners/antigravity/*.md` | Antigravity (`agy`) runner spec — argv, permission modes, agy-gate plugin, resume — + JSONL + translation |
 | `docs/reference/runners/gemini/*.md` | Gemini runner spec + JSONL + translation (deprecated, unsupported — no fixes) |
 | `docs/reference/runners/amp/*.md` | AMP runner spec + JSONL + translation (deprecated, unsupported — no fixes) |
 | `docs/reference/transports/telegram.md` | Telegram transport — Bot API client, outbox, voice, forum topics |
@@ -21,7 +22,7 @@ documented config gotcha.
 | `docs/reference/dev-instance.md` | Dev vs staging service quickref + staging workflow |
 | `docs/reference/integration-testing.md` | Per-tier integration test playbook |
 | `.claude/rules/*.md` | Project rule files (auto-load on edits to matching paths) |
-| `.claude/skills/*/SKILL.md` | Project skills — telegram-bot-api, jsonl-subprocess-runner, claude-stream-json, codex-opencode-pi, untether-architecture, release-coordination |
+| `.claude/skills/*/SKILL.md` | Project skills — telegram-bot-api, jsonl-subprocess-runner, claude-stream-json, codex-opencode-pi, antigravity-cli, untether-architecture, release-coordination |
 
 Read the relevant file before proposing any change. Untether docs are
 deliberately concrete — they contain code paths, event names, config keys.
@@ -55,6 +56,7 @@ issue tracker before proposing a fix in Untether code:
 | Codex CLI | `openai/codex` | `gh search issues "repo:openai/codex <error fragment>" --limit 10` |
 | OpenCode | `sst/opencode` | `gh search issues "repo:sst/opencode <error fragment>" --limit 10` |
 | Pi | `earendil-works/pi` (formerly `badlogic/pi-mono`; npm `@mariozechner/pi-coding-agent`) | `gh search issues "repo:earendil-works/pi <error fragment>" --limit 10` |
+| Antigravity CLI | `google-antigravity/antigravity-cli` | `gh search issues "repo:google-antigravity/antigravity-cli <error fragment>" --limit 10` |
 | Gemini CLI (deprecated) | `google-gemini/gemini-cli` | `gh search issues "repo:google-gemini/gemini-cli <error fragment>" --limit 10` |
 | AMP CLI (deprecated) | `sourcegraph/amp` | `gh search issues "repo:sourcegraph/amp <error fragment>" --limit 10` |
 

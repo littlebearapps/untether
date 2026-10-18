@@ -38,12 +38,27 @@ Include:
 - Configuration parsing and validation
 - Telegram transport security
 - Subprocess management and session handling
+- Untether's agy plugin for Antigravity CLI (`untether agy-gate install`), which approves or blocks agy's tool calls in **Ask me**, and the checks Untether runs before an Antigravity run
 
 **Out of scope:**
 - Upstream agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI) — report to their respective maintainers
 - Telegram Bot API — report to [Telegram](https://telegram.org/blog/bug-bounty)
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
+
+## Security improvements in v0.36.1
+
+v0.36.1 (published to TestPyPI as release candidates 0.36.1rcN) adds the Antigravity CLI engine with safe defaults and tightens group chats, triggers and error output. Upgrade notes: [Upgrading to v0.36.1](docs/how-to/update.md#upgrading-to-v0361).
+
+- **Antigravity runs are safe by default** ([#558](https://github.com/littlebearapps/untether/issues/558), [#980](https://github.com/littlebearapps/untether/issues/980)). A chat runs in **Workspace** (agy's accept-edits mode, no shell, web or MCP tools; not a sandbox) unless you pick otherwise, and cron and webhook runs never inherit Full access or Ask me from the chat. **Ask me** passes agy's `--dangerously-skip-permissions` only after checking, before every run, that Untether's agy plugin is installed, unedited and loaded for the project, and refuses the run otherwise. Model ids and conversation ids are validated and always joined to their flag, prompts go to agy on stdin, and sign-in URLs, tokens and paths in agy's output are redacted. Read the [Google terms note](docs/how-to/switch-engines.md#antigravity-cli) before using a Google account sign-in.
+- **Untrusted agy config is flagged** ([#1043](https://github.com/littlebearapps/untether/issues/1043), [#1044](https://github.com/littlebearapps/untether/issues/1044)). Untether warns when a project carries agy hooks, plugins, agents or MCP servers it doesn't manage, holds scheduled runs after that config changes until someone sends a message in the chat, and holds a scheduled Workspace run when agy's tool-permission setting can't be confirmed. This is a tripwire, not isolation.
+- **Changing settings in a group needs a group admin** ([#1042](https://github.com/littlebearapps/untether/issues/1042)). The `/config` menu, `/planmode` and `/verbose` now refuse a change from anyone who isn't a group admin or the creator, as the other settings commands already did.
+- **Webhook runs never inherit Claude's `bypassPermissions`** ([#1142](https://github.com/littlebearapps/untether/issues/1142)), and **`[triggers.server] exposed = true`** marks a webhook server behind a tunnel or reverse proxy as public, so `auth = "none"` webhooks are refused there ([#1119](https://github.com/littlebearapps/untether/issues/1119)). Trigger file paths use the full default deny list and failed webhook auth is rate-limited per sender ([#906](https://github.com/littlebearapps/untether/issues/906)); one bad trigger no longer switches off the rest, and webhook secrets stay out of logs ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+- **A model id or resume line can't add a command-line flag** ([#1034](https://github.com/littlebearapps/untether/issues/1034)). Values that start with a dash or contain control characters are refused before any engine starts; Pi resume lines can't write a session file outside Pi's sessions folder ([#1064](https://github.com/littlebearapps/untether/issues/1064)).
+- **Secrets in URLs stay out of Telegram** ([#1151](https://github.com/littlebearapps/untether/issues/1151), [#1161](https://github.com/littlebearapps/untether/issues/1161)). Engine error cards and model names shown in footers, `/model`, `/agent` and `/config` mask a URL's login details and query values.
+- **Claude's login is read only when you ask for usage** ([#1150](https://github.com/littlebearapps/untether/issues/1150)). A Claude run no longer reads your stored Claude Code login or calls Anthropic's usage endpoint after every answer; only `/usage` and the opt-in subscription-usage footer do.
+
+See the [CHANGELOG](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md) (v0.36.1 section) for the full entry list.
 
 ## Security improvements in v0.36.0
 

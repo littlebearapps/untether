@@ -39,7 +39,8 @@ Runner (Protocol)
       CodexRunner
       OpenCodeRunner (wraps run_impl: refuses OpenCode 2.x before spawning, #970)
       PiRunner
-      AntigravityRunner (prompt on stdin; refuses before spawn without a project or with an invalid argv value, #558)
+      AntigravityRunner (overrides run_impl: pre-spawn refusals — no project, invalid argv value, gate not ready,
+        unsupported agy, /continue lookup, /compact with no conversation — then the per-run gate socket; prompt on stdin, #558)
       GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
   (each concrete runner also mixes in ResumeTokenMixin)
@@ -204,6 +205,7 @@ Resume line formats per engine:
 - Codex: `` `codex resume <thread_id>` ``
 - OpenCode: `` `opencode --session <ses_XXX>` ``
 - Pi: `` `pi --session <token>` ``
+- Antigravity: `` `agy --conversation <id>` `` (passed to agy joined, `--conversation=<id>`)
 
 ## Engine backend registration
 

@@ -33,7 +33,7 @@ paths:
 - **Minor**: new features, new commands, new engines, config additions
 - **Major**: breaking changes to config, runner protocol, or public API
 - **Pre-1.0 (`0.x`)**: a line with any `### breaking` entry ships as the next **minor**, never a patch — anyone pinned
-  to `~=0.35` must not get breaking changes. That is why the 0.35.5rc1–rc20 line ships as **v0.36.0** (rcs continue as
+  to `~=0.35` must not get breaking changes. That is why the 0.35.5rc1–rc20 line shipped as **v0.36.0** (rcs continued as
   `0.36.0rcN`; [#947](https://github.com/littlebearapps/untether/issues/947)).
 
 ## MANDATORY integration testing before release

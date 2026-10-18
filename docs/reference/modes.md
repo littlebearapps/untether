@@ -96,7 +96,7 @@ enabled = false
 Since there is no auto-resume, you have three ways to continue a session:
 
 1. **Reply-to-continue:** reply to a previous bot message in Telegram. Untether extracts the resume token from that message.
-2. **`/continue`:** picks up the most recent CLI session using the engine's native continue flag.
+2. **`/continue`:** picks up the most recent CLI session using the engine's native continue flag. Antigravity CLI resumes the last conversation run from this exact project directory by id instead, and the deprecated AMP engine doesn't support it (see [commands](commands-and-directives.md)).
 3. **Copy to terminal:** copy the resume line from the bot message (e.g. `` `codex resume abc123` ``) and run it directly in a terminal.
 
 ## Changing modes
@@ -115,7 +115,7 @@ These work identically in all three modes:
 
 - All engine runners (Claude, Codex, OpenCode, Pi, Antigravity; plus the deprecated, unsupported Gemini and AMP)
 - All commands except `/topic` (workspace-only); `/ctx` binds the chat instead of a topic outside workspace mode
-- Permission control (approve/deny/discuss, plan mode) — Claude Code, and Antigravity CLI's Plan first and Ask me
+- Permission control (approve/deny/discuss, plan mode) — Claude Code, and Antigravity CLI's Plan first and Ask me (Ask me needs Untether's agy plugin on the host)
 - Question option buttons — Claude Code, and Antigravity CLI with Untether's agy plugin
 - Steer/queue follow-ups — Claude Code, and Antigravity CLI with Untether's agy plugin; live sessions are Claude Code only
 - `/continue` cross-environment resume
