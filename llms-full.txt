@@ -3954,6 +3954,8 @@ This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. 
 !!! note "Before v0.36.0"
     Safe used to pass `--ask-for-approval untrusted`. `codex exec` never applied that flag, so Safe ran exactly like Full auto, and codex-cli 0.149.0+ rejects it outright, so every Safe run failed at startup ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
+<a id="antigravity-cli-permission-mode"></a>
+
 ### Antigravity CLI — Permission mode
 
 Toggle via `/config` → **Permission mode**:
@@ -4073,6 +4075,8 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
     Workspace only limits agy's own tool calls. agy hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers run their own commands in every mode, and a run can write those files for the next run to execute. Untether shows a ⚠️ row when a project carries agy config it doesn't manage, and when a run changes it or another engine's files (such as `.claude/`, `.envrc` or `.github/workflows/`). After agy's config changes, or when Untether can't check it, cron and webhook runs in that project are held until someone sends a message in the chat. This is a warning system with [known limits](../reference/runners/antigravity/runner.md#agy-hooks-plugins-and-mcp-servers), not isolation. Only run Antigravity in projects you trust.
 
 Before you use a Google account sign-in with Antigravity, read the [terms note](switch-engines.md#antigravity-cli). For the rest of the engine (first run, effort, quota, scheduled runs), see [Use Antigravity CLI](antigravity.md).
+
+<a id="gemini-cli-approval-mode"></a>
 
 ### Gemini CLI — Approval mode
 
