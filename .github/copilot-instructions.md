@@ -25,6 +25,8 @@ Runners (`src/untether/runners/`) manage engine subprocesses, emit events via th
 
 All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
+Antigravity CLI (`agy`) is its own `antigravity` engine, never the deprecated `gemini` id. Every user-influenced agy argv value goes through `utils/antigravity_argv.agy_flag()` (joined `--flag=value`), text from agy reaches Telegram or logs only through `utils/antigravity_redact.redact_agy_text()`, and only `decide_antigravity_mode()` may grant `--dangerously-skip-permissions`. Gemini CLI and Amp are deprecated: security and doc fixes only.
+
 ## Testing patterns
 
 - Stub subprocess runners with fake CLI scripts for engine tests
@@ -41,4 +43,4 @@ All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
 ## Commands
 
-Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/steer` / `/queue` (Claude follow-ups), `/verbose`, `/restart`.
+Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/steer` / `/queue` (Claude and Antigravity follow-ups), `/verbose`, `/restart`.

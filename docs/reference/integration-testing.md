@@ -90,23 +90,25 @@ These tests were previously considered "manual" but can be automated via MCP and
 | Capability | Claude | Codex | OpenCode | Pi | Antigravity | Gemini ⚠️ | Amp ⚠️ |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Support status** | Yes | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
-| Interactive approval | Yes | - | - | - | - (pre-run mode; gate in rc3) | Flag only | - |
-| Plan mode | Yes | - | - | - | rc3 (gate) | - | - |
-| Ask questions | Yes | - | - | - | - | - | - |
+| Interactive approval | Yes | - | - | - | Yes (Ask me, agy plugin) | Flag only | - |
+| Plan mode | Yes | - | - | - | Yes (Plan first) | - | - |
+| Ask questions | Yes | - | - | - | Yes (agy plugin) | - | - |
 | Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Model override | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Reasoning levels | Yes | Yes | - | - | Yes (per model) | - | - |
 | API cost tracking | Yes | - | Yes | - | - (tokens only) | Yes | Yes |
 | Subscription usage | Yes | - | - | - | Quota groups (`/usage`) | - | - |
 | Diff preview | Yes | - | - | - | Yes (Ask me, agy plugin) | - | - |
+| Steer follow-ups | Yes | - | - | - | Yes (agy plugin) | - | - |
+| Live sessions | Yes | - | - | - | - (one `agy` run per message) | - | - |
 
-Antigravity in 0.36.1rc1 has two permission modes, picked before the run: **Workspace** (the default: `agy`'s own
-`--mode=accept-edits`, so file edits inside the project and no shell) and **Full access** (explicit). From
-0.36.1rc4 **Plan first** runs too (agy's `--mode=plan`; the plan is answered with Approve / Deny / Let's discuss,
+Antigravity has four permission modes. Two are picked before the run and were all 0.36.1rc1 had: **Workspace** (the
+default: `agy`'s own `--mode=accept-edits` under Untether's no-shell agent, so file edits inside the project and no
+shell) and **Full access** (explicit). From 0.36.1rc4 **Plan first** runs too (agy's `--mode=plan`; the plan is answered with Approve / Deny / Let's discuss,
 [#981](https://github.com/littlebearapps/untether/issues/981)), and **Ask me** asks in Telegram before shell, web, MCP
 and files outside the project, once Untether's agy plugin is installed
-([#980](https://github.com/littlebearapps/untether/issues/980); AG-49 to AG-58). A blocked tool shows as a
-`⚠️ Blocked: …` progress row.
+([#980](https://github.com/littlebearapps/untether/issues/980); AG-49 to AG-58). Question buttons and steer need the
+same plugin (AG-27 to AG-34). A blocked tool shows as a `⚠️ Blocked: …` progress row.
 
 ---
 
@@ -506,6 +508,9 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all supported engines), U6, U7 |
 | Antigravity engine (`runners/antigravity.py`, `schemas/antigravity.py`, `utils/antigravity_quota.py`) | Tier 1 (Antigravity) + AG-* |
+| Antigravity argv / CLI version (`utils/antigravity_argv.py`, `PROBED_CLI_VERSION` in `runners/antigravity.py`) | `uv run pytest tests/test_antigravity_cli_schema_drift.py` against the installed agy, AG-1, AG-4, U5 (Antigravity) |
+| Antigravity gate plugin (`antigravity/*.py`, `cli/agy_gate.py`, `interactive/*.py`) | `untether agy-gate status --project <dir> --canary`, AG-27 to AG-34 (questions, steer), AG-47 to AG-59 (plugin checks, Ask me approvals) |
+| Antigravity Plan first (`utils/antigravity_plan.py`, `telegram/commands/antigravity_plan.py`) | AG-41 to AG-46 |
 | Base runner / liveness watchdog / stall monitor (`runner.py` `JsonlSubprocessRunner`, `_subprocess_watchdog`; `runner_bridge.py` expected-wait branches) | Tier 1 U1 + U6 on every supported engine |
 | Preamble (`runner_bridge.py` `_apply_preamble`) | U1 + U2 + U6 on Codex, OpenCode and Pi; C1, C2, C4 on Claude (`preamble.applied preamble_len=3338` unchanged for Claude) |
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |

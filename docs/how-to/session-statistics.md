@@ -57,6 +57,7 @@ claude: ✅ <auth method>
 codex: ✅ logged in using chatgpt
 opencode: ✅ 2 provider(s)
 pi: ❌ no credentials
+antigravity: ℹ️ set to use a Gemini API key
 ```
 
 This checks each engine's credential files or auth status commands without starting a run. Claude shows the `authMethod` its `claude auth status` reports; an engine whose status can't be read shows `❓ status unavailable`. Antigravity shows the sign-in route agy is set to use (`antigravity: ℹ️ set to use Google sign-in`) for up to an hour after an Antigravity run checked agy's settings (nothing straight after a restart); it doesn't start agy or test the sign-in. On `/stats`, each engine line ends with a `(N triggered, M manual)` breakdown when either count is non-zero (cron, webhook and `/at` runs count as triggered).

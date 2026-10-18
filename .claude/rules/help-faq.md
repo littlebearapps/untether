@@ -38,28 +38,31 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
 - Treat the FAQ like a contract with users. Whenever a new feature
   lands in `CHANGELOG.md`, ask: does the existing FAQ still answer
   questions correctly?
-- Specifically watch for (Q numbers as of 0.36.0rc1 — they drift as questions are added, so match on the quoted heading):
-  - **Engine support changes** — Q3 ("Which AI coding agents…")
+- Specifically watch for (match on the quoted heading; question numbers drift as questions are added):
+  - **Engine support changes** — "Which AI coding agents…"
     enumerates the 5 supported engines (Antigravity CLI joined in v0.36.1,
     #558) plus the 2 deprecated ones (Gemini CLI, Amp). If a new engine lands or one is
     deprecated or removed, update.
-  - **Subscription / API key model changes** — Q4 ("Do I need an API
-    key?") describes which engines use OAuth vs API key. Any auth-flow
+  - **Subscription / API key model changes** — "Do I need an API
+    key?" describes which engines use OAuth vs API key. Any auth-flow
     changes need an FAQ refresh.
-  - **Privacy / data flow changes** — Q5 ("Where does my code and data
-    go?") covers Telegram, agent CLI, vendor, and Untether itself.
+  - **Antigravity sign-in / permission-mode changes** — "Can I use Antigravity CLI with my
+    Google account?" and "Why can't Antigravity run shell commands…" track the terms notice,
+    sign-in routes and the `/new`-after-switching-mode rule.
+  - **Privacy / data flow changes** — "Where does my code and data
+    go?" covers Telegram, agent CLI, vendor, and Untether itself.
     Any new outbound network call or telemetry MUST be reflected here.
-  - **Approval-flow changes** — Q6 ("How do I approve tool calls…")
+  - **Approval-flow changes** — "How do I approve tool calls…"
     documents Plan mode buttons and `/planmode` semantics. Any change
     to ExitPlanMode, ask-mode, or per-engine approval policies needs
     an FAQ pass.
-  - **Cost / budget changes** — Q11 ("How do I keep agents from
-    spending too much…") shows `[cost_budget]` config. New keys, new
+  - **Cost / budget changes** — "How do I keep agents from
+    spending too much…" shows `[cost_budget]` config. New keys, new
     budget types, or Stop at limit (`auto_cancel`) changes need an FAQ refresh.
-  - **Voice transcription changes** — Q15 ("Can I send voice notes…")
+  - **Voice transcription changes** — "Can I send voice notes…"
     references `voice_transcription_*` config keys. Renames or new
     keys need an FAQ pass.
-  - **Install / update / uninstall path changes** — Q2/Q18/Q19 cover
+  - **Install / update / uninstall path changes** — the install, update and uninstall questions cover
     `uv tool` and `pipx` flows. Any change to the wizard, default
     config path, or systemd integration needs an FAQ refresh.
 

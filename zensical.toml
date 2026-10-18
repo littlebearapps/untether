@@ -101,12 +101,12 @@ nav = [
         { "Stream JSON cheatsheet" = "reference/runners/antigravity/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/antigravity/untether-events.md" },
       ] },
-      { "Gemini" = [
+      { "Gemini (deprecated)" = [
         { "Runner" = "reference/runners/gemini/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/gemini/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/gemini/untether-events.md" },
       ] },
-      { "Amp" = [
+      { "Amp (deprecated)" = [
         { "Runner" = "reference/runners/amp/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/amp/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/amp/untether-events.md" },

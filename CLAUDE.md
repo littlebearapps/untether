@@ -1,9 +1,10 @@
 # Untether
 
-Telegram bridge for Claude Code, Codex, OpenCode, Pi and other agent CLIs — control coding agents from your phone.
+Telegram bridge for Claude Code, Codex, OpenCode, Pi, Antigravity and other agent CLIs — control coding agents from your phone.
 **Repo**: [littlebearapps/untether](https://github.com/littlebearapps/untether) · **Upstream**: [banteg/takopi](https://github.com/banteg/takopi).
 Untether adds interactive permission control (Telegram approval buttons, plan mode, AskUserQuestion), live sessions,
-cost/usage tracking and many UX fixes. Interactive features are **Claude Code-only**; other engines run non-interactively.
+cost/usage tracking and many UX fixes. Interactive features are **Claude Code's**, plus Antigravity's gate-based Ask me
+approvals, questions, steer and Plan first card; other engines run non-interactively.
 
 <!-- Context budget: keep this file under ~200 lines / ~15k chars. Feature detail goes in
      docs/reference/feature-catalog.md, test-file detail in docs/reference/test-catalog.md.
@@ -17,6 +18,7 @@ cost/usage tracking and many UX fixes. Interactive features are **Claude Code-on
 | What each test file covers (+ counts) | `docs/reference/test-catalog.md` |
 | Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`, no `runner.md`) |
 | Claude permission modes, live sessions, control channel | `docs/reference/runners/claude/runner.md` |
+| Antigravity permission modes, agy gate, `/continue`, native-vs-custom register | `docs/reference/runners/antigravity/runner.md` |
 | Telegram transport | `docs/reference/transports/telegram.md` |
 | Dev/staging instances | `docs/reference/dev-instance.md` |
 | Integration-test playbook (tiers, chat IDs) | `docs/reference/integration-testing.md` |
@@ -54,12 +56,18 @@ Nathan's call. Full rule: `.claude/rules/runner-development.md` → "Native-firs
 Both still ship and load but are strictly deprecated and no longer supported — no removal is scheduled, though a future
 release may drop them (Gemini: upstream EOL for individual accounts, hangs under Untether until the watchdog cancels;
 AMP: remote `426` refusal). **When a cross-engine sweep breaks either runner, `xfail`/`skip` the test — do NOT fix the
-runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier. Antigravity
-CLI (`antigravity`, #558) is its own engine from v0.36.1 and must never reuse the `gemini` id: it runs with a pre-run
-permission mode (Workspace by default; bypass only for Full access, or Ask me behind Untether's agy-gate hook) (what each rc added: `docs/reference/feature-catalog.md`); Ask me approval buttons and
-Plan first plan approval shipped in 0.36.1, and warm/live agy sessions are deferred (#977 shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through `utils/antigravity_argv.py` (`--flag=value` only).
-Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
-OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
+runner.** Security and doc-accuracy fixes still apply. Both are excluded from every integration-test tier.
+
+## Other engine notes
+
+- **Antigravity CLI** (`antigravity`, #558) is its own engine from v0.36.1 and must never reuse the `gemini` id. The
+  permission mode is chosen before the run: Workspace (default; no-shell agent), Plan first (agy plan mode + Approve
+  Plan card), Full access (bypass), or Ask me (bypass only once Untether's agy-gate plugin is ready; the gate also
+  carries question buttons and steer). One `agy` process per message: warm/live agy sessions are deferred (#977
+  shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through
+  `utils/antigravity_argv.py` (`--flag=value` only). Detail: the `antigravity-cli` skill.
+- Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
+- OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 
 ## Commands
 
@@ -118,8 +126,8 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 3. **Stable** — `/pr-main X.Y.Z` (bump, CHANGELOG, PR `dev`→`master`); on Nathan's explicit go, `/pr-main X.Y.Z --merge`
    (or Nathan merges), then `scripts/fleet-rollout.sh X.Y.Z` once PyPI has it.
 
-Pre-1.0, a line with any `### breaking` entry ships as a **minor**: the 0.35.5rc1–rc20 line ships as **v0.36.0**
-(rcs continue as `0.36.0rcN`, milestone `v0.36.0`; [#947](https://github.com/littlebearapps/untether/issues/947)).
+Pre-1.0, a line with any `### breaking` entry ships as a **minor**, never a patch (precedent: the 0.35.5rc1–rc20 line
+shipped as **v0.36.0**; [#947](https://github.com/littlebearapps/untether/issues/947)).
 
 **NEVER skip integration testing or the attestation gate.** Every bug fix / significant change needs a GitHub issue
 (labels `bug`/`enhancement`/`documentation`, `severity:*`, `priority: *`), linked from CHANGELOG as

@@ -28,7 +28,7 @@ For time-sensitive callbacks (approval buttons), use early answering:
 - Provide `early_answer_toast()` returning the toast text ("Approved", "Denied", etc.)
 - Dispatch calls `answerCallbackQuery` before processing the action
 - With `approval_originator_only` on (#388, default off, hot-reloads via `update_from`), `_dispatch_callback` refuses
-  a `claude_control:` / `aq:` tap from anyone but the run's originator **before** the early answer — the early toast
+  a `claude_control:` / `ia:` / `aq:` / `agy_plan:` tap from anyone but the run's originator **before** the early answer — the early toast
   reserves a control claim, so never move the check after it. Logic: `telegram/approval_originator.py`
 
 ## Ephemeral messages

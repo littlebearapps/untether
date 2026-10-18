@@ -27,6 +27,8 @@ body:
         - Codex CLI
         - OpenCode
         - Pi
+        - Antigravity CLI
+        - Gemini CLI or Amp (deprecated)
         - Not engine-specific
   - type: textarea
     id: context

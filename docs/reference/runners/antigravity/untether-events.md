@@ -66,6 +66,8 @@ These yield a single `CompletedEvent(ok=False)` and keep the chat's saved sessio
 | `gate_self_protect` | Ask me in a project that contains Untether's own package, venv or plugin folder |
 | `gate_foreign_config` | Ask me in a project with agy hooks, plugins, agents or MCP servers Untether doesn't manage (or user-level ones) |
 | `unsupported_version` | agy is older than 1.3.1 |
+| `continue_unresolved` | `/continue` found no conversation for this exact project directory, its latest one has also been run from another folder, or agy's record of recent conversations couldn't be read ([#1039](https://github.com/littlebearapps/untether/issues/1039)) |
+| `compact_no_conversation` | `/compact` in a chat with no Antigravity conversation yet (or after `/new`): nothing to compact ([#1114](https://github.com/littlebearapps/untether/issues/1114)) |
 | `config_changed` | Unattended run, and the project's agy config differs from what an attended run last showed |
 | `config_unchecked` | Unattended run, and that config couldn't be checked |
 | `agy_always_proceed` | Workspace run, and agy's own settings report a `toolPermission` other than `request-review` / `strict` |

@@ -188,7 +188,7 @@ source listed for the classified type. Specifically:
   `proc_returncode`, `peak_idle`, `tool_name` etc. from matching lines.
 - **state files** — `active_progress.json`, `last_update_id.json`,
   `seen.json`, attestation marker files.
-- **Telegram chat history** for the 6 dev engine chats if the issue is
+- **Telegram chat history** for the 7 dev engine chats (5 supported + 2 deprecated) if the issue is
   chat-side (verify via `mcp__telegram__get_history`).
 - **git log + CHANGELOG** for regressions correlated with recent rc/release
   bumps.

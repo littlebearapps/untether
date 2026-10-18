@@ -30,6 +30,7 @@ body:
         - Codex CLI
         - OpenCode
         - Pi
+        - Antigravity CLI
         - All / not engine-specific
   - type: textarea
     id: alternatives

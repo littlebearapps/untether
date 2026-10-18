@@ -4,6 +4,9 @@ Keep tabs on your Claude Code subscription from anywhere — Untether surfaces u
 
 In an Antigravity chat, `/usage` shows agy's own quota groups and AI credits — see [Cost budgets → Antigravity](cost-budgets.md#antigravity). The footer switch below also works for Antigravity, where the line shows what your last `/usage` fetched (up to 15 minutes old) — see [Use Antigravity CLI → Usage and quota](antigravity.md#usage-and-quota). In Codex, OpenCode and other chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
 
+<!-- TODO: capture screenshot: antigravity-quota-footer — the end of an Antigravity final answer with Subscription usage on: the footer and the `⚡ Gemini Models 5h: 12% | wk: 3%` quota line under it -->
+<!-- <img src="../assets/screenshots/antigravity-quota-footer.jpg" alt="Antigravity answer footer with the quota line built from the last /usage" width="360" loading="lazy" /> -->
+
 ## Check usage with /usage
 
 Send `/usage` in any chat to see a full breakdown of your Claude Code subscription usage:

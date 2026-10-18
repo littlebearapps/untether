@@ -14,7 +14,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
                                   ProgressTracker
 ```
 
-- **Runners** (`src/untether/runners/`) — engine-specific subprocess managers
+- **Runners** (`src/untether/runners/`) — engine-specific subprocess managers; Antigravity's approval/question/steer gate (agy plugin) is `src/untether/antigravity/`, its argv checks `src/untether/utils/antigravity_argv.py`
 - **RunnerBridge** (`src/untether/runner_bridge.py`) — connects runners to Telegram presenter
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — renders progress, inline keyboards, answers
 - **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
@@ -70,14 +70,14 @@ uv run pytest tests/test_*.py -x # specific file
 | `/cancel` | Stop the running agent (an idle live session is closed; pending `/at` runs and loops are dropped too) |
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off) |
+| `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off); in an Antigravity chat `on` = Plan first, `off` = Workspace |
 | `/usage` | Claude subscription quota; Antigravity quota groups and AI credits; other engines: the last session's tokens |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
 | `/config` | Interactive settings menu |
-| `/steer` / `/queue` | Claude: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
+| `/steer` / `/queue` | Claude, or Antigravity with Untether's agy plugin: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
 | `/verbose` | Toggle verbose progress mode |
 | `/restart` | Gracefully restart Untether |
 

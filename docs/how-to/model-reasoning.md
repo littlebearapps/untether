@@ -17,7 +17,9 @@ Send `/model` to see the override for the current engine and where it comes from
 
     defaults: topic: none, chat: sonnet
 
-    available engines: codex, claude, opencode, pi
+    available engines: antigravity, claude, codex, opencode, pi (not installed: amp, gemini)
+
+`available engines` lists only the engines that can run on this host; any that aren't installed or failed to load follow in brackets ([#1165](https://github.com/littlebearapps/untether/issues/1165)).
 
 `model: **default** (no override)` means no chat or topic override is set, so the engine uses its own default (see the resolution order below).
 
@@ -77,7 +79,7 @@ Valid levels depend on the engine:
 
 `minimal` was removed for Codex in v0.36.0: no current Codex model supports it, and it fails alongside Codex's default web search. A saved `minimal` is ignored with a one-line note on each run, and the run uses the engine default until you pick another level.
 
-Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.
+Other engines (OpenCode, Pi, and the deprecated Gemini CLI and Amp) ignore this setting.
 
 ### Antigravity effort
 

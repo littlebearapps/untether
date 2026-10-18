@@ -23,6 +23,11 @@ graph TD
 - **Workspace** — you manage multiple projects and want each Telegram forum topic bound to a project/branch.
 - **Handoff** — you switch between Telegram and terminal, copying resume lines to continue sessions in your IDE.
 
+!!! note "Workflow modes aren't permission modes"
+    These modes decide how conversations continue and are set in `untether.toml`. They're unrelated to an engine's
+    permission mode, such as Antigravity CLI's **Workspace** mode, which you pick per chat in `/config` →
+    **Permission mode** (see [Use Antigravity CLI](antigravity.md#permission-modes)).
+
 ## Mode comparison
 
 | | Assistant | Workspace | Handoff |

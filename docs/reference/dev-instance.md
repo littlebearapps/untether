@@ -160,7 +160,7 @@ Seven dev-bot test workspaces live under `test-projects/` in the repo (gitignore
 | `test-projects/test-gemini/` | Gemini CLI (deprecated) | `[projects.gemini-test]` |
 | `test-projects/test-amp/` | AMP (deprecated) | `[projects.amp-test]` |
 
-Each has a `CLAUDE.md` and `.claude/settings.json`. `test-antigravity/` is the exception: it is its own small git repo with an `AGENTS.md`, and must not contain an `.agents/` folder. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified.
+Each has a `CLAUDE.md` and `.claude/settings.json`. `test-antigravity/` is the exception: it is its own small git repo with an `AGENTS.md`, and must not contain an `.agents/` folder. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified. Ask me, question buttons and steer in the Antigravity chat need Untether's agy plugin on the host: install it once with the dev interpreter (`~/untether/.venv/bin/untether agy-gate install`), then check it with `agy-gate status --project ~/untether/test-projects/test-antigravity` (see "#980 / #981 — Antigravity gate" in [integration-testing.md](integration-testing.md)).
 
 !!! warning "Gemini CLI and AMP are deprecated"
     Both engines still load but are **deprecated and no longer supported** (no fixes; may be removed in a future release). Their routes remain in the dev config, but they are excluded from every integration-test tier — see [integration-testing.md](integration-testing.md).

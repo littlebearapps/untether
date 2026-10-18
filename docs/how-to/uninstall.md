@@ -17,6 +17,9 @@ If you installed Untether's agy plugin for Antigravity CLI, remove it while the 
 untether agy-gate uninstall
 ```
 
+It refuses to remove a plugin folder that was edited since install, or one Untether didn't install; check what is
+there, then add `--force` to remove it anyway.
+
 Untether also keeps a no-shell agent for Antigravity's Workspace mode in agy's agent folder. It does nothing on its
 own, but you can delete it:
 

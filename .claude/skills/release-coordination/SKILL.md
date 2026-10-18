@@ -89,7 +89,7 @@ Analyse commits since the last tag and determine the version bump:
 
 **Decision rule (pre-1.0, `0.x`)**: if ANY entry is `### breaking` or adds features → **minor**. Otherwise → patch. A
 breaking line never ships as a patch — anyone pinned to `~=0.35` would get it. Example: the 0.35.5rc1–rc20 line carried
-six `### breaking` entries, so it ships as **v0.36.0** and its rcs continue as `0.36.0rcN`
+six `### breaking` entries, so it shipped as **v0.36.0** and its rcs continued as `0.36.0rcN`
 ([#947](https://github.com/littlebearapps/untether/issues/947)). If the version changes mid-line, rename the
 milestone, the CHANGELOG heading and the rc numbering together.
 

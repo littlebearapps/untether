@@ -6,7 +6,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, `onboarding_cmd.py`, `plugins.py`); loads settings, selects engine/transport, runs the transport backend. |
+| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, `onboarding_cmd.py`, `plugins.py`, `agy_gate.py` for `untether agy-gate install` / `uninstall` / `status`); loads settings, selects engine/transport, runs the transport backend. |
 | `telegram/backend.py` | Telegram transport backend: validates config, runs onboarding, builds and runs the Telegram bridge. |
 
 ## Orchestration and routing
@@ -24,11 +24,10 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `error_hints.py` | Maps engine error text to the actionable hints shown in Telegram. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
 | `live_followup.py` | Writes a queued follow-up into a still-running Claude session (live sessions) instead of resuming a new process. |
-| `live_sessions.py` | Engine-neutral seam for live sessions: the bridge, scheduler and steer code ask it for an engine's backend instead of importing the Claude runner. Claude is the only backend today ([#977](https://github.com/littlebearapps/untether/issues/977)). |
+| `live_sessions.py` | Engine-neutral seam for live sessions: the bridge, scheduler and steer code ask it for an engine's backend instead of importing the Claude runner. Claude is the only live backend today; Antigravity has a steer-only target (`steer_backend`) ([#977](https://github.com/littlebearapps/untether/issues/977)). |
 | `session_costs.py` | Per-session cost and token ledger, so a resumed session's running totals are recorded per run. |
 | `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
 | `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
-| `telegram/first_start.py` | Holds a follow-up sent while a chat's first run hasn't reported its session yet, so it resumes that conversation instead of starting a second one; `/cancel` and `/new` drop such messages ([#1157](https://github.com/littlebearapps/untether/issues/1157)). |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
 | `loop_scheduler.py` | Loop mode: runs Claude's `/loop` schedules (declined `CronCreate` calls) and long `ScheduleWakeup`s with the `[loop]` caps, plus the cancel and cron-suppression records; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
 | `orphan_approvals.py` | Pushed standalone Approve / Deny message for a background agent's approval request that arrives while a Claude session is idle; re-sent after 10 min, then every 30 min, and removed once answered. |
@@ -67,7 +66,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
 | `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
 | `telegram/first_start.py` | Holds a message sent while a chat's first run hasn't reported its session yet, so it resumes that conversation instead of starting a second; `/cancel` and `/new` drop it ([#1157](https://github.com/littlebearapps/untether/issues/1157)). |
-| `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
+| `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions; Antigravity runs through the agy gate). |
+| `telegram/arrival_order.py` | Keeps a session scope's follow-ups in the order they arrived ([#1164](https://github.com/littlebearapps/untether/issues/1164)). |
 | `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
 | `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
 | `telegram/reply_context.py` | Appends the replied-to message and any selected quote to the prompt as bounded, clearly marked context ([#736](https://github.com/littlebearapps/untether/issues/736)). |
@@ -97,6 +97,23 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `runners/extra_args_guard.py` | Rejects approval- and sandbox-bypass flags in `extra_args`. |
 | `runners/tool_actions.py` | Shared tool-call → action kind and title mapping used by the runners' event translation. |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
+| `interactive/*` | Engine-neutral registry of approval and question cards awaiting an answer, their button callback data, diff / command previews, and the unattended-run reply ([#960](https://github.com/littlebearapps/untether/issues/960)). |
+
+## Antigravity CLI
+
+| Module | Responsibility |
+|--------|----------------|
+| `runners/antigravity.py` | The `agy` runner: argv, permission-mode decision (`decide_antigravity_mode`, the only source of the bypass flag), stream translation and background task map ([#558](https://github.com/littlebearapps/untether/issues/558)). |
+| `utils/antigravity_argv.py` | The one place a user-influenced value becomes part of agy's argv (allow-listed, joined `--flag=value`). |
+| `utils/antigravity_redact.py` | One redaction pass for every piece of agy text Untether surfaces. |
+| `utils/antigravity_agent.py` | The no-shell `untether-workspace` agent file for Workspace and Plan first runs ([#1037](https://github.com/littlebearapps/untether/issues/1037)). |
+| `utils/antigravity_plan.py`, `telegram/commands/antigravity_plan.py` | Plan first: finding the plan artifact, and the Approve Plan / Deny / Let's discuss card ([#981](https://github.com/littlebearapps/untether/issues/981)). |
+| `utils/antigravity_scan.py`, `utils/antigravity_state.py` | Planted-config scan of agy hooks, plugins, agents and MCP servers, and the small persisted state behind it (seen config, notices). |
+| `utils/antigravity_quota.py` | Zero-token `agy -p /<command>` probes (`/usage`, `/credits`, `/effort`, `/config`). |
+| `utils/antigravity_continue.py` | Finds the Antigravity conversation `/continue` may resume: the one agy last ran from the exact project directory ([#1039](https://github.com/littlebearapps/untether/issues/1039)). |
+| `utils/antigravity_context.py` | Published context windows per Antigravity model, used for the estimated `~N% ctx` in the header ([#979](https://github.com/littlebearapps/untether/issues/979)). |
+| `telegram/commands/_antigravity_mode_text.py` | How the Antigravity permission modes read in Telegram (`/config`, `/planmode`). |
+| `antigravity/gate_*.py` | Untether's agy gate plugin: files and install (`gate_plugin`), readiness precheck (`gate_precheck`), per-run socket (`gate_server`), hook command (`gate_hook`), Ask me safe list and approval card (`gate_policy`), hook canary (`gate_canary`) ([#980](https://github.com/littlebearapps/untether/issues/980)). |
 
 ## Triggers
 
@@ -133,9 +150,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `utils/env_policy.py` | Engine subprocess environment allowlist (`[security] env_extra_allow` / `env_extra_prefix_allow`). |
 | `utils/env_audit.py` | Checks a running engine's real environment against that allowlist. |
+| `utils/engine_argv.py` | Engine-neutral guard for user-influenced argv values ([#1034](https://github.com/littlebearapps/untether/issues/1034)). |
 | `utils/usage_cache.py` | Short-lived cache for the Claude subscription-usage fetch behind `/usage` and the opt-in usage footer (the default near-limit warning reads the run's `rate_limit_event` instead, [#1150](https://github.com/littlebearapps/untether/issues/1150)). |
-| `utils/antigravity_continue.py` | Finds the Antigravity conversation `/continue` may resume: the one agy last ran from the exact project directory ([#1039](https://github.com/littlebearapps/untether/issues/1039)). |
-| `utils/antigravity_context.py` | Published context windows per Antigravity model, used for the estimated `~N% ctx` in the header ([#979](https://github.com/littlebearapps/untether/issues/979)). |
 | `utils/error_display.py`, `utils/json_state.py` | User-facing error sanitisation, incl. `redact_url_secrets` for engine error cards ([#1151](https://github.com/littlebearapps/untether/issues/1151)); atomic JSON writes for state files. |
 | `utils/paths.py` | Path/command relativisation helpers, and the per-run context variables (base directory, thread, sender, trigger source). |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |

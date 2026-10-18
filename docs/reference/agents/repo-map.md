@@ -24,7 +24,8 @@ Quick pointers for navigating the Untether codebase.
 ## Engines and streaming
 
 - Runner implementations: `src/untether/runners/*` (`claude.py` holds Claude's interactive features; `antigravity.py` is the Antigravity CLI runner, a separate engine from `gemini.py`; `gemini.py` and `amp.py` are deprecated and no longer supported, but still load)
-- Antigravity's approval/question/steer gate (Untether's agy plugin): `src/untether/antigravity/` (`gate_plugin.py`, `gate_server.py`, `gate_precheck.py`, `gate_policy.py`, `gate_hook.py`); `untether agy-gate` CLI: `src/untether/cli/agy_gate.py`; engine-neutral approval registry: `src/untether/interactive/`
+- Antigravity's approval/question/steer gate (Untether's agy plugin): `src/untether/antigravity/` (`gate_plugin.py`, `gate_server.py`, `gate_precheck.py`, `gate_policy.py`, `gate_hook.py`, `gate_canary.py`); `untether agy-gate` CLI: `src/untether/cli/agy_gate.py`; engine-neutral approval registry: `src/untether/interactive/`
+- Antigravity argv allow-list and text redaction: `src/untether/utils/antigravity_argv.py`, `src/untether/utils/antigravity_redact.py`; the other `utils/antigravity_*.py` helpers hold the Workspace agent, Plan first, the planted-config scan, `/continue`, the zero-token probes and context windows; the plan card: `src/untether/telegram/commands/antigravity_plan.py`
 - Per-run engine options (model, reasoning, permission mode) via ContextVar: `src/untether/runners/run_options.py`
 - `extra_args` deny-list tokeniser: `src/untether/runners/extra_args_guard.py`
 - JSONL decoding schemas: `src/untether/schemas/*`

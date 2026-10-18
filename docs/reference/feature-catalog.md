@@ -27,6 +27,7 @@ per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
 - **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
 - **Compact startup message** — version number, conditional diagnostics (only shows mode/topics/triggers/engines when they carry signal), project count instead of full list
 - **Engine lists name only installed engines** ([#1165](https://github.com/littlebearapps/untether/issues/1165), 0.36.1rc10) — `/agent`'s `available:` line, `/model`'s `available engines:` line, the "unknown engine" replies of `/agent set` / `/model set` / `/reasoning set`, and `/config` → Engine & model offer only engines that can run, then `(not installed: …)` / `misconfigured:` / `failed to load:` in the startup message's wording; one shared helper (`TransportRuntime.available_engines_text()` / `engine_availability_notes()` in `transport_runtime.py`) also feeds the startup message
+- **Engine table layouts** ([#1162](https://github.com/littlebearapps/untether/issues/1162), 0.36.1rc9) — each engine reads `[engines.<id>]` if present, else its top-level `[<id>]`, even when other engines use `[engines.*]` (`UntetherSettings.engine_config`, `settings.py`); both present → `[engines.<id>]` wins and WARNING `config.engine_table.duplicate` (`used` / `ignored`) is logged on every read
 - **Workflow mode indicator** — startup message shows `mode: assistant`, `mode: workspace`, or `mode: handoff`; derived from `session_mode` + `topics.enabled`
 - **Model/mode footer** — final messages show model name + permission mode (e.g. `🏷 sonnet · plan`) from `StartedEvent.meta`; all engines populate model info. `handle_message` seeds the model Untether passes (run-options override, else the runner's configured `model`; `_passed_model`) so a cancelled or error final that comes before the engine's first `StartedEvent` (a Pi run cancelled before any output, OpenCode's `Model not found`) still names it — the engine's own meta merges over it ([#1155](https://github.com/littlebearapps/untether/issues/1155), 0.36.1rc9). `_short_model_name` (`markdown.py`) handles Claude 5 major-only IDs, the `fable` family and the `[1m]` context marker (#688); `runner.completed` / `session.summary` log `model` + `model_display` (#695)
 - **`/verbose`** — toggle verbose progress mode per chat; shows tool details (file paths, commands, patterns) in progress messages; needs a group admin in a group (#1042, below)
@@ -152,6 +153,7 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | `antigravity/gate_hook.py` | The agy gate's hook command (stdlib only): one socket round trip per hook call, PreToolUse fails closed (#980) |
 | `antigravity/gate_plugin.py` | The gate plugin's files, `agy plugin install` / `uninstall`, install-state inspection, scanner exemption check (#980) |
 | `antigravity/gate_server.py` | Per-run gate socket: auth, question cards (`ia` responder), steer queue + `injectSteps`, `Stop`, liveness/tripwire state, steer backend (#980, #981) |
+| `antigravity/gate_policy.py` | Ask me policy (pure): `classify` (safe list of reads and in-project edits; everything else asks), `card_title` previews, exact command+cwd "Always allow" grants in memory (#980) |
 | `antigravity/gate_precheck.py` | Is the gate loaded for a run: install check + cached `agy -p /hooks` evaluation (#980) |
 | `antigravity/gate_canary.py` | `untether agy-gate status --canary`: one trivial turn that must reach the gate (#980) |
 | `cli/agy_gate.py` | `untether agy-gate install / uninstall / status` (#980) |
@@ -250,14 +252,14 @@ Detailed protocol specs and event cheatsheets for each integration:
 | Pi runner spec | `docs/reference/runners/pi/runner.md` | CLI invocation, file-based sessions, provider/model selection |
 | Pi stream-json | `docs/reference/runners/pi/stream-json-cheatsheet.md` | JSONL event shapes (`SessionHeader`, `AgentStart`, `ToolExecution`) |
 | Pi event mapping | `docs/reference/runners/pi/untether-events.md` | Pi JSONL → Untether event translation rules |
-| Gemini runner spec | `docs/reference/runners/gemini/runner.md` | CLI invocation, stream-json, model selection |
-| Gemini stream-json | `docs/reference/runners/gemini/stream-json-cheatsheet.md` | JSONL event shapes (`init`, `message`, `tool_use`, `tool_result`, `result`, `error`) |
-| Gemini event mapping | `docs/reference/runners/gemini/untether-events.md` | Gemini JSONL → Untether event translation rules |
-| AMP runner spec | `docs/reference/runners/amp/runner.md` | CLI invocation, stream-json, mode/model selection |
-| AMP stream-json | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
-| AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
-| Antigravity runner | `docs/reference/runners/antigravity/runner.md` | Google terms note, sign-in routes, invocation, `/continue`, permission modes, planted-config tripwire, errors, quota, credits and the quota line, context use, `/export`, effort, background wait and background rows, native vs custom register |
-| Antigravity stream-json | `docs/reference/runners/antigravity/stream-json-cheatsheet.md` | agy 1.3.x event shapes with real examples (`init`, `step_update`, `result`, `command_result`) |
+| Gemini runner spec (⚠️ deprecated) | `docs/reference/runners/gemini/runner.md` | CLI invocation, stream-json, model selection |
+| Gemini stream-json (⚠️ deprecated) | `docs/reference/runners/gemini/stream-json-cheatsheet.md` | JSONL event shapes (`init`, `message`, `tool_use`, `tool_result`, `result`, `error`) |
+| Gemini event mapping (⚠️ deprecated) | `docs/reference/runners/gemini/untether-events.md` | Gemini JSONL → Untether event translation rules |
+| AMP runner spec (⚠️ deprecated) | `docs/reference/runners/amp/runner.md` | CLI invocation, stream-json, mode/model selection |
+| AMP stream-json (⚠️ deprecated) | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
+| AMP event mapping (⚠️ deprecated) | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
+| Antigravity runner | `docs/reference/runners/antigravity/runner.md` | Google terms note, sign-in routes, invocation, `/continue`, permission modes (Workspace, Plan first, Ask me, Full access), planted-config tripwire, Untether's agy gate (install, questions, steer), errors, quota, credits and the quota line, context use, `/export`, effort, background wait and background rows, native vs custom register |
+| Antigravity stream-json | `docs/reference/runners/antigravity/stream-json-cheatsheet.md` | agy 1.3.x event shapes (tested against 1.4.0) with real examples (`init`, `step_update`, `result`, `command_result`) |
 | Antigravity event mapping | `docs/reference/runners/antigravity/untether-events.md` | agy JSONL → Untether event translation rules, pre-spawn refusals, background task map |
 | Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
 | Workflow modes | `docs/reference/modes.md` | Assistant, workspace, handoff — settings, commands, mode-agnostic features |

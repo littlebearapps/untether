@@ -63,7 +63,7 @@ See [security.md](security.md#restrict-access) for the full discussion.
 
 ## Engine CLI not found
 
-**Symptoms:** "codex: command not found" or similar error after sending a task.
+**Symptoms:** the startup message lists the engine under `not installed`, or a task sent to it gets `engine 'codex' is unavailable: codex not found on PATH` (or similar).
 
 The engine CLI isn't on your PATH. Install the engine you need:
 
@@ -90,7 +90,7 @@ npm install -g @google/gemini-cli
 npm install -g @sourcegraph/amp
 ```
 
-Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether also looks for `~/.local/bin/agy`, and for an agy installed anywhere else, set `[antigravity] cmd` to its path.
+Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether also looks for `~/.local/bin/agy`, and for an agy installed anywhere else, set `[antigravity] cmd` to its path (see [Antigravity shows as not installed](#antigravity-shows-as-not-installed)).
 
 The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
 
@@ -180,6 +180,12 @@ Switch to `claude`, `codex`, `opencode`, `pi` or `antigravity` via `/config → 
 
 Antigravity (`agy`) runs headless: it can't ask for a sign-in mid-run, and it asks for approval only in **Ask me** mode through Untether's agy plugin. Untether turns each failure into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli), and the user guide is [Use Antigravity CLI](antigravity.md).
 
+### Antigravity shows as not installed
+
+**Symptoms:** the startup message's installed engines line lists `antigravity` under `not installed`, `/config` → **Engine & model** has no Antigravity button, `/agent set antigravity` lists it as not installed, or a message to it gets `engine 'antigravity' is unavailable: agy not found on PATH`.
+
+Untether looks for `agy` on the `PATH` it runs with, then at `~/.local/bin/agy` (where agy's installer puts it). For an agy anywhere else, set `[antigravity] cmd` to its full path. A `cmd` that points at a missing file is reported as `… not found or not executable` instead. Restart Untether after installing agy or changing `cmd` so it looks again, then check the startup message. If Antigravity is your `default_engine`, Untether won't start at all until agy is found (`Default engine 'antigravity' unavailable: …`). The engine id is always `antigravity`: `/gemini` runs the deprecated Gemini CLI, not agy.
+
 ### Antigravity says it isn't signed in
 
 **Symptoms:** `Antigravity CLI isn't signed in on this host — agy wanted a browser sign-in, which a bot can't complete.`
@@ -228,13 +234,16 @@ With `reason=project_agents`, the project defines its own agy agents or plugins 
 
 ### Antigravity Ask me is refused
 
-Ask me needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host and checks it before every run; nothing runs when a check fails, and the reply says which:
+Ask me needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host and checks it before every run; nothing runs when a check fails, and the reply says which. Until the plugin is installed, `/config` → **Permission mode** shows **🔒 Ask me — set up**, which opens the plugin's status page instead of switching mode.
 
-- **"aren't set up on this host"**: run `untether agy-gate install` on the host.
-- **"aren't ready for this project"**: run `untether agy-gate status --project <folder>`. Common causes: `agy plugin disable untether-gate` was run (`agy plugin enable untether-gate`), the plugin is from another Untether version (`untether agy-gate install`), or agy isn't signed in.
+- **"aren't set up on this host"**: run `untether agy-gate install` on the host. No restart is needed.
+- **"aren't ready for this project"**: run `untether agy-gate status --project <folder>`. Common causes: `agy plugin disable untether-gate` was run (`agy plugin enable untether-gate`), the plugin is from another Untether version (`untether agy-gate install`), the plugin was edited since install (check what changed in `~/.gemini/config/plugins/untether-gate/`, then `untether agy-gate install --force`), or agy isn't signed in.
 - **"isn't available in this project"**: the project contains Untether's own code or config (a checkout of Untether itself, or the folder holding `untether.toml`), or agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage. Those run their own commands without asking, so Ask me would promise something it can't keep. Use Workspace or Full access there, or remove that config.
 
 Cron and webhook runs only use Ask me when the cron itself sets `permission_mode = "ask"`; a chat's Ask me runs them as Workspace.
+
+<!-- TODO: capture screenshot: antigravity-ask-me-refused — the plain reply to a message in an Ask me chat on a host without the plugin: "Ask me needs Telegram approvals, which aren't set up on this host. Run untether agy-gate install on the host …" ending "Nothing was run. Workspace and Full access still work here." -->
+<!-- <img src="../assets/screenshots/antigravity-ask-me-refused.jpg" alt="Antigravity Ask me refused because Untether's agy plugin isn't installed on the host" width="360" loading="lazy" /> -->
 
 ### Antigravity questions or steer stopped working after an upgrade
 
@@ -859,6 +868,11 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `cost_budget.run_stopped` | WARNING | Stop at limit ended a live session after the reply that passed the budget (`scope=per_run` or `per_day`) |
 | `callback.not_originator` / `ask_user_question.not_originator` | WARNING | With `approval_originator_only = true`, someone other than the run's originator tried to answer an approval or question ([#388](https://github.com/littlebearapps/untether/issues/388)) |
 | `opencode.version.unsupported` | ERROR | The installed OpenCode CLI is 2.x; the run was refused before starting ([#970](https://github.com/littlebearapps/untether/issues/970)) |
+| `antigravity.version.unsupported` | ERROR | The installed agy is older than 1.3.1; the run was refused before starting ([#976](https://github.com/littlebearapps/untether/issues/976)) |
+| `antigravity.gate.precheck_failed` | WARNING | An Ask me run was refused: Untether's agy plugin isn't ready for the project (`reason=missing`, `edited`, `outdated`, `disabled`, `not_listed`, …), the project holds agy config Untether doesn't manage (`foreign_config`) or Untether's own code (`self_protect`) ([#980](https://github.com/littlebearapps/untether/issues/980)) |
+| `antigravity.gate.plugin_changed` | WARNING | The plugin folder `~/.gemini/config/plugins/untether-gate/` no longer matches what Untether installed; questions and steer are off and scheduled agy runs are held |
+| `antigravity.workspace_agent.unavailable` | WARNING | Untether couldn't use its no-shell Workspace agent (with a `reason`); see [above](#antigravity-workspace-agent-file-unavailable) |
+| `antigravity.unattended_full_downgraded` / `antigravity.unattended_ask_downgraded` | WARNING | A cron or webhook run would have inherited Full access or Ask me from its chat or `untether.toml`, so it ran as Workspace |
 | `session.auto_clear_skipped` | INFO | A resumed Codex/OpenCode/Pi run failed for a reason other than the resume, so the saved session was kept (`reason=not_resume_failure`, [#952](https://github.com/littlebearapps/untether/issues/952)) |
 | `final.early_delivery_timeout` | WARNING | A live session's first answer took over 60 s to hand to Telegram ([#928](https://github.com/littlebearapps/untether/issues/928)) |
 | `final.post_delivery_timeout` | WARNING | The steps after a live session's early answer (outbox files, background status message, closing notices, Stop at limit) ran past their own 60 s limit ([#991](https://github.com/littlebearapps/untether/issues/991)) |

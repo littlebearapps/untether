@@ -83,7 +83,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 
 <img src="../assets/screenshots/final-answer-footer.jpg" alt="Final answer with model/cost footer and resume line" width="360" loading="lazy" />
 
-The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx`. When resume lines are enabled, a line like `codex resume abc123` appears too—that's how Untether knows which conversation to continue.
+The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx` (Antigravity CLI shows an estimate, `~3% ctx`, when the chat has a model set). When resume lines are enabled, a line like `codex resume abc123` (or `agy --conversation …` for Antigravity CLI) appears too—that's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 
@@ -151,7 +151,7 @@ Want to use a different engine for one message? Prefix your message with `/<engi
 
 This uses Claude Code for just this message. The resume line will show `claude --resume ...`, and replies will automatically use Claude Code.
 
-Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/antigravity` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
+Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/antigravity` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported). Antigravity CLI only runs in a chat with a project, so bind one first (`/ctx set <project>`; see [Use Antigravity CLI](../how-to/antigravity.md#select-the-engine)).
 
 !!! tip "Set a default engine"
     Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.
@@ -174,7 +174,7 @@ The agent might be doing something slow (large repo scan, network call). Wait a 
 
 **Agent CLI not found**
 
-The agent CLI isn't on your PATH. Install the CLI for the engine you're using (e.g., `npm install -g @openai/codex`) and make sure the install location is in your PATH.
+The agent CLI isn't on your PATH. Install the CLI for the engine you're using (e.g., `npm install -g @openai/codex`) and make sure the install location is in your PATH. For Antigravity CLI, Untether also looks in `~/.local/bin/agy` (where agy's installer puts it) and at `[antigravity] cmd` if your config sets one.
 
 **Bot doesn't respond at all**
 

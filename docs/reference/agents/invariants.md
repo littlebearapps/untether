@@ -46,6 +46,16 @@ per-run `RunStreamHandle` the runner publishes through a ContextVar
 
 Normative details live in the [Specification](../specification.md) (§5.2).
 
+## Antigravity permission boundary
+
+- `decide_antigravity_mode()` (`runners/antigravity.py`) is the only place that grants agy's
+  `--dangerously-skip-permissions`: Full access, or Ask me once Untether's agy gate is ready for the
+  project. Ask me without a ready gate is refused before agy starts, never downgraded silently.
+- The gate's `PreToolUse` hook fails closed (no socket, bad reply or timeout → `deny`).
+- Every user-influenced agy argv value is joined to its flag (`--flag=value`) through
+  `utils/antigravity_argv.py`, and every piece of agy text shown or logged passes
+  `utils/antigravity_redact.py` ([#558](https://github.com/littlebearapps/untether/issues/558)).
+
 ## Resume lines
 
 Resume lines embedded in chat are the engine’s canonical resume command (e.g. `claude --resume <id>`).
