@@ -23,7 +23,7 @@ dependencies = [
   "structlog>=26.1.0",
   "sulguk>=0.11.1",
   "tomli-w>=1.2.0",
-  "typer>=0.21.0",
+  "typer>=0.27.3",
   "watchfiles>=0.21.0",
 ]
 classifiers = [
