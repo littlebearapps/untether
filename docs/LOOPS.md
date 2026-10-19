@@ -22,7 +22,8 @@ Each loop records four fields (AT's shape) plus a build **Status**:
 - **Authority** — what it is allowed to do, and the hard boundary it must not cross.
 
 > **Status legend:** `available` = built and usable now · `planned Pn` = specified
-> in `docs/plans/agentic-loops-and-commands/` for phase *n*, not yet built.
+> in `docs/plans/agentic-loops-and-commands/` for phase *n*, not yet built ·
+> `optional` = needs a locally installed plugin; skipped when absent.
 > (`docs/plans/` is gitignored — the plan pack lives in the lba-1 checkout only.)
 
 ---
@@ -52,6 +53,7 @@ Support commands + conventions
   /docs            escape-hatch: reconcile docs OUTSIDE a PR (default = folded into /pr-dev) [available]
   /research        reuse the global /research; findings land under docs/findings/  [available]
   agents           advisory non-authoring reviewers: debug-reviewer / delivery-reviewer / qa-reviewer [available]
+  ponytail         optional plugin: /ponytail-review in /pr-dev, /ponytail-debt in /pr-main [optional]
 
 Automated (non-agentic — already live)
   A1   untether-issue-watcher daemon (auto:error-report) — 5 hosts, host-tagged
@@ -175,6 +177,19 @@ Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the 
 | `debug-reviewer` | a `/debug`/`/fix` hand-off (Debug Report + fix) | symptom-not-root-cause, un-falsifiable verification, co-batched high-risk state machines |
 | `delivery-reviewer` | a `/pr-dev`/`/pr-main` hand-off | wrong PR base, red locally, missing docs completion, any master-merge/tag/release boundary crossed |
 | `qa-reviewer` | a `/qa` run | non-dev-bot target, unbounded drive, hand-written/non-green marker, authority escalation |
+
+### Ponytail plugin (optional)  ·  Status: **optional**
+
+A third-party Claude Code plugin ([DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)),
+installed at local scope only where a maintainer chooses — never a dependency of any loop.
+
+- **Always-on mode:** its hooks steer every session and subagent toward the smallest complete change.
+  Nothing to wire; the loops don't restate it.
+- **`/ponytail-review`:** `/pr-dev` step D-2b, a code review of the branch diff (Must fix → fix before the PR).
+- **`/ponytail-debt`:** `/pr-main` step M-4b, the `shortcut:` comment ledger in the release PR body.
+- **`/ponytail-audit`:** manual only, one package at a time; route findings through `/debug` → `/fix`.
+- **Authority:** report-only (review, audit and debt change no code). Every step skips silently when the plugin
+  is absent.
 
 ---
 

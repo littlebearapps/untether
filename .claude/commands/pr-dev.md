@@ -64,6 +64,14 @@ python3 scripts/validate_release.py    # only if pyproject.toml version changed
 Fix-loop until green **before** push (`superpowers:verification-before-completion`
 via the Skill tool — evidence before "done"). Never push red.
 
+### D-2b. Code review of the branch diff (optional — needs the ponytail plugin)
+
+If the `ponytail` plugin is installed (local scope; most hosts and clones don't
+have it — skip silently when absent), run `/ponytail-review` on the branch diff
+against `dev`. Fix every **Must fix** finding, then re-run D-2. List unfixed
+**Should fix** findings under `## Review` in the PR body. Skip it for docs-only
+branches (D-4).
+
 ### D-3. Docs completion inline (the folded-in `/docs`)
 
 This is the completion criterion that replaces AT's separate docs stage +
@@ -111,6 +119,9 @@ Stage **explicit paths** (never `git add -A`), commit with a conventional messag
 - uv run pytest — <N> passed, <M>% coverage
 - uv run ruff check src/ tests/ — clean
 - integration tiers to run: <list> (via /qa)
+
+## Review
+- /ponytail-review — <verdict>; unfixed Should fix: <list or none> (omit section if D-2b skipped)
 
 ## Batching
 - <which issues share this PR and why they're safe to co-batch>
