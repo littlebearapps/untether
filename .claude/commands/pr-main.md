@@ -106,6 +106,13 @@ Per `.claude/rules/help-faq.md`, scan the collapsed changelog against
 `docs/faq/faq.md`; update any user-visible surface answer that the release
 changes. (Edit/Write allowed; never `rm`/`mv`/`>` it — `help-faq-protect.sh` blocks that.)
 
+### M-4b. Shortcut ledger (optional — needs the ponytail plugin)
+
+If the `ponytail` plugin is installed (skip silently when absent), run
+`/ponytail-debt` and put its ledger under `## Shortcuts` in the PR body, so
+deferred `shortcut:` comments stay visible at each release. Advisory — never
+blocks. Rows tagged `no-trigger` are worth a follow-up issue.
+
 ### M-5. Confirm the attestation marker (advisory)
 
 Check that `/qa` wrote the marker for this version:
@@ -136,6 +143,9 @@ pyproject.toml → X.Y.Z · uv.lock synced
 ## Tests / attestation
 - validate_release.py — clean
 - attestation: integration-test-pass-X.Y.Z.json (head_sha=…, tiers=…, <ts>)
+
+## Shortcuts
+<`/ponytail-debt` ledger, or omit if M-4b skipped>
 
 ## Announcement
 <output of `python3 scripts/release_announcement.py render X.Y.Z` — posted to
