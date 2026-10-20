@@ -231,6 +231,7 @@
 
 ### tests
 
+- approval-registry snapshot test no longer flakes: it checked a request's age with `>= 5.0`, and `(at + 5.0) - at` can round to just under 5.0 for some clock values (seen in CI as `4.999999999999943`). It now compares with `pytest.approx`. Nothing in Untether changes [#1184](https://github.com/littlebearapps/untether/issues/1184)
 - Claude CLI drift test: every probe now matches minified names that contain `$`. Claude Code 2.1.302 renamed the aborted-turn check to `$D` and the command-hook spawner to `$H`, so one probe failed and the detached-hook probe was skipped. A new self-check stops a probe from using a bare `\w` name class again, and the probed version is now 2.1.302. Nothing in Untether changes [#1170](https://github.com/littlebearapps/untether/issues/1170)
 - drift suites re-probed: Antigravity `agy` 1.3.6 and 1.4.0 (same flags and `--mode` values, no stream or `/usage` changes; Untether's agy plugin passes `agy plugin validate --strict`) [#1160](https://github.com/littlebearapps/untether/issues/1160) and Claude Code CLI 2.1.301 (flag snapshot re-taken; hidden `--client-data-url` and `--permission-prompt-tool` are checked to still parse) [#1156](https://github.com/littlebearapps/untether/issues/1156)
 
