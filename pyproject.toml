@@ -14,7 +14,7 @@ dependencies = [
   "anyio>=4.14.2",  # GHSA-82r6-8w77-94w6, GHSA-5p39-cfhj-2xmp (#875)
   "httpx>=0.28.1,<1",  # #782: httpx 1.x drops AsyncClient
   "markdown-it-py[linkify]",
-  "msgspec>=0.20.0",
+  "msgspec>=0.22.0",
   "openai>=2.15.0",
   "pydantic>=2.12.5",
   "pydantic-settings>=2.12.0",
