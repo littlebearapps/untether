@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.36.1rc10"
+version = "0.36.1rc11"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "antigravity", "agy", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, Pi and Antigravity CLI to Telegram with interactive permissions, voice input, cost tracking, and live progress."
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -10,8 +10,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-  "aiohttp>=3.14.3",  # GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7 (#875)
+  "aiohttp>=3.14.4",  # GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7 (#875); 8 more (#1208)
   "anyio>=4.14.2",  # GHSA-82r6-8w77-94w6, GHSA-5p39-cfhj-2xmp (#875)
+  "certifi>=2026.10.18",  # PYSEC-2026-4320 via httpx (#1208)
   "httpx>=0.28.1,<1",  # #782: httpx 1.x drops AsyncClient
   "markdown-it-py[linkify]",
   "msgspec>=0.22.0",

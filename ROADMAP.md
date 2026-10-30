@@ -2,23 +2,9 @@
 
 This roadmap reflects the project's direction based on recent development and community feedback. It is not a commitment — priorities may shift as the ecosystem evolves. Website: [untether.cc](https://untether.cc).
 
-## Latest release — v0.36.0
+## Latest release — v0.36.1
 
-The stable release after 0.35.4 (its release candidates were numbered 0.35.5rc1–rc20, then 0.36.0rc1–rc5). It carries breaking changes, so read [Upgrading to v0.36.0](docs/how-to/update.md#upgrading-to-v0360) before upgrading; the [CHANGELOG](CHANGELOG.md) has the full list.
-
-- **Live Claude sessions** — a Claude session stays open after its reply while background tasks, subagents, `Monitor` or `ScheduleWakeup` keep working; their results arrive as their own messages with a live background-task status, and follow-ups can be queued or steered into the running session ([#776](https://github.com/littlebearapps/untether/issues/776), [#777](https://github.com/littlebearapps/untether/issues/777), [#775](https://github.com/littlebearapps/untether/issues/775))
-- **Context-window visibility** — Claude's context use in the status line (`62% ctx`) and 🗜️ compaction rows ([#819](https://github.com/littlebearapps/untether/issues/819))
-- **Claude Code's own `auto` mode** — Untether's old plan-auto-approve mode renamed `plan-auto` so Claude Code's classifier-gated `auto` mode is reachable, and `/planmode off` now asks before shell commands, web fetches and MCP tools ([#741](https://github.com/littlebearapps/untether/issues/741), [#749](https://github.com/littlebearapps/untether/issues/749))
-- **Loop mode owns Claude's schedules** — with Loop mode on, Untether fires `/loop` iterations itself within the `[loop]` caps; with it off, Claude can no longer schedule recurring tasks on its own ([#925](https://github.com/littlebearapps/untether/issues/925))
-- **Safer unattended, shared and sandboxed runs** — cron and webhook runs deny approvals instead of waiting, approval buttons only work in their own chat (optionally only for the person who started the run), `extra_args` refuses approval- and sandbox-bypass flags, and Codex safe mode is a real read-only sandbox ([#835](https://github.com/littlebearapps/untether/issues/835), [#388](https://github.com/littlebearapps/untether/issues/388), [#209](https://github.com/littlebearapps/untether/issues/209), [#830](https://github.com/littlebearapps/untether/issues/830))
-- **Stop at limit** — `[cost_budget] auto_cancel` pauses new runs once the daily budget is reached, and today's total survives restarts ([#896](https://github.com/littlebearapps/untether/issues/896), [#898](https://github.com/littlebearapps/untether/issues/898))
-- **Everyday polish** — reply and quote context passed to the agent ([#736](https://github.com/littlebearapps/untether/issues/736)), `/export` as a file ([#418](https://github.com/littlebearapps/untether/issues/418)), per-cron model and effort, a better voice vocabulary, and an outbox that only sends the current run's files
-- **OpenCode 2.x guard** — Untether supports the OpenCode 1.x CLI and refuses 2.x with a clear message instead of running it outside its process control ([#970](https://github.com/littlebearapps/untether/issues/970))
-- **Gemini CLI and Amp deprecated** — both stay included and still load, but are no longer supported: no fixes, excluded from testing, and they may be removed in a future release. See [deprecated engines](README.md#deprecated-engines) ([#720](https://github.com/littlebearapps/untether/issues/720), [#458](https://github.com/littlebearapps/untether/issues/458))
-
-## Next release — v0.36.1
-
-In release candidates on TestPyPI now. Most installs need no config change, but read [Upgrading to v0.36.1](docs/how-to/update.md#upgrading-to-v0361) first: in a group chat, changing settings now needs a group admin, and scheduled Antigravity runs can be held once after the upgrade.
+Most installs need no config change, but read [Upgrading to v0.36.1](docs/how-to/update.md#upgrading-to-v0361) first: in a group chat, changing settings now needs a group admin, and scheduled Antigravity runs can be held once after the upgrade.
 
 - **Antigravity CLI engine** — Google's [Antigravity CLI](https://antigravity.google) (`agy` 1.3.1 or newer), the successor to Gemini CLI, as its own `antigravity` engine, not a Gemini rename: progress, resume and `/continue`, model and effort, quota groups and AI credits in `/usage`, and background commands and subagents in the progress message ([#558](https://github.com/littlebearapps/untether/issues/558)). Read the [Google terms note](docs/how-to/switch-engines.md#antigravity-cli) before using a Google account sign-in
 - **Antigravity permission modes and Telegram buttons** — Workspace by default, Full access only when you pick it, **Plan first** with Approve Plan / Deny / Let's discuss, and, with Untether's agy plugin (`untether agy-gate install`), **Ask me** approval cards, option buttons for its questions and `/steer` into a running turn ([#980](https://github.com/littlebearapps/untether/issues/980), [#981](https://github.com/littlebearapps/untether/issues/981))
