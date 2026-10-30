@@ -99,7 +99,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-anyio>=0.0.0",
     "pytest-cov>=7.1.0",
-    "ruff>=0.14.10",
+    "ruff>=0.17.2",
     "ty>=0.0.86",
 ]
 docs = [
