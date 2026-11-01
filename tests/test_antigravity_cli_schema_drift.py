@@ -49,8 +49,9 @@ from untether.schemas import antigravity as agy_schema
 # 2026-10-16, with no drift here any time; 1.3.4 added the unknown-agent
 # refusal pinned below, 1.3.5 the ``auto`` mode, #1091; 1.3.6 changed no
 # flag, #1156; 1.4.0 neither, but its ``plugin validate`` now applies the
-# loader's own rules, pinned below, #1160).
-PROBED_CLI_VERSION = "1.4.0"
+# loader's own rules, pinned below, #1160; 1.4.10 on 2026-10-30, no flag or
+# stream change, only a "no logo" validate note, #1209).
+PROBED_CLI_VERSION = "1.4.10"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
@@ -215,8 +216,8 @@ def test_gate_plugin_passes_plugin_validate(tmp_path: Path) -> None:
     """``untether agy-gate install`` stages the plugin and refuses to install
     it unless ``agy plugin validate`` passes (R3-1). agy 1.4.0 made validate
     apply the loader's own rules and warn about unknown ``plugin.json``
-    fields and misplaced files, so pin that the staged gate has no finding
-    at all, ``--strict`` included (#1160). Local only: no network."""
+    fields and misplaced files, so pin that the staged gate has no warning
+    or error, ``--strict`` included (#1160, #1209). Local only: no network."""
     staged = tmp_path / gate_plugin.PLUGIN_NAME
     staged.mkdir()
     files = gate_plugin.template_files(gate_plugin.DEFAULT_WAIT_S)
@@ -236,7 +237,10 @@ def test_gate_plugin_passes_plugin_validate(tmp_path: Path) -> None:
     assert strict.returncode == 0, (strict.stdout + strict.stderr)[:500]
     report = json.loads(strict.stdout)
     assert report["name"] == gate_plugin.PLUGIN_NAME
-    assert report["findings"] == [], report["findings"]
+    # agy 1.4.9 adds a "no logo" note; the gate is never published, so only
+    # warnings and errors count (#1209).
+    findings = [f for f in report["findings"] if f.get("severity") != "note"]
+    assert findings == [], report["findings"]
     assert report["components"]["hooks"] == 1, report["components"]
 
 

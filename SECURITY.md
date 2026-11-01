@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---------|-----------|
-| Latest release on PyPI (currently 0.36.0) | Yes |
+| Latest release on PyPI (currently 0.36.1) | Yes |
 | Older releases | No |
 
 Only the latest published release receives security fixes. Please upgrade before reporting. Since v0.36.0, the 0.36.x line is the supported one and 0.35.x no longer receives fixes.
@@ -48,7 +48,7 @@ Include:
 
 ## Security improvements in v0.36.1
 
-v0.36.1 (published to TestPyPI as release candidates 0.36.1rcN) adds the Antigravity CLI engine with safe defaults and tightens group chats, triggers and error output. Upgrade notes: [Upgrading to v0.36.1](docs/how-to/update.md#upgrading-to-v0361).
+v0.36.1 adds the Antigravity CLI engine with safe defaults and tightens group chats, triggers and error output. Upgrade notes: [Upgrading to v0.36.1](docs/how-to/update.md#upgrading-to-v0361).
 
 - **Antigravity runs are safe by default** ([#558](https://github.com/littlebearapps/untether/issues/558), [#980](https://github.com/littlebearapps/untether/issues/980)). A chat runs in **Workspace** (agy's accept-edits mode, no shell, web or MCP tools; not a sandbox) unless you pick otherwise, and cron and webhook runs never inherit Full access or Ask me from the chat. **Ask me** passes agy's `--dangerously-skip-permissions` only after checking, before every run, that Untether's agy plugin is installed, unedited and loaded for the project, and refuses the run otherwise. Model ids and conversation ids are validated and always joined to their flag, prompts go to agy on stdin, and sign-in URLs, tokens and paths in agy's output are redacted. Read the [Google terms note](docs/how-to/switch-engines.md#antigravity-cli) before using a Google account sign-in.
 - **Untrusted agy config is flagged** ([#1043](https://github.com/littlebearapps/untether/issues/1043), [#1044](https://github.com/littlebearapps/untether/issues/1044)). Untether warns when a project carries agy hooks, plugins, agents or MCP servers it doesn't manage, holds scheduled runs after that config changes until someone sends a message in the chat, and holds a scheduled Workspace run when agy's tool-permission setting can't be confirmed. This is a tripwire, not isolation.

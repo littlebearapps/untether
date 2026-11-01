@@ -483,7 +483,7 @@ def test_snapshot_lists_responder_requests() -> None:
     assert set(by_id) == {"ag-1", "ag-q"}
     assert by_id["ag-1"].tool_name == "run_command"
     assert by_id["ag-1"].kind == "tool"
-    assert by_id["ag-1"].age_s >= 5.0
+    assert by_id["ag-1"].age_s == pytest.approx(5.0)  # (at + 5.0) - at rounds (#1184)
     assert by_id["ag-1"].input_details == "cmd=ls"
     assert by_id["ag-1"].writer_ok is True
     assert by_id["ag-q"].kind == "ask"
