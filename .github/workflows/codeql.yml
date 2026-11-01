@@ -18,6 +18,9 @@ concurrency:
 jobs:
   analyse:
     name: CodeQL (${{ matrix.language }})
+    # Dependabot PRs bump lock/manifest files only; scanning each one burned the
+    # org standard runner pool (auditor-toolkit #3739). Push + schedule still scan.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       security-events: write  # upload CodeQL results to security tab
