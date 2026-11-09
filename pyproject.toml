@@ -100,7 +100,7 @@ dev = [
     "pytest-anyio>=0.0.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.14.10",
-    "ty>=0.0.86",
+    "ty>=0.0.95",
 ]
 docs = [
     "mkdocstrings-python>=2.0.10",
