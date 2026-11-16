@@ -1,6 +1,6 @@
 # Untether — Gemini Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi and Antigravity CLI (engine id `antigravity`, never `gemini`) from your phone (Gemini CLI and Amp are deprecated) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 Website: https://untether.cc · Help centre (user docs, synced flat from `docs/` on `master`): `https://littlebearapps.com/help/untether/<file-stem>/`
 
@@ -14,7 +14,7 @@ Website: https://untether.cc · Help centre (user docs, synced flat from `docs/`
 ## Architecture
 
 ```
-Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
+Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/antigravity/gemini/amp)
                                        |
                                   ProgressTracker
 ```
@@ -44,6 +44,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
+- runners/antigravity.py — Antigravity CLI (`agy`) runner; argv values only via utils/antigravity_argv.py (`--flag=value`), agy text only via utils/antigravity_redact.py
+- antigravity/ — Untether's agy plugin gate (Ask me approvals, questions, steer)
 - runners/gemini.py — Gemini CLI runner (deprecated, unsupported — xfail/skip on sweeps, don't fix)
 - runners/amp.py — AMP CLI runner (deprecated, unsupported — xfail/skip on sweeps, don't fix)
 - runner_bridge.py — Runner-to-transport bridge

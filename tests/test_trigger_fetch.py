@@ -245,6 +245,23 @@ class TestFetchFileRead:
         assert "deny glob" in err
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "name", [".env.local", ".env.production", "server.key", "id_rsa", ".netrc"]
+    )
+    async def test_file_read_files_default_secrets_denied(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # #906: the cron ``file_read`` fetch uses the same deny list as
+        # ``[transports.telegram.files]``, not a narrower private copy.
+        target = tmp_path / name
+        target.write_text("SECRET=value")
+        fetch = _make_fetch(type="file_read", url=None, file_path=str(target))
+        ok, err, data = await execute_fetch(fetch)
+        assert ok is False
+        assert "deny glob" in err
+        assert data is None
+
+    @pytest.mark.anyio
     async def test_file_read_deep_git_denied(self, tmp_path: Path) -> None:
         # #831: ``.git/**`` used to deny only direct children of ``.git``.
         target = tmp_path / ".git" / "refs" / "heads" / "main"

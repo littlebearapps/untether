@@ -348,9 +348,14 @@ async def manage_subprocess(
     reap_orphans: bool = True,
     orphan_pid_snapshot: Sequence[int] | None = None,
     orphan_pid_starttimes: Mapping[int, int] | None = None,
+    log_teardown_exit: bool = False,
     **kwargs: Any,
 ) -> AsyncIterator[Process]:
     """Ensure subprocesses receive SIGTERM, then SIGKILL after a 10s timeout.
+
+    ``log_teardown_exit`` (#1062): log ``subprocess.exit`` (``reason=
+    "teardown"``) for a process this context stopped itself, for a caller
+    whose own exit line is skipped when its run is cancelled.
 
     ``reap_orphans`` (#590, ``[watchdog] reap_orphans``): after the leader
     has exited — including clean rc=0 — sweep surviving process-group
@@ -375,6 +380,14 @@ async def manage_subprocess(
                 if timed_out:
                     kill_process(proc)
                     await proc.wait()
+            if log_teardown_exit:
+                logger.info(
+                    "subprocess.exit",
+                    pid=proc.pid,
+                    rc=proc.returncode,
+                    reason="teardown",
+                    killed=timed_out,
+                )
         # #590: the leader is dead — reap group survivors (leaked MCP
         # children etc.) before releasing the transport.
         if reap_orphans:

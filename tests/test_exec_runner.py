@@ -1610,3 +1610,55 @@ def test_819_task_notification_system_frames_still_set_last_event_type() -> None
         }
     )
     assert stream.last_event_type == "system"
+
+
+# ── #975 (08 §6): the watchdog's background-wait probe ──────────────────────
+
+
+def test_background_pending_duck_types_engine_state() -> None:
+    from types import SimpleNamespace
+
+    from untether.runner import JsonlStreamState, _background_pending
+
+    stream = JsonlStreamState(expected_session=None)
+    assert _background_pending(stream) == 0  # no engine_state (every other engine)
+    stream.engine_state = SimpleNamespace()
+    assert _background_pending(stream) == 0  # a state without the probe
+    stream.engine_state = SimpleNamespace(
+        awaiting_background=lambda: True, background_count=lambda: 3
+    )
+    assert _background_pending(stream) == 3
+    stream.engine_state = SimpleNamespace(awaiting_background=lambda: True)
+    assert _background_pending(stream) == 1  # no count → at least one
+    stream.engine_state = SimpleNamespace(
+        awaiting_background=lambda: False, background_count=lambda: 3
+    )
+    assert _background_pending(stream) == 0  # past the cap: liveness resumes
+
+
+def test_background_pending_never_raises() -> None:
+    from types import SimpleNamespace
+
+    from untether.runner import JsonlStreamState, _background_pending
+
+    def boom() -> bool:
+        raise RuntimeError("probe broke")
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = SimpleNamespace(awaiting_background=boom)
+    assert _background_pending(stream) == 0
+    stream.engine_state = SimpleNamespace(
+        awaiting_background=lambda: True, background_count=boom
+    )
+    assert _background_pending(stream) == 1
+
+
+def test_background_pending_false_for_claude_state() -> None:
+    """Claude's state has no ``awaiting_background``: its watchdog path is
+    untouched."""
+    from untether.runner import JsonlStreamState, _background_pending
+    from untether.runners.claude import ClaudeStreamState
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = ClaudeStreamState()
+    assert _background_pending(stream) == 0

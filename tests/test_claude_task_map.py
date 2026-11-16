@@ -398,6 +398,67 @@ def test_task_registered_and_ended_logs_emitted() -> None:
     assert ended[0]["reason"] == "task_notification"
 
 
+def _registered(logs: list) -> list:
+    return [e for e in logs if e["event"] == "claude.task.registered"]
+
+
+def test_1003_snapshot_then_task_started_registers_once() -> None:
+    """#1003: the snapshot placeholder and the task_started that describes
+    it are one task (same native ``task_id``) — one registration line."""
+    state = ClaudeStreamState()
+    with capture_logs() as logs:
+        _feed(state, _snapshot(("a1", "local_agent", "Research the thing")))
+        _feed(state, _started_agent("a1", "toolu_a"))
+    registered = _registered(logs)
+    assert len(registered) == 1
+    assert registered[0]["task_id"] == "a1"
+    assert registered[0]["source"] == "snapshot"
+    # The upgrade from placeholder to described task is logged under its own
+    # name, with what the snapshot entry could not say.
+    confirmed = [e for e in logs if e["event"] == "claude.task.confirmed"]
+    assert len(confirmed) == 1
+    assert confirmed[0]["task_id"] == "a1"
+    assert confirmed[0]["subagent_type"] == "general-purpose"
+    assert confirmed[0]["tool_use_id"] == "toolu_a"
+    assert len(state.tasks) == 1
+
+
+def test_1003_task_started_then_snapshot_registers_once() -> None:
+    state = ClaudeStreamState()
+    with capture_logs() as logs:
+        _feed(state, _started_agent("a1", "toolu_a"))
+        _feed(state, _snapshot(("a1", "local_agent", "Research the thing")))
+    registered = _registered(logs)
+    assert len(registered) == 1
+    assert registered[0]["source"] == "task_started"
+    assert not [e for e in logs if e["event"] == "claude.task.confirmed"]
+
+
+def test_1003_two_tasks_register_twice() -> None:
+    state = ClaudeStreamState()
+    with capture_logs() as logs:
+        _feed(
+            state,
+            _snapshot(("a1", "local_agent", "Research"), ("b1", "local_bash", "sleep")),
+        )
+        _feed(state, _started_agent("a1", "toolu_a"))
+        _feed(state, _started_bash("b1", "toolu_b"))
+    assert sorted(e["task_id"] for e in _registered(logs)) == ["a1", "b1"]
+
+
+def test_1003_resumed_task_logs_revived_not_registered_again() -> None:
+    """A resumed agent reuses its task_id (#801): ``claude.task.revived``
+    is its line, not a second registration."""
+    state = ClaudeStreamState()
+    with capture_logs() as logs:
+        _feed(state, _started_agent("a1", "toolu_a"))
+        _feed(state, _notification("a1", "toolu_a", "completed"))
+        _feed(state, _started_agent("a1", "toolu_a2"))
+    assert len(_registered(logs)) == 1
+    assert sum(1 for e in logs if e["event"] == "claude.task.revived") == 1
+    assert not [e for e in logs if e["event"] == "claude.task.confirmed"]
+
+
 def test_task_ended_logged_once_for_updated_then_notification() -> None:
     state = ClaudeStreamState()
     with capture_logs() as logs:

@@ -82,7 +82,7 @@ This means `systemctl --user stop untether` (Linux) also drains gracefully, as s
 Untether persists the last Telegram `update_id` to `last_update_id.json` in the config directory. On startup, polling resumes from the saved offset — no messages are dropped or re-processed within Telegram's 24-hour retention window. Pending `/at` delays are cancelled during drain and not persisted (they are lost on restart).
 
 !!! note "Drain timeout"
-    The default drain timeout is 120 seconds. If active runs don't complete within this window, they are cancelled and each affected chat or topic gets `⚠️ Restart timed out — N run(s) interrupted.` with a hint that the session is saved and can be resumed.
+    The default drain timeout is 120 seconds. If active runs don't complete within this window, they are cancelled and each affected chat or topic gets `⚠️ Restart timed out — N run(s) interrupted.` with a hint that the session is saved and can be resumed by sending a new message or starting that chat's engine (for example `/codex`).
 
 ## Orphan progress cleanup
 
@@ -93,7 +93,7 @@ Untether automatically handles this: active progress messages are tracked in `ac
 !!! untether "Untether"
     ⚠️ interrupted by restart
 
-This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.36.0 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)).
+This replaces the stale progress text and removes any inline keyboards (approval buttons), so there's no confusion about which messages are from the current session. Since v0.36.0 only runs that were genuinely in flight get this label; a run that had already been cancelled or had failed keeps its final message ([#810](https://github.com/littlebearapps/untether/issues/810)). Since v0.36.1, if the message was waiting on an approval, its "Action required — approval needed" push is deleted too, so it doesn't point at a message with no buttons left ([#1084](https://github.com/littlebearapps/untether/issues/1084)).
 
 The cleanup happens before the startup message is sent, so by the time you see "Untether started", all orphan messages are already resolved.
 
@@ -122,7 +122,7 @@ systemctl --user enable --now untether
 
 The service doesn't read your shell rc or direnv `.envrc`. Put variables that engines and their MCP wrapper scripts need (for example `BWS_ACCESS_TOKEN`) in `~/.untether/.env`, one `KEY=value` per line; the unit loads it with `EnvironmentFile=`. A wrapper script under `set -u` that references an unset variable kills its MCP server at session start, so guard references as described in [MCP wrapper scripts under `set -u`](../reference/env-vars.md#mcp-wrapper-set-u) ([#454](https://github.com/littlebearapps/untether/issues/454)).
 
-See the [dev instance reference](../reference/dev-instance.md) for full service file documentation.
+To run a second, development instance next to it, see the [two-instance model](dev-setup.md#two-instance-model) in Dev setup.
 
 ## Auto-continue (Claude Code)
 
@@ -158,8 +158,6 @@ This validates:
 - Voice transcription has an API key
 
 It doesn't check engine CLIs; the startup message lists engines that are `not installed`, `misconfigured` or `failed to load`. `untether doctor` exits with status 1 if any check reports an error.
-
-It doesn't check engine CLIs or deny globs: the startup message lists engines that are missing, misconfigured or failed to load.
 
 Run this after any config change, after upgrading, or when something isn't working.
 
@@ -201,7 +199,7 @@ When enabled, Untether watches the config file for changes and reloads most sett
 
 **Hot-reloadable** (applied immediately):
 
-- Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`, need a restart)
+- Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`/`max_body_bytes`, need a restart; `exposed` and `trusted_proxy_header` hot-reload)
 - Telegram bridge: `voice_transcription`, `[files]` (the `outbox_*` settings apply from the next delivery, [#924](https://github.com/littlebearapps/untether/issues/924); turning outbox delivery on when it was off at startup still needs a restart), `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
 - `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `heartbeat_interval`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481), [#777](https://github.com/littlebearapps/untether/issues/777), [#819](https://github.com/littlebearapps/untether/issues/819)); `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of an open Claude session ([#863](https://github.com/littlebearapps/untether/issues/863))
@@ -224,7 +222,9 @@ Untether re-reads `untether.toml` only when its contents (or the `UNTETHER__*` e
 - the top-level `transport`
 - `watch_config` itself (the watcher starts with the process)
 
-When a reload touches a restart-only key, Untether posts a `⚠️ Restart required` notice naming the keys. The notice names the service that is actually running — for example `systemctl --user restart untether-dev`, or `launchctl kickstart -k gui/<uid>/<label>` on macOS — or falls back to generic wording when it can't detect one, and suggests `/restart` as an alternative ([#927](https://github.com/littlebearapps/untether/issues/927)).
+A reload that changes a `[transports.telegram]` key is confirmed in Telegram with a silent `♻️ Hot-reloaded … No restart needed` notice. It goes to the `allowed_user_ids` admin DMs (the main `chat_id` when there are none) and to any chat with a run in progress, in that run's topic, so an agent that edited the config sees it. Idle project chats are left alone ([#1030](https://github.com/littlebearapps/untether/issues/1030)).
+
+When a reload touches a restart-only key, Untether posts one `⚠️ Restart required` notice naming the keys to every project chat and admin DM. The notice names the service that is actually running — for example `systemctl --user restart untether-dev`, or `launchctl kickstart -k gui/<uid>/<label>` on macOS — or falls back to generic wording when it can't detect one, and suggests `/restart` as an alternative ([#927](https://github.com/littlebearapps/untether/issues/927)).
 
 ## Process management
 

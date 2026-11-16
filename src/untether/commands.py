@@ -125,10 +125,28 @@ class CommandResult:
 
 @runtime_checkable
 class CommandBackend(Protocol):
+    """A slash-command / button-callback plugin.
+
+    Optional attributes, read with ``getattr`` (so older plugins keep
+    working):
+
+    - ``callback_only: bool`` — the backend only answers inline-button taps
+      (its callback data is ``<id>:…``). It is left out of the bot's command
+      menu, and a typed ``/<id>`` gets a short harmless reply without
+      reaching ``handle`` (#1068).
+    - ``answer_early: bool`` + ``early_answer_toast(...)`` — answer the
+      button tap before ``handle`` runs (#247).
+    """
+
     id: str
     description: str
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None: ...
+
+
+def is_callback_only(backend: object) -> bool:
+    """#1068: True for a backend that only answers button taps."""
+    return getattr(backend, "callback_only", False) is True
 
 
 def _validate_command_backend(backend: object, ep) -> None:

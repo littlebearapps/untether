@@ -147,3 +147,38 @@ class TestMissingSecret:
             prompt_template="Fail",
         )
         assert verify_auth(wh, {"authorization": "Bearer x"}, b"") is False
+
+
+class TestNonAsciiCredentials:
+    """#906: ``hmac.compare_digest(str, str)`` raises ``TypeError`` on
+    non-ASCII input, which surfaced as a 500. A bad credential is a plain
+    ``False`` (401), whatever bytes it holds."""
+
+    def test_non_ascii_bearer_token_is_rejected(self):
+        wh = _make_webhook(auth="bearer", secret="tok_123")
+        headers = {"authorization": "Bearer t\u00f6k_123"}
+        assert verify_auth(wh, headers, b"") is False
+
+    def test_surrogate_bearer_token_is_rejected(self):
+        # aiohttp decodes header bytes with ``surrogateescape``, so invalid
+        # UTF-8 arrives as lone surrogates.
+        wh = _make_webhook(auth="bearer", secret="tok_123")
+        headers = {"authorization": "Bearer tok\udcff123"}
+        assert verify_auth(wh, headers, b"") is False
+
+    def test_non_ascii_secret_matches_itself(self):
+        wh = _make_webhook(auth="bearer", secret="s\u00e9cret-\u2603")
+        assert (
+            verify_auth(wh, {"authorization": "Bearer s\u00e9cret-\u2603"}, b"") is True
+        )
+        assert verify_auth(wh, {"authorization": "Bearer secret"}, b"") is False
+
+    def test_non_ascii_hmac_signature_is_rejected(self):
+        wh = _make_webhook(auth="hmac-sha256", secret="test_secret")
+        headers = {"x-hub-signature-256": "sha256=d\u00e9adbeef"}
+        assert verify_auth(wh, headers, b"{}") is False
+
+    def test_non_ascii_hmac_sha1_signature_is_rejected(self):
+        wh = _make_webhook(auth="hmac-sha1", secret="test_secret")
+        headers = {"x-hub-signature": "sha1=\u2603"}
+        assert verify_auth(wh, headers, b"{}") is False

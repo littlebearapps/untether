@@ -25,7 +25,7 @@
 
 ---
 
-Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai) and [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
+Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine (or server) and connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) and [Antigravity CLI](https://antigravity.google) to a Telegram bot. Send a task from your phone, watch the agent work in real time, tap a button when it needs permission, and read the result when it's done — no desk, no SSH, no screen sharing. The agent keeps running if you close Telegram or lose signal.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/littlebearapps/untether/master/docs/assets/screenshots/hero-collage.jpg" alt="Send tasks by voice, approve plans remotely, and get reports back from background agents and CI" width="100%" />
@@ -36,7 +36,7 @@ Your AI coding agents need a terminal, but you don't need to sit at one. Untethe
 
 ## ⚡ Quick start
 
-You need **Python 3.12+**, [uv](https://docs.astral.sh/uv/) (or pipx), and at least one agent CLI on your `PATH` (`claude`, `codex`, `opencode` or `pi`).
+You need **Python 3.12+**, [uv](https://docs.astral.sh/uv/) (or pipx), and at least one agent CLI on your `PATH` (`claude`, `codex`, `opencode`, `pi` or `agy`).
 
 ```sh
 uv tool install untether        # recommended
@@ -52,15 +52,15 @@ The wizard creates your Telegram bot (or takes an existing token), picks a [work
 
 Step-by-step: [Install and onboard](https://littlebearapps.com/help/untether/install/) → [First run](https://littlebearapps.com/help/untether/first-run/). Update with `uv tool upgrade untether` (or `pipx upgrade untether`), then send `/restart` from Telegram — see [Update Untether](https://littlebearapps.com/help/untether/update/).
 
-> **Upgrading from 0.35.x?** v0.36.0 has breaking changes (the `auto` permission mode is now `plan-auto`, unattended crons deny approvals, Codex safe mode is a real read-only sandbox, and more). Read [Upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) first.
+> **Upgrading from 0.35.x?** v0.36.0 has breaking changes (the `auto` permission mode is now `plan-auto`, unattended crons deny approvals, Codex safe mode is a real read-only sandbox, and more). Read [Upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) first. Moving to v0.36.1? In a group, changing settings now needs a group admin, and scheduled Antigravity runs can be held once after the upgrade — see [Upgrading to v0.36.1](https://littlebearapps.com/help/untether/update/#upgrading-to-v0361).
 
 ---
 
 ## 🎯 What you get
 
 - 📡 **Live progress** — tool calls, file changes and elapsed time stream into one message as the agent works ([verbose progress](https://littlebearapps.com/help/untether/verbose-progress/))
-- 🔐 **Approvals from your phone (Claude)** — approve tool calls, plans and clarifying questions with inline buttons; four permission modes via `/planmode` ([interactive approval](https://littlebearapps.com/help/untether/interactive-approval/), [plan mode](https://littlebearapps.com/help/untether/plan-mode/))
-- ↪️ **Live sessions and steering (Claude)** — background tasks stay visible, and `/steer` sends a follow-up into the running session ([steer follow-ups](https://littlebearapps.com/help/untether/steer-follow-ups/))
+- 🔐 **Approvals from your phone (Claude, Antigravity)** — approve tool calls, plans and clarifying questions with inline buttons; four permission modes via `/planmode` for Claude, and Workspace / Plan first / Ask me / Full access for Antigravity ([interactive approval](https://littlebearapps.com/help/untether/interactive-approval/), [plan mode](https://littlebearapps.com/help/untether/plan-mode/))
+- ↪️ **Live sessions and steering (Claude, Antigravity)** — background tasks stay visible, and `/steer` sends a follow-up into the running turn (Antigravity needs Untether's agy plugin for steering); Claude keeps its session live between turns ([steer follow-ups](https://littlebearapps.com/help/untether/steer-follow-ups/))
 - 🎙️ **Voice notes** — dictate tasks; transcribed by any Whisper-compatible endpoint ([voice notes](https://littlebearapps.com/help/untether/voice-notes/))
 - 📁 **Projects, branches and worktrees** — `/myproject @feat/thing` targets a repo and branch, with parallel runs in isolated worktrees ([projects](https://littlebearapps.com/help/untether/projects/), [worktrees](https://littlebearapps.com/help/untether/worktrees/))
 - 💬 **Three workflow modes** — ongoing chat, forum topics per project, or reply-to-continue handoff ([choose a mode](https://littlebearapps.com/help/untether/choose-a-mode/))
@@ -77,39 +77,42 @@ Every command is listed in the [commands reference](https://littlebearapps.com/h
 
 | Engine | Install | Good at |
 |--------|---------|---------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context — and all interactive features |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context — and the fullest set of interactive features |
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@1` | 75+ providers via Models.dev, local models (**1.x only** — 2.x is refused before it starts) |
 | [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
+| [Antigravity CLI](https://antigravity.google)⁴ | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | Google's Gemini models, per-model effort, quota groups and credits in `/usage` (agy 1.3.1+) |
 
-Use your existing Claude or ChatGPT subscription — no extra API keys needed unless you want API billing. Switch engines per message (`/codex …`) or per chat (`/agent set claude`) — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/).
+Use your existing Claude or ChatGPT subscription — no extra API keys needed unless you want API billing (for Antigravity CLI we recommend a Gemini API key; see the note below). Switch engines per message (`/codex …`) or per chat (`/agent set claude`) — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/).
 
 ### Engine compatibility
 
-| Feature | Claude Code | Codex | OpenCode | Pi |
-|---------|:-----------:|:-----:|:--------:|:--:|
-| Progress streaming, resume, voice input, model override | ✅ | ✅ | ✅ | ✅ |
-| Terminal resume (`/continue`) | ✅ | ✅ | ✅ | ✅² |
-| Cost tracking | ✅ | ~¹ | ✅ | ~¹ |
-| Reasoning / effort levels | ✅ | ✅ | — | — |
-| Pre-run approval policy (`/config`) | ✅ | ✅ | — | — |
-| Interactive approvals, plan mode, ask mode, diff preview | ✅ | — | —³ | — |
-| Live sessions, background tasks, `/steer` | ✅ | — | — | — |
-| Context % in status line, subscription usage | ✅ | — | — | — |
-| Context compaction shown | ✅ | — | — | ✅ |
-| Device re-auth (`/auth codex`) | — | ✅ | — | — |
+| Feature | Claude Code | Codex | OpenCode | Pi | Antigravity⁴ |
+|---------|:-----------:|:-----:|:--------:|:--:|:-:|
+| Progress streaming, resume, voice input, model override | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Terminal resume (`/continue`) | ✅ | ✅ | ✅ | ✅² | ✅ |
+| Cost tracking | ✅ | ~¹ | ✅ | ~¹ | ~¹ |
+| Reasoning / effort levels | ✅ | ✅ | — | — | ✅⁵ |
+| Pre-run approval policy (`/config`) | ✅ | ✅ | — | — | ✅⁴ |
+| Interactive approvals, plan mode, ask mode, diff preview | ✅ | — | —³ | — | ✅⁴ |
+| Live sessions, background tasks, `/steer` | ✅ | — | — | — | ~⁷ |
+| Context % in status line, subscription usage | ✅ | — | — | — | ~⁶ |
+| Context compaction shown | ✅ | — | — | ✅ | ~⁸ |
+| Device re-auth (`/auth codex`) | — | ✅ | — | — | — |
 
-¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use.
+¹ Token counts only, no USD cost. ² Pi needs `provider = "openai-codex"` for OAuth subscriptions in headless mode. ³ `opencode run` rejects tools your OpenCode rules set to `ask` — set them to `allow` for unattended use. ⁴ Antigravity runs with a pre-run permission mode: **Workspace** (default — reads and edits files in the project; no shell, web or MCP tools, so no commands and no deleting or renaming files; not a sandbox), **Plan first** (a plan card with Approve / Deny / Let's discuss), **Ask me** (Approve / Deny cards with a command or diff preview; needs Untether's agy plugin, `untether agy-gate install`) or **Full access**. With the plugin installed, agy's questions also get option buttons in any mode. **After switching a chat between Workspace or Plan first and Ask me or Full access, send `/new`** — agy keeps a conversation on the tools it started with. Guide: [Use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/). ⁵ The levels offered depend on the model. ⁶ `/usage` shows agy's quota groups and AI credits, and an optional quota line can follow each answer (built from your last `/usage`). Context % is an estimate (`~N% ctx`), shown only when the chat has a model set. ⁷ Background commands, timers and subagents are listed in the `⏳ background` block while a run is going; `/steer` reaches a running turn when the agy plugin is installed; no live sessions (each message starts agy afresh). ⁸ `/compact` runs agy's own compaction (agy 1.3.5 or newer) and is confirmed as `🗜️ Context compacted (manual)`, with no token figure; agy's automatic compaction isn't reported.
+
+> ⚠️ **Antigravity and Google account sign-ins.** Google's [Antigravity terms](https://antigravity.google/terms) say that using third-party software to access the service with an Antigravity sign-in is a breach that may lead to suspension of your Antigravity and/or Gemini CLI accounts. Untether runs Google's own `agy` binary and never reads your Google credentials, but it is still third-party software driving the CLI. **We recommend a Gemini API key or an Enterprise sign-in** — see [switch engines](https://littlebearapps.com/help/untether/switch-engines/#antigravity-cli). If you use a Google account sign-in anyway, you accept that risk for that account.
 
 ### Deprecated engines
 
-[Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Amp](https://ampcode.com) still ship and load, but are **deprecated and no longer supported** — no testing, no bug fixes, and they may be removed in a future release. Google retired Gemini CLI for individual accounts on 18 June 2026; its successor, Antigravity CLI, arrives as its own engine in v0.36.1. Amp remotely refuses clients it considers out of date, so a working setup can stop without notice. Details: [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/#why-does-my-gemini-run-stall-or-my-amp-run-fail-immediately).
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Amp](https://ampcode.com) still ship and load, but are **deprecated and no longer supported** — no testing, no bug fixes, and they may be removed in a future release. Google retired Gemini CLI for individual accounts on 18 June 2026; its successor, Antigravity CLI, is supported as its own `antigravity` engine (above). Amp remotely refuses clients it considers out of date, so a working setup can stop without notice. Details: [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/#why-does-my-gemini-run-stall-or-my-amp-run-fail-immediately).
 
 ---
 
 ## 🔒 Privacy and security
 
-Untether runs entirely on your machine: no telemetry, no analytics, no phone-home, no auto-updates. Its own outbound calls are the Telegram Bot API, Anthropic's subscription-usage endpoint for Claude (using Claude Code's existing login) and, only if you enable it, a voice-transcription endpoint; agent CLIs call their own vendors' APIs. Config lives in `~/.untether/untether.toml` — it holds your bot token, so never commit it. Lock the bot to your Telegram user ID and read [security hardening](https://littlebearapps.com/help/untether/security/) and [where your data goes](https://littlebearapps.com/help/untether/faq/#where-does-my-code-and-data-go).
+Untether runs entirely on your machine: no telemetry, no analytics, no phone-home, no auto-updates. Its own outbound calls are the Telegram Bot API, Anthropic's subscription-usage endpoint for Claude (using Claude Code's existing login, only for `/usage` and the opt-in usage footer) and, only if you enable it, a voice-transcription endpoint; agent CLIs call their own vendors' APIs. Config lives in `~/.untether/untether.toml` — it holds your bot token, so never commit it. Lock the bot to your Telegram user ID and read [security hardening](https://littlebearapps.com/help/untether/security/) and [where your data goes](https://littlebearapps.com/help/untether/faq/#where-does-my-code-and-data-go).
 
 ---
 
@@ -118,9 +121,9 @@ Untether runs entirely on your machine: no telemetry, no analytics, no phone-hom
 Full docs live in the [help centre](https://littlebearapps.com/help/untether/) (mirrored from [`docs/`](https://github.com/littlebearapps/untether/tree/master/docs)).
 
 - **Tutorials** — [install](https://littlebearapps.com/help/untether/install/), [first run](https://littlebearapps.com/help/untether/first-run/), [conversation modes](https://littlebearapps.com/help/untether/conversation-modes/), [projects and branches](https://littlebearapps.com/help/untether/projects-and-branches/), [multi-engine workflows](https://littlebearapps.com/help/untether/multi-engine/)
-- **How-to guides** — [all guides](https://github.com/littlebearapps/untether/tree/master/docs/how-to), including [group chats](https://littlebearapps.com/help/untether/group-chat/), [forum topics](https://littlebearapps.com/help/untether/topics/), [model and reasoning](https://littlebearapps.com/help/untether/model-reasoning/), [session export](https://littlebearapps.com/help/untether/export-sessions/) and [uninstall](https://littlebearapps.com/help/untether/uninstall/)
+- **How-to guides** — [all guides](https://github.com/littlebearapps/untether/tree/master/docs/how-to), including [switch engines](https://littlebearapps.com/help/untether/switch-engines/), [use Antigravity CLI](https://littlebearapps.com/help/untether/antigravity/), [group chats](https://littlebearapps.com/help/untether/group-chat/), [forum topics](https://littlebearapps.com/help/untether/topics/), [model and reasoning](https://littlebearapps.com/help/untether/model-reasoning/), [session export](https://littlebearapps.com/help/untether/export-sessions/) and [uninstall](https://littlebearapps.com/help/untether/uninstall/)
 - **Reference** — [configuration](https://littlebearapps.com/help/untether/config/), [commands](https://littlebearapps.com/help/untether/commands-and-directives/), [engine runners](https://github.com/littlebearapps/untether/tree/master/docs/reference/runners), [architecture](https://littlebearapps.com/help/untether/architecture/)
-- **Help** — [FAQ](https://littlebearapps.com/help/untether/faq/), [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/), [changelog](https://littlebearapps.com/help/untether/changelog/), [upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360)
+- **Help** — [FAQ](https://littlebearapps.com/help/untether/faq/), [troubleshooting](https://littlebearapps.com/help/untether/troubleshooting/), [changelog](https://littlebearapps.com/help/untether/changelog/), [upgrading to v0.36.0](https://littlebearapps.com/help/untether/update/#upgrading-to-v0360) and [v0.36.1](https://littlebearapps.com/help/untether/update/#upgrading-to-v0361)
 
 ---
 

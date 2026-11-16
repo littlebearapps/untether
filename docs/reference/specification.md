@@ -1,10 +1,10 @@
-# Untether Specification v0.36.0 [2026-10-08]
+# Untether Specification v0.36.1 [unreleased]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.36.0 specifies:
+Untether v0.36.1 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -23,7 +23,7 @@ Out of scope:
 
 ## 2. Terminology
 
-- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`; the deprecated `"gemini"` and `"amp"` still load but are deprecated and no longer supported, and may be removed in a future release).
+- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`, `"antigravity"`; the deprecated `"gemini"` and `"amp"` still load but are deprecated and no longer supported, and may be removed in a future release).
 - **Runner**: Untether adapter that executes an engine process and yields **Untether events**.
 - **Thread**: a single engine-side conversation, identified in Untether by a **ResumeToken**.
 - **ResumeToken**: Untether-owned thread identifier `{ engine: EngineId, value: str }`.
@@ -45,6 +45,7 @@ The canonical ResumeLine embedded in chat MUST be the engine’s CLI resume comm
 - `claude --resume <id>`
 - `opencode --session <id>`
 - `pi --session <token>`
+- `agy --conversation <id>` (Antigravity CLI)
 - `gemini --resume <id>` (deprecated engine)
 - `amp threads continue <id>` (deprecated engine)
 
@@ -131,7 +132,7 @@ Required:
 Optional:
 
 * `title: str`
-* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude Code also populates `meta.permissionMode` (plus `cwd`, `tools`, `mcp_servers` and similar `system/init` fields), and `meta.effort` when a reasoning level is set. The bridge MAY add `meta.trigger` (cron/webhook provenance) and `meta.complete` (the `✓ turn complete` marker). `model`, `effort`, `permissionMode`, `trigger` and `complete` feed the `🏷` footer line on final messages.
+* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude Code also populates `meta.permissionMode` (plus `cwd`, `tools`, `mcp_servers` and similar `system/init` fields), and `meta.effort` when a reasoning level is set. Antigravity populates `meta.permissionMode` (`workspace`, `plan first`, `ask me` or `full access`) and `meta.effort`; Codex sets `meta.permissionMode` only in safe mode, and the deprecated Gemini runner sets its approval tier. The bridge MAY add `meta.trigger` (cron/webhook provenance) and `meta.complete` (the `✓ turn complete` marker). `model`, `effort`, `permissionMode`, `trigger` and `complete` feed the `🏷` footer line on final messages.
 
 #### 4.3.2 `action`
 
@@ -333,11 +334,12 @@ Required behaviour:
 Runs that start as new threads:
 
 * If a job starts with `resume=None` and later yields `started(resume=token)`, the bridge MUST treat that run as the in-flight job for `ThreadKey(token)` until it completes (for scheduling and cancellation routing).
+* While such a run has not yet yielded `started`, a job for the same saved-session scope and engine MUST NOT start a second thread: it MUST wait until the run's token is known (then enqueue behind `ThreadKey(token)`) or the run ends without one (then start the thread itself). A command that cancels the starting run (`/cancel`, `/new`) MUST drop the jobs waiting on it and tell the sender; it MUST NOT let them start a thread nobody saw queued ([#1157](https://github.com/littlebearapps/untether/issues/1157)). Stateless chats (no saved session) are exempt: every message is its own thread.
 
 Live sessions:
 
 * While a live-session run is in flight, the bridge MAY deliver queued jobs for the same ThreadKey into the live engine process as follow-up turns instead of waiting for the run to end ([#776](https://github.com/littlebearapps/untether/issues/776)). A job taken off the queue MUST be either delivered or put back at the head of the queue — never lost or run twice. The engine process serialises the turns, so the one-active-run invariant (§5.2) still holds.
-* Follow-up mode ([#775](https://github.com/littlebearapps/untether/issues/775)) decides what a message sent mid-run does: `queue` (default) waits for the running turn to end; `steer` writes it into the running session at once. Steering is Claude Code-only; other engines fall back to `queue`.
+* Follow-up mode ([#775](https://github.com/littlebearapps/untether/issues/775)) decides what a message sent mid-run does: `queue` (default) waits for the running turn to end; `steer` writes it into the running session at once. Steering works on Claude Code, and on Antigravity CLI with Untether's agy plugin ([#981](https://github.com/littlebearapps/untether/issues/981)); other engines fall back to `queue`.
 
 ### 6.3 Progress message behaviour
 
@@ -550,6 +552,11 @@ When `outbox_cleanup` is `true` (default), the bridge SHOULD delete delivered fi
 The bridge SHOULD deliver only entries that entered or changed in the outbox during the run (the later of the entry's modification and status-change times, against the run's start with a small grace). Older entries SHOULD NOT be sent; they SHOULD be quarantined once and reported in a single notice. A live session's run starts when the session started.
 
 ## 13. Changelog
+
+### v0.36.1 (unreleased)
+
+- Add `antigravity` (Antigravity CLI) to the EngineIds (§2) with its `agy --conversation <id>` resume line (§3.1); steering works on Antigravity with Untether's agy plugin (§6.2); Antigravity's `started` carries `meta.permissionMode` and `meta.effort` (§4.3.1).
+- A job for a saved-session scope whose first run hasn't reported its token yet waits for that token instead of starting a parallel thread; cancelling the starting run drops the waiting jobs (§6.2, [#1157](https://github.com/littlebearapps/untether/issues/1157)).
 
 ### v0.36.0 (2026-10-08)
 

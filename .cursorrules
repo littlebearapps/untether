@@ -1,6 +1,6 @@
 # Untether — Cursor Rules
 
-Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi; Gemini CLI and Amp are deprecated and no longer supported — still included, may be removed in a future release). Lets users control agents from their phone or any device — agents run on the user's machine while they're away from the terminal.
+Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi, Antigravity CLI — engine id `antigravity`, never `gemini`; Gemini CLI and Amp are deprecated and no longer supported — still included, may be removed in a future release). Lets users control agents from their phone or any device — agents run on the user's machine while they're away from the terminal.
 
 ## Stack & conventions
 

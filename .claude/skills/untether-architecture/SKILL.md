@@ -17,7 +17,7 @@ triggers:
 
 # Untether Architecture
 
-Telegram bridge for agent CLIs (Claude Code, Codex, OpenCode, Pi). Control coding agents from anywhere.
+Telegram bridge for agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI). Control coding agents from anywhere.
 
 ## Data flow
 
@@ -200,6 +200,7 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+antigravity = "untether.runners.antigravity:BACKEND"
 gemini = "untether.runners.gemini:BACKEND"  # deprecated, unsupported
 amp = "untether.runners.amp:BACKEND"        # deprecated, unsupported
 ```
@@ -224,9 +225,10 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | File | Commands |
 |------|----------|
 | `dispatch.py` | Callback dispatch, early answering, ephemeral registration |
-| `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring |
+| `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring; `IaControlCommand` (`ia:`) answers engine-neutral cards (#960), e.g. Antigravity's Ask me approvals incl. `always` |
+| `antigravity_plan.py` | Antigravity Plan first card: Approve Plan / Deny / Let's discuss (`agy_plan:<action>:<id>`, #981) |
 | `planmode.py` | `/planmode` toggle |
-| `usage.py` | `/usage` — Claude subscription quota; token totals for other engines (#417) |
+| `usage.py` | `/usage` — Claude subscription quota; Antigravity quota groups + AI credits (#979); token totals for other engines (#417) |
 | `model.py` | `/model` override |
 | `reasoning.py` | `/reasoning` override |
 | `listen.py` | `/listen` (formerly `/trigger`, still accepted) — all-messages vs mentions-only |
@@ -254,8 +256,9 @@ Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
 - `claude_control:deny:<request_id>` — deny control request
 - `claude_control:discuss:<request_id>` — pause & outline plan
 - `claude_control:chat:<request_id>` — let's discuss (holds the request open)
+- `ia:<approve|deny|always>:<request_id>` — engine-neutral approval card (Antigravity's agy gate)
 - synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>` / `aq:other`
-- opt-in `[transports.telegram] approval_originator_only` (#388): `claude_control:` / `aq:` taps (and typed AskUserQuestion answers) are accepted only from the user whose message started the run; cron / webhook / `/at` / loop runs have no originator, so any allowed user may answer
+- opt-in `[transports.telegram] approval_originator_only` (#388): `claude_control:` / `ia:` / `aq:` / `agy_plan:` taps (and typed AskUserQuestion answers) are accepted only from the user whose message started the run; cron / webhook / `/at` / loop runs have no originator, so any allowed user may answer
 
 ## Running tasks
 
@@ -310,7 +313,9 @@ Both crons and webhooks feed into `TriggerDispatcher.dispatch_cron()`/`dispatch_
 
 - Cron/webhook runs are **unattended** (`RunContext.trigger_source`): a Claude approval, plan approval or question is
   denied at once (`permission.unattended_deny`, #835) — they need an explicit autonomous `permission_mode`
-  (`plan-auto`, `auto`, `dontAsk`). A reply to the run continues attended. `/at` runs still ask.
+  (`plan-auto`, `auto`, `dontAsk`). A reply to the run continues attended. `/at` runs still ask. Antigravity crons get
+  Full access or Ask me only from their own `permission_mode` (otherwise Workspace); a gated cron denies every tool off the
+  safe list, and a Plan first cron posts the plan with no card.
 - Per-cron `permission_mode` / `model` / `reasoning` overrides apply to that run only (`_apply_trigger_overrides`).
 
 ### Loop mode (`loop_scheduler.py`)
@@ -322,7 +327,8 @@ caps; Loop off → denied with Loop mode / `/at` guidance. `[loop] own_schedule 
 
 ### Key files
 
-- `triggers/cron.py` — cron parser, timezone-aware scheduler
+- `triggers/cron.py` — cron matcher, timezone-aware scheduler
+- `triggers/cron_expr.py` — the 5-field cron grammar shared by the matcher and `schedule` config validation (#1144), so a schedule that loads is one the matcher understands
 - `triggers/settings.py` — `CronConfig`, `WebhookConfig`, `TriggersSettings` (pydantic)
 - `triggers/dispatcher.py` — notification + `run_job()` bridge
 - `triggers/server.py` — aiohttp webhook server

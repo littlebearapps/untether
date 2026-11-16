@@ -1,0 +1,449 @@
+{
+ "config": {
+  "permission_mode": "default",
+  "prompt": "add a notes file"
+ },
+ "scenario": "cancel_with_pending_approval",
+ "steps": [
+  {
+   "logs": [
+    "debug progress.sent +[channel_id,logger_name,message_id]",
+    "debug runner.start_prompt engine=\"claude\" +[logger_name,prompt_preview]",
+    "debug transport.send_message +[channel_id,logger_name,rendered,reply_to_message_id]",
+    "info claude.post_result_idle.task_started session_id=null +[logger_name,poll_interval_s,timeout_s]",
+    "info handle.incoming +[channel_id,logger_name,resume,text,user_msg_id]",
+    "info preamble.applied source=\"default\" +[logger_name,preamble_len]",
+    "info runner.start engine=\"claude\" +[args,logger_name,prompt_len,resume]",
+    "info subprocess.spawn +[args,cmd,logger_name,pid,use_control_channel]",
+    "info subprocess.stdin.payload_sent +[logger_name,payload_len,pid]"
+   ],
+   "registry": {
+    "active_runners": [],
+    "answered_ask_flows": {},
+    "ask_flows": {},
+    "cancelled_during_write": [],
+    "discuss_approved": [],
+    "discuss_carry": [],
+    "discuss_feedback_refs": {},
+    "handled": [],
+    "idle_live_session_count": 0,
+    "inflight": {},
+    "live_sessions": {},
+    "outline_pending": [],
+    "pending_ask": {},
+    "plan_exit_approved": [],
+    "request_to_channel": {},
+    "request_to_input": {},
+    "request_to_originator": {},
+    "request_to_session": {},
+    "request_to_tool_name": {},
+    "session_bg_state": [],
+    "session_stdin": [],
+    "states": {}
+   },
+   "result": [
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio"
+   ],
+   "stdin": [
+    {
+     "request": {
+      "hooks": {
+       "PreToolUse": [
+        {
+         "hookCallbackIds": [
+          "ut_loop_cron_create"
+         ],
+         "matcher": "CronCreate",
+         "timeout": 30
+        },
+        {
+         "hookCallbackIds": [
+          "ut_loop_cron_delete"
+         ],
+         "matcher": "CronDelete",
+         "timeout": 30
+        }
+       ]
+      },
+      "subtype": "initialize"
+     },
+     "request_id": "init_<id>",
+     "type": "control_request"
+    },
+    {
+     "message": {
+      "content": "[Untether] You are running via Untether, a Telegram bridge for coding agents. The user is interacting through Telegram on a mobile device.\n\nKey constraints:\n- The user can ONLY see your final assistant text messages\n- Tool calls, thinking blocks, file contents, and terminal output are invisible\n- Keep the user informed by writing clear status updates as visible text\n- If hooks fire at session end, your final response MUST still contain the user's requested content. Hook concerns are secondary — briefly note them AFTER the main content, never instead of it.\n\nConfiguration changes (`untether.toml`):\n- Untether hot-reloads its `untether.toml` (default `~/.untether/untether.toml`) automatically — edits take effect within ~1 second of saving.\n- Do NOT restart the Untether service after editing config (`systemctl --user restart untether`, an `untether-*` instance unit, or `launchctl kickstart … untether`). The restart is unnecessary, and because it shuts down the very session issuing the command, the graceful drain will time out (120s) and your final answer to the user will be silently dropped.\n- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`, turning on `[triggers] enabled`) are flagged at reload time — if you didn't see such a warning, no restart is needed.\n\nPlan-mode requirements (when you call `ExitPlanMode`):\n- Your `plan` parameter MUST be a concise 3–5 bullet summary of your findings, decisions, or proposed changes — never just a file path. Keep it short: the plan is shown to the user for approval, not as the final deliverable.\n- After `ExitPlanMode` is approved, your next assistant message — which becomes the user's final Telegram message — should be a brief CLI-style summary: 3–7 bullets or 1–2 short paragraphs covering key findings, recommendations, decisions made, and next steps. Aim for ~500–1500 characters total. Do NOT re-paste the full plan content — the user has already seen it during approval. Brevity is the goal; do not just write \"Plan approved\" either.\n\nEvery response that completes work MUST end with a structured summary (keep each section brief — headline bullets, not full content; aim for ~500–1500 characters total across the whole summary):\n  ## Summary\n  ### Completed\n  - [What was done — short bullets with file paths/line numbers]\n  - [Key decisions made and why — one line each]\n  ### Plan/Document Created (if applicable)\n  - [Path AND a 3–5 bullet headline summary — the user has already seen the plan during approval, so this is a pointer + headline, not a re-paste of the full content]\n  ### Files for Review (if applicable)\n  - To send files to the user, write them to `.untether-outbox/`\n  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n  - Files are delivered as Telegram documents when the run completes\n  - Only files written or copied into it during this run are sent — older leftovers are moved aside. To resend an older file, copy it in again.\n  - The user can also request any project file with `/file get <path>`\n  ### Next Steps\n  - [Remaining work, if any]\n  ### Decisions Needed (if any)\n  - [Blocking questions — state your recommended option clearly]\n\nWhen you need clarification from the user, use AskUserQuestion with clear options. The user will see interactive buttons to choose from.\n\n---\n\nadd a notes file",
+      "role": "user"
+     },
+     "parent_tool_use_id": null,
+     "session_id": "",
+     "type": "user"
+    }
+   ],
+   "step": "do:accept",
+   "telegram": [
+    {
+     "chat": 123,
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "notify": false,
+     "op": "send",
+     "reply_to": 10,
+     "text": "starting · claude · <t>"
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "meta": {
+      "cwd": "/work/project",
+      "model": "claude-golden-1",
+      "permissionMode": "default",
+      "pid": "<pid>",
+      "tools": [
+       "Bash",
+       "Read",
+       "Edit",
+       "Write",
+       "Glob",
+       "Grep"
+      ]
+     },
+     "resume": {
+      "engine": "claude",
+      "is_continue": false,
+      "value": "golden-session-1"
+     },
+     "title": "claude-golden-1",
+     "type": "started"
+    }
+   ],
+   "logs": [
+    "debug claude.hook.cli_baseline +[baselined,children,cli_pid,logger_name,pid]",
+    "debug claude_runner.registered session_id=\"golden-session-1\" +[logger_name]",
+    "debug export.session.new session_id=\"golden-session-1\" +[channel_id,logger_name]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug runner.started.seen reason=\"first_seen\" +[emit,expected_session,found_session,jsonl_seq,logger_name,pid,resume]",
+    "debug session_lock.acquired engine=\"claude\" session_id=\"golden-session-1\" +[logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info claude.permission_mode.changed from=null session_id=\"golden-session-1\" source=\"init\" to=\"default\" turn=1 +[logger_name]",
+    "info session_stdin.registered session_id=\"golden-session-1\" +[logger_name,pid]"
+   ],
+   "registry": {
+    "active_runners": [
+     "golden-session-1"
+    ],
+    "live_sessions": {
+     "golden-session-1": {
+      "accepting": true,
+      "accepting_steer": true,
+      "close_reason": null,
+      "closing": false,
+      "idle": false,
+      "listeners": 1
+     }
+    },
+    "session_bg_state": [
+     "golden-session-1"
+    ],
+    "session_stdin": [
+     "golden-session-1"
+    ],
+    "states": {
+     "golden-session-1": {
+      "auto_approve_queue": [],
+      "auto_deny_queue": [],
+      "awaiting_injected": {},
+      "awaiting_user_approval": false,
+      "completed_turns": 0,
+      "control_action_for_tool": {},
+      "control_registered": [],
+      "control_request_snapshot": [],
+      "effective_permission_mode": "default",
+      "exitplanmode_plans": {},
+      "live_close_reason": null,
+      "live_mode": true,
+      "pending_control_requests": [],
+      "plan_rearm_failed": false,
+      "plan_rearm_pending": false,
+      "prompting_mode": true,
+      "request_to_action": {},
+      "turn": 1,
+      "turn_open": true
+     }
+    }
+   },
+   "step": "emit:system/init",
+   "telegram": [
+    {
+     "entities": [
+      "code@56+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t>\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "action": {
+      "detail": {
+       "input": {
+        "command": "touch notes.txt"
+       },
+       "name": "Bash"
+      },
+      "id": "toolu_bash_1",
+      "kind": "command",
+      "title": "touch notes.txt"
+     },
+     "phase": "started",
+     "type": "action"
+    }
+   ],
+   "logs": [
+    "debug action.recorded kind=\"command\" +[logger_name,title]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]"
+   ],
+   "step": "emit:assistant/tool_use:Bash",
+   "telegram": [
+    {
+     "entities": [
+      "code@34+15",
+      "code@84+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t> · step 1\n\n▸ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+    }
+   ]
+  },
+  {
+   "events": [
+    {
+     "action": {
+      "detail": {
+       "inline_keyboard": {
+        "buttons": [
+         [
+          {
+           "callback_data": "claude_control:approve:req-bash-1",
+           "text": "✅ Approve"
+          },
+          {
+           "callback_data": "claude_control:deny:req-bash-1",
+           "text": "❌ Deny"
+          }
+         ]
+        ]
+       },
+       "request_id": "req-bash-1",
+       "request_type": "CanUseTool",
+       "tool_name": "Bash"
+      },
+      "id": "claude.control.1",
+      "kind": "warning",
+      "title": "Permission Request [CanUseTool] - tool: Bash (command=`touch notes.txt`)\n$ `touch notes.txt`"
+     },
+     "phase": "started",
+     "type": "action"
+    }
+   ],
+   "logs": [
+    "debug action.recorded kind=\"warning\" +[logger_name,title]",
+    "debug control_request.registered request_id=\"req-bash-1\" session_id=\"golden-session-1\" +[logger_name]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info control_request.received agent_id=null decision_reason_type=null permission_mode=\"default\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" unattended=null +[logger_name]",
+    "info progress_edits.keyboard_attach request_id=\"req-bash-1\" tool_name=\"Bash\" +[channel_id,keyboard_rows,logger_name,message_id]",
+    "info render_progress.inline_keyboard_found request_id=\"req-bash-1\" tool_name=\"Bash\" +[action_id,buttons,logger_name]"
+   ],
+   "registry": {
+    "request_to_channel": {
+     "req-bash-1": 123
+    },
+    "request_to_input": {
+     "req-bash-1": {
+      "command": "touch notes.txt"
+     }
+    },
+    "request_to_originator": {
+     "req-bash-1": 7001
+    },
+    "request_to_session": {
+     "req-bash-1": "golden-session-1"
+    },
+    "request_to_tool_name": {
+     "req-bash-1": "Bash"
+    },
+    "states": {
+     "golden-session-1": {
+      "awaiting_user_approval": true,
+      "control_action_for_tool": {
+       "toolu_bash_1": "claude.control.1"
+      },
+      "control_registered": [
+       "req-bash-1"
+      ],
+      "control_request_snapshot": [
+       {
+        "answerable_by_text": false,
+        "input_details": "(command=`touch notes.txt`)",
+        "kind": "tool",
+        "request_id": "req-bash-1",
+        "session_id": "golden-session-1",
+        "tool_name": "Bash",
+        "writer_ok": true
+       }
+      ],
+      "pending_control_requests": [
+       "req-bash-1"
+      ],
+      "request_to_action": {
+       "req-bash-1": "claude.control.1"
+      }
+     }
+    }
+   },
+   "step": "emit:control_request/can_use_tool/Bash/req-bash-1",
+   "telegram": [
+    {
+     "entities": [
+      "code@34+15",
+      "code@106+15",
+      "code@125+15",
+      "code@175+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "✅ Approve => claude_control:approve:req-bash-1",
+       "❌ Deny => claude_control:deny:req-bash-1"
+      ],
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t> · step 2\n\n▸ touch notes.txt\n▸ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "chat": 123,
+     "id": 2,
+     "notify": true,
+     "op": "send",
+     "reply_to": 1,
+     "text": "Action required — approval needed"
+    }
+   ]
+  },
+  {
+   "logs": [
+    "debug session_lock.released engine=\"claude\" +[logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info cancel.requested +[chat_id,logger_name,progress_message_id,thread_id]",
+    "info claude.live_session.lifecycle_exited close_reason=null reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
+    "info claude.live_session.steer_window_closed reason=\"cancel\" session_id=\"golden-session-1\" +[logger_name]",
+    "info claude.post_result_idle.task_exited reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
+    "info claude_runner.session_cleanup cleaned=[\"active_runners\", \"session_stdin\", \"session_bg_state\", \"live_session\", \"requests(1)\"] session_id=\"golden-session-1\" +[logger_name]",
+    "info handle.cancelled +[elapsed_s,logger_name,resume]",
+    "info session.summary cancelled=true engine=\"claude\" ok=null session_id=\"golden-session-1\" +[approval_surfaces,duration_seconds,event_count,followup_turns,hooks_started,last_event_type,liveness_stalls,logger_name,model,model_display,no_query_results,peak_idle_seconds,peak_live_idle_seconds,saw_result,stall_suppressions,stall_warnings,unanswerable_control_requests]"
+   ],
+   "registry": {
+    "active_runners": [],
+    "live_sessions": {
+     "golden-session-1": "<removed>"
+    },
+    "request_to_channel": {
+     "req-bash-1": "<removed>"
+    },
+    "request_to_originator": {
+     "req-bash-1": "<removed>"
+    },
+    "request_to_session": {
+     "req-bash-1": "<removed>"
+    },
+    "session_bg_state": [],
+    "session_stdin": [],
+    "states": {
+     "golden-session-1": "<removed>"
+    }
+   },
+   "step": "do:cancel",
+   "telegram": [
+    {
+     "entities": [
+      "code@0+9",
+      "code@36+15",
+      "code@108+15",
+      "code@127+15",
+      "code@177+32"
+     ],
+     "id": 1,
+     "keyboard": [],
+     "op": "edit",
+     "text": "cancelled · claude · <t> · step 2\n\n▸ touch notes.txt\n▸ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "id": 2,
+     "op": "delete"
+    }
+   ]
+  },
+  {
+   "logs": [
+    "debug callback.executed command=\"claude_control\" +[chat_id,logger_name]",
+    "info callback.answered command=\"claude_control\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
+    "info callback.dispatch command=\"claude_control\" +[chat_id,logger_name]",
+    "warning claude_control.not_found action=\"approve\" reason=\"unknown\" request_id=\"req-bash-1\" +[logger_name]",
+    "warning control_response.request_not_found reason=\"unknown\" request_id=\"req-bash-1\" +[logger_name]"
+   ],
+   "step": "do:tap data=claude_control:approve:req-bash-1",
+   "telegram": [
+    {
+     "chat": 123,
+     "id": 3,
+     "notify": true,
+     "op": "send",
+     "reply_to": 1,
+     "text": "⚠️ Control request not found or session ended"
+    },
+    {
+     "callback_query_id": "cb-1",
+     "op": "answer_callback",
+     "show_alert": null,
+     "text": "This request has expired"
+    }
+   ]
+  },
+  {
+   "step": "end"
+  }
+ ]
+}

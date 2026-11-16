@@ -1,0 +1,11 @@
+{"_do":"config","permission_mode":"plan","prompt":"refactor the parser"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_epm_1","name":"ExitPlanMode","input":{"plan":"# Plan\n1. Rename the argument\n2. Update the callers"}}]}}
+{"type":"control_request","request_id":"req-epm-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan\n1. Rename the argument\n2. Update the callers"},"tool_use_id":"toolu_epm_1"}}
+{"_do":"tap","data":"claude_control:discuss:req-epm-1","_stdin":1}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_epm_1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"I will stop here."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":2,"result":"I will stop here.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"drain"}
+{"_do":"eof"}
+{"_do":"exit","rc":0}

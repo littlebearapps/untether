@@ -20,8 +20,7 @@ def test_codex_run_options_override_model_and_reasoning() -> None:
     assert args == [
         "-c",
         "notify=[]",
-        "--model",
-        "gpt-4.1-mini",
+        "--model=gpt-4.1-mini",
         "-c",
         "model_reasoning_effort=low",
         "exec",
@@ -37,9 +36,8 @@ def test_claude_run_options_override_model() -> None:
     with apply_run_options(EngineRunOptions(model="claude-opus")):
         args = runner.build_args("hi", None, state=None)
 
-    assert "--model" in args
-    model_idx = args.index("--model") + 1
-    assert args[model_idx] == "claude-opus"
+    assert "--model=claude-opus" in args
+    assert "--model=claude-sonnet" not in args
 
 
 def test_opencode_run_options_override_model() -> None:
@@ -48,14 +46,15 @@ def test_opencode_run_options_override_model() -> None:
     with apply_run_options(EngineRunOptions(model="gpt-4o-mini")):
         args = runner.build_args("hi", None, state=state)
 
-    assert "--model" in args
-    model_idx = args.index("--model") + 1
-    assert args[model_idx] == "gpt-4o-mini"
+    assert "--model=gpt-4o-mini" in args
+    assert "--model=claude-sonnet" not in args
 
 
 def test_pi_run_options_override_model() -> None:
     runner = PiRunner(extra_args=[], model="pi-default", provider=None)
-    state = PiStreamState(resume=ResumeToken(engine=PI_ENGINE, value="sess.jsonl"))
+    # #1064: a real-shaped saved Pi session id (a bare `sess.jsonl` would
+    # be a file in the cwd, which the resume check refuses).
+    state = PiStreamState(resume=ResumeToken(engine=PI_ENGINE, value="019e81c8"))
     with apply_run_options(EngineRunOptions(model="pi-override")):
         args = runner.build_args("hi", None, state=state)
 

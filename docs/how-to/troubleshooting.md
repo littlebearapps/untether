@@ -63,7 +63,7 @@ See [security.md](security.md#restrict-access) for the full discussion.
 
 ## Engine CLI not found
 
-**Symptoms:** "codex: command not found" or similar error after sending a task.
+**Symptoms:** the startup message lists the engine under `not installed`, or a task sent to it gets `engine 'codex' is unavailable: codex not found on PATH` (or similar).
 
 The engine CLI isn't on your PATH. Install the engine you need:
 
@@ -80,6 +80,9 @@ npm install -g opencode-ai@1
 # Pi
 npm install -g @mariozechner/pi-coding-agent
 
+# Antigravity CLI (agy 1.3.1 or newer)
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+
 # Gemini CLI — DEPRECATED, see below
 npm install -g @google/gemini-cli
 
@@ -87,7 +90,7 @@ npm install -g @google/gemini-cli
 npm install -g @sourcegraph/amp
 ```
 
-Verify with `which codex` (or `which claude`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH.
+Verify with `which codex` (or `which claude`, `which agy`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH. agy's installer puts it in `~/.local/bin`, which a systemd or launchd service's `PATH` often leaves out: Untether also looks for `~/.local/bin/agy`, and for an agy installed anywhere else, set `[antigravity] cmd` to its path (see [Antigravity shows as not installed](#antigravity-shows-as-not-installed)).
 
 The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
 
@@ -108,9 +111,10 @@ The version is checked again whenever the `opencode` binary changes, so the next
 **Symptoms:** Engine starts but fails with authentication or permission errors.
 
 - **Codex:** Run `codex` in a terminal and sign in with your ChatGPT account
-- **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
+- **Claude Code:** Run `claude auth login` (or `claude`, then `/login`) to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
+- **Antigravity CLI:** see [Antigravity says it isn't signed in](#antigravity-says-it-isnt-signed-in) — a Gemini API key or Enterprise sign-in is recommended over a Google account sign-in
 - **Gemini CLI** (⚠️ deprecated): see below — individual Google accounts (free, Google AI Pro and Ultra) can no longer authenticate at all
 - **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
 
@@ -160,8 +164,8 @@ events and no exit — hence the stall rather than an error message. Filed as
 
 Gemini CLI reached **end-of-life for individual Google accounts (free, Google AI Pro and Ultra) on
 18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to
-[Antigravity CLI](https://antigravity.google) (Untether support is planned as a
-separate engine in v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)) or use a supported engine. Enterprise / Google Cloud licences
+[Antigravity CLI](https://antigravity.google) (supported as its own `antigravity` engine, see
+[Switch engines](switch-engines.md#antigravity-cli)) or use another supported engine. Enterprise / Google Cloud licences
 may still work, but Untether no longer verifies this.
 
 ### What to do
@@ -170,7 +174,152 @@ Both engines are deprecated and no longer supported: they are still included,
 but get no fixes, are excluded from testing, and may be removed in a future
 release — see
 [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines).
-Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model`.
+Switch to `claude`, `codex`, `opencode`, `pi` or `antigravity` via `/config → Engine & model`.
+
+## Antigravity CLI
+
+Antigravity (`agy`) runs headless: it can't ask for a sign-in mid-run, and it asks for approval only in **Ask me** mode through Untether's agy plugin. Untether turns each failure into one clear message. Setup is in [Switch engines](switch-engines.md#antigravity-cli), and the user guide is [Use Antigravity CLI](antigravity.md).
+
+### Antigravity shows as not installed
+
+**Symptoms:** the startup message's installed engines line lists `antigravity` under `not installed`, `/config` → **Engine & model** has no Antigravity button, `/agent set antigravity` lists it as not installed, or a message to it gets `engine 'antigravity' is unavailable: agy not found on PATH`.
+
+Untether looks for `agy` on the `PATH` it runs with, then at `~/.local/bin/agy` (where agy's installer puts it). For an agy anywhere else, set `[antigravity] cmd` to its full path. A `cmd` that points at a missing file is reported as `… not found or not executable` instead. Restart Untether after installing agy or changing `cmd` so it looks again, then check the startup message. If Antigravity is your `default_engine`, Untether won't start at all until agy is found (`Default engine 'antigravity' unavailable: …`). The engine id is always `antigravity`: `/gemini` runs the deprecated Gemini CLI, not agy.
+
+### Antigravity says it isn't signed in
+
+**Symptoms:** `Antigravity CLI isn't signed in on this host — agy wanted a browser sign-in, which a bot can't complete.`
+
+agy has no usable sign-in in Untether's environment. Pick one:
+
+- **Gemini API key:** `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` and `GEMINI_API_KEY` in the service environment (both are needed).
+- **Enterprise:** `AGY_ADC_AUTH=true` with `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_CLOUD_LOCATION`.
+- **Google account:** run `agy` in a terminal on the host as the same user and finish the sign-in. Read the [terms note](switch-engines.md#antigravity-cli) first.
+
+If `agy` works in your terminal but not under Untether, the sign-in is probably in a desktop keyring the service can't reach: make sure `DBUS_SESSION_BUS_ADDRESS` is set in the service environment. Variables outside the [env allowlist](security.md#engine-subprocess-env-allowlist) (a proxy, for example) need `[security] env_extra_allow`.
+
+### "Google is asking this account to verify itself or appeal a Terms of Service block"
+
+Google has challenged or blocked the account. Run `agy` in a terminal on the host to see Google's link. Untether doesn't retry. A Gemini API key or Enterprise sign-in avoids the Google-account terms that cause this.
+
+### Antigravity says it can't run shell commands after I switched to Full access
+
+**Symptoms:** the footer says `full access`, but Antigravity still answers that shell commands need Full access, or won't delete or rename a file.
+
+!!! warning "Send `/new`"
+    agy keeps a conversation on the tools it started with. This conversation began in **Workspace**, so it keeps its no-shell tools. Send `/new`, then your message again: Full access applies from the next new conversation.
+
+The `/config` toast says the same when you pick Full access (`Permission mode: full access — send /new if you're switching from Workspace or Plan first (not from Ask me)`). See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+### Antigravity says a shell command needs Full access
+
+The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, or to **Ask me** to approve each command from Telegram (needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)), then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access.
+
+### Antigravity was blocked from using a shell command or a file outside the project
+
+**Symptoms:** a `⚠️ Blocked: …` row, and the reply ends with "headless runs can't ask for approval, so it stopped there. To allow it: /config → Permission mode → Full access, then /new."
+
+- **A file outside the project.** Workspace only reaches the project. Switch to **Full access** in `/config` → **Permission mode**, then send `/new`.
+- **A shell command** (`⚠️ Blocked: shell command (RunCommand) — …`). Workspace conversations normally have no shell tool at all, so this means the conversation isn't on Untether's no-shell agent: it started in Full access, or the [agent file is unavailable](#antigravity-workspace-agent-file-unavailable). Send `/new` to get a clean Workspace conversation, or switch to Full access and send `/new`. When the conversation started in Full access, the notice itself says so and asks for `/new`. In these conversations an exact allow rule such as `command(git status)` in `permissions.allow` in agy's settings file also lets that one command through.
+
+For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access. See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+### Antigravity Workspace agent file unavailable
+
+**Symptoms:** the log has WARNING `antigravity.workspace_agent.unavailable` (with a `reason` and `path`), and Workspace turns end on `⚠️ Antigravity was blocked from using a shell command…` again.
+
+Untether couldn't write its no-shell agent file, `~/.gemini/config/agents/untether-workspace/agent.md`, or that path is a symlink. The run still goes ahead in Workspace, but on agy's default agent, which tends to open with a shell command that agy then blocks. Check that `~/.gemini/config/agents`, its `untether-workspace` folder and `agent.md` are real paths (none of them a symlink) and that the Untether user can write there. Untether tries again on every Workspace run, so no restart is needed, but the warning is logged only once per cause until Untether restarts. Don't edit the file: Untether overwrites changes.
+
+With `reason=project_agents`, the project defines its own agy agents or plugins (an `agents`, `agents.json`, `plugins` or `plugins.json` entry in one of its `.agents/` folders). agy picks agents by name, so Untether won't name its own agent in such a project, and Workspace runs there use agy's default agent: a shell attempt ends the turn with the blocked notice, as it did before the no-shell agent. `reason=project_unchecked` means the project's `.agents` is a symlink or couldn't be listed. `reason=user_agent` or `user_unchecked` means your own `~/.gemini/config/agents/` has a second `untether-workspace`, or something other than `agent.md` sits in Untether's folder there: remove it.
+
+### Antigravity Ask me is refused
+
+Ask me needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host and checks it before every run; nothing runs when a check fails, and the reply says which. Until the plugin is installed, `/config` → **Permission mode** shows **🔒 Ask me — set up**, which opens the plugin's status page instead of switching mode.
+
+- **"aren't set up on this host"**: run `untether agy-gate install` on the host. No restart is needed.
+- **"aren't ready for this project"**: run `untether agy-gate status --project <folder>`. Common causes: `agy plugin disable untether-gate` was run (`agy plugin enable untether-gate`), the plugin is from another Untether version (`untether agy-gate install`), the plugin was edited since install (check what changed in `~/.gemini/config/plugins/untether-gate/`, then `untether agy-gate install --force`), or agy isn't signed in.
+- **"isn't available in this project"**: the project contains Untether's own code or config (a checkout of Untether itself, or the folder holding `untether.toml`), or agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage. Those run their own commands without asking, so Ask me would promise something it can't keep. Use Workspace or Full access there, or remove that config.
+
+Cron and webhook runs only use Ask me when the cron itself sets `permission_mode = "ask"`; a chat's Ask me runs them as Workspace.
+
+<!-- TODO: capture screenshot: antigravity-ask-me-refused — the plain reply to a message in an Ask me chat on a host without the plugin: "Ask me needs Telegram approvals, which aren't set up on this host. Run untether agy-gate install on the host …" ending "Nothing was run. Workspace and Full access still work here." -->
+<!-- <img src="../assets/screenshots/antigravity-ask-me-refused.jpg" alt="Antigravity Ask me refused because Untether's agy plugin isn't installed on the host" width="360" loading="lazy" /> -->
+
+### Antigravity questions or steer stopped working after an upgrade
+
+**Symptoms:** a `⚠️ Untether's agy plugin (untether-gate) is from another Untether version …` row, questions are skipped, `/steer` queues instead, Ask me is refused and scheduled Antigravity runs are held.
+
+The new Untether version changed the plugin's files, so the copy on the host no longer matches. Run `untether agy-gate install` on the host (no restart needed), then `untether agy-gate status` to check. This happens once after upgrading from a 0.36.1 pre-release (rc1 to rc3).
+
+### Antigravity Ask me: no card for a shell command
+
+If you switched a chat from Workspace or Plan first to Ask me, the conversation still runs on Untether's no-shell agent, so agy has no shell to ask about. Send `/new`. Switching between Ask me and Full access needs no `/new`.
+
+### Antigravity Plan first: "This plan card has expired" or "A newer plan replaced this one"
+
+Plan cards live in Untether's memory for 24 hours and only the newest card for a conversation can be approved. After a restart, or once you have sent another message (which plans again), older cards no longer work. Send a message to get a fresh plan and use its card. If Antigravity answers without writing a plan, the answer ends with "no plan was written this time"; reply to keep planning.
+
+### "That Antigravity conversation no longer exists"
+
+agy didn't recognise the conversation being resumed (it was deleted, or belongs to another machine or user). Untether stops agy before it answers in a brand-new conversation, and clears the saved session when that is the one that's gone (a stale resume line you replied to leaves the chat's saved session alone, [#1052](https://github.com/littlebearapps/untether/issues/1052)). Send your message again to start fresh.
+
+After `/continue` the message is `The conversation Antigravity had recorded for this project no longer exists, so nothing was resumed.` instead: agy's record of this project's last conversation pointed at one that has been deleted. Nothing is cleared, so a normal message carries on from the chat's own conversation (or starts a new one).
+
+### "That model id isn't valid for Antigravity"
+
+**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash).`
+
+Untether checks the model id before it starts agy and refuses one that agy could misread. Set a valid id with `/model set <id>` (run `agy models` on the host for the list) or go back to the default with `/model clear`. For a cron, fix its `model`. The same check on `[antigravity] model` in `untether.toml` is a config error at startup.
+
+If the message is `🛑 That Antigravity conversation id isn't valid, so nothing was started.`, the resume line you replied to (or the saved session) doesn't hold a real conversation id: send `/new` and try again.
+
+### "Effort … isn't available"
+
+Antigravity models accept different effort levels. Open `/config` → **Effort**: it shows only the levels the chat's model takes. See [Antigravity effort](model-reasoning.md#antigravity-effort).
+
+### "The engine CLI rejected a command-line flag"
+
+The installed agy doesn't accept a flag this Untether version passes. agy updates itself often, so this usually means Untether is behind: update Untether, and report it if it persists.
+
+### Antigravity says its quota or AI credits are used up
+
+**Symptoms:** `This Antigravity quota is used up. /usage shows when each group resets; Untether won't retry.` or `Antigravity's AI credits balance is too low to continue.`
+
+agy reported that a quota group (for example a 5-hour or weekly limit for a model group) or your AI credits ran out. Untether stops the run straight away and doesn't retry, and the chat's saved conversation is kept. Send `/usage` to see each group's use and reset time and your remaining credits, then wait for the reset, top up, or switch the chat to a model in another quota group with `/model set <id>`. Cost budgets don't help here: they count dollars, which Antigravity doesn't report. See [Usage and quota](antigravity.md#usage-and-quota).
+
+### "Antigravity CLI … is older than 1.3.1"
+
+Run `agy update` on the host. The next message works without a restart.
+
+### Antigravity seems stuck after answering
+
+**Symptoms:** `⏳ Antigravity is waiting for 1 background task (N min) — agy holds its answer until they finish (up to 30 min).`
+
+agy sends one answer per run and holds it until background commands it started have finished, for up to 30 minutes. This isn't a stall, and the run isn't auto-cancelled for it. `/cancel` stops the run and the background commands. A command that hangs in the foreground looks the same for up to about 31 minutes; after that the ordinary [stall warnings](#stall-warnings) apply.
+
+### A scheduled Antigravity run was refused because its workspace config changed
+
+**Symptoms:** a cron or webhook run replies `agy's workspace config changed since someone last ran Antigravity in this chat's project (…)`, or `Untether couldn't check agy's hooks, plugins and MCP servers …`.
+
+agy runs its own hooks, plugins and MCP servers in every mode, so Untether won't let an unattended run execute config nobody has seen. The message names the files: check them on the host first if you didn't change them, because the next message sent in that chat runs with the changed config. That run shows a ⚠️ row listing the files, and the schedule works again from the next fire. An `/at` or `/loop` run doesn't release the hold. If the check itself can't finish, the message says why (for example too many files under `.agents/`, a config file that isn't plain JSON, an agent file whose front matter Untether can't read with certainty, or a hook command that is itself a variable). Scheduled runs then stay held until a check succeeds; a message sent in the chat still runs and shows a ⚠️ row, but doesn't release them. After upgrading to v0.36.1 you may see the "config changed" message once for a project whose agy config Untether now follows more fully; see [Upgrading to v0.36.1](update.md#upgrading-to-v0361).
+
+If the message instead starts `Untether's agy plugin (untether-gate) isn't what Untether installed`, the change is to Untether's own agy plugin, whose hooks run in every agy session on the host. A message in the chat doesn't release this hold: every scheduled Antigravity run stays held until the plugin is restored. Check what changed in `~/.gemini/config/plugins/untether-gate/` if you didn't change it, then run the command the message names on the host (`untether agy-gate install --force`, or `untether agy-gate install` when only the version differs) ([#1078](https://github.com/littlebearapps/untether/issues/1078)).
+
+### A scheduled Antigravity run says it couldn't read agy's tool-permission setting
+
+**Symptoms:** a cron or webhook run replies `Untether couldn't read agy's tool-permission setting before this run (…), so this scheduled run is held.` In a run you started from the chat, the message is `Untether couldn't confirm agy's tool-permission setting: …`.
+
+Before a Workspace run Untether asks agy for its own tool-permission setting (`agy -p /config`) and checks it again in agy's first event. A scheduled run is held when the first check fails or gives no value; a run from the chat goes ahead with a ⚠️ row on one check and is stopped only when both are missing. Nothing needs changing for a one-off: the next fire checks again (a failed check is remembered for five minutes). If it keeps happening, run `agy -p /config` on the host to see why it fails, and check for an Untether update. Full access runs aren't affected.
+
+### Antigravity won't run Workspace because agy's own settings allow every tool
+
+**Symptoms:** `agy's own settings change its permission checks (toolPermission: always-proceed), so Untether won't run Workspace mode`.
+
+agy's settings file tells it to approve tools without asking, which would make "Workspace" mean something it doesn't say. Set `toolPermission` back to `request-review` in `~/.gemini/antigravity-cli/settings.json`, or pick Full access in `/config` if that is what you want.
+
+### "Antigravity needs a project"
+
+Antigravity edits files where it runs, so it is refused in a chat with no project. Bind one with `/ctx set <project>`, or use a chat or topic routed to a project.
 
 ## Progress stuck on "starting"
 
@@ -225,6 +374,8 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Pending user approval / question | 10 min, then every 30 min | `⏳ Waiting for your approval to use Write (N min) — tap Approve or Deny above. The session is paused, not stuck.` |
 
 The pending-approval reminder names what it's waiting for: a question reads "⏳ Waiting for your answer" (with the question underneath) and a plan reads "⏳ Waiting for you to approve the plan". The reminder is removed once you answer, and a later reminder replaces the earlier one.
+
+While Antigravity holds its answer for a background command, the stall warning is replaced by a `⏳ Antigravity is waiting for 1 background task …` line and the run isn't auto-cancelled; see [Antigravity seems stuck after answering](#antigravity-seems-stuck-after-answering).
 
 For Codex, OpenCode and Pi, a child process only earns the 15 min threshold while the process tree is using CPU: Codex's npm wrapper and OpenCode's MCP servers are always there, so an idle engine falls back to 5 min ([#953](https://github.com/littlebearapps/untether/issues/953)).
 
@@ -414,7 +565,7 @@ Run `untether doctor` to check the voice API key. It doesn't check the transcrip
 
 ## `/browse` says "No project directory for this chat"
 
-Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, or set `default_project`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
+Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under `[projects.<alias>]`), or when `default_project` is set in `untether.toml`. It used to fall back to the process working directory, which under systemd is your home directory ([#389](https://github.com/littlebearapps/untether/issues/389)). Bind the chat, set `default_project`, or point the chat at a project with `/ctx set <project>`. Hidden paths and paths matching `deny_globs` are refused with a short reply such as `Hidden paths can't be browsed.` — see [Browse files](browse-files.md#limits-and-filtering).
 
 ## Topics not appearing
 
@@ -452,8 +603,8 @@ Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under
 
 1. **Check `watch_config`:** Hot-reload requires `watch_config = true` in the top-level config. Without it, changes only apply on restart.
 2. **Hot-reloadable settings** apply immediately: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, `followup_mode`, trigger crons/webhooks/auth/timezones, plus `[progress]`, `[footer]` and most `[watchdog]` keys on the next run — see the full list in [Operations → Config hot-reload](operations.md#config-hot-reload). Some `[watchdog]` keys (`post_result_bg_max_hold`, `bg_hold_rearm_on_progress`, `bg_hold_declared_waits`, `rearm_plan_mode`) are read when a Claude session starts, so an already-open session keeps the old value until it closes.
-3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, the `[transports.telegram.topics]` table, `message_overflow`, `triggers.enabled` (off to on), `triggers.server.host`/`port`/`rate_limit`/`max_body_bytes`. Editing one of the Telegram keys or `triggers.enabled` in a running bot triggers a Telegram restart-required warning to every project chat plus any `allowed_user_ids` admin DM ([#318](https://github.com/littlebearapps/untether/issues/318)) so you won't silently keep running on the stale value.
-4. Check the log for `config.reload.applied` (success), `config.reload.transport_config_changed restart_required=True` (restart needed), or `config.reload.restart_notify.sent` (Telegram warning broadcast).
+3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, the `[transports.telegram.topics]` table, `message_overflow`, `triggers.enabled` (off to on), `triggers.server.host`/`port`/`rate_limit`/`max_body_bytes`. Editing one of the Telegram keys or `triggers.enabled` in a running bot sends one Telegram `⚠️ Restart required` notice to every project chat plus any `allowed_user_ids` admin DM ([#318](https://github.com/littlebearapps/untether/issues/318)) so you won't silently keep running on the stale value. An edit that hot-reloads is confirmed more quietly: the `♻️ Hot-reloaded` notice goes only to the `allowed_user_ids` admin DMs (the main `chat_id` when there are none) and to chats with a run in progress, not to idle project chats ([#1030](https://github.com/littlebearapps/untether/issues/1030)).
+4. Check the log for `config.reload.applied` (success), `config.reload.transport_config_changed restart_required=True` (restart needed), or `config.reload.applied_notify.sent` (the Telegram notice; `targets` lists each `[chat_id, thread_id]` it went to).
 
 ## /at delay not firing
 
@@ -470,14 +621,14 @@ Since v0.36.0 `/browse` only works in a chat bound to a project (`chat_id` under
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If a resumed run fails and its error card ends with `ℹ️ The saved session couldn't be resumed, so it was cleared — your next message starts a new session.`, the saved session couldn't be found (Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`) or, for Claude, the run ended with no turns. Just send your message again. For Codex, OpenCode and Pi, a resumed run that fails for an unrelated reason (a bad `/model`, a missing API key) keeps the saved session, so fix the cause and carry on in the same conversation ([#952](https://github.com/littlebearapps/untether/issues/952)).
+- If a resumed run fails and its error card ends with `ℹ️ The saved session couldn't be resumed, so it was cleared — your next message starts a new session.`, the saved session couldn't be found (Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`) or, for Claude, the run ended with no turns. Just send your message again. For Codex, OpenCode and Pi, a resumed run that fails for an unrelated reason (a bad `/model`, a missing API key) keeps the saved session, so fix the cause and carry on in the same conversation ([#952](https://github.com/littlebearapps/untether/issues/952)). A resume line that names some other session (an old one you replied to) never clears the chat's saved session: that run just fails, and your next plain message carries on in the saved session ([#1052](https://github.com/littlebearapps/untether/issues/1052)). Its error card says `This chat's saved session isn't affected` and has no resume line of its own, so replying to it carries on too ([#1070](https://github.com/littlebearapps/untether/issues/1070)).
 - If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.36.0 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
 
 ## Follow-up message says it's "queued"
 
 **Symptoms:** You send a follow-up (or voice note) and it shows a `queued` notice instead of running immediately.
 
-A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.36.0, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). The notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
+A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.36.0, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). If the session is sitting idle between turns, the message goes in straight away and its card shows no queued note ([#1154](https://github.com/littlebearapps/untether/issues/1154)); when it has to wait behind a turn that hasn't started yet, the notice reads `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` ([#781](https://github.com/littlebearapps/untether/issues/781)). With `[watchdog] live_sessions = false` the follow-up really does wait for the background work, and the notice says `⏳ Queued behind the previous run's N background task(s) — starts when they finish …` instead. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
 
 ## Messages arrive after the run finished (🔔 / 📡 / ⏰)
 
@@ -491,14 +642,17 @@ To turn this off and get the pre-v0.36.0 behaviour back (stop at the first answe
 
 ## Session closed after 4 hours and the next message started fresh
 
-**Symptoms:** After a long Claude session — often one where background agents kept reporting back by themselves — you see `⏳ Closing session — 2 background tasks still running at the session time limit: … Stopping them.`, then `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.` The background status message ends `⏹️ … stopped (session time limit reached)`.
+**Symptoms:** After a long Claude session — often one where background agents kept reporting back by themselves — you see `⏳ Closing session — 2 background tasks still running at the session time limit: … Stopping them.` (or `⏳ Closing session — it reached the session time limit (4 h) and the turn in progress didn't finish in time. Stopping it.`), then either `↩️ Reply to continue in the same session.` or `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.` The background status message ends `⏹️ … stopped (session time limit reached)`.
 
 Every open Claude session has an absolute time limit, `[watchdog] live_session_max_s` (default `14400`, 4 hours). It's a backstop against a session that never ends, such as an endless `Monitor`. The clock starts when the session's Claude process starts (usually your first message) and isn't reset by follow-ups or by `🔔 Background task finished` turns, so a session kept busy by background agents reaches the limit even if you only sent one message. There's no warning before it.
 
 What happens at the limit depends on what's running:
 
 - **Nothing running** (Claude had answered and no background work was live): the session closes cleanly and your next message continues it, with a fresh 4-hour clock.
-- **A turn or background tasks still running:** they're stopped, and the next message starts a fresh session. Untether currently does this even when Claude's own reply had finished and the session could have been resumed ([#887](https://github.com/littlebearapps/untether/issues/887)).
+- **Claude is in the middle of a reply:** Untether waits for that reply to finish (up to 30 more minutes) and closes the session straight after it, so the reply isn't lost. Only a reply still running after those 30 minutes is stopped; the error message then says Untether closed the session at its time limit.
+- **Background tasks still running after Claude's reply:** they're stopped. When Claude Code shuts down cleanly, which is the usual case, you see `↩️ Reply to continue in the same session.` and your next message picks up where it left off. If it doesn't shut down cleanly you see the `⚠️` warning and the next message starts a fresh session.
+
+Before v0.36.1 the limit stopped a reply in mid-flight, always started a fresh session when background tasks were running, and could show a misleading "The session could not be loaded … Send /new" hint ([#887](https://github.com/littlebearapps/untether/issues/887)). You never need `/new` after this limit unless you want a fresh start.
 
 A session that closes by itself between tasks (about a minute after the last background work ends) resumes on your next message with a fresh clock, so the limit mostly affects workflows that keep background agents running back to back for hours.
 
@@ -513,7 +667,8 @@ A session that closes by itself between tasks (about a minute after the last bac
 
     It's read each time a session starts, so the next new session uses it without a restart. A session that's already open keeps the limit it started with.
 
-- **After a fresh start**, check `git status` for partial work the stopped tasks left behind, and tell Claude where it was up to (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
+- **Reply to continue.** The stopped background tasks don't restart by themselves, so tell Claude what was running (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
+- **After a fresh start** (the `⚠️` warning), check `git status` for partial work the stopped tasks left behind, and tell Claude where it was up to (for example, "the T8 background agent was stopped at the session limit — check its changes and carry on").
 
 ## "Asked for auto mode — Claude Code is running default"
 
@@ -525,7 +680,7 @@ Claude Code's auto mode needs a model that supports it. On one that doesn't (for
 
 **Symptoms:** A scheduled or webhook-started Claude run ends with a plan or a short report instead of doing the work, and its final carries a line like `🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`.
 
-Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then `[engines.claude] permission_mode`, so a cron that lands on `plan` stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`. The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
+Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then `[engines.claude] permission_mode`, so a cron that lands on `plan` stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`, except that it never inherits `bypassPermissions`: it runs in `default` instead ([#1142](https://github.com/littlebearapps/untether/issues/1142)). The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
 
 ## "🛡️ safeguards stopped a response"
 
@@ -613,7 +768,7 @@ Budgets are checked when a result arrives, so on their own they alert rather tha
 | Linux | Plain-text JSON file | `~/.claude/.credentials.json` |
 | macOS | macOS Keychain | Entry: `Claude Code-credentials` |
 
-Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude login` to refresh credentials.
+For `/usage` and the opt-in subscription-usage footer (the only things that read them), Untether checks both locations automatically. If you've recently changed platforms or reinstalled, run `claude auth login` to refresh credentials.
 
 ## Using debug mode
 
@@ -697,7 +852,9 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `outline_cleanup.delete_failed` | WARNING | Stale plan outline message couldn't be deleted |
 | `handle.engine_resolved` | INFO | Engine and CWD successfully resolved for a run |
 | `file_transfer.saved` | INFO | File uploaded and written to disk |
+| `file_transfer.reused` | INFO | An upload was byte-for-byte identical to a file already saved, so nothing was written ([#1031](https://github.com/littlebearapps/untether/issues/1031)) |
 | `file_transfer.denied` | WARNING | File transfer refused for this user (not allowlisted, not a group admin) |
+| `command.admin_required` | WARNING | A settings change in a group (`/config`, `/planmode` or `/verbose`) was refused: the sender isn't a group admin (`reason=not_admin`), Telegram couldn't confirm their role (`lookup_failed`) or the sender is unknown (`no_sender`). Carries `chat_id` and `sender_id` ([#1042](https://github.com/littlebearapps/untether/issues/1042)) |
 | `file_transfer.path_denied` | INFO | Path refused by a deny glob or hidden-path rule (WARNING when a symlink was involved) |
 | `browse.path_denied` | INFO | `/browse` refused a hidden or deny-globbed path |
 | `claude.permission_mode.mismatch` | WARNING | Claude Code started in a different permission mode from the one requested |
@@ -711,8 +868,14 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `cost_budget.run_stopped` | WARNING | Stop at limit ended a live session after the reply that passed the budget (`scope=per_run` or `per_day`) |
 | `callback.not_originator` / `ask_user_question.not_originator` | WARNING | With `approval_originator_only = true`, someone other than the run's originator tried to answer an approval or question ([#388](https://github.com/littlebearapps/untether/issues/388)) |
 | `opencode.version.unsupported` | ERROR | The installed OpenCode CLI is 2.x; the run was refused before starting ([#970](https://github.com/littlebearapps/untether/issues/970)) |
+| `antigravity.version.unsupported` | ERROR | The installed agy is older than 1.3.1; the run was refused before starting ([#976](https://github.com/littlebearapps/untether/issues/976)) |
+| `antigravity.gate.precheck_failed` | WARNING | An Ask me run was refused: Untether's agy plugin isn't ready for the project (`reason=missing`, `edited`, `outdated`, `disabled`, `not_listed`, …), the project holds agy config Untether doesn't manage (`foreign_config`) or Untether's own code (`self_protect`) ([#980](https://github.com/littlebearapps/untether/issues/980)) |
+| `antigravity.gate.plugin_changed` | WARNING | The plugin folder `~/.gemini/config/plugins/untether-gate/` no longer matches what Untether installed; questions and steer are off and scheduled agy runs are held |
+| `antigravity.workspace_agent.unavailable` | WARNING | Untether couldn't use its no-shell Workspace agent (with a `reason`); see [above](#antigravity-workspace-agent-file-unavailable) |
+| `antigravity.unattended_full_downgraded` / `antigravity.unattended_ask_downgraded` | WARNING | A cron or webhook run would have inherited Full access or Ask me from its chat or `untether.toml`, so it ran as Workspace |
 | `session.auto_clear_skipped` | INFO | A resumed Codex/OpenCode/Pi run failed for a reason other than the resume, so the saved session was kept (`reason=not_resume_failure`, [#952](https://github.com/littlebearapps/untether/issues/952)) |
 | `final.early_delivery_timeout` | WARNING | A live session's first answer took over 60 s to hand to Telegram ([#928](https://github.com/littlebearapps/untether/issues/928)) |
+| `final.post_delivery_timeout` | WARNING | The steps after a live session's early answer (outbox files, background status message, closing notices, Stop at limit) ran past their own 60 s limit ([#991](https://github.com/littlebearapps/untether/issues/991)) |
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
 
@@ -724,14 +887,14 @@ Telegram bot tokens, OpenAI API keys (`sk-...`), GitHub tokens (`ghp_`, `ghs_`, 
 
 When an engine fails, Untether scans the error message and shows an actionable recovery hint above the raw error. The raw error is wrapped in a code block for visual separation. Hints are case-insensitive and pattern-matched — the first match wins. Your session is automatically saved in most cases, so you can resume after resolving the issue.
 
-Untether recognises **77 error patterns**, grouped like this:
+Untether recognises **86 error patterns**, grouped like this:
 
 | Category | Examples | Engines |
 |----------|----------|---------|
 | Unsupported client | Engine refuses this client version, Gemini individual-tier end-of-life | AMP, Gemini |
-| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex |
+| CLI flag and config drift | A flag the installed CLI rejects, a retired Codex config value | Codex, Antigravity |
 | Authentication | API key missing/invalid, token refresh, login required | All |
-| Subscription & billing | Usage limits, quota exceeded, billing hard limit | Claude, Codex, OpenCode, Gemini |
+| Subscription & billing | Usage limits, quota exceeded, billing hard limit, AI credits | Claude, Codex, OpenCode, Antigravity, Gemini |
 | API overload & server | 500/502/503/504, overloaded | All |
 | Rate limits | Rate limited, too many requests | All |
 | Model errors | Model not found, invalid model | All |
@@ -743,7 +906,7 @@ Untether recognises **77 error patterns**, grouped like this:
 | CLI & filesystem | Command not found, disk full, permission denied | All |
 | Signals | SIGTERM, SIGKILL, SIGABRT | All |
 | Process & session | No result event, no session ID, execution errors | All |
-| Engine-specific | AMP credits/login, Gemini result status | AMP, Gemini |
+| Engine-specific | Antigravity upstream cancel, AMP credits/login, Gemini result status | Antigravity, AMP, Gemini |
 | Account & proxy | Account suspended, proxy auth, request timeout | All |
 
 For the full list of patterns and hints, see the [Error Reference](../reference/errors.md).
@@ -755,10 +918,11 @@ Loop mode (`/config → 🔁 Loop mode`) decides whether Claude can schedule rep
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Claude says scheduling is off, or points you to Loop mode or `/at` | Loop mode is off (the default), so Untether declined Claude's `CronCreate` | `/config → 🔁 Loop mode → 🔁 On`, then ask again; for a one-off delay use `/at <delay> <prompt>` |
-| Loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
+| `⏰ Loop finished — it reached its limit of 20 runs`, or the loop stopped after 20 iterations | Hit the iteration cap (`[loop] max_iterations`, 20 by default). The notice is new in v0.36.1; earlier versions stopped silently ([#1004](https://github.com/littlebearapps/untether/issues/1004)) | Restart the loop with a fresh `/loop`, or raise `max_iterations` in `untether.toml` |
 | `⏰ Self-paced wake-up limit reached` and the session closed | A chain of self-paced wake-ups (`ScheduleWakeup`, a dynamic `/loop`) hit `[loop] max_iterations` in a row, in either Loop mode | Send a message to carry on (it resets the count), or raise `max_iterations` |
 | A loop fired inside an open session, ignored the caps, or came back after a resume | Untether older than v0.36.0, or `[loop] own_schedule = false`: Claude Code's own scheduler ran the task | Upgrade and leave `own_schedule` at its default (`true`); `/new` starts a session that can't bring the old task back |
-| Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
+| `⏰ Loop finished — it reached its time limit of 4 hours` or `… it expired 7 days after it was created` | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
+| `⏰ Scheduled run cancelled — …` | A one-off run Claude scheduled was dropped at a `[loop]` cap before it ran | Ask Claude to schedule it again, or use `/at <delay> <prompt>` |
 | Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
 | Loop kept firing after `/cancel` | Before v0.36.0 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)), and before v0.36.0 a cancelled loop could come back with your next message ([#926](https://github.com/littlebearapps/untether/issues/926)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |

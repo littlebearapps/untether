@@ -198,7 +198,7 @@ message continues when it carries no resume line.
 - **`session_mode = "stateless"`** (default): without topics, each message starts a new session
   unless it carries or replies to a resume line.
 
-**Follow-up mode** ([#775](https://github.com/littlebearapps/untether/issues/775), Claude Code only)
+**Follow-up mode** ([#775](https://github.com/littlebearapps/untether/issues/775), Claude Code, and Antigravity CLI with Untether's agy plugin)
 decides what a message sent while a run is active does: `queue` waits for the running turn to end,
 `steer` writes it into the running session. It resolves in this order:
 

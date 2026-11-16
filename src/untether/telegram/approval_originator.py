@@ -2,7 +2,8 @@
 
 With ``[transports.telegram] approval_originator_only = true``, a Claude
 approval button (``claude_control:``, incl. the orphan-approval surface) or an
-AskUserQuestion answer (``aq:`` buttons and typed replies) is accepted only
+AskUserQuestion answer (``aq:`` buttons and typed replies), or an Antigravity
+plan card (``agy_plan:``, #981) is accepted only
 from the Telegram user whose message started the run. Runs with no human
 originator — cron, webhook, ``/at`` and loop fires — stay answerable by any
 allowed user. Off by default: every allowed user can answer, as before.
@@ -17,6 +18,9 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+from ..interactive.buttons import APPROVAL_COMMAND_IDS
+from ..interactive.questions import get_ask_question_flow
+from ..interactive.registry import control_request_originator
 from ..logging import get_logger
 
 logger = get_logger(__name__)
@@ -55,8 +59,6 @@ def message_sender(chat_id: int, message_id: int) -> int | None:
 def request_originator_mismatch(request_id: str, sender_id: int | None) -> int | None:
     """The originator of a pending request when *sender_id* is someone else,
     else None (same user, or no human originator)."""
-    from ..runners.claude import control_request_originator
-
     originator = control_request_originator(request_id)
     if originator is None or originator == sender_id:
         return None
@@ -66,13 +68,22 @@ def request_originator_mismatch(request_id: str, sender_id: int | None) -> int |
 def callback_originator_mismatch(
     command_id: str, args_text: str, chat_id: int, sender_id: int | None
 ) -> tuple[str, int] | None:
-    """``(request_id, originator)`` when a ``claude_control`` / ``aq`` tap
-    comes from someone other than the run's originator, else None."""
-    if command_id == "claude_control":
+    """``(request_id, originator)`` when a ``claude_control`` / ``ia`` /
+    ``aq`` tap comes from someone other than the run's originator, else
+    None. ``ia`` (#960) is the engine-neutral approval prefix: checked the
+    same way, by the request id in its callback data."""
+    if command_id in APPROVAL_COMMAND_IDS:
         _action, _, request_id = (args_text or "").partition(":")
-    elif command_id == "aq":
-        from ..runners.claude import get_ask_question_flow
+    elif command_id == "agy_plan":
+        # #981: an Antigravity plan card records the plan run's originator.
+        from ..utils import antigravity_plan
 
+        _action, _, request_id = (args_text or "").partition(":")
+        originator = antigravity_plan.originator(request_id) if request_id else None
+        if originator is None or originator == sender_id:
+            return None
+        return request_id, originator
+    elif command_id == "aq":
         flow = get_ask_question_flow(channel_id=chat_id)
         if flow is None:
             return None

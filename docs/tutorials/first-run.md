@@ -16,10 +16,10 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.36.0)
+    🐕 **untether is ready** (v0.36.1)
 
     *default engine:* `codex`<br>
-    *installed engines:* `claude, codex, opencode`<br>
+    *installed engines:* `claude, codex, opencode` (not installed: amp, antigravity, gemini, pi)<br>
     *mode:* `assistant`<br>
     *directories:* `api, happy-gadgets, website`
 
@@ -76,14 +76,14 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 !!! untether "Untether"
     done · codex · 11s · step 5
     
-    Untether is a Telegram bridge for AI coding agents (Codex, Claude Code, OpenCode, Pi). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
+    Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi, Antigravity CLI). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
 
     `codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714`
 
 
 <img src="../assets/screenshots/final-answer-footer.jpg" alt="Final answer with model/cost footer and resume line" width="360" loading="lazy" />
 
-The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx`. When resume lines are enabled, a line like `codex resume abc123` appears too—that's how Untether knows which conversation to continue.
+The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx` (Antigravity CLI shows an estimate, `~3% ctx`, when the chat has a model set). When resume lines are enabled, a line like `codex resume abc123` (or `agy --conversation …` for Antigravity CLI) appears too—that's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 
@@ -114,7 +114,7 @@ Untether extracts the resume token from the message you replied to and continues
     `/new` cancels any running task and clears stored sessions for the current chat or topic.
 
 !!! tip "Sending while the agent is still working"
-    A message you send mid-run is queued: it runs as the next turn once the current one finishes. With Claude Code you can send `/steer <text>` instead to slip it into the running turn — see [Steer follow-ups](../how-to/steer-follow-ups.md).
+    A message you send mid-run is queued: it runs as the next turn once the current one finishes. With Claude Code (or Antigravity CLI with Untether's agy plugin installed) you can send `/steer <text>` instead to slip it into the running turn — see [Steer follow-ups](../how-to/steer-follow-ups.md).
 
 ## 6. Cancel a run
 
@@ -151,7 +151,7 @@ Want to use a different engine for one message? Prefix your message with `/<engi
 
 This uses Claude Code for just this message. The resume line will show `claude --resume ...`, and replies will automatically use Claude Code.
 
-Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported).
+Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/antigravity` (plus `/gemini` and `/amp`, which still work but are deprecated and no longer supported). Antigravity CLI only runs in a chat with a project, so bind one first (`/ctx set <project>`; see [Use Antigravity CLI](../how-to/antigravity.md#select-the-engine)).
 
 !!! tip "Set a default engine"
     Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.
@@ -174,7 +174,7 @@ The agent might be doing something slow (large repo scan, network call). Wait a 
 
 **Agent CLI not found**
 
-The agent CLI isn't on your PATH. Install the CLI for the engine you're using (e.g., `npm install -g @openai/codex`) and make sure the install location is in your PATH.
+The agent CLI isn't on your PATH. Install the CLI for the engine you're using (e.g., `npm install -g @openai/codex`) and make sure the install location is in your PATH. For Antigravity CLI, Untether also looks in `~/.local/bin/agy` (where agy's installer puts it) and at `[antigravity] cmd` if your config sets one.
 
 **Bot doesn't respond at all**
 

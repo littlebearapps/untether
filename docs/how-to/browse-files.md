@@ -12,7 +12,7 @@ Send `/browse` to open the project root:
 
 Untether replies with a directory listing rendered as inline keyboard buttons. Each button is a file or directory you can tap.
 
-`/browse` needs a project root: the chat must be bound to a project (`chat_id` under `[projects.<alias>]`), or `default_project` must be set in `untether.toml`. Otherwise it refuses rather than guessing a directory ([#389](https://github.com/littlebearapps/untether/issues/389)):
+`/browse` needs a project root. It lists the project a message in that chat would run in: the chat's or topic's `/ctx` binding first, then the project the chat is bound to (`chat_id` under `[projects.<alias>]`), then `default_project` in `untether.toml` — the same project `/file` uses. Otherwise it refuses rather than guessing a directory ([#389](https://github.com/littlebearapps/untether/issues/389)):
 
 !!! untether "Untether"
     No project directory for this chat. Bind the chat to a project (chat_id under [projects.&lt;alias&gt;]) or set default_project in untether.toml.

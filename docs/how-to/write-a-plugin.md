@@ -98,6 +98,8 @@ class MyCommand:
 BACKEND = MyCommand()
 ```
 
+A backend that only handles its own inline buttons (callback data `hello:…`) should set `callback_only = True`: it then stays out of the bot's command menu, and a typed `/hello` gets a short harmless reply instead of reaching `handle` ([#1068](https://github.com/littlebearapps/untether/issues/1068)). See [`CommandBackend`](../reference/plugin-api.md#commandbackend).
+
 To reply with a file instead of (or as well as) text, set `attachment`:
 `CommandResult(text="report ready", attachment=CommandAttachment(filename="report.md", content=data))`.
 Telegram sends it as a document with `text` as the caption, and falls back to a plain message if the upload fails or the file is over 10 MB. Attachments work for text commands only; callback results ignore them. See [`CommandAttachment`](../reference/plugin-api.md).

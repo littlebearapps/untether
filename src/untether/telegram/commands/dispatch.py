@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 
-from ...commands import CommandContext, CommandResult, get_command
+from ...commands import CommandContext, CommandResult, get_command, is_callback_only
 from ...config import ConfigError
 from ...context import RunContext
 from ...logging import get_logger
@@ -24,6 +24,12 @@ if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
+
+# #1068: the reply to a typed button-only command (``/agy_plan``, ``/aq``…).
+CALLBACK_ONLY_TEXT = (
+    "That command only works through the buttons on Untether's messages, "
+    "so there's nothing to do here."
+)
 
 # #418: Telegram caps a document caption at 1024 characters (UTF-16 units).
 _CAPTION_MAX = 1024
@@ -165,6 +171,94 @@ def _release_early_claim(backend: object, owner: str | None) -> None:
         logger.debug("callback.release_claim_failed", exc_info=True)
 
 
+# #1042: shown when a backend's own ``admin_gate`` hook fails — the gate
+# fails closed rather than letting the change through unchecked.
+_ADMIN_GATE_UNAVAILABLE = "failed to verify permissions for this change."
+
+
+async def _admin_gate_refusal(
+    cfg: TelegramBridgeConfig,
+    backend: object,
+    *,
+    command_id: str,
+    args_text: str,
+    chat_id: int,
+    sender_id: int | None,
+    is_private: bool,
+    source: str,
+) -> str | None:
+    """Refusal text when this invocation needs a group admin, else ``None``.
+
+    #1042: a backend that changes chat or host settings exposes
+    ``admin_gate(args_text)``, returning an ``AdminGate`` for an invocation
+    that changes something and ``None`` for one that only reads or navigates.
+    Both entry paths — a typed command and a button tap — call this before the
+    backend runs, so the two cannot drift apart. The check is the one the
+    settings text commands use (``check_admin_or_private_ids``): private chats
+    pass, a group needs ``creator`` / ``administrator``, and an unknown sender,
+    a failed member lookup or a failing hook is refused.
+    """
+    hook = getattr(backend, "admin_gate", None)
+    if hook is None:
+        return None
+    from .overrides import PermissionDecision, check_admin_or_private_ids
+
+    failed_text = _ADMIN_GATE_UNAVAILABLE
+    try:
+        gate = hook(args_text)
+        if gate is None:
+            return None
+        failed_text = gate.failed_member
+        decision = await check_admin_or_private_ids(
+            cfg,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            is_private=is_private,
+            missing_sender=gate.missing_sender,
+            failed_member=gate.failed_member,
+            denied=gate.denied,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed, never fail open
+        logger.warning(
+            "command.admin_check_failed",
+            command=command_id,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            source=source,
+            error_type=exc.__class__.__name__,
+        )
+        decision = PermissionDecision(
+            allowed=False, error_text=failed_text, reason="lookup_failed"
+        )
+    if decision.allowed:
+        return None
+    logger.warning(
+        "command.admin_required",
+        command=command_id,
+        chat_id=chat_id,
+        sender_id=sender_id,
+        source=source,
+        reason=decision.reason,
+    )
+    return decision.error_text or _ADMIN_GATE_UNAVAILABLE
+
+
+def _callback_is_private(msg: TelegramCallbackQuery) -> bool:
+    """Whether a button tap came from a private chat.
+
+    Mirrors ``TelegramIncomingMessage.is_private``: the chat type Telegram
+    reported when there is one, else the id's sign (only users have positive
+    chat ids).
+    """
+    raw = msg.raw if isinstance(msg.raw, dict) else {}
+    message = raw.get("message")
+    chat = message.get("chat") if isinstance(message, dict) else None
+    chat_type = chat.get("type") if isinstance(chat, dict) else None
+    if isinstance(chat_type, str):
+        return chat_type == "private"
+    return msg.chat_id > 0
+
+
 async def _dispatch_command(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
@@ -233,6 +327,12 @@ async def _dispatch_command(
             chat_id=chat_id,
         )
         return
+    if is_callback_only(backend):
+        # #1068: e.g. `/agy_plan` typed (or tapped in an old command menu).
+        # Its handler expects button data, so never run it on typed text.
+        logger.debug("command.callback_only_typed", command=command_id, chat_id=chat_id)
+        await executor.send(CALLBACK_ONLY_TEXT, reply_to=message_ref, notify=False)
+        return
     try:
         plugin_config = cfg.runtime.plugin_config(command_id)
     except ConfigError as exc:
@@ -241,6 +341,21 @@ async def _dispatch_command(
             reply_to=message_ref,
             notify=True,
         )
+        return
+    # #1042: a settings change in a group needs an admin, as the settings
+    # text commands do. Same gate as the button path below.
+    refusal = await _admin_gate_refusal(
+        cfg,
+        backend,
+        command_id=command_id,
+        args_text=args_text,
+        chat_id=chat_id,
+        sender_id=msg.sender_id,
+        is_private=msg.is_private,
+        source="command",
+    )
+    if refusal is not None:
+        await executor.send(refusal, reply_to=message_ref, notify=True)
         return
     ctx = CommandContext(
         command=command_id,
@@ -316,8 +431,15 @@ async def _dispatch_callback(
     stateful_mode: bool,
     default_engine_override: EngineId | None,
     callback_query_id: str | None = None,
+    *,
+    ambient_context_resolver: Callable[[], Awaitable[RunContext | None]] | None = None,
 ) -> None:
-    """Dispatch a callback query to a command backend."""
+    """Dispatch a callback query to a command backend.
+
+    ``ambient_context_resolver`` (#997) looks up the chat/topic's ambient run
+    context for ``CommandContext.ambient_context`` — after the early answer,
+    so it never delays clearing the button spinner.
+    """
     # Validate sender in group chats — prevent unauthorised users pressing
     # another user's approval buttons (#192).
     if (
@@ -446,6 +568,22 @@ async def _dispatch_callback(
         except ConfigError as exc:
             await _answer_callback(user_safe_error(exc, fallback="plugin config error"))
             return
+        # #1042: a settings change in a group needs an admin. Checked before
+        # the early answer, whose toast announces the change as done; a
+        # refused tap is answered with the refusal and nothing runs.
+        refusal = await _admin_gate_refusal(
+            cfg,
+            backend,
+            command_id=command_id,
+            args_text=args_text,
+            chat_id=chat_id,
+            sender_id=msg.sender_id,
+            is_private=_callback_is_private(msg),
+            source="callback",
+        )
+        if refusal is not None:
+            await _answer_callback(refusal)
+            return
         # Early callback answering: clear the Telegram spinner immediately.
         # #247: the early-answer branch MUST run before backend.handle() so
         # answerCallbackQuery reaches Telegram before any blocking control-
@@ -461,6 +599,18 @@ async def _dispatch_callback(
             # is None — clearing the spinner before backend.handle() is the
             # whole point. A None toast just means no toast text will appear.
             await _answer_callback(toast, early=True)
+
+        ambient_context: RunContext | None = None
+        if ambient_context_resolver is not None:
+            try:
+                ambient_context = await ambient_context_resolver()
+            except Exception as exc:  # noqa: BLE001 — a tap must still be handled
+                logger.warning(
+                    "callback.ambient_context_failed",
+                    command=command_id,
+                    chat_id=chat_id,
+                    error_type=exc.__class__.__name__,
+                )
 
         # For callbacks, text is the full callback data and args come from parsing
         text = msg.data or ""
@@ -480,6 +630,7 @@ async def _dispatch_callback(
             default_chat_id=cfg.chat_id,
             file_deny_globs=tuple(cfg.files.deny_globs),
             callback_query_id=callback_query_id,
+            ambient_context=ambient_context,  # #997
         )
         try:
             result = await backend.handle(ctx)

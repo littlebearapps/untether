@@ -39,6 +39,31 @@ second failure logs ERROR `telegram.network_error`. `getUpdates` is never
 retried here — the poll loop retries on its own
 ([#861](https://github.com/littlebearapps/untether/issues/861)).
 
+A `sendMessage` that ends that way has an **unknown outcome**: Telegram may have
+posted the message, and the Bot API has no idempotency key and no way to look a
+message up, so its id is lost. `telegram.network_error` and
+`transport.send.failed` then carry `delivery_unknown=true`, and
+`TelegramTransport.pop_unconfirmed_send(chat_id)` reports it once to the caller.
+Only a run's progress message acts on it
+([#1029](https://github.com/littlebearapps/untether/issues/1029)):
+
+- the progress message is sent **once** more, so the run has a message it can
+  edit, finalise and be cancelled from (WARNING `progress.send.unconfirmed`). A
+  second lost response ends it there — the run goes on without a progress
+  message, and a live turn stops asking for one. A send that certainly failed is
+  not repeated.
+- if the first send did arrive, the chat holds an untracked copy
+  (`starting · 0s` / `working · 0s` with a `cancel` button). The transport
+  remembers the chat and the time window of each such send (in memory, 48 h, 64
+  entries). A `cancel` tap on a message that no run or queued job owns, whose
+  Telegram `date` falls in one of those windows (±30 s), is that copy: it is
+  deleted and the tap is answered `out-of-date copy of a progress message —
+  removed. Nothing was cancelled; use /cancel to stop a run.` (INFO
+  `cancel.unconfirmed_progress_removed`). No run is cancelled by it.
+- an untracked copy nobody taps stays in the chat, and the record does not
+  survive a restart: after one, the tap gets the usual `nothing is currently
+  running for that message.`
+
 ## Incoming messages
 
 `parse_incoming_update` accepts text messages (and media captions), voice
@@ -142,7 +167,7 @@ Deployment-specific nouns (your project names, hostnames, third-party tools) are
 deliberately **not** in the default — add them yourself. Setting the key
 **replaces** the default rather than extending it, so include the engine names
 you care about in your own value (the default no longer lists Gemini, Amp or Pi,
-[#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
+[#789](https://github.com/littlebearapps/untether/issues/789), and doesn't list Antigravity or agy). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
 After transcription, Untether rewrites the known mishears of the name Claude, whatever the prompt ([#789](https://github.com/littlebearapps/untether/issues/789)): `Clawde` / `Clawd` / `Clode` → `Claude`; `Clawde|Clawd|Clawed|Corde|Clode|Clod` + `Code` → `Claude Code`; `Clawde|Clawd|Clawed|Claw|Corde|Clode|Clod` + `.md` → `CLAUDE.md` (whole words, case-insensitive; a bare "clawed" or "clod" is a real word and is kept). A rewrite logs INFO `voice.transcript.corrected` with the `corrections` count, never the text.
@@ -217,7 +242,10 @@ Behaviour:
     `forward.prompt.dropped` with `reason` and `merged_count`. Sending it first would only start a run for the command
     to kill, or run it in the session being left. Before v0.36.0
     `/continue` dropped it silently and `/cancel` / `/new` let it run after
-    them.
+    them. For `/cancel`, the 🗑️ notice is its reply: since v0.36.1 it no
+    longer also answers `nothing running in this chat.` (closing an idle
+    session, a pending `/at` run or a loop is still reported;
+    [#1084](https://github.com/littlebearapps/untether/issues/1084)).
   - Every other command **flushes** the pending prompt first
     (`forward.prompt.flushed reason=command`). Ordering is best-effort: the
     prompt is dispatched before the command is handled, but its run starts
@@ -244,9 +272,12 @@ followup_mode` → `queue`. `/steer <text>` and `/queue <text>` override once;
 bare `/steer` / `/queue` set the chat (or topic) default, as does the `/config`
 Follow-up page. Only plain text and voice transcripts steer — files, media
 groups, forwards and commands always queue, and a pending `AskUserQuestion`
-takes the message as its answer first. Steering is Claude-only: other engines,
-or a chat with no live Claude run, fall back to queueing with a one-line notice
-(`↪️ Steer isn't supported on <engine> — queued instead.`). See
+takes the message as its answer first. Steering works on Claude Code and, with
+Untether's agy plugin on the host, on Antigravity CLI (the steer reaches the agy
+run before its next step; [#981](https://github.com/littlebearapps/untether/issues/981)).
+Other engines, or a chat with no running Claude or Antigravity turn, fall back to
+queueing with a one-line notice (`↪️ Steer isn't supported on <engine> — queued
+instead.`). See
 [Steer follow-ups](../../how-to/steer-follow-ups.md).
 
 === "toml"
@@ -383,11 +414,21 @@ a few Telegram-specific rewrites:
   numbers: the start is set on the list's first item (`<li value>`), which
   the HTML-to-entities converter honours, where it ignored `<ol start>` and
   renumbered from 1 ([#886](https://github.com/littlebearapps/untether/issues/886)).
+- **Loose list items** — in a list with blank lines between its items, or an
+  item holding a code block or a second paragraph, the item's first paragraph
+  stays on the same line as its bullet or number; a code block or extra
+  paragraph still follows on its own lines
+  ([#1094](https://github.com/littlebearapps/untether/issues/1094)).
 - **Bare filenames** — `.md`, `.sh` and `.py` are also country-code TLDs, so a
   bare `CLAUDE.md`, `setup.sh` or `render.py:86` (paths and `:line[:col]`
   suffixes included) is rendered as inline code rather than auto-linked as a
   domain. Explicit link text and real URLs keep their links
   ([#788](https://github.com/littlebearapps/untether/issues/788)).
+- **Bare URLs inside bold or italic** — in `**https://example.org/about**:` or
+  `_https://example.org_,` the closing markers (and any punctuation after them)
+  are not part of the link, so the emphasis closes around the URL. A URL that
+  isn't wrapped in emphasis keeps its own `_` and `*` characters
+  ([#1152](https://github.com/littlebearapps/untether/issues/1152)).
 - **Line breaks** — CommonMark turns a single newline inside a paragraph into
   a space, which collapsed one-item-per-line digests into a single paragraph.
   A single newline is now kept as a line break when the next line is indented
@@ -436,8 +477,9 @@ deny_globs = [
   glob, and a link pointing outside the project is refused. Benign in-root
   symlinks keep working. Denials log `file_transfer.path_denied`.
 - **`/browse`** ([#389](https://github.com/littlebearapps/untether/issues/389))
-  browses the active run's directory, else the chat's bound project, else
-  `default_project`; with none of those it refuses and explains how to bind one
+  browses the active run's directory, else the chat's or topic's `/ctx`
+  binding ([#997](https://github.com/littlebearapps/untether/issues/997)), else
+  the chat's bound project, else `default_project`; with none of those it refuses and explains how to bind one
   (it no longer falls back to the process working directory). Listings,
   previews and direct paths apply the deny globs and also hide dot-paths except
   `.github` and `.gitignore`. Button ids are scoped per chat. Denials log
@@ -451,7 +493,10 @@ deny_globs = [
   (`outbox_stale_policy = "send"` restores the old behaviour).
   `outbox_deliver_directories = "zip"` bundles a directory's deliverable
   members into one `.zip`, never following symlinks and pruning deny-globbed
-  subdirectories.
+  subdirectories. Outbox files, `/file get` and command attachments are sent
+  with Telegram's content-type detection off, so a `.webp` image arrives as a
+  file rather than a sticker
+  ([#1056](https://github.com/littlebearapps/untether/issues/1056)).
 
 See [File transfer](../../how-to/file-transfer.md) and
 [Browse files](../../how-to/browse-files.md) for usage.
@@ -538,7 +583,8 @@ responses to Claude's PTY, editing feedback messages, etc.) happens
 independently — answering just clears the spinner.
 
 Callbacks are accepted only from allowed senders (`allowed_user_ids`, #377).
-A Claude approval callback (`claude_control:…`) is also bound to the chat whose
+An approval callback (`claude_control:…`, or the engine-neutral `ia:…` that
+Antigravity's Ask me cards and questions use, #960) is also bound to the chat whose
 message carries the button: the same callback data sent from another chat (a
 modified client can attach any callback data to any bot message it can see)
 reads as expired and answers nothing
@@ -546,15 +592,16 @@ reads as expired and answers nothing
 families already act only on the tapping chat.
 
 With `approval_originator_only = true` (opt-in, hot-reloads), `_dispatch_callback`
-also refuses a `claude_control:` or `aq:` tap from anyone but the run's
-originator, **before** the early answer reserves a claim: toast
+also refuses a `claude_control:`, `ia:`, `aq:` or `agy_plan:` (Antigravity plan
+card, #981) tap from anyone but the run's originator, **before** the early answer reserves a claim: toast
 `Only the person who started this run can answer this.`, WARNING
 `callback.not_originator` (`chat_id`, `request_id`, `sender_id`,
 `originator_id`). The originator comes from the triggering message: the loop
 notes `(chat_id, message_id) → sender_id` for every allowed message
 (`telegram/approval_originator.py`, bounded), `_run_engine` sets the run's
-sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the Claude
-runner records it per request in `_REQUEST_TO_ORIGINATOR`. Cron, webhook, `/at`
+sender contextvar (`utils/paths.py` `get_run_sender_id`) from it, and the
+approval registry records it per request in `_REQUEST_TO_ORIGINATOR` (`interactive/registry.py`; an
+Antigravity plan card records its plan run's originator in `utils/antigravity_plan.py`). Cron, webhook, `/at`
 and loop fires start from a bot notice, so they have no originator and any
 allowed user may answer. A typed AskUserQuestion answer is gated the same way
 (`ask_user_question.not_originator`, reply instead of answering).
@@ -606,6 +653,7 @@ the cause.
   after that they are logged at ERROR (`telegram.network_error`) and the call
   returns `None`.
 - Non-429 HTTP errors are logged at ERROR (`telegram.http_error`) and dropped (no retry).
+- `getUpdates` is the exception ([#1111](https://github.com/littlebearapps/untether/issues/1111)): a 5xx or a transport error (read timeout, dropped connection, connect error) there is transient — the poll loop retries every 2 s and nothing user-visible is lost — so `telegram.http_error` / `telegram.network_error` log at WARNING with `transient=true`, `consecutive_failures` and `failing_for_s`. Once polling has failed for 120 s with no success in between, one ERROR of the same event is logged with `persistent=true` (later failures in that outage stay WARNING), and the first successful poll logs INFO `telegram.poll_recovered` (`consecutive_failures`, `outage_s`, `escalated`). 4xx on `getUpdates` (401 bad token, 409 another poller) stays ERROR every time.
 - Benign `editMessage*` / `deleteMessage` rejections ("message is not modified", "message to edit not found", "message to delete not found", "message can't be edited", "message can't be deleted") are classified by their `description` (case-insensitive substring; Telegram's `error_code` is 400 for all of them and documented as unstable) and logged at INFO as `telegram.benign_rejection` with a `reason_class` (`not_modified`, `target_gone`, `not_editable`, `not_deletable`), instead of ERROR. A missing, zero or negative `message_id`, `MESSAGE_ID_INVALID`, a benign-looking string on any other method, and every non-400 status stay at ERROR. When 5 rejections of one `(method, reason_class)` arrive within 60 s, one WARNING `telegram.benign_rejection.burst` (with `distinct_messages`, `message_ids`, `chat_ids`) is logged per window, so a wrong-id bug or a stuck edit loop still surfaces ([#746](https://github.com/littlebearapps/untether/issues/746)).
 - `telegram.http_error`, `telegram.network_error` and `telegram.api_error` carry the target `chat_id` and `message_id` (when the request had them), and `telegram.network_retry` the `chat_id`, so a failed edit can be tied to its chat. They, `telegram.benign_rejection`, `outbox.op.failed` and `transport.send/edit/delete.failed` also carry `kind`: the Untether surface the call was for — `progress` (a run's or follow-up turn's progress message), `final`, `bg_status`, `approval_surface`, `approval_notify`, `approval_reminder`, `outline`, `ephemeral` or `followup_notice` (a live follow-up's "session ended before this message ran" notice) — or `null` for an untagged call (commands, notices, triggers). The kind is a context variable set by the caller and carried on the outbox op onto the worker task ([#823](https://github.com/littlebearapps/untether/issues/823)).
 - The recorded failure reason (`transport.edit.failed error=`, `startup.orphan_cleanup.edit_failed reason=`) is Telegram's `description` when the response carries one, else `http <status>: <body>`.

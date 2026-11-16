@@ -564,6 +564,58 @@ async def test_build_versions_line_caches_probes(
     assert sorted(calls) == ["claude", "pi", "pi"]
 
 
+@pytest.mark.anyio
+async def test_failed_probe_is_cached_only_briefly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1067: a probe that failed (e.g. timed out) is retried after the short
+    failure TTL, not hidden for the full 5-minute success TTL."""
+    calls: list[str] = []
+    answers = iter([None, "1.14.33"])
+
+    def probe(cmd: str) -> str | None:
+        calls.append(cmd)
+        return next(answers)
+
+    clock = [1000.0]
+    monkeypatch.setattr(telegram_backend.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    assert await telegram_backend._cli_version("opencode") is None
+    clock[0] += telegram_backend._CLI_VERSION_FAILED_TTL_S - 1
+    assert await telegram_backend._cli_version("opencode") is None
+    assert calls == ["opencode"]
+    clock[0] += 2
+    assert await telegram_backend._cli_version("opencode") == "1.14.33"
+    assert calls == ["opencode", "opencode"]
+    assert (
+        telegram_backend._CLI_VERSION_FAILED_TTL_S < telegram_backend._CLI_VERSION_TTL_S
+    )
+
+
+def test_detect_cli_version_timeout_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1067: a slow `--version` gets a generous bound (OpenCode takes ~3.5 s
+    alone) and a timeout leaves a debug line instead of vanishing."""
+    import subprocess as sp
+
+    from structlog.testing import capture_logs
+
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        seen.update(kwargs)
+        raise sp.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    with capture_logs() as logs:
+        assert telegram_backend._detect_cli_version("opencode") is None
+    assert seen["timeout"] >= 10
+    (line,) = [e for e in logs if e["event"] == "cli_version.probe_timeout"]
+    assert line["cmd"] == "opencode"
+    assert line["log_level"] == "debug"
+
+
 def test_startup_message_excludes_versions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -799,3 +851,100 @@ def test_836_failure_never_breaks_startup(monkeypatch: pytest.MonkeyPatch) -> No
         msg = _msg_836([{"id": "c", "permission_mode": "default"}])
     assert "_triggers:_" in msg and "unattended" not in msg
     assert any(e["event"] == "startup.unattended_line_failed" for e in logs)
+
+
+@pytest.mark.anyio
+async def test_versions_line_probes_backend_cli_cmd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#993 (08 §3): the probe uses the backend's ``cli_cmd`` (agy for
+    antigravity) while the label stays the engine id."""
+    # #1089: agy resolves like the runner's; keep the host's agy out of it.
+    _agy_off_path(monkeypatch, tmp_path)
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return {"agy": "1.3.2", "claude": "2.1.300"}.get(cmd)
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    line = await telegram_backend._build_versions_line(("antigravity", "claude"))
+    assert "agy" in probed and "antigravity" not in probed
+    assert line is not None
+    assert line.endswith("antigravity 1.3.2 · claude 2.1.300")
+
+
+@pytest.mark.anyio
+async def test_versions_line_existing_engines_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return None
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    await telegram_backend._build_versions_line(
+        ("claude", "codex", "opencode", "pi", "not-an-engine")
+    )
+    assert sorted(probed) == ["claude", "codex", "not-an-engine", "opencode", "pi"]
+
+
+# --- #1089: the About probe runs the agy the runner spawns -------------------
+
+
+def _agy_off_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """PATH without agy and a home we control; returns that home."""
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(empty_bin))
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _fake_agy(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+async def _probed_agy_cmd(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    probed: list[str] = []
+
+    def probe(cmd: str) -> str | None:
+        probed.append(cmd)
+        return "1.3.5"
+
+    monkeypatch.setattr(telegram_backend, "_detect_cli_version", probe)
+    line = await telegram_backend._build_versions_line(("antigravity",))
+    assert line is not None and line.endswith("antigravity 1.3.5")
+    return probed
+
+
+@pytest.mark.anyio
+async def test_1089_versions_line_probes_local_bin_agy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = _agy_off_path(monkeypatch, tmp_path)
+    agy = _fake_agy(home / ".local" / "bin" / "agy")
+    assert await _probed_agy_cmd(monkeypatch) == [str(agy)]
+
+
+@pytest.mark.anyio
+async def test_1089_versions_line_probes_configured_agy_cmd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _agy_off_path(monkeypatch, tmp_path)
+    agy = _fake_agy(tmp_path / "opt" / "agy")
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n[transports.telegram]\n'
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n\n'
+        f'[antigravity]\ncmd = "{agy}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(config_path))
+    assert await _probed_agy_cmd(monkeypatch) == [str(agy)]

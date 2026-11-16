@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -17,14 +17,16 @@ from ..config_watch import watch_config as watch_config_changes
 from ..context import RunContext, attended_context, unattended_trigger
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
+from ..live_sessions import live_backend
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..progress import ProgressTracker
 from ..runners.run_options import EngineRunOptions, claude_tap_waits_for
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
-from ..transport import MessageRef, RenderedMessage, SendOptions
+from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
+from . import arrival_order, first_start
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -61,6 +63,7 @@ from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
+from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
@@ -141,6 +144,39 @@ def _chat_session_key(
     return (msg.chat_id, msg.sender_id)
 
 
+async def _clear_failed_session(
+    token: ResumeToken,
+    *,
+    topic_store: TopicStateStore | None,
+    topic_key: tuple[int, int] | None,
+    chat_session_store: ChatSessionStore | None,
+    chat_session_key: tuple[int, int | None] | None,
+) -> bool:
+    """Clear the saved session a failed resume named; return whether one was
+    removed (``on_resume_failed``).
+
+    #1052: compare by session id, not just engine. A stale resume line names
+    some other session, so its failure leaves the chat's (or topic's) own
+    saved session alone, and the run says nothing was cleared.
+    """
+    cleared = False
+    if topic_store is not None and topic_key is not None:
+        cleared = await topic_store.clear_engine_session(
+            topic_key[0], topic_key[1], token.engine, resume=token.value
+        )
+    if chat_session_store is not None and chat_session_key is not None:
+        cleared = (
+            await chat_session_store.clear_engine_session(
+                chat_session_key[0],
+                chat_session_key[1],
+                token.engine,
+                resume=token.value,
+            )
+            or cleared
+        )
+    return cleared
+
+
 async def _resolve_engine_run_options(
     chat_id: int,
     thread_id: int | None,
@@ -218,6 +254,11 @@ def _apply_trigger_overrides(
     derived: dict[str, object] = {}
     if (source := unattended_trigger(context)) is not None:
         derived["unattended_trigger"] = source
+    if "permission_mode" in fields:
+        # #558 (08 §10, REVIEW M3): keep the trigger's own mode apart from
+        # an inherited one, so the agy runner can refuse to inherit Full
+        # access. Every other runner ignores the field.
+        derived["trigger_permission_mode"] = fields["permission_mode"]
     if not fields and not derived:
         return run_options
     from dataclasses import replace
@@ -234,11 +275,14 @@ def _apply_trigger_overrides(
         # the same options the run is spawned with.
         new_options = drop_unsupported_reasoning(engine, new_options)
     if log:
+        # A run Untether starts itself with a fixed mode (an approved
+        # Antigravity plan, #981) carries no trigger; don't log it as a cron.
+        prefix = "trigger.cron" if context.trigger_source is not None else "run"
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None
             if previous != value:
                 logger.info(
-                    f"trigger.cron.{name}_override",
+                    f"{prefix}.{name}_override",
                     trigger_source=context.trigger_source,
                     engine=engine,
                     **{f"chat_{name}": previous, f"trigger_{name}": value},
@@ -326,56 +370,49 @@ async def _send_startup(cfg: TelegramBridgeConfig) -> None:
         logger.info("startup.sent", chat_id=cfg.chat_id)
 
 
-async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -> None:
-    """#318 follow-up: broadcast restart-required warning to project chats + admin DMs.
+def _reload_notice_targets(
+    cfg: TelegramBridgeConfig,
+    running_tasks: Mapping[MessageRef, object] | None,
+    *,
+    restart_pending: bool,
+) -> list[tuple[int, int | None]]:
+    """Who gets the reload notice, as ``(chat_id, thread_id)`` pairs (#1030).
 
-    PR #336 wired the warning to ``cfg.chat_id`` alone; in project-routed
-    deployments that value is the placeholder sentinel and every send
-    fails with "chat not found". This helper instead targets every active
-    project chat plus any ``allowed_user_ids`` admin DM, falling back to
-    ``cfg.chat_id`` only when no routed targets exist. Per-chat failures
-    are logged and skipped so one bad chat can't mask the warning from
-    the rest.
+    The reported diff only ever covers global keys, so no chat is "affected"
+    by it. A hot-reload confirmation goes to the ``allowed_user_ids`` admin
+    DMs (``cfg.chat_id`` when there are none) plus every chat with a run in
+    flight: that keeps the "No restart needed" cue in front of the agent
+    that made the edit (#547/#548) without posting in idle project chats.
+
+    A pending restart affects every chat, so it keeps the #318 audience:
+    every project chat plus the admin DMs, with ``cfg.chat_id`` only when
+    neither exists (in project-routed deployments it is a placeholder).
+
+    A busy chat is addressed in the thread (topic) its run started in, and
+    that send stands in for the chat's plain one, so no chat is told twice.
     """
-    from ..service_manager import restart_hint
+    from ..runner_bridge import running_task_is_live_idle
 
-    keys_text = ", ".join(f"`{k}`" for k in keys)
-    # #927: name the running unit/label (generic wording when undetected).
-    text = (
-        "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
-        f"Setting {keys_text} changed — restart required to take effect.\n"
-        f"To apply: {restart_hint()}."
-    )
-    targets: set[int] = set()
-    targets.update(cfg.runtime.project_chat_ids())
-    targets.update(cfg.allowed_user_ids or ())
-    if not targets:
-        targets.add(cfg.chat_id)
-    sent_count = 0
-    for chat_id in sorted(targets):
-        try:
-            sent = await cfg.exec_cfg.transport.send(
-                channel_id=chat_id,
-                message=RenderedMessage(
-                    text=text,
-                    extra={"parse_mode": "Markdown"},
-                ),
-                options=SendOptions(notify=True),
-            )
-            if sent is not None:
-                sent_count += 1
-        except Exception as exc:  # noqa: BLE001 — logged then continue
-            logger.warning(
-                "config.reload.restart_notify.failed",
-                chat_id=chat_id,
-                error=str(exc),
-            )
-    logger.info(
-        "config.reload.restart_notify.sent",
-        keys=keys,
-        targets=sorted(targets),
-        sent_count=sent_count,
-    )
+    chats: set[int] = set(cfg.allowed_user_ids or ())
+    if restart_pending:
+        chats.update(cfg.runtime.project_chat_ids())
+    if not chats:
+        chats.add(cfg.chat_id)
+    targets: set[tuple[int, int | None]] = set()
+    busy: set[int] = set()
+    for ref, task in (running_tasks or {}).items():
+        done = getattr(task, "done", None)
+        if done is not None and done.is_set():
+            continue
+        # #776: a live session idling between turns has no run in flight.
+        if running_task_is_live_idle(task):
+            continue
+        chat_id = cast(int, ref.channel_id)
+        busy.add(chat_id)
+        # #826: the task's thread, never the echoed ``ref.thread_id``.
+        targets.add((chat_id, getattr(task, "thread_id", None)))
+    targets.update((chat_id, None) for chat_id in chats - busy)
+    return sorted(targets, key=lambda target: (target[0], target[1] or 0))
 
 
 async def _notify_reload_applied(
@@ -384,33 +421,39 @@ async def _notify_reload_applied(
     path: Path,
     hot_keys: list[str],
     restart_keys: list[str],
+    restart_reasons: Sequence[str] = (),
+    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
-    """#547 axis 2 / #548: broadcast a hot-reload confirmation message so
-    agents and users see "did my edit work?" answered in-chat (instead of
-    having to switch to ``journalctl``). The headline framing ("No restart
-    needed.") flips the trained-in agent reflex to ``systemctl restart``
-    after editing config.
+    """#547 axis 2 / #548: send a reload confirmation so agents and users
+    see "did my edit work?" answered in-chat (instead of having to switch to
+    ``journalctl``). The headline framing ("No restart needed.") flips the
+    trained-in agent reflex to ``systemctl restart`` after editing config.
 
-    Reuses the same broadcast pattern as ``_notify_restart_required``: send
-    to every active project chat + admin DMs, falling back to
-    ``cfg.chat_id`` if no routed targets exist. Per-chat failures are
-    logged and skipped — one bad chat can't mask the affirmation from
-    the rest.
+    This is the only reload notice: a restart-only key is reported here too
+    ("Restart required" / "Partial reload"), once per chat (#1030), and it
+    pings. Recipients come from :func:`_reload_notice_targets`. Per-chat
+    failures are logged and skipped — one bad chat can't mask the notice
+    from the rest.
+
+    ``restart_reasons`` (#1146) are restarts no edited key explains, e.g.
+    triggers that failed at start-up.
     """
-    if not hot_keys and not restart_keys:
+    restart_pending = bool(restart_keys) or bool(restart_reasons)
+    if not hot_keys and not restart_pending:
         return
     from ..config_reload_notification import format_reload_notification
 
     text = format_reload_notification(
-        path=path, hot_keys=hot_keys, restart_keys=restart_keys
+        path=path,
+        hot_keys=hot_keys,
+        restart_keys=restart_keys,
+        restart_reasons=restart_reasons,
     )
-    targets: set[int] = set()
-    targets.update(cfg.runtime.project_chat_ids())
-    targets.update(cfg.allowed_user_ids or ())
-    if not targets:
-        targets.add(cfg.chat_id)
+    targets = _reload_notice_targets(
+        cfg, running_tasks, restart_pending=restart_pending
+    )
     sent_count = 0
-    for chat_id in sorted(targets):
+    for chat_id, thread_id in targets:
         try:
             sent = await cfg.exec_cfg.transport.send(
                 channel_id=chat_id,
@@ -418,7 +461,8 @@ async def _notify_reload_applied(
                     text=text,
                     extra={"parse_mode": "Markdown"},
                 ),
-                options=SendOptions(notify=False),  # non-disruptive
+                # A pending restart needs action; a confirmation doesn't.
+                options=SendOptions(notify=restart_pending, thread_id=thread_id),
             )
             if sent is not None:
                 sent_count += 1
@@ -426,14 +470,224 @@ async def _notify_reload_applied(
             logger.warning(
                 "config.reload.applied_notify.failed",
                 chat_id=chat_id,
+                thread_id=thread_id,
                 error=str(exc),
             )
     logger.info(
         "config.reload.applied_notify.sent",
         hot_keys=hot_keys,
         restart_keys=restart_keys,
-        targets=sorted(targets),
+        restart_reasons=list(restart_reasons),
+        targets=[list(target) for target in targets],
         sent_count=sent_count,
+    )
+
+
+async def _notify_trigger_config_problem(
+    cfg: TelegramBridgeConfig,
+    text: str,
+    *,
+    running_tasks: Mapping[MessageRef, object] | None = None,
+) -> None:
+    """#1117: post a trigger config problem (skipped entries, or a whole
+    ``[triggers]`` block that failed) to the reload-notice audience.
+
+    Rendered from markdown into entities (no parse mode), so validation text
+    full of ``_`` can't make the send fail; the formatters escape user text
+    (#1144), so a schedule's ``*`` shows as typed. Never raises.
+    """
+    from ..markdown import MarkdownParts
+    from .render import prepare_telegram
+
+    try:
+        rendered, entities = prepare_telegram(MarkdownParts(header=text))
+        targets = _reload_notice_targets(cfg, running_tasks, restart_pending=False)
+    except Exception:  # noqa: BLE001 — a notice must never break startup/reload
+        logger.warning("triggers.config_notice.crashed", exc_info=True)
+        return
+    sent_count = 0
+    for chat_id, thread_id in targets:
+        try:
+            sent = await cfg.exec_cfg.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=rendered, extra={"entities": entities}),
+                options=SendOptions(notify=True, thread_id=thread_id),
+            )
+            if sent is not None:
+                sent_count += 1
+        except Exception as exc:  # noqa: BLE001 — logged then continue
+            logger.warning(
+                "triggers.config_notice.failed",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+    logger.info(
+        "triggers.config_notice.sent",
+        targets=[list(target) for target in targets],
+        sent_count=sent_count,
+    )
+
+
+async def _notify_new_invalid_triggers(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    invalid: Sequence[InvalidTrigger],
+    *,
+    trigger_manager: TriggerManager | None,
+    exposed: bool,
+) -> None:
+    """#1117: on reload, announce only entries not already announced (an
+    unrelated edit doesn't repeat the notice; a fixed entry is forgotten).
+
+    #1146: ``auth="none"`` webhooks the reload refused are announced the same
+    way, and the notice only says "reloaded normally" when the triggers (and
+    the webhook server) are really running."""
+    from ..config_reload_notification import format_invalid_triggers_notice
+
+    refused = trigger_manager.refused_webhook_ids if trigger_manager else ()
+    new = [item for item in invalid if item not in state.trigger_invalid_notified]
+    new_refused = [i for i in refused if i not in state.trigger_refused_notified]
+    state.trigger_invalid_notified = set(invalid)
+    state.trigger_refused_notified = set(refused)
+    if new or new_refused:
+        await _notify_trigger_config_problem(
+            cfg,
+            format_invalid_triggers_notice(
+                new,
+                phase="reload",
+                refused_webhook_ids=new_refused,
+                exposed=exposed,
+                running=trigger_manager is not None,
+                webhook_server_running=not state.webhook_server_refused,
+            ),
+            running_tasks=state.running_tasks,
+        )
+
+
+def _allowed_tools_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if item is not None)
+    return ()
+
+
+async def _audit_trigger_permissions(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    settings: TriggersSettings,
+    *,
+    reason: str,
+) -> None:
+    """#1142: warn (once per finding) about crons that inherit a bypass mode
+    and risky ``agent_run`` webhooks. Reads each trigger chat's ``/planmode``
+    the way ``run_job`` does. Never raises: an audit must not stop triggers."""
+    from ..permission_audit import (
+        ANTIGRAVITY_ENGINE,
+        CLAUDE_ENGINE,
+        TriggerEngineDefaults,
+        audit_trigger_permission_risks,
+        log_trigger_permission_risks,
+        trigger_chat_engine_pairs,
+    )
+
+    try:
+        runtime = cfg.runtime
+
+        def resolve(engine: str | None, project: str | None) -> str:
+            return runtime.resolve_engine(
+                engine_override=engine, context=RunContext(project=project)
+            )
+
+        def runner_attr(engine: str, name: str) -> object:
+            if engine not in runtime.engine_ids:
+                return None
+            runner = runtime.resolve_runner(
+                resume_token=None, engine_override=engine
+            ).runner
+            return getattr(runner, name, None)
+
+        modes: dict[tuple[int, str], str | None] = {}
+        if state.chat_prefs is not None:
+            for chat_id, engine in trigger_chat_engine_pairs(
+                settings, default_chat_id=cfg.chat_id, resolve_engine=resolve
+            ):
+                override = await state.chat_prefs.get_engine_override(chat_id, engine)
+                modes[(chat_id, engine)] = (
+                    override.permission_mode if override is not None else None
+                )
+        spent: set[str] = set()
+        if runtime.config_path is not None and any(
+            cron.run_once for cron in settings.crons
+        ):
+            from ..triggers import run_once_state
+
+            spent = set(
+                run_once_state.load_fired_state(
+                    run_once_state.resolve_state_path(runtime.config_path)
+                )
+            )
+        claude_mode = runner_attr(CLAUDE_ENGINE, "permission_mode")
+        agy_mode = runner_attr(ANTIGRAVITY_ENGINE, "default_permission_mode")
+        defaults = TriggerEngineDefaults(
+            claude_mode=claude_mode if isinstance(claude_mode, str) else None,
+            claude_skip_permissions=runner_attr(
+                CLAUDE_ENGINE, "dangerously_skip_permissions"
+            )
+            is True,
+            claude_allowed_tools=_allowed_tools_tuple(
+                runner_attr(CLAUDE_ENGINE, "allowed_tools")
+            ),
+            claude_allowed_tools_explicit=runner_attr(
+                CLAUDE_ENGINE, "allowed_tools_explicit"
+            )
+            is True,
+            antigravity_mode=agy_mode if isinstance(agy_mode, str) else None,
+        )
+        risks = audit_trigger_permission_risks(
+            settings,
+            default_chat_id=cfg.chat_id,
+            resolve_engine=resolve,
+            defaults=defaults,
+            chat_mode=lambda chat_id, engine: modes.get((chat_id, engine)),
+            spent_cron_ids=spent,
+        )
+        log_trigger_permission_risks(
+            risks, warned=state.trigger_permission_risks_warned, reason=reason
+        )
+    except Exception:  # noqa: BLE001 — a warning must never break triggers
+        logger.warning("trigger.permission_audit.failed", exc_info=True)
+
+
+async def _notify_trigger_block_failure_on_reload(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    trigger_manager: TriggerManager | None,
+    error: str,
+) -> None:
+    """#1117: a reload whose ``[triggers]`` block failed keeps the previous
+    triggers, so say so in Telegram, naming the webhooks whose old secret is
+    still accepted. Once per distinct error.
+
+    #1146: if start-up refused the webhook server, only the crons are still
+    running and no webhook secret is being accepted."""
+    from ..config_reload_notification import format_trigger_block_failure_notice
+
+    if state.trigger_block_error_notified == error:
+        return
+    state.trigger_block_error_notified = error
+    active = trigger_manager.secret_webhook_ids() if trigger_manager else []
+    await _notify_trigger_config_problem(
+        cfg,
+        format_trigger_block_failure_notice(
+            error,
+            phase="reload",
+            running=trigger_manager is not None,
+            active_secret_webhook_ids=active,
+            webhook_server_running=not state.webhook_server_refused,
+        ),
+        running_tasks=state.running_tasks,
     )
 
 
@@ -681,6 +935,7 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if config_path is None:
         return
     from .progress_persistence import (
+        NOTIFY_KEY,
         clear_all_progress,
         load_active_progress,
         resolve_progress_path,
@@ -691,11 +946,16 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if not entries:
         return
     logger.info("startup.orphan_cleanup", count=len(entries))
-    edited = failed = skipped = 0
+    edited = failed = skipped = notify_deleted = 0
     pop = getattr(cfg.bot, "pop_edit_error", None)
     for entry in entries.values():
         chat_id = entry.get("chat_id")
         message_id = entry.get("message_id")
+        # #1084: the card's buttons go below, so its "Action required" push
+        # would point at nothing to tap — delete it, whatever the edit does.
+        notify_id = entry.get(NOTIFY_KEY)
+        if chat_id is not None and notify_id is not None:
+            notify_deleted += await _delete_orphan_notify(cfg, chat_id, notify_id)
         if chat_id is None or message_id is None:
             skipped += 1
             continue
@@ -735,8 +995,38 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
         edited=edited,
         failed=failed,
         skipped=skipped,
+        notify_deleted=notify_deleted,
     )
     clear_all_progress(progress_path)
+
+
+async def _delete_orphan_notify(
+    cfg: TelegramBridgeConfig, chat_id: Any, message_id: Any
+) -> int:
+    """#1084: delete an orphan card's approval push. 1 when it went, else 0;
+    a failure (already deleted, too old, corrupt id) is DEBUG, like an
+    orphan edit (#746)."""
+    try:
+        cid, mid = int(chat_id), int(message_id)
+        with message_kind("approval_notify"):
+            ok = await cfg.bot.delete_message(chat_id=cid, message_id=mid)
+    except Exception:  # noqa: BLE001 — corrupt entry (int()) or an unexpected raise
+        logger.debug(
+            "startup.orphan_cleanup.notify_delete_failed",
+            chat_id=chat_id,
+            message_id=message_id,
+            exc_info=True,
+        )
+        return 0
+    if not ok:
+        logger.debug(
+            "startup.orphan_cleanup.notify_delete_failed",
+            chat_id=cid,
+            message_id=mid,
+        )
+        return 0
+    logger.debug("startup.orphan_cleanup.notify_deleted", chat_id=cid, message_id=mid)
+    return 1
 
 
 def _init_quarantine_store(config_path: Path) -> None:
@@ -945,6 +1235,27 @@ class TelegramLoopState:
     # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
     # don't repeat the warning.
     trigger_chat_fallbacks_warned: set[TriggerChatFallback] = field(default_factory=set)
+    # #1142: ``trigger.cron.inherits_bypass`` / ``trigger.webhook.*`` audit
+    # findings already logged, so reloads don't repeat them.
+    trigger_permission_risks_warned: set[TriggerRisk] = field(default_factory=set)
+    # #1117: invalid trigger entries / the block-level error already announced
+    # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
+    trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
+    trigger_block_error_notified: str | None = None
+    # #1146: refused ``auth="none"`` webhook ids already announced; whether
+    # that refusal kept the webhook server down at start-up (it stays down
+    # until a restart); and whether the whole [triggers] block failed at
+    # start-up (a reload then needs a restart for that reason, not because
+    # ``triggers.enabled`` was touched).
+    trigger_refused_notified: set[str] = field(default_factory=set)
+    webhook_server_refused: bool = False
+    triggers_init_failed: bool = False
+
+
+# #1146: the restart reason a reload names after [triggers] failed at start-up.
+_TRIGGERS_INIT_FAILED_RESTART_REASON = (
+    "triggers failed at start-up, so no crons or webhooks are running"
+)
 
 
 def _triggers_enable_needs_restart(
@@ -962,9 +1273,14 @@ def _triggers_enable_needs_restart(
 
 
 if TYPE_CHECKING:
+    from ..permission_audit import TriggerRisk
     from ..runner_bridge import RunningTasks
     from ..triggers.manager import TriggerManager
-    from ..triggers.settings import TriggerChatFallback
+    from ..triggers.settings import (
+        InvalidTrigger,
+        TriggerChatFallback,
+        TriggersSettings,
+    )
 
 
 _FORWARD_FIELDS = (
@@ -1031,6 +1347,21 @@ def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | 
 _SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
 
 
+def _arrival_scope(
+    msg: TelegramIncomingMessage,
+    chat_session_key: tuple[int, int | None] | None,
+    topic_key: tuple[int, int] | None,
+) -> arrival_order.Scope:
+    """#1164: prompts that can share a session keep their arrival order: the
+    chat and thread, plus the per-sender key in groups (so another member's
+    first message is never held behind this one's follow-ups). With no
+    session scope at all (stateless) each sender keeps their own order."""
+    owner: object = chat_session_key
+    if chat_session_key is None and topic_key is None:
+        owner = ("sender", msg.sender_id)
+    return (msg.chat_id, msg.thread_id, owner)
+
+
 def _reply_targets_running_progress(
     running_tasks: Mapping[MessageRef, object],
     chat_id: int,
@@ -1086,15 +1417,7 @@ def _apply_command_barrier(
 
 def _dropped_prompt_notice(pending: _PendingPrompt, *, command: str) -> str:
     count = len(pending.merged_message_ids) + 1 + len(pending.forwards)
-    if count == 1:
-        return (
-            f"🗑️ Dropped 1 message sent just before /{command} — "
-            "send it again if you still need it."
-        )
-    return (
-        f"🗑️ Dropped {count} messages sent just before /{command} — "
-        "send them again if you still need them."
-    )
+    return dropped_notice(count, command=command)
 
 
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
@@ -1594,9 +1917,10 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     (finishing background work under the liveness-aware ceiling, #646/#647)
     previously sat on a bare "queued" progress message for the whole hold —
     observed at 5m36s, permitted up to 30 min — with nothing telling the
-    user why, or that /cancel was available. Returns ``None`` for non-Claude
-    engines, unknown sessions, and normal mid-run queues (where the active
-    progress message above already explains itself).
+    user why, or that /cancel was available. Returns ``None`` for engines
+    with no live-session backend (#977 — only Claude has one), unknown
+    sessions, and normal mid-run queues (where the active progress message
+    above already explains itself).
 
     #781: with live sessions (#776) a follow-up to a session that is live
     and accepting input is written into that same process as soon as its
@@ -1607,14 +1931,21 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     process exits. The live note omits "/cancel to drop it": once the
     scheduler hands the job to the injector it is no longer in the
     cancellable queue.
+
+    #1154: the live note shows only when the follow-up really waits behind
+    a turn (an earlier follow-up written but not started yet). A live
+    session idle between turns takes it straight away — the old check
+    (post-result + accepting) is exactly that idle state, so a media group
+    sent to an idle chat flashed "Queued … current turn ends" with nothing
+    running.
     """
-    if resume_token.engine != "claude":
+    backend = live_backend(resume_token.engine)
+    if backend is None:
         return None
     try:
-        from ..runners.claude import is_session_accepting, session_linger_info
-
-        info = session_linger_info(resume_token.value)
-        live = info is not None and is_session_accepting(resume_token.value)
+        info = backend.linger_info(resume_token.value)
+        live = info is not None and backend.is_accepting(resume_token.value)
+        waits_for_turn = live and backend.turn_pending(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1625,12 +1956,16 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     if not post_result:
         return None
     if live:
+        if not waits_for_turn:
+            return None
         if bg_count > 0:
             return (
-                "⏳ Queued — sent as soon as Claude's current turn ends "
-                "(background tasks keep running)."
+                f"⏳ Queued — sent as soon as {backend.display_name}'s current "
+                f"turn ends (background tasks keep running)."
             )
-        return "⏳ Queued — sent as soon as Claude's current turn ends."
+        return (
+            f"⏳ Queued — sent as soon as {backend.display_name}'s current turn ends."
+        )
     if bg_count > 0:
         plural = "s" if bg_count != 1 else ""
         return (
@@ -1790,27 +2125,41 @@ async def _notify_drain_timeout(
     remaining: int,
 ) -> None:
     """Send a timeout notice to each unique chat/topic still running after
-    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``."""
+    drain. Same #665 thread routing + dedupe as ``_notify_drain_start``.
+
+    #1159: the hint names each chat's own engine (the run's session engine,
+    else the engine it was started on), or none when neither is known —
+    never a hardcoded ``/claude`` in a Codex or Pi chat.
+    """
     from ..transport import RenderedMessage, SendOptions
 
-    hint = (
-        "Untether was restarted. Your session is saved"
-        " \N{EM DASH} resume by sending a new message"
-        " or starting /claude."
-    )
-    msg = RenderedMessage(
-        text=(
-            f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
-            f" {remaining} run(s) interrupted."
-            f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
-        ),
-        extra={},
-    )
+    def _message(engine: str | None) -> RenderedMessage:
+        restart = f" or starting /{engine}." if engine else "."
+        hint = (
+            "Untether was restarted. Your session is saved"
+            f" \N{EM DASH} resume by sending a new message{restart}"
+        )
+        return RenderedMessage(
+            text=(
+                f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
+                f" {remaining} run(s) interrupted."
+                f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+            ),
+            extra={},
+        )
+
+    engines: dict[tuple[int | str, object], str] = {}
+    for ref, task in list(running_tasks.items()):
+        resume = getattr(task, "resume", None)
+        engine = getattr(resume, "engine", None) or getattr(task, "engine", None)
+        if isinstance(engine, str) and engine:
+            engines.setdefault((ref.channel_id, ref.thread_id), engine)
     notified: set[tuple[int | str, object]] = set()
     for ref in list(running_tasks):
         target = (ref.channel_id, ref.thread_id)
         if target not in notified:
             notified.add(target)
+            msg = _message(engines.get(target))
             try:
                 await transport.send(  # type: ignore[attr-defined]
                     channel_id=ref.channel_id,
@@ -2001,11 +2350,12 @@ async def run_main_loop(
                 refresh_topics_scope()
                 await set_command_menu(cfg)
                 # #547 axis 2 / #548: accumulate the keys that actually
-                # changed in this reload so the broadcast at the end of
+                # changed in this reload so the notice at the end of
                 # handle_reload can tell the user (and any agent reading
                 # in next-turn context) whether a restart is required.
                 _reload_hot_keys: list[str] = []
                 _reload_restart_keys: list[str] = []
+                _reload_restart_reasons: list[str] = []
                 if state.transport_snapshot is not None:
                     new_snapshot = reload.settings.transports.telegram.model_dump()
                     changed = _diff_keys(state.transport_snapshot, new_snapshot)
@@ -2027,14 +2377,8 @@ async def run_main_loop(
                                 keys=restart_keys,
                                 restart_required=True,
                             )
-                            # #318 (follow-up): PR #336 sent to cfg.chat_id,
-                            # but in project-routed deployments that is the
-                            # placeholder sentinel and every send fails with
-                            # "chat not found". Broadcast to every project
-                            # chat plus admin DMs so the warning actually
-                            # reaches whoever's driving the bot. Per-chat
-                            # failures are logged and skipped.
-                            await _notify_restart_required(cfg, restart_keys)
+                            # #1030: the Telegram warning is the reload
+                            # notice sent at the end of this handler.
                         if hot_keys:
                             cfg.update_from(reload.settings.transports.telegram)
                             state.forward_coalesce_s = max(
@@ -2101,32 +2445,49 @@ async def run_main_loop(
                         current=triggers_enabled_now,
                         running=trigger_manager is not None,
                     ):
-                        logger.warning(
-                            "config.reload.restart_required",
-                            key="triggers.enabled",
-                            hint=(
-                                "The cron scheduler and webhook server only "
-                                "start at startup; restart Untether to run "
-                                "the configured triggers."
-                            ),
+                        enable_hint = (
+                            "The cron scheduler and webhook server only "
+                            "start at startup; restart Untether to run "
+                            "the configured triggers."
                         )
-                        _reload_restart_keys.append("triggers.enabled")
+                        if state.triggers_init_failed:
+                            # #1146: [triggers] failed at start-up, so the
+                            # key wasn't touched — name the real reason.
+                            logger.warning(
+                                "config.reload.restart_required",
+                                reason="triggers_init_failed",
+                                hint=enable_hint,
+                            )
+                            _reload_restart_reasons.append(
+                                _TRIGGERS_INIT_FAILED_RESTART_REASON
+                            )
+                        else:
+                            logger.warning(
+                                "config.reload.restart_required",
+                                key="triggers.enabled",
+                                hint=enable_hint,
+                            )
+                            _reload_restart_keys.append("triggers.enabled")
                     state.triggers_enabled = triggers_enabled_now
 
-                # #547 axis 2 / #548: broadcast the affirmative
+                # #547 axis 2 / #548: send the affirmative
                 # "Hot-reloaded — No restart needed." (or, if any
                 # restart-only key was edited, the matching
                 # "Restart required" / "Partial reload" message). The
                 # headline framing flips the trained-in agent reflex to
                 # ``systemctl restart`` after editing config; agents read
-                # this message in next-turn context and adapt.
-                if _reload_hot_keys or _reload_restart_keys:
+                # this message in next-turn context and adapt. #1030: to
+                # the admin DMs and the chats with a run in flight, not
+                # every project chat (a pending restart still goes wide).
+                if _reload_hot_keys or _reload_restart_keys or _reload_restart_reasons:
                     try:
                         await _notify_reload_applied(
                             cfg,
                             path=reload.config_path,
                             hot_keys=_reload_hot_keys,
                             restart_keys=_reload_restart_keys,
+                            restart_reasons=_reload_restart_reasons,
+                            running_tasks=state.running_tasks,
                         )
                     except Exception:  # noqa: BLE001 — never break reload
                         logger.warning(
@@ -2134,24 +2495,48 @@ async def run_main_loop(
                         )
 
                 # --- Hot-reload trigger configuration ---
+                from ..triggers.settings import format_trigger_error
+
                 if triggers_read_error is not None:
                     if trigger_manager is not None:
+                        reload_error = format_trigger_error(triggers_read_error)
                         logger.warning(
                             "config.reload.triggers_failed",
-                            error=str(triggers_read_error),
+                            error=reload_error,
+                        )
+                        await _notify_trigger_block_failure_on_reload(
+                            cfg, state, trigger_manager, reload_error
                         )
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
                         from ..triggers.settings import (
                             TriggersSettings,
-                            parse_trigger_config,
+                            log_invalid_triggers,
+                            parse_trigger_config_isolated,
+                            warn_short_webhook_secrets,
                             warn_trigger_chat_fallbacks,
                         )
 
                         if isinstance(raw_triggers, dict) and triggers_enabled_now:
-                            new_settings = parse_trigger_config(raw_triggers)
+                            # #1117: a bad entry skips only that trigger.
+                            parsed_triggers = parse_trigger_config_isolated(
+                                raw_triggers
+                            )
+                            new_settings = parsed_triggers.settings
                             if trigger_manager is not None:
                                 trigger_manager.update(new_settings)
+                            state.trigger_block_error_notified = None
+                            log_invalid_triggers(
+                                parsed_triggers.invalid, phase="reload"
+                            )
+                            await _notify_new_invalid_triggers(
+                                cfg,
+                                state,
+                                parsed_triggers.invalid,
+                                trigger_manager=trigger_manager,
+                                exposed=new_settings.server.exposed,
+                            )
+                            warn_short_webhook_secrets(new_settings)
                             # #894: warn (once) about project-only triggers
                             # that will post to the default chat.
                             warn_trigger_chat_fallbacks(
@@ -2160,13 +2545,26 @@ async def run_main_loop(
                                 project_chat_id=cfg.runtime.project_chat_id,
                                 warned=state.trigger_chat_fallbacks_warned,
                             )
+                            # #1142: inherited bypass / risky webhooks.
+                            await _audit_trigger_permissions(
+                                cfg, state, new_settings, reason="reload"
+                            )
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
+                            state.trigger_invalid_notified = set()
+                            state.trigger_refused_notified = set()
+                            state.trigger_block_error_notified = None
                     except (ValueError, TypeError, OSError) as exc:
+                        # #1117: secret-free summary, plus a Telegram notice
+                        # (the previous triggers — and secrets — stay live).
+                        reload_error = format_trigger_error(exc)
                         logger.warning(
                             "config.reload.triggers_failed",
-                            error=str(exc),
+                            error=reload_error,
+                        )
+                        await _notify_trigger_block_failure_on_reload(
+                            cfg, state, trigger_manager, reload_error
                         )
 
             if watch_enabled and config_path is not None:
@@ -2345,46 +2743,49 @@ async def run_main_loop(
                 base_cb: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
                 topic_key: tuple[int, int] | None,
                 chat_session_key: tuple[int, int | None] | None,
+                on_saved: Callable[[], None] | None = None,
             ) -> Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None:
                 if base_cb is None and topic_key is None and chat_session_key is None:
                     return None
 
                 async def _wrapped(token: ResumeToken, done: anyio.Event) -> None:
-                    if base_cb is not None:
-                        await base_cb(token, done)
-                    if state.topic_store is not None and topic_key is not None:
-                        await state.topic_store.set_session_resume(
-                            topic_key[0], topic_key[1], token
-                        )
-                    if (
-                        state.chat_session_store is not None
-                        and chat_session_key is not None
-                    ):
-                        await state.chat_session_store.set_session_resume(
-                            chat_session_key[0], chat_session_key[1], token
-                        )
+                    try:
+                        if base_cb is not None:
+                            await base_cb(token, done)
+                        if state.topic_store is not None and topic_key is not None:
+                            await state.topic_store.set_session_resume(
+                                topic_key[0], topic_key[1], token
+                            )
+                        if (
+                            state.chat_session_store is not None
+                            and chat_session_key is not None
+                        ):
+                            await state.chat_session_store.set_session_resume(
+                                chat_session_key[0], chat_session_key[1], token
+                            )
+                    finally:
+                        # #1157: the token is known even if saving it
+                        # failed — never hold waiters for the whole run.
+                        if on_saved is not None:
+                            on_saved()
 
                 return _wrapped
 
             def wrap_on_resume_failed(
                 topic_key: tuple[int, int] | None,
                 chat_session_key: tuple[int, int | None] | None,
-            ) -> Callable[[ResumeToken], Awaitable[None]] | None:
+            ) -> Callable[[ResumeToken], Awaitable[bool]] | None:
                 if topic_key is None and chat_session_key is None:
                     return None
 
-                async def _wrapped(token: ResumeToken) -> None:
-                    if state.topic_store is not None and topic_key is not None:
-                        await state.topic_store.clear_engine_session(
-                            topic_key[0], topic_key[1], token.engine
-                        )
-                    if (
-                        state.chat_session_store is not None
-                        and chat_session_key is not None
-                    ):
-                        await state.chat_session_store.clear_engine_session(
-                            chat_session_key[0], chat_session_key[1], token.engine
-                        )
+                async def _wrapped(token: ResumeToken) -> bool:
+                    return await _clear_failed_session(
+                        token,
+                        topic_store=state.topic_store,
+                        topic_key=topic_key,
+                        chat_session_store=state.chat_session_store,
+                        chat_session_key=chat_session_key,
+                    )
 
                 return _wrapped
 
@@ -2401,6 +2802,7 @@ async def run_main_loop(
                 | None = None,
                 engine_override: EngineId | None = None,
                 progress_ref: MessageRef | None = None,
+                on_session_saved: Callable[[], None] | None = None,
             ) -> None:
                 topic_key = (
                     (chat_id, thread_id)
@@ -2466,7 +2868,10 @@ async def run_main_loop(
                     context=context,
                     reply_ref=reply_ref,
                     on_thread_known=wrap_on_thread_known(
-                        on_thread_known, topic_key, chat_session_key
+                        on_thread_known,
+                        topic_key,
+                        chat_session_key,
+                        on_saved=on_session_saved,
                     ),
                     on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
                     # Run the engine the options and the approval audit were
@@ -2627,17 +3032,30 @@ async def run_main_loop(
             # --- Trigger system (webhooks + cron) ---
             trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
+                from ..config_reload_notification import (
+                    format_invalid_triggers_notice,
+                    format_trigger_block_failure_notice,
+                    format_webhook_server_refused_notice,
+                )
                 from ..triggers.cron import run_cron_scheduler
                 from ..triggers.dispatcher import TriggerDispatcher
                 from ..triggers.manager import TriggerManager
                 from ..triggers.server import run_webhook_server
                 from ..triggers.settings import (
-                    parse_trigger_config,
+                    format_trigger_error,
+                    log_invalid_triggers,
+                    parse_trigger_config_isolated,
+                    warn_short_webhook_secrets,
                     warn_trigger_chat_fallbacks,
                 )
 
                 try:
-                    trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    # #1117: a bad cron/webhook entry skips only that trigger.
+                    parsed_triggers = parse_trigger_config_isolated(cfg.trigger_config)
+                    trigger_settings = parsed_triggers.settings
+                    log_invalid_triggers(parsed_triggers.invalid, phase="startup")
+                    state.trigger_invalid_notified = set(parsed_triggers.invalid)
+                    warn_short_webhook_secrets(trigger_settings)
                     # #894: a project-only trigger posts to the default chat,
                     # not the project's — warn once so it isn't a surprise.
                     warn_trigger_chat_fallbacks(
@@ -2645,6 +3063,19 @@ async def run_main_loop(
                         default_chat_id=cfg.chat_id,
                         project_chat_id=cfg.runtime.project_chat_id,
                         warned=state.trigger_chat_fallbacks_warned,
+                    )
+                    # #1142: crons inheriting a bypass mode, and agent_run
+                    # webhooks with no project or risky pre-approved tools.
+                    # A task, not an await: it reads chat prefs, and startup
+                    # must not yield before the trigger manager exists.
+                    tg.start_soon(
+                        partial(
+                            _audit_trigger_permissions,
+                            cfg,
+                            state,
+                            trigger_settings,
+                            reason="startup",
+                        )
                     )
                     # #317: pass config_path so the manager can load/save
                     # the run_once fired-state alongside untether.toml.
@@ -2655,6 +3086,27 @@ async def run_main_loop(
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
                     cfg.trigger_manager = trigger_manager
+                    # #1146: an auth="none" webhook refused here keeps the
+                    # whole webhook server down (run_webhook_server applies
+                    # the same check), so say that, not "started normally".
+                    refused = trigger_manager.refused_webhook_ids
+                    state.trigger_refused_notified = set(refused)
+                    state.webhook_server_refused = bool(refused)
+                    startup_notice: str | None = None
+                    if refused:
+                        startup_notice = format_webhook_server_refused_notice(
+                            refused,
+                            exposed=trigger_settings.server.exposed,
+                            invalid=parsed_triggers.invalid,
+                        )
+                    elif parsed_triggers.invalid:
+                        startup_notice = format_invalid_triggers_notice(
+                            parsed_triggers.invalid, phase="startup"
+                        )
+                    if startup_notice is not None:
+                        tg.start_soon(
+                            partial(_notify_trigger_config_problem, cfg, startup_notice)
+                        )
                     trigger_dispatcher = TriggerDispatcher(
                         run_job=run_job,
                         transport=cfg.exec_cfg.transport,
@@ -2688,15 +3140,30 @@ async def run_main_loop(
                         crons_configured=len(trigger_settings.crons),
                     )
                 except (ValueError, TypeError, OSError) as exc:
+                    # #1117: secret-free summary (no pydantic input repr) —
+                    # the issue-watcher copies ``error`` into GitHub issues.
+                    init_error = format_trigger_error(exc)
                     logger.error(
                         "triggers.init_failed",
-                        error=str(exc),
+                        error=init_error,
                         error_type=exc.__class__.__name__,
+                    )
+                    state.trigger_block_error_notified = init_error
+                    tg.start_soon(
+                        partial(
+                            _notify_trigger_config_problem,
+                            cfg,
+                            format_trigger_block_failure_notice(
+                                init_error, phase="startup", running=False
+                            ),
+                        )
                     )
                     # #894: nothing is running, so treat triggers as off —
                     # a reload that fixes the TOML is then flagged
-                    # restart-required like an off→on flip.
+                    # restart-required (#1146: naming this failure, not
+                    # ``triggers.enabled``).
                     state.triggers_enabled = False
+                    state.triggers_init_failed = True
 
             def resolve_topic_key(
                 msg: TelegramIncomingMessage,
@@ -2809,6 +3276,27 @@ async def run_main_loop(
 
             async def dispatch_prompt_run(
                 *,
+                route: first_start.Route | None = None,
+                ticket: arrival_order.Ticket | None = None,
+                **kwargs: Any,
+            ) -> None:
+                # #1157: the prompt counts as routed toward the first-start
+                # wait from here (or from its caller's earlier route), before
+                # any await, so a /new or /cancel that drops the first start
+                # while it is still on its way drops it too.
+                # #1164: ``ticket`` keeps it in arrival order (None: /continue,
+                # which runs inline in the update loop and must never wait).
+                route = route if route is not None else first_start.route()
+                try:
+                    await _dispatch_prompt_run(route=route, ticket=ticket, **kwargs)
+                finally:
+                    arrival_order.done(ticket)
+                    first_start.close_route(route)
+
+            async def _dispatch_prompt_run(
+                *,
+                route: first_start.Route,
+                ticket: arrival_order.Ticket | None,
                 msg: TelegramIncomingMessage,
                 prompt_text: str,
                 resolved: ResolvedMessage,
@@ -2819,8 +3307,20 @@ async def run_main_loop(
                 steerable: bool = False,
                 followup_override: str | None = None,
             ) -> None:
+                # #1164: everything from here until the prompt has its place
+                # (queued, waiting on the first start, steered or started)
+                # awaits — the steer notice and the queued card are Telegram
+                # sends — so it runs one prompt at a time, in arrival order.
+                dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if dropped_in_line is not None:
+                    # /cancel or /new while it waited behind an earlier
+                    # prompt: no queued card or first-start wait had it yet.
+                    await make_reply(cfg, msg)(
+                        text=dropped_notice(1, command=dropped_in_line)
+                    )
+                    return
                 context = resolved.context
                 reply_quote_text = msg.reply_quote_text
                 reply_reference_text = (
@@ -2882,19 +3382,110 @@ async def run_main_loop(
                         is_resume_line=cfg.runtime.is_resume_line,
                     ),
                 )
-                if resume_token is None:
-                    await run_job(
-                        chat_id,
-                        user_msg_id,
-                        prompt_text,
-                        None,
-                        context,
-                        msg.thread_id,
-                        chat_session_key,
-                        reply_ref,
-                        scheduler.note_thread_known,
-                        engine_override,
+                start_key = first_start.first_start_key(
+                    topic_key, chat_session_key, engine_resolution.engine
+                )
+                while resume_token is None and start_key is not None:
+                    # #1157: no check-then-register gap — nothing awaits
+                    # between the stored-session lookup and this.
+                    first = first_start.get(start_key)
+                    if first is None:
+                        dropped_by = first_start.dropped_since(route, start_key)
+                        if dropped_by is not None:
+                            # It was on its way here (e.g. sending its steer
+                            # fallback notice) when /cancel or /new dropped
+                            # the first start it would have waited on.
+                            logger.info(
+                                "prompt.first_start_dropped",
+                                chat_id=chat_id,
+                                user_msg_id=user_msg_id,
+                                command=dropped_by,
+                                dropped=1,
+                                in_flight=True,
+                            )
+                            await make_reply(cfg, msg)(
+                                text=dropped_notice(1, command=dropped_by)
+                            )
+                            return
+                        break
+                    logger.info(
+                        "prompt.waiting_first_start",
+                        chat_id=chat_id,
+                        user_msg_id=user_msg_id,
+                        engine=engine_resolution.engine,
                     )
+                    first.waiting += 1
+                    try:
+                        await first.settled.wait()
+                    finally:
+                        first.waiting -= 1
+                    if first.dropped_by is not None:
+                        # /cancel or /new stopped the run it waited for.
+                        await make_reply(cfg, msg)(
+                            text=dropped_notice(1, command=first.dropped_by)
+                        )
+                        return
+                    resume_token = first.resume
+                    if resume_token is None:
+                        # It ended without a session: look again, then
+                        # start one ourselves unless another waiter did.
+                        resume_token = await resume_resolver.stored_token(
+                            chat_session_key=chat_session_key,
+                            topic_key=topic_key,
+                            engine_for_session=engine_resolution.engine,
+                        )
+                # Past the wait: the scheduler / a registered first start
+                # covers this message from here.
+                first_start.close_route(route)
+                if resume_token is None:
+                    if start_key is None:
+                        arrival_order.done(ticket)
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            scheduler.note_thread_known,
+                            engine_override,
+                        )
+                        return
+                    key = start_key
+                    starting = first_start.register(
+                        key, chat_id=chat_id, thread_id=msg.thread_id
+                    )
+
+                    # Later prompts now wait on this start: let them go.
+                    arrival_order.done(ticket)
+
+                    def settle() -> None:
+                        first_start.release(key, starting)
+
+                    async def note_first_known(
+                        token: ResumeToken, done: anyio.Event
+                    ) -> None:
+                        starting.resume = token
+                        await scheduler.note_thread_known(token, done)
+
+                    try:
+                        await run_job(
+                            chat_id,
+                            user_msg_id,
+                            prompt_text,
+                            None,
+                            context,
+                            msg.thread_id,
+                            chat_session_key,
+                            reply_ref,
+                            note_first_known,
+                            engine_override,
+                            on_session_saved=settle,
+                        )
+                    finally:
+                        settle()
                     return
                 progress_ref = await _send_queued_progress(
                     cfg,
@@ -2914,6 +3505,7 @@ async def run_main_loop(
                     chat_session_key,
                     progress_ref,
                 )
+                arrival_order.done(ticket)
 
             async def _try_steer(
                 *,
@@ -2982,6 +3574,8 @@ async def run_main_loop(
                     topic_store=state.topic_store,
                     run_options=run_options_for,
                     run_cwd=run_cwd_for,
+                    thread_filter=thread_filter_for(msg),
+                    queued_ahead=scheduler.has_unstarted,
                 )
 
             async def run_prompt_from_upload(
@@ -3004,6 +3598,9 @@ async def run_main_loop(
                 )
                 topic_key = resolve_topic_key(msg)
                 await dispatch_prompt_run(
+                    ticket=arrival_order.take(
+                        _arrival_scope(msg, chat_session_key, topic_key)
+                    ),
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,
@@ -3014,6 +3611,25 @@ async def run_main_loop(
                 )
 
             async def _dispatch_pending_prompt(pending: _PendingPrompt) -> None:
+                # #1157: routed from the moment the coalescer hands it over;
+                # #1164: and in line, in the order the coalescer hands over.
+                route = first_start.route()
+                ticket = arrival_order.take(
+                    _arrival_scope(
+                        pending.msg, pending.chat_session_key, pending.topic_key
+                    )
+                )
+                try:
+                    await _dispatch_pending_prompt_routed(pending, route, ticket)
+                finally:
+                    arrival_order.done(ticket)
+                    first_start.close_route(route)
+
+            async def _dispatch_pending_prompt_routed(
+                pending: _PendingPrompt,
+                route: first_start.Route,
+                ticket: arrival_order.Ticket,
+            ) -> None:
                 msg = pending.msg
                 reply = make_reply(cfg, msg)
                 try:
@@ -3059,6 +3675,8 @@ async def run_main_loop(
                 if not ok:
                     return
                 await dispatch_prompt_run(
+                    route=route,
+                    ticket=ticket,
                     msg=msg,
                     prompt_text=prompt_text,
                     resolved=resolved,
@@ -3121,21 +3739,12 @@ async def run_main_loop(
                 resolve_prompt_message=resolve_prompt_message,
             )
 
-            async def build_message_context(
-                msg: TelegramIncomingMessage,
-            ) -> TelegramMsgContext:
-                chat_id = msg.chat_id
-                reply_id = msg.reply_to_message_id
-                reply_ref = (
-                    MessageRef(channel_id=chat_id, message_id=reply_id)
-                    if reply_id is not None
-                    else None
-                )
-                topic_key = resolve_topic_key(msg)
-                chat_session_key = _chat_session_key(
-                    msg, store=state.chat_session_store
-                )
-                stateful_mode = topic_key is not None or chat_session_key is not None
+            async def resolve_ambient_context(
+                chat_id: int, topic_key: tuple[int, int] | None
+            ) -> tuple[str | None, RunContext | None]:
+                """``(chat_project, ambient_context)`` for a chat/topic: the
+                topic's ``/ctx`` binding, else the chat's, else the chat's
+                project. Shared by messages and button taps (#997)."""
                 chat_project = (
                     _topics_chat_project(cfg, chat_id) if cfg.topics.enabled else None
                 )
@@ -3157,6 +3766,43 @@ async def run_main_loop(
                     ambient_context = _merge_topic_context(
                         chat_project=chat_project, bound=None
                     )
+                return chat_project, ambient_context
+
+            async def callback_ambient_context(
+                chat_id: int, thread_id: int | None
+            ) -> RunContext | None:
+                # Same topic-key rule as a message (`_topic_key`).
+                topic_key = (
+                    (chat_id, thread_id)
+                    if state.topic_store is not None
+                    and thread_id is not None
+                    and cfg.topics.enabled
+                    and _topics_chat_allowed(
+                        cfg, chat_id, scope_chat_ids=state.topics_chat_ids
+                    )
+                    else None
+                )
+                _, ambient_context = await resolve_ambient_context(chat_id, topic_key)
+                return ambient_context
+
+            async def build_message_context(
+                msg: TelegramIncomingMessage,
+            ) -> TelegramMsgContext:
+                chat_id = msg.chat_id
+                reply_id = msg.reply_to_message_id
+                reply_ref = (
+                    MessageRef(channel_id=chat_id, message_id=reply_id)
+                    if reply_id is not None
+                    else None
+                )
+                topic_key = resolve_topic_key(msg)
+                chat_session_key = _chat_session_key(
+                    msg, store=state.chat_session_store
+                )
+                stateful_mode = topic_key is not None or chat_session_key is not None
+                chat_project, ambient_context = await resolve_ambient_context(
+                    chat_id, topic_key
+                )
                 return TelegramMsgContext(
                     chat_id=chat_id,
                     thread_id=msg.thread_id,
@@ -3225,8 +3871,17 @@ async def run_main_loop(
                     )
 
                 if classification.is_cancel:
+                    # #1084: the 🗑️ notice above is this /cancel's reply when
+                    # it dropped a prompt — no "nothing running" as well.
                     tg.start_soon(
-                        handle_cancel, cfg, msg, state.running_tasks, scheduler
+                        partial(
+                            handle_cancel,
+                            cfg,
+                            msg,
+                            state.running_tasks,
+                            scheduler,
+                            dropped_pending=barrier_drop is not None,
+                        )
                     )
                     return
 
@@ -3413,7 +4068,7 @@ async def run_main_loop(
 
                 # A1: Intercept text as AskUserQuestion reply if one is pending
                 if text and not is_voice_transcribed:
-                    from ..runners.claude import (
+                    from ..interactive.questions import (
                         answer_ask_question,
                         answer_ask_question_with_options,
                         get_ask_question_flow,
@@ -3666,7 +4321,16 @@ async def run_main_loop(
                             )
                             cb_stateful_mode = cb_topic_key is not None
                             tg.start_soon(
-                                dispatch_callback,
+                                # #997: a tap sees the context the command
+                                # that drew the button saw (/browse root).
+                                partial(
+                                    dispatch_callback,
+                                    ambient_context_resolver=partial(
+                                        callback_ambient_context,
+                                        update.chat_id,
+                                        cb_thread_id,
+                                    ),
+                                ),
                                 cfg,
                                 update,
                                 cb_command_id,

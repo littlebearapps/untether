@@ -30,14 +30,23 @@ def _make_ctx(
     config_path: Path | None = None,
     engine_ids: tuple[str, ...] = ("codex", "claude"),
     default_engine: str = "codex",
+    missing: tuple[str, ...] = (),
 ) -> MagicMock:
-    """Build a minimal CommandContext-like object for testing."""
+    """Build a minimal CommandContext-like object for testing.
+
+    ``missing`` engines are known but not installed (#1165)."""
     ctx = MagicMock()
     ctx.args_text = args_text
     ctx.text = text
     ctx.message.channel_id = chat_id
     ctx.config_path = config_path
     ctx.runtime.engine_ids = engine_ids
+    ctx.runtime.available_engine_ids.return_value = tuple(
+        e for e in engine_ids if e not in missing
+    )
+    ctx.runtime.engine_availability_notes.return_value = (
+        (f"not installed: {', '.join(missing)}",) if missing else ()
+    )
     ctx.runtime.default_engine = default_engine
     ctx.runtime.default_context_for_chat.return_value = None
     ctx.runtime.project_default_engine.return_value = None
@@ -774,6 +783,50 @@ class TestCodexApprovalPolicy:
         assert override is None or override.permission_mode is None
 
     @pytest.mark.anyio
+    async def test_clear_button_is_the_pages_own_1155(self, tmp_path):
+        """#1155: the Codex page's Clear override has its own action, so its
+        toast names the page ("Approval policy"), not "Permission mode"."""
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await ConfigCommand().handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:pm:cxc" in data
+        assert "config:pm:clr" not in data
+        assert ConfigCommand.early_answer_toast("pm:cxc") == (
+            "Approval policy: cleared"
+        )
+        # Claude's (shared) Clear toast is unchanged.
+        assert ConfigCommand.early_answer_toast("pm:clr") == (
+            "Permission mode: cleared"
+        )
+
+    @pytest.mark.anyio
+    async def test_clear_action_clears_override_1155(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        for action in ("cxc", "clr"):  # typed `/config pm:clr` still works
+            await prefs.set_engine_override(
+                123, "codex", EngineOverrides(permission_mode="safe")
+            )
+            ctx = _make_ctx(
+                args_text=f"pm:{action}",
+                text=f"config:pm:{action}",
+                config_path=state_path,
+                default_engine="codex",
+            )
+            await ConfigCommand().handle(ctx)
+            override = await prefs.get_engine_override(123, "codex")
+            assert override is None or override.permission_mode is None
+
+    @pytest.mark.anyio
     async def test_home_page_shows_codex_permission(self, tmp_path):
         """Home page shows approval policy for codex engine."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -1035,6 +1088,275 @@ class TestGeminiApprovalModeToasts:
 
 
 # ---------------------------------------------------------------------------
+# Antigravity permission mode (#558 phase 02, D21)
+# ---------------------------------------------------------------------------
+
+
+class TestAntigravityPermissionPage:
+    @staticmethod
+    def _ctx(tmp_path, action: str | None = None, *, toml_mode: str | None = None):
+        args = "pm" if action is None else f"pm:{action}"
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}",
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity", "claude"),
+        )
+        ctx.runtime.resolve_runner.return_value.runner.default_permission_mode = (
+            toml_mode
+        )
+        return ctx
+
+    @staticmethod
+    async def _override(tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        return await prefs.get_engine_override(123, "antigravity")
+
+    @pytest.mark.anyio
+    async def test_antigravity_permission_page_text_and_buttons(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        text = msg.text
+        assert "<b>📋 Permission mode</b>" in text
+        # #1080: Ask me does ask mid-run.
+        assert "can't stop mid-run to ask you" not in text
+        assert "in Ask me what it asks you about first in Telegram" in text
+        assert "Not a sandbox" in text
+        assert "read-only" not in text.lower()
+        assert "--dangerously-skip-permissions" in text
+        assert "Cron and webhook runs only get this when the cron itself sets it" in (
+            text
+        )
+        # #1037: Workspace has no shell tool, so no allow-rule tip; the
+        # page says a switch across the two agent groups needs /new (#1060,
+        # #980 R3-3).
+        assert "command(git status)" not in text
+        assert (
+            "After switching between Workspace / Plan first and Ask me / Full"
+            " access, send /new." in text.replace("</b>", "")
+        )
+        assert "started in Ask me or Full access keeps reaching for it" in text
+        assert "(Workspace ↔ Plan first, Ask me ↔ Full access)" in text
+        # #980: Ask me is real now, and says what it asks about.
+        assert "coming soon" not in text
+        assert "asks you in Telegram (with the command or a diff)" in text
+        # #981: Plan first is live and says what Approve does.
+        assert "Approve / Deny / Let's discuss" in text
+        assert "coming soon: needs the gate)" not in text.split("Plan first")[1]
+        assert "Current: <b>workspace</b> (default)" in text
+        assert "interactive-approval/#antigravity-cli--permission-mode" in text
+        labels = _buttons_labels(msg)
+        assert labels == [
+            "✓ Workspace",
+            "Full access",
+            # #980: no Telegram approvals on this (test) host.
+            "🔒 Ask me — set up",
+            "Plan first",
+            "🔐 Telegram approvals",  # #980: the read-only gate status page
+            "Clear override",
+            "← Back",
+        ]
+        assert _buttons_data(msg) == [
+            "config:pm:agw",
+            "config:pm:agf",
+            "config:gt",  # set-up button opens the status page
+            "config:pm:agp",
+            "config:gt",
+            "config:pm:agc",
+            "config:home",
+        ]
+
+    @pytest.mark.anyio
+    async def test_antigravity_pm_actions_store_values(self, tmp_path):
+        cmd = ConfigCommand()
+        await cmd.handle(self._ctx(tmp_path, "agf"))
+        assert (await self._override(tmp_path)).permission_mode == "full"
+        await cmd.handle(self._ctx(tmp_path, "agw"))
+        assert (await self._override(tmp_path)).permission_mode == "workspace"
+        await cmd.handle(self._ctx(tmp_path, "clr"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        # #1060: the agy page's own Clear override clears the same way.
+        await cmd.handle(self._ctx(tmp_path, "agf"))
+        await cmd.handle(self._ctx(tmp_path, "agc"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        # #981: Plan first is stored like any other mode.
+        await cmd.handle(self._ctx(tmp_path, "agp"))
+        assert (await self._override(tmp_path)).permission_mode == "plan"
+        await cmd.handle(self._ctx(tmp_path, "agc"))
+        override = await self._override(tmp_path)
+        assert override is None or override.permission_mode is None
+        # #980: Ask me is stored like any other mode (a run on a host with
+        # no Telegram approvals is refused with the install hint).
+        await cmd.handle(self._ctx(tmp_path, "aga"))
+        assert (await self._override(tmp_path)).permission_mode == "ask"
+
+    @pytest.mark.anyio
+    async def test_antigravity_ask_me_button_when_gate_installed(self, tmp_path):
+        """#980: with the plugin installed, Ask me is a plain setter button."""
+        from tests.antigravity_gate_support import install_plugin
+
+        install_plugin()
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        labels = _buttons_labels(msg)
+        data = _buttons_data(msg)
+        assert labels[2] == "Ask me"
+        assert data[2] == "config:pm:aga"
+
+    @pytest.mark.anyio
+    async def test_antigravity_pm_setter_keeps_loop_override(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123,
+            "antigravity",
+            EngineOverrides(model="gemini-3.1-pro", loop_enabled=True),
+        )
+        await ConfigCommand().handle(self._ctx(tmp_path, "agf"))
+        override = await self._override(tmp_path)
+        assert override.permission_mode == "full"
+        assert override.model == "gemini-3.1-pro"
+        assert override.loop_enabled is True
+
+    @pytest.mark.anyio
+    async def test_antigravity_home_and_page_show_toml_full(self, tmp_path):
+        ctx = self._ctx(tmp_path, toml_mode="full")
+        await ConfigCommand().handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "Current: <b>full access</b> (from untether.toml)" in page.text
+        assert "✓ Full access" in _buttons_labels(page)
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        home.runtime.resolve_runner.return_value.runner.default_permission_mode = "full"
+        await ConfigCommand().handle(home)
+        text = _last_send_msg(home).text
+        assert "<b>Agent controls</b> <i>(Antigravity CLI)</i>" in text
+        assert (
+            "Permission mode: <b>full access</b> (from untether.toml)"
+            "  · all tools approved" in text
+        )
+        assert "config:pm" in _buttons_data(_last_send_msg(home))
+        # A chat override wins over the TOML value on both pages.
+        await ConfigCommand().handle(self._ctx(tmp_path, "agw", toml_mode="full"))
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        await ConfigCommand().handle(home)
+        assert (
+            "Permission mode: <b>workspace</b>  · edits files, no shell — not a sandbox"
+            in _last_send_msg(home).text
+        )
+
+    @pytest.mark.anyio
+    async def test_antigravity_home_hint_default(self, tmp_path):
+        home = _make_ctx(
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity",),
+        )
+        await ConfigCommand().handle(home)
+        assert (
+            "Permission mode: <b>workspace</b> (default)"
+            "  · edits files, no shell — not a sandbox" in _last_send_msg(home).text
+        )
+
+    def test_antigravity_toast_labels_present(self):
+        toast = ConfigCommand.early_answer_toast
+        # #1060 / #981 / #980 (R3-3): a conversation keeps the tools it
+        # started with, so a switch across Workspace / Plan first (no-shell
+        # agent) and Ask me / Full access (agy's default agent) needs /new.
+        assert toast("pm:agw") == (
+            "Permission mode: workspace — send /new if you're switching from Full"
+            " access or Ask me (not from Plan first)"
+        )
+        assert toast("pm:agp") == (
+            "Permission mode: plan first — send /new if you're switching from Full"
+            " access or Ask me (not from Workspace)"
+        )
+        assert toast("pm:agf") == (
+            "Permission mode: full access — send /new if you're switching from"
+            " Workspace or Plan first (not from Ask me)"
+        )
+        assert toast("pm:aga") == (
+            "Permission mode: ask me — send /new if you're switching from"
+            " Workspace or Plan first (not from Full access)"
+        )
+        assert toast("pm:agc") == (
+            "Permission mode: cleared — send /new if this switched between"
+            " Workspace / Plan first and Ask me / Full access"
+        )
+        # The shared Clear toast other engines use is unchanged.
+        assert toast("pm:clr") == "Permission mode: cleared"
+
+    @pytest.mark.anyio
+    async def test_gemini_permission_page_unchanged(self, tmp_path):
+        """Guards the #766 regression that dropped the Gemini buttons."""
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=tmp_path / "prefs.json",
+            default_engine="gemini",
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert msg.text.startswith("<b>📋 Approval mode</b>")
+        assert "Control which tools Gemini can use" in msg.text
+        assert _buttons_data(msg) == [
+            "config:pm:ro",
+            "config:pm:ae",
+            "config:pm:ya",
+            "config:pm:clr",
+            "config:home",
+        ]
+
+    @pytest.mark.anyio
+    async def test_unsupported_engine_lists_antigravity(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=tmp_path / "prefs.json",
+            default_engine="pi",
+            engine_ids=("pi",),
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "Only available for Claude Code, Codex, Antigravity CLI and Gemini CLI."
+            in _last_edit_msg(ctx).text
+        )
+
+    def test_mode_text_covers_every_valid_mode(self):
+        from untether.runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
+        from untether.telegram.commands._antigravity_mode_text import (
+            ANTIGRAVITY_MODE_TEXT,
+            ANTIGRAVITY_PM_ACTIONS,
+            antigravity_mode_label,
+        )
+
+        valid = VALID_PERMISSION_MODES_BY_ENGINE["antigravity"]
+        assert set(ANTIGRAVITY_MODE_TEXT) == valid
+        assert set(ANTIGRAVITY_PM_ACTIONS.values()) == valid
+        assert antigravity_mode_label(None) == "workspace"
+        assert antigravity_mode_label("accept-edits") == "workspace"
+        assert antigravity_mode_label("full") == "full access"
+        for mode in ANTIGRAVITY_MODE_TEXT.values():
+            assert "read-only" not in mode.hint
+
+
+# ---------------------------------------------------------------------------
 # Verbose sub-page
 # ---------------------------------------------------------------------------
 
@@ -1135,6 +1457,48 @@ class TestEngine:
         assert "config:ag:amp" in data
         # explanatory line present
         assert "deprecated" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_1165_engine_page_omits_not_installed_engines(self, tmp_path):
+        """A known engine whose CLI isn't installed gets no button, and the
+        page says so in the startup message's wording."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag",
+            text="config:ag",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "amp"),
+            missing=("claude", "amp"),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        data = _buttons_data(msg)
+        assert "config:ag:codex" in data
+        assert "config:ag:claude" not in data
+        assert "config:ag:amp" not in data
+        assert "not installed: claude, amp" in msg.text
+        # amp isn't offered, so there's no deprecation notice for it either.
+        assert "deprecated" not in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_1165_engine_set_refuses_not_installed_engine(self, tmp_path):
+        """A stale button for an engine that's no longer installed doesn't set
+        it as the chat default; the picker is shown again."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
+            missing=("claude",),
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "engine:" in msg.text.lower()
+        from untether.telegram.chat_prefs import ChatPrefsStore
+
+        assert await ChatPrefsStore(state_path).get_default_engine(123) is None
 
     @pytest.mark.anyio
     async def test_engine_page_no_deprecation_notice_when_none_present(self, tmp_path):
@@ -1941,7 +2305,7 @@ class TestReasoning:
         assert "minimal not supported" in text
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("engine", ["claude", "codex"])
+    @pytest.mark.parametrize("engine", ["claude", "codex", "antigravity"])
     async def test_reasoning_page_renders_every_allowed_level(self, tmp_path, engine):
         """Guards the `_LEVEL_BUTTON_MAP[level]` lookup against tuple edits."""
         from untether.telegram.engine_overrides import (
@@ -1968,7 +2332,7 @@ class TestReasoning:
     def test_reasoning_supported_engines_all_parametrised(self):
         from untether.telegram.engine_overrides import REASONING_SUPPORTED_ENGINES
 
-        assert set(REASONING_SUPPORTED_ENGINES) == {"claude", "codex"}
+        assert set(REASONING_SUPPORTED_ENGINES) == {"claude", "codex", "antigravity"}
 
     @pytest.mark.anyio
     async def test_reasoning_clear_returns_home(self, tmp_path):
@@ -2195,6 +2559,195 @@ class TestReasoning:
 # ---------------------------------------------------------------------------
 
 
+class TestAntigravityEffortPage:
+    """#558 phase 05 (D29): agy's Effort page asks agy which levels the
+    chat's model supports (a zero-token ``-p /effort`` probe, stubbed here)."""
+
+    @staticmethod
+    def _ctx(tmp_path, action: str | None = None, *, toml_model: str | None = None):
+        args = "rs" if action is None else f"rs:{action}"
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}",
+            config_path=tmp_path / "prefs.json",
+            default_engine="antigravity",
+            engine_ids=("antigravity", "claude"),
+        )
+        runner = ctx.runtime.resolve_runner.return_value.runner
+        runner.command.return_value = "agy-under-test"
+        runner.model = toml_model
+        return ctx
+
+    @staticmethod
+    def _stub(monkeypatch, data=None, *, error: str | None = None) -> list:
+        from untether.utils import antigravity_quota
+
+        calls: list = []
+
+        async def probe(runner, model):
+            calls.append(model)
+            if error is not None:
+                raise antigravity_quota.AgySlashError(error)
+            return data
+
+        monkeypatch.setattr(antigravity_quota, "_probe_model_efforts", probe)
+        antigravity_quota.clear_effort_cache()
+        return calls
+
+    @staticmethod
+    async def _set(tmp_path, **fields):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(123, "antigravity", EngineOverrides(**fields))
+
+    @staticmethod
+    async def _override(tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        return await prefs.get_engine_override(123, "antigravity")
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_default_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(
+            monkeypatch,
+            {
+                "adjustable": True,
+                "current": "high",
+                "available": ["low", "medium", "high"],
+            },
+        )
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "<b>🧠 Effort</b>" in msg.text
+        assert "Model: <b>agy default</b> · supports low, medium, high" in msg.text
+        assert _buttons_labels(msg) == [
+            "Low",
+            "Medium",
+            "High",
+            "Clear override",
+            "← Back",
+        ]
+        assert "config:rs:xhi" not in _buttons_data(msg)
+        assert "config:rs:max" not in _buttons_data(msg)
+        assert calls == [None]
+        # A second page open uses the cache: no new probe.
+        await ConfigCommand().handle(self._ctx(tmp_path))
+        assert calls == [None]
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_filters_by_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(
+            monkeypatch,
+            {"adjustable": True, "current": "high", "available": ["low", "high"]},
+        )
+        await self._set(tmp_path, model="gemini-3.1-pro", reasoning="medium")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert _buttons_labels(msg) == ["Low", "High", "Clear override", "← Back"]
+        assert "Model: <b>gemini-3.1-pro</b> · supports low, high" in msg.text
+        # The stored level this model can't use is named, not ticked.
+        assert "medium isn't available for this model" in msg.text
+        assert calls == ["gemini-3.1-pro"]
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_uses_toml_model(
+        self, tmp_path, monkeypatch
+    ):
+        calls = self._stub(monkeypatch, {"adjustable": False})
+        ctx = self._ctx(tmp_path, toml_model="gpt-oss-120b")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert calls == ["gpt-oss-120b"]
+        assert _buttons_labels(msg) == ["Clear override", "← Back"]
+        assert "Model: <b>gpt-oss-120b</b> · fixed effort" in msg.text
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_probe_failure_falls_back(
+        self, tmp_path, monkeypatch
+    ):
+        self._stub(monkeypatch, error="timeout")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert _buttons_labels(msg)[:3] == ["Low", "Medium", "High"]
+        assert (
+            "Couldn't ask agy which levels this model supports — showing the"
+            " usual three" in msg.text
+        )
+
+    @pytest.mark.anyio
+    async def test_antigravity_reasoning_page_escapes_model_id(
+        self, tmp_path, monkeypatch
+    ):
+        self._stub(monkeypatch, error="timeout")
+        await self._set(tmp_path, model="<b>x</b>&y")
+        ctx = self._ctx(tmp_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "&lt;b&gt;x&lt;/b&gt;&amp;y" in text
+        assert "<b>x</b>&y" not in text
+
+    @pytest.mark.anyio
+    async def test_antigravity_effort_setter_keeps_other_overrides(
+        self, tmp_path, monkeypatch
+    ):
+        """#903: the setter goes through ``with_override``; a tap never
+        spawns the probe."""
+        calls = self._stub(monkeypatch, error="must_not_run")
+        await self._set(tmp_path, model="gemini-3.8-flash", permission_mode="full")
+        await ConfigCommand().handle(self._ctx(tmp_path, "hi"))
+        override = await self._override(tmp_path)
+        assert override.reasoning == "high"
+        assert override.model == "gemini-3.8-flash"
+        assert override.permission_mode == "full"
+        assert calls == []
+        # xhigh / max aren't agy levels: a crafted tap stores nothing.
+        await ConfigCommand().handle(self._ctx(tmp_path, "max"))
+        assert (await self._override(tmp_path)).reasoning == "high"
+
+    def test_antigravity_model_hint_static(self):
+        from untether.telegram.commands.config import _engine_model_hint
+
+        hint = _engine_model_hint("antigravity")
+        assert hint.startswith("agy default")
+        assert "agy models" in hint
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("engine", "label", "buttons"),
+        [
+            ("claude", "Effort", ["Low", "Medium", "High", "Xhigh", "Max"]),
+            ("codex", "Reasoning", ["Low", "Medium", "High", "Xhigh"]),
+        ],
+    )
+    async def test_codex_and_claude_reasoning_pages_unchanged(
+        self, tmp_path, monkeypatch, engine, label, buttons
+    ):
+        calls = self._stub(monkeypatch, error="must_not_run")
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=tmp_path / "prefs.json",
+            default_engine=engine,
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert f"<b>🧠 {label}</b>" in msg.text
+        assert _buttons_labels(msg) == [*buttons, "Clear override", "← Back"]
+        assert "Model:" not in msg.text
+        assert "agy" not in msg.text
+        assert calls == []
+
+
 class TestReasoningToasts:
     def test_toast_reasoning_minimal_removed(self):
         # #416: no toast for the retired `min` action.
@@ -2342,7 +2895,37 @@ class TestAskQuestions:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code" in msg.text
+        assert "Available for Claude Code" in msg.text
+        assert "untether agy-gate install" in msg.text  # #980
+
+    @pytest.mark.anyio
+    async def test_ask_questions_page_for_antigravity_with_gate(
+        self, tmp_path, monkeypatch
+    ):
+        """#980: Ask mode is capability-driven — Antigravity gets the page
+        (and the home rows) once Untether's agy plugin is installed."""
+        from untether.antigravity import gate_plugin
+
+        def ctx_for(args: str) -> MagicMock:
+            return _make_ctx(
+                args_text=args,
+                text=f"config:{args}" if args else "/config",
+                config_path=tmp_path / "prefs.json",
+                engine_ids=("codex", "claude", "antigravity"),
+                default_engine="antigravity",
+            )
+
+        ctx = ctx_for("aq")
+        await ConfigCommand().handle(ctx)
+        assert "Available for Claude Code" in _last_edit_msg(ctx).text
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        ctx = ctx_for("aq")
+        await ConfigCommand().handle(ctx)
+        assert "config:aq:on" in _buttons_data(_last_edit_msg(ctx))
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        data = _buttons_data(_last_send_msg(home))
+        assert {"config:aq", "config:gt", "config:fu"} <= set(data)
 
     @pytest.mark.anyio
     async def test_ask_questions_no_config_path(self):
@@ -2513,7 +3096,56 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code" in msg.text
+        assert "Available for Claude Code" in msg.text
+
+    @pytest.mark.anyio
+    async def test_1090_diff_preview_for_antigravity_with_gate(
+        self, tmp_path, monkeypatch
+    ):
+        """#1090: Antigravity gets Diff preview wherever Ask me can run
+        (Untether's agy plugin installed); the page says it only changes Ask
+        me's cards, and the override is stored for the antigravity engine."""
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+
+        def ctx_for(args: str) -> MagicMock:
+            return _make_ctx(
+                args_text=args,
+                text=f"config:{args}" if args else "/config",
+                config_path=state_path,
+                engine_ids=("codex", "claude", "antigravity"),
+                default_engine="antigravity",
+            )
+
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        assert "Diff preview:" not in _last_send_msg(home).text
+        assert "config:dp" not in _buttons_data(_last_send_msg(home))
+        ctx = ctx_for("dp")
+        await ConfigCommand().handle(ctx)
+        assert "untether agy-gate install" in _last_edit_msg(ctx).text
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        home = ctx_for("")
+        await ConfigCommand().handle(home)
+        msg = _last_send_msg(home)
+        assert "Diff preview:" in msg.text
+        assert {"config:aq", "config:dp", "config:gt", "config:fu"} <= set(
+            _buttons_data(msg)
+        )
+        ctx = ctx_for("dp")
+        await ConfigCommand().handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "config:dp:on" in _buttons_data(page)
+        assert "Ask me" in page.text
+
+        ctx = ctx_for("dp:on")
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "antigravity")
+        assert override is not None and override.diff_preview is True
 
     @pytest.mark.anyio
     async def test_diff_preview_no_config_path(self):
@@ -2546,13 +3178,13 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_home(self, tmp_path):
-        """No override → home shows 'default'."""
+        """No override → home shows 'default', never 'off' (#1115)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Diff preview: <b>off</b>" in msg.text
+        assert "Diff preview: <b>default</b>  · diffs on cards" in msg.text
 
     @pytest.mark.anyio
     async def test_diff_preview_on_label_on_home(self, tmp_path):
@@ -2642,7 +3274,7 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_page(self, tmp_path):
-        """No override → page shows resolved 'off'."""
+        """No override → page shows 'default', not 'off' (#1115)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -2653,7 +3285,535 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
+        assert "Current: <b>default</b>" in msg.text
+        assert "Current: <b>off</b>" not in msg.text
+
+
+# ---------------------------------------------------------------------------
+# #1115: Diff preview unset is "default", not "off"
+# ---------------------------------------------------------------------------
+
+_DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
+
+
+class TestDiffPreviewUnsetLabel1115:
+    """Unset Diff preview still shows diffs on approval cards (Claude:
+    ``run_opts.diff_preview is not False``; agy: ``card_title(diff=...)``)
+    but holds no edits (both gate only on ``is True``). The page, the home
+    line and the toggle tick must all say "default", never "off"."""
+
+    @staticmethod
+    async def _setup(tmp_path, monkeypatch, engine: str, value: bool | None):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        if engine == "antigravity":
+            from untether.antigravity import gate_plugin
+
+            monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        pm = "ask" if engine == "antigravity" else None
+        if value is not None or pm is not None:
+            await prefs.set_engine_override(
+                123, engine, EngineOverrides(diff_preview=value, permission_mode=pm)
+            )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, engine: str, args: str = ""):
+        return _make_ctx(
+            args_text=args,
+            text=f"config:{args}" if args else "/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine=engine,
+        )
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_unset_shows_default(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, None)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert f"Current: <b>default</b> — {_DP_UNSET_TEXT}" in msg.text
+        # The option list no longer calls "off" the default.
+        assert "buttons only (default)" not in msg.text
+        assert f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}" in msg.text
+        labels = _buttons_labels(msg)
+        assert "On" in labels
+        assert "Off" in labels
+        assert "Clear" in labels
+        assert not any(label.startswith("✓") for label in labels)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_on(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, True)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Current: <b>on</b>" in msg.text
+        labels = _buttons_labels(msg)
+        assert "✓ On" in labels
+        assert "Off" in labels
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_page_off(self, tmp_path, monkeypatch, engine):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, False)
+        ctx = self._ctx(state_path, engine, "dp")
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
         assert "Current: <b>off</b>" in msg.text
+        labels = _buttons_labels(msg)
+        assert "✓ Off" in labels
+        assert "On" in labels
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("engine", "value", "line"),
+        [
+            ("claude", None, "Diff preview: <b>default</b>  · diffs on cards"),
+            # #1147: no Claude mode resolves here, so On is generic.
+            (
+                "claude",
+                True,
+                "Diff preview: <b>on</b>  · edits sent for approval wait",
+            ),
+            ("claude", False, "Diff preview: <b>off</b>  · buttons only"),
+            ("antigravity", None, "Diff preview: <b>default</b>  · diffs on cards"),
+            ("antigravity", True, "Diff preview: <b>on</b>  · edits ask first"),
+            ("antigravity", False, "Diff preview: <b>off</b>  · buttons only"),
+        ],
+    )
+    async def test_home_line(self, tmp_path, monkeypatch, engine, value, line):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, value)
+        ctx = self._ctx(state_path, engine)
+        await ConfigCommand().handle(ctx)
+        assert line in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "antigravity"])
+    async def test_clear_returns_home_showing_default(
+        self, tmp_path, monkeypatch, engine
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, engine, False)
+        ctx = self._ctx(state_path, engine, "dp:clr")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "Diff preview: <b>default</b>  · diffs on cards" in text
+        assert "Diff preview: <b>off</b>" not in text
+
+    def test_toggle_row_without_default_ticks_nothing(self):
+        from untether.telegram.commands.config import _toggle_row
+
+        row = _toggle_row(
+            "Diff",
+            current=None,
+            default=None,
+            on_data="a",
+            off_data="b",
+            clr_data="c",
+        )
+        assert [b["text"] for b in row] == ["On", "Off", "Clear"]
+        row = _toggle_row(
+            "Diff",
+            current=False,
+            default=None,
+            on_data="a",
+            off_data="b",
+            clr_data="c",
+        )
+        assert [b["text"] for b in row] == ["On", "✓ Off", "Clear"]
+
+
+# ---------------------------------------------------------------------------
+# #1147: Diff preview On wording follows the chat's Claude permission mode
+# ---------------------------------------------------------------------------
+
+_DP_ON_PLAIN = "• <b>on</b> — edits wait for your approval, with the diff"
+_DP_ON_CLAUDE = (
+    "• <b>on</b> — an edit or command that reaches Untether for approval"
+    " waits for your tap, with the diff"
+)
+_DP_HOME_ON_PLAIN = "Diff preview: <b>on</b>  · edits ask first"
+_DP_NOTE_PROMPTING_ACCEPT_EDITS = (
+    "In this chat's Permission mode (<b>off</b>), Claude Code asks you"
+    " itself and its cards show the diff, so On holds nothing extra:"
+    " edits inside the project still run without asking."
+)
+# Per-mode truth (rc8 live QA, issue #1147): auto's in-project edits never
+# reach Untether, and plan-auto's rubber-stamped plan lifts the gate (#283).
+_DP_NOTES = {
+    "plan": (
+        "In this chat's Permission mode (<b>on</b>), that's an edit or command"
+        " Claude tries before you approve its plan. Once you approve the plan,"
+        " or one held edit, the rest of that reply runs without asking."
+    ),
+    "plan-auto": (
+        "In this chat's Permission mode (<b>plan-auto</b>), the plan is"
+        " approved for you, so only an edit or command Claude tries before its"
+        " plan is held; the edits that carry out the plan run without asking."
+    ),
+    "auto": (
+        "In this chat's Permission mode (<b>auto</b>), Claude Code approves"
+        " edits inside the project itself and sends other actions to its"
+        " classifier, so only what it still asks about reaches Untether:"
+        " protected files, or actions after repeated classifier blocks."
+    ),
+    "dontAsk": (
+        "In this chat's Permission mode (<b>dontAsk</b>), edits and commands"
+        " are pre-approved and anything else is refused, so On rarely holds"
+        " anything."
+    ),
+    "bypassPermissions": (
+        "In this chat's Permission mode (<b>bypassPermissions</b>), Claude Code"
+        " skips its permission checks, so On rarely holds anything."
+    ),
+}
+_DP_HOME_HINTS = {
+    "plan": "edits before plan approval wait",
+    "plan-auto": "rarely holds: plans auto-approved",
+    "auto": "only edits Claude Code asks about",
+    "dontAsk": "rarely holds in this mode",
+    "bypassPermissions": "rarely holds in this mode",
+    "acceptEdits": "nothing extra in this mode",
+    "default": "nothing extra in this mode",
+    "manual": "nothing extra in this mode",
+    None: "edits sent for approval wait",
+}
+
+
+def _dp_home_on(mode: str | None) -> str:
+    return f"Diff preview: <b>on</b>  · {_DP_HOME_HINTS[mode]}"
+
+
+class TestDiffPreviewOnWording1147:
+    """Claude's diff gate only runs outside the prompting modes (``claude.py``
+    ``not state.prompting_mode``), skips a session whose plan (or a held
+    edit) was approved this reply (``_PLAN_EXIT_APPROVED``, #283/#369), and
+    only ever sees what Claude Code sends to stage 6. The page and home line
+    must say what On actually holds, per chat mode."""
+
+    @staticmethod
+    async def _setup(tmp_path, chat_mode: str | None):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "claude",
+            EngineOverrides(diff_preview=True, permission_mode=chat_mode),
+        )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, args: str = "", toml_mode: str | None = None):
+        ctx = _make_ctx(
+            args_text=args,
+            text=f"config:{args}" if args else "/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude"),
+            default_engine="claude",
+        )
+        ctx.runtime.resolve_runner.return_value.runner.permission_mode = toml_mode
+        return ctx
+
+    @pytest.mark.anyio
+    async def test_page_on_in_accept_edits_keeps_rc8_note(self, tmp_path):
+        state_path = await self._setup(tmp_path, "acceptEdits")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        assert _DP_ON_PLAIN not in text
+        assert "autonomous permission modes" not in text
+        assert _DP_NOTE_PROMPTING_ACCEPT_EDITS in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", ["default", "manual"])
+    async def test_page_on_in_manual_keeps_rc8_note(self, tmp_path, mode):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        assert (
+            "In this chat's Permission mode (<b>manual</b>), Claude Code asks"
+            " you itself and its cards show the diff, so On holds nothing extra."
+        ) in text
+        assert "edits inside the project still run" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", list(_DP_NOTES))
+    async def test_page_on_in_autonomous_mode_says_what_is_held(self, tmp_path, mode):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        # The rc8 plain bullet overstated auto and plan-auto (#1147 rc8 QA).
+        assert _DP_ON_PLAIN not in text
+        assert _DP_NOTES[mode] in text
+        assert "holds nothing extra" not in text
+
+    @pytest.mark.anyio
+    async def test_page_on_in_auto_does_not_promise_in_project_edits(self, tmp_path):
+        state_path = await self._setup(tmp_path, "auto")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "edits wait for your approval" not in text
+        assert "approves edits inside the project itself" in text
+
+    @pytest.mark.anyio
+    async def test_page_on_in_plan_auto_says_plan_edits_run(self, tmp_path):
+        state_path = await self._setup(tmp_path, "plan-auto")
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "edits wait for your approval" not in text
+        assert "the edits that carry out the plan run without asking" in text
+
+    @pytest.mark.anyio
+    async def test_page_on_with_no_mode_has_no_note(self, tmp_path):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        assert "In this chat's Permission mode" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("toml_mode", ["acceptEdits", "auto"])
+    async def test_page_uses_toml_mode_when_chat_has_none(self, tmp_path, toml_mode):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp", toml_mode=toml_mode)
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        if toml_mode == "auto":
+            assert _DP_NOTES["auto"] in text
+        else:
+            assert _DP_NOTE_PROMPTING_ACCEPT_EDITS in text
+
+    @pytest.mark.anyio
+    async def test_chat_mode_wins_over_toml(self, tmp_path):
+        state_path = await self._setup(tmp_path, "auto")
+        ctx = self._ctx(state_path, "dp", toml_mode="acceptEdits")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_NOTES["auto"] in text
+        assert "holds nothing extra" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mode", list(_DP_HOME_HINTS))
+    async def test_home_line_on(self, tmp_path, mode):
+        state_path = await self._setup(tmp_path, mode)
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert _dp_home_on(mode) in text
+        assert "edits ask in autonomous modes" not in text
+        assert _DP_HOME_ON_PLAIN not in text
+
+    @pytest.mark.anyio
+    async def test_resolve_runner_failure_falls_back_to_generic(self, tmp_path):
+        state_path = await self._setup(tmp_path, None)
+        ctx = self._ctx(state_path, "dp")
+        ctx.runtime.resolve_runner.side_effect = RuntimeError("boom")
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_CLAUDE in text
+        assert "In this chat's Permission mode" not in text
+
+    def test_every_claude_mode_has_home_hint(self):
+        from untether.runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
+        from untether.telegram.commands.config import _claude_dp_on_hint
+
+        for mode in VALID_PERMISSION_MODES_BY_ENGINE["claude"]:
+            assert _claude_dp_on_hint(mode) == _DP_HOME_HINTS[mode]
+        assert _claude_dp_on_hint(None) == _DP_HOME_HINTS[None]
+
+    @pytest.mark.anyio
+    async def test_antigravity_on_unchanged(self, tmp_path, monkeypatch):
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "antigravity",
+            EngineOverrides(diff_preview=True, permission_mode="ask"),
+        )
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="antigravity",
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert _DP_ON_PLAIN in text
+        assert "reaches Untether for approval" not in text
+        assert "In this chat's Permission mode" not in text
+
+
+# ---------------------------------------------------------------------------
+# #1167: Antigravity's Diff preview home hint follows the Permission mode
+# ---------------------------------------------------------------------------
+
+# Ask me keeps the shared hints (#1090, #1115).
+_AGY_DP_ASK_HINTS = {
+    True: "Diff preview: <b>on</b>  · edits ask first",
+    False: "Diff preview: <b>off</b>  · buttons only",
+    None: "Diff preview: <b>default</b>  · diffs on cards",
+}
+# Outside Ask me the gate shows no cards, so no value changes anything.
+_AGY_DP_OTHER_HINTS = {
+    True: "Diff preview: <b>on</b>  · only in Ask me",
+    False: "Diff preview: <b>off</b>  · only in Ask me",
+    None: "Diff preview: <b>default</b>  · only in Ask me",
+}
+
+
+class TestAgyDiffPreviewHomeHint1167:
+    """agy's gate holds an edit for a card only in Ask me (``GateRun.required``);
+    in Workspace, Plan first and Full access it gives no decision. The home
+    line must not say "edits ask first" (or promise cards) there."""
+
+    @staticmethod
+    async def _setup(tmp_path, monkeypatch, value: bool | None, chat_mode: str | None):
+        from untether.antigravity import gate_plugin
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+        state_path = tmp_path / "prefs.json"
+        if value is not None or chat_mode is not None:
+            prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+            await prefs.set_engine_override(
+                123,
+                "antigravity",
+                EngineOverrides(diff_preview=value, permission_mode=chat_mode),
+            )
+        return state_path
+
+    @staticmethod
+    def _ctx(state_path, toml_mode: str | None = None):
+        ctx = _make_ctx(
+            args_text="",
+            text="/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="antigravity",
+        )
+        ctx.runtime.resolve_runner.return_value.runner.default_permission_mode = (
+            toml_mode
+        )
+        return ctx
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("value", [True, False, None])
+    @pytest.mark.parametrize("mode", ["workspace", "full", "plan", None])
+    async def test_outside_ask_me_says_only_in_ask_me(
+        self, tmp_path, monkeypatch, mode, value
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, value, mode)
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert _AGY_DP_OTHER_HINTS[value] in text
+        assert "edits ask first" not in text
+        assert "diffs on cards" not in text
+        assert "buttons only" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("value", [True, False, None])
+    async def test_ask_me_keeps_shared_hints(self, tmp_path, monkeypatch, value):
+        state_path = await self._setup(tmp_path, monkeypatch, value, "ask")
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert _AGY_DP_ASK_HINTS[value] in text
+        assert "only in Ask me" not in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("toml_mode", "expected"),
+        [("full", _AGY_DP_OTHER_HINTS[True]), ("ask", _AGY_DP_ASK_HINTS[True])],
+    )
+    async def test_untether_toml_mode_when_chat_has_none(
+        self, tmp_path, monkeypatch, toml_mode, expected
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, True, None)
+        ctx = self._ctx(state_path, toml_mode=toml_mode)
+        await ConfigCommand().handle(ctx)
+        assert expected in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_chat_mode_wins_over_toml(self, tmp_path, monkeypatch):
+        state_path = await self._setup(tmp_path, monkeypatch, True, "workspace")
+        ctx = self._ctx(state_path, toml_mode="ask")
+        await ConfigCommand().handle(ctx)
+        assert _AGY_DP_OTHER_HINTS[True] in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_unknown_stored_mode_fails_closed_to_workspace(
+        self, tmp_path, monkeypatch
+    ):
+        state_path = await self._setup(tmp_path, monkeypatch, True, "bogus")
+        ctx = self._ctx(state_path)
+        await ConfigCommand().handle(ctx)
+        assert _AGY_DP_OTHER_HINTS[True] in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("value", "chat_mode", "line"),
+        [
+            (True, "acceptEdits", "Diff preview: <b>on</b>  · nothing extra"),
+            (True, "auto", "Diff preview: <b>on</b>  · only edits Claude Code asks"),
+            (False, "auto", "Diff preview: <b>off</b>  · buttons only"),
+            (None, "auto", "Diff preview: <b>default</b>  · diffs on cards"),
+        ],
+    )
+    async def test_claude_unchanged(self, tmp_path, value, chat_mode, line):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "claude",
+            EngineOverrides(diff_preview=value, permission_mode=chat_mode),
+        )
+        ctx = _make_ctx(
+            args_text="",
+            text="/config",
+            config_path=state_path,
+            engine_ids=("codex", "claude", "antigravity"),
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert line in text
+        assert "only in Ask me" not in text
+
+    def test_hint_matches_page_wording(self):
+        from untether.telegram.commands.config import _agy_dp_hint
+
+        assert _agy_dp_hint("ask") is None
+        for mode in ("workspace", "plan", "full", None, "bogus"):
+            assert _agy_dp_hint(mode) == "only in Ask me"
 
 
 # ---------------------------------------------------------------------------

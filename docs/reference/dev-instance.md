@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # Dev Instance
 
 The release pipeline uses two isolated Untether instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
@@ -139,9 +144,11 @@ This reinstalls the last stable PyPI version.
 
 **Dev systemd unit** (`~/.config/systemd/user/untether-dev.service`): Sets `UNTETHER_CONFIG_PATH` and points `ExecStart` at the local `.venv`. Run `systemctl --user daemon-reload` after editing.
 
+**Engine credentials**: each engine CLI keeps its own sign-in on the host (for Pi, `~/.pi/agent/auth.json`, which takes priority over environment variables). Don't put provider API keys in the dev unit or in a drop-in under `untether-dev.service.d/`: a hard-coded key there goes stale without anyone noticing, and one did exactly that to the Pi rows of the first 0.36.1rc1 run (removed 2026-10-11). Keys belong in the secrets manager, read by the engine's own auth store.
+
 ## Test project directories
 
-Six dev-bot test workspaces live under `test-projects/` in the repo (gitignored, not version-controlled):
+Seven dev-bot test workspaces live under `test-projects/` in the repo (gitignored, not version-controlled):
 
 | Directory | Engine | Dev config route |
 |-----------|--------|-----------------|
@@ -149,10 +156,11 @@ Six dev-bot test workspaces live under `test-projects/` in the repo (gitignored,
 | `test-projects/test-codex/` | Codex | `[projects.codex-test]` |
 | `test-projects/test-opencode/` | OpenCode | `[projects.opencode-test]` |
 | `test-projects/test-pi/` | Pi | `[projects.pi-test]` |
+| `test-projects/test-antigravity/` | Antigravity | `[projects.antigravity-test]` |
 | `test-projects/test-gemini/` | Gemini CLI (deprecated) | `[projects.gemini-test]` |
 | `test-projects/test-amp/` | AMP (deprecated) | `[projects.amp-test]` |
 
-Each has a `CLAUDE.md` and `.claude/settings.json`. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified.
+Each has a `CLAUDE.md` and `.claude/settings.json`. `test-antigravity/` is the exception: it is its own small git repo with an `AGENTS.md`, and must not contain an `.agents/` folder. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified. Ask me, question buttons and steer in the Antigravity chat need Untether's agy plugin on the host: install it once with the dev interpreter (`~/untether/.venv/bin/untether agy-gate install`), then check it with `agy-gate status --project ~/untether/test-projects/test-antigravity` (see "#980 / #981 — Antigravity gate" in [integration-testing.md](integration-testing.md)).
 
 !!! warning "Gemini CLI and AMP are deprecated"
     Both engines still load but are **deprecated and no longer supported** (no fixes; may be removed in a future release). Their routes remain in the dev config, but they are excluded from every integration-test tier — see [integration-testing.md](integration-testing.md).
@@ -167,6 +175,7 @@ Each test project has a dedicated Telegram group (all in the `ut-dev` folder):
 | ut-dev: codex | `-4929463515` | Codex |
 | ut-dev: opencode | `-5200822877` | OpenCode |
 | ut-dev: pi | `-5156256333` | Pi |
+| ut-dev · Antigravity | `-5540298446` | Antigravity |
 | ut-dev: gemini | `-5207762142` | Gemini CLI (deprecated) |
 | ut-dev: amp | `-5230875989` | AMP (deprecated) |
 

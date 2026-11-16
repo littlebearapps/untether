@@ -12,6 +12,7 @@ from ._permission_mode_text import (
     cli_name_suffix,
     mode_display,
 )
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -51,6 +52,20 @@ class PlanModeCommand:
     id = "planmode"
     description = "Set Claude Code permission mode: on/plan-auto/auto/off"
 
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: changing the chat's permission mode needs a group admin.
+
+        `/planmode` writes the setting `/config pm:*` writes, so it takes the
+        same gate (run by the dispatch before ``handle``). A mode name,
+        ``clear`` and the bare toggle change it; ``show`` and anything that
+        only gets the usage reply do not.
+        """
+        args = args_text.strip().lower()
+        if args == "" or args == "clear" or args in PERMISSION_MODES:
+            return SETTINGS_ADMIN_GATE
+        return None
+
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
         from ..engine_overrides import with_override
@@ -64,6 +79,8 @@ class PlanModeCommand:
             )
 
         current_engine = await resolve_effective_engine(ctx)
+        if current_engine == "antigravity":
+            return await _handle_antigravity(ctx, config_path)
         if current_engine not in _PLANMODE_ENGINES:
             hint = ""
             if current_engine in {"codex", "gemini"}:
@@ -114,6 +131,7 @@ class PlanModeCommand:
             logger.info(
                 "planmode.set",
                 chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
                 mode=args,
                 cli_mode=cli_mode,
                 command="planmode",
@@ -134,7 +152,12 @@ class PlanModeCommand:
             current = await chat_prefs.get_engine_override(chat_id, engine)
             updated = with_override(current, permission_mode=None)
             await chat_prefs.set_engine_override(chat_id, engine, updated)
-            logger.info("planmode.cleared", chat_id=chat_id, command="planmode")
+            logger.info(
+                "planmode.cleared",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                command="planmode",
+            )
             return CommandResult(
                 text=(
                     "permission mode <b>override cleared</b>: no override for"
@@ -145,6 +168,115 @@ class PlanModeCommand:
             )
 
         return CommandResult(text=PLANMODE_USAGE, notify=True)
+
+
+_AGY_PLAN_ONLY = (
+    "<b>{arg}</b> isn't available for Antigravity — use /planmode on / off,"
+    " or /config → Permission mode."
+)
+
+
+async def _handle_antigravity(ctx: CommandContext, config_path) -> CommandResult:
+    """#981: ``/planmode`` for Antigravity maps onto its permission modes —
+    ``on`` = Plan first; ``off`` = drop back to Workspace (or the TOML
+    default when that isn't Plan first); ``show``; ``clear``."""
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import with_override
+    from . import _antigravity_mode_text as agy_mode
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+    engine = agy_mode.ENGINE
+    args = ctx.args_text.strip().lower()
+
+    async def _effective() -> str:
+        value, _source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        return agy_mode.canonical_mode(value)
+
+    before = await _effective()
+
+    async def _describe(prefix: str) -> CommandResult:
+        value, source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        mode = agy_mode.ANTIGRAVITY_MODE_TEXT[agy_mode.canonical_mode(value)]
+        if agy_mode.needs_new(before, value):
+            # #1060 / #980: a conversation keeps the tools it started with,
+            # so a switch to or from Full access or Ask me applies from the
+            # next new one.
+            prefix = prefix.replace(
+                "applies from your next message", agy_mode.NEW_NEEDED_TEXT
+            ).replace(
+                "override cleared", f"override cleared ({agy_mode.NEW_NEEDED_TEXT})"
+            )
+        return CommandResult(
+            text=(
+                f"{prefix}<b>{mode.label}</b>{agy_mode.source_suffix(source)}:"
+                f" {mode.hint}."
+            ),
+            notify=True,
+            parse_mode="HTML",
+        )
+
+    async def _store(value: str | None) -> None:
+        current = await prefs.get_engine_override(chat_id, engine)
+        await prefs.set_engine_override(
+            chat_id, engine, with_override(current, permission_mode=value)
+        )
+
+    if args == "show":
+        return await _describe("permission mode: ")
+    if args in ("auto", "plan-auto"):
+        return CommandResult(
+            text=_AGY_PLAN_ONLY.format(arg=args), notify=True, parse_mode="HTML"
+        )
+    if args == "":
+        value, _source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        args = "off" if agy_mode.canonical_mode(value) == "plan" else "on"
+    if args == "on":
+        await _store("plan")
+        logger.info(
+            "planmode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="on",
+            engine=engine,
+        )
+        return await _describe(
+            "applies from your next message. permission mode for this chat: "
+        )
+    if args == "off":
+        await _store(None)
+        value, _source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        if agy_mode.canonical_mode(value) == "plan":
+            # ``[antigravity] permission_mode = "plan"``: off must still mean off.
+            await _store("workspace")
+        logger.info(
+            "planmode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="off",
+            engine=engine,
+        )
+        return await _describe(
+            "applies from your next message. permission mode for this chat: "
+        )
+    if args == "clear":
+        await _store(None)
+        logger.info(
+            "planmode.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=engine,
+        )
+        return await _describe("override cleared. permission mode: ")
+    return CommandResult(text=PLANMODE_USAGE, notify=True)
 
 
 BACKEND: CommandBackend = PlanModeCommand()

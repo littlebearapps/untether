@@ -32,12 +32,16 @@ from ...transport_runtime import TransportRuntime
 from ...utils.paths import (
     reset_run_base_dir,
     reset_run_channel_id,
+    reset_run_context,
     reset_run_sender_id,
     reset_run_thread_id,
+    reset_run_trigger_source,
     set_run_base_dir,
     set_run_channel_id,
+    set_run_context,
     set_run_sender_id,
     set_run_thread_id,
+    set_run_trigger_source,
 )
 from ..approval_originator import message_sender
 from ..bridge import send_plain
@@ -203,7 +207,7 @@ async def _run_engine(
     reply_ref: MessageRef | None = None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]]
     | None = None,
-    on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
+    on_resume_failed: Callable[[ResumeToken], Awaitable[bool | None]] | None = None,
     engine_override: EngineId | None = None,
     thread_id: int | None = None,
     show_resume_line: bool = True,
@@ -327,6 +331,13 @@ async def _run_engine(
         # #388: the user whose message started the run (None for cron,
         # webhook, /at and loop fires) — pending approvals record it.
         run_sender_token = set_run_sender_id(message_sender(chat_id, user_msg_id))
+        # #1044: what started the run (None = a person's message), so a
+        # runner can tell an /at or loop re-fire from someone in the chat.
+        run_trigger_token = set_run_trigger_source(
+            context.trigger_source if context is not None else None
+        )
+        # #981: where a decision taken later (a plan card) has to run.
+        run_context_token = set_run_context(context)
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -375,6 +386,8 @@ async def _run_engine(
             reset_run_channel_id(run_channel_token)
             reset_run_thread_id(run_thread_token)
             reset_run_sender_id(run_sender_token)
+            reset_run_trigger_source(run_trigger_token)
+            reset_run_context(run_context_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",
@@ -513,6 +526,28 @@ class _TelegramCommandExecutor(CommandExecutor):
             else RenderedMessage(text=message)
         )
         return await self._exec_cfg.transport.edit(ref=ref, message=rendered)
+
+    async def enqueue_resume(
+        self,
+        prompt: str,
+        resume: ResumeToken,
+        *,
+        context: RunContext | None,
+        reply_to_message_id: int,
+        thread_id: int | None = None,
+    ) -> None:
+        """#981: resume *resume* in this chat as a queued follow-up — the
+        same scheduler path a reply takes, so it waits for (and holds) the
+        session like any other message. Not part of the ``CommandExecutor``
+        protocol: built-in callback backends look it up with ``getattr``."""
+        await self._scheduler.enqueue_resume(
+            self._chat_id,
+            reply_to_message_id,
+            prompt,
+            resume,
+            context=context,
+            thread_id=thread_id if thread_id is not None else self._thread_id,
+        )
 
     async def run_one(
         self, request: RunRequest, *, mode: RunMode = "emit"

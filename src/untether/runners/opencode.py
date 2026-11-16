@@ -51,6 +51,7 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import opencode as opencode_schema
+from ..utils import engine_argv
 from ..utils.paths import relativize_path
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
@@ -579,12 +580,20 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if resume.is_continue:
                 args.append("--continue")
             else:
-                args.extend(["--session", resume.value])
+                # #1034: yargs (1.14.33) reads a dash-leading token after
+                # --session / --model as another flag; validate and join.
+                args.append(
+                    engine_argv.joined(
+                        "--session", engine_argv.check_resume(resume.value)
+                    )
+                )
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model
-        if model is not None:
-            args.extend(["--model", str(model)])
+        if model is not None and model != "":
+            args.append(
+                engine_argv.joined("--model", engine_argv.check_model(str(model)))
+            )
         args.extend(["--", prompt])
         return args
 
@@ -806,6 +815,12 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         raise ConfigError(
             f"Invalid `opencode.model` in {config_path}; expected a string."
         )
+    if model:
+        problem = engine_argv.model_problem(model)
+        if problem is not None:  # #1034
+            raise ConfigError(
+                f"Invalid `opencode.model` in {config_path}; a model id {problem}."
+            )
 
     # Fall back to OpenCode's own config for the default model so it appears
     # in the Telegram footer even without an untether.toml override.

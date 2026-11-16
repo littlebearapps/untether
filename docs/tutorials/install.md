@@ -32,7 +32,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.36.0`).
+You should see the installed version number (e.g. `0.36.1`).
 
 ## 3. Install agent CLIs
 
@@ -55,7 +55,7 @@ npm install -g @anthropic-ai/claude-code
 Untether uses the official Claude Code CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Untether defaults to subscription billing unless you opt into API billing in config.
 
 !!! note "macOS credentials"
-    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
+    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether reads them from either place, and only for `/usage` and the opt-in subscription-usage footer — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
 
 ### OpenCode
 
@@ -75,6 +75,22 @@ npm install -g @mariozechner/pi-coding-agent
 
 Pi can authenticate via a provider login or use API billing. You can log in with Anthropic (Claude subscription), OpenAI (ChatGPT subscription), GitHub Copilot, Google Cloud Code Assist (Gemini CLI), or Antigravity (Gemini 3, Claude, GPT-OSS), or choose API billing instead.
 
+### Antigravity CLI
+
+```sh
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Antigravity CLI (`agy`, 1.3.1 or newer) is Google's successor to Gemini CLI. Untether recommends signing it in with a **Gemini API key** or a **Gemini Enterprise** sign-in: Google's terms don't allow third-party tools to use a Google account sign-in, and Google may suspend the account. Setup steps and the full note are in [Switch engines → Antigravity CLI](../how-to/switch-engines.md#antigravity-cli); once it's installed, see [Use Antigravity CLI](../how-to/antigravity.md).
+
+For approval buttons (**Ask me**), question buttons and `/steer` in Antigravity chats, also add Untether's agy plugin once Untether is installed (step 2):
+
+```sh
+untether agy-gate install
+```
+
+It installs through agy's own `agy plugin install`, writes only `~/.gemini/config/plugins/untether-gate/`, and does nothing in your own `agy` sessions. Without it, Antigravity still runs in Workspace, Plan first and Full access. See [Telegram questions and steer](../how-to/antigravity.md#telegram-questions-and-steer).
+
 ### Gemini CLI ⚠️ deprecated
 
 !!! warning "Deprecated — don't install for new setups"
@@ -89,8 +105,8 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 
     The `gemini` engine is still included but **deprecated and no longer
     supported**: no bug fixes, no testing, and it may be removed in a future
-    release. Antigravity CLI support is planned as a separate `antigravity` engine
-    in v0.36.1 ([#558](https://github.com/littlebearapps/untether/issues/558)).
+    release. Antigravity CLI is supported as its own `antigravity` engine
+    from v0.36.1 — see [Switch engines](../how-to/switch-engines.md#antigravity-cli).
 
 ```sh
 npm install -g @google/gemini-cli
@@ -302,21 +318,22 @@ step 4: default engine
 
 untether runs these engines on your computer. switch anytime with /agent.
 
-  engine    status         install command
-  ───────────────────────────────────────────
-  codex     ✓ installed
-  claude    ✓ installed
-  opencode  ✗ not found    npm install -g opencode-ai@1
-  pi        ✗ not found    npm install -g @mariozechner/pi-coding-agent
-  gemini    ✗ not found    npm install -g @google/gemini-cli
-  amp       ✗ not found    npm install -g @sourcegraph/amp
+  engine       status         install command
+  ──────────────────────────────────────────────
+  amp          ✗ not found    npm install -g @sourcegraph/amp
+  antigravity  ✗ not found    curl -fsSL https://antigravity.google/cli/install.sh | bash
+  claude       ✓ installed
+  codex        ✓ installed
+  gemini       ✗ not found    npm install -g @google/gemini-cli
+  opencode     ✗ not found    npm install -g opencode-ai@1
+  pi           ✗ not found    npm install -g @mariozechner/pi-coding-agent
 
 ? choose default engine:
- ❯ codex
-   claude
+ ❯ claude
+   codex
 ```
 
-Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode or Pi. If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
+Only installed engines are offered as the default. The table also lists `gemini` and `amp`, which still load but are deprecated and no longer supported, so pick Claude Code, Codex, OpenCode, Pi or Antigravity CLI (`antigravity`, which is a separate engine from `gemini`). The wizard looks for each CLI on your `PATH` (and for agy, also at `~/.local/bin/agy`, where its installer puts it, or at `[antigravity] cmd` if your config sets one). If no engine is installed, the wizard tells you to install one and rerun `untether --onboard` (you can still save the config). You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Choose your workflow mode
 
@@ -354,10 +371,10 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 **untether is ready** (v0.36.0)
+    🐕 **untether is ready** (v0.36.1)
 
     *default engine:* `codex`<br>
-    *installed engines:* `codex, claude` (not installed: opencode, pi, gemini, amp)<br>
+    *installed engines:* `claude, codex` (not installed: amp, antigravity, gemini, opencode, pi)<br>
     *mode:* `assistant`<br>
     *directories:* `none`
 
@@ -473,7 +490,7 @@ Your config file lives at `~/.untether/untether.toml`. The onboarding wizard pop
         scope = "auto"
         ```
 
-The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that.
+The wizard writes no `permission_mode`, so Claude Code starts without approval buttons until you pick a mode with `/planmode` — the [interactive control](interactive-control.md) tutorial covers that. Antigravity CLI starts in **Workspace** mode (it edits files in the project, with no shell, web or MCP tools) until you pick another mode in `/config` → Permission mode; see [Use Antigravity CLI](../how-to/antigravity.md#permission-modes).
 
 This config file controls all of Untether's behaviour. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 

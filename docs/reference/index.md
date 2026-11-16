@@ -66,6 +66,10 @@ These are “engine adapter” implementation details: JSONL formats, mapping ru
   - [runner.md](runners/pi/runner.md)
   - [stream-json-cheatsheet.md](runners/pi/stream-json-cheatsheet.md)
   - [untether-events.md](runners/pi/untether-events.md)
+- Antigravity CLI ([user guide](../how-to/antigravity.md)):
+  - [runner.md](runners/antigravity/runner.md)
+  - [stream-json-cheatsheet.md](runners/antigravity/stream-json-cheatsheet.md)
+  - [untether-events.md](runners/antigravity/untether-events.md)
 - Gemini CLI (deprecated, no longer supported):
   - [runner.md](runners/gemini/runner.md)
   - [stream-json-cheatsheet.md](runners/gemini/stream-json-cheatsheet.md)

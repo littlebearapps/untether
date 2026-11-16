@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 from ...context import RunContext
 from ...logging import get_logger
+from ...utils.engine_argv import model_problem, safe_preview
+from ...utils.error_display import redact_url_secrets
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import resolve_override_value, with_override
 from ..files import split_command_args
@@ -29,6 +31,71 @@ MODEL_USAGE = (
     "usage: `/model`, `/model set <model>`, "
     "`/model set <engine> <model>`, or `/model clear [engine]`"
 )
+
+
+async def _remaining_model(
+    cfg: TelegramBridgeConfig,
+    msg: TelegramIncomingMessage,
+    engine: str,
+    *,
+    tkey: tuple[int, int] | None,
+    topic_store: TopicStateStore | None,
+    chat_prefs: ChatPrefsStore | None,
+) -> tuple[str, str] | None:
+    """``(source label, model)`` Untether passes to *engine* once an override
+    is cleared — a remaining override, else the engine's configured model —
+    or None when it passes no model at all (#998)."""
+    topic_override = None
+    if tkey is not None and topic_store is not None:
+        topic_override = await topic_store.get_engine_override(tkey[0], tkey[1], engine)
+    chat_override = None
+    if chat_prefs is not None:
+        chat_override = await chat_prefs.get_engine_override(msg.chat_id, engine)
+    resolution = resolve_override_value(
+        topic_override=topic_override, chat_override=chat_override, field="model"
+    )
+    if resolution.value:
+        label = (
+            "topic override"
+            if resolution.source == "topic_override"
+            else "chat override"
+        )
+        return (label, resolution.value)
+    try:
+        runner = cfg.runtime.resolve_runner(
+            resume_token=None, engine_override=engine
+        ).runner
+    except Exception:  # noqa: BLE001 — a reply line must never break /model
+        return None
+    configured = getattr(runner, "model", None)
+    if isinstance(configured, str) and configured:
+        return ("configured default", configured)
+    return None
+
+
+# `/model set` and `/model clear` (#1155) offer the same way to a clean start:
+# a resumed session can keep the model it was using (Pi stores it in its
+# session file).
+_NEW_SESSION_HINT = "If you want a clean start on the new model, run `/new`."
+
+
+def _after_clear_line(engine: str, remaining: tuple[str, str] | None) -> str:
+    """#998: what the next run gets. Every runner passes a model it knows on
+    resumed runs too; with none, the engine decides and a resumed session can
+    keep the cleared model (Claude Code 2.1.296 and Pi 0.78.0 do), so the
+    only sure way back to the engine's default is a fresh session."""
+    if remaining is not None:
+        label, model = remaining
+        return (
+            f"From the next run Untether passes the {label} "
+            f"`{redact_url_secrets(model)}`.\n"
+            f"{_NEW_SESSION_HINT}"
+        )
+    return (
+        f"Untether no longer chooses a model for `{engine}`, and a resumed "
+        "session may stay on the model it was using. Run `/new` to start a "
+        "fresh session on the engine's default."
+    )
 
 
 async def _handle_model_command(
@@ -78,18 +145,23 @@ async def _handle_model_command(
             field="model",
         )
         engine_line = f"engine: {engine} ({ENGINE_SOURCE_LABELS[engine_source]})"
-        model_value = resolution.value or "default"
+        # #1161: a URL-shaped model is shown without its secrets (the stored
+        # value is unchanged).
+        model_value = redact_url_secrets(resolution.value or "default")
         model_line = (
             f"model: **{model_value}** ({OVERRIDE_SOURCE_LABELS[resolution.source]})"
         )
-        topic_label = resolution.topic_value or "none"
+        topic_label = redact_url_secrets(resolution.topic_value or "none")
         if tkey is None:
             topic_label = "none"
         chat_label = (
-            "unavailable" if chat_prefs is None else resolution.chat_value or "none"
+            "unavailable"
+            if chat_prefs is None
+            else redact_url_secrets(resolution.chat_value or "none")
         )
         defaults_line = f"defaults: topic: {topic_label}, chat: {chat_label}"
-        available_line = f"available engines: {', '.join(cfg.runtime.engine_ids)}"
+        # #1165: only engines that can run; missing ones as "not installed".
+        available_line = f"available engines: {cfg.runtime.available_engines_text()}"
         await reply(
             text="\n\n".join([engine_line, model_line, defaults_line, available_line])
         )
@@ -99,6 +171,18 @@ async def _handle_model_command(
         engine_arg, model = parse_set_args(tokens, engine_ids=engine_ids)
         if model is None:
             await reply(text=MODEL_USAGE)
+            return
+        # #1034: the value becomes part of an engine CLI's argv. Refuse one
+        # that could read as a flag before it is stored (never echoed back).
+        problem = model_problem(model)
+        if problem is not None:
+            logger.warning(
+                "model.set.invalid",
+                chat_id=msg.chat_id,
+                preview=safe_preview(model),
+                command="model",
+            )
+            await reply(text=f"invalid model: a model id {problem}.\n\n{MODEL_USAGE}")
             return
         if not await require_admin_or_private(
             cfg,
@@ -123,9 +207,9 @@ async def _handle_model_command(
         else:
             engine = engine_arg
             if engine not in engine_ids:
-                available = ", ".join(cfg.runtime.engine_ids)
+                available = cfg.runtime.available_engines_text(code=True)
                 await reply(
-                    text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                    text=f"unknown engine `{engine}`.\navailable engines: {available}"
                 )
                 return
         try:
@@ -153,23 +237,17 @@ async def _handle_model_command(
         logger.info(
             "model.set",
             chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
             engine=engine,
             model=model,
             scope=scope,
             command="model",
         )
-        if scope == "topic":
-            await reply(
-                text=(
-                    f"topic model override **set to** `{model}` for `{engine}`.\n"
-                    "If you want a clean start on the new model, run `/new`."
-                )
-            )
-            return
+        shown = redact_url_secrets(model)  # #1161
         await reply(
             text=(
-                f"chat model override **set to** `{model}` for `{engine}`.\n"
-                "If you want a clean start on the new model, run `/new`."
+                f"{scope} model override **set to** `{shown}` for `{engine}`.\n"
+                f"{_NEW_SESSION_HINT}"
             )
         )
         return
@@ -202,9 +280,9 @@ async def _handle_model_command(
                 return
             engine, _ = selection
         if engine not in engine_ids:
-            available = ", ".join(cfg.runtime.engine_ids)
+            available = cfg.runtime.available_engines_text(code=True)
             await reply(
-                text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
+                text=f"unknown engine `{engine}`.\navailable engines: {available}"
             )
             return
         try:
@@ -229,11 +307,22 @@ async def _handle_model_command(
             return
         if scope is None:
             return
-        logger.info("model.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
-        if scope == "topic":
-            await reply(text="topic model override **cleared** (using chat default).")
-            return
-        await reply(text="chat model override **cleared**.")
+        logger.info(
+            "model.cleared",
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            engine=engine,
+            scope=scope,
+        )
+        remaining = await _remaining_model(
+            cfg, msg, engine, tkey=tkey, topic_store=topic_store, chat_prefs=chat_prefs
+        )
+        await reply(
+            text=(
+                f"{scope} model override **cleared** for `{engine}`.\n"
+                f"{_after_clear_line(engine, remaining)}"
+            )
+        )
         return
 
     await reply(text=MODEL_USAGE)

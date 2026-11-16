@@ -1,0 +1,36 @@
+{"_do":"config","permission_mode":"plan","prompt":"wait then report"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_sleep_1","name":"Bash","input":{"command":"sleep 8"}}]}}
+{"type":"control_request","request_id":"req-bash-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"sleep 8"},"tool_use_id":"toolu_sleep_1"},"_stdin":1}
+{"_do":"followup","text":"switch model mid-turn","msg_id":22,"options":{"model":"claude-other"}}
+{"_do":"followup","text":"other project mid-turn","msg_id":23,"cwd":"/work/other"}
+{"_do":"steer","text":"also print the hostname","msg_id":30,"_stdin":1}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"queued"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sleep_1","content":"slept"}]}}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"started"}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"DONE + also print the hostname"}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":2,"result":"DONE + also print the hostname","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"completed"}
+{"_do":"queued_note"}
+{"_do":"steer","text":"and a haiku","msg_id":31,"_stdin":1}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"queued"}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"started"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_03","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"A haiku."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":1,"result":"A haiku.","total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"followup","text":"one more thing","msg_id":20,"_stdin":1}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"queued"}
+{"type":"command_lifecycle","command_uuid":"$stdin:uuid","state":"started"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_04","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"One more thing done."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":1,"result":"One more thing done.","total_cost_usd":0.03,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"steer","text":"not for this engine","msg_id":32,"engine":"codex"}
+{"_do":"followup","text":"switch model","msg_id":21,"options":{"model":"claude-other"},"_eof":true}
+{"_do":"message","text":"switch model","msg_id":21,"resume":true}
+{"_do":"exit","rc":0,"then_accept":true,"_stdin":2}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_05","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"Resumed."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":1,"result":"Resumed.","total_cost_usd":0.04,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"drain"}
+{"_do":"eof"}
+{"_do":"exit","rc":0}

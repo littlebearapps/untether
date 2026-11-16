@@ -479,3 +479,82 @@ def test_apply_token_delta_opencode_per_run() -> None:
     assert out["session_total_usage"] == {"input_tokens": 12, "output_tokens": 3}
     assert "token_delta_source" not in out
     assert "input_tokens" not in out
+
+
+# --- #1062: the engine's own per-run count -----------------------------------
+
+
+def test_token_ledger_run_tokens_after_a_cancelled_first_run() -> None:
+    """agy 1.3.3 (probes rc4-h1/h2): the first run was cancelled, so nothing
+    was recorded; the next run's total (41,974) also holds the cancelled
+    turn's 27,461. The run's own model calls (14,513) are its figure."""
+    from structlog.testing import capture_logs
+
+    ledger = SessionCostLedger(path=None)
+    with capture_logs() as logs:
+        r = ledger.record_tokens(
+            "antigravity",
+            "c",
+            _tok(41974, 915),
+            scope="thread_cumulative",
+            resumed=True,
+            run_tokens=_tok(14513, 41),
+        )
+    assert r.source == "engine_run"
+    assert r.delta == _tok(14513, 41)
+    assert r.cumulative == _tok(41974, 915)
+    unknown = [e for e in logs if e["event"] == "usage.token_baseline_unknown"]
+    assert len(unknown) == 1 and unknown[0]["run_reported"] is True
+    tokens = ledger.session_tokens("antigravity", "c")
+    assert tokens is not None and tokens.last_run == _tok(14513, 41)
+    assert tokens.last_source == "engine_run"
+
+
+def test_token_ledger_run_tokens_skip_a_cancelled_run_in_between() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "antigravity", "c", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    # A cancelled run spent 50/5 and recorded nothing; this run spent 30/3.
+    r = ledger.record_tokens(
+        "antigravity",
+        "c",
+        _tok(180, 18),
+        scope="thread_cumulative",
+        resumed=True,
+        run_tokens=_tok(30, 3),
+    )
+    assert r.delta == _tok(30, 3)
+    assert r.cumulative == _tok(180, 18)
+
+
+def test_token_ledger_empty_run_tokens_fall_back_to_the_difference() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    r = ledger.record_tokens(
+        "codex",
+        "t",
+        _tok(250, 30),
+        scope="thread_cumulative",
+        resumed=True,
+        run_tokens=_tok(0, 0),
+    )
+    assert r.source == "ledger" and r.delta == _tok(150, 20)
+
+
+def test_apply_token_delta_antigravity_footer_is_the_run_not_the_thread() -> None:
+    """The footer after a cancelled run reads as that run's own use, with no
+    `` · thread total`` label."""
+    usage = {
+        "input_tokens": 41974,
+        "output_tokens": 915,
+        "run_tokens": {"input_tokens": 14513, "output_tokens": 41},
+    }
+    out = rb._apply_token_delta("antigravity", "c", usage, resumed=True)
+    assert out is not None
+    assert (out["input_tokens"], out["output_tokens"]) == (14513, 41)
+    assert out["token_delta_source"] == "engine_run"
+    line = rb._format_run_cost(out, thread_cumulative=True)
+    assert line == "14.5k/41"

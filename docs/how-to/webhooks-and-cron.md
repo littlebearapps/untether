@@ -65,7 +65,7 @@ Webhooks accept HTTP POST requests and turn them into agent runs. Example: trigg
 | `bearer` | `Authorization: Bearer <token>` | Simple shared secret |
 | `hmac-sha256` | `X-Hub-Signature-256` | GitHub webhooks |
 | `hmac-sha1` | `X-Hub-Signature` | Legacy GitHub webhooks |
-| `none` | (none) | Local testing only — since v0.35.4 **refused on non-loopback hosts** unless `[triggers] allow_unauthenticated_webhooks = true` ([#382](https://github.com/littlebearapps/untether/issues/382)) |
+| `none` | (none) | Local testing only — since v0.35.4 **refused on non-loopback hosts** unless `[triggers] allow_unauthenticated_webhooks = true` ([#382](https://github.com/littlebearapps/untether/issues/382)), and on any host when `[triggers.server] exposed = true` ([#1119](https://github.com/littlebearapps/untether/issues/1119)) |
 
 ### Prompt templating
 
@@ -171,6 +171,12 @@ Common patterns:
 | `0 */2 * * *` | Every 2 hours |
 | `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
 
+Use numbers only: names like `MON` or `JAN` aren't supported. A schedule with a
+mistake (the wrong number of fields, a value out of range such as minute `99`, a
+step of `0`, or a range that runs backwards such as `5-1`) is caught when the config
+loads: that cron is skipped and the Telegram notice names the bad field (see
+[When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)).
+
 ### Data-fetch crons
 
 Crons can pull data from external sources before rendering the prompt:
@@ -229,7 +235,7 @@ Webhooks can perform lightweight actions without spawning an agent:
     message_template = "📈 {{ticker}} hit {{price}}"
     ```
 
-Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. Template fields come only from the webhook payload; there are no built-in variables such as a date. A `file_write` path, like a cron `file_read` fetch, is checked at any depth against a fixed deny list (`.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**`), so a templated path can't land in `.git/hooks` or `~/.ssh` ([#831](https://github.com/littlebearapps/untether/issues/831)). This list is separate from `[transports.telegram.files] deny_globs`. See the
+Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. Template fields come only from the webhook payload; there are no built-in variables such as a date. A `file_write` path, like a cron `file_read` fetch, is checked at any depth against the default `[transports.telegram.files] deny_globs` list (`.git/**`, `.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/id_rsa`, `**/.ssh/**`, `**/.netrc` and the rest), so a templated path can't land in `.git/hooks`, `~/.ssh` or `.env.local` ([#831](https://github.com/littlebearapps/untether/issues/831), [#906](https://github.com/littlebearapps/untether/issues/906)). Triggers always use the default list; a `deny_globs` value you set yourself does not change it. See the
 [triggers reference](../reference/triggers/triggers.md#non-agent-actions) for details.
 
 ## Chat routing
@@ -252,6 +258,23 @@ Each webhook and cron can specify where the Telegram notification appears:
     rate_limit = 60        # max requests per minute
     max_body_bytes = 1048576  # 1 MB max payload
     ```
+
+### Behind a tunnel or reverse proxy
+
+A Cloudflare Tunnel, ngrok, nginx or Caddy in front of a `127.0.0.1` bind makes the server public, even though Untether only sees loopback connections. Tell Untether so ([#1119](https://github.com/littlebearapps/untether/issues/1119)):
+
+=== "toml"
+
+    ```toml
+    [triggers.server]
+    host = "127.0.0.1"
+    exposed = true                          # refuse auth = "none" webhooks
+    trusted_proxy_header = "CF-Connecting-IP"  # Cloudflare; "X-Real-IP" for nginx
+    ```
+
+- `exposed = true` refuses `auth = "none"` webhooks whatever the bind address (`allow_unauthenticated_webhooks` no longer opts back in).
+- `trusted_proxy_header` names the header your proxy sets to the real client address. Untether reads it only with `exposed = true` and only from a loopback connection, and uses it for the failed-auth lockout and the `remote` field in its logs, so one client sending bad secrets is locked out without locking out the others. Only name a header your proxy overwrites on every request (Cloudflare always sets `CF-Connecting-IP`; with nginx add `proxy_set_header X-Real-IP $remote_addr;`).
+- Both settings hot-reload. Rate limiting per client still belongs at the edge (your proxy or Cloudflare): Untether's own `rate_limit` can't tell clients apart without the header.
 
 The server includes a health endpoint at `GET /health` for uptime monitoring. While the master pause toggle is active (see [Pause and resume all triggers](#pause-and-resume-all-triggers)) it returns `{"status": "paused", "paused": true}` so external monitors can distinguish "paused but up" from "down".
 
@@ -287,9 +310,40 @@ accessible immediately, and removed webhooks start returning 404.
 
 !!! note
     Server settings (`host`, `port`, `rate_limit`, `max_body_bytes`) still require a
-    restart, and so does turning `enabled` from off to on. Turning `enabled` off applies
+    restart (`exposed` and `trusted_proxy_header` hot-reload), and so does turning `enabled` from off to on. Turning `enabled` off applies
     straight away (crons stop and webhook paths return 404). See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
     for the full list.
+
+### When a trigger entry is invalid
+
+Each `[[triggers.crons]]` and `[[triggers.webhooks]]` entry is checked on its own
+([#1117](https://github.com/littlebearapps/untether/issues/1117)). An entry with a
+mistake (a missing `prompt`, a typo in a key, a bad cron `schedule`
+([#1144](https://github.com/littlebearapps/untether/issues/1144)), or a key your
+installed version doesn't know yet) is skipped and the others keep running. Untether logs
+`triggers.trigger_invalid` and posts a notice in Telegram naming the skipped trigger
+and what's wrong with it. A skipped webhook is switched off, so its old secret stops
+working too.
+
+A mistake that affects every trigger still stops them all: a bad `[triggers.server]`
+value, an unknown key directly under `[triggers]`, or two entries with the same `id`
+(or webhooks with the same `path`). At startup nothing runs (`triggers.init_failed`).
+On a reload the previous crons and webhooks keep running (`config.reload.triggers_failed`),
+and the Telegram notice names every webhook whose **old secret is still accepted**, so
+a secret you were rotating doesn't stay live without you knowing.
+
+The notices only say the other triggers "started normally" or "reloaded normally"
+when they really are running
+([#1146](https://github.com/littlebearapps/untether/issues/1146)). If the triggers
+failed at startup, or the webhook server didn't start, saving a fix can't start them:
+the notice says to restart instead, and the restart notice names the reason
+(`triggers failed at start-up`). An `auth = "none"` webhook refused by `exposed = true`
+is announced the same way (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)).
+
+!!! tip "Upgrade first, then edit"
+    When a new version adds a trigger key, install it before you add the key to
+    `untether.toml`. An older version rejects a key it doesn't know (now only that one
+    trigger is skipped).
 
 ## One-shot crons with `run_once`
 
@@ -325,12 +379,23 @@ permission_mode = "auto"
     Before v0.36.0, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
 
 !!! warning "Unattended runs deny instead of waiting"
-    Cron and webhook runs never wait on an approval button nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). In `default` / `manual` / `acceptEdits` (what `/planmode off` sets) any tool the mode would ask about is denied; in `plan` the plan approval and the file-changing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) are denied; in `auto`, `dontAsk` and `bypassPermissions` only the requests the CLI still asks about (an `ask` rule, a hook's `ask`, a tool that needs a person, auto mode falling back after repeated blocks) are denied; with diff preview on, an edit awaiting its diff approval is denied. Questions are always denied. Claude is told to carry on without the denied action or stop and report; the final lists the denials (`🔒 unattended (cron:<id>) · denied …`) and each logs `permission.unattended_deny`. A reply to the run's message continues in an attended session with normal buttons. `/at` runs keep their buttons. For hands-off crons set `permission_mode` to `plan-auto`, `auto` or `bypassPermissions` (or pre-approve the tools). Startup logs `trigger.unattended_approval_risk` for crons set to an asking mode, and the startup message lists them.
+    Cron and webhook runs never wait on an approval button nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). In `default` / `manual` / `acceptEdits` (what `/planmode off` sets) any tool the mode would ask about is denied; in `plan` the plan approval and the file-changing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) are denied; in `auto`, `dontAsk` and `bypassPermissions` only the requests the CLI still asks about (an `ask` rule, a hook's `ask`, a tool that needs a person, auto mode falling back after repeated blocks) are denied; with diff preview on, an edit awaiting its diff approval is denied. Questions are always denied. Claude is told to carry on without the denied action or stop and report; the final lists the denials (`🔒 unattended (cron:<id>) · denied …`) and each logs `permission.unattended_deny`. A reply to the run's message continues in an attended session with normal buttons. `/at` runs keep their buttons. For hands-off crons set `permission_mode` to `plan-auto`, `auto` or `bypassPermissions` (or pre-approve the tools). The first denial for each trigger adds a 💡 hint that names where the run's mode came from: the chat's `/planmode`, `[claude] permission_mode` in `untether.toml` (when the chat has none set), the trigger's own `permission_mode`, or, for a webhook, the guard that never lets it inherit `bypassPermissions`. Startup logs `trigger.unattended_approval_risk` for crons set to an asking mode, and the startup message lists them.
 
 !!! note "Webhooks have no `permission_mode`"
     A webhook run always uses its chat's `/planmode`, then the engine default — so a webhook into a `plan` (or `/planmode off`) chat has its approvals denied the same way. Set the chat's mode with `/planmode plan-auto` or `/planmode auto` if the webhook should act on its own; per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). Webhooks aren't listed in the startup message.
 
-Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run whose cron value differs from the chat's own setting logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)). Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
+!!! warning "Webhooks never inherit bypass"
+    A webhook's prompt is built from the request it receives, so since v0.36.1 a Claude webhook run never inherits `bypassPermissions`: not from the chat's permission mode, `[engines.claude] permission_mode` or `dangerously_skip_permissions = true`. It runs in `default` mode instead, so anything that would ask for approval is denied, and Untether logs `claude.webhook_bypass_downgraded` once per webhook ([#1142](https://github.com/littlebearapps/untether/issues/1142)). Antigravity webhook runs never get Full access or Ask me: a chat's Full access or Ask me runs them as Workspace. A Codex webhook whose mode Untether doesn't recognise runs `safe` (read-only sandbox) instead of full auto (`codex.webhook_unknown_mode_safe`).
+
+    Crons still inherit the chat's or engine's mode in v0.36.1. At startup (and when a reload changes the list) Untether logs:
+
+    - `trigger.cron.inherits_bypass` — a cron with no `permission_mode` of its own that inherits Claude's `bypassPermissions` (it keeps it) or Antigravity's Full access (it runs as Workspace). Set `permission_mode` on the cron to make the choice explicit
+    - `trigger.webhook.no_project` — an `agent_run` webhook with no `project`, which runs in Untether's own working directory
+    - `trigger.webhook.preapproved_tools` — an `agent_run` webhook whose Claude mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or no mode at all) while `[engines.claude] allowed_tools` pre-approves `Bash`, `Edit` or `Write` (the default list does). Use a prompting mode for the webhook's chat or narrow `allowed_tools`. If you set `allowed_tools` yourself, it applies even in prompting modes, so this also fires for a webhook in a `default`, `manual` or `acceptEdits` chat, or one whose bypass mode was downgraded to `default`; remove `Bash`, `Edit` and `Write` from the list to stop those tools running without an approval
+
+    These are warnings only; a later release makes them stricter ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
+
+Precedence (Claude and Antigravity): cron `permission_mode` > the chat's own mode (`/planmode`, or Antigravity's permission mode) > engine config default. Every run whose cron value differs from the chat's own setting logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)), except on a webhook run, which runs `safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)). On an Antigravity cron the valid values are `workspace`, `full`, `ask` and `plan`; a cron runs with Full access or Ask me only when it sets `permission_mode = "full"` or `"ask"` itself, and a webhook run never gets either. An unattended Ask me run denies everything that would need a tap, and a Plan first run only posts its plan ([#980](https://github.com/littlebearapps/untether/issues/980), [#981](https://github.com/littlebearapps/untether/issues/981)). A scheduled Antigravity run is also held when the project's agy hooks, plugins or MCP config changed since someone last ran Antigravity there from the chat; send a message in the chat to release it. Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Per-cron model and effort
 
@@ -347,7 +412,7 @@ permission_mode = "auto"
 prompt = "Triage new issues."
 ```
 
-Set `engine` alongside `model` so the name matches the engine. `reasoning` is checked against the engine's levels at config load when `engine` is set (Claude `low`…`max`, Codex `low`…`xhigh`; OpenCode/Pi don't take it) — a bad value fails the trigger config the way a bad `permission_mode` does (on reload the previous triggers stay active and `config.reload.triggers_failed` is logged). A reply to the cron's message runs on the chat's model. Logs: `trigger.cron.model_override`, `trigger.cron.reasoning_override`. Webhooks have neither field yet — per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Pick a model per cron](schedule-tasks.md#pick-a-model-per-cron).
+Set `engine` alongside `model` so the name matches the engine. `reasoning` is checked against the engine's levels at config load when `engine` is set (Claude `low`…`max`, Codex `low`…`xhigh`, Antigravity `low`…`high`; OpenCode/Pi don't take it) — a bad value makes that cron invalid, the way a bad `permission_mode` does, so it is skipped and named in the Telegram notice while the other triggers keep running (see [When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)). A reply to the cron's message runs on the chat's model. Logs: `trigger.cron.model_override`, `trigger.cron.reasoning_override`. Webhooks have neither field yet — per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Pick a model per cron](schedule-tasks.md#pick-a-model-per-cron).
 
 ## Delayed runs with `/at`
 
@@ -383,6 +448,10 @@ See the [Triggers reference — Trigger visibility](../reference/triggers/trigge
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.
 - All secret comparisons use timing-safe comparison.
 - Rate limiting prevents abuse (token-bucket, per-webhook and global).
+- Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning at startup and on each reload; it still works for now, but a future release will refuse it ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+- Untether never writes a webhook secret to its logs or error messages, including when the webhook's entry is invalid.
+- Failed auth attempts are budgeted per webhook and client address (`rate_limit` a minute). A sender that connects directly and goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected.
+- Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy, or set `exposed = true` and `trusted_proxy_header` so Untether counts each client behind the proxy separately (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)). Otherwise Untether ignores `X-Forwarded-For` and similar headers. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).
 - Webhook prompts are prefixed with an untrusted-payload marker.
 
 ## Related

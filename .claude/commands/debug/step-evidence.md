@@ -137,6 +137,7 @@ via the Telegram MCP. Chat IDs (canonical list: `docs/reference/integration-test
 | Codex CLI | `4929463515` |
 | OpenCode | `5200822877` |
 | Pi | `5156256333` |
+| Antigravity CLI | `5540298446` |
 | Gemini CLI (deprecated) | `5207762142` |
 | AMP CLI (deprecated) | `5230875989` |
 

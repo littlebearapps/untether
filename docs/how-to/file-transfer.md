@@ -53,7 +53,7 @@ If you send a file **without a caption**, Untether saves it to `incoming/<origin
 !!! note "iOS: captions on documents"
     Telegram on iOS doesn't always show a caption field when sending files via the "File" picker — the file sends immediately. To add a `/file put <path>` caption on iOS, send photos (which always show the caption field) or use **Telegram Desktop / macOS**, which shows a caption field for all file types. Alternatively, skip the caption and let files auto-save to `incoming/`.
 
-If the target file already exists, Untether auto-appends a numeric suffix (`_1`, `_2`, etc.) to avoid collisions — so `spec.pdf` becomes `spec_1.pdf`. Use `--force` to overwrite instead:
+If the target file already exists, Untether auto-appends a numeric suffix (`_1`, `_2`, etc.) to avoid collisions — so `spec.pdf` becomes `spec_1.pdf`. If you re-send a file that is byte-for-byte identical to the one already saved (or to one of its numbered copies), Untether writes nothing and replies `already saved as … (identical)`; the agent is pointed at the existing file. Use `--force` to overwrite instead:
 
 ```
 /file put --force docs/spec.pdf
@@ -140,7 +140,7 @@ When the run finishes successfully, Untether:
 1. Scans `.untether-outbox/` for files (flat scan, no subdirectories)
 2. Keeps only the files written or copied into it **during this run** (#924) — judged by the later of the file's modification and status-change times, so `mv` and `cp -p` still count. Anything older is moved once to `.untether-outbox/.skipped/` and listed in a single `📎 N older files were already in .untether-outbox/ …` notice instead of being sent
 3. Validates each file against deny globs, size limits, and path traversal rules
-4. Sends valid files as Telegram documents with `📎 filename (size)` captions
+4. Sends valid files as Telegram documents with `📎 filename (size)` captions. Every file arrives as the original file, whatever its type: a `.webp` image is no longer turned into a sticker, so you can open it full-size and save it
 5. Cleans up — deletes sent files and removes the empty directory
 
 Files are sent in alphabetical order, one at a time, immediately after the agent's text response. In a live Claude session, "this run" starts when the session started, so a background task's file that a later wake turn reports is still delivered.
@@ -172,6 +172,7 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
+| Antigravity CLI | Yes | In **Ask me**, a write into the outbox asks for approval first ([Security](security.md#antigravity-ask-me)) |
 | Gemini CLI (deprecated) | Yes | Untether runs it with `--approval-mode yolo` unless the chat picks **Edit files**, which can still write files |
 | AMP (deprecated) | Yes | — |
 

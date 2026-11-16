@@ -1,6 +1,6 @@
 # Agent preamble
 
-Untether injects a context preamble at the start of the prompt for every new run (including a resumed session), telling the engine it's running via Telegram and requesting structured end-of-task summaries. Follow-ups and steers sent into a Claude session that is still open don't repeat it; the session already has it. This works across all engines (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp).
+Untether injects a context preamble at the start of the prompt for every new run (including a resumed session), telling the engine it's running via Telegram and requesting structured end-of-task summaries. Follow-ups and steers sent into a Claude session that is still open don't repeat it; the session already has it. This works across all engines (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, and the deprecated Gemini CLI and Amp).
 
 ## What the default preamble does
 
@@ -10,7 +10,10 @@ The built-in preamble tells the agent:
 2. **Visibility constraints** — only final assistant text is visible; tool calls, thinking blocks, and terminal output are invisible to the user
 3. **Summary format** — every response that completes work should end with a short structured summary (about 500–1,500 characters) including "Completed", "Next Steps", and "Decisions Needed" sections, plus how to send files back through `.untether-outbox/` (this part is included even when `[transports.telegram.files] enabled = false`; use a custom `text` if you don't want it)
 4. **Config changes** — Untether hot-reloads `untether.toml`, so the agent must not restart the Untether service after editing it (a restart from inside the session drops its own final answer)
-5. **Plan mode** — the `ExitPlanMode` plan should be a 3–5 bullet summary, and the reply after approval a brief summary rather than a re-paste of the plan
+5. **Plan mode** (Claude Code only) — the `ExitPlanMode` plan should be a 3–5 bullet summary, and the reply after approval a brief summary rather than a re-paste of the plan
+6. **Questions** — Claude Code is told to use `AskUserQuestion` (or not to, when Ask mode is off), which Untether shows as buttons. Antigravity CLI, once [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) is installed, is told the same about its own `ask_question` tool. Every other engine is told: "If you need clarification, say so in your final reply — the user will answer in their next message."
+
+From v0.36.1 the built-in text depends on what the engine can do ([#1035](https://github.com/littlebearapps/untether/issues/1035)). Before that, every engine received Claude's `ExitPlanMode` and `AskUserQuestion` instructions, naming tools the other engines don't have. Claude's preamble is unchanged, and a custom `text` is still sent as written to every engine.
 
 This means agents naturally produce mobile-friendly summaries instead of expecting the user to read terminal output or file diffs.
 
@@ -48,7 +51,7 @@ Set `text` to your custom string. When `text` is `null` (the default), Untether 
 
 ## Ask mode interaction
 
-Untether appends one more line to the preamble, the built-in one or your own `text`. Unless ask mode is turned off in `/config`, the line encourages the agent to use `AskUserQuestion` with structured options; with ask mode off it tells the agent not to ask and to proceed with defaults instead. The line is added for every engine, although only Claude Code turns those questions into buttons.
+Untether appends one more line to the preamble, the built-in one or your own `text`. For Claude Code, and Antigravity CLI with Untether's agy plugin, unless ask mode is turned off in `/config`, the line encourages the agent to use `AskUserQuestion` (agy: `ask_question`) with structured options; with ask mode off it tells the agent not to ask and to proceed with defaults instead. Every other engine gets the "say so in your final reply" line instead, since it has no question buttons.
 
 ## Hook awareness
 

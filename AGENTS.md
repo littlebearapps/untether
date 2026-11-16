@@ -1,6 +1,6 @@
 # Untether — Agent Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, and Pi from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, and Antigravity CLI (v0.36.1+, engine id `antigravity`, never `gemini`) from your phone (Gemini CLI and Amp are deprecated and unsupported — when a sweep breaks them, xfail/skip the test rather than fixing the runner) or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
@@ -9,12 +9,12 @@ Website: https://untether.cc · Help centre (user docs, synced flat from `docs/`
 ## Architecture
 
 ```
-Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/gemini/amp)
+Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/antigravity/gemini/amp)
                                        |
                                   ProgressTracker
 ```
 
-- **Runners** (`src/untether/runners/`) — engine-specific subprocess managers
+- **Runners** (`src/untether/runners/`) — engine-specific subprocess managers; Antigravity's approval/question/steer gate (agy plugin) is `src/untether/antigravity/`, its argv checks `src/untether/utils/antigravity_argv.py`
 - **RunnerBridge** (`src/untether/runner_bridge.py`) — connects runners to Telegram presenter
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — renders progress, inline keyboards, answers
 - **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
@@ -27,6 +27,10 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - Australian English in user-facing text (realise, colour, behaviour, licence)
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Feature branches: `feature/*`, `fix/*`, `docs/*`
+
+## Engine work is native-first (strict)
+
+Every fix, update, enhancement or new feature for a supported engine (Claude Code, Codex, OpenCode, Pi, Antigravity) and for any engine added later must use what the engine ships natively: CLI flags, config, hooks, and its protocol's events and mid-session requests (the engine's SDK docs describe these). Build custom Untether functionality only when the engine doesn't provide the feature on Untether's surface (headless, no TypeScript-only or experimental APIs, the user's own login, durable enough for the job), and record the gap in the engine's register under `docs/reference/runners/<engine>/`. Check the installed version's docs before designing, never memory. Don't add an engine's SDK package as a dependency without the maintainer's decision. Gemini CLI and Amp get no feature work. Full rule: `.claude/rules/runner-development.md` → "Native-first".
 
 ## Runner 3-event contract
 
@@ -66,14 +70,14 @@ uv run pytest tests/test_*.py -x # specific file
 | `/cancel` | Stop the running agent (an idle live session is closed; pending `/at` runs and loops are dropped too) |
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off) |
-| `/usage` | Claude subscription quota; token totals for Codex/OpenCode |
+| `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off); in an Antigravity chat `on` = Plan first, `off` = Workspace |
+| `/usage` | Claude subscription quota; Antigravity quota groups and AI credits; other engines: the last session's tokens |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
 | `/config` | Interactive settings menu |
-| `/steer` / `/queue` | Claude: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
+| `/steer` / `/queue` | Claude, or Antigravity with Untether's agy plugin: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
 | `/verbose` | Toggle verbose progress mode |
 | `/restart` | Gracefully restart Untether |
 

@@ -4,13 +4,14 @@ import subprocess
 import sys
 import time
 from collections.abc import Collection
+from contextlib import suppress
 from pathlib import Path
 
 import anyio
 
 from .. import __version__
-from ..backends import EngineBackend
-from ..config import read_config
+from ..backends import EngineBackend, EngineConfig
+from ..config import ConfigError, read_config
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter
 from ..runner_bridge import ExecBridgeConfig
@@ -18,6 +19,7 @@ from ..settings import (
     ProgressSettings,
     TelegramTopicsSettings,
     TelegramTransportSettings,
+    load_settings_if_exists,
 )
 from ..transport_runtime import TransportRuntime
 from ..transports import SetupResult, TransportBackend
@@ -69,44 +71,79 @@ def _parse_cli_version(output: str) -> str | None:
     return text
 
 
+# #1067: `opencode --version` alone takes ~3.5 s on lba-1, and the probes run
+# side by side (#951), so the old 5 s bound dropped OpenCode from /config →
+# About. Twice the slowest seen, and a hung CLI only delays the About view.
+_CLI_VERSION_TIMEOUT_S = 10.0
+
+
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
-        # #202: cmd comes from EngineBackend.cli_cmd (e.g. "claude", "codex"),
-        # a fixed table of engine entrypoints configured in pyproject.toml.
-        # No shell, fixed argv, 5-second timeout (#951: the probes now run
-        # side by side, so Node start-up is slower than the ~2-3 s serial).
+        # #202: cmd is EngineBackend.cli_cmd (e.g. "claude", "agy") or the
+        # engine id (#993), a fixed table of entrypoints from pyproject.toml.
+        # No shell, fixed argv, bounded by ``_CLI_VERSION_TIMEOUT_S``.
         result = subprocess.run(  # nosec B603
             [cmd, "--version"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=_CLI_VERSION_TIMEOUT_S,
         )
         if result.returncode == 0:
             # #951: Pi prints its version to stderr.
             return _parse_cli_version(result.stdout) or _parse_cli_version(
                 result.stderr or ""
             )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+        logger.debug("cli_version.probe_failed", cmd=cmd, rc=result.returncode)
+    except subprocess.TimeoutExpired:
+        logger.debug(
+            "cli_version.probe_timeout", cmd=cmd, timeout_s=_CLI_VERSION_TIMEOUT_S
+        )
+    except (FileNotFoundError, OSError) as exc:
+        logger.debug(
+            "cli_version.probe_failed", cmd=cmd, error_type=exc.__class__.__name__
+        )
     return None
 
 
 # #951: engine versions only change on an upgrade, so /config → About reuses
-# a probe for a few minutes instead of spawning every CLI on each tap.
+# a probe for a few minutes instead of spawning every CLI on each tap. A
+# failed probe (timeout, missing CLI) is retried after a short while instead
+# (#1067: a slow first probe used to hide the version for the full 5 min).
 _CLI_VERSION_TTL_S = 300.0
+_CLI_VERSION_FAILED_TTL_S = 30.0
 _CLI_VERSION_CACHE: dict[str, tuple[float, str | None]] = {}
 
 
 async def _cli_version(cmd: str) -> str | None:
     cached = _CLI_VERSION_CACHE.get(cmd)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < _CLI_VERSION_TTL_S:
-        return cached[1]
+    if cached is not None:
+        ttl = _CLI_VERSION_TTL_S if cached[1] is not None else _CLI_VERSION_FAILED_TTL_S
+        if now - cached[0] < ttl:
+            return cached[1]
     # A worker thread, so the ~2-3 s Node start-up never blocks the event loop.
     version = await anyio.to_thread.run_sync(_detect_cli_version, cmd)
     _CLI_VERSION_CACHE[cmd] = (now, version)
     return version
+
+
+def _engine_cli_cmd(engine: str) -> str:
+    """#993: the binary to ``--version`` for an engine — the command its
+    runner spawns (#1089: ``[antigravity] cmd``, else agy on PATH, else
+    ``~/.local/bin/agy``), else the engine id."""
+    try:
+        from ..engines import get_backend
+
+        backend = get_backend(engine)
+    except Exception:  # noqa: BLE001 — a lookup failure must not hide the line
+        return engine
+    config: EngineConfig = {}
+    with suppress(ConfigError):
+        loaded = load_settings_if_exists()
+        if loaded is not None:
+            config = loaded[0].engine_config(engine, config_path=loaded[1])
+    return backend.cli_command(config)
 
 
 async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
@@ -121,7 +158,7 @@ async def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     versions: dict[str, str | None] = {}
 
     async def probe(engine: str) -> None:
-        versions[engine] = await _cli_version(engine)
+        versions[engine] = await _cli_version(_engine_cli_cmd(engine))
 
     async with anyio.create_task_group() as tg:
         for engine in engines:
@@ -209,27 +246,9 @@ def _build_startup_message(
     header = f"\N{DOG} **untether is ready** (v{__version__})"
 
     # engines — separate default and installed lines
-    available_engines = list(runtime.available_engine_ids())
-    missing_engines = list(runtime.missing_engine_ids())
-    misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
-    failed_engines = list(runtime.engine_ids_with_status("load_error"))
-    engine_notes: list[str] = []
-    if missing_engines:
-        engine_notes.append(f"not installed: {', '.join(missing_engines)}")
-    if misconfigured_engines:
-        engine_notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
-    if failed_engines:
-        engine_notes.append(f"failed to load: {', '.join(failed_engines)}")
-    engine_list = ", ".join(available_engines) if available_engines else "none"
-
     details: list[str] = []
     details.append(f"_default engine:_ `{runtime.default_engine}`")
-    if engine_notes:
-        details.append(
-            f"_installed engines:_ `{engine_list}` ({'; '.join(engine_notes)})"
-        )
-    else:
-        details.append(f"_installed engines:_ `{engine_list}`")
+    details.append(f"_installed engines:_ {runtime.available_engines_text(code=True)}")
 
     # mode — derived from session_mode + topics
     mode = _resolve_mode_label(session_mode, topics.enabled)

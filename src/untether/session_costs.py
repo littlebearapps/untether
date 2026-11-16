@@ -42,6 +42,13 @@ def _key(engine: str, session_id: str) -> str:
 # for the whole thread (Codex) or this run only (OpenCode).
 type TokenScope = Literal["thread_cumulative", "per_run"]
 
+# #1062: ``CompletedEvent.usage`` key under which a thread-cumulative engine
+# that can also tell its own run's use (Antigravity: the sum of the run's
+# model calls) reports it. ``record_tokens`` then uses it as the run's figure:
+# the difference of two running totals also counts any run in between that
+# never reported a result (a cancelled one).
+RUN_TOKENS_KEY = "run_tokens"
+
 # Token fields understood across engines. Codex (flat): input/cached_input/
 # cache_write_input/output/reasoning_output. OpenCode (nested under
 # ``usage["usage"]``): input/output/reasoning/cache_read/cache_write. Claude
@@ -88,6 +95,7 @@ class TokenDelta:
     delta: dict[str, int]  # this run
     cumulative: dict[str, int]  # session/thread total after this run
     # "ledger" | "new_session" | "baseline_unknown" | "zero_total" | "per_run"
+    # | "engine_run" (#1062)
     source: str
     runs: int
 
@@ -183,6 +191,7 @@ class SessionCostLedger:
         *,
         scope: TokenScope,
         resumed: bool,
+        run_tokens: Mapping[str, Any] | None = None,
     ) -> TokenDelta:
         """Record this run's token usage and return the per-run delta (#419).
 
@@ -192,6 +201,11 @@ class SessionCostLedger:
         re-count tokens already recorded. An all-zero total (a turn with no
         model call) writes nothing. ``per_run``: ``tokens`` is this run's
         usage and is added to the stored session total.
+
+        ``run_tokens`` (#1062, ``thread_cumulative`` only): the engine's own
+        count for this run. When it has input or output tokens it is the
+        delta (source ``engine_run``) — right even with no baseline, and
+        when a cancelled run in between left its tokens in the total.
         """
         key = _key(engine, session_id)
         new = _int_tokens(tokens)
@@ -232,6 +246,22 @@ class SessionCostLedger:
                     k: max(prev.get(k, 0), new.get(k, 0))
                     for k in _union_keys(prev, new)
                 }
+            reported = _int_tokens(run_tokens) if run_tokens else {}
+            if (
+                reported.get("input_tokens", 0) > 0
+                or reported.get("output_tokens", 0) > 0
+            ):
+                if source == "baseline_unknown":
+                    logger.info(
+                        "usage.token_baseline_unknown",
+                        engine=engine,
+                        session_id=session_id,
+                        recorded_input=new.get("input_tokens"),
+                        recorded_output=new.get("output_tokens"),
+                        run_reported=True,
+                    )
+                delta = {k: reported.get(k, 0) for k in new}
+                source = "engine_run"
         runs += 1
         entry = self._entries.setdefault(key, {})
         entry.update(

@@ -204,13 +204,18 @@ def test_invalid_schema_raises_every_call(tmp_path: Path, counter: _Counter):
     assert str(p) not in S._SETTINGS_CACHE
 
 
-def test_valid_then_invalid_raises_not_stale(tmp_path: Path, counter: _Counter):
+def test_valid_then_invalid_falls_back_not_cached(tmp_path: Path, counter: _Counter):
+    """#1050: a broken file after a good read serves the last good settings,
+    but the broken bytes are never cached (each read re-checks the file)."""
     p = tmp_path / "u.toml"
     p.write_text(_cfg(5))
-    _load(p)
+    good = _load(p)
     p.write_text("[[broken\n")
-    with pytest.raises(ConfigError):
-        S.load_settings_if_exists(p)
+    assert _load(p) is good
+    assert _load(p) is good
+    assert counter.migrates == 3
+    p.write_text(_cfg(6))
+    assert _load(p).progress.max_actions == 6
 
 
 def test_revert_to_previous_bytes_may_hit_old_entry(tmp_path: Path, counter: _Counter):
@@ -219,8 +224,7 @@ def test_revert_to_previous_bytes_may_hit_old_entry(tmp_path: Path, counter: _Co
     p.write_text(a)
     assert _load(p).progress.max_actions == 5
     p.write_text("[[broken\n")
-    with pytest.raises(ConfigError):
-        S.load_settings_if_exists(p)
+    assert _load(p).progress.max_actions == 5  # #1050 last-good fallback
     p.write_text(a)
     assert _load(p).progress.max_actions == 5
 
@@ -430,3 +434,202 @@ def test_bridge_helpers_see_edits(counter: _Counter):
     p.write_text(_cfg(6, "[footer]\nshow_api_cost = false\n"))
     assert runner_bridge._load_footer_settings().show_api_cost is False
     assert counter.parses == 3
+
+
+# --- #1049/#1050: a config caught mid-save --------------------------------------
+#
+# A per-run read of a half-written untether.toml serves the last good settings
+# and logs a WARNING (the issue watcher files ERROR-level events), escalating to
+# one ERROR only if the file stays broken past the grace period.
+
+_PARTIAL = _BASE + '[progress]\nmax_actions = 7\n[footer]\nshow = "unterminat'
+
+
+def _by_event(logs: list[dict], name: str) -> list[dict]:
+    return [r for r in logs if r["event"] == name]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    c = _Clock()
+    monkeypatch.setattr(S, "_now", c)
+    return c
+
+
+def test_1050_partial_write_falls_back_with_warning(tmp_path: Path, clock: _Clock):
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    good = _load(p)
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs:
+        assert _load(p) is good
+    assert not [r for r in logs if r["log_level"] == "error"]
+    warned = _by_event(logs, "config.read.toml_error_fallback")
+    assert [r["log_level"] for r in warned] == ["warning"]
+    assert "Unterminated string" in warned[0]["error"]
+    assert warned[0]["path"] == str(p)
+    assert warned[0]["grace_s"] == S.BAD_CONFIG_GRACE_S
+
+
+def test_1050_repeat_reads_of_same_bad_file_do_not_repeat_warning(
+    tmp_path: Path, clock: _Clock
+):
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    _load(p)
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs:
+        for _ in range(5):
+            _load(p)
+    levels = [
+        r["log_level"] for r in _by_event(logs, "config.read.toml_error_fallback")
+    ]
+    assert levels == ["warning", "debug", "debug", "debug", "debug"]
+    # A different parse error is a new warning (same error text is not).
+    p.write_text(_BASE + "[[progress\n")
+    with capture_logs() as logs:
+        _load(p)
+    levels = [
+        r["log_level"] for r in _by_event(logs, "config.read.toml_error_fallback")
+    ]
+    assert levels == ["warning"]
+
+
+def test_1050_still_broken_after_grace_escalates_to_one_error(
+    tmp_path: Path, clock: _Clock
+):
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    good = _load(p)
+    p.write_text(_PARTIAL)
+    _load(p)
+    clock.now += S.BAD_CONFIG_GRACE_S - 1
+    with capture_logs() as logs:
+        _load(p)
+    assert not [r for r in logs if r["log_level"] == "error"]
+    clock.now += 2
+    with capture_logs() as logs:
+        assert _load(p) is good  # still served, never fails the run
+        _load(p)
+    errors = [r for r in logs if r["log_level"] == "error"]
+    assert [r["event"] for r in errors] == ["config.read.toml_error"]
+    assert errors[0]["bad_for_s"] >= S.BAD_CONFIG_GRACE_S
+    assert "Unterminated string" in errors[0]["error"]
+
+
+def test_1050_recovery_resets_the_grace_clock(tmp_path: Path, clock: _Clock):
+    p = tmp_path / "u.toml"
+    good_text = _cfg(5)
+    p.write_text(good_text)
+    _load(p)
+    p.write_text(_PARTIAL)
+    _load(p)
+    clock.now += S.BAD_CONFIG_GRACE_S / 2
+    p.write_text(good_text)  # back to the cached bytes: a cache hit
+    _load(p)
+    clock.now += S.BAD_CONFIG_GRACE_S
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs:
+        _load(p)
+    assert not [r for r in logs if r["log_level"] == "error"]
+    assert _by_event(logs, "config.read.toml_error_fallback")[0]["log_level"] == (
+        "warning"
+    )
+
+
+def test_1050_invalid_schema_falls_back_with_warning(tmp_path: Path, clock: _Clock):
+    """A save cut at a line boundary can parse yet miss whole tables."""
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    good = _load(p)
+    p.write_text('transport = "telegram"\n')
+    with capture_logs() as logs:
+        assert _load(p) is good
+    assert not [r for r in logs if r["log_level"] == "error"]
+    warned = _by_event(logs, "config.read.invalid_fallback")
+    assert [r["log_level"] for r in warned] == ["warning"]
+    clock.now += S.BAD_CONFIG_GRACE_S + 1
+    with capture_logs() as logs:
+        _load(p)
+    assert [r["event"] for r in logs if r["log_level"] == "error"] == [
+        "config.read.invalid"
+    ]
+
+
+def test_1050_no_last_good_still_raises_with_error(tmp_path: Path, clock: _Clock):
+    p = tmp_path / "u.toml"
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs, pytest.raises(ConfigError, match="Malformed TOML"):
+        S.load_settings_if_exists(p)
+    errors = [r for r in logs if r["log_level"] == "error"]
+    assert [r["event"] for r in errors] == ["config.read.toml_error"]
+
+
+def test_1050_strict_load_seeds_the_fallback(tmp_path: Path, clock: _Clock):
+    """Startup's strict load counts as the last good config, so a save caught
+    before the first run still has something to fall back on."""
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    started, _ = S.load_settings(p)
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs:
+        assert _load(p) is started
+    assert not [r for r in logs if r["log_level"] == "error"]
+
+
+def test_1049_strict_load_with_fallback_warns_and_raises(tmp_path: Path, clock: _Clock):
+    """The config watcher keeps its previous config, so its read warns."""
+    p = tmp_path / "u.toml"
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs, pytest.raises(ConfigError, match="Malformed TOML"):
+        S.load_settings(p, has_fallback=True)
+    assert not [r for r in logs if r["log_level"] == "error"]
+    warned = _by_event(logs, "config.read.toml_error_fallback")
+    assert [r["log_level"] for r in warned] == ["warning"]
+    # Startup (no fallback) stays loud.
+    with capture_logs() as logs, pytest.raises(ConfigError):
+        S.load_settings(p)
+    assert [r["event"] for r in logs if r["log_level"] == "error"] == [
+        "config.read.toml_error"
+    ]
+
+
+def test_1050_clear_settings_cache_drops_fallback_and_tracker(
+    tmp_path: Path, clock: _Clock
+):
+    p = tmp_path / "u.toml"
+    p.write_text(_cfg(5))
+    _load(p)
+    p.write_text(_PARTIAL)
+    _load(p)
+    assert S._LAST_GOOD and S._BAD_CONFIG
+    S.clear_settings_cache()
+    assert S._LAST_GOOD == {} and S._BAD_CONFIG == {}
+    with pytest.raises(ConfigError):
+        S.load_settings_if_exists(p)
+
+
+def test_1050_bridge_helper_keeps_last_good_mid_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock
+):
+    """The per-run reader behind #1050 (runner_bridge helpers) keeps the
+    configured values instead of hard defaults while the file is mid-save."""
+    from untether import runner_bridge as rb
+
+    p = tmp_path / "untether.toml"
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(p))
+    p.write_text(_cfg(9))
+    assert rb._load_progress_settings().max_actions == 9
+    p.write_text(_PARTIAL)
+    with capture_logs() as logs:
+        assert rb._load_progress_settings().max_actions == 9
+    assert not [r for r in logs if r["log_level"] == "error"]
+    assert not _by_event(logs, "progress_settings.load_failed")

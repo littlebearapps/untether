@@ -99,6 +99,32 @@ class TestDenyReason:
     def test_nested_data_allowed(self) -> None:
         assert _deny_reason(Path("incoming/batch-2026-04-12.json")) is None
 
+    # ── #906: same deny list as ``[transports.telegram.files]`` ─────────
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/proj/.env.local",
+            "/proj/.env.production",
+            "/proj/deploy/.env",
+            "/proj/certs/server.key",
+            "/home/x/keys/id_rsa",
+            "/home/x/keys/id_ed25519",
+            "/home/x/.netrc",
+            "/home/x/.npmrc",
+            "/home/x/.pypirc",
+            "/proj/sub/.envrc",
+        ],
+    )
+    def test_files_default_secrets_denied(self, path: str) -> None:
+        assert _deny_reason(Path(path)) is not None
+
+    def test_covers_every_files_default_glob(self) -> None:
+        from untether.settings import TelegramFilesSettings
+        from untether.triggers.actions import _DENY_GLOBS
+
+        assert set(TelegramFilesSettings().deny_globs) <= set(_DENY_GLOBS)
+
 
 # ---------------------------------------------------------------------------
 # execute_file_write
@@ -106,6 +132,19 @@ class TestDenyReason:
 
 
 class TestExecuteFileWrite:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("name", [".env.local", "server.key", "id_rsa", ".netrc"])
+    async def test_templated_secret_path_denied(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        # #906: the path is templated from the payload, so an authenticated
+        # sender picks it — the narrower trigger-only list let these through.
+        wh = _make_webhook(action="file_write", file_path=str(tmp_path / "{{name}}"))
+        ok, msg = await execute_file_write(wh, {"name": name}, b"x")
+        assert ok is False
+        assert "deny glob" in msg
+        assert not (tmp_path / name).exists()
+
     @pytest.mark.anyio
     async def test_successful_write(self, tmp_path: Path) -> None:
         target = tmp_path / "output.json"

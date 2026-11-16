@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -11,7 +13,7 @@ from ..context import RunContext
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter, MarkdownParts
 from ..model import ResumeToken
-from ..progress import ProgressState
+from ..progress import ProgressState, keyboard_action
 from ..runner_bridge import ExecBridgeConfig, RunningTask, RunningTasks
 from ..scheduler import ThreadScheduler
 from ..settings import (
@@ -56,6 +58,27 @@ CANCEL_MARKUP = {
 }
 CLEAR_MARKUP = {"inline_keyboard": []}
 
+# #1029: how far a message's Telegram ``date`` may sit outside the local
+# window of the send it is matched to (clock skew, whole-second dates), how
+# long a lost send stays claimable, and how many are remembered.
+_UNCONFIRMED_DATE_SLACK_S = 30.0
+_UNCONFIRMED_TTL_S = 48 * 3600.0
+_UNCONFIRMED_MAX = 64
+
+
+def _has_cancel_button(reply_markup: Any) -> bool:
+    if not isinstance(reply_markup, dict):
+        return False
+    rows = reply_markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return False
+    return any(
+        isinstance(button, dict) and button.get("callback_data") == CANCEL_CALLBACK_DATA
+        for row in rows
+        if isinstance(row, list)
+        for button in row
+    )
+
 
 class TelegramPresenter:
     def __init__(
@@ -92,34 +115,29 @@ class TelegramPresenter:
         if _is_cancelled_label(label):
             reply_markup = CLEAR_MARKUP
         else:
-            # Check if any active action has inline keyboard buttons (e.g. permission approval)
-            #
-            # #683: scan NEWEST-first. Telegram renders one keyboard per
-            # message, and the newest pending request is the one the user must
-            # answer. Oldest-first let an uncompleted keyboard action — most
-            # notably the synthetic ``claude.discuss_approve.N`` emitted by the
-            # Pause & Outline hold-open path, which nothing ever completes —
-            # pin the keyboard for the rest of the run and silently swallow
-            # every later AskUserQuestion / approval keyboard.
+            # A pending action's inline keyboard (e.g. permission approval).
+            # Telegram renders one keyboard per message: #1079 keeps it on
+            # the oldest pending request until that is answered
+            # (``progress.keyboard_action``; a Pause & Outline hold ranks
+            # last, #683).
             reply_markup = CANCEL_MARKUP
-            for action_state in reversed(state.actions):
-                if not action_state.completed:
-                    kb = action_state.action.detail.get("inline_keyboard")
-                    if kb and isinstance(kb, dict) and "buttons" in kb:
-                        # Merge permission buttons with cancel button
-                        reply_markup = {
-                            "inline_keyboard": kb["buttons"]
-                            + CANCEL_MARKUP["inline_keyboard"]
-                        }
-                        logger.info(
-                            "render_progress.inline_keyboard_found",
-                            action_id=action_state.action.id,
-                            buttons=len(kb["buttons"]),
-                            # #822: which request / tool the keyboard is for.
-                            request_id=action_state.action.detail.get("request_id"),
-                            tool_name=action_state.action.detail.get("tool_name"),
-                        )
-                        break
+            action_state = keyboard_action(state.actions)
+            if action_state is not None:
+                kb = action_state.action.detail.get("inline_keyboard")
+                if kb and isinstance(kb, dict) and "buttons" in kb:
+                    # Merge permission buttons with cancel button
+                    reply_markup = {
+                        "inline_keyboard": kb["buttons"]
+                        + CANCEL_MARKUP["inline_keyboard"]
+                    }
+                    logger.info(
+                        "render_progress.inline_keyboard_found",
+                        action_id=action_state.action.id,
+                        buttons=len(kb["buttons"]),
+                        # #822: which request / tool the keyboard is for.
+                        request_id=action_state.action.detail.get("request_id"),
+                        tool_name=action_state.action.detail.get("tool_name"),
+                    )
         return RenderedMessage(
             text=text,
             extra={"entities": entities, "reply_markup": reply_markup},
@@ -251,8 +269,74 @@ class TelegramBridgeConfig:
 
 
 class TelegramTransport:
-    def __init__(self, bot: BotClient) -> None:
+    def __init__(
+        self, bot: BotClient, *, wall_clock: Callable[[], float] = time.time
+    ) -> None:
         self._bot = bot
+        self._wall_clock = wall_clock
+        # #1029: chats whose latest send ended with its delivery unknown.
+        self._unconfirmed_chats: set[int] = set()
+        # #1029: (chat_id, sent_from, sent_until) of each cancel-button
+        # message that may exist in a chat without Untether knowing its id.
+        self._unconfirmed_progress: deque[tuple[int, float, float]] = deque(
+            maxlen=_UNCONFIRMED_MAX
+        )
+
+    def pop_unconfirmed_send(self, channel_id: int | str) -> bool:
+        """#1029: True once if the latest ``send`` to the chat returned
+        ``None`` although Telegram may have posted the message.
+
+        The response was lost after the request left (a read timeout). The
+        Bot API has no idempotency key and no way to look a message up, so
+        the outcome stays unknown: the caller may send a replacement, never
+        assume either way."""
+        chat_id = cast(int, channel_id)
+        if chat_id in self._unconfirmed_chats:
+            self._unconfirmed_chats.discard(chat_id)
+            return True
+        return False
+
+    def claim_unconfirmed_progress(
+        self, channel_id: int | str, message_date: object
+    ) -> bool:
+        """#1029: is this untracked message the copy of a lost progress send?
+
+        ``message_date`` is the Telegram ``date`` of a message whose cancel
+        button was tapped and that no run owns. It matches when a progress
+        send to the chat was in flight at that moment and ended with its
+        delivery unknown. A match is consumed: one lost send, one message."""
+        if isinstance(message_date, bool) or not isinstance(message_date, int):
+            return False
+        if message_date <= 0:  # an inaccessible (too old) message
+            return False
+        chat_id = cast(int, channel_id)
+        cutoff = self._wall_clock() - _UNCONFIRMED_TTL_S
+        while self._unconfirmed_progress and self._unconfirmed_progress[0][2] < cutoff:
+            self._unconfirmed_progress.popleft()
+        for entry in self._unconfirmed_progress:
+            entry_chat, sent_from, sent_until = entry
+            if entry_chat != chat_id:
+                continue
+            if (
+                sent_from - _UNCONFIRMED_DATE_SLACK_S
+                <= message_date
+                <= sent_until + _UNCONFIRMED_DATE_SLACK_S
+            ):
+                self._unconfirmed_progress.remove(entry)
+                return True
+        return False
+
+    def _note_send_failed(
+        self, *, chat_id: int, reply_markup: Any, sent_from: float
+    ) -> bool:
+        """#1029: record a failed send whose delivery is unknown."""
+        pop = getattr(self._bot, "pop_unconfirmed_send", None)
+        if not callable(pop) or not pop(chat_id):
+            return False
+        self._unconfirmed_chats.add(chat_id)
+        if _has_cancel_button(reply_markup):
+            self._unconfirmed_progress.append((chat_id, sent_from, self._wall_clock()))
+        return True
 
     @staticmethod
     def _extract_followups(message: RenderedMessage) -> list[RenderedMessage]:
@@ -311,7 +395,10 @@ class TelegramTransport:
         }
         for index, followup in enumerate(followups):
             try:
-                await self._bot.send_message(**self._followup_params(followup, **route))
+                sent = await self._bot.send_message(
+                    **self._followup_params(followup, **route)
+                )
+                self._note_followup_sent(followup, chat_id, sent, message_thread_id)
             except anyio.get_cancelled_exc_class():
                 # #928: a bounded caller (the early final delivery) cut the
                 # send short. This chunk is already queued; queue the rest
@@ -325,6 +412,31 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    @staticmethod
+    def _note_followup_sent(
+        followup: RenderedMessage,
+        chat_id: int,
+        sent: Any,
+        thread_id: int | None,
+    ) -> None:
+        """#1074: a chunk may ask where it landed (``extra["on_sent"]``, called
+        with its ``MessageRef``), e.g. a review card a later run retires."""
+        hook = followup.extra.get("on_sent")
+        message_id = getattr(sent, "message_id", None)
+        if not callable(hook) or not isinstance(message_id, int):
+            return
+        sent_thread = getattr(sent, "message_thread_id", None)
+        try:
+            hook(
+                MessageRef(
+                    channel_id=chat_id,
+                    message_id=message_id,
+                    thread_id=sent_thread if sent_thread is not None else thread_id,
+                )
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a send
+            logger.debug("transport.followup.on_sent_failed", exc_info=True)
 
     async def _queue_followups(
         self,
@@ -413,6 +525,8 @@ class TelegramTransport:
             )
             notify = bool(message.extra.get("followup_notify", True))
         followups = self._extract_followups(message)
+        self._unconfirmed_chats.discard(chat_id)
+        sent_from = self._wall_clock()
         try:
             sent = await self._bot.send_message(
                 chat_id=chat_id,
@@ -437,12 +551,19 @@ class TelegramTransport:
             )
             raise
         if sent is None:
+            delivery_unknown = self._note_send_failed(
+                chat_id=chat_id,
+                reply_markup=message.extra.get("reply_markup"),
+                sent_from=sent_from,
+            )
             logger.warning(
                 "transport.send.failed",
                 kind=current_message_kind(),
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
                 text_len=len(message.text) if message.text else 0,
+                # #1029: True = Telegram may have posted it all the same.
+                delivery_unknown=delivery_unknown,
             )
             return None
         if followups:
@@ -627,10 +748,14 @@ async def handle_cancel(
     msg: TelegramIncomingMessage,
     running_tasks: RunningTasks,
     scheduler: ThreadScheduler | None = None,
+    *,
+    dropped_pending: bool = False,
 ) -> None:
     from .commands import handle_cancel as _handle_cancel
 
-    await _handle_cancel(cfg, msg, running_tasks, scheduler)
+    await _handle_cancel(
+        cfg, msg, running_tasks, scheduler, dropped_pending=dropped_pending
+    )
 
 
 async def handle_callback_cancel(

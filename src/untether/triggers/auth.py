@@ -32,16 +32,31 @@ def verify_auth(
         logger.warning("auth.no_secret", auth=config.auth)
         return False
 
+    secret = config.secret.get_secret_value()
     if config.auth == "bearer":
-        return _verify_bearer(config.secret, headers)
+        return _verify_bearer(secret, headers)
 
     if config.auth in ("hmac-sha256", "hmac-sha1"):
         algo = hashlib.sha256 if config.auth == "hmac-sha256" else hashlib.sha1
         sig_headers = _ALGO_HEADERS[config.auth]
-        return _verify_hmac(config.secret, body, headers, algo, sig_headers)
+        return _verify_hmac(secret, body, headers, algo, sig_headers)
 
     logger.warning("auth.unknown_mode", auth=config.auth)
     return False
+
+
+def _secrets_equal(provided: str, expected: str) -> bool:
+    """Constant-time comparison that never raises (#906).
+
+    ``hmac.compare_digest`` accepts ``str`` only when both sides are ASCII and
+    raises ``TypeError`` otherwise, which turned a non-ASCII credential into a
+    500. Bytes compare for any input; ``surrogatepass`` covers the lone
+    surrogates aiohttp produces for header bytes that aren't valid UTF-8.
+    """
+    return hmac.compare_digest(
+        provided.encode("utf-8", "surrogatepass"),
+        expected.encode("utf-8", "surrogatepass"),
+    )
 
 
 def _verify_bearer(secret: str, headers: Mapping[str, str]) -> bool:
@@ -51,7 +66,7 @@ def _verify_bearer(secret: str, headers: Mapping[str, str]) -> bool:
         logger.debug("auth.bearer.missing_header")
         return False
     token = auth_header[7:]
-    return hmac.compare_digest(token, secret)
+    return _secrets_equal(token, secret)
 
 
 def _verify_hmac(
@@ -71,7 +86,7 @@ def _verify_hmac(
         # Strip algorithm prefix (e.g. "sha256=", "sha1=")
         if "=" in sig:
             sig = sig.split("=", 1)[1]
-        if hmac.compare_digest(sig, expected):
+        if _secrets_equal(sig, expected):
             return True
     logger.debug("auth.hmac.no_match", algo=algo.__name__)
     return False

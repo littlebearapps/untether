@@ -1,11 +1,16 @@
-# Steer a running Claude run
+# Steer a running agent
 
-When Claude Code is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
+When Claude Code (or Antigravity CLI) is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
 
 - **queue** (the default) — the message waits until Claude's current turn finishes, then runs as the next turn.
 - **steer** — the message goes straight into the run that is already working. Claude reads it at its next step (the next time a tool finishes) and folds it into the answer it is producing.
 
-Steer is **Claude Code only** and needs a live session, which means a permission mode is set (`/planmode` or `/config` → Permission mode) and `[watchdog] live_sessions` is on (the default). Other engines always queue.
+Steer works on **Claude Code** and **Antigravity**. Claude needs a live session, which means a permission mode is set (`/planmode` or `/config` → Permission mode) and `[watchdog] live_sessions` is on (the default). Antigravity needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: the message goes into the agy run that is working, before agy's next step. Other engines always queue.
+
+**Antigravity differences.** There is no live session: a steer only reaches a run that is still working. If agy has already started writing its final answer (no further step), the steer doesn't reach it and you get `⚠️ The session ended before this message ran — please send it again.` after the run.
+
+<!-- TODO: capture screenshot: antigravity-steer-received — an Antigravity chat with Follow-up set to steer: a message sent mid-run answered "↪️ Steered into the current run.", and the run's progress message showing the `↪️ steer received: …` row -->
+<!-- <img src="../assets/screenshots/antigravity-steer-received.jpg" alt="Antigravity run taking a steered message, with the steer received row in its progress message" width="360" loading="lazy" /> -->
 
 ## Steer one message
 
@@ -40,7 +45,7 @@ If the steer arrives after Claude's last tool call (it is already writing its an
 followup_mode = "steer"
 ```
 
-Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default. In a group, only admins can change the default with a bare `/steer` or `/queue`; anyone allowed to use the bot can still send `/steer <text>` or `/queue <text>`.
+Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default. In a group, only admins can change the default, whether with a bare `/steer` or `/queue` or in `/config`; anyone allowed to use the bot can still send `/steer <text>` or `/queue <text>`.
 
 Voice notes follow the default: a transcribed voice note sent to a steer chat is steered.
 
@@ -57,9 +62,15 @@ The message is queued as normal and Untether tells you why:
 
 | Reply | Meaning |
 |---|---|
-| `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine isn't Claude Code. |
+| `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine isn't Claude Code or Antigravity. |
+| `↪️ Steer needs Untether's agy plugin on this host (untether agy-gate install) — queued instead.` | Antigravity without the plugin. |
+| `↪️ The Antigravity turn is still starting, so it can't take a message yet — queued; it runs when this turn ends.` | Antigravity: the run hasn't started agy's conversation yet (the first few seconds), so there is nothing to steer into ([#1077](https://github.com/littlebearapps/untether/issues/1077)). |
+| `↪️ No running Antigravity turn to steer — queued instead.` | Antigravity: nothing is running, the run has already sent its answer, or its hooks aren't reaching Untether. |
 | `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
+| `↪️ Earlier messages are still waiting to run — queued behind them.` | A message you sent earlier is still queued for this session, so this one waits its turn behind it instead of jumping ahead into the current run (`/steer <text>` still steers) ([#1164](https://github.com/littlebearapps/untether/issues/1164)). |
+
+In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)).
 
 With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` tells you too, with two exceptions: while Claude is waiting on a question (`AskUserQuestion`) the text is queued without a note, and if your model or mode changed since the session started, the queued run posts its own notice when it restarts the session with the new settings.
 
@@ -71,7 +82,9 @@ In either mode, one notice can appear on a follow-up after the run ends:
 |---|---|
 | `⚠️ The session ended before this message ran — please send it again.` | The follow-up was written into the session, but the session ended before Claude started it. It did not run. |
 
-Cancelling a run doesn't drop a follow-up already queued behind it: it runs next, so you don't need to send it again.
+Cancelling a run doesn't drop a follow-up already queued behind it: it runs next, so you don't need to send it again. The one exception is a chat's first run that hasn't started its conversation yet (below).
+
+A message you send while the chat's first run is still starting (a new chat, or straight after `/new`, before the engine has opened its conversation) waits for that run and then continues the same conversation, whether the chat is set to Queue or Steer. It never starts a second conversation alongside the first ([#1157](https://github.com/littlebearapps/untether/issues/1157)). If the first run fails before it starts a conversation, the waiting message starts one. If you `/cancel` the first run or send `/new` before it has started its conversation, the waiting message is dropped too (even one sent just before, still showing its "queued instead" notice), and you get `🗑️ Dropped 1 message sent just before /cancel — send it again if you still need it.`
 
 ## Related
 

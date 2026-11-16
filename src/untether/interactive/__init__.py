@@ -1,0 +1,113 @@
+"""Engine-neutral approval / question registry (#960).
+
+The pending-request store every interactive engine shares: Claude's control
+channel today, Antigravity's hook gate and Codex app-server later. An engine
+registers each request it is blocked on with a :class:`Responder`; Telegram
+taps and typed replies answer it through :func:`respond` (or the question
+helpers), whatever the engine. Nothing here imports ``untether.runners`` or
+``untether.telegram``.
+"""
+
+from .buttons import (
+    APPROVAL_COMMAND_IDS,
+    CONTROL_CALLBACK_PREFIXES,
+    approval_keyboard,
+)
+from .preview import format_diff_preview
+from .questions import (
+    AskQuestionState,
+    answer_ask_question,
+    answer_ask_question_with_options,
+    format_question_message,
+    get_ask_question_flow,
+    get_ask_question_flow_by_id,
+    get_pending_ask_request,
+    get_question_option_buttons,
+    option_label,
+    pending_control_requests_for_session,
+    recently_answered_ask_flow,
+    recently_resolved_ask_flow,
+)
+from .registry import (
+    CONTROL_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_CALLBACK_PREFIX,
+    ControlLookup,
+    ControlRequestSnapshot,
+    ControlRequestStatus,
+    ControlSendResult,
+    Decision,
+    HandledControl,
+    Responder,
+    answer_control_request,
+    bind_request_channel,
+    callback_prefix,
+    claim_control_request,
+    classify_control_request,
+    control_request_origin,
+    control_request_originator,
+    drop_session,
+    expire,
+    mark_request_handled,
+    new_control_claim_owner,
+    on_session_dropped,
+    register,
+    release_control_claims,
+    respond,
+    respond_to_control_request,
+    responder_for,
+    session_alive,
+    set_default_responder,
+    snapshot,
+    withdraw,
+)
+from .unattended import unattended_deny_message
+
+__all__ = [
+    "APPROVAL_COMMAND_IDS",
+    "CONTROL_CALLBACK_PREFIXES",
+    "CONTROL_REQUEST_TIMEOUT_SECONDS",
+    "DEFAULT_CALLBACK_PREFIX",
+    "AskQuestionState",
+    "ControlLookup",
+    "ControlRequestSnapshot",
+    "ControlRequestStatus",
+    "ControlSendResult",
+    "Decision",
+    "HandledControl",
+    "Responder",
+    "answer_ask_question",
+    "answer_ask_question_with_options",
+    "answer_control_request",
+    "approval_keyboard",
+    "bind_request_channel",
+    "callback_prefix",
+    "claim_control_request",
+    "classify_control_request",
+    "control_request_origin",
+    "control_request_originator",
+    "drop_session",
+    "expire",
+    "format_diff_preview",
+    "format_question_message",
+    "get_ask_question_flow",
+    "get_ask_question_flow_by_id",
+    "get_pending_ask_request",
+    "get_question_option_buttons",
+    "mark_request_handled",
+    "new_control_claim_owner",
+    "on_session_dropped",
+    "option_label",
+    "pending_control_requests_for_session",
+    "recently_answered_ask_flow",
+    "recently_resolved_ask_flow",
+    "register",
+    "release_control_claims",
+    "respond",
+    "respond_to_control_request",
+    "responder_for",
+    "session_alive",
+    "set_default_responder",
+    "snapshot",
+    "unattended_deny_message",
+    "withdraw",
+]

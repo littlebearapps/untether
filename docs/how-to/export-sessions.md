@@ -12,7 +12,7 @@ Send `/export` in the chat where the run happened:
 
 Untether replies with the full transcript attached as a Markdown file (`untether-export-<engine>-<session>-<YYYYmmdd-HHMM>.md`), with a one-line summary as the caption ([#418](https://github.com/littlebearapps/untether/issues/418)). The file includes:
 
-- **Usage** — cost, turns and duration (or token counts when the engine reports no cost), labelled `last run` or, for Codex, `thread total` ([#859](https://github.com/littlebearapps/untether/issues/859))
+- **Usage** — cost, turns and duration (or token counts when the engine reports no cost), labelled `last run` or, for Codex, `thread total` ([#859](https://github.com/littlebearapps/untether/issues/859)). For Antigravity each figure names its own scope, e.g. `38.4s (last run) · 24263 in / 303 out tokens (thread total)` ([#1158](https://github.com/littlebearapps/untether/issues/1158))
 - **Engine and model**
 - **Action timeline** — each tool call with status and title
 - **Final answer** — the agent's full response text for each run
@@ -46,7 +46,7 @@ Model: claude-opus-5-5
 Fixed the import order in main.py and all tests pass.
 ```
 
-The usage line is the most recent run's figure (for a Claude live session, its latest turn's running total for that process); the transcript covers every run and every turn of the session. For Codex, which reports a running total for the whole thread, it is the thread total.
+The usage line is the most recent run's figure (for a Claude live session, its latest turn's running total for that process); the transcript covers every run and every turn of the session. Codex and Antigravity report token use as a running total for the whole thread, so their token figure is the thread total. Codex's header has only tokens, so it ends `· thread total`; Antigravity's also shows the last run's duration, so each figure is labelled `(last run)` or `(thread total)`.
 
 ## Export as JSON
 
@@ -61,6 +61,8 @@ You get a `.json` file with the same information in a machine-readable format, s
 ## What gets exported
 
 Untether keeps the **20 most recently active sessions** in memory, across all chats; the least recently active is dropped first. History is lost on restart. The `/export` command exports the chat's most recently *active* session, so a resumed older session counts as the latest ([#417](https://github.com/littlebearapps/untether/issues/417)). It's the most recent session **in the chat**: in a forum group that means the most recent session in any topic of the group, not just the current topic (topic-scoped export is tracked in [#849](https://github.com/littlebearapps/untether/issues/849)).
+
+An export holds only what Untether itself saw: turns you ran in a terminal (after copying a resume line, say) aren't in it, even when the chat later resumed that session. An Antigravity export names the model agy ran (`Model: gemini-3.8-flash`), or `agy default` when the chat set none ([#1058](https://github.com/littlebearapps/untether/issues/1058)).
 
 Each session records:
 

@@ -1,0 +1,6 @@
+{"_do":"config","permission_mode":"default","prompt":"add a notes file"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"default"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_bash_1","name":"Bash","input":{"command":"touch notes.txt"}}]}}
+{"type":"control_request","request_id":"req-bash-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch notes.txt"},"tool_use_id":"toolu_bash_1"}}
+{"_do":"cancel","gone":true}
+{"_do":"tap","data":"claude_control:approve:req-bash-1","message_id":1}

@@ -1,0 +1,7 @@
+{"_do":"config","permission_mode":"plan","prompt":"say hello","watchdog":{"post_result_limbo_grace":0.3}}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"plan"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"Hello."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":1,"result":"Hello.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5},"_eof":true}
+{"_do":"queued_note"}
+{"_do":"followup","text":"too late","msg_id":20}
+{"_do":"exit","rc":0}

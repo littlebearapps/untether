@@ -21,10 +21,12 @@ from ..files import (
     default_upload_name,
     default_upload_path,
     deny_reason,
+    find_identical_file,
     format_bytes,
     normalize_relative_path,
     parse_file_command,
     parse_file_prompt,
+    upload_name_siblings,
     write_bytes_atomic,
     zip_directory,
 )
@@ -56,6 +58,9 @@ class _FilePutResult:
     rel_path: Path | None
     size: int | None
     error: str | None
+    # True when an identical file was already there and nothing was written
+    # (#1031); ``rel_path`` is then that existing file.
+    reused: bool = False
 
 
 @dataclass(slots=True)
@@ -63,6 +68,7 @@ class _SavedFilePut:
     context: RunContext | None
     rel_path: Path
     size: int
+    reused: bool = False
 
 
 @dataclass(slots=True)
@@ -303,6 +309,7 @@ async def _save_document_payload(
     # Report where the file actually lands (#390 D5); identical to the
     # requested path unless an in-root symlink was followed.
     resolved_path = check.rel
+    existing: Path | None = None
     if target.exists():
         if target.is_dir():
             return _FilePutResult(
@@ -312,6 +319,7 @@ async def _save_document_payload(
                 error="upload target is a directory.",
             )
         if not force:
+            existing = target
             target = deduplicate_target(target)
             # ``check.root`` is resolved and ``target`` is under it, so this
             # can't raise on a symlinked project path (it used to crash the
@@ -341,6 +349,39 @@ async def _save_document_payload(
             size=None,
             error="file is too large to upload.",
         )
+    if existing is not None:
+        # #1031: a re-sent file that is byte-identical to the one already at
+        # the requested name, or to one of its ``_N`` copies, is reused
+        # rather than saved again. Names the deny globs cover are left out
+        # before anything is read, so the returned path has passed them too.
+        root = check.root
+        collided = existing
+
+        def _find_identical() -> Path | None:
+            candidates = [
+                candidate
+                for candidate in upload_name_siblings(collided)
+                if deny_reason(candidate.relative_to(root), cfg.files.deny_globs)
+                is None
+            ]
+            return find_identical_file(candidates, payload)
+
+        identical = await anyio.to_thread.run_sync(_find_identical)
+        if identical is not None:
+            reused_path = identical.relative_to(root)
+            logger.info(
+                "file_transfer.reused",
+                name=identical.name,
+                path=str(reused_path),
+                size=len(payload),
+            )
+            return _FilePutResult(
+                name=identical.name,
+                rel_path=reused_path,
+                size=len(payload),
+                error=None,
+                reused=True,
+            )
     try:
         write_bytes_atomic(target, payload)
     except OSError as exc:
@@ -438,6 +479,7 @@ async def _save_file_put(
         context=plan.resolved.context,
         rel_path=result.rel_path,
         size=result.size,
+        reused=result.reused,
     )
 
 
@@ -459,6 +501,14 @@ async def _handle_file_put(
     if saved is None:
         return
     context_label = _format_context(cfg.runtime, saved.context)
+    if saved.reused:
+        await reply(
+            text=(
+                f"already saved as `{saved.rel_path.as_posix()}` "
+                f"in `{context_label}` (identical, {format_bytes(saved.size)})"
+            ),
+        )
+        return
     await reply(
         text=(
             f"saved `{saved.rel_path.as_posix()}` "
@@ -487,27 +537,33 @@ async def _handle_file_put_group(
     if saved_group is None:
         return
     context_label = _format_context(cfg.runtime, saved_group.context)
-    total_bytes = sum(item.size or 0 for item in saved_group.saved)
+    # #1031: files that were already there (identical) are reported apart
+    # from the newly written ones and don't count towards the size.
+    written = [item for item in saved_group.saved if not item.reused]
+    reused = [item for item in saved_group.saved if item.reused]
+    total_bytes = sum(item.size or 0 for item in written)
     dir_label: Path | None = saved_group.base_dir
     if dir_label is None and saved_group.saved:
         first_path = saved_group.saved[0].rel_path
         if first_path is not None:
             dir_label = first_path.parent
     if saved_group.saved:
-        saved_names = ", ".join(f"`{item.name}`" for item in saved_group.saved)
+        listed = written or reused
+        saved_names = ", ".join(f"`{item.name}`" for item in listed)
+        verb = "saved" if written else "already saved"
+        detail = format_bytes(total_bytes) if written else "identical"
         if dir_label is not None:
             dir_text = dir_label.as_posix()
             if not dir_text.endswith("/"):
                 dir_text = f"{dir_text}/"
             text = (
-                f"saved {saved_names} to `{dir_text}` "
-                f"in `{context_label}` ({format_bytes(total_bytes)})"
+                f"{verb} {saved_names} to `{dir_text}` in `{context_label}` ({detail})"
             )
         else:
-            text = (
-                f"saved {saved_names} in `{context_label}` "
-                f"({format_bytes(total_bytes)})"
-            )
+            text = f"{verb} {saved_names} in `{context_label}` ({detail})"
+        if written and reused:
+            reused_names = ", ".join(f"`{item.name}`" for item in reused)
+            text = f"{text}\n\nalready saved: {reused_names} (identical)"
     else:
         text = "failed to upload files."
     failure_text = _format_file_put_failures(saved_group.failed)

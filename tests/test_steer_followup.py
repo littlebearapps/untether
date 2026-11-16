@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
+import structlog
 
 from tests.telegram_fakes import FakeTransport
 from untether import runner_bridge as rb
@@ -232,12 +233,14 @@ async def _steer(
     run_cwd: Any = None,
     text: str = "also the hostname",
     user_msg_id: int = 42,
+    thread_id: int | None = None,
+    **extra: Any,
 ) -> bool:
     return await maybe_steer(
         cfg,
         chat_id=CHAT,
         user_msg_id=user_msg_id,
-        thread_id=None,
+        thread_id=thread_id,
         topic_thread_id=None,
         prompt_text=text,
         engine=engine,
@@ -248,6 +251,7 @@ async def _steer(
         topic_store=None,
         run_options=run_options,
         run_cwd=run_cwd,
+        **extra,
     )
 
 
@@ -340,6 +344,40 @@ async def test_non_claude_engine_falls_back(explicit: bool) -> None:
     assert "codex" in _texts(cfg)[0]
 
 
+async def test_live_backend_without_steer_falls_back_with_engine_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#977: the gate is the backend's ``supports_steer``, not the engine
+    name — a live-session engine that cannot take a mid-turn line queues,
+    and nothing is asked of its (or Claude's) registry."""
+    from untether import live_sessions
+
+    class _NoSteerLive:
+        engine = "warm"
+        supports_steer = False
+
+        def get(self, session_id: str):
+            raise AssertionError("registry consulted for a no-steer backend")
+
+    def _boom(*args: Any, **kwargs: Any):
+        raise AssertionError("Claude consulted for another engine")
+
+    monkeypatch.setitem(live_sessions._BACKENDS, "warm", _NoSteerLive())
+    monkeypatch.setattr("untether.interactive.questions.get_pending_ask_request", _boom)
+    monkeypatch.setattr(claude_mod, "get_live_session", _boom)
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    ok = await _steer(
+        cfg,
+        engine="warm",
+        token=ResumeToken(engine="warm", value="thread-1"),
+        override="steer",
+        running=running,
+    )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("engine", "warm")]
+
+
 async def test_default_mode_notice_only_once_per_run() -> None:
     cfg = _cfg("steer")
     running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
@@ -351,6 +389,124 @@ async def test_default_mode_notice_only_once_per_run() -> None:
     running = {MessageRef(channel_id=CHAT, message_id=10): _Busy()}
     await _steer(cfg, engine="codex", token=token, running=running)
     assert len(_texts(cfg)) == 2
+
+
+# ── #990: the busy-run lookup is scoped to the sender's thread ───────────────
+
+_CODEX = ResumeToken(engine="codex", value="thread-1")
+
+
+def _busy_in(thread_id: int | None, *, ref_thread: int | None = None) -> dict:
+    """One busy run started from ``thread_id``; ``ref_thread`` is the thread
+    the progress ref echoes, which is not the scope key (#826)."""
+    task = _Busy()
+    task.thread_id = thread_id  # type: ignore[attr-defined]
+    return {MessageRef(channel_id=CHAT, message_id=9, thread_id=ref_thread): task}
+
+
+def _forum_filter(thread_id: int | None):
+    from untether.telegram.topics import thread_filter_for
+    from untether.telegram.types import TelegramIncomingMessage
+
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=CHAT,
+        message_id=42,
+        text="hi",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+        thread_id=thread_id,
+        chat_type="supergroup",
+        is_forum=True,
+    )
+    return thread_filter_for(msg)
+
+
+@pytest.mark.parametrize("engine_token", [_CODEX, None])
+@pytest.mark.parametrize("general", [None, 1])
+async def test_990_general_ignores_another_topics_busy_run(
+    engine_token: ResumeToken | None, general: int | None
+) -> None:
+    """A default-steer message in General with a busy run only in topic 7
+    simply runs — no "queued instead" notice (every engine)."""
+    cfg = _cfg("steer")
+    ok = await _steer(
+        cfg,
+        engine="codex" if engine_token else "claude",
+        token=engine_token,
+        running=_busy_in(7, ref_thread=7),
+        thread_id=general,
+        thread_filter=_forum_filter(general),
+    )
+    assert ok is False
+    assert _texts(cfg) == []
+
+
+async def test_990_topic_matches_its_own_busy_run() -> None:
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=7),
+        thread_id=7,
+        thread_filter=_forum_filter(7),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+async def test_990_general_matches_generals_busy_run() -> None:
+    """General is its own thread: ``None`` and topic id 1 are the same."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(1),
+        thread_id=None,
+        thread_filter=_forum_filter(None),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+async def test_990_scope_is_the_tasks_thread_not_the_echoed_ref() -> None:
+    """A topic-7 run whose progress ref carries no thread is not topic 8's."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=None),
+        thread_id=8,
+        thread_filter=_forum_filter(8),
+    )
+    assert _texts(cfg) == []
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(7, ref_thread=None),
+        thread_id=7,
+        thread_filter=_forum_filter(7),
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
+@pytest.mark.parametrize("thread_id", [None, 31])
+async def test_990_non_forum_chat_stays_chat_wide(thread_id: int | None) -> None:
+    """No thread filter (basic group, or a non-forum supergroup whose thread
+    id is only a reply-chain root): any busy run in the chat counts."""
+    cfg = _cfg("steer")
+    await _steer(
+        cfg,
+        engine="codex",
+        token=_CODEX,
+        running=_busy_in(None),
+        thread_id=thread_id,
+        thread_filter=None,
+    )
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
 
 
 async def test_default_mode_silent_when_nothing_running() -> None:
@@ -690,7 +846,7 @@ async def test_bare_steer_on_non_claude_engine_notes_claude_only(
     await handle_followup_default_command(
         cfg, _cmd_msg("/steer"), "steer", None, None, prefs
     )
-    assert "Claude-only" in _texts(cfg)[0]
+    assert "Claude Code and Antigravity only" in _texts(cfg)[0]
 
 
 async def test_bare_command_denied_for_group_non_admin(tmp_path: Path) -> None:
@@ -799,7 +955,21 @@ async def test_config_page_renders_and_sets(tmp_path: Path) -> None:
 async def test_config_page_notice_on_other_engines(tmp_path: Path) -> None:
     ctx = _config_ctx("fu", config_path=tmp_path / "untether.toml", engine="codex")
     await ConfigCommand().handle(ctx)
-    assert "Claude Code only" in _edited(ctx).text
+    assert "Claude Code and Antigravity only" in _edited(ctx).text
+
+
+async def test_config_page_names_the_chat_engine(tmp_path: Path) -> None:
+    """#1077: an Antigravity chat's page said "while Claude is working"."""
+    path = tmp_path / "untether.toml"
+    ctx = _config_ctx("fu", config_path=path, engine="antigravity")
+    await ConfigCommand().handle(ctx)
+    text = _edited(ctx).text
+    assert "while Antigravity is working" in text
+    assert "Antigravity picks it up" in text
+    assert "Claude" not in text
+    ctx = _config_ctx("fu", config_path=path)
+    await ConfigCommand().handle(ctx)
+    assert "while Claude is working" in _edited(ctx).text
 
 
 async def test_config_page_no_config_path() -> None:
@@ -917,3 +1087,174 @@ async def test_996_unresolvable_cwd_never_steers(
     assert out is False
     assert called == [] and pipe.sent == []
     assert rb._FOLLOWUP_ANCHORS == {}
+
+
+# ── Antigravity (#981): steer through Untether's agy plugin ────────────────
+
+AGY_CID = "c752bf1f-9d83-49ad-8a16-e3ae862e6afb"
+AGY_TOKEN = ResumeToken(engine="antigravity", value=AGY_CID)
+
+
+@pytest.fixture
+def agy_gate_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from untether.antigravity import gate_plugin, gate_server
+
+    gate_server._reset_for_tests()
+    monkeypatch.setattr(gate_plugin, "installed_ready", lambda: True)
+
+
+async def test_agy_steer_queues_into_the_running_gated_turn(
+    agy_gate_installed: None,
+) -> None:
+    from untether.antigravity import gate_server
+    from untether.events import EventFactory
+
+    gate = gate_server.GateRun(config_path=None, factory=EventFactory("antigravity"))
+    gate.set_conversation(AGY_CID)
+    gate_server._RUNS[gate.session_key] = gate
+    cfg = _cfg("steer")
+    ok = await _steer(cfg, engine="antigravity", token=AGY_TOKEN)
+    assert ok is True
+    assert _texts(cfg) == [STEERED_ACK]
+    (item,) = gate.steer_queue
+    assert item.text == "also the hostname"
+    # The anchor waits for the delivery note (or the run-end sweep).
+    assert item.command_uuid in rb._FOLLOWUP_ANCHORS
+
+
+async def test_agy_compact_is_never_steered(agy_gate_installed: None) -> None:
+    """#1114: agy's /compact is its own run on the conversation; steered
+    into a running turn it would reach the model as text. It queues."""
+    from untether.antigravity import gate_server
+    from untether.events import EventFactory
+
+    gate = gate_server.GateRun(config_path=None, factory=EventFactory("antigravity"))
+    gate.set_conversation(AGY_CID)
+    gate_server._RUNS[gate.session_key] = gate
+    cfg = _cfg("steer")
+    with structlog.testing.capture_logs() as logs:
+        ok = await _steer(
+            cfg,
+            engine="antigravity",
+            token=AGY_TOKEN,
+            override="steer",
+            text="/compact",
+        )
+    assert ok is False
+    assert not gate.steer_queue
+    assert _texts(cfg) == []
+    assert [log["reason"] for log in logs if log["event"] == "steer.skipped"] == [
+        "native_command"
+    ]
+    # Ordinary text still steers into the same turn.
+    assert await _steer(cfg, engine="antigravity", token=AGY_TOKEN) is True
+
+
+async def test_agy_steer_without_running_turn_queues(agy_gate_installed: None) -> None:
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    ok = await _steer(
+        cfg, engine="antigravity", token=AGY_TOKEN, override="steer", running=running
+    )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("no_live", "antigravity")]
+    assert "Antigravity" in _texts(cfg)[0] and "Claude" not in _texts(cfg)[0]
+
+
+async def test_agy_steer_without_plugin_says_how_to_install() -> None:
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    ok = await _steer(
+        cfg, engine="antigravity", token=AGY_TOKEN, override="steer", running=running
+    )
+    assert ok is False
+    assert "untether agy-gate install" in _texts(cfg)[0]
+    # #1077: sent as HTML, so the command shows as code, not in backticks.
+    (call,) = cfg.exec_cfg.transport.send_calls
+    assert call["message"].extra.get("parse_mode") == "HTML"
+    assert "`" not in _texts(cfg)[0]
+    assert "<code>untether agy-gate install</code>" in _texts(cfg)[0]
+
+
+async def test_agy_steer_while_the_turn_is_starting_says_so(
+    agy_gate_installed: None,
+) -> None:
+    """#1077: a steer sent before agy reported its session (so before its
+    gate is bound) said "No running Antigravity turn" while a turn was
+    starting."""
+    cfg = _cfg("steer")
+    busy = _Busy()
+    busy.resume_ready = anyio.Event()  # type: ignore[attr-defined]
+    running = {MessageRef(channel_id=CHAT, message_id=9): busy}
+    with structlog.testing.capture_logs() as logs:
+        ok = await _steer(
+            cfg,
+            engine="antigravity",
+            token=AGY_TOKEN,
+            override="steer",
+            running=running,
+        )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("starting", "antigravity")]
+    assert "still starting" in _texts(cfg)[0]
+    assert [log["reason"] for log in logs if log["event"] == "steer.fallback"] == [
+        "starting"
+    ]
+    # Once the run has reported its session, a missing gate is "no_live".
+    busy.resume_ready.set()  # type: ignore[attr-defined]
+    cfg = _cfg("steer")
+    await _steer(
+        cfg, engine="antigravity", token=AGY_TOKEN, override="steer", running=running
+    )
+    assert _texts(cfg) == [fallback_notice("no_live", "antigravity")]
+
+
+async def test_agy_steer_after_result_falls_back(agy_gate_installed: None) -> None:
+    from untether.antigravity import gate_server
+    from untether.events import EventFactory
+
+    gate = gate_server.GateRun(config_path=None, factory=EventFactory("antigravity"))
+    gate.set_conversation(AGY_CID)
+    gate.note_result()
+    cfg = _cfg("steer")
+    assert await _steer(cfg, engine="antigravity", token=AGY_TOKEN) is False
+    assert not gate.steer_queue
+
+
+def test_agy_is_a_steer_target_not_a_live_session() -> None:
+    from untether import live_sessions
+
+    assert live_sessions.live_backend("antigravity") is None
+    assert not live_sessions.supports_live_session("antigravity")
+    target = live_sessions.steer_backend("antigravity")
+    assert target is not None and target.engine == "antigravity"
+    assert live_sessions.steer_backend("claude") is live_sessions.live_backend("claude")
+    assert live_sessions.steer_backend("codex") is None
+
+
+async def test_1164_queued_ahead_defers_a_default_steer_but_not_an_explicit_one() -> (
+    None
+):
+    """#1164: while an earlier follow-up for the session is queued and hasn't
+    run, a default-mode steer queues behind it (with a notice while a run is
+    busy) instead of jumping ahead into the live run. ``/steer`` still
+    steers."""
+    _live, pipe = _install()
+    cfg = _cfg("steer")
+    seen: list[ResumeToken] = []
+
+    def queued_ahead(token: ResumeToken) -> bool:
+        seen.append(token)
+        return True
+
+    running = {MessageRef(channel_id=CHAT, message_id=1): _Busy()}
+    assert await _steer(cfg, running=running, queued_ahead=queued_ahead) is False
+    assert pipe.sent == []
+    assert seen == [TOKEN]
+    assert _texts(cfg) == [
+        "\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Earlier messages "
+        "are still waiting to run — queued behind them."
+    ]
+
+    assert await _steer(cfg, override="steer", queued_ahead=queued_ahead) is True
+    assert len(pipe.sent) == 1

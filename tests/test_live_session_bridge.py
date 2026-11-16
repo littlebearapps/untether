@@ -781,6 +781,80 @@ def test_829_max_hold_notice_names_the_quiet_time(
     assert "reply to continue" not in text.lower()
 
 
+@pytest.mark.parametrize(
+    ("max_s", "span"),
+    [(14400.0, "4 h"), (43200.0, "12 h"), (5400.0, "1.5 h"), (600.0, "10 min")],
+)
+def test_887_abs_cap_mid_turn_notice_needs_no_background_task(
+    max_s: float, span: str
+) -> None:
+    """#887: a turn cut short at the session time limit is announced even
+    when there is no background task to name."""
+    text = rb._live_closing_notice("abs_cap", [], mid_turn=True, max_s=max_s)
+    assert text == (
+        "\N{HOURGLASS WITH FLOWING SAND} Closing session — it reached the session "
+        f"time limit ({span}) and the turn in progress didn't finish in time. "
+        "Stopping it."
+    )
+    assert "/new" not in text
+
+
+def test_887_abs_cap_notice_with_tasks_is_unchanged() -> None:
+    assert rb._live_closing_notice(
+        "abs_cap", ["a"], mid_turn=True, max_s=14400.0
+    ) == rb._live_closing_notice("abs_cap", ["a"])
+
+
+_EDE = "Claude Code run failed (error_during_execution)\nsession: 0202db2b"
+
+
+def test_887_abs_cap_close_never_gets_the_archive_hint() -> None:
+    """#887: the run failed because Untether closed the session at its time
+    limit — the hint says so and never suggests /new."""
+    hint = rb._run_error_hint(
+        _EDE + " \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 50",
+        usage={"num_turns": 50},
+        close_reason="abs_cap",
+    )
+    assert hint is not None
+    assert "time limit" in hint and "live_session_max_s" in hint
+    assert "did not archive or expire" in hint
+    assert "could not be loaded" not in hint and "/new" not in hint
+    # ...whatever the error text was (the CLI may die without a result).
+    assert (
+        rb._run_error_hint(
+            "claude finished without a result event", usage=None, close_reason="abs_cap"
+        )
+        == hint
+    )
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"num_turns": 50}, False),  # the session loaded and ran: not archived
+        ({"num_turns": 1}, False),
+        ({"num_turns": 0}, True),  # #228: a resume that never started
+        ({}, True),  # no turn count reported: keep the hint
+        (None, True),
+    ],
+)
+def test_887_archive_hint_only_for_a_run_with_no_turns(
+    usage: dict | None, expected: bool
+) -> None:
+    hint = rb._run_error_hint(_EDE, usage=usage, close_reason=None)
+    assert (hint is not None and "could not be loaded" in hint) is expected
+
+
+def test_887_other_hints_are_untouched() -> None:
+    from untether.error_hints import get_error_hint
+
+    for raw in ("rate limit exceeded", "something with no hint at all"):
+        assert rb._run_error_hint(
+            raw, usage={"num_turns": 9}, close_reason="max_hold"
+        ) == get_error_hint(raw)
+
+
 def test_829_closed_notice_wording() -> None:
     assert rb._live_closed_notice(False) == (
         "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to "
@@ -866,7 +940,13 @@ from untether.runner_bridge import (  # noqa: E402
     IncomingMessage,
     handle_message,
 )
-from untether.runners.mock import Emit, Return, ScriptRunner  # noqa: E402
+from untether.runners.mock import (  # noqa: E402
+    Advance,
+    Emit,
+    Return,
+    ScriptRunner,
+    Sleep,
+)
 
 _TOKEN = ResumeToken(engine="claude", value="sess-798")
 
@@ -2208,3 +2288,180 @@ async def test_1015_no_query_turn_deletes_its_progress_message() -> None:
         if c["ref"] not in (run_progress, ref) and "FIRST" not in c["message"].text
     ]
     assert others == [], others
+
+
+async def test_1017_silent_followup_turn_progress_header_ticks(monkeypatch) -> None:
+    """#1017 end to end (handle_message → FollowupTurnRouter →
+    ``_create_turn_progress``): a follow-up turn that thinks for a minute with
+    no tool call has its own progress message repainted by the heartbeat —
+    it used to read ``working · claude · 0s`` until the answer arrived."""
+    from untether import runner_bridge as rb
+    from untether.settings import ProgressSettings
+
+    monkeypatch.setattr(rb, "_TURN_LAZY_PROGRESS_S", 0.01)
+    monkeypatch.setattr(
+        rb,
+        "_load_progress_settings",
+        lambda: ProgressSettings().model_copy(
+            update={"heartbeat_interval": 0.02, "min_render_interval": 0.0}
+        ),
+    )
+    clock = _FakeClock(start=0.0)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN, meta={"model": "opus"})),
+            Emit(_turn("started", 2, reason="followup")),
+            Sleep(0.1),  # the turn's lazy progress message goes up
+            Advance(65.0),  # a minute of silent thinking
+            Sleep(0.2),
+            Emit(_turn("completed", 2, reason="followup", ok=True, answer="SECOND")),
+            Return(answer="FIRST"),
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+        advance=clock.set,
+    )
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=runner,
+        incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+        resume_token=None,
+        clock=clock,
+    )
+    run_progress = transport.send_calls[0]["ref"]
+    _, progress = _turn_texts(transport, run_progress, "SECOND")
+    assert "0s" in progress[0], progress
+    assert any("1m" in text for text in progress[1:]), progress
+
+
+async def test_1072_abs_cap_closing_notice_follows_the_turns_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1072: the session reached its time limit and closes right after a
+    turn's result (between turns, with a background task to name). The
+    lifecycle's ``closing`` notice can fire while that turn's final is still
+    being rendered; it must reach the chat after the final, not before."""
+    from untether import runner_bridge as rb
+    from untether.markdown import MarkdownPresenter
+    from untether.runners.mock import Return, ScriptRunner, Wait
+    from untether.transport import MessageRef, RenderedMessage, SendOptions
+
+    texts: list[str] = []
+
+    class _Transport:
+        def __init__(self) -> None:
+            self._next = 1
+
+        async def send(
+            self,
+            *,
+            channel_id: int | str,
+            message: RenderedMessage,
+            options: SendOptions | None = None,
+        ) -> MessageRef:
+            texts.append(message.text)
+            self._next += 1
+            return MessageRef(channel_id=channel_id, message_id=self._next)
+
+        async def edit(
+            self, *, ref: MessageRef, message: RenderedMessage, wait: bool = True
+        ) -> MessageRef:
+            texts.append(message.text)
+            return ref
+
+        async def delete(self, *, ref: MessageRef) -> bool:
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    listeners: list = []
+    subscribed = anyio.Event()
+
+    class _Live:
+        def add_listener(self, sid: str, cb) -> bool:
+            listeners.append(cb)
+            subscribed.set()
+            return True
+
+    monkeypatch.setattr(rb, "live_backend", lambda engine: _Live())
+    finish = anyio.Event()
+    runner = ScriptRunner(
+        [Wait(finish), Return(answer="THE FINAL ANSWER")], engine="codex"
+    )
+    cfg = rb.ExecBridgeConfig(
+        transport=_Transport(), presenter=MarkdownPresenter(), final_notify=True
+    )
+    payload = {"reason": "abs_cap", "tasks": ["bg job"], "mid_turn": False}
+
+    async def _run() -> None:
+        await rb.handle_message(
+            cfg,
+            runner=runner,
+            incoming=rb.IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=None,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_run)
+        with anyio.fail_after(5):
+            await subscribed.wait()
+        # The lifecycle closes while the final hasn't been handed over yet.
+        tg.start_soon(listeners[0], "closing", payload)
+        await anyio.sleep(0.2)
+        finish.set()
+
+    final_at = next(i for i, t in enumerate(texts) if "THE FINAL ANSWER" in t)
+    notice_at = next(i for i, t in enumerate(texts) if "Closing session" in t)
+    assert final_at < notice_at
+
+
+async def test_1072_mid_turn_cap_notice_is_not_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn cut short at the cap has no final yet: its notice is sent at
+    once (the wait is only for a close between turns)."""
+    from untether import runner_bridge as rb
+    from untether.markdown import MarkdownPresenter
+    from untether.runners.mock import Return, ScriptRunner, Wait
+
+    listeners: list = []
+    subscribed = anyio.Event()
+
+    class _Live:
+        def add_listener(self, sid: str, cb) -> bool:
+            listeners.append(cb)
+            subscribed.set()
+            return True
+
+    monkeypatch.setattr(rb, "live_backend", lambda engine: _Live())
+    finish = anyio.Event()
+    transport = FakeTransport()
+    runner = ScriptRunner([Wait(finish), Return(answer="LATE")], engine="codex")
+    cfg = rb.ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    async def _run() -> None:
+        await rb.handle_message(
+            cfg,
+            runner=runner,
+            incoming=rb.IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=None,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_run)
+        with anyio.fail_after(5):
+            await subscribed.wait()
+        with anyio.fail_after(1):
+            await listeners[0](
+                "closing",
+                {"reason": "abs_cap", "tasks": [], "mid_turn": True, "max_s": 600.0},
+            )
+        sent = [c["message"].text for c in transport.send_calls]
+        assert any("Closing session" in t for t in sent)
+        finish.set()

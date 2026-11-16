@@ -263,6 +263,12 @@ class TelegramClient:
             return pop("editMessageText", chat_id, message_id)
         return None
 
+    def pop_unconfirmed_send(self, chat_id: int) -> bool:
+        """#1029: True once if the last ``sendMessage`` to the chat ended
+        with its delivery unknown (a response lost after the request left)."""
+        pop = getattr(self._client, "pop_unconfirmed_send", None)
+        return bool(pop(chat_id)) if callable(pop) else False
+
     async def edit_message_text(
         self,
         chat_id: int,
@@ -438,12 +444,17 @@ class TelegramClient:
         async def execute() -> ChatMember | None:
             return await self._client.get_chat_member(chat_id, user_id)
 
+        # #1077: a read, not a message — Telegram's per-chat send limit
+        # doesn't apply. Paced in the group's bucket, the #1042 admin check
+        # before a /config tap waited up to 3 s for a slot and pushed the
+        # page's own edit back another 3 s, so the old page (with the old
+        # "Current:") stayed up for seconds after the setting was saved.
         return await self.enqueue_op(
             key=self.unique_key("get_chat_member"),
             label="get_chat_member",
             execute=execute,
             priority=SEND_PRIORITY,
-            chat_id=chat_id,
+            chat_id=None,
         )
 
     async def create_forum_topic(self, chat_id: int, name: str) -> ForumTopic | None:

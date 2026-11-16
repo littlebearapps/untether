@@ -166,6 +166,7 @@ Comment + forwarded messages arrive as separate updates:
 - Bare `<br>`, `<br/>`, `<br />` → line break (a space inside a table row); other tags stay escaped text (#786)
 - Bare filenames ending `.md`, `.sh`, `.py` (country-code TLDs) → inline code, so neither linkify nor Telegram clients turn `CLAUDE.md` into `http://claude.md/` (#788)
 - GFM pipe tables keep one row per line with a bold header, repeated across split chunks (#797); single newlines in line-structured text are kept while wrapped prose reflows (#870); an ordered list keeps its own start number (#886)
+- Bare URLs inside open `*` / `_` emphasis: the closing markers and punctuation after them are cut from the link, so `**https://x.org/a**:` links only the URL and the bold closes (#1152; markdown-it's linkify rule is replaced by an emphasis-aware copy). URLs outside emphasis keep their own `_` / `*`
 
 ## Approval push notifications
 

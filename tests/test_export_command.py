@@ -424,6 +424,27 @@ def test_export_usage_header_names_its_scope() -> None:
     assert "9 in / 2 out tokens · thread total" in md
 
 
+def test_export_usage_header_labels_mixed_scopes() -> None:
+    """#1158: agy reports thread-total tokens but the duration is the last
+    run's, so each figure names its own scope instead of one suffix."""
+    agy = [{"type": "started", "engine": "antigravity", "title": "t"}]
+    usage = {"input_tokens": 24263, "output_tokens": 303, "duration_ms": 38400}
+    md = _format_export_markdown("s", agy, usage)
+    assert (
+        "**Usage:** 38.4s (last run) · 24263 in / 303 out tokens (thread total)" in md
+    )
+    assert "· thread total\n" not in md
+    # Thread-total tokens alone keep the single suffix.
+    md = _format_export_markdown("s", agy, {"input_tokens": 9, "output_tokens": 2})
+    assert "**Usage:** 9 in / 2 out tokens · thread total" in md
+    # A per-run engine keeps one "last run" suffix for every figure.
+    pi = [{"type": "started", "engine": "pi", "title": "t"}]
+    md = _format_export_markdown(
+        "s", pi, {"input_tokens": 9, "output_tokens": 2, "duration_ms": 1500}
+    )
+    assert "**Usage:** 1.5s · 9 in / 2 out tokens · last run" in md
+
+
 # --- #418: /export attaches the full transcript as a document ---------------
 
 

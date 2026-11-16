@@ -32,6 +32,12 @@ class EngineRunOptions:
     # equality on purpose: a human reply into a still-live cron process is not
     # written into it (``options_changed``) but resumes in an attended one.
     unattended_trigger: str | None = None
+    # #558 (08 §10, REVIEW M3): the trigger's *own* ``permission_mode`` (a
+    # cron's), set beside ``permission_mode`` by ``_apply_trigger_overrides``.
+    # By the time options reach a runner, a cron's own ``"full"`` and one
+    # inherited from the chat or TOML look identical; only the agy runner
+    # reads this, so unattended runs never inherit Full access.
+    trigger_permission_mode: str | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.
@@ -94,9 +100,29 @@ LEGACY_CLAUDE_PLAN_AUTO_MODE = "auto"
 # validator accepts any non-empty string for those).
 # Extending this dict requires auditing the runner to ensure each value maps to
 # a defined CLI / protocol outcome — see issues #331 (Codex + Gemini completion)
-# and #332 (full cross-engine extension).
+# and #332 (full cross-engine extension). Last audited 2026-10-11 for
+# ``antigravity`` (#558, agy 1.3.3): every value below maps to a defined
+# outcome in ``runners/antigravity.py`` (``_effective_mode``).
+#
+# Antigravity (D21, D37): ``workspace`` = agy's ``--mode=accept-edits``
+# (without it headless agy refuses file writes inside the project),
+# ``full`` = ``--dangerously-skip-permissions``; ``plan`` = agy's own
+# ``--mode=plan`` under the no-shell agent, approved by a Workspace resume
+# (#981); ``ask`` (#980) runs with the bypass flag on agy's default agent only
+# when Untether's approval gate is ready for the project, and the gate then
+# answers every tool. Anything less refuses the run before spawn with what to
+# fix, never a silent downgrade (``decide_antigravity_mode``).
+# ``accept-edits`` is not an Untether value: it is what Workspace already
+# passes to agy. Unknown
+# stored values fail **closed** to Workspace — unlike Codex, whose unknown
+# mode fails open (``codex.py``).
+ANTIGRAVITY_PERMISSION_MODES: frozenset[str] = frozenset(
+    {"workspace", "ask", "plan", "full"}
+)
+
 VALID_PERMISSION_MODES_BY_ENGINE: dict[str, frozenset[str]] = {
     "claude": CLAUDE_CLI_PERMISSION_MODES | {CLAUDE_PLAN_AUTO_MODE},
+    "antigravity": ANTIGRAVITY_PERMISSION_MODES,
 }
 
 
@@ -162,6 +188,41 @@ def is_claude_prompting_mode(mode: str | None) -> bool:
     path with no control channel at all, so no stage-6 request can arrive.
     """
     return mode in _CLAUDE_PROMPTING_MODES
+
+
+# #1142: the mode a Claude webhook runs in instead of an inherited bypass.
+# Read by `ClaudeRunner` and the #1145 webhook audit.
+CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE = "default"
+
+
+def permission_mode_source(options: EngineRunOptions | None) -> str:
+    """#1159: where a run's permission mode came from, for the unattended
+    footer's hint.
+
+    ``"trigger"`` — the trigger's own ``permission_mode`` (a cron's);
+    ``"chat"`` — the chat/topic preference (``/planmode``, ``/config``);
+    ``"engine_config"`` — neither, so the engine's ``untether.toml`` section
+    (or its built-in default). ``_apply_trigger_overrides`` writes a trigger's
+    own mode into ``permission_mode`` too, so ``trigger_permission_mode`` is
+    checked first.
+    """
+    if options is not None and options.trigger_permission_mode is not None:
+        return "trigger"
+    if options is not None and options.permission_mode is not None:
+        return "chat"
+    return "engine_config"
+
+
+def claude_sends_allowed_tools(mode: str | None, *, explicit: bool) -> bool:
+    """True when a Claude run in *mode* sends ``--allowedTools`` (#749).
+
+    The implicit default allowlist is dropped in prompting modes, so it can't
+    pre-approve the tools those modes exist to ask about; an explicit
+    ``[engines.claude] allowed_tools`` is the user's choice and is sent in
+    every mode. ``ClaudeRunner._build_args`` and the #1145 webhook audit both
+    use this, so the warning can't drift from what the runner does.
+    """
+    return explicit or not is_claude_prompting_mode(mode)
 
 
 # Modes in which an unattended run (cron / webhook) stops and waits for a

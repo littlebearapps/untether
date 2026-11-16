@@ -411,3 +411,70 @@ async def test_resolve_engine_run_options_sanitises_stale_chat_and_topic_minimal
     assert first.ignored_reasoning == "minimal"
     assert first.model == "gpt-5.5"
     assert first == second
+
+
+# ── Antigravity effort (#558 phase 05, D29) ─────────────────────────────────
+
+
+def test_antigravity_reasoning_levels_low_medium_high() -> None:
+    """The static button ceiling: no agy model accepts xhigh or max
+    (probes/1.3.x/z-model-effort-combos.txt); the drift suite re-checks."""
+    from untether.telegram.engine_overrides import allowed_reasoning_levels
+
+    assert allowed_reasoning_levels("antigravity") == ("low", "medium", "high")
+
+
+def test_reasoning_levels_global_unchanged() -> None:
+    """PR #766 carried a pre-#416 copy with ``minimal``; the fallback must
+    stay as it is."""
+    from untether.telegram.engine_overrides import REASONING_LEVELS
+
+    assert REASONING_LEVELS == ("low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("level", ["xhigh", "max"])
+def test_drop_unsupported_reasoning_antigravity_xhigh_and_max_dropped(
+    level: str,
+) -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    out = drop_unsupported_reasoning("antigravity", EngineRunOptions(reasoning=level))
+    assert out is not None
+    assert out.reasoning is None
+    assert out.ignored_reasoning == level
+
+
+def test_antigravity_reasoning_label_effort() -> None:
+    from untether.telegram.engine_overrides import get_reasoning_label
+
+    assert get_reasoning_label("antigravity") == "Effort"
+
+
+def test_antigravity_supports_reasoning_for_cron_validation() -> None:
+    from untether.telegram.engine_overrides import (
+        REASONING_SUPPORTED_ENGINES,
+        supports_reasoning,
+    )
+
+    assert supports_reasoning("antigravity") is True
+    # Nobody else joined or left.
+    assert frozenset({"claude", "codex", "antigravity"}) == REASONING_SUPPORTED_ENGINES
+
+
+def test_antigravity_defaults_never_read_agy_settings() -> None:
+    """D33: agy's own settings file is out of bounds — no guessing."""
+    from untether.telegram.engine_overrides import (
+        get_engine_default_model,
+        get_engine_default_reasoning,
+    )
+
+    assert get_engine_default_model("antigravity") is None
+    assert get_engine_default_reasoning("antigravity") is None
+
+
+def test_plan_exit_tool_engines_is_claude_only() -> None:
+    """08 §11: only Claude has an ``ExitPlanMode`` tool to write a plan for."""
+    from untether.telegram.engine_overrides import PLAN_EXIT_TOOL_ENGINES
+
+    assert frozenset({"claude"}) == PLAN_EXIT_TOOL_ENGINES

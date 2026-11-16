@@ -31,6 +31,7 @@ from typing import Any
 import anyio
 
 from .background_status import escape_markdown
+from .interactive.buttons import approval_keyboard
 from .logging import get_logger
 from .markdown import HARD_BREAK
 from .transport import (
@@ -55,16 +56,9 @@ _RETIRED_TEXT = "✅ No longer waiting."
 def synth_keyboard(request_id: str) -> list[list[dict[str, str]]]:
     """Approve / Deny for a request with no tracked keyboard. Valid for tool
     requests, outline holds and ``da:`` synthetic requests alike (the
-    ``claude_control`` handler resolves by request id)."""
-    return [
-        [
-            {
-                "text": "✅ Approve",
-                "callback_data": f"claude_control:approve:{request_id}",
-            },
-            {"text": "❌ Deny", "callback_data": f"claude_control:deny:{request_id}"},
-        ]
-    ]
+    ``claude_control`` handler resolves by request id). #960: the prefix is
+    the registering engine's (``claude_control`` for every Claude request)."""
+    return approval_keyboard(request_id)
 
 
 def render_surface_markdown(

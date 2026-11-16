@@ -121,7 +121,9 @@ Fields NOT in Untether's `StreamResultMessage` schema (silently ignored by msgsp
 
 A **quota-status snapshot**, not a throttle notice: `rate_limit_info.status` is
 `allowed` / `allowed_warning` / `rejected`, plus `resetsAt`, `rateLimitType`,
-`unifiedWindows` and overage fields. `allowed` → stashed, nothing rendered;
+`unifiedWindows` and overage fields. `allowed` → stashed (`ClaudeStreamState.rate_limit_windows`), nothing rendered
+— with the usage footer off, the final's ≥70 % 5h warning is built from that stash, never from a login-token usage
+fetch (#1150);
 `allowed_warning` → one `⚠️ 5h limit N% used — resets HH:MM` note per window, no
 latch; only `rejected` not covered by overage latches an expected wait until
 `resetsAt` (`⏳ Rate limited until …`). Bare events latch nothing — the #657

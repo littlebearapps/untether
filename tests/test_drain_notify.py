@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from untether.model import ResumeToken
 from untether.runner_bridge import RunningTask
 from untether.telegram.loop import _notify_drain_start, _notify_drain_timeout
 from untether.transport import MessageRef, RenderedMessage, SendOptions
@@ -148,7 +149,51 @@ class TestNotifyDrainTimeout:
 
         text = transport.send_calls[0]["text"]
         assert "session is saved" in text
-        assert "/claude" in text
+        # #1159: no engine known for the run -> neutral wording, never /claude.
+        assert "/claude" not in text
+        assert "resume by sending a new message." in text
+
+    @pytest.mark.anyio
+    async def test_resume_hint_names_the_runs_engine(self) -> None:
+        """#1159: a Codex chat is told /codex, never /claude."""
+        transport = FakeTransport()
+        ref = MessageRef(channel_id=111, message_id=100)
+        tasks = {ref: RunningTask(engine="codex")}
+
+        await _notify_drain_timeout(transport, tasks, remaining=1)
+
+        text = transport.send_calls[0]["text"]
+        assert "starting /codex." in text
+        assert "/claude" not in text
+
+    @pytest.mark.anyio
+    async def test_resume_hint_prefers_the_resume_tokens_engine(self) -> None:
+        transport = FakeTransport()
+        ref = MessageRef(channel_id=111, message_id=100)
+        tasks = {
+            ref: RunningTask(resume=ResumeToken(engine="pi", value="s1"), engine="pi")
+        }
+
+        await _notify_drain_timeout(transport, tasks, remaining=1)
+
+        assert "starting /pi." in transport.send_calls[0]["text"]
+
+    @pytest.mark.anyio
+    async def test_each_chat_gets_its_own_engine(self) -> None:
+        transport = FakeTransport()
+        tasks = {
+            MessageRef(channel_id=111, message_id=100): RunningTask(engine="claude"),
+            MessageRef(channel_id=222, message_id=101): RunningTask(
+                engine="antigravity"
+            ),
+        }
+
+        await _notify_drain_timeout(transport, tasks, remaining=2)
+
+        by_chat = {c["channel_id"]: c["text"] for c in transport.send_calls}
+        assert "starting /claude." in by_chat[111]
+        assert "starting /antigravity." in by_chat[222]
+        assert "/claude" not in by_chat[222]
 
     @pytest.mark.anyio
     async def test_transport_error_swallowed(self) -> None:

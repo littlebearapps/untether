@@ -100,7 +100,9 @@ async def _plan_listen_command(
         )
 
     if action in {"all", "mentions"}:
-        logger.info("listen.set", chat_id=msg.chat_id, mode=action)
+        logger.info(
+            "listen.set", chat_id=msg.chat_id, sender_id=msg.sender_id, mode=action
+        )
         decision = await check_admin_or_private(
             cfg,
             msg,
@@ -129,7 +131,7 @@ async def _plan_listen_command(
         )
 
     if action == "clear":
-        logger.info("listen.clear", chat_id=msg.chat_id)
+        logger.info("listen.clear", chat_id=msg.chat_id, sender_id=msg.sender_id)
         decision = await check_admin_or_private(
             cfg,
             msg,

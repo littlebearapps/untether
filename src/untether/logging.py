@@ -58,6 +58,11 @@ URL_USERINFO_RE = re.compile(
     r"://(?!\*\*\*@[^\s/?#\"'<>\\@]*(?:[\s/?#\"'<>\\]|\Z))"
     r"[^\s/?#\"'<>\\]{1,512}@"
 )
+# #1065: every parameter value in a URL's query string, not only the ones
+# whose name ``KEY_VALUE_RE`` knows (``?token=`` was masked, ``&state=`` and
+# ``&code=`` were not). A whole URL is matched in one greedy run (bounded
+# scheme, the same shape as ``runner._URL_RE``), so the scan stays linear.
+URL_RE = re.compile(r"[a-z][a-z0-9+.-]{1,20}://[^\s\"'<>\\]*", re.IGNORECASE)
 _REDACTED = "[REDACTED]"
 # Values that are clearly not credentials (``secret=None``, ``token=true``).
 _NON_SECRET_VALUES = frozenset({"none", "null", "true", "false", "***"})
@@ -159,12 +164,43 @@ def _redact_key_value(match: re.Match[str]) -> str:
     return f"{name}{sep}{_REDACTED}"
 
 
+def _redact_query_value(value: str) -> str:
+    # Kept: empty / already-masked values, counts and short flags
+    # (``page=2``, ``x=1``) — never long enough to be a credential.
+    if (
+        len(value) < 4
+        or value.isdigit()
+        or value.startswith("[REDACTED")
+        or value.lower() in _NON_SECRET_VALUES
+    ):
+        return value
+    return _REDACTED
+
+
+def _redact_url_query(match: re.Match[str]) -> str:
+    url = match.group(0)
+    start = url.find("?")
+    if start < 0:
+        return url
+    end = url.find("#", start)
+    if end < 0:
+        end = len(url)
+    # Split, not a regex: a long query with no ``=`` must stay linear.
+    params = []
+    for param in url[start + 1 : end].split("&"):
+        name, sep, value = param.partition("=")
+        params.append(f"{name}{sep}{_redact_query_value(value)}" if sep else param)
+    return f"{url[: start + 1]}{'&'.join(params)}{url[end:]}"
+
+
 def _redact_text(value: str) -> str:
     redacted = value
     # #841: URL userinfo first, so a token used as the username becomes one
     # marker. Cheap prefilter: most log strings carry no URL.
     if "://" in redacted:
         redacted = URL_USERINFO_RE.sub("://[REDACTED]@", redacted)
+        if "?" in redacted:
+            redacted = URL_RE.sub(_redact_url_query, redacted)
     redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", redacted)
     redacted = TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
     redacted = OPENAI_PROJECT_KEY_RE.sub("[REDACTED_KEY]", redacted)

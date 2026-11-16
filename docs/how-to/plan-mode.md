@@ -40,6 +40,8 @@ Toggle per chat:
 
 Mode is stored per chat and persists across sessions. New runs in the chat use the configured mode. The change applies from your next message; until then the current run and any background wake-ups keep the old mode.
 
+In a group, changing the mode needs a group admin or the creator, the same as the Permission mode page in `/config`; anyone else gets `changing settings is restricted to group admins.` and nothing changes. `/planmode show` is open to everyone. See [Admin-only commands](group-chat.md#admin-only-commands).
+
 A mode that `/planmode` can't set (`default`/`manual`, `dontAsk`, `bypassPermissions`, set in `untether.toml` or by hand) is shown under its own name, never as `off`. With no override, `/planmode show` and `/config` say **engine default**: the chat uses `[engines.claude] permission_mode` from `untether.toml`, or Claude Code's own settings with no approval buttons if that's unset.
 
 !!! warning "`dangerously_skip_permissions` overrides every mode"
@@ -184,6 +186,18 @@ For unattended crons, `auto` is usually the better choice: Claude Code's classif
     Before v0.36.0, `permission_mode = "auto"` on a cron meant plan mode with the plan gate auto-approved. It now selects Claude Code's own auto mode. Existing crons keep working but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also logs a warning (`trigger.unattended_approval_risk`) at startup for crons set to `default`, `manual`, `acceptEdits` or `plan`, and when a cron or webhook fires into a chat whose mode will ask for approval. Since v0.36.0 nothing waits: an unattended run denies anything it would have asked about and lists the denials in its final ([#835](https://github.com/littlebearapps/untether/issues/835)), so set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own.
 
 Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. The rest of the chat's interactive traffic continues to honour plan mode. See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the full reference.
+
+## Antigravity CLI: Plan first
+
+Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` are Claude-only. It needs no plugin on the host, and works differently from Claude's plan mode:
+
+- Antigravity plans in one run and **stops**: the final shows the plan, followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss**. Nothing in the project changes until you approve.
+- **Approve Plan** starts a second run in the same conversation, in Workspace mode (file edits, no shell). Its answer starts `📋 Plan (approved)`.
+- **Deny** and **Let's discuss** run nothing; reply to revise the plan and a new card appears.
+- There is no Pause & Outline button: the plan file already is the outline.
+- Cron and webhook runs post the plan and change nothing; set `permission_mode = "workspace"` on a cron that should make the change.
+
+Details: [Interactive approval — Antigravity: Plan first](interactive-approval.md#antigravity-plan-first).
 
 ## Related
 

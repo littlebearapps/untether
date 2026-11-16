@@ -161,3 +161,57 @@ def test_resolve_message_project_directive_clears_ambient_branch() -> None:
 
     assert resolved.context == RunContext(project="other", branch=None)
     assert resolved.context_source == "directives"
+
+
+# #1165: one wording for engines Untether knows but can't run.
+
+
+def _runtime_with_statuses(statuses: dict[str, str]) -> TransportRuntime:
+    entries = [
+        RunnerEntry(
+            engine=engine,
+            runner=ScriptRunner([Return(answer="ok")], engine=engine),
+            status=status,  # type: ignore[arg-type]
+            issue=None if status == "ok" else status,
+        )
+        for engine, status in statuses.items()
+    ]
+    router = AutoRouter(entries=entries, default_engine=entries[0].engine)
+    return TransportRuntime(
+        router=router, projects=ProjectsConfig(projects={}, default_project=None)
+    )
+
+
+def test_1165_available_engines_text_all_installed() -> None:
+    runtime = _runtime_with_statuses({"codex": "ok", "pi": "ok"})
+    assert runtime.engine_availability_notes() == ()
+    assert runtime.available_engines_text() == "codex, pi"
+    assert runtime.available_engines_text(code=True) == "`codex, pi`"
+
+
+def test_1165_available_engines_text_notes_unavailable_engines() -> None:
+    runtime = _runtime_with_statuses(
+        {
+            "codex": "ok",
+            "amp": "missing_cli",
+            "claude": "missing_cli",
+            "pi": "bad_config",
+            "opencode": "load_error",
+        }
+    )
+    # bad_config still runs (on defaults), so it's listed *and* noted.
+    assert runtime.available_engine_ids() == ("codex", "pi")
+    assert runtime.engine_availability_notes() == (
+        "not installed: amp, claude",
+        "misconfigured: pi",
+        "failed to load: opencode",
+    )
+    assert runtime.available_engines_text(code=True) == (
+        "`codex, pi` (not installed: amp, claude; misconfigured: pi;"
+        " failed to load: opencode)"
+    )
+
+
+def test_1165_available_engines_text_none_available() -> None:
+    runtime = _runtime_with_statuses({"codex": "load_error"})
+    assert runtime.available_engines_text() == "none (failed to load: codex)"

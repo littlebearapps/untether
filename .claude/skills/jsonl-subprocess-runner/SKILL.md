@@ -16,7 +16,7 @@ triggers:
 
 # JSONL Subprocess Runner Framework
 
-All Untether engine runners (Claude, Codex, OpenCode, Pi; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
+All Untether engine runners (Claude, Codex, OpenCode, Pi, Antigravity; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
 
 ## Key files
 
@@ -39,6 +39,8 @@ Runner (Protocol)
       CodexRunner
       OpenCodeRunner (wraps run_impl: refuses OpenCode 2.x before spawning, #970)
       PiRunner
+      AntigravityRunner (overrides run_impl: pre-spawn refusals — no project, invalid argv value, gate not ready,
+        unsupported agy, /continue lookup, /compact with no conversation — then the per-run gate socket; prompt on stdin, #558)
       GeminiRunner, AmpRunner (deprecated, unsupported)
       ClaudeRunner (overrides run_impl for PTY support)
   (each concrete runner also mixes in ResumeTokenMixin)
@@ -203,6 +205,7 @@ Resume line formats per engine:
 - Codex: `` `codex resume <thread_id>` ``
 - OpenCode: `` `opencode --session <ses_XXX>` ``
 - Pi: `` `pi --session <token>` ``
+- Antigravity: `` `agy --conversation <id>` `` (passed to agy joined, `--conversation=<id>`)
 
 ## Engine backend registration
 
@@ -225,6 +228,7 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+antigravity = "untether.runners.antigravity:BACKEND"
 gemini = "untether.runners.gemini:BACKEND"  # deprecated
 amp = "untether.runners.amp:BACKEND"        # deprecated
 ```

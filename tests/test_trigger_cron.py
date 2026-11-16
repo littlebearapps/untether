@@ -11,10 +11,14 @@ import anyio
 import pytest
 
 from untether.triggers.cron import (
-    _parse_field,
     _resolve_now,
     cron_matches,
     run_cron_scheduler,
+)
+from untether.triggers.cron_expr import (
+    CronExpressionError,
+    parse_cron_expression,
+    parse_cron_field,
 )
 from untether.triggers.manager import TriggerManager
 from untether.triggers.settings import parse_trigger_config
@@ -129,18 +133,107 @@ class TestResolveNow:
 class TestCronStepValidation:
     """Security fix: step=0 must not crash the scheduler."""
 
-    def test_step_zero_returns_empty_set(self):
-        result = _parse_field("*/0", 0, 59)
-        assert result == set()
+    def test_step_zero_rejected(self):
+        with pytest.raises(CronExpressionError, match="step"):
+            parse_cron_field("*/0", "minute", 0, 59)
 
-    def test_negative_step_returns_empty_set(self):
-        result = _parse_field("*/-1", 0, 59)
-        assert result == set()
+    def test_negative_step_rejected(self):
+        with pytest.raises(CronExpressionError, match="step"):
+            parse_cron_field("*/-1", "minute", 0, 59)
 
     def test_step_zero_in_expression_no_match(self):
         now = datetime.datetime(2026, 2, 24, 10, 0)
-        # Expression with step=0 should not match (returns empty set)
+        # Expression with step=0 never matches (and never raises)
         assert cron_matches("*/0 * * * *", now) is False
+
+
+class TestCronExpressionGrammar1144:
+    """#1144: one strict parser shared by the matcher and config validation."""
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "* * * * *",
+            "0 9 * * *",
+            "0 3 * * 1-5",
+            "*/15 * * * *",
+            "0 0 1,15 * *",
+            "0 9-17 * * *",
+            "0 0 1 6 *",
+            "0,30 * * * *",
+            "0 10 * * 0",
+            "0 10 * * 7",
+            "0 9 * * 0,6",
+            "0 0 1 1 *",
+            "0-30/10 * * * *",
+            "5/10 * * * *",
+            "59 23 31 12 7",
+            "  0   9  *  *  *  ",
+        ],
+    )
+    def test_valid_expressions_parse(self, expression):
+        fields = parse_cron_expression(expression)
+        assert len(fields) == 5
+        assert all(fields)
+
+    @pytest.mark.parametrize(
+        ("expression", "needle"),
+        [
+            ("99 99 * * *", "minute field: 99 is out of range (0–59)"),
+            ("0 24 * * *", "hour field: 24 is out of range (0–23)"),
+            ("0 0 0 * *", "day-of-month field: 0 is out of range (1–31)"),
+            ("0 0 32 * *", "day-of-month field: 32 is out of range (1–31)"),
+            ("0 0 * 13 *", "month field: 13 is out of range (1–12)"),
+            ("0 0 * * 8", "day-of-week field: 8 is out of range (0–7)"),
+            ("0 0-99 * * *", "hour field: 99 is out of range (0–23)"),
+            ("* *", "needs 5 fields"),
+            ("* * * * * *", "needs 5 fields"),
+            ("*/0 * * * *", "minute field: step must be a whole number of 1 or more"),
+            ("*/-1 * * * *", "minute field: step must be a whole number of 1 or more"),
+            ("*/ * * * *", "minute field: step must be a whole number of 1 or more"),
+            ("a b c d e", "minute field: 'a' isn't a number"),
+            ("0 9 * * MON", "day-of-week field: 'MON' isn't a number"),
+            ("0 9 * JAN *", "month field: 'JAN' isn't a number"),
+            ("5-1 * * * *", "minute field: range 5-1 runs backwards"),
+            ("1,,2 * * * *", "minute field: empty item"),
+            ("-1 * * * *", "minute field: '-1' isn't a valid range"),
+            ("a-b * * * *", "minute field: 'a-b' isn't a valid range"),
+            ("+5 * * * *", "minute field: '+5' isn't a number"),
+            ("1_0 * * * *", "minute field: '1_0' isn't a number"),
+        ],
+    )
+    def test_invalid_expressions_name_the_field(self, expression, needle):
+        with pytest.raises(CronExpressionError) as excinfo:
+            parse_cron_expression(expression)
+        assert needle in str(excinfo.value)
+
+    def test_error_is_a_value_error(self):
+        # pydantic turns a ValueError raised in a validator into a field error.
+        assert issubclass(CronExpressionError, ValueError)
+
+    def test_field_values(self):
+        minutes, hours, days, months, weekdays = parse_cron_expression(
+            "*/15 9-17/4 1,15 * 1-5"
+        )
+        assert minutes == {0, 15, 30, 45}
+        assert hours == {9, 13, 17}
+        assert days == {1, 15}
+        assert months == set(range(1, 13))
+        assert weekdays == {1, 2, 3, 4, 5}
+
+    def test_single_value_with_step_is_just_the_value(self):
+        # Pre-#1144 matcher behaviour, kept so no live schedule changes meaning.
+        assert parse_cron_field("5/10", "minute", 0, 59) == {5}
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["a b c d e", "99 99 * * *", "5-1 * * * *", "* *", "0 9 * * MON"],
+    )
+    def test_cron_matches_never_raises_on_bad_expression(self, expression):
+        """Pre-#1144, ``a b c d e`` raised ValueError on every tick
+        (``triggers.cron.match_failed`` with a traceback each minute)."""
+        now = datetime.datetime(2026, 2, 24, 10, 0)
+        assert cron_matches(expression, now) is False
 
 
 # ── run_once cron flag (#288) ─────────────────────────────────────────

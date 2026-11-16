@@ -2,12 +2,15 @@
 
 ``ThreadScheduler`` calls :func:`inject_live_followup` for every queued
 resume job before waiting on the owning process to exit. When the target
-Claude session is still live and accepting input, the message is written
-into that process — queued until its current turn ends — instead of
-``--resume``-ing a new process after the old one exits. That removes the
-fresh-session diverts and double executions of #647/#776 for the common
-case; anything else (no live process, closing, other engines) falls back to
+session is still live and accepting input, the message is written into that
+process — queued until its current turn ends — instead of ``--resume``-ing a
+new process after the old one exits. That removes the fresh-session diverts
+and double executions of #647/#776 for the common case; anything else (no
+live process, closing, an engine with no live-session backend) falls back to
 the unchanged resume path.
+
+The engine's registry is reached through :mod:`untether.live_sessions`
+(#977); Claude is the only backend today.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from .live_sessions import live_backend
 from .logging import get_logger
 from .scheduler import ThreadJob
 from .transport import MessageRef
@@ -38,68 +42,67 @@ async def inject_live_followup(
     cwd_for: CwdFor | None = None,
 ) -> bool:
     token = job.resume_token
-    if token.engine != "claude":
+    backend = live_backend(token.engine)
+    if backend is None or not backend.enabled():
         return False
     from .runner_bridge import register_followup_anchor, settle_followup_anchor
-    from .runners.claude import (
-        get_live_session,
-        inject_when_idle,
-        is_session_accepting,
-    )
 
+    # Log events keep the engine's own namespace (``claude.live_session.*``).
+    ns = f"{backend.log_ns}.live_session"
     session_id = token.value
-    if not is_session_accepting(session_id):
-        live = get_live_session(session_id)
+    if not backend.is_accepting(session_id):
+        live = backend.get(session_id)
         logger.debug(
-            "claude.live_session.inject_skipped",
+            f"{ns}.inject_skipped",
             session_id=session_id,
             live=live is not None,
             closing=bool(live and live.closing),
         )
         return False
-    live = get_live_session(session_id)
-    if live is not None and live.state.plan_rearm_failed:
-        # #383: the CLI refused to go back into plan mode — close the live
-        # process once idle so this message resumes a fresh one spawned with
-        # --permission-mode plan (same fallback as options_changed).
-        from .runners.claude import close_live_session
-
-        closed = await close_live_session(
-            session_id, "plan_rearm_failed", notice=False, only_if_idle=True
+    close_reason = backend.pre_inject_close_reason(session_id)
+    if close_reason is not None:
+        # #383 (Claude, ``plan_rearm_failed``): the CLI refused to go back
+        # into plan mode — close the live process once idle so this message
+        # resumes a fresh one spawned with --permission-mode plan (same
+        # fallback as options_changed).
+        closed = await backend.close(
+            session_id, close_reason, notice=False, only_if_idle=True
         )
         logger.info(
-            "claude.live_session.plan_rearm_failed_closed",
+            f"{ns}.{close_reason}_closed",
             session_id=session_id,
             closed=closed,
         )
         return False
     wanted: Any = None
     if options_for is not None:
-        live = get_live_session(session_id)
+        # Both read before the await, off the same process: its spawn
+        # options never change, and a process that replaces it meanwhile
+        # must not be compared against.
+        live = backend.get(session_id)
+        spawn_options = backend.spawn_options(session_id) if live is not None else None
         try:
             wanted = await options_for(job)
         except Exception:  # noqa: BLE001 — unknown options: don't inject
-            logger.warning("claude.live_session.options_resolve_failed", exc_info=True)
+            logger.warning(f"{ns}.options_resolve_failed", exc_info=True)
             return False
-        if live is not None and wanted != live.state.spawn_run_options:
+        if live is not None and wanted != spawn_options:
             # The chat's settings changed since this process started
             # (/planmode, /model, reasoning, /config toggles): a follow-up
             # written into it would run with the old ones. Close it (once
             # idle) so the message resumes a fresh process instead.
-            from .runners.claude import close_live_session
-
-            closed = await close_live_session(
+            closed = await backend.close(
                 session_id, "options_changed", notice=True, only_if_idle=True
             )
             logger.info(
-                "claude.live_session.options_changed",
+                f"{ns}.options_changed",
                 session_id=session_id,
                 closed=closed,
             )
             return False
     if cwd_for is not None:
-        live = get_live_session(session_id)
-        spawn_cwd = live.state.spawn_cwd if live is not None else None
+        live = backend.get(session_id)
+        spawn_cwd = backend.spawn_cwd(session_id) if live is not None else None
         resolve_error: str | None = None
         try:
             wanted_cwd: Path | None = await cwd_for(job)
@@ -114,16 +117,14 @@ async def inject_live_followup(
             # message resumes the session in the new directory. A context
             # that no longer resolves takes the same path, so the resume
             # reports the error instead of writing into the old cwd.
-            from .runners.claude import close_live_session
-
-            closed = await close_live_session(
+            closed = await backend.close(
                 session_id, "options_changed", notice=True, only_if_idle=True
             )
             # Mid-turn the close is refused and the pump retries every tick:
             # only the close itself is worth an INFO line.
             log = logger.info if closed else logger.debug
             log(
-                "claude.live_session.context_changed",
+                f"{ns}.context_changed",
                 session_id=session_id,
                 chat_id=job.chat_id,
                 source="scheduler",
@@ -139,13 +140,11 @@ async def inject_live_followup(
         # #896: a follow-up written here would start a turn past the daily
         # budget. End the session once idle; the message then takes the
         # resume path, where the daily gate refuses it (with Run anyway).
-        from .runners.claude import close_live_session
-
-        closed = await close_live_session(
+        closed = await backend.close(
             session_id, BUDGET_STOP_REASON, notice=True, only_if_idle=True
         )
         logger.info(
-            "claude.live_session.budget_refused",
+            f"{ns}.budget_refused",
             session_id=session_id,
             chat_id=job.chat_id,
             closed=closed,
@@ -165,22 +164,25 @@ async def inject_live_followup(
         ),
         placeholder=job.progress_ref,
         in_flight=True,
+        engine=backend.engine,
     )
     ok = False
     try:
-        ok = await inject_when_idle(session_id, job.text, command_uuid=command_uuid)
+        ok = await backend.inject_when_idle(
+            session_id, job.text, command_uuid=command_uuid
+        )
     finally:
         settle_followup_anchor(command_uuid, written=ok)
     if not ok:
         logger.info(
-            "claude.live_session.inject_unavailable",
+            f"{ns}.inject_unavailable",
             session_id=session_id,
             chat_id=job.chat_id,
             user_msg_id=job.user_msg_id,
         )
         return False
     logger.info(
-        "claude.live_session.injected",
+        f"{ns}.injected",
         session_id=session_id,
         command_uuid=command_uuid,
         chat_id=job.chat_id,

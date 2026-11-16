@@ -8,6 +8,14 @@ from __future__ import annotations
 # → overload/server → rate limits → model → context → content safety
 # → setting compatibility (#416) → invalid request → session → network
 # → signals → execution.
+# #228: a resume that fails before its first turn. Named so the bridge can
+# withhold it from a run that did have turns (#887) — the patterns below only
+# see the error text.
+SESSION_NOT_LOADED_HINT = (
+    "The session could not be loaded \N{EM DASH} Claude Code may have"
+    " archived or expired it. Send /new to start a fresh session."
+)
+
 _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Engine end-of-life / unsupported client ---
     # These MUST stay first. Both signatures are emitted by CLIs that exit
@@ -65,6 +73,13 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         " version may not match the installed CLI. Update Untether, and report"
         " it if the problem persists.",
     ),
+    # Antigravity CLI (agy, Go flag package): an unknown flag exits rc 2.
+    (
+        "flags provided but not defined",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
     (
         "no longer supported",
         "The engine CLI reports that this client version or account tier is no"
@@ -72,6 +87,12 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         " via /config.",
     ),
     # --- Authentication ---
+    (
+        "isn't signed in on this host",
+        'On a server, the Gemini API key route (`modelProvider: "gemini"` +'
+        " `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids"
+        " interactive sign-in.",
+    ),
     (
         "access token could not be refreshed",
         "Run `codex login --device-auth` to re-authenticate.",
@@ -143,6 +164,15 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Google API quota exhausted. Check your quota at"
         " console.cloud.google.com, then resume.",
     ),
+    # Antigravity's own quota / credits errors (#558).
+    (
+        "quota is used up",
+        "/usage shows each quota group and when it resets.",
+    ),
+    (
+        "ai credits balance is too low",
+        "/usage shows each quota group and when it resets.",
+    ),
     # --- API overload / server errors ---
     (
         "overloaded_error",
@@ -184,6 +214,31 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Rate limited \N{EM DASH} the engine will retry automatically.",
     ),
     # --- Model errors ---
+    # Antigravity (#558): every agy model/effort rejection starts "invalid
+    # model selection", so the effort shapes must outrank it.
+    (
+        '" effort (available:',
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "invalid --effort",
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "conflicts with --effort",
+        "That effort level isn't available for this Antigravity model \N{EM DASH}"
+        " pick another in /config \N{RIGHTWARDS ARROW} Effort, or use a model id"
+        " without an effort suffix.",
+    ),
+    (
+        "invalid model selection",
+        "Antigravity doesn't recognise that model. Run `agy models` on the host"
+        " for the list, or `/model clear`.",
+    ),
     (
         "model_not_found",
         "Model not available. Check the model name in /config"
@@ -343,11 +398,7 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "The process aborted unexpectedly. Try starting a fresh session with /new.",
     ),
     # --- Execution errors ---
-    (
-        "error_during_execution",
-        "The session could not be loaded \N{EM DASH} Claude Code may have"
-        " archived or expired it. Send /new to start a fresh session.",
-    ),
+    ("error_during_execution", SESSION_NOT_LOADED_HINT),
     # --- Process / session errors ---
     (
         "finished without a result event",
@@ -370,6 +421,11 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     (
         "amp login",
         "Run `amp login` to authenticate with Sourcegraph.",
+    ),
+    (
+        "antigravity ended with status canceled",
+        "Antigravity cancelled the turn upstream (long turns sometimes do,"
+        " antigravity-cli#902). Retry, or split the task into smaller steps.",
     ),
     (
         "gemini result status:",
@@ -421,9 +477,34 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+# #1046: agy refuses a model that has no default effort level when no
+# ``--effort`` is passed, and names the levels it takes:
+# ``--model gemini-3.8-flash requires --effort (available: low, medium, high)``.
+# The id is valid, so this must outrank "invalid model selection" (the same
+# refusal's prefix). The levels come from agy's text: named only when every
+# one is a level Untether knows, otherwise the hint drops the list.
+_NEEDS_EFFORT_PATTERN = "requires --effort"
+
+
+def _needs_effort_hint(error_message: str) -> str:
+    from .utils.antigravity_quota import EFFORT_VOCABULARY, efforts_from_refusal
+
+    levels = efforts_from_refusal(error_message)
+    offers = ""
+    if levels and all(level in EFFORT_VOCABULARY for level in levels):
+        offers = f" \N{EM DASH} agy offers {', '.join(levels)}"
+    return (
+        f"That model needs an effort level{offers}. Set one with"
+        " `/reasoning set <level>` or in /config \N{RIGHTWARDS ARROW} Effort,"
+        " then send your message again."
+    )
+
+
 def get_error_hint(error_message: str) -> str | None:
     """Return an actionable hint for a known error pattern, or None."""
     lower = error_message.lower()
+    if _NEEDS_EFFORT_PATTERN in lower:
+        return _needs_effort_hint(error_message)
     for pattern, hint in _HINT_PATTERNS:
         if pattern in lower:
             return hint

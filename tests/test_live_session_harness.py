@@ -316,6 +316,45 @@ async def test_829_unclean_close_warns_of_a_fresh_session(
     assert not any("Reply to continue" in t for t in _texts(transport))
 
 
+async def test_887_turn_cut_short_at_the_time_limit_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#887 end to end: a turn that outlives the session time limit and its
+    grace is closed with a notice naming the limit, an error final that says
+    Untether closed it, and the continue line — never "/new"."""
+    _watchdog(monkeypatch, live_session_max_s=0.5)
+    os.environ["FAKE_CLAUDE_RESULT_DELAY_S"] = "20"
+    transport = await _drive(
+        "followup", timings={**_FAST_CLOSE, "_abs_cap_turn_grace_s": 0.3}
+    )
+    texts = _texts(transport)
+    everything = texts + [c["message"].text for c in transport.edit_calls]
+    notices = [t for t in texts if "Closing session" in t]
+    assert len(notices) == 1
+    assert "session time limit" in notices[0] and "turn in progress" in notices[0]
+    finals = [t for t in everything if "did not archive or expire" in t]
+    assert finals and all("live_session_max_s" in t for t in finals)
+    assert any(t.endswith("Reply to continue in the same session.") for t in texts)
+    assert texts.index(notices[0]) < next(
+        i for i, t in enumerate(texts) if "Reply to continue" in t
+    )
+    assert not any("/new" in t or "could not be loaded" in t for t in everything)
+
+
+async def test_887_turn_that_ends_within_the_grace_is_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#887: the time limit passes mid-turn; the turn finishes and its answer
+    is delivered, with no closing notice and no error."""
+    _watchdog(monkeypatch, live_session_max_s=0.5)
+    os.environ["FAKE_CLAUDE_RESULT_DELAY_S"] = "1.5"
+    transport = await _drive("followup", timings=_FAST_CLOSE)
+    everything = _texts(transport) + [c["message"].text for c in transport.edit_calls]
+    assert any("FIRST" in t for t in everything)
+    assert not any("Closing session" in t for t in everything)
+    assert not any("time limit" in t or "/new" in t for t in everything)
+
+
 def _summary(logs: list[dict]) -> dict:
     (summary,) = [e for e in logs if e.get("event") == "session.summary"]
     return summary
@@ -1013,3 +1052,135 @@ async def test_900_non_live_errored_run_final_unchanged(
     assert not any("WAKE-FAILED" in t for _, t, _ in transport.log)
     events = [r.get("event") for r in logs]
     assert "final.error_delivered_early" not in events
+
+
+# ---------------------------------------------------------------------------
+# #991: an early-delivery timeout must not skip what follows the answer
+# ---------------------------------------------------------------------------
+
+
+class _StallAfterAnswerTransport(_OrderedTransport):
+    """The run's answer lands, then that call never returns — the #928 shape
+    (a Telegram retry stalled behind a message that was already sent)."""
+
+    def __init__(self, needle: str) -> None:
+        super().__init__()
+        self._needle = needle
+        self.stalled = 0
+
+    async def _stall(self, text: str) -> None:
+        if self._needle in text:
+            self.stalled += 1
+            await anyio.sleep_forever()
+
+    async def send(self, *, channel_id, message, options=None):  # type: ignore[override]
+        ref = await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+        await self._stall(message.text)
+        return ref
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+        edited = await super().edit(ref=ref, message=message, wait=wait)
+        await self._stall(message.text)
+        return edited
+
+
+async def _drive_991(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    transport: _OrderedTransport,
+    *,
+    wake_s: float,
+    send_file: Any = None,
+    outbox_config: Any = None,
+) -> list[dict[str, Any]]:
+    import untether.runner_bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "_EARLY_DELIVERY_TIMEOUT_S", 0.3)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
+    os.environ["FAKE_CLAUDE_WAKE_S"] = str(wake_s)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=outbox_config,
+    )
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    with capture_logs() as logs, anyio.fail_after(25.0):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+    return logs
+
+
+async def test_991_delivery_timeout_keeps_notices_and_turn_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#991: the answer's send outlives the early-delivery bound. Everything
+    queued behind it used to be dropped with it: the turn's outbox files
+    waited for the session to close, and the session's closing notice was
+    never shown (its listener stayed gated). Both still happen, once each,
+    and the answer is not sent again."""
+    from untether.settings import TelegramFilesSettings
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    _watchdog(monkeypatch, post_result_bg_max_hold=1.5)
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "turn-file.md").write_text("turn file", encoding="utf-8")
+    transport = _StallAfterAnswerTransport("waiting")
+
+    async def send_file(channel_id, thread_id, filename, *args: Any, **kw: Any):
+        transport.log.append(("file", filename, None))
+
+    token = set_run_base_dir(tmp_path)
+    try:
+        logs = await _drive_991(
+            monkeypatch,
+            "bg_bash_wake",
+            transport,
+            wake_s=30,
+            send_file=send_file,
+            outbox_config=TelegramFilesSettings(enabled=True),
+        )
+    finally:
+        reset_run_base_dir(token)
+
+    assert any(e["event"] == "final.early_delivery_timeout" for e in logs)
+    assert transport.stalled == 1, "the answer was sent again"
+    kinds = [(kind, text) for kind, text, _ in transport.log]
+    files = [i for i, (kind, _) in enumerate(kinds) if kind == "file"]
+    notices = [i for i, (_, text) in enumerate(kinds) if "Closing session" in text]
+    assert [kinds[i][1] for i in files] == ["turn-file.md"]
+    assert len(notices) == 1
+    # Delivered right after the answer, not held until the session closed.
+    assert files[0] < notices[0]
+
+
+async def test_991_delivery_timeout_still_opens_the_status_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#991: the background status message opens after the answer even when
+    the answer's send outlives the early-delivery bound — exactly one."""
+    _watchdog(monkeypatch)
+    _progress(monkeypatch, show_background_tasks=True)
+    transport = _StallAfterAnswerTransport("agent started")
+    logs = await _drive_991(monkeypatch, "bg_agent_wake", transport, wake_s=1.5)
+
+    assert any(e["event"] == "final.early_delivery_timeout" for e in logs)
+    assert transport.stalled == 1, "the answer was sent again"
+    kinds = [(kind, text) for kind, text, _ in transport.log]
+    status = [
+        i
+        for i, (kind, text) in enumerate(kinds)
+        if kind == "send" and text.startswith("⏳ background (1)")
+    ]
+    assert len(status) == 1
+    report = next(i for i, (_, text) in enumerate(kinds) if "REPORT: all good" in text)
+    # Opened while the agent was still running, before its wake turn's report.
+    assert status[0] < report

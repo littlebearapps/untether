@@ -5,14 +5,21 @@ from typing import TYPE_CHECKING
 
 from ...logging import get_logger
 from ...progress import ProgressTracker
-from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
+from ...runner_bridge import (
+    RunningTask,
+    RunningTasks,
+    running_task_is_idle_after_result,
+)
 from ...scheduler import ThreadJob, ThreadScheduler
-from ...transport import MessageRef
-from ..topics import thread_filter_for, thread_scope_label
+from ...transport import MessageRef, message_kind
+from .. import arrival_order, first_start
+from ..topics import _norm_thread, thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
@@ -50,19 +57,51 @@ def _claim_cancel(chat_id: int, message_id: int) -> bool:
     return True
 
 
+def _drop_first_start_waiters(chat_id: int, task: RunningTask) -> int:
+    """#1157: cancelling a run that hasn't reported its session yet also
+    drops the messages waiting on it (they have no queued card to cancel
+    from); each is told so. A run that has its session leaves its queued
+    follow-ups to run, as before.
+
+    #1164: the same goes for messages in its thread still in line behind an
+    earlier one (no queued card yet either): dropped with a starting run,
+    left to queue and run behind a run that has its session."""
+    if task.resume is not None:
+        return 0
+    own = _norm_thread(task.thread_id)
+
+    def same_thread(thread_id: int | None) -> bool:
+        return _norm_thread(thread_id) == own
+
+    return first_start.drop_waiting(
+        chat_id, thread_filter=same_thread, command="cancel"
+    ) + arrival_order.drop_waiting(chat_id, thread_filter=same_thread, command="cancel")
+
+
 async def handle_cancel(
     cfg: TelegramBridgeConfig,
     msg: TelegramIncomingMessage,
     running_tasks: RunningTasks,
     scheduler: ThreadScheduler | None = None,
+    *,
+    dropped_pending: bool = False,
 ) -> None:
+    """``dropped_pending``: the #807 command barrier dropped a prompt sent
+    just before this ``/cancel`` and already replied with its 🗑️ notice —
+    that notice is this ``/cancel``'s reply, so a bare "nothing running"
+    fallback is not sent as well (#1084). Every other reply still is."""
     reply = make_reply(cfg, msg)
     chat_id = msg.chat_id
     reply_id = msg.reply_to_message_id
 
     if reply_id is None:
         if msg.reply_to_text:
-            await reply(text="nothing is currently running for that message.")
+            await _reply_nothing_running(
+                reply,
+                "nothing is currently running for that message.",
+                chat_id=chat_id,
+                dropped_pending=dropped_pending,
+            )
             return
         # Fallback: single active run or single queued job in this chat
         # #776: one entry per run — a live run is also registered under each
@@ -122,6 +161,7 @@ async def handle_cancel(
                 progress_message_id=ref.message_id,
             )
             task.cancel_requested.set()
+            _drop_first_start_waiters(chat_id, task)
             return
         if len(matches) > 1:
             logger.debug("cancel.ambiguous", chat_id=chat_id, active_runs=len(matches))
@@ -180,10 +220,18 @@ async def handle_cancel(
             thread_id=msg.thread_id,
             idle_closed=idle_closed,
         )
-        text = f"nothing running in this {thread_scope_label(msg)}"
         if idle_closed:
-            text += f" \u2014 {_idle_closed_label(idle_closed)}"
-        await reply(text=f"{text}.")
+            # #902: closing an idle session is news the 🗑️ notice doesn't
+            # carry, so this reply is always sent.
+            text = f"nothing running in this {thread_scope_label(msg)}"
+            await reply(text=f"{text} \u2014 {_idle_closed_label(idle_closed)}.")
+            return
+        await _reply_nothing_running(
+            reply,
+            f"nothing running in this {thread_scope_label(msg)}.",
+            chat_id=chat_id,
+            dropped_pending=dropped_pending,
+        )
         return
 
     progress_ref = MessageRef(channel_id=chat_id, message_id=reply_id)
@@ -200,7 +248,12 @@ async def handle_cancel(
                 )
                 await _edit_cancelled_message(cfg, progress_ref, job)
                 return
-        await reply(text="nothing is currently running for that message.")
+        await _reply_nothing_running(
+            reply,
+            "nothing is currently running for that message.",
+            chat_id=chat_id,
+            dropped_pending=dropped_pending,
+        )
         return
 
     if not _claim_cancel(chat_id, reply_id):
@@ -234,6 +287,22 @@ async def handle_cancel(
         progress_message_id=reply_id,
     )
     running_task.cancel_requested.set()
+    _drop_first_start_waiters(chat_id, running_task)
+
+
+async def _reply_nothing_running(
+    reply: Callable[..., Awaitable[object]],
+    text: str,
+    *,
+    chat_id: int,
+    dropped_pending: bool,
+) -> None:
+    """Send a "nothing running" reply unless the barrier's 🗑️ notice has
+    already answered this ``/cancel`` (#1084)."""
+    if dropped_pending:
+        logger.debug("cancel.nothing_running.answered_by_drop", chat_id=chat_id)
+        return
+    await reply(text=text)
 
 
 def _idle_closed_label(count: int) -> str:
@@ -283,6 +352,8 @@ async def handle_callback_cancel(
                     text="dropped from queue.",
                 )
                 return
+        if await _remove_unconfirmed_progress(cfg, query, progress_ref):
+            return
         await cfg.bot.answer_callback_query(
             callback_query_id=query.callback_query_id,
             text="nothing is currently running for that message.",
@@ -310,10 +381,52 @@ async def handle_callback_cancel(
         progress_message_id=query.message_id,
     )
     running_task.cancel_requested.set()
+    _drop_first_start_waiters(query.chat_id, running_task)
     await cfg.bot.answer_callback_query(
         callback_query_id=query.callback_query_id,
         text=f"{_idle_closed_label(1)}." if idle else "cancelling...",
     )
+
+
+async def _remove_unconfirmed_progress(
+    cfg: TelegramBridgeConfig,
+    query: TelegramCallbackQuery,
+    progress_ref: MessageRef,
+) -> bool:
+    """#1029: remove the untracked copy of a progress message.
+
+    A progress ``sendMessage`` that lost its response may still have been
+    posted. Untether never learns that message's id, so it can't edit,
+    finalise or delete it — until someone taps its cancel button, which is
+    the one place the id arrives. No run owns the message, so nothing is
+    cancelled: the copy is deleted and the toast says so.
+    """
+    claim = getattr(cfg.exec_cfg.transport, "claim_unconfirmed_progress", None)
+    if not callable(claim):
+        return False
+    message = (query.raw or {}).get("message")
+    date = message.get("date") if isinstance(message, dict) else None
+    if not claim(query.chat_id, date):
+        return False
+    with message_kind("progress"):
+        removed = await cfg.exec_cfg.transport.delete(ref=progress_ref)
+    logger.info(
+        "cancel.unconfirmed_progress_removed",
+        chat_id=query.chat_id,
+        progress_message_id=query.message_id,
+        removed=removed,
+    )
+    await cfg.bot.answer_callback_query(
+        callback_query_id=query.callback_query_id,
+        text=(
+            "out-of-date copy of a progress message — removed. "
+            "Nothing was cancelled; use /cancel to stop a run."
+            if removed
+            else "out-of-date copy of a progress message — nothing was "
+            "cancelled. Use /cancel to stop a run."
+        ),
+    )
+    return True
 
 
 async def _edit_cancelled_message(

@@ -53,6 +53,8 @@ done · claude · 1m 36s · step 10 · 62% ctx
 
 It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known: for current Claude models it shows from the first step, and for any other model it appears by the final of the first run on that model. Learned windows are saved in `context_windows.json` next to your config, so the value survives a restart. It disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
 
+Antigravity chats can show an estimate instead, written `~3% ctx`: the tokens the model last read against the window Google publishes for that model. It appears only when the chat has a model set that Untether has a published figure for, and agy doesn't report its own automatic compaction, so there is no compaction row for it; a [`/compact`](antigravity.md#compact-the-conversation) you send is answered `🗜️ Context compacted (manual)`. See [Use Antigravity CLI](antigravity.md#models-and-effort).
+
 When Claude compacts its context, the progress message shows one row for it (a single step):
 
 ```
@@ -124,7 +126,7 @@ In **verbose** mode the tool's `format_verbose_detail` line additionally renders
 - `Monitor` — countdown remaining
 - `KillShell` — target shell id
 
-Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. The tick also repaints the message when nothing else has for a whole interval, so the header's elapsed time (`working · codex · 1m 33s`) keeps moving while an engine writes a long answer with no tool calls, or stalls ([#954](https://github.com/littlebearapps/untether/issues/954)). A busy run gets no extra edits. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
+Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. The tick also repaints the message when nothing else has for a whole interval, so the header's elapsed time (`working · codex · 1m 33s`) keeps moving while an engine writes a long answer with no tool calls, or stalls ([#954](https://github.com/littlebearapps/untether/issues/954)). Since v0.36.1 it also moves before the engine's first event, so a turn that thinks for minutes before doing anything no longer sits at `0s` ([#1017](https://github.com/littlebearapps/untether/issues/1017)). A busy run gets no extra edits. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
 
 ## Background tasks (Claude)
 
@@ -149,6 +151,8 @@ Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell 
 ```
 
 When the last task finishes the message is finalised (`✅ all 2 background tasks done`, with ❌ failed / ⏹️ stopped rows where relevant). If the session closes first — `/cancel`, `/new`, the background hold limit, a restart — the remaining rows are marked ⏹️ stopped with the reason, so the message never keeps saying "running". Claude's own report on a finished task still arrives as a normal message. `/ping` shows `⏳ background: N tasks running` for the chat while any are live.
+
+Antigravity runs use the same `⏳ background (N)` block for background commands, timers and subagents that agy starts, and `/ping` counts them ([#978](https://github.com/littlebearapps/untether/issues/978)). agy sends one answer per run and holds it until that work finishes, so there is no status message after the answer and no wake-up messages. See [Use Antigravity CLI](antigravity.md#your-first-run).
 
 ### Quiet acknowledgements
 
@@ -175,6 +179,8 @@ A wake turn still arrives as its own message when it runs a tool (up to three `R
 ## Per-chat override
 
 The `/verbose` toggle overrides the global config for the current chat. This override persists until you clear it or restart Untether.
+
+In a group, `/verbose` needs a group admin or the creator in every form, the same as the Verbose page in `/config`. See [Admin-only commands](group-chat.md#admin-only-commands).
 
 ## Clear override
 

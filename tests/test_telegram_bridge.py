@@ -251,28 +251,38 @@ def test_telegram_presenter_progress_shows_cancel_button() -> None:
 
 
 def _keyboard_action(
-    action_id: str, buttons: list[list[dict[str, str]]]
+    action_id: str,
+    buttons: list[list[dict[str, str]]],
+    *,
+    request_type: str | None = None,
 ) -> ActionEvent:
     """Build a started `warning` action carrying an inline keyboard."""
+    detail: dict[str, object] = {"inline_keyboard": {"buttons": buttons}}
+    if request_type is not None:
+        detail["request_type"] = request_type
     return ActionEvent(
         engine="claude",
         action=Action(
             id=action_id,
             kind="warning",
             title=action_id,
-            detail={"inline_keyboard": {"buttons": buttons}},
+            detail=detail,
         ),
         phase="started",
     )
 
 
-def test_telegram_presenter_progress_prefers_newest_pending_keyboard() -> None:
+def test_telegram_presenter_progress_outline_hold_never_shadows_a_later_keyboard() -> (
+    None
+):
     """A stale uncompleted keyboard action must not shadow a newer one (#683).
 
     The synthetic ``claude.discuss_approve.N`` action emitted by the
-    Pause & Outline hold-open path is never completed, so an oldest-first
-    scan pinned the rendered keyboard to it for the rest of the run and
-    silently swallowed every later AskUserQuestion / approval keyboard.
+    Pause & Outline hold-open path (``request_type=DiscussApproval``) was
+    never completed, so an oldest-first scan pinned the rendered keyboard to
+    it for the rest of the run and silently swallowed every later
+    AskUserQuestion / approval keyboard. #1079 is oldest-first again, with
+    such a hold ranked after every other request.
     """
     presenter = TelegramPresenter()
     tracker = ProgressTracker(engine="claude")
@@ -287,6 +297,7 @@ def test_telegram_presenter_progress_prefers_newest_pending_keyboard() -> None:
                     }
                 ]
             ],
+            request_type="DiscussApproval",
         )
     )
     tracker.note_event(
@@ -305,6 +316,41 @@ def test_telegram_presenter_progress_prefers_newest_pending_keyboard() -> None:
     assert keyboard[0][0]["callback_data"] == "aq:opt:0"
     assert keyboard[1][0]["callback_data"] == "aq:other"
     assert keyboard[-1][0]["text"] == "cancel"
+
+
+def test_telegram_presenter_progress_keeps_the_oldest_pending_keyboard() -> None:
+    """#1079: with two requests pending, the buttons stay on the first one
+    until it is answered; a newer request doesn't take them over under the
+    user's finger. Then they move to the next one."""
+    presenter = TelegramPresenter()
+    tracker = ProgressTracker(engine="antigravity")
+    tracker.note_event(
+        _keyboard_action(
+            "gate.agy_967f",
+            [[{"text": "✅ Approve", "callback_data": "ia:approve:agy_967f"}]],
+        )
+    )
+    tracker.note_event(
+        _keyboard_action(
+            "gate.agy_e6f1",
+            [[{"text": "✅ Approve", "callback_data": "ia:approve:agy_e6f1"}]],
+        )
+    )
+    rendered = presenter.render_progress(tracker.snapshot(), elapsed_s=0.0)
+    keyboard = rendered.extra["reply_markup"]["inline_keyboard"]
+    assert keyboard[0][0]["callback_data"] == "ia:approve:agy_967f"
+    # The row the buttons answer is marked while more than one waits.
+    assert rendered.text.count("👇") == 1
+    assert "👇 ▸ gate.agy_967f" in rendered.text
+    first = _keyboard_action(
+        "gate.agy_967f",
+        [[{"text": "✅ Approve", "callback_data": "ia:approve:agy_967f"}]],
+    )
+    tracker.note_event(replace(first, phase="completed"))
+    rendered = presenter.render_progress(tracker.snapshot(), elapsed_s=0.0)
+    keyboard = rendered.extra["reply_markup"]["inline_keyboard"]
+    assert keyboard[0][0]["callback_data"] == "ia:approve:agy_e6f1"
+    assert "👇" not in rendered.text  # one request left: unmarked, as before
 
 
 def test_telegram_presenter_progress_skips_completed_keyboard_actions() -> None:
@@ -432,6 +478,31 @@ async def test_telegram_transport_sends_followups() -> None:
     assert bot.send_calls[1]["message_thread_id"] == 7
     assert bot.send_calls[1]["replace_message_id"] is None
     assert bot.send_calls[1]["disable_notification"] is True
+
+
+@pytest.mark.anyio
+async def test_telegram_transport_reports_where_a_followup_landed() -> None:
+    """#1074: a follow-up chunk's ``on_sent`` hook gets its MessageRef (the
+    plan card a later run retires); a failing hook doesn't fail the send."""
+    bot = FakeBot()
+    transport = TelegramTransport(bot)
+    seen: list[MessageRef] = []
+
+    def boom(_ref: MessageRef) -> None:
+        raise RuntimeError("hook")
+
+    card = RenderedMessage(text="card", extra={"on_sent": seen.append})
+    bad = RenderedMessage(text="bad", extra={"on_sent": boom})
+    await transport.send(
+        channel_id=123,
+        message=RenderedMessage(text="final", extra={"followups": [card, bad]}),
+        options=SendOptions(thread_id=7),
+    )
+    assert len(bot.send_calls) == 3
+    (ref,) = seen
+    assert ref.channel_id == 123 and ref.thread_id == 7
+    assert isinstance(ref.message_id, int)
+    assert "on_sent" not in bot.send_calls[1]
 
 
 @pytest.mark.anyio
@@ -1414,6 +1485,67 @@ async def test_388_run_engine_sets_run_sender_from_triggering_message() -> None:
 
     assert runner.seen_senders == [4242, None]
     assert get_run_sender_id() is None
+
+
+class _TriggerRecordingRunner(ScriptRunner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen_triggers: list[str | None] = []
+
+    async def run(self, prompt, resume):  # type: ignore[override]
+        from untether.utils.paths import get_run_trigger_source
+
+        self.seen_triggers.append(get_run_trigger_source())
+        async for event in super().run(prompt, resume):
+            yield event
+
+
+@pytest.mark.anyio
+async def test_1044_run_engine_sets_run_trigger_source() -> None:
+    """#1044: a runner can tell a person's message (None) from a run a
+    dispatcher started — cron, webhook, ``/at`` or a loop re-fire. Reset
+    after the run."""
+    from untether.utils.paths import get_run_trigger_source
+
+    contexts = [
+        None,
+        RunContext(project=None),
+        RunContext(trigger_source="at:1f2e3d"),
+        RunContext(trigger_source="loop:ut_loop_ab12cd34"),
+        RunContext(trigger_source="cron:nightly"),
+    ]
+    runner = _TriggerRecordingRunner(
+        [Return(answer="ok") for _ in contexts],
+        engine=CODEX_ENGINE,
+        resume_value="r-1044",
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=_CaptureTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+
+    for context in contexts:
+        await _run_engine(
+            exec_cfg=exec_cfg,
+            runtime=runtime,
+            running_tasks={},
+            chat_id=123,
+            user_msg_id=1,
+            text="hello",
+            resume_token=None,
+            context=context,
+        )
+
+    assert runner.seen_triggers == [
+        None,
+        None,
+        "at:1f2e3d",
+        "loop:ut_loop_ab12cd34",
+        "cron:nightly",
+    ]
+    assert get_run_trigger_source() is None
 
 
 @pytest.mark.anyio
@@ -2496,7 +2628,131 @@ async def test_model_command_set_and_clear_chat_override(tmp_path: Path) -> None
     assert override is not None
     assert override.model is None
     assert override.reasoning == "low"
-    assert "chat model override cleared." in transport.send_calls[-1]["message"].text
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    # #998: nothing configured to fall back to, so the reply says what a
+    # resumed session may do and how to get the engine default back.
+    assert "/new" in text
+
+
+async def _clear_model(
+    cfg: TelegramBridgeConfig,
+    *,
+    topic_store: TopicStateStore | None = None,
+    chat_prefs: ChatPrefsStore | None = None,
+    thread_id: int | None = None,
+) -> None:
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=11,
+        text="/model clear",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=456,
+        chat_type="supergroup",
+        thread_id=thread_id,
+    )
+    await _handle_model_command(
+        cfg,
+        msg,
+        "clear",
+        ambient_context=None,
+        topic_store=topic_store,
+        chat_prefs=chat_prefs,
+        resolved_scope="main" if thread_id is not None else None,
+        scope_chat_ids=frozenset({123}) if thread_id is not None else None,
+    )
+
+
+@pytest.mark.anyio
+async def test_model_clear_names_the_configured_default(tmp_path: Path) -> None:
+    """#998: with `[<engine>] model` set, Untether passes it on the next run
+    (resumed or not), so the reply names it; like `/model set` it offers
+    `/new` for a clean start (#1155)."""
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runner.model = "gpt-5.5"  # type: ignore[attr-defined]
+    cfg = make_cfg(transport, runner)
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(cfg, chat_prefs=chat_prefs)
+
+    override = await chat_prefs.get_engine_override(123, CODEX_ENGINE)
+    assert override is None or override.model is None
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    assert "configured default gpt-5.5" in text
+    # #1155: like `/model set`, the reply offers `/new` for a clean start —
+    # a resumed Pi session can keep the model it was using.
+    assert "If you want a clean start on the new model, run /new." in text
+
+
+@pytest.mark.anyio
+async def test_model_clear_without_a_default_suggests_new(tmp_path: Path) -> None:
+    """#998: no configured model means Untether passes none, and a resumed
+    session can keep the cleared model (Claude, Pi) — the reply says so."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(cfg, chat_prefs=chat_prefs)
+
+    text = transport.send_calls[-1]["message"].text
+    assert "chat model override cleared for codex." in text
+    assert "resumed session may stay on the model it was using" in text
+    assert "/new" in text
+    assert "configured default" not in text
+
+
+@pytest.mark.anyio
+async def test_model_clear_topic_names_the_chat_override(tmp_path: Path) -> None:
+    """#998: clearing a topic override leaves the chat override in charge."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = replace(cfg, topics=TelegramTopicsSettings(enabled=True, scope="main"))
+    topic_store = TopicStateStore(tmp_path / "telegram_topics_state.json")
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    await topic_store.set_engine_override(
+        123, 77, CODEX_ENGINE, EngineOverrides(model="gpt-4.1", reasoning=None)
+    )
+    await chat_prefs.set_engine_override(
+        123, CODEX_ENGINE, EngineOverrides(model="gpt-4.1-mini", reasoning=None)
+    )
+
+    await _clear_model(
+        cfg, topic_store=topic_store, chat_prefs=chat_prefs, thread_id=77
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert "topic model override cleared for codex." in text
+    assert "chat override gpt-4.1-mini" in text
+    assert "If you want a clean start on the new model, run /new." in text  # #1155
+
+
+@pytest.mark.anyio
+async def test_model_clear_topic_without_any_model_suggests_new(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = replace(cfg, topics=TelegramTopicsSettings(enabled=True, scope="main"))
+    topic_store = TopicStateStore(tmp_path / "telegram_topics_state.json")
+    await topic_store.set_engine_override(
+        123, 77, CODEX_ENGINE, EngineOverrides(model="gpt-4.1", reasoning=None)
+    )
+
+    await _clear_model(cfg, topic_store=topic_store, thread_id=77)
+
+    text = transport.send_calls[-1]["message"].text
+    assert "topic model override cleared for codex." in text
+    assert "/new" in text
 
 
 @pytest.mark.anyio
@@ -3482,14 +3738,20 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("already_saved", [False, True])
 async def test_run_main_loop_prompt_upload_uses_caption_directives(
     tmp_path: Path,
+    already_saved: bool,
 ) -> None:
     payload = b"hello"
     proj_dir = tmp_path / "proj"
     other_dir = tmp_path / "other"
     proj_dir.mkdir()
     other_dir.mkdir()
+    if already_saved:
+        # #1031: an identical earlier upload is reused, not copied to `_1`.
+        (other_dir / "incoming").mkdir()
+        (other_dir / "incoming" / "hello.txt").write_bytes(payload)
 
     class _UploadBot(FakeBot):
         async def get_file(self, file_id: str) -> File | None:
@@ -3557,11 +3819,18 @@ async def test_run_main_loop_prompt_upload_uses_caption_directives(
                 raw={"file_id": "doc-1"},
             ),
         )
+        # Keep polling until the run starts: the identical-file comparison
+        # runs in a worker thread, which a finite poller's shutdown would
+        # otherwise race.
+        with anyio.move_on_after(5):
+            while not runner.calls:
+                await anyio.sleep(0.01)
 
     await run_main_loop(cfg, poller)
 
     saved_path = other_dir / "incoming" / "hello.txt"
     assert saved_path.read_bytes() == payload
+    assert [item.name for item in saved_path.parent.iterdir()] == ["hello.txt"]
     assert runner.calls
     prompt_text, _ = runner.calls[0]
     assert "do thing" in prompt_text
@@ -4277,6 +4546,93 @@ async def test_807_command_barrier_real_window(tmp_path: Path) -> None:
     (dropped,) = [e for e in logs if e["event"] == "forward.prompt.dropped"]
     assert dropped["reason"] == "new"
     assert dropped["merged_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_1084_cancel_in_window_replies_once() -> None:
+    """#1084: `A, /cancel` inside one coalesce window answered twice — the
+    🗑️ notice and "nothing running in this chat." The notice is the reply."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "alpha prompt")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(2, "/cancel")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    assert runner.calls == []
+    texts = [call["message"].text for call in transport.send_calls]
+    assert texts == [
+        "🗑️ Dropped 1 message sent just before /cancel — "
+        "send it again if you still need it."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1084_cancel_outside_window_still_says_nothing_running() -> None:
+    """#902 still holds: a /cancel with nothing pending always replies."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(2, "/cancel")
+        await anyio.sleep(_cfg.forward_coalesce_s * 2)
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    texts = [call["message"].text for call in transport.send_calls]
+    assert texts == ["nothing running in this chat."]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("reply_to_message_id", "reply_to_text"),
+    [(None, None), (None, "an old message"), (77, "an old message")],
+)
+async def test_1084_dropped_pending_skips_only_nothing_running(
+    reply_to_message_id: int | None, reply_to_text: str | None
+) -> None:
+    """Every "nothing running" variant is skipped when the barrier's notice
+    already answered; an idle-session close is still reported (#902)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=reply_to_message_id,
+        reply_to_text=reply_to_text,
+        sender_id=123,
+    )
+    await handle_cancel(cfg, msg, {}, dropped_pending=True)
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
+async def test_1084_dropped_pending_still_reports_idle_close() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    idle = _idle_live_task()
+    await handle_cancel(
+        cfg,
+        _plain_cancel_msg(),
+        {MessageRef(channel_id=123, message_id=4084): idle},
+        dropped_pending=True,
+    )
+    assert idle.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == (
+        "nothing running in this chat \N{EM DASH} closed the idle session."
+    )
 
 
 @pytest.mark.anyio
@@ -5335,7 +5691,7 @@ async def test_388_typed_ask_answer_originator_only(
         calls.append((request_id, text))
         return True
 
-    monkeypatch.setattr(claude_mod, "answer_ask_question", _answer)
+    monkeypatch.setattr("untether.interactive.questions.answer_ask_question", _answer)
     claude_mod._PENDING_ASK_REQUESTS["req-388a"] = (123, "Which one?")
     claude_mod._REQUEST_TO_SESSION["req-388a"] = "sess-388a"
     claude_mod._REQUEST_TO_ORIGINATOR["req-388a"] = 2
@@ -5537,6 +5893,102 @@ async def test_950_command_context_sees_chat_engine_default_and_bound_context(
     assert seen[0].default_engine_override == "pi"
     assert seen[0].ambient_context is not None
     assert seen[0].ambient_context.project == "beta"
+
+
+@pytest.mark.anyio
+async def test_997_browse_and_its_buttons_follow_the_chats_ctx_binding(
+    tmp_path: Path,
+) -> None:
+    """#997: in a chat bound by chat_id to one project and by `/ctx` to
+    another, `/browse` lists the `/ctx` project — as runs and `/file` do —
+    and a tap on one of its directory buttons stays in that project."""
+    state_path = tmp_path / "untether.toml"
+    for name in ("alpha", "beta/sub"):
+        (tmp_path / name).mkdir(parents=True)
+    (tmp_path / "alpha" / "alpha-only.txt").write_text("a")
+    (tmp_path / "beta" / "sub" / "inner.txt").write_text("b")
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    projects = ProjectsConfig(
+        projects={
+            "alpha": ProjectConfig(
+                alias="Alpha",
+                path=tmp_path / "alpha",
+                worktrees_dir=Path(".worktrees"),
+                chat_id=123,
+            ),
+            "beta": ProjectConfig(
+                alias="Beta",
+                path=tmp_path / "beta",
+                worktrees_dir=Path(".worktrees"),
+            ),
+        },
+        default_project=None,
+        chat_map={123: "alpha"},
+    )
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=runner.engine, runner=runner)],
+        default_engine=runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=projects, config_path=state_path)
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    await prefs.set_context(123, RunContext(project="beta"))
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+    def keyboards() -> list[list[dict]]:
+        return [
+            [
+                b
+                for row in call["message"].extra["reply_markup"]["inline_keyboard"]
+                for b in row
+            ]
+            for call in transport.send_calls
+            if "reply_markup" in call["message"].extra
+        ]
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="/browse",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+        with anyio.fail_after(5):
+            while not keyboards():
+                await anyio.sleep(0.01)
+        (button,) = keyboards()[0]
+        yield TelegramCallbackQuery(
+            transport="telegram",
+            chat_id=123,
+            message_id=2,
+            callback_query_id="cb-997",
+            data=button["callback_data"],
+            sender_id=123,
+        )
+        with anyio.fail_after(5):
+            while len(transport.send_calls) < 2:
+                await anyio.sleep(0.01)
+
+    await run_main_loop(cfg, poller)
+
+    first, second = keyboards()
+    assert [b["text"] for b in first] == ["📂 sub/"]
+    assert transport.send_calls[1]["message"].text.startswith("📁 sub")
+    assert any("inner.txt" in b["text"] for b in second)
 
 
 @pytest.mark.anyio
@@ -6017,8 +6469,13 @@ async def _894_run_with_reload(
     monkeypatch: pytest.MonkeyPatch,
     cfg: TelegramBridgeConfig,
     toml_after_reload: str,
+    *,
+    reloaded_telegram: dict[str, Any] | None = None,
 ) -> None:
-    """Start the loop, rewrite untether.toml, fire one reload, then stop."""
+    """Start the loop, rewrite untether.toml, fire one reload, then stop.
+
+    ``reloaded_telegram`` overrides ``[transports.telegram]`` keys in the
+    reloaded settings only, so the reload sees them as changed."""
     from untether.config_watch import ConfigReload
     from untether.runtime_loader import RuntimeSpec
     from untether.settings import TelegramTransportSettings, UntetherSettings
@@ -6026,7 +6483,10 @@ async def _894_run_with_reload(
     tg_settings = {"bot_token": "tok", "chat_id": 123, "allow_any_user": True}
     transport_config = TelegramTransportSettings.model_validate(tg_settings)
     new_settings = UntetherSettings.model_validate(
-        {"transport": "telegram", "transports": {"telegram": tg_settings}}
+        {
+            "transport": "telegram",
+            "transports": {"telegram": {**tg_settings, **(reloaded_telegram or {})}},
+        }
     )
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
     spec = RuntimeSpec(
@@ -6093,6 +6553,49 @@ async def test_894_reload_enabling_triggers_flags_restart_required(
 
 
 @pytest.mark.anyio
+async def test_1030_restart_only_key_is_announced_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart-only key used to be announced twice per chat (the #318
+    warning, then the #548 reload notice). It is one message now."""
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        "[triggers]\nenabled = false\n",
+        reloaded_telegram={"message_overflow": "trim"},
+    )
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    notices = [
+        c for c in transport.send_calls if "message_overflow" in c["message"].text
+    ]
+    # No allowed users here, so the pending restart goes to the project chat.
+    assert [c["channel_id"] for c in notices] == [-100555]
+    assert "Restart required" in notices[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_1030_hot_reload_notice_skips_idle_project_chats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        "[triggers]\nenabled = false\n",
+        reloaded_telegram={"show_resume_line": False},
+    )
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    notices = [
+        c for c in transport.send_calls if "show_resume_line" in c["message"].text
+    ]
+    assert [c["channel_id"] for c in notices] == [cfg.chat_id]
+    assert "No restart needed" in notices[0]["message"].text
+
+
+@pytest.mark.anyio
 async def test_894_reload_without_triggers_flip_is_quiet(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -6144,24 +6647,479 @@ async def test_894_reload_fixing_failed_startup_triggers_flags_restart_required(
     """[triggers] enabled at startup but invalid → init fails and nothing
     runs. A reload that fixes the TOML still can't start the scheduler, so it
     must be flagged restart-required like an off→on flip."""
+    # #1117: only a block-level error (here [triggers.server]) still stops
+    # every trigger; a bad cron entry would only skip that cron.
     cfg = _894_cfg(
         tmp_path,
-        trigger_config={"enabled": True, "crons": [{"id": "broken"}]},
+        trigger_config={"enabled": True, "server": {"port": "not-a-port"}},
     )
     with capture_logs() as logs:
         await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
 
     assert [e for e in logs if e["event"] == "triggers.init_failed"]
     restart = [e for e in logs if e["event"] == "config.reload.restart_required"]
-    assert [e["key"] for e in restart] == ["triggers.enabled"]
+    # #1146: the real reason, not an untouched ``triggers.enabled`` key.
+    assert [e.get("reason") for e in restart] == ["triggers_init_failed"]
+    assert "key" not in restart[0]
     transport = cast(FakeTransport, cfg.exec_cfg.transport)
-    notices = [
-        c["message"].text
-        for c in transport.send_calls
-        if "triggers.enabled" in c["message"].text
-    ]
+    texts = [c["message"].text for c in transport.send_calls]
+    assert not [t for t in texts if "triggers.enabled" in t]
+    notices = [t for t in texts if "triggers failed at start-up" in t]
     assert len(notices) == 1
     assert "Restart required" in notices[0]
+
+
+# ── #1117: per-trigger isolation, failure notices, secrets out of logs ──
+
+_1117_SECRET = "s3cretVALUE123-rotate-me-please"
+
+
+def _1117_no_webhook_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    import untether.triggers.server as trigger_server
+
+    monkeypatch.setattr(trigger_server, "run_webhook_server", _noop)
+
+
+def _1117_texts(cfg: TelegramBridgeConfig) -> list[str]:
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    return [c["message"].text for c in transport.send_calls]
+
+
+def _1117_assert_no_secret(*blobs: object) -> None:
+    for blob in blobs:
+        text = str(blob)
+        for start in range(len(_1117_SECRET) - 5):
+            assert _1117_SECRET[start : start + 6] not in text
+
+
+def _1117_webhook_toml(secret_line: str) -> str:
+    return (
+        "[triggers]\nenabled = true\n\n"
+        "[[triggers.webhooks]]\n"
+        'id = "gh"\npath = "/hooks/gh"\n'
+        f"{secret_line}\n"
+        'prompt_template = "hi"\n'
+    )
+
+
+@pytest.mark.anyio
+async def test_1117_startup_skips_only_the_invalid_cron_and_notifies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: one invalid cron + two valid ones → the two start, and a
+    Telegram notice names the invalid id."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "good-a", "schedule": "0 9 * * *", "prompt": "a"},
+            {"id": "broken", "schedule": "0 9 * * *", "future_key": 1},
+            {"id": "good-b", "schedule": "0 10 * * *", "prompt": "b"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            "[triggers]\nenabled = true\n\n[[triggers.crons]]\n"
+            'id = "good-a"\nschedule = "0 9 * * *"\nprompt = "a"\n',
+        )
+
+    assert not [e for e in logs if e["event"] == "triggers.init_failed"]
+    enabled = [e for e in logs if e["event"] == "triggers.enabled"]
+    assert enabled[0]["crons"] == 2
+    invalid = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+    assert [(e["trigger_id"], e["phase"]) for e in invalid] == [("broken", "startup")]
+    assert invalid[0]["log_level"] == "error"
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "1 trigger skipped" in notices[0]
+    assert "cron broken" in notices[0]
+    assert "future_key" in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1117_startup_block_failure_notifies_and_hides_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "server": {"port": "nope"},
+        "webhooks": [
+            {"id": "gh", "path": "/hooks/gh", "secret": _1117_SECRET},  # invalid
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    failed = [e for e in logs if e["event"] == "triggers.init_failed"]
+    assert failed and "server.port" in failed[0]["error"]
+    assert "\n" not in failed[0]["error"]
+    texts = _1117_texts(cfg)
+    assert any("Triggers failed to start" in t for t in texts)
+    _1117_assert_no_secret(logs, texts)
+
+
+@pytest.mark.anyio
+async def test_1117_invalid_webhook_entry_leaks_no_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: the confirmed truncated-repr leak — a model-level error
+    on a webhook carrying a secret — reaches no log line or notice."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [{"id": "gh", "path": "/hooks/gh", "secret": _1117_SECRET}],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        # Same entry on reload, still without a prompt_template.
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            _1117_webhook_toml(f'secret = "{_1117_SECRET}"').replace(
+                'prompt_template = "hi"\n', ""
+            ),
+        )
+
+    invalid = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+    assert {e["phase"] for e in invalid} == {"startup", "reload"}
+    assert "prompt_template is required" in invalid[0]["error"]
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_reload_block_failure_says_old_secret_still_active(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    broken = (
+        _1117_webhook_toml(f'secret = "{_1117_SECRET}"')
+        + '\n[triggers.server]\nport = "nope"\n'
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, broken)
+
+    failed = [e for e in logs if e["event"] == "config.reload.triggers_failed"]
+    assert failed and "server.port" in failed[0]["error"]
+    notices = [t for t in _1117_texts(cfg) if "reload failed" in t]
+    assert len(notices) == 1
+    assert "old webhook secret is still active for: gh" in notices[0]
+    # The previous webhook (and its old secret) is still the live one.
+    manager = cfg.trigger_manager
+    assert manager is not None
+    live = manager.webhook_for_path("/hooks/gh")
+    assert live is not None and live.secret is not None
+    assert live.secret.get_secret_value() == "o" * 40
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_reload_invalid_webhook_switches_it_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reload that breaks one webhook drops that webhook (its old secret is
+    not left active) and says so."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            _1117_webhook_toml(f'secret = "{_1117_SECRET}"\nauth = "bogus"'),
+        )
+
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/gh") is None
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "webhook gh" in notices[0]
+    assert "no earlier secret for it stays active" in notices[0]
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+@pytest.mark.anyio
+async def test_1117_short_secret_warns_at_startup_and_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": _1117_SECRET[:12],
+                "prompt_template": "hi",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch, cfg, _1117_webhook_toml(f'secret = "{_1117_SECRET[:12]}"')
+        )
+
+    short = [e for e in logs if e["event"] == "triggers.webhook.short_secret"]
+    assert [e["webhook_id"] for e in short] == ["gh", "gh"]  # startup + reload
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/gh") is not None  # still accepted
+    _1117_assert_no_secret(logs, _1117_texts(cfg))
+
+
+# ── #1146: trigger notices match what is actually running ──
+
+
+def _1146_open_webhooks(**server: object) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "server": dict(server),
+        "webhooks": [
+            {
+                "id": "gh",
+                "path": "/hooks/gh",
+                "secret": "o" * 40,
+                "prompt_template": "hi",
+            },
+            {
+                "id": "open",
+                "path": "/hooks/open",
+                "auth": "none",
+                "prompt_template": "hi",
+            },
+        ],
+    }
+
+
+_1146_OPEN_TOML = (
+    "[triggers]\nenabled = true\n\n"
+    "[triggers.server]\n{server}\n"
+    "[[triggers.webhooks]]\n"
+    'id = "gh"\npath = "/hooks/gh"\nsecret = "{secret}"\n'
+    'prompt_template = "hi"\n\n'
+    "[[triggers.webhooks]]\n"
+    'id = "open"\npath = "/hooks/open"\nauth = "none"\n'
+    'prompt_template = "hi"\n'
+    "{extra}"
+)
+
+_1146_BROKEN_CRON = (
+    '\n[[triggers.crons]]\nid = "broken"\nschedule = "0 9 * * *"\nfuture_key = 1\n'
+)
+
+
+@pytest.mark.anyio
+async def test_1146_startup_refused_server_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario A at start-up: exposed + an auth = "none" webhook keeps the
+    whole webhook server down. One notice names the refused webhook and says
+    no webhook is served; it never claims the other triggers started
+    normally. An unchanged reload doesn't repeat it."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = _1146_open_webhooks(exposed=True)
+    trigger_config["crons"] = [
+        {"id": "broken", "schedule": "0 9 * * *", "future_key": 1}
+    ]
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=_1146_BROKEN_CRON
+        ),
+    )
+
+    texts = _1117_texts(cfg)
+    refused = [t for t in texts if "Webhook server not started" in t]
+    assert len(refused) == 1
+    assert "no webhooks are being served" in refused[0]
+    assert "Refused: open" in refused[0]
+    assert "cron broken" in refused[0]
+    assert "remove exposed = true" in refused[0]
+    assert not [t for t in texts if "other triggers started normally" in t]
+    assert not [t for t in texts if "Trigger config" in t]  # no second notice
+
+
+@pytest.mark.anyio
+async def test_1146_reload_after_refused_startup_says_server_is_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A later reload notice mustn't say 'reloaded normally' while the
+    webhook server refused at start-up is still down."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks(exposed=True))
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=_1146_BROKEN_CRON
+        ),
+    )
+
+    notices = [t for t in _1117_texts(cfg) if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "cron broken" in notices[0]
+    assert "webhook open" not in notices[0]  # already announced at start-up
+    assert "the webhook server isn't running" in notices[0]
+    assert "reloaded normally, but" in notices[0]
+    assert "without a restart" not in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_refusing_open_webhook_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario A on reload: turning on exposed drops only the auth = "none"
+    route, and says so in Telegram like a skipped invalid webhook."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks())
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(server="exposed = true", secret="o" * 40, extra=""),
+    )
+
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/open") is None
+    assert manager.webhook_for_path("/hooks/gh") is not None
+    texts = _1117_texts(cfg)
+    assert not [t for t in texts if "Webhook server not started" in t]
+    notices = [t for t in texts if "Trigger config" in t]
+    assert len(notices) == 1
+    assert "1 trigger skipped" in notices[0]
+    assert "webhook open: refused" in notices[0]
+    assert "The other triggers reloaded normally." in notices[0]
+    assert "remove exposed = true" in notices[0]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_after_startup_block_failure_needs_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scenario B: duplicate cron ids stop every trigger at start-up. Saving
+    a fix (with one entry still invalid) can't start them: the restart notice
+    names the real reason and the skipped-entries notice says a restart is
+    still needed."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "dup", "schedule": "0 9 * * *", "prompt": "a"},
+            {"id": "dup", "schedule": "0 10 * * *", "prompt": "b"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(
+            monkeypatch,
+            cfg,
+            "[triggers]\nenabled = true\n\n[[triggers.crons]]\n"
+            'id = "dup"\nschedule = "0 9 * * *"\nprompt = "a"\n' + _1146_BROKEN_CRON,
+        )
+
+    assert [e for e in logs if e["event"] == "triggers.init_failed"]
+    texts = _1117_texts(cfg)
+    assert not [t for t in texts if "triggers.enabled" in t]
+    restart = [t for t in texts if "Restart required" in t]
+    assert len(restart) == 1
+    assert "triggers failed at start-up" in restart[0]
+    skipped = [t for t in texts if "Trigger config" in t]
+    assert len(skipped) == 1
+    assert "cron broken" in skipped[0]
+    assert "normally" not in skipped[0]
+    assert "without a restart" not in skipped[0]
+    assert "No triggers are running" in skipped[0]
+
+
+@pytest.mark.anyio
+async def test_1144_startup_notice_keeps_cron_asterisks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 defect: with two invalid schedules in one notice, Telegram
+    turned the asterisks between them into italics ('99 99 * * ' and ' *')."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {"id": "bad-range", "schedule": "99 99 * * *", "prompt": "a"},
+            {"id": "two-fields", "schedule": "* *", "prompt": "b"},
+            {"id": "good", "schedule": "17 3 * * *", "prompt": "c"},
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    calls = [c for c in transport.send_calls if "Trigger config" in c["message"].text]
+    assert len(calls) == 1
+    message = calls[0]["message"]
+    assert "'99 99 * * *'" in message.text
+    assert "'* *'" in message.text
+    entities = message.extra.get("entities", [])
+    assert not [e for e in entities if e["type"] in {"italic", "bold"}]
+
+
+@pytest.mark.anyio
+async def test_1146_reload_block_failure_with_server_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Live rc8 edge case: the webhook server was refused at start-up, then a
+    reload broke the whole [triggers] block. No webhook is served, so the
+    notice mustn't say webhooks still run or an old secret is active."""
+    _1117_no_webhook_server(monkeypatch)
+    cfg = _894_cfg(tmp_path, trigger_config=_1146_open_webhooks(exposed=True))
+    dup_crons = (
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 9 * * *"\nprompt = "a"\n'
+        '\n[[triggers.crons]]\nid = "dup"\nschedule = "0 10 * * *"\nprompt = "b"\n'
+    )
+    await _894_run_with_reload(
+        monkeypatch,
+        cfg,
+        _1146_OPEN_TOML.format(
+            server="exposed = true", secret="o" * 40, extra=dup_crons
+        ),
+    )
+
+    notices = [t for t in _1117_texts(cfg) if "reload failed" in t]
+    assert len(notices) == 1
+    assert "previous crons are still running unchanged" in notices[0]
+    assert "no webhooks are being served" in notices[0]
+    assert "crons and webhooks are still running" not in notices[0]
+    assert "secret" not in notices[0]
+    assert "to start the webhook server" in notices[0]
 
 
 def test_894_triggers_enable_needs_restart_truth_table() -> None:
@@ -6173,3 +7131,78 @@ def test_894_triggers_enable_needs_restart_truth_table() -> None:
     assert f(previous=False, current=True, running=True) is False  # hot re-enable
     assert f(previous=True, current=False, running=True) is False  # off is hot
     assert f(previous=False, current=False, running=False) is False
+
+
+# --- #1142: start-up trigger permission audit ------------------------------
+
+_1142_TRIGGERS_TOML = (
+    "[triggers]\nenabled = true\n\n"
+    "[[triggers.crons]]\n"
+    'id = "nightly"\nschedule = "0 3 * * *"\nprompt = "hi"\n\n'
+    "[[triggers.webhooks]]\n"
+    'id = "bare"\npath = "/hooks/bare"\nauth = "none"\n'
+    'prompt_template = "Payload: {{text}}"\n'
+)
+
+
+@pytest.mark.anyio
+async def test_1142_startup_audit_flags_bypass_cron_and_bare_webhook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Acceptance: in a chat set to /planmode bypass, a cron with no mode of
+    its own is flagged at startup (it keeps the mode), and a project-less
+    agent_run webhook starts and is flagged too. A reload of the same
+    triggers doesn't repeat either warning."""
+    _1117_no_webhook_server(monkeypatch)
+    trigger_config = {
+        "enabled": True,
+        "crons": [{"id": "nightly", "schedule": "0 3 * * *", "prompt": "hi"}],
+        "webhooks": [
+            {
+                "id": "bare",
+                "path": "/hooks/bare",
+                "auth": "none",
+                "prompt_template": "Payload: {{text}}",
+            }
+        ],
+    }
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_894_projects(),
+        config_path=tmp_path / "untether.toml",
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        trigger_config=trigger_config,
+    )
+    prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "untether.toml"))
+    await prefs.set_engine_override(
+        123, "claude", EngineOverrides(permission_mode="bypassPermissions")
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _1142_TRIGGERS_TOML)
+
+    cron = [e for e in logs if e["event"] == "trigger.cron.inherits_bypass"]
+    assert len(cron) == 1
+    assert cron[0]["cron_id"] == "nightly"
+    assert cron[0]["origin"] == "chat"
+    assert cron[0]["outcome"] == "runs_with_bypass"
+    # The startup audit runs as a task, so the test's immediate reload may
+    # log it first; either way it is logged once.
+    assert cron[0]["reason"] in {"startup", "reload"}
+    assert cron[0]["log_level"] == "warning"
+    bare = [e for e in logs if e["event"] == "trigger.webhook.no_project"]
+    assert [e["webhook_id"] for e in bare] == ["bare"]
+    manager = cfg.trigger_manager
+    assert manager is not None
+    assert manager.webhook_for_path("/hooks/bare") is not None  # still starts
+    assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]

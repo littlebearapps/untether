@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...commands import get_command
+from ...commands import get_command, is_callback_only
 from ...config import ConfigError
 from ...ids import RESERVED_COMMAND_IDS, is_valid_id
 from ...logging import get_logger
@@ -60,6 +60,10 @@ def build_bot_commands(
             continue
         cmd = backend.id.lower()
         if cmd in seen:
+            continue
+        if is_callback_only(backend):
+            # #1068: a button handler (`agy_plan`, `aq`, `claude_control`)
+            # has nothing to do as a typed command.
             continue
         if not is_valid_id(cmd):
             logger.debug(

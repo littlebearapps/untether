@@ -28,7 +28,7 @@ For time-sensitive callbacks (approval buttons), use early answering:
 - Provide `early_answer_toast()` returning the toast text ("Approved", "Denied", etc.)
 - Dispatch calls `answerCallbackQuery` before processing the action
 - With `approval_originator_only` on (#388, default off, hot-reloads via `update_from`), `_dispatch_callback` refuses
-  a `claude_control:` / `aq:` tap from anyone but the run's originator **before** the early answer — the early toast
+  a `claude_control:` / `ia:` / `aq:` / `agy_plan:` tap from anyone but the run's originator **before** the early answer — the early toast
   reserves a control claim, so never move the check after it. Logic: `telegram/approval_originator.py`
 
 ## Ephemeral messages
@@ -68,7 +68,7 @@ Freshness (#924): only entries changed since the dispatch's `outbox_since` are s
 
 ## Progress persistence
 
-`progress_persistence.py` tracks active progress messages in `active_progress.json`. On startup, orphan messages from a prior instance are edited to "⚠️ interrupted by restart" with keyboard removed.
+`progress_persistence.py` tracks active progress messages in `active_progress.json`. On startup, orphan messages from a prior instance are edited to "⚠️ interrupted by restart" with keyboard removed, and an entry's tracked approval push (`notify_message_id`, set/cleared by `ProgressEdits._persist_approval_notify`) is deleted (#1084). Keep new entry keys optional: older files must still load.
 
 ## Telegram update_id persistence (#287)
 
@@ -93,7 +93,7 @@ the topic/chat `/agent` default and can fire on a different engine than a plain 
 
 ## Markdown rendering (`telegram/render.py`)
 
-`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797). Single newlines in line-structured text are kept as line breaks while wrapped prose reflows (#870), and an ordered list keeps its own start number (#886, sulguk ignores `<ol start>`, so it goes on the first `<li value>`).
+`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. Closing `*`/`_` emphasis markers never end up inside a bare URL's link (#1152, `_linkify_inline` replaces markdown-it's inline linkify rule). A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797). Single newlines in line-structured text are kept as line breaks while wrapped prose reflows (#870); an ordered list keeps its own start number (#886, sulguk ignores `<ol start>`, so it goes on the first `<li value>`), and a loose list item's first paragraph is unwrapped so its text stays on the marker's line (#1094).
 
 ## Forward-coalesce command barrier (#807)
 
@@ -103,6 +103,8 @@ A slash command sent while a prompt is pending in the `ForwardCoalescer` window
 - `/cancel`, `/new`, `/continue` → `ForwardCoalescer.drop(key, reason=<cmd>)`
   (INFO `forward.prompt.dropped`) and a reply to the dropped prompt:
   `🗑️ Dropped N message(s) sent just before /<cmd> — …`. Never drop silently (#794).
+  For `/cancel` that notice is its reply: `handle_cancel(dropped_pending=True)` skips only
+  the bare "nothing running" fallbacks — idle close / `/at` / loop replies still go (#1084).
 - any other command → `ForwardCoalescer.flush(key, reason="command")` first.
   **Best-effort ordering only:** the prompt is dispatched via `start_soon` and
   awaits prefs/context, so a `/model` or `/planmode` right behind it can still
@@ -129,6 +131,16 @@ An idle Claude live session (answered, no in-flight turn or background task; `ru
 not a "running" task for wording or ambiguity: `/new` says `closed the idle session` (#895), and `/cancel` closes it
 (`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
 Never return early from `/cancel` after closing an idle session.
+
+A message sent while a chat's first run hasn't reported its session yet waits on that run (`telegram/first_start.py`,
+#1157) and has no queued card, so the job-queue cancel paths never see it. Every way `/cancel` or `/new` stops a
+starting run must also call `first_start.drop_waiting(...)` (each woken waiter then replies with the #807-style dropped
+notice) — never let a waiter start a fresh conversation nobody saw queued. Likewise a prompt still in its arrival line
+(`telegram/arrival_order.py`, #1164: it waits behind an earlier prompt that is sending its notice or queued card) has
+neither a card nor a first-start wait: `/new` always calls `arrival_order.drop_waiting(...)` too, and so does a
+`/cancel` that stops a run which hasn't reported its session (the same condition as `first_start.drop_waiting`); the
+dropped prompt replies with the same notice when its turn comes. A `/cancel` of a run that has its session leaves
+in-line prompts to queue and run, like its queued follow-ups.
 
 ## After changes
 

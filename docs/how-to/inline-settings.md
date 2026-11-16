@@ -10,6 +10,8 @@ Send `/config` in any chat:
 /config
 ```
 
+In a group chat, anyone allowed to use the bot can open the menu and read it, but only a group admin or the creator can change a setting. Other members see `changing settings is restricted to group admins.` and nothing changes. See [Group chat](group-chat.md#the-config-menu-in-a-group).
+
 The home page shows current values grouped under **Agent controls**, **Display** and **Routing**, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
 
 ```
@@ -18,7 +20,7 @@ The home page shows current values grouped under **Agent controls**, **Display**
 Agent controls (Claude Code)
 Permission mode: on  · approve the plan first
 Ask mode: on  · interactive questions
-Diff preview: off  · buttons only
+Diff preview: default  · diffs on cards
 
 Display
 Cost & usage: cost on, sub off
@@ -37,7 +39,7 @@ Effort: default  · high
 [📝 Diff preview]  [🔍 Verbose]
 [💰 Cost & usage]  [↩️ Resume line]
 [📡 Listen]        [🔁 Loop mode]
-[🧠 Reasoning]     [⚙️ Engine & model]
+[🧠 Effort]        [⚙️ Engine & model]
 [↪️ Follow-up]     [ℹ️ About]
 [⏰ Triggers]      [⏸ Pause triggers]   ← only when [triggers] is enabled
 
@@ -47,14 +49,14 @@ Effort: default  · high
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Antigravity CLI** shows **Permission mode** (workspace / plan first / ask me / full access) and **Effort**, plus **Ask mode**, **Diff preview** and **Follow-up** once Untether's agy plugin is installed on the host. **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
 Tap any button to open that setting's page. Each sub-page shows:
 
 - A description of the setting
-- The current effective value (resolved from override or default — never shows a bare "default" label)
+- The current effective value (resolved from override or default — never shows a bare "default" label, except Diff preview, whose unset state is neither on nor off: see below)
 - Buttons to change the value
 - A **Clear override** button to revert to the global/engine default
 - A **← Back** button to return to the home page
@@ -74,8 +76,10 @@ When you tap a setting button:
 Some settings have more than two states and use a different layout:
 
 - **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
+- **Permission mode** (Antigravity CLI) — `[Workspace] [Full access]` on the first row, `[Ask me] [Plan first]` on the second (Ask me reads `🔒 Ask me — set up` until Untether's agy plugin is installed), then `[🔐 Telegram approvals]` and `[Clear override] [← Back]`
 - **Approval mode** (Gemini, deprecated) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
+- **Effort** (Antigravity CLI) — low / medium / high, narrowed to the levels the chat's model accepts (none for a fixed-effort model)
 - **Reasoning** (Codex) — low / medium / high / xhigh
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
@@ -84,28 +88,36 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Permission mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
+- **Permission mode** — Claude Code, and Antigravity CLI with its own page: **Workspace** (default), **Full access**, **Plan first** (a plan you approve with buttons) or **Ask me** (approval buttons before shell, web, MCP and files outside the project; shown as **🔒 Ask me — set up** until [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) is installed on the host, and that button opens its status page). See [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode). The page carries a ⚠️ line, and the toasts say when to send `/new`: switching between Workspace / Plan first and Ask me / Full access only applies from a new conversation (see the warning below). Codex and Gemini have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
 - **Approval mode** — Gemini CLI only (deprecated). Toggle between "read-only", "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy. Despite its label, "read-only" (also what an unset chat shows) runs Gemini with `--approval-mode yolo`, i.e. full access — see [Interactive approval](interactive-approval.md#gemini-cli-approval-mode).
-- **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
-- **Follow-up** — Claude Code only ([#775](https://github.com/littlebearapps/untether/issues/775)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
-- **Reasoning** — Claude Code and Codex only. Hidden for OpenCode, Pi, Gemini, and Amp.
+- **Ask mode** — Claude Code, and Antigravity CLI once [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) is installed on the host ([#980](https://github.com/littlebearapps/untether/issues/980)). Hidden for other engines.
+- **Diff preview** — Claude Code, and Antigravity CLI once [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) is installed on the host ([#1090](https://github.com/littlebearapps/untether/issues/1090)), where it only changes [Ask me](interactive-approval.md#antigravity-ask-me)'s approval cards. Hidden for other engines.
+- **🔐 Telegram approvals** — Antigravity CLI only, from the home page or Permission mode: whether Untether's agy plugin is installed and loaded for the chat's project, the host commands to install or remove it, and a **Re-check** button. Read-only: the plugin is installed on the host, never from Telegram.
+- **Follow-up** — Claude Code, and Antigravity CLI with Untether's agy plugin ([#775](https://github.com/littlebearapps/untether/issues/775), [#981](https://github.com/littlebearapps/untether/issues/981)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
+- **Reasoning** — Claude Code, Codex and Antigravity CLI (where the page is called **Effort** and shows only the levels the chat's model accepts). Hidden for OpenCode, Pi, Gemini, and Amp.
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.
+
+<!-- TODO: capture screenshot: antigravity-telegram-approvals-page — /config → 🔐 Telegram approvals (Antigravity) page with the plugin installed: "Plugin: …", "Approval and question wait: 900 s", "This chat's project: ready (agy lists the hooks)", the three untether agy-gate host commands and the 🔄 Re-check / ← Back buttons -->
+<!-- <img src="../assets/screenshots/antigravity-telegram-approvals-page.jpg" alt="Telegram approvals page for Antigravity showing the agy plugin installed and ready for the chat's project" width="360" loading="lazy" /> -->
+
+!!! warning "Antigravity: after switching between Workspace / Plan first and Ask me / Full access, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in Workspace keeps its no-shell tools after you pick **Full access** or **Ask me**, even though the footer says `full access`; the new mode applies from the next new conversation. Switching back needs `/new` too: a conversation that began in Full access or Ask me keeps its shell, which Workspace and Plan first then block. Moving between Workspace and Plan first, or between Ask me and Full access, needs no `/new`.
 
 ## Available settings
 
 | Setting | Options | Persisted |
 |---------|---------|-----------|
-| Permission mode | off, on, plan-auto, auto | Yes (chat prefs) |
+| Permission mode | Claude: off, on, plan-auto, auto; Antigravity: Workspace, Full access, Ask me, Plan first | Yes (chat prefs) |
 | Approval policy | full auto, safe (read-only sandbox) | Yes (chat prefs) |
 | Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |
 | Verbose | off, on | No (in memory, cleared on restart) |
-| Diff preview | off, on | Yes (chat prefs) |
+| Diff preview | default (not set), on, off | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh; Antigravity: low, medium, high (only those the model accepts) | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
@@ -113,7 +125,22 @@ When you switch engines via the Engine & model page, the home page automatically
 | Budget | off, on | Yes (chat prefs) |
 | Stop at limit | off, on | Yes (chat prefs) |
 
-Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
+Diff preview has three states. **default** (not set) shows the diff on the approval cards that appear but holds no edit just to preview it; **on** also makes an edit or command that reaches Untether for approval wait for your tap, with the diff; **off** shows approval buttons only. Which edits reach Untether depends on the Claude permission mode, so the page adds a note for the chat's mode and the home line says what On holds there ([#1147](https://github.com/littlebearapps/untether/issues/1147)):
+
+| Permission mode | Home line after `on` | What On holds |
+|---|---|---|
+| on (plan) | `edits before plan approval wait` | an edit or command Claude tries before you approve its plan; once you approve the plan, or one held edit, the rest of that reply runs |
+| plan-auto | `rarely holds: plans auto-approved` | only an edit tried before the plan is approved for you; the plan's edits run |
+| auto | `only edits Claude Code asks about` | protected files, or actions after repeated classifier blocks; Claude Code approves in-project edits itself |
+| dontAsk, bypassPermissions | `rarely holds in this mode` | almost nothing |
+| off (acceptEdits), manual | `nothing extra in this mode` | nothing extra: Claude Code asks you itself and its cards show the diff (in off, in-project edits still run) |
+| engine default, no mode in `untether.toml` | `edits sent for approval wait` | nothing: Claude Code runs without approval buttons |
+
+With no Diff preview setting, neither On nor Off is ticked; **Clear** goes back to default ([#1115](https://github.com/littlebearapps/untether/issues/1115)).
+
+In an Antigravity chat, Diff preview only changes [Ask me](interactive-approval.md#antigravity-ask-me)'s approval cards, so the home line reads `only in Ask me` while the chat is in Workspace, Plan first or Full access, whatever the setting. In Ask me it reads `edits ask first` (on), `buttons only` (off) or `diffs on cards` (default) ([#1167](https://github.com/littlebearapps/untether/issues/1167)).
+
+Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is the deprecated Gemini CLI.
 
 ### Triggers page {#triggers-page}
 
@@ -150,7 +177,7 @@ Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`);
 The Cost & Usage sub-page merges cost display and budget controls into a unified page with toggle rows:
 
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
-- **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code only)
+- **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code), or the quota line built from your last `/usage` (Antigravity CLI)
 - **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
 - **Stop at limit** — per-chat override of `[cost_budget] auto_cancel`. Stops new runs once the daily budget is reached and ends a session after the reply that passes the per-run budget. It can't interrupt a reply in progress (see [Cost budgets](cost-budgets.md#stop-at-limit))
 

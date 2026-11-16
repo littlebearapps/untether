@@ -13,7 +13,7 @@ OverrideSource = Literal["topic_override", "chat_default", "default"]
 # #416: no `minimal` — every allowed tuple must only hold levels that have a
 # /config button.
 REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
+REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex", "antigravity"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
@@ -22,16 +22,58 @@ _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     # test_codex_cli_schema_drift.py::test_bundled_catalogue_has_no_minimal
     # (and ::test_listed_models_support_untether_codex_levels).
     "codex": ("low", "medium", "high", "xhigh"),
+    # #558 (D29): the ceiling for agy's buttons. Its CLI also names `xhigh`
+    # and `max`, but no model accepts them (Pro takes low/high only, gpt-oss
+    # a fixed medium), so /config narrows this per model from a cached
+    # `agy -p /effort` probe. Pinned by test_antigravity_cli_schema_drift.py
+    # (::test_effort_values_superset, ::test_default_model_efforts).
+    "antigravity": ("low", "medium", "high"),
 }
 
 
+# Engines whose question buttons need nothing on the host. Antigravity's
+# need Untether's agy plugin (#980): ``ask_questions_supported`` decides.
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
-PERMISSION_MODE_SUPPORTED_ENGINES = frozenset({"claude", "codex", "gemini"})
 
-DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
+def ask_questions_supported(engine: str | None, cwd: object = None) -> bool:
+    """Capability-driven (#980, D23): Claude always; Antigravity when
+    Untether's agy plugin is installed (and, when *cwd*'s ``-p /hooks``
+    check already ran, it passed). Cheap: never runs agy."""
+    if engine in ASK_QUESTIONS_SUPPORTED_ENGINES:
+        return True
+    if engine != "antigravity":
+        return False
+    from pathlib import Path
 
-SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude"})
+    from ..antigravity import gate_plugin, gate_precheck
+
+    if not gate_plugin.installed_ready():
+        return False
+    latest = gate_precheck.latest(cwd if isinstance(cwd, Path) else None)
+    return latest is None or latest.ok
+
+
+# #558 (D23): engines with an `ExitPlanMode` tool — the only ones whose
+# preamble carries the plan-mode requirements block.
+PLAN_EXIT_TOOL_ENGINES = frozenset({"claude"})
+
+PERMISSION_MODE_SUPPORTED_ENGINES = frozenset(
+    {"claude", "codex", "antigravity", "gemini"}
+)
+
+
+def diff_preview_supported(engine: str | None, cwd: object = None) -> bool:
+    """Claude always; Antigravity wherever Ask me can run (#1090): the toggle
+    only changes Ask me's approval cards, and Ask me needs the same agy
+    plugin as Ask mode."""
+    return ask_questions_supported(engine, cwd)
+
+
+# Engines with a subscription-usage footer. Each needs an entry in
+# ``runner_bridge.SUBSCRIPTION_FOOTERS`` (#979): this set also shows the
+# /config → Cost & usage toggle, which does nothing without one.
+SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude", "antigravity"})
 
 API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "amp"})
 
@@ -305,6 +347,7 @@ _ENGINE_REASONING_LABEL: dict[str, str] = {
     "claude": "Effort",
     "codex": "Reasoning",
     "pi": "Thinking",
+    "antigravity": "Effort",
 }
 
 
@@ -348,7 +391,8 @@ def get_engine_default_model(engine: str) -> str | None:
             return None
         return None
     # claude/codex/gemini auto-route; amp derives from mode — no stable
-    # settings-file source, keep the static hint.
+    # settings-file source, keep the static hint. antigravity: agy's own
+    # settings file is never read (D33), so the static hint too.
     return None
 
 

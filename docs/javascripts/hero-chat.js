@@ -24,7 +24,7 @@
   const DONE_TIME = 23000;
   const MAX_VISIBLE = 5;
 
-  const ANSWER = `Untether is a Telegram bridge for agent CLIs like Claude Code, Codex, OpenCode, and Pi. It lets you run agents from chat, stream progress back, manage multiple repos and branches, and resume sessions from either chat or terminal.`;
+  const ANSWER = `Untether is a Telegram bridge for agent CLIs like Claude Code, Codex, OpenCode, Pi, and Antigravity CLI. It lets you run agents from chat, stream progress back, manage multiple repos and branches, and resume sessions from either chat or terminal.`;
 
   const USER_QUESTION = 'what does this project do?';
 

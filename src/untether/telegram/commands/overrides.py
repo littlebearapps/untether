@@ -53,10 +53,38 @@ async def require_admin_or_private(
     return False
 
 
+PermissionRefusal = Literal["no_sender", "lookup_failed", "not_admin"]
+
+
 @dataclass(frozen=True, slots=True)
 class PermissionDecision:
     allowed: bool
     error_text: str | None = None
+    # Why a refusal happened, for logs (ids only — never the text).
+    reason: PermissionRefusal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdminGate:
+    """Refusal wording for a command that needs a group admin (#1042).
+
+    A command backend returns one from ``admin_gate(args_text)`` when the
+    invocation changes settings; the dispatch runs the admin-or-private check
+    before the backend (and before a button's early answer).
+    """
+
+    missing_sender: str
+    failed_member: str
+    denied: str
+
+
+# The one refusal wording for a chat-settings change: `/config` actions and
+# the text commands that write the same settings (`/planmode`, `/verbose`).
+SETTINGS_ADMIN_GATE = AdminGate(
+    missing_sender="cannot verify sender for settings changes.",
+    failed_member="failed to verify settings permissions.",
+    denied="changing settings is restricted to group admins.",
+)
 
 
 async def check_admin_or_private(
@@ -67,17 +95,48 @@ async def check_admin_or_private(
     failed_member: str,
     denied: str,
 ) -> PermissionDecision:
-    sender_id = msg.sender_id
+    return await check_admin_or_private_ids(
+        cfg,
+        chat_id=msg.chat_id,
+        sender_id=msg.sender_id,
+        is_private=msg.is_private,
+        missing_sender=missing_sender,
+        failed_member=failed_member,
+        denied=denied,
+    )
+
+
+async def check_admin_or_private_ids(
+    cfg: TelegramBridgeConfig,
+    *,
+    chat_id: int,
+    sender_id: int | None,
+    is_private: bool,
+    missing_sender: str,
+    failed_member: str,
+    denied: str,
+) -> PermissionDecision:
+    """The admin-or-private check, for callers without an incoming message.
+
+    A button tap carries a chat id and a sender id but no message of the
+    sender's own, so the check takes the ids directly. Private chats pass; in
+    a group only ``creator`` / ``administrator`` do; an unknown sender or a
+    failed member lookup is refused.
+    """
     if sender_id is None:
-        return PermissionDecision(allowed=False, error_text=missing_sender)
-    if msg.is_private:
+        return PermissionDecision(
+            allowed=False, error_text=missing_sender, reason="no_sender"
+        )
+    if is_private:
         return PermissionDecision(allowed=True)
-    member = await cfg.bot.get_chat_member(msg.chat_id, sender_id)
+    member = await cfg.bot.get_chat_member(chat_id, sender_id)
     if member is None:
-        return PermissionDecision(allowed=False, error_text=failed_member)
+        return PermissionDecision(
+            allowed=False, error_text=failed_member, reason="lookup_failed"
+        )
     if member.status in {"creator", "administrator"}:
         return PermissionDecision(allowed=True)
-    return PermissionDecision(allowed=False, error_text=denied)
+    return PermissionDecision(allowed=False, error_text=denied, reason="not_admin")
 
 
 async def resolve_engine_selection(

@@ -31,7 +31,7 @@ flowchart TB
 
     subgraph Runner["Runner Layer"]
         runner_proto[Runner Protocol<br/>runner.py]
-        runners[runners/<br/>claude, codex, opencode, pi,<br/>gemini + amp (deprecated)]
+        runners[runners/<br/>claude, codex, opencode, pi, antigravity,<br/>gemini + amp (deprecated)]
         schemas[schemas/<br/>JSONL decoders]
     end
 
@@ -54,7 +54,7 @@ flowchart TB
     end
 
     subgraph External["External"]
-        agent_clis[Agent CLIs<br/>claude, codex, opencode, pi, gemini, amp]
+        agent_clis[Agent CLIs<br/>claude, codex, opencode, pi, agy, gemini, amp]
         telegram_api[Telegram Bot API]
         webhook_sources[Webhook Sources<br/>GitHub, CI, etc.]
     end
@@ -225,6 +225,7 @@ flowchart TD
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
     D -->|OpenCode 1.x| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;<br/>(2.x refused before spawn)"]
+    D -->|Antigravity| D7["agy --input-format stream-json<br/>--output-format stream-json<br/>[--conversation=id] --mode=… or<br/>--dangerously-skip-permissions<br/>(prompt on stdin)"]
     D -->|Gemini, deprecated| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
     D -->|Amp, deprecated| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
@@ -232,6 +233,7 @@ flowchart TD
     D2 --> E
     D3 --> E
     D4 --> E
+    D7 --> E
     D5 --> E
     D6 --> E
 
@@ -335,6 +337,7 @@ flowchart TD
         codex[codex.py]
         opencode[opencode.py]
         pi[pi.py]
+        antigravity[antigravity.py]
         gemini[gemini.py]
         amp[amp.py]
     end
@@ -344,6 +347,7 @@ flowchart TD
         codex_s[codex.py]
         opencode_s[opencode.py]
         pi_s[pi.py]
+        antigravity_s[antigravity.py]
         gemini_s[gemini.py]
         amp_s[amp.py]
     end
@@ -352,6 +356,7 @@ flowchart TD
     codex --> codex_s
     opencode --> opencode_s
     pi --> pi_s
+    antigravity --> antigravity_s
     gemini --> gemini_s
     amp --> amp_s
 
@@ -385,7 +390,7 @@ flowchart LR
     subgraph Config["~/.untether/"]
         toml[untether.toml]
         lock[untether.lock]
-        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history"]
+        state["state files (JSON)<br/>chat prefs, sessions, topics,<br/>active_progress, last_update_id,<br/>active_loops, daily_cost, stats,<br/>session_costs, session_quarantine,<br/>run_once_fired / run_once_pending,<br/>triggers_history,<br/>antigravity_seen_config / antigravity_notices"]
     end
 
     subgraph toml_contents["untether.toml"]
@@ -396,6 +401,7 @@ flowchart LR
         plugins_extra["[plugins.mycommand]<br/>setting = ..."]
         claude_cfg["[engines.claude]<br/>model = ...<br/>permission_mode = ..."]
         codex_cfg["[engines.codex]<br/>model = ..."]
+        agy_cfg["[engines.antigravity]<br/>model = ...<br/>permission_mode = workspace / ask / plan / full"]
         runtime_cfg["[progress] [watchdog] [footer]<br/>[cost_budget] [loop] [security]"]
         triggers_cfg["[triggers]<br/>[[triggers.crons]]<br/>[[triggers.webhooks]]"]
         projects_cfg["[projects.alias]<br/>path = ...<br/>worktrees_dir = ...<br/>default_engine = ..."]

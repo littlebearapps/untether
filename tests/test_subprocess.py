@@ -71,6 +71,57 @@ async def test_manage_subprocess_uses_10s_kill_timeout(
     assert captured_timeout == [10.0]
 
 
+@pytest.mark.anyio
+async def test_manage_subprocess_logs_exit_when_torn_down() -> None:
+    """#1062: a run cancelled mid-flight never reaches its caller's
+    ``subprocess.exit`` line, so the teardown logs the exit itself."""
+    import anyio
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        with anyio.CancelScope() as scope:
+            async with subprocess_utils.manage_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                log_teardown_exit=True,
+            ) as proc:
+                scope.cancel()
+                await anyio.sleep(5)
+    exits = [e for e in logs if e["event"] == "subprocess.exit"]
+    assert len(exits) == 1
+    assert exits[0]["pid"] == proc.pid
+    assert exits[0]["rc"] == -signal.SIGTERM
+    assert exits[0]["reason"] == "teardown"
+    assert exits[0]["killed"] is False
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_logs_no_teardown_exit_after_a_clean_exit() -> None:
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        async with subprocess_utils.manage_subprocess(
+            [sys.executable, "-c", "pass"], log_teardown_exit=True
+        ) as proc:
+            await proc.wait()
+    assert [e for e in logs if e["event"] == "subprocess.exit"] == []
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_teardown_exit_log_is_opt_in() -> None:
+    """Callers that log their own exit (Claude's runner) are unchanged."""
+    import anyio
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        with anyio.CancelScope() as scope:
+            async with subprocess_utils.manage_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(30)"]
+            ):
+                scope.cancel()
+                await anyio.sleep(5)
+    assert [e for e in logs if e["event"] == "subprocess.exit"] == []
+
+
 # ---------------------------------------------------------------------------
 # #275 — descendant-tree cleanup tests
 # ---------------------------------------------------------------------------

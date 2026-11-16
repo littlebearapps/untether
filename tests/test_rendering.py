@@ -427,6 +427,103 @@ def test_render_markdown_www_host_with_md_tld_stays_link() -> None:
     assert _link_urls(entities) == ["http://www.example.md"]
 
 
+def _entity_spans(text: str, entities: list[dict], kind: str) -> list[str]:
+    return [
+        text[e["offset"] : e["offset"] + e["length"]]
+        for e in entities
+        if e.get("type") == kind
+    ]
+
+
+@pytest.mark.parametrize(
+    ("md", "text_out", "url", "kind"),
+    [
+        ("**https://x.org/a**: y", "https://x.org/a: y", "https://x.org/a", "bold"),
+        ("**https://x.org/a**. y", "https://x.org/a. y", "https://x.org/a", "bold"),
+        ("__https://x.org/a__; y", "https://x.org/a; y", "https://x.org/a", "bold"),
+        ("_https://x.org/a_, y", "https://x.org/a, y", "https://x.org/a", "italic"),
+        ("*https://x.org/a*) y", "https://x.org/a) y", "https://x.org/a", "italic"),
+        (
+            "See **https://www.iana.org/about**:",
+            "See https://www.iana.org/about:",
+            "https://www.iana.org/about",
+            "bold",
+        ),
+        (
+            "_https://x.org/a_b_c_, y",
+            "https://x.org/a_b_c, y",
+            "https://x.org/a_b_c",
+            "italic",
+        ),
+        (
+            "**https://x.org/a_b**: y",
+            "https://x.org/a_b: y",
+            "https://x.org/a_b",
+            "bold",
+        ),
+    ],
+)
+def test_render_markdown_emphasis_wrapped_url_closes_outside_link(
+    md: str, text_out: str, url: str, kind: str
+) -> None:
+    """#1152: the closing emphasis markers (and any punctuation after them)
+    are not part of a bare URL that the markers wrap."""
+    text, entities = render_markdown(md)
+
+    assert text == text_out
+    assert "*" not in text and "__" not in text
+    assert _link_urls(entities) == [url]
+    assert _entity_spans(text, entities, kind) == [url]
+    assert _entity_spans(text, entities, "text_link") == [url]
+
+
+def test_render_markdown_url_at_end_of_longer_emphasis_closes_outside_link() -> None:
+    text, entities = render_markdown("**Source: https://x.org/a**: y")
+
+    assert text == "Source: https://x.org/a: y"
+    assert _link_urls(entities) == ["https://x.org/a"]
+    assert _entity_spans(text, entities, "bold") == ["Source: https://x.org/a"]
+
+
+def test_render_markdown_closed_emphasis_does_not_trim_later_url() -> None:
+    """An emphasis that already closed before the URL leaves its `_` alone."""
+    text, entities = render_markdown("__a__ https://x.org/wiki/Foo_, y")
+
+    assert text == "a https://x.org/wiki/Foo_, y"
+    assert _link_urls(entities) == ["https://x.org/wiki/Foo_"]
+
+
+@pytest.mark.parametrize(
+    ("md", "url"),
+    [
+        ("see https://x.org/a_b_c here", "https://x.org/a_b_c"),
+        ("see https://x.org/a_b_c.", "https://x.org/a_b_c"),
+        (
+            "see https://x.org/snake_case_name/x_y now",
+            "https://x.org/snake_case_name/x_y",
+        ),
+        ("see https://x.org/a*b now", "https://x.org/a*b"),
+        (
+            "see https://en.wikipedia.org/wiki/Foo_ now",
+            "https://en.wikipedia.org/wiki/Foo_",
+        ),
+        ("see https://x.org/a.", "https://x.org/a"),
+        ("see https://x.org/a, then go", "https://x.org/a"),
+    ],
+)
+def test_render_markdown_bare_url_underscores_and_punctuation(
+    md: str, url: str
+) -> None:
+    """#1152: a bare URL not wrapped in emphasis keeps its own `_` / `*`
+    characters, and trailing sentence punctuation stays outside the link."""
+    text, entities = render_markdown(md)
+
+    assert text == md
+    assert _link_urls(entities) == [url]
+    assert _entity_spans(text, entities, "italic") == []
+    assert _entity_spans(text, entities, "bold") == []
+
+
 @pytest.mark.parametrize(
     "md",
     [
@@ -991,6 +1088,54 @@ def test_886_continuation_chunk_keeps_numbering() -> None:
         if re.match(r"^\d+\. item", line)
     ]
     assert numbers == list(range(1, 21))
+
+
+# ── #1094: loose list items keep their text on the marker's line ────────────
+
+
+def test_1094_loose_ordered_list_with_code_block() -> None:
+    md = "1. First step:\n\n   ```bash\n   ls -la\n   ```\n\n2. Second step\n"
+    text, entities = render_markdown(md)
+    assert text == "1. First step:\n\n\xa0ls -la\n\n2. Second step"
+    pre = [e for e in entities if e["type"] == "pre"]
+    assert len(pre) == 1
+    assert pre[0]["language"] == "bash"
+    assert "ls -la" in _utf16_slice(text, pre[0]["offset"], pre[0]["length"])
+
+
+def test_1094_loose_bullet_list() -> None:
+    assert render_markdown("- alpha\n\n- beta\n\n- gamma")[0] == (
+        "- alpha\n- beta\n- gamma"
+    )
+
+
+def test_1094_loose_ordered_list_keeps_start_number() -> None:
+    assert render_markdown("3. three\n\n4. four")[0] == "3. three\n4. four"
+
+
+def test_1094_loose_item_with_nested_paragraph() -> None:
+    text, _ = render_markdown("- first\n\n  more about first\n\n- second")
+    assert text == "- first\n\n\xa0more about first\n\n- second"
+
+
+def test_1094_loose_nested_list() -> None:
+    text, _ = render_markdown("1. outer\n\n   - inner a\n\n   - inner b\n\n2. next")
+    assert text == "1. outer\n\xa0- inner a\n\xa0- inner b\n2. next"
+
+
+def test_1094_loose_item_formatting_entities() -> None:
+    text, entities = render_markdown("- **bold** lead\n\n- `code` lead")
+    assert text == "- bold lead\n- code lead"
+    spans = {e["type"]: _utf16_slice(text, e["offset"], e["length"]) for e in entities}
+    assert spans == {"bold": "bold", "code": "code"}
+
+
+def test_1094_tight_lists_unchanged() -> None:
+    assert render_markdown("- a\n- b")[0] == "- a\n- b"
+    assert render_markdown("1. a\n2. b")[0] == "1. a\n2. b"
+    assert render_markdown("before\n\n- a\n- b\n\nafter")[0] == (
+        "before\n\n- a\n- b\n\nafter"
+    )
 
 
 @pytest.mark.parametrize(

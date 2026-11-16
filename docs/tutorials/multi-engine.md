@@ -1,6 +1,6 @@
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode and Pi with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode, Pi and Antigravity CLI with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 
@@ -14,10 +14,11 @@ Different engines have different strengths:
 | **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe = read-only sandbox), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
-| **Gemini CLI** ⚠️ | Deprecated — no longer supported | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
+| **Antigravity CLI** | Google's Gemini models (plus Claude and GPT models on some plans) | Permission modes (Workspace, Plan first, Ask me, Full access), effort levels per model, quota groups and AI credits in `/usage`; approval and question buttons and steer with Untether's agy plugin |
+| **Gemini CLI** ⚠️ | Deprecated — no longer supported | Approval mode (edit files or full access; its Read-only button still runs with full access), auto Pro/Flash routing, extensions |
 | **AMP** ⚠️ | Deprecated — no longer supported | Mode selection (deep/free/rush/smart), rich permissions |
 
-Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, arrives as its own engine in v0.36.1. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
+Gemini CLI and AMP are still included and still load and run, but are no longer supported (no bug fixes, no testing, and they may be removed in a future release) — don't start new work on them. Antigravity CLI, Gemini CLI's successor, is supported as its own `antigravity` engine from v0.36.1 — see [Use Antigravity CLI](../how-to/antigravity.md) and, for install and sign-in, [Switch engines](../how-to/switch-engines.md#antigravity-cli). See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md#engine-compatibility) for a full feature-by-feature breakdown.
 
@@ -36,6 +37,11 @@ Prefix any message with `/<engine>`:
 !!! user "You"
     /pi explain how the event loop works in this codebase
 
+!!! user "You"
+    /antigravity summarise what changed in the last commit
+
+Antigravity CLI only runs where there is a project, because it edits files where it runs: bind the chat with `/ctx set <project>` or add a project directive (section 2).
+
 <img src="../assets/screenshots/multi-engine-switch.jpg" alt="Engine switching — /claude then /codex in the same chat" width="360" loading="lazy" />
 
 The engine only applies to that message. The response will have a resume line for that engine:
@@ -44,7 +50,7 @@ The engine only applies to that message. The response will have a resume line fo
     done · claude · 8s<br>
     `claude --resume abc123`
 
-When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`.
+When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`. Each engine has its own resume line: Codex shows `codex resume …` and Antigravity CLI shows `agy --conversation …`.
 
 ## 2. Engine + project + branch
 
@@ -89,9 +95,11 @@ Example response:
     model: **default** (no override)<br>
     reasoning: **default** (no override)<br>
     defaults: topic: none, chat: claude, project: none, global: codex<br>
-    available: codex, claude, opencode, pi, gemini, amp
+    available: amp, antigravity, claude, codex, gemini, opencode, pi
 
 <img src="../assets/screenshots/agent-resolution.jpg" alt="/agent command output showing engine resolution layers" width="360" loading="lazy" />
+
+`available:` lists the engines that can run on this machine. Engines Untether supports but can't find are named after the list, as in the startup message, for example `available: claude, codex (not installed: amp, gemini)`.
 
 Clear it:
 

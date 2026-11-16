@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import re
 import signal
@@ -17,6 +18,7 @@ from weakref import WeakValueDictionary
 
 import anyio
 
+from .live_sessions import idle_live_session_counts
 from .logging import get_logger, log_pipeline
 from .model import (
     Action,
@@ -27,11 +29,23 @@ from .model import (
     StartedEvent,
     UntetherEvent,
 )
+from .utils.error_display import redact_url_secrets
 from .utils.paths import get_run_base_dir
 from .utils.streams import drain_stderr, iter_bytes_lines
-from .utils.subprocess import manage_subprocess
+from .utils.subprocess import (
+    kill_process,
+    manage_subprocess,
+    terminate_process,
+    wait_for_process,
+)
 
 _lock_logger = get_logger(__name__)
+
+# #558 phase 03: the task group of the stderr drain task that is running an
+# opt-in ``on_stderr_line`` hook. ``kill_with_escalation`` schedules its
+# SIGKILL follow-up there, so the escalation never blocks draining. Set only
+# inside that task (a hook runs synchronously in it).
+_STDERR_HOOK_TG: ContextVar[Any] = ContextVar("untether_stderr_hook_tg", default=None)
 
 
 class ResumeTokenMixin:
@@ -112,6 +126,67 @@ class SessionLockMixin:
 PRESPAWN_BLOCKED_KEY = "prespawn_blocked"
 
 
+# #981: ``CompletedEvent.usage`` key for a decision card an engine wants
+# posted right after the final (Antigravity's Plan first card):
+# ``{"text": str, "buttons": [[{"text", "callback_data"}, …], …]}``. The bridge
+# sends it as the final's last message, after the footers.
+REVIEW_CARD_KEY = "review_card"
+
+
+def review_card(usage: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The well-formed review card on ``usage`` (#981), or None."""
+    if not isinstance(usage, dict):
+        return None
+    card = usage.get(REVIEW_CARD_KEY)
+    if not isinstance(card, dict):
+        return None
+    text = card.get("text")
+    buttons = card.get("buttons")
+    if not isinstance(text, str) or not text or not isinstance(buttons, list):
+        return None
+    if not buttons or not all(isinstance(row, list) and row for row in buttons):
+        return None
+    return card
+
+
+# #1074: a card may carry ``"id"`` (the engine's own card id). The transport
+# reports where it posted that card (``note_review_card_ref``), so a later
+# run can retire it: ``usage[RETIRED_CARDS_KEY]`` lists ``{"id", "text"}``
+# for cards that can no longer be answered, and the bridge edits each one to
+# its ``text`` with no buttons.
+RETIRED_CARDS_KEY = "retired_cards"
+_REVIEW_CARD_REFS: dict[str, Any] = {}
+_REVIEW_CARD_REFS_MAX = 256
+
+
+def note_review_card_ref(card_id: str, ref: Any) -> None:
+    _REVIEW_CARD_REFS.pop(card_id, None)
+    _REVIEW_CARD_REFS[card_id] = ref
+    while len(_REVIEW_CARD_REFS) > _REVIEW_CARD_REFS_MAX:
+        _REVIEW_CARD_REFS.pop(next(iter(_REVIEW_CARD_REFS)))
+
+
+def pop_review_card_ref(card_id: str) -> Any:
+    return _REVIEW_CARD_REFS.pop(card_id, None)
+
+
+def retired_cards(usage: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """The well-formed ``(id, text)`` pairs on ``usage`` (#1074)."""
+    if not isinstance(usage, dict):
+        return []
+    items = usage.get(RETIRED_CARDS_KEY)
+    if not isinstance(items, list):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        card_id, text = item.get("id"), item.get("text")
+        if isinstance(card_id, str) and card_id and isinstance(text, str) and text:
+            out.append((card_id, text))
+    return out
+
+
 def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
     """The guard-block reason marked on ``usage`` (#838), or None."""
     if not isinstance(usage, dict):
@@ -123,18 +198,13 @@ def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
 def _idle_claude_live_session_count() -> int:
     """Idle Claude live sessions (#776) currently holding a process (#838).
 
-    Engine-agnostic: the guard runs for every engine, and a Codex block can
-    be caused by idle Claude sessions. Imported lazily (claude.py imports
-    this module); any failure counts as zero — diagnostics must never block.
+    Claude's share of :func:`untether.live_sessions.idle_live_session_counts`
+    (#977), which resolves the runner lazily (claude.py imports this module)
+    and counts any failure as zero — diagnostics must never block. The
+    pre-spawn guard reads the per-engine counts itself; this accessor is kept
+    for the golden-replay harness's registry snapshot.
     """
-    try:
-        from .runners.claude import idle_live_session_count
-    except ImportError:  # pragma: no cover — claude runner always ships
-        return 0
-    try:
-        return idle_live_session_count()
-    except Exception:  # noqa: BLE001
-        return 0
+    return idle_live_session_counts().get("claude", 0)
 
 
 def _rc_label(rc: int) -> str:
@@ -148,7 +218,10 @@ def _rc_label(rc: int) -> str:
     return f"rc={rc}"
 
 
-_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+# #1033: any scheme, any case (``wss://``, ``HTTPS://``), the same shape as
+# ``utils/antigravity_redact._SCHEME_URL_RE``. Applied before the path
+# patterns in ``_sanitise_stderr``.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.-]{1,20}://[^\s\"'<>]*", re.IGNORECASE)
 
 # #208: ordered list of absolute-path patterns. More specific roots first so
 # they're not partially eaten by the generic fallback. Stop chars exclude `:`
@@ -311,14 +384,85 @@ def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:
     return False
 
 
+def _background_pending(stream: JsonlStreamState, logger: Any = None) -> int:
+    """How many background tasks the engine is holding its answer for (#975);
+    0 when it isn't waiting on any.
+
+    agy holds its single ``result`` — and prints nothing — until a background
+    ``run_command`` finishes (up to 30 min), which is an expected wait, not a
+    liveness stall. Duck-typed like :func:`_approval_pending`:
+    ``engine_state.awaiting_background()`` (bounded by the engine's own cap,
+    after which ordinary liveness handling resumes) and, for the count,
+    ``background_count()``. Engines without the probe — every one but
+    Antigravity — always get 0.
+    """
+    es = getattr(stream, "engine_state", None)
+    probe = getattr(es, "awaiting_background", None)
+    if not callable(probe):
+        return 0
+    try:
+        if not probe():
+            return 0
+    except Exception as exc:  # noqa: BLE001 - watchdog must not die
+        if logger is not None:
+            logger.debug("subprocess.background_probe_failed", error=str(exc))
+        return 0
+    counter = getattr(es, "background_count", None)
+    try:
+        count = int(counter()) if callable(counter) else 1
+    except Exception:  # noqa: BLE001 - watchdog must not die
+        count = 1
+    return max(1, count)
+
+
+def _event_type(raw: dict[str, Any]) -> str:
+    """The frame's event name: ``type`` (every engine but Antigravity), else
+    agy's ``event`` envelope key (#558), else ``"unknown"``."""
+    t = raw.get("type")
+    if isinstance(t, str):
+        return t
+    e = raw.get("event")
+    if isinstance(e, str):
+        return e
+    return "unknown"
+
+
+# #558: agy tool steps that carry a verdict (DONE / ERROR) — the
+# tool_result-equivalent for the #322 detector.
+_ANTIGRAVITY_TOOL_TERMINAL_STATES = frozenset({"DONE", "ERROR"})
+
+
+def _classify_antigravity_event(raw: dict[str, Any]) -> str | None:
+    """agy's ``{"event": …}`` envelope (#558); None for any other shape."""
+    if "type" in raw:
+        return None
+    event = raw.get("event")
+    if event == "result":
+        return _ASSISTANT_EVENT_KIND
+    if event != "step_update":
+        return None
+    su = raw.get("step_update")
+    if not isinstance(su, dict):
+        return _OTHER_EVENT_KIND
+    step_type = su.get("step_type")
+    if step_type == "tool" and su.get("state") in _ANTIGRAVITY_TOOL_TERMINAL_STATES:
+        return _TOOL_RESULT_EVENT_KIND
+    if step_type == "agent_response":
+        return _ASSISTANT_EVENT_KIND
+    return _OTHER_EVENT_KIND
+
+
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
 
-    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Gemini, AMP.
-    Conservative — unknown shapes return "other".
+    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Antigravity, and the
+    deprecated Gemini and AMP. Conservative — unknown shapes return "other".
     """
     if not isinstance(raw, dict):
         return _OTHER_EVENT_KIND
+    agy_kind = _classify_antigravity_event(raw)
+    if agy_kind is not None:
+        return agy_kind
     t = raw.get("type")
     if not isinstance(t, str):
         return _OTHER_EVENT_KIND
@@ -379,10 +523,15 @@ def _classify_jsonl_event(raw: Any) -> str:
 
 
 def _sanitise_stderr(text: str) -> str:
-    """Redact absolute paths and URLs from stderr before exposing to users."""
+    """Redact URLs and absolute paths from stderr before exposing to users.
+
+    URLs go first (#1033): the generic path pattern otherwise eats a URL's
+    ``//host/path``, the URL pattern no longer matches, and the query string
+    (tokens, OAuth codes) survives as ``https:[path]?token=…``.
+    """
+    text = _URL_RE.sub("[url]", text)
     for pattern in _PATH_PATTERNS:
         text = pattern.sub("[path]", text)
-    text = _URL_RE.sub("[url]", text)
     return text
 
 
@@ -743,6 +892,10 @@ class JsonlSubprocessRunner(BaseRunner):
         detail: dict[str, Any] | None = None,
     ) -> UntetherEvent:
         note_id = self.next_note_id(state)
+        # #1151: a warning / error row is engine text shown on the progress
+        # card (Codex's ``error`` event is the API-error JSON) — mask URL
+        # userinfo and query values, as on the final error card.
+        message = redact_url_secrets(message)
         action = Action(
             id=note_id,
             kind="warning",
@@ -1157,7 +1310,7 @@ class JsonlSubprocessRunner(BaseRunner):
         except (json.JSONDecodeError, ValueError):
             raw_dict = None
         if isinstance(raw_dict, dict):
-            etype = str(raw_dict.get("type", "unknown"))
+            etype = _event_type(raw_dict)
             etool = None
             # Cover common engine conventions for tool name
             for key in ("tool_name", "tool", "name"):
@@ -1165,6 +1318,15 @@ class JsonlSubprocessRunner(BaseRunner):
                 if isinstance(val, str) and val:
                     etool = val
                     break
+            # #558: agy nests the tool name (and the step kind) one level down.
+            step_label: str | None = None
+            step = raw_dict.get("step_update") if etype == "step_update" else None
+            if isinstance(step, dict):
+                tool_name = step.get("tool_name")
+                if etool is None and isinstance(tool_name, str) and tool_name:
+                    etool = tool_name
+                step_type = step.get("step_type")
+                step_label = f"step:{step_type}" if isinstance(step_type, str) else None
             # Also check nested item.type for Codex-style events
             item = raw_dict.get("item")
             if etool is None and isinstance(item, dict):
@@ -1187,7 +1349,7 @@ class JsonlSubprocessRunner(BaseRunner):
             if liveness_label is not None:
                 label = liveness_label
             else:
-                label = f"tool:{etool}" if etool else etype
+                label = f"tool:{etool}" if etool else (step_label or etype)
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
             # intervening "other" events (attachments, system hooks) and is
@@ -1277,6 +1439,159 @@ class JsonlSubprocessRunner(BaseRunner):
     # Refreshed per run from WatchdogSettings by the bridge.
     _reap_orphans: bool = True
 
+    # #558 (08 §2): opt in to publishing the runner's own state as
+    # ``stream.engine_state`` so the duck-typed watchdog / stall-monitor
+    # probes can see it. Claude sets it from its own ``run_impl``; every
+    # other runner keeps ``None`` unless it opts in here.
+    _EXPOSE_ENGINE_STATE: bool = False
+
+    # #558 phase 03 (REVIEW M2): SIGKILL follows SIGTERM after this long when
+    # ``kill_with_escalation`` finds the process still alive.
+    _KILL_ESCALATION_S: float = 3.0
+
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        """Opt-in per-line stderr hook (#558 phase 03, REVIEW M2).
+
+        Called from the stderr drain task for every line. It must be cheap
+        and non-blocking, and may call ``self.kill_with_escalation(proc)``.
+        The base runner passes a hook to ``drain_stderr`` only when a
+        subclass overrides this method, so every other engine drains
+        stderr exactly as before.
+        """
+        return
+
+    def kill_with_escalation(self, proc: Any) -> None:
+        """SIGTERM *proc* (its process group) now; SIGKILL it after
+        ``_KILL_ESCALATION_S`` if it is still alive.
+
+        Synchronous. The SIGKILL follow-up runs on the stderr hook's task
+        group; called anywhere else, only the SIGTERM is sent (the
+        ``manage_subprocess`` teardown still escalates on exit).
+        """
+        if getattr(proc, "returncode", None) is not None:
+            return
+        terminate_process(proc)
+        tg = _STDERR_HOOK_TG.get()
+        if tg is not None:
+            tg.start_soon(self._escalate_kill, proc)
+
+    async def _escalate_kill(self, proc: Any) -> None:
+        timed_out = await wait_for_process(proc, timeout=self._KILL_ESCALATION_S)
+        if not timed_out or proc.returncode is not None:
+            return
+        self.get_logger().warning(
+            "subprocess.kill_escalated",
+            pid=proc.pid,
+            after_s=self._KILL_ESCALATION_S,
+        )
+        kill_process(proc)
+
+    async def _drain_stderr_hooked(
+        self,
+        proc: Any,
+        state: Any,
+        logger: Any,
+        tag: str,
+        capture: list[str],
+    ) -> None:
+        """``drain_stderr`` with this runner's ``on_stderr_line`` hook, in a
+        task group of its own that also hosts any kill escalation."""
+        async with anyio.create_task_group() as hook_tg:
+            token = _STDERR_HOOK_TG.set(hook_tg)
+            try:
+                await drain_stderr(
+                    proc.stderr,
+                    logger,
+                    tag,
+                    capture,
+                    on_line=functools.partial(
+                        self.on_stderr_line, state=state, proc=proc
+                    ),
+                )
+            finally:
+                _STDERR_HOOK_TG.reset(token)
+
+    def on_spawned(self, *, state: Any, pid: int) -> None:
+        """Hook called once the subprocess exists (after ``publish_run_stream``).
+
+        No-op by default. ``translate`` never sees the process, so a runner
+        that needs the PID (e.g. for a descendant snapshot) records it here.
+        """
+
+    def check_resume_value(self, value: Any) -> str:
+        """*value* if this engine's CLI can take it as a resume value, else
+        ``EngineArgvError`` (#1034).
+
+        The default is the engine-neutral ``engine_argv.check_resume``. A
+        runner whose CLI reads more into the value narrows it — Pi opens or
+        creates a session *file* at a path (#1064), Codex starts a new
+        thread for any value that isn't a known thread (#1065) — and calls
+        the same method from ``build_args``, so the pre-spawn refusal and
+        argv never disagree.
+        """
+        from .utils import engine_argv
+
+        return engine_argv.check_resume(value)
+
+    def _invalid_argv_refusal(
+        self, resume: ResumeToken | None
+    ) -> CompletedEvent | None:
+        """Refuse a model or resume value the engine CLI could parse as a
+        flag (#1034), before anything spawns or registers.
+
+        ``build_args`` raises on the same values; this turns that into one
+        plain card and a log line that never echoes the raw value. A resume
+        line typed in chat (``claude --resume --some-flag``), ``/model set``,
+        ``[engine] model`` and a cron's ``model`` all end up here.
+        """
+        from .runners.run_options import get_run_options
+        from .utils import engine_argv
+
+        run_options = get_run_options()
+        model = getattr(self, "model", None)
+        if run_options is not None and run_options.model:
+            model = run_options.model
+        checks: list[tuple[str, Any, Callable[[Any], str], str]] = []
+        if model is not None and model != "":
+            checks.append(
+                (
+                    "model",
+                    model if isinstance(model, str) else str(model),
+                    engine_argv.check_model,
+                    engine_argv.INVALID_MODEL_TEXT,
+                )
+            )
+        if resume is not None and not resume.is_continue:
+            checks.append(
+                (
+                    "resume",
+                    resume.value,
+                    self.check_resume_value,
+                    engine_argv.INVALID_RESUME_TEXT,
+                )
+            )
+        for field_name, value, check, text in checks:
+            try:
+                check(value)
+            except engine_argv.EngineArgvError as exc:
+                self.get_logger().warning(
+                    "runner.argv.invalid_value",
+                    engine=self.engine,
+                    field=field_name,
+                    reason=exc.reason,
+                    preview=engine_argv.safe_preview(value),
+                )
+                # Never hand a bad id back as the run's resume token.
+                return CompletedEvent(
+                    engine=self.engine,
+                    ok=False,
+                    answer="",
+                    resume=None,
+                    error=text,
+                    usage={PRESPAWN_BLOCKED_KEY: engine_argv.INVALID_ARGUMENT_BLOCK},
+                )
+        return None
+
     def _check_prespawn_ram_guard(
         self, resume: ResumeToken | None
     ) -> CompletedEvent | None:
@@ -1323,11 +1638,13 @@ class JsonlSubprocessRunner(BaseRunner):
         from .utils.subprocess import live_engine_subprocess_count
 
         live_runs = live_engine_subprocess_count()
-        # #838: idle Claude live sessions (#776) stay inside manage_subprocess
-        # and so count toward ``live_runs`` — on purpose (they still hold
-        # their MCP children's RAM). Name them on the logs and the message so
-        # a block while "nothing is running" explains itself, on any engine.
-        idle_live = _idle_claude_live_session_count()
+        # #838: idle live sessions (#776) stay inside manage_subprocess and so
+        # count toward ``live_runs`` — on purpose (they still hold their MCP
+        # children's RAM). Name them on the logs and the message so a block
+        # while "nothing is running" explains itself, on any engine. #977:
+        # counted per engine through the live-session seam.
+        idle_by_engine = idle_live_session_counts()
+        idle_live = sum(idle_by_engine.values())
         ctx: dict[str, Any] = {"idle_live_sessions": idle_live} if idle_live else {}
         if max_runs > 0 and live_runs >= max_runs:
             logger.error(
@@ -1339,8 +1656,12 @@ class JsonlSubprocessRunner(BaseRunner):
             )
             idle_clause = ""
             if idle_live:
+                # Named "Claude" while every idle session is Claude's.
+                idle_kind = (
+                    "Claude" if idle_by_engine.get("claude", 0) == idle_live else "live"
+                )
                 idle_clause = (
-                    f" (including {idle_live} idle Claude session(s) kept open "
+                    f" (including {idle_live} idle {idle_kind} session(s) kept open "
                     f"for background work — they close on their own)"
                 )
             return CompletedEvent(
@@ -1444,6 +1765,7 @@ class JsonlSubprocessRunner(BaseRunner):
         # deliberates. Tracked as a local rather than on the stream so
         # the lifetime matches the watchdog loop (per-subprocess).
         last_approval_pending_emit_at: float = 0.0
+        last_background_wait_emit_at: float = 0.0
 
         # Poll until the process is dead or the reader finishes.
         while not reader_done.is_set():
@@ -1505,6 +1827,27 @@ class JsonlSubprocessRunner(BaseRunner):
                                 source="watchdog",
                             )
                             prev_diag = diag
+                    elif background := _background_pending(stream, logger):
+                        # #975: agy is holding its answer for a background
+                        # task. Same shape as the approval wait above: a
+                        # paced INFO, no auto-kill, ``liveness_warned`` not
+                        # latched so a real hang afterwards still warns.
+                        now = time.monotonic()
+                        if (
+                            last_background_wait_emit_at == 0.0
+                            or now - last_background_wait_emit_at
+                            >= _APPROVAL_PENDING_REFIRE_S
+                        ):
+                            last_background_wait_emit_at = now
+                            logger.info(
+                                "subprocess.background_wait",
+                                pid=pid,
+                                idle_seconds=round(idle, 1),
+                                background=background,
+                                event_count=stream.event_count,
+                                last_event_type=stream.last_event_type,
+                                source="watchdog",
+                            )
                     else:
                         liveness_warned = True
                         stream.liveness_stalls += 1
@@ -1596,6 +1939,11 @@ class JsonlSubprocessRunner(BaseRunner):
         if block_result is not None:
             yield block_result
             return
+        # #1034: a model / resume value the CLI could read as a flag.
+        refusal = self._invalid_argv_refusal(resume)
+        if refusal is not None:
+            yield refusal
+            return
 
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
@@ -1625,6 +1973,17 @@ class JsonlSubprocessRunner(BaseRunner):
         async with manage_subprocess(
             cmd,
             reap_orphans=self._reap_orphans,
+            # #558 (08 §2): a runner whose state collects descendant PIDs
+            # (agy's background children) gets them swept at teardown.
+            # ``None`` for everyone else — identical to before.
+            orphan_pid_snapshot=getattr(state, "orphan_pid_snapshot", None),
+            # Each collected PID's /proc start time, so the sweep refuses a
+            # recycled PID (#590 hardening).
+            orphan_pid_starttimes=getattr(state, "orphan_pid_starttimes", None),
+            # #1062: a cancelled run never reaches the ``subprocess.exit``
+            # line below, so the teardown logs the exit of the process it
+            # stopped. (Claude's runner spawns on its own path.)
+            log_teardown_exit=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1659,22 +2018,41 @@ class JsonlSubprocessRunner(BaseRunner):
             # pid + stream together, so nobody ever sees this spawn's pid
             # paired with a previous spawn's stream.
             stream = JsonlStreamState(expected_session=resume)
+            if self._EXPOSE_ENGINE_STATE:
+                stream.engine_state = state
             self.last_pid = proc.pid
             self.current_stream = stream
             publish_run_stream(stream, proc.pid)
+            self.on_spawned(state=state, pid=proc.pid)
 
             await self._send_payload(proc, payload, logger=logger, resume=resume)
 
             reader_done = anyio.Event()
 
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    drain_stderr,
-                    proc.stderr,
-                    logger,
-                    tag,
-                    stream.stderr_capture,
-                )
+                # #558 phase 03: only a runner that overrides
+                # ``on_stderr_line`` gets a hooked drain; every other engine
+                # keeps the exact four-argument call.
+                if (
+                    type(self).on_stderr_line
+                    is not JsonlSubprocessRunner.on_stderr_line
+                ):
+                    tg.start_soon(
+                        self._drain_stderr_hooked,
+                        proc,
+                        state,
+                        logger,
+                        tag,
+                        stream.stderr_capture,
+                    )
+                else:
+                    tg.start_soon(
+                        drain_stderr,
+                        proc.stderr,
+                        logger,
+                        tag,
+                        stream.stderr_capture,
+                    )
                 tg.start_soon(
                     self._subprocess_watchdog,
                     proc,

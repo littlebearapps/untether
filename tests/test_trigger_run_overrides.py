@@ -195,3 +195,45 @@ def test_743_logs_once_per_changed_field_and_not_when_log_false():
     with capture_logs() as quiet:
         _apply_trigger_overrides(ro, ctx, engine="claude", log=False)
     assert quiet == []
+
+
+def test_trigger_overrides_set_trigger_permission_mode_only_when_cron_sets_it():
+    """#558 (08 §10): the cron's own mode is kept apart from an inherited one,
+    so the agy runner can refuse to inherit Full access."""
+    chat_full = EngineRunOptions(permission_mode="full")
+    out = _apply_trigger_overrides(
+        chat_full, RunContext(trigger_source="cron:x"), engine="antigravity"
+    )
+    assert out is not None
+    assert out.permission_mode == "full"  # inherited …
+    assert out.trigger_permission_mode is None  # … not the cron's own
+    out = _apply_trigger_overrides(
+        None,
+        RunContext(trigger_source="cron:x", permission_mode="full"),
+        engine="antigravity",
+    )
+    assert out is not None
+    assert out.permission_mode == "full"
+    assert out.trigger_permission_mode == "full"
+    out = _apply_trigger_overrides(
+        chat_full,
+        RunContext(trigger_source="cron:x", permission_mode="workspace"),
+        engine="antigravity",
+    )
+    assert out is not None
+    assert out.permission_mode == "workspace"
+    assert out.trigger_permission_mode == "workspace"
+
+
+def test_981_untriggered_fixed_mode_is_not_logged_as_a_cron():
+    """An approved Antigravity plan resumes with a fixed Workspace mode and no
+    trigger; its override line must not claim a cron set it."""
+    from structlog.testing import capture_logs
+
+    ro = EngineRunOptions(permission_mode="plan")
+    ctx = RunContext(permission_mode="workspace")
+    with capture_logs() as logs:
+        out = _apply_trigger_overrides(ro, ctx, engine="antigravity")
+    assert out is not None and out.permission_mode == "workspace"
+    assert [rec["event"] for rec in logs] == ["run.permission_mode_override"]
+    assert logs[0]["trigger_source"] is None

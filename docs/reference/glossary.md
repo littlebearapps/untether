@@ -5,7 +5,7 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Core concepts
 
 **Engine**
-:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode or Pi (Gemini CLI and Amp still load but are deprecated and no longer supported, and may be removed in a future release). Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
+:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode, Pi or Antigravity CLI (Gemini CLI and Amp still load but are deprecated and no longer supported, and may be removed in a future release). Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
 
 **Runner**
 :   The Untether component that manages an engine subprocess. Each engine has a dedicated runner (e.g. `ClaudeRunner`, `CodexRunner`) that translates between the engine's output format and Untether's internal events.
@@ -39,22 +39,25 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Interactive control (Claude Code)
 
 **Permission mode**
-:   The level of oversight applied to Claude Code's actions. **Plan** (`on`) has Claude plan without editing files and asks you to approve the plan. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs file edits and common filesystem commands and asks before anything else. Plan-auto was called `auto` before v0.36.0, before Claude Code shipped a mode of that name. The modes that prompt (`default`, `manual`, accept edits) send every remaining tool request to Telegram for approval.
+:   The level of oversight applied to Claude Code's actions. **Plan** (`on`) has Claude plan without editing files and asks you to approve the plan. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs file edits and common filesystem commands and asks before anything else. Plan-auto was called `auto` before v0.36.0, before Claude Code shipped a mode of that name. The modes that prompt (`default`, `manual`, accept edits) send every remaining tool request to Telegram for approval. Antigravity CLI has its own four modes: **Workspace** (the default: edits files in the project, no shell), **Plan first**, **Ask me** and **Full access**; see [Use Antigravity CLI](../how-to/antigravity.md#permission-modes).
 
 **Approval buttons**
-:   Inline Telegram buttons that appear when Claude Code needs your permission. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding.
+:   Inline Telegram buttons that appear when Claude Code needs your permission. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding. Antigravity CLI shows Approve / Deny cards in **Ask me** mode and a plan card in **Plan first**.
+
+**agy plugin** (`untether-gate`)
+:   An opt-in plugin that Untether installs into Antigravity CLI on the host (`untether agy-gate install`). It gives Antigravity chats approval buttons in Ask me, question buttons and `/steer`, and does nothing in your own `agy` sessions.
 
 **Progress message**
 :   The Telegram message that Untether updates in real time as the agent works. It shows the engine, elapsed time, step count, and a list of recent tool calls. When the run finishes, it's replaced by the final answer.
 
 **Diff preview**
-:   A compact view of what Claude Code is about to change, shown alongside approval buttons. For file edits, it shows removed lines (`- old`) and added lines (`+ new`) in a fenced `diff` block. For shell commands, it shows the command to be run.
+:   A compact view of what Claude Code (or Antigravity CLI in Ask me) is about to change, shown alongside approval buttons. For file edits, it shows removed lines (`- old`) and added lines (`+ new`) in a fenced `diff` block. For shell commands, it shows the command to be run.
 
 **Live session**
 :   A Claude Code process that stays running after its reply while background work (background tasks, subagents, `Monitor`, `ScheduleWakeup`) is still going. Each later turn arrives as its own Telegram message (short acknowledgements fold into a background-status message instead), and a follow-up you send is written into the same process instead of resuming it. The session closes itself when idle; `[watchdog] live_sessions = false` turns it off.
 
 **Steer**
-:   A follow-up mode (`/steer`) that writes your message straight into a running Claude Code turn instead of queueing it until the turn ends. The default is **queue**.
+:   A follow-up mode (`/steer`) that writes your message straight into a running Claude Code turn (or Antigravity turn, with the agy plugin) instead of queueing it until the turn ends. The default is **queue**.
 
 ## Projects and branches
 

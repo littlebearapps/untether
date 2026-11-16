@@ -25,6 +25,7 @@ nav = [
   { "How-to" = [
     { "Overview" = "how-to/index.md" },
     { "Switch engines" = "how-to/switch-engines.md" },
+    { "Antigravity CLI" = "how-to/antigravity.md" },
     { "Projects" = "how-to/projects.md" },
     { "Worktrees" = "how-to/worktrees.md" },
     { "Route by chat" = "how-to/route-by-chat.md" },
@@ -73,7 +74,6 @@ nav = [
     { "Glossary" = "reference/glossary.md" },
     { "Context resolution" = "reference/context-resolution.md" },
     { "Triggers" = "reference/triggers/triggers.md" },
-    { "Dev instance" = "reference/dev-instance.md" },
     { "Telegram transport" = "reference/transports/telegram.md" },
     { "Runners" = [
       { "Overview" = "reference/runners/index.md" },
@@ -96,12 +96,17 @@ nav = [
         { "Stream JSON cheatsheet" = "reference/runners/pi/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/pi/untether-events.md" },
       ] },
-      { "Gemini" = [
+      { "Antigravity" = [
+        { "Runner" = "reference/runners/antigravity/runner.md" },
+        { "Stream JSON cheatsheet" = "reference/runners/antigravity/stream-json-cheatsheet.md" },
+        { "Untether events" = "reference/runners/antigravity/untether-events.md" },
+      ] },
+      { "Gemini (deprecated)" = [
         { "Runner" = "reference/runners/gemini/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/gemini/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/gemini/untether-events.md" },
       ] },
-      { "Amp" = [
+      { "Amp (deprecated)" = [
         { "Runner" = "reference/runners/amp/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/amp/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/amp/untether-events.md" },

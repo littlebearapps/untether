@@ -11,6 +11,7 @@ Prefix the first non-empty line with an engine directive:
 /claude shrink and store artifacts forever
 /opencode hide their paper until they reply
 /pi render a diorama of this timeline
+/antigravity sketch the timeline as a table
 ```
 
 Directives are only parsed at the start of the first non-empty line.
@@ -43,7 +44,7 @@ Selection precedence (highest to lowest): resume token → `/<engine-id>` direct
 ## Engine installation
 
 Untether shells out to engine CLIs. Install them and make sure they’re on your `PATH`
-(`codex`, `claude`, `opencode`, `pi`). Authentication is handled by each CLI. For OpenCode, install the 1.x CLI (`npm install -g opencode-ai@1`): OpenCode 2.x (`@opencode/cli`) isn't supported yet, and Untether refuses a run on it before anything starts ([#970](https://github.com/littlebearapps/untether/issues/970)).
+(`codex`, `claude`, `opencode`, `pi`, `agy`). Authentication is handled by each CLI. For OpenCode, install the 1.x CLI (`npm install -g opencode-ai@1`): OpenCode 2.x (`@opencode/cli`) isn't supported yet, and Untether refuses a run on it before anything starts ([#970](https://github.com/littlebearapps/untether/issues/970)).
 
 !!! warning "Deprecated engines"
 
@@ -52,18 +53,85 @@ Untether shells out to engine CLIs. Install them and make sure they’re on your
     no fixes, are excluded from testing, and may be removed in a future
     release. Gemini CLI no longer authenticates individual or free Google
     accounts (upstream end-of-life, 18 June 2026, [announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) — use [Antigravity CLI](https://antigravity.google) instead;
-    Untether support for it is planned for v0.36.1, [#558](https://github.com/littlebearapps/untether/issues/558)),
+    Untether supports it as its own `antigravity` engine, see [below](#antigravity-cli)),
     and Untether's Amp integration is unmaintained. `/config` → **Engine & model**
     marks both with ⚠️; they can still be selected. See
     [deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines)
     in the README.
 
+## Antigravity CLI
+
+Antigravity CLI (`agy`) is Google's successor to Gemini CLI. Untether supports agy 1.3.1 or newer as the
+`antigravity` engine ([#558](https://github.com/littlebearapps/untether/issues/558)), separate from the deprecated
+`gemini` engine: select it with `/antigravity` or `/agent set antigravity`, never `/gemini`. This section covers install and
+sign-in; for day-to-day use (permission modes, effort, quota, scheduled runs) see [Use Antigravity CLI](antigravity.md).
+
+!!! warning "Read this before using Antigravity with a Google account sign-in"
+    Google's [Antigravity terms](https://antigravity.google/terms) say: "Using third party software, tools, or
+    services to access the Service (e.g. using OpenClaw with Antigravity OAuth) is a breach of this Agreement. Such
+    actions may be grounds for suspension or termination of your Antigravity and/or Gemini CLI accounts." The
+    [Antigravity FAQ](https://antigravity.google/docs/faq) recommends "a Gemini Enterprise or Google AI Studio API
+    key" for third-party coding agents.
+
+    Untether runs Google's own `agy` binary on your machine and never reads or reuses your Google credentials, but it
+    is still third-party software driving the CLI, and Google does block accounts. **We recommend a Gemini API key or
+    an Enterprise sign-in.** If you use a Google account sign-in anyway, you accept that risk for that account. This
+    isn't legal advice. The full quotes are in the
+    [Antigravity runner reference](../reference/runners/antigravity/runner.md).
+
+**1. Install agy** on the machine that runs Untether:
+
+```sh
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+The installer puts `agy` in `~/.local/bin`, where Untether finds it even when that folder isn't on its `PATH`. For an
+agy installed anywhere else, set `[antigravity] cmd` to its path, or the engine shows as not installed.
+
+**2. Choose how agy signs in.** Untether never signs in for you.
+
+- **Gemini API key (recommended).** Add `"modelProvider": "gemini"` to agy's settings file
+  (`~/.gemini/antigravity-cli/settings.json`) and put `GEMINI_API_KEY` in Untether's environment. You need both:
+  the key alone does nothing. Google bills this per token.
+- **Gemini Enterprise / Google Cloud (recommended).** Set `AGY_ADC_AUTH=true`, `GOOGLE_CLOUD_QUOTA_PROJECT` and
+  `GOOGLE_CLOUD_LOCATION` in Untether's environment, with Application Default Credentials on the host.
+- **Google account.** Run `agy` once in a terminal on the host and finish the sign-in. Read the warning above
+  first. In chats that use this route, Untether adds a one-time notice to the first Antigravity answer.
+
+**3. Give the chat a project.** Antigravity edits files in its working directory, so Untether won't run it without
+one. Bind the chat with `/ctx set <project>` or use a chat that already routes to a project.
+
+**4. Select it:** `/agent set antigravity`, or `/antigravity <prompt>` for one message.
+
+<!-- TODO: capture screenshot: antigravity-engine-switch — a chat where `/agent set antigravity` is answered "chat default engine set to antigravity", followed by the next message's `working · antigravity` progress message -->
+<!-- <img src="../assets/screenshots/antigravity-engine-switch.jpg" alt="Switching a chat to Antigravity with /agent set antigravity, then its first progress message" width="360" loading="lazy" /> -->
+
+**5. Pick a permission mode** in `/config` → **Permission mode**. The default, **Workspace**, lets Antigravity read,
+create and edit files in the project. It has no shell, web or MCP tools, so it can't run commands, and can't delete or
+rename files (a "rename" is a copy; the original stays). **Plan first** writes a plan for you to approve first,
+**Ask me** asks in Telegram before each shell command or other risky tool, and **Full access** approves everything.
+See [Antigravity CLI — Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+
+**6. Optional: install Untether's agy plugin** on the host with `untether agy-gate install`. It brings approval
+buttons (Ask me), question buttons and `/steer` to Antigravity chats; see
+[Telegram questions and steer](antigravity.md#telegram-questions-and-steer).
+
+!!! warning "After switching between Workspace / Plan first and Ask me / Full access, send `/new`"
+    agy keeps a conversation on the tools it started with. A conversation that began in Workspace still can't run
+    shell commands after you switch to Full access, even though the footer says `full access`, and one that began
+    in Full access keeps its shell after you switch back. Send `/new`: the new mode applies from the next new
+    conversation.
+
+Not available for Antigravity: live sessions (each message is its own agy run). If something goes wrong, see
+[Troubleshooting](troubleshooting.md#antigravity-cli).
+
 ## Feature differences
 
-Not all features are available on every engine. See the [engine compatibility matrix](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/index.md) for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
+Not all features are available on every engine. See the [engine compatibility matrix](../reference/runners/index.md) for a full breakdown of which features (interactive permissions, plan mode, reasoning levels, etc.) each engine supports.
 
 ## Related
 
+- [Use Antigravity CLI](antigravity.md)
 - [Commands & directives](../reference/commands-and-directives.md)
 - [Config reference](../reference/config.md)
 - [Multi-engine workflows](../tutorials/multi-engine.md) — tutorial on using multiple engines

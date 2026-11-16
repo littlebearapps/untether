@@ -16,6 +16,8 @@ triggers:
 
 # Codex, OpenCode, and Pi Runner Protocols
 
+Antigravity CLI (`agy`) has its own skill, `antigravity-cli` (pre-run permission modes + the agy gate).
+
 These three engines are **non-interactive only** — no control channel, no permission prompts. They extend `JsonlSubprocessRunner` and use its `run_impl` (ClaudeRunner replaces it; OpenCodeRunner only wraps it with a pre-spawn version check, #970).
 
 A failed **resumed** run keeps the chat's saved session unless the error names the resume itself (`_RESUME_FAILURE_RE` in `runner_bridge.py`: Codex `no rollout found`, OpenCode `Session not found`, Pi `No session found`, …) — none of the three reports `num_turns`, so the Claude-style 0-turn rule can't apply (#952). A new "session not found" wording must be added there.

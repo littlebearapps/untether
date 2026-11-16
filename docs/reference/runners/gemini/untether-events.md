@@ -10,7 +10,7 @@
     (`IneligibleTierError`); under Untether the subprocess hangs until the
     watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
     Antigravity CLI ships as a separate engine in v0.36.1
-    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
+    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename: see the [Antigravity runner](../antigravity/runner.md).
 
 This document describes how the Gemini runner translates Gemini CLI `--output-format stream-json` JSONL events into Untether events.
 
@@ -48,9 +48,9 @@ Resume regex: `(?im)^\s*`?gemini\s+--resume\s+(?P<token>[A-Za-z0-9_-]+)`?\s*$`
 
 ---
 
-## 3. Session lifecycle + serialization
+## 3. Session lifecycle + serialisation
 
-Untether requires **serialization per session token**:
+Untether requires **serialisation per session token**:
 
 - For new runs (`resume=None`), do **not** acquire a lock until a `StartedEvent`
   is emitted (when the `init` event arrives with a session ID).

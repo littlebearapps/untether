@@ -1619,3 +1619,462 @@ def test_path_denied_reply_keeps_glob_stars_when_rendered() -> None:
     assert rendered == (
         "path denied by rule: **/.ssh/** (resolves to r15/real/.ssh/key.txt)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1031 — reuse an identical upload instead of saving another `_N` copy
+# ---------------------------------------------------------------------------
+
+
+class _MultiFileBot(FakeBot):
+    """Serves a different payload per document (``file_id`` == file name)."""
+
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        super().__init__()
+        self._payloads = payloads
+
+    async def get_file(self, file_id: str) -> File | None:
+        return File(file_path=f"files/{file_id}")
+
+    async def download_file(self, file_path: str) -> bytes | None:
+        return self._payloads.get(Path(file_path).name)
+
+
+def _incoming(tmp_path: Path, cfg, **files: bytes) -> Path:
+    incoming = tmp_path / cfg.files.uploads_dir
+    incoming.mkdir(parents=True, exist_ok=True)
+    for name, content in files.items():
+        (incoming / name).write_bytes(content)
+    return incoming
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(item.name for item in directory.iterdir())
+
+
+async def _put(cfg, root: Path, name: str = "report.txt", *, force: bool = False):
+    return await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name=name),
+        run_root=root,
+        rel_path=None,
+        base_dir=None,
+        force=force,
+    )
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_reuses_identical_original(
+    tmp_path: Path,
+) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    incoming = _incoming(tmp_path, cfg, **{"report.txt": payload})
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.error is None
+    assert result.reused is True
+    assert result.name == "report.txt"
+    assert result.rel_path == Path("incoming/report.txt")
+    assert result.size == len(payload)
+    assert _names(incoming) == ["report.txt"]  # no `_1` copy, no temp file
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_reuses_identical_sibling(tmp_path: Path) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    incoming = _incoming(
+        tmp_path,
+        cfg,
+        **{
+            "report.txt": b"different!",  # same size, other bytes
+            "report_1.txt": b"another version",
+            "report_2.txt": payload,
+        },
+    )
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.error is None
+    assert result.reused is True
+    assert result.name == "report_2.txt"
+    assert result.rel_path == Path("incoming/report_2.txt")
+    assert _names(incoming) == ["report.txt", "report_1.txt", "report_2.txt"]
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_explicit_path_reuses_identical(
+    tmp_path: Path,
+) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "spec.pdf", payload)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "spec.pdf").write_bytes(payload)
+
+    result = await transfer._save_document_payload(
+        cfg,
+        document=_document(file_name="whatever.pdf"),
+        run_root=tmp_path,
+        rel_path=Path("docs/spec.pdf"),
+        base_dir=None,
+        force=False,
+    )
+
+    assert result.reused is True
+    assert result.rel_path == Path("docs/spec.pdf")
+    assert _names(tmp_path / "docs") == ["spec.pdf"]
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_same_size_different_bytes_still_copies(
+    tmp_path: Path,
+) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    incoming = _incoming(tmp_path, cfg, **{"report.txt": b"different!"})
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.error is None
+    assert result.reused is False
+    assert result.name == "report_1.txt"
+    assert (incoming / "report_1.txt").read_bytes() == payload
+    assert (incoming / "report.txt").read_bytes() == b"different!"
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_force_overwrites_identical(
+    tmp_path: Path, monkeypatch
+) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    incoming = _incoming(tmp_path, cfg, **{"report.txt": payload})
+    writes: list[str] = []
+    real_write = transfer.write_bytes_atomic
+
+    def _spy(path: Path, data: bytes) -> None:
+        writes.append(path.name)
+        real_write(path, data)
+
+    def _no_compare(*_args, **_kwargs):
+        raise AssertionError("--force must not compare with existing files")
+
+    monkeypatch.setattr(transfer, "write_bytes_atomic", _spy)
+    monkeypatch.setattr(transfer, "find_identical_file", _no_compare)
+
+    result = await _put(cfg, tmp_path, force=True)
+
+    assert result.error is None
+    assert result.reused is False
+    assert result.rel_path == Path("incoming/report.txt")
+    assert writes == ["report.txt"]
+    assert _names(incoming) == ["report.txt"]
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_free_name_does_not_compare(
+    tmp_path: Path, monkeypatch
+) -> None:
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    # A stray identical `_1` with no original: the requested name is free, so
+    # the upload is written there as before.
+    incoming = _incoming(tmp_path, cfg, **{"report_1.txt": payload})
+
+    def _no_compare(*_args, **_kwargs):
+        raise AssertionError("a free target name must not be compared")
+
+    monkeypatch.setattr(transfer, "find_identical_file", _no_compare)
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.reused is False
+    assert result.name == "report.txt"
+    assert _names(incoming) == ["report.txt", "report_1.txt"]
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_does_not_reuse_symlinked_sibling(
+    tmp_path: Path,
+) -> None:
+    payload = b"same bytes"
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(payload)
+    _, cfg = _put_cfg(root, "report.txt", payload)
+    incoming = _incoming(root, cfg, **{"report.txt": b"different!"})
+    _link(incoming / "report_1.txt", outside)
+
+    result = await _put(cfg, root)
+
+    # The link out of the project is never read, so no match is reported.
+    assert result.error is None
+    assert result.reused is False
+    assert result.name == "report_2.txt"
+    assert (incoming / "report_2.txt").read_bytes() == payload
+    assert (incoming / "report_1.txt").is_symlink()
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_does_not_read_denied_sibling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    payload = b"same bytes"
+    _, base = _put_cfg(tmp_path, "report.txt", payload)
+    files = base.files.model_copy(
+        update={"deny_globs": [*base.files.deny_globs, "**/report_1.txt"]}
+    )
+    cfg = replace(base, files=files)
+    incoming = _incoming(
+        tmp_path, cfg, **{"report.txt": b"different!", "report_1.txt": payload}
+    )
+    compared: list[list[str]] = []
+    real_find = transfer.find_identical_file
+
+    def _spy(candidates, data):
+        compared.append([item.name for item in candidates])
+        return real_find(candidates, data)
+
+    monkeypatch.setattr(transfer, "find_identical_file", _spy)
+
+    result = await _put(cfg, tmp_path)
+
+    assert compared == [["report.txt"]]
+    assert result.error is None
+    assert result.reused is False
+    assert result.name == "report_2.txt"
+    assert (incoming / "report_2.txt").read_bytes() == payload
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_denied_dedup_name_still_refused(
+    tmp_path: Path,
+) -> None:
+    _, base = _put_cfg(tmp_path, "report.txt", b"same bytes")
+    files = base.files.model_copy(
+        update={"deny_globs": [*base.files.deny_globs, "**/report_1.txt"]}
+    )
+    cfg = replace(base, files=files)
+    incoming = _incoming(tmp_path, cfg, **{"report.txt": b"different!"})
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.error == "path denied by rule: `**/report_1.txt`"
+    assert _names(incoming) == ["report.txt"]
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_compares_off_the_event_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    _incoming(tmp_path, cfg, **{"report.txt": payload})
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+    real_find = transfer.find_identical_file
+
+    def _spy(candidates, data):
+        seen.append(threading.get_ident())
+        return real_find(candidates, data)
+
+    monkeypatch.setattr(transfer, "find_identical_file", _spy)
+
+    result = await _put(cfg, tmp_path)
+
+    assert result.reused is True
+    assert seen and seen[0] != loop_thread
+
+
+@pytest.mark.anyio
+async def test_save_document_payload_reuse_logs_relative_path(
+    tmp_path: Path,
+) -> None:
+    from structlog.testing import capture_logs
+
+    payload = b"same bytes"
+    _, cfg = _put_cfg(tmp_path, "report.txt", payload)
+    _incoming(tmp_path, cfg, **{"report.txt": payload})
+
+    with capture_logs() as logs:
+        await _put(cfg, tmp_path)
+
+    assert [e for e in logs if e["event"] == "file_transfer.saved"] == []
+    reused = [e for e in logs if e["event"] == "file_transfer.reused"]
+    assert len(reused) == 1
+    assert reused[0]["path"] == "incoming/report.txt"
+    assert reused[0]["size"] == len(payload)
+
+
+@pytest.mark.anyio
+async def test_handle_file_put_replies_already_saved(tmp_path: Path) -> None:
+    # `/file put` and the captionless auto-put (`_handle_file_put_default`)
+    # share `_handle_file_put`.
+    payload = b"hello"
+    transport, cfg = _put_cfg(tmp_path, "note.txt", payload)
+    incoming = _incoming(tmp_path, cfg, **{"note.txt": payload})
+    msg = _msg("", document=_document(file_name="note.txt"))
+
+    await transfer._handle_file_put_default(
+        cfg, msg, ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text == "already saved as incoming/note.txt in proj (identical, 5 b)"
+    assert _names(incoming) == ["note.txt"]
+
+
+@pytest.mark.anyio
+async def test_handle_file_put_explicit_path_replies_already_saved(
+    tmp_path: Path,
+) -> None:
+    payload = b"hello"
+    transport, cfg = _put_cfg(tmp_path, "note.txt", payload)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.txt").write_bytes(payload)
+    msg = _msg("/file put docs/note.txt", document=_document(file_name="note.txt"))
+
+    await transfer._handle_file_put(
+        cfg, msg, "docs/note.txt", ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text == "already saved as docs/note.txt in proj (identical, 5 b)"
+    assert _names(tmp_path / "docs") == ["note.txt"]
+
+
+@pytest.mark.anyio
+async def test_handle_file_put_changed_file_still_replies_saved(
+    tmp_path: Path,
+) -> None:
+    transport, cfg = _put_cfg(tmp_path, "note.txt", b"hello")
+    _incoming(tmp_path, cfg, **{"note.txt": b"other"})
+    msg = _msg("", document=_document(file_name="note.txt"))
+
+    await transfer._handle_file_put_default(
+        cfg, msg, ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text == "saved incoming/note_1.txt in proj (5 b)"
+
+
+@pytest.mark.anyio
+async def test_save_file_put_carries_reused_flag(tmp_path: Path) -> None:
+    # `_save_file_put` is what the caption-as-prompt path
+    # (`handle_prompt_upload`) calls to build `[uploaded file: …]`.
+    payload = b"hello"
+    _, cfg = _put_cfg(tmp_path, "note.txt", payload)
+    _incoming(tmp_path, cfg, **{"note.txt": b"older", "note_1.txt": payload})
+    msg = _msg("", document=_document(file_name="note.txt"))
+
+    saved = await transfer._save_file_put(
+        cfg, msg, "", ambient_context=None, topic_store=None
+    )
+
+    assert saved is not None
+    assert saved.reused is True
+    assert saved.rel_path == Path("incoming/note_1.txt")
+    assert saved.size == len(payload)
+
+
+def _group(tmp_path: Path, payloads: dict[str, bytes]):
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime(tmp_path),
+        bot=_MultiFileBot(payloads),
+    )
+    messages = [
+        _msg("", message_id=index, document=_document(file_id=name, file_name=name))
+        for index, name in enumerate(payloads, start=1)
+    ]
+    return transport, cfg, messages
+
+
+@pytest.mark.anyio
+async def test_save_file_put_group_mixes_reused_and_new(tmp_path: Path) -> None:
+    payloads = {"a.txt": b"aaa", "b.txt": b"bbbb", "c.txt": b"ccccc"}
+    _, cfg, messages = _group(tmp_path, payloads)
+    incoming = _incoming(tmp_path, cfg, **{"a.txt": b"aaa", "c.txt": b"other"})
+
+    result = await transfer._save_file_put_group(
+        cfg, messages[0], "", messages, ambient_context=None, topic_store=None
+    )
+
+    assert result is not None
+    assert result.failed == []
+    assert [(item.name, item.reused) for item in result.saved] == [
+        ("a.txt", True),
+        ("b.txt", False),
+        ("c_1.txt", False),
+    ]
+    assert _names(incoming) == ["a.txt", "b.txt", "c.txt", "c_1.txt"]
+
+
+@pytest.mark.anyio
+async def test_handle_file_put_group_reply_mixes_reused_and_new(
+    tmp_path: Path,
+) -> None:
+    transport, cfg, messages = _group(tmp_path, {"a.txt": b"aaa", "b.txt": b"bbbb"})
+    _incoming(tmp_path, cfg, **{"a.txt": b"aaa"})
+
+    await transfer._handle_file_put_group(
+        cfg, messages[0], "", messages, ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    # Only the newly written file counts towards the size.
+    assert text == (
+        "saved b.txt to incoming/ in proj (4 b)\n\nalready saved: a.txt (identical)"
+    )
+
+
+@pytest.mark.anyio
+async def test_handle_file_put_group_reply_all_reused(tmp_path: Path) -> None:
+    payloads = {"a.txt": b"aaa", "b.txt": b"bbbb"}
+    transport, cfg, messages = _group(tmp_path, payloads)
+    incoming = _incoming(tmp_path, cfg, **payloads)
+
+    await transfer._handle_file_put_group(
+        cfg, messages[0], "", messages, ambient_context=None, topic_store=None
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text == "already saved a.txt, b.txt to incoming/ in proj (identical)"
+    assert _names(incoming) == ["a.txt", "b.txt"]
+
+
+@pytest.mark.anyio
+async def test_media_group_prompt_annotation_carries_reused_path(
+    tmp_path: Path,
+) -> None:
+    from untether.telegram.commands import media as media_commands
+
+    payloads = {"a.txt": b"aaa", "b.txt": b"bbbb"}
+    transport, base, messages = _group(tmp_path, payloads)
+    files = base.files.model_copy(
+        update={"enabled": True, "auto_put": True, "auto_put_mode": "prompt"}
+    )
+    cfg = replace(base, files=files)
+    incoming = _incoming(tmp_path, cfg, **{"a.txt": b"aaa"})
+    messages[0] = replace(messages[0], text="review these")
+    prompts: list[str] = []
+
+    async def _run_prompt(_msg, prompt: str, _resolved: ResolvedMessage) -> None:
+        prompts.append(prompt)
+
+    await media_commands._handle_media_group(
+        cfg, messages, topic_store=None, run_prompt=_run_prompt
+    )
+
+    assert prompts == [
+        "review these\n\n[uploaded files]\n- incoming/a.txt\n- incoming/b.txt"
+    ]
+    assert _names(incoming) == ["a.txt", "b.txt"]
+    assert transport.send_calls == []

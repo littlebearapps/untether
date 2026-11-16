@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import html
+import re
+from typing import Any, Literal
+
+import anyio
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
-from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
+from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, is_claude_prompting_mode
 from ...transport import RenderedMessage
+from ...utils.error_display import redact_url_secrets
+from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
     BUTTON_MODES,
@@ -19,6 +25,7 @@ from ._permission_mode_text import (
     cli_name_suffix,
     mode_display,
 )
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -88,7 +95,7 @@ def _toggle_row(
     label: str,
     *,
     current: bool | None,
-    default: bool,
+    default: bool | None,
     on_data: str,
     off_data: str,
     clr_data: str,
@@ -98,14 +105,18 @@ def _toggle_row(
 
     When *compact* is False (single-toggle pages), buttons show just On/Off.
     When *compact* is True (multi-toggle pages), buttons include the label.
+    A *default* of None means "unset is neither on nor off" (#1115): with no
+    override, neither button is ticked.
     """
     effective = current if current is not None else default
+    on_active = effective is not None and bool(effective)
+    off_active = effective is not None and not effective
     if compact:
-        on_text = _check(f"{label}: on", active=effective)
-        off_text = _check(f"{label}: off", active=not effective)
+        on_text = _check(f"{label}: on", active=on_active)
+        off_text = _check(f"{label}: off", active=off_active)
     else:
-        on_text = _check("On", active=effective)
-        off_text = _check("Off", active=not effective)
+        on_text = _check("On", active=on_active)
+        off_text = _check("Off", active=off_active)
     return [
         {"text": on_text, "callback_data": on_data},
         {"text": off_text, "callback_data": off_data},
@@ -159,6 +170,12 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "full auto": "Codex's own sandbox",
         "safe": "read-only sandbox",
         "full access": "all tools approved",
+        # #558 D21: Antigravity (shares "full access" above).
+        **{
+            text.label: text.hint
+            for text in agy_mode.ANTIGRAVITY_MODE_TEXT.values()
+            if text.label != "full access"
+        },
         "edit files": "files ok, no shell",
         "read-only": "write tools blocked",
     },
@@ -167,8 +184,11 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "off": "agent guesses",
     },
     "dp": {
-        "on": "show code changes",
+        # #1115: unset is its own state — cards show the diff, but nothing
+        # is held for a preview (Claude and agy gate only on ``is True``).
+        "on": "edits ask first",
         "off": "buttons only",
+        "default": "diffs on cards",
     },
     "vb": {
         "on": "detailed progress",
@@ -190,24 +210,34 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
     "amp": "smart mode (Opus 4.6)",
     "opencode": "provider/model (e.g. openai/gpt-4o)",
     "pi": "from provider config",
+    # #558 (D29): never guessed from agy's settings file; `-p /model` would
+    # spawn agy on a page render.
+    "antigravity": "agy default (run agy models on the host to list them)",
 }
+
+
+def _shown_model(model: str) -> str:
+    """A model id as an HTML page shows it: a URL's login details and query
+    values masked (#1161), then escaped."""
+    return html.escape(redact_url_secrets(model))
 
 
 def _engine_model_hint(engine: str) -> str:
     """#475: the engine's resolved default model (matching the run footer),
-    falling back to the static placeholder when unresolvable."""
+    falling back to the static placeholder when unresolvable. HTML-safe."""
     from ..engine_overrides import get_engine_default_model
 
     resolved = get_engine_default_model(engine)
     if resolved is not None:
-        return resolved
+        return _shown_model(resolved)
     return _ENGINE_MODEL_HINTS.get(engine, "from CLI settings")
 
 
 # Map "default" to effective value for settings with known defaults.
+# Not "dp" (#1115): unset Diff preview is neither on nor off, so it stays
+# "default".
 _DEFAULT_EFFECTIVE: dict[str, str] = {
     "aq": "on",
-    "dp": "off",
     "vb": "off",
 }
 
@@ -230,10 +260,10 @@ async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
-        ASK_QUESTIONS_SUPPORTED_ENGINES,
-        DIFF_PREVIEW_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        ask_questions_supported,
+        diff_preview_supported,
         get_engine_default_reasoning,
         get_reasoning_label,
         supports_reasoning,
@@ -253,10 +283,13 @@ async def _page_home(ctx: CommandContext) -> None:
     rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
+    dp_hint_text: str | None = None
+    agy_value: str | None = None
     cu_label = "default"
     _cu_ac: bool | None = None
     _cu_su: bool | None = None
     engine_override = None
+    pm_source = ""
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -267,6 +300,14 @@ async def _page_home(ctx: CommandContext) -> None:
             pm_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
         elif current_engine == "codex":
             pm_label = "safe" if pm == "safe" else "full auto"
+        elif current_engine == "antigravity":
+            # #558 REVIEW M4: same resolver as the permission page, so a TOML
+            # Full access shows on both.
+            agy_value, agy_source = await agy_mode.antigravity_effective_mode(
+                prefs, chat_id, ctx.runtime
+            )
+            pm_label = agy_mode.antigravity_mode_label(agy_value)
+            pm_source = agy_mode.source_suffix(agy_source)
         elif current_engine == "gemini":
             if pm == "yolo":
                 pm_label = "full access"
@@ -303,6 +344,12 @@ async def _page_home(ctx: CommandContext) -> None:
         # Diff preview override for current engine
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
+        if current_engine == "claude" and dp_label == "on":
+            dp_hint_text = _claude_dp_on_hint(
+                _claude_resolved_mode(engine_override, ctx.runtime)
+            )
+        elif current_engine == "antigravity":
+            dp_hint_text = _agy_dp_hint(agy_value)
 
         # Cost & usage overrides — resolution deferred until has_api_cost is known
         _cu_ac = engine_override.show_api_cost if engine_override else None
@@ -318,8 +365,8 @@ async def _page_home(ctx: CommandContext) -> None:
 
     show_plan_mode = current_engine in PERMISSION_MODE_SUPPORTED_ENGINES
     show_reasoning = supports_reasoning(current_engine)
-    show_ask_questions = current_engine in ASK_QUESTIONS_SUPPORTED_ENGINES
-    show_diff_preview = current_engine in DIFF_PREVIEW_SUPPORTED_ENGINES
+    show_ask_questions = ask_questions_supported(current_engine)
+    show_diff_preview = diff_preview_supported(current_engine)
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -370,14 +417,34 @@ async def _page_home(ctx: CommandContext) -> None:
                     f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
                 )
             if show_diff_preview:
+                # #1147: what On holds depends on the permission mode.
                 lines.append(
-                    f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
+                    f"Diff preview: <b>{dp_display}</b>"
+                    f"{_dp_home_suffix(dp_hint_text, dp_label)}"
                 )
         elif current_engine == "codex":
             lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
             lines.append(
                 f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
             )
+        elif current_engine == "antigravity":
+            lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
+            lines.append(
+                f"Permission mode: <b>{pm_label}</b>{pm_source}"
+                f"{_home_hint('pm', pm_label)}"
+            )
+            if show_ask_questions:
+                # #980: Untether's agy plugin is installed.
+                lines.append(
+                    f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
+                )
+            if show_diff_preview:
+                # #1090: Ask me's approval cards (same plugin predicate);
+                # #1167: the hint follows the chat's Permission mode.
+                lines.append(
+                    f"Diff preview: <b>{dp_display}</b>"
+                    f"{_dp_home_suffix(dp_hint_text, dp_label)}"
+                )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
             lines.append(
@@ -416,9 +483,12 @@ async def _page_home(ctx: CommandContext) -> None:
     if model_label == "default":
         engine_hint = _engine_model_hint(current_engine)
         model_hint = f"  · {engine_hint}"
-    lines.append(f"Model: <b>{model_label}</b>{model_hint}")
+    lines.append(f"Model: <b>{_shown_model(model_label)}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
-    if current_engine == "claude":
+    if current_engine == "claude" or (
+        current_engine == "antigravity" and show_ask_questions
+    ):
+        # #981: agy steers through Untether's agy plugin (same predicate).
         lines.append(
             f"Follow-up: <b>{followup_label}</b>{_home_hint('fu', followup_label)}"
         )
@@ -546,6 +616,10 @@ async def _page_home(ctx: CommandContext) -> None:
     else:
         # Other engines
         row1 = []
+        if show_plan_mode:
+            # Antigravity (#558): the only non-Claude/Codex/Gemini engine
+            # with a permission mode.
+            row1.append({"text": "📋 Permission mode", "callback_data": "config:pm"})
         if show_cost_usage:
             row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
         row1.append({"text": "↩️ Resume line", "callback_data": "config:rl"})
@@ -560,7 +634,26 @@ async def _page_home(ctx: CommandContext) -> None:
         if show_reasoning:
             row3.append({"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"})
         buttons.append(row3)
-        buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
+        if current_engine == "antigravity":
+            # #980/#981: questions and steer need Untether's agy plugin; the
+            # 🔐 page says whether it is installed and how (read-only).
+            row4 = [{"text": "🔐 Telegram approvals", "callback_data": "config:gt"}]
+            if show_ask_questions:
+                row4.insert(0, {"text": "❓ Ask mode", "callback_data": "config:aq"})
+                buttons.append(row4)
+                # #1090: Diff preview needs the same plugin.
+                buttons.append(
+                    [
+                        {"text": "📝 Diff preview", "callback_data": "config:dp"},
+                        {"text": "↪️ Follow-up", "callback_data": "config:fu"},
+                    ]
+                )
+                buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
+            else:
+                row4.append({"text": "ℹ️ About", "callback_data": "config:ab"})
+                buttons.append(row4)
+        else:
+            buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
     # #296: a ⏰ Triggers navigation button whenever triggers are enabled
     # (even with none configured, D2 — the page explains how to add one),
@@ -625,7 +718,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ctx,
             (
                 "<b>📋 Permission mode</b>\n\n"
-                "Only available for Claude Code, Codex, and Gemini CLI."
+                "Only available for Claude Code, Codex, Antigravity CLI and"
+                " Gemini CLI."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
@@ -641,7 +735,30 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             current, permission_mode=mode_value if mode_value != "auto" else None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.approval_policy.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
+        await _page_home(ctx)
+        return
+
+    # --- Antigravity permission mode actions (#558, D21) ---
+    if engine == "antigravity" and action in agy_mode.ANTIGRAVITY_PM_ACTIONS:
+        mode_value = agy_mode.ANTIGRAVITY_PM_ACTIONS[action]
+        # Ask me is stored even when the host has no Telegram approvals yet
+        # (a typed `/config pm:aga`): the run is then refused with the
+        # install hint, never run as something else (#980).
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = with_override(current, permission_mode=mode_value)
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info(
+            "config.antigravity_permission_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -650,7 +767,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=_PM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.planmode.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.planmode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -659,7 +781,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=_GEMINI_AM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_mode.set", chat_id=chat_id, mode=action)
+        logger.info(
+            "config.approval_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=action,
+        )
         await _page_home(ctx)
         return
 
@@ -667,16 +794,31 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.approval_mode.set", chat_id=chat_id, mode="ro")
+        logger.info(
+            "config.approval_mode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="ro",
+        )
         await _page_home(ctx)
         return
 
-    # --- Clear (all engines) ---
-    if action == "clr":
+    # --- Clear (all engines; ``agc`` / ``cxc`` are the agy / Codex pages'
+    # own, so their toasts name the page: #1060, #1155) ---
+    if (
+        action == "clr"
+        or (engine == "antigravity" and action == "agc")
+        or (engine == "codex" and action == "cxc")
+    ):
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.permission_mode.cleared", chat_id=chat_id, engine=engine)
+        logger.info(
+            "config.permission_mode.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=engine,
+        )
         await _page_home(ctx)
         return
 
@@ -767,10 +909,94 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                 },
             ],
             [
-                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                # #1155: the page's own clear, so the toast says
+                # "Approval policy" (``clr`` still clears when typed).
+                {"text": "Clear override", "callback_data": "config:pm:cxc"},
                 {"text": "← Back", "callback_data": "config:home"},
             ],
         ]
+
+    elif engine == "antigravity":
+        agy_value, agy_source = await agy_mode.antigravity_effective_mode(
+            prefs, chat_id, ctx.runtime
+        )
+        current_label = agy_mode.antigravity_mode_label(agy_value)
+        active_mode = agy_mode.canonical_mode(agy_value)
+        lines = [
+            "<b>📋 Permission mode</b>",
+            "",
+            # #1080: Ask me does stop to ask, so not "it can't ask you".
+            "This picks what Antigravity may do on its own, and in Ask me"
+            " what it asks you about first in Telegram.",
+            "",
+            "• <b>Workspace</b> — edits files in this project (and temp"
+            " folders); it has no shell, web or MCP tools. Not a"
+            " sandbox: a run can still write files that later runs or tools"
+            " execute (default)",
+            "• <b>Ask me</b> — reads and edits files in this project on its"
+            " own, and asks you in Telegram (with the command or a diff)"
+            " before shell commands, web, MCP, subagents and files outside"
+            " the project. A Deny, or no answer in 15 min, blocks the tool."
+            " Needs Telegram approvals on the host (🔐 below). Cron and"
+            " webhook runs only get it when the cron itself sets it",
+            "• <b>Plan first</b> — writes a plan and changes nothing; the plan"
+            " is posted with Approve / Deny / Let's discuss, and Approve"
+            " carries it out in Workspace mode. Scheduled runs only post"
+            " the plan",
+            "• <b>Full access</b> — every tool is approved, including shell,"
+            " network and files outside the project (agy's"
+            " --dangerously-skip-permissions). Cron and webhook runs only get"
+            " this when the cron itself sets it",
+            "",
+            "⚠️ <b>After switching between Workspace / Plan first and Ask me"
+            " / Full access, send /new.</b> A conversation keeps the tools it"
+            " started with: one that started in Workspace or Plan first has"
+            " no shell (so Ask me would have nothing to ask about), and one"
+            " that started in Ask me or Full access keeps reaching for it,"
+            " which Workspace and Plan first then block. The new mode applies"
+            " from the next new conversation. Switching within a pair"
+            " (Workspace ↔ Plan first, Ask me ↔ Full access) applies from"
+            " your next message.",
+            "",
+            f"Current: <b>{current_label}</b>{agy_mode.source_suffix(agy_source)}",
+            "",
+            _learn_more("interactive-approval", "antigravity-cli--permission-mode"),
+        ]
+        from ...antigravity import gate_plugin
+
+        # #980: no Telegram approvals on the host → "🔒 Ask me — set up",
+        # which opens their status page (install is a host command).
+        gate_ready = await anyio.to_thread.run_sync(gate_plugin.installed_ready)
+        buttons = [
+            [
+                {
+                    "text": _check(
+                        agy_mode.button_text(action_id, gate_ready=gate_ready),
+                        active=active_mode
+                        == agy_mode.ANTIGRAVITY_PM_ACTIONS[action_id],
+                    ),
+                    "callback_data": (
+                        "config:gt"
+                        if action_id == "aga" and not gate_ready
+                        else f"config:pm:{action_id}"
+                    ),
+                }
+                for action_id in row
+            ]
+            for row in agy_mode.BUTTON_ROWS
+        ]
+        buttons.append(
+            [{"text": "🔐 Telegram approvals", "callback_data": "config:gt"}]
+        )
+        buttons.append(
+            [
+                {
+                    "text": "Clear override",
+                    "callback_data": "config:pm:agc",
+                },
+                {"text": "← Back", "callback_data": "config:home"},
+            ]
+        )
 
     elif engine == "gemini":
         if pm == "yolo":
@@ -872,7 +1098,12 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
             new_value = None
         updated = with_override(current, loop_enabled=new_value)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.loop.set", chat_id=chat_id, value=new_value)
+        logger.info(
+            "config.loop.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=new_value,
+        )
         await _page_home(ctx)
         return
 
@@ -948,17 +1179,29 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
     if action == "on":
         _VERBOSE_OVERRIDES[chat_id] = "verbose"
-        logger.info("config.verbose.set", chat_id=chat_id, verbosity="verbose")
+        logger.info(
+            "config.verbose.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            verbosity="verbose",
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         _VERBOSE_OVERRIDES[chat_id] = "compact"
-        logger.info("config.verbose.set", chat_id=chat_id, verbosity="compact")
+        logger.info(
+            "config.verbose.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            verbosity="compact",
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         _VERBOSE_OVERRIDES.pop(chat_id, None)
-        logger.info("config.verbose.cleared", chat_id=chat_id)
+        logger.info(
+            "config.verbose.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1019,7 +1262,8 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
-    available = list(ctx.runtime.engine_ids)
+    # #1165: offer only engines that can run (the startup message's list).
+    available = list(ctx.runtime.available_engine_ids())
 
     if action == "md_clr":
         # Clear model override (handled here for the merged page)
@@ -1028,18 +1272,27 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         if current and current.model:
             updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
-            logger.info("config.model.cleared", chat_id=chat_id)
+            logger.info(
+                "config.model.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+            )
         await _page_engine(ctx)
         return
 
     if action == "clr":
         await prefs.clear_default_engine(chat_id)
-        logger.info("config.engine.cleared", chat_id=chat_id)
+        logger.info(
+            "config.engine.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
     elif action and action in available:
         await prefs.set_default_engine(chat_id, action)
-        logger.info("config.engine.set", chat_id=chat_id, engine=action)
+        logger.info(
+            "config.engine.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=action,
+        )
         await _page_home(ctx)
         return
 
@@ -1050,7 +1303,9 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     engine_override = await prefs.get_engine_override(chat_id, current_engine)
     model_override = engine_override.model if engine_override else None
     engine_hint = _engine_model_hint(current_engine)
-    model_label = model_override or f"default ({engine_hint})"
+    model_label = (
+        _shown_model(model_override) if model_override else f"default ({engine_hint})"
+    )
 
     lines = [
         "<b>⚙️ Engine & model</b>",
@@ -1073,6 +1328,10 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
             f"⚠️ <b>{deprecated_shown}</b> — deprecated, no longer supported,"
             " may be removed in a future release. Prefer another engine.",
         ]
+
+    unavailable_notes = ctx.runtime.engine_availability_notes()
+    if unavailable_notes:
+        lines += ["", f"<i>{html.escape('; '.join(unavailable_notes))}</i>"]
 
     lines += [
         "",
@@ -1129,17 +1388,29 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
 
     if action == "all":
         await prefs.clear_listen_mode(chat_id)
-        logger.info("config.listen.set", chat_id=chat_id, mode="all")
+        logger.info(
+            "config.listen.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="all",
+        )
         await _page_home(ctx)
         return
     elif action == "men":
         await prefs.set_listen_mode(chat_id, "mentions")
-        logger.info("config.listen.set", chat_id=chat_id, mode="mentions")
+        logger.info(
+            "config.listen.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode="mentions",
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         await prefs.clear_listen_mode(chat_id)
-        logger.info("config.listen.cleared", chat_id=chat_id)
+        logger.info(
+            "config.listen.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1215,12 +1486,19 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
     if action in {"q", "s"}:
         mode = "steer" if action == "s" else "queue"
         await prefs.set_followup_mode(chat_id, mode)
-        logger.info("config.followup.set", chat_id=chat_id, mode=mode)
+        logger.info(
+            "config.followup.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=mode,
+        )
         await _page_home(ctx)
         return
     if action == "clr":
         await prefs.clear_followup_mode(chat_id)
-        logger.info("config.followup.cleared", chat_id=chat_id)
+        logger.info(
+            "config.followup.cleared", chat_id=chat_id, sender_id=ctx.message.sender_id
+        )
         await _page_home(ctx)
         return
 
@@ -1229,14 +1507,18 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
     effective = current or default
     source = "chat" if current is not None else "default"
     current_engine, _label = await _resolve_effective_engine(ctx)
+    # #1077: name the chat's engine, not Claude, in an Antigravity chat.
+    who = {"claude": "Claude", "antigravity": "Antigravity"}.get(
+        current_engine, "the agent"
+    )
 
     lines = [
         "<b>↪️ Follow-up mode</b>",
         "",
-        "What a message sent while Claude is working does.",
+        f"What a message sent while {who} is working does.",
         "",
         "• <b>queue</b> — waits for the current turn to finish, then runs (default)",
-        "• <b>steer</b> — goes straight into the running turn; Claude picks it "
+        f"• <b>steer</b> — goes straight into the running turn; {who} picks it "
         "up at its next step",
         "",
         "One-off: <code>/steer &lt;text&gt;</code> or "
@@ -1245,11 +1527,27 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
         "",
         f"Current: <b>{effective}</b> ({source})",
     ]
-    if current_engine != "claude":
+    if current_engine == "antigravity":
+        from ..engine_overrides import ask_questions_supported
+
+        # #981: agy takes a steer before its next model call, through
+        # Untether's agy plugin.
         lines += [
             "",
-            f"⚠️ Steer is Claude Code only — <b>{current_engine}</b> runs "
-            "always queue follow-ups.",
+            "Antigravity: a steer reaches agy before its next step"
+            + (
+                "."
+                if ask_questions_supported(current_engine)
+                else " once Untether's agy plugin is installed on the host"
+                " (<code>untether agy-gate install</code>); until then"
+                " follow-ups queue."
+            ),
+        ]
+    elif current_engine != "claude":
+        lines += [
+            "",
+            f"⚠️ Steer is Claude Code and Antigravity only — <b>{current_engine}</b>"
+            " runs always queue follow-ups.",
         ]
     lines += ["", _learn_more("steer-follow-ups")]
 
@@ -1296,7 +1594,12 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             current = await prefs.get_engine_override(chat_id, current_engine)
             updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
-            logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
+            logger.info(
+                "config.model.cleared",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                engine=current_engine,
+            )
         await _page_engine(ctx)
         return
 
@@ -1319,6 +1622,37 @@ _RS_ACTIONS: dict[str, str] = {
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
+
+
+def _antigravity_runner_and_model(
+    ctx: CommandContext, override_model: str | None
+) -> tuple[Any, str | None]:
+    """The agy runner and the model a plain message in this chat would use
+    (chat override, then ``[antigravity] model``, else agy's default)."""
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="antigravity"
+        ).runner
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None, override_model
+    toml_model = getattr(runner, "model", None)
+    model = override_model or (toml_model if isinstance(toml_model, str) else None)
+    return runner, model or None
+
+
+async def _antigravity_model_efforts(
+    runner: Any, model: str | None
+) -> tuple[str, ...] | None:
+    """#558 (D29): ask agy which effort levels *model* accepts — a cached
+    zero-token probe, bounded at 10 s. None when it can't say."""
+    from ...utils import antigravity_quota
+
+    if runner is None:
+        return None
+    levels: tuple[str, ...] | None = None
+    with anyio.move_on_after(antigravity_quota.EFFORT_TIMEOUT_S + 1.0):
+        levels = await antigravity_quota.agy_model_efforts(runner, model)
+    return levels
 
 
 def _effective_reasoning(
@@ -1379,6 +1713,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             logger.warning(
                 "config.reasoning.unsupported_level",
                 chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
                 engine=current_engine,
                 reasoning_level=level,
                 allowed=sorted(allowed),
@@ -1391,6 +1726,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         logger.info(
             "config.reasoning.set",
             chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
             engine=current_engine,
             reasoning_level=level,
         )
@@ -1400,7 +1736,12 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         current = await prefs.get_engine_override(chat_id, current_engine)
         updated = with_override(current, reasoning=None)
         await prefs.set_engine_override(chat_id, current_engine, updated)
-        logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
+        logger.info(
+            "config.reasoning.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            engine=current_engine,
+        )
         await _page_home(ctx)
         return
 
@@ -1419,6 +1760,37 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         current_label = f"default ({engine_default})" if engine_default else "default"
 
     levels = allowed_reasoning_levels(current_engine)
+    # #558 (D29): agy's levels depend on the model. Asked here — on a page
+    # open, never on a button tap (those return above) — and cached.
+    agy_lines: list[str] = []
+    if current_engine == "antigravity":
+        agy_runner, agy_model = _antigravity_runner_and_model(
+            ctx, override.model if override else None
+        )
+        available = await _antigravity_model_efforts(agy_runner, agy_model)
+        model_label = (
+            html.escape(redact_url_secrets(agy_model)[:80])
+            if agy_model
+            else "agy default"
+        )
+        if available is None:
+            agy_lines = [
+                f"Model: <b>{model_label}</b>",
+                "<i>Couldn't ask agy which levels this model supports"
+                " \N{EM DASH} showing the usual three.</i>",
+            ]
+        else:
+            levels = tuple(lv for lv in levels if lv in available)
+            supports = (
+                f"supports {', '.join(available)}" if available else "fixed effort"
+            )
+            agy_lines = [f"Model: <b>{model_label}</b> · {supports}"]
+            if reasoning and reasoning not in available:
+                current_label = (
+                    f"default ({reasoning} isn't available for this model"
+                    " \N{EM DASH} ignored)"
+                )
+                reasoning = None
 
     level_descriptions: list[str] = []
     if "low" in levels or "medium" in levels or "high" in levels:
@@ -1445,6 +1817,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         f"ℹ️ <i>Default: uses engine's own {rs_label_lower} level</i>",
         "",
         f"Engine: <b>{current_engine}</b>",
+        *agy_lines,
         f"Current: <b>{current_label}</b>",
         "",
         _learn_more("model-reasoning", "set-reasoning-level"),
@@ -1488,7 +1861,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, with_override
+    from ..engine_overrides import ask_questions_supported, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1502,12 +1875,14 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude Code-only guard
+    # Claude Code, or Antigravity with Untether's agy plugin (#980)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if current_engine not in ASK_QUESTIONS_SUPPORTED_ENGINES:
+    if not ask_questions_supported(current_engine):
         await _respond(
             ctx,
-            "<b>❓ Ask mode</b>\n\nOnly available for Claude Code.",
+            "<b>❓ Ask mode</b>\n\nAvailable for Claude Code, and for"
+            " Antigravity once Untether's agy plugin is installed on the host"
+            " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1518,21 +1893,35 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=True)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
+        logger.info(
+            "config.ask_questions.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=True,
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=False)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
+        logger.info(
+            "config.ask_questions.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=False,
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, ask_questions=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.ask_questions.cleared", chat_id=chat_id)
+        logger.info(
+            "config.ask_questions.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+        )
         await _page_home(ctx)
         return
 
@@ -1574,9 +1963,247 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     await _respond(ctx, "\n".join(lines), buttons)
 
 
+# ---------------------------------------------------------------------------
+# Antigravity: Telegram approvals gate status (#980) — read-only
+# ---------------------------------------------------------------------------
+
+
+_BACKTICK_SPAN = re.compile(r"`([^`]+)`")
+
+
+def _code_spans(text: str) -> str:
+    """#1077: escape plain text for the page, rendering its `…` spans (CLI
+    commands in shared reason texts) as <code> instead of literal backticks."""
+    return _BACKTICK_SPAN.sub(r"<code>\1</code>", html.escape(text))
+
+
+def _chat_project_cwd(ctx: CommandContext) -> Any:
+    """The folder a plain message in this chat runs agy in, or None."""
+    try:
+        context = ctx.ambient_context or ctx.runtime.default_context_for_chat(
+            ctx.message.channel_id
+        )
+        return ctx.runtime.resolve_run_cwd(context)
+    except Exception:  # noqa: BLE001 — a status line must never break /config
+        return None
+
+
+async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None:
+    """REVIEW-2 m3: status only. Installing writes into ``~/.gemini`` and is
+    host-wide, so it is a host command, never a button. ``Re-check`` only
+    re-runs agy's own ``-p /hooks`` listing for this chat's project."""
+    from ...antigravity import gate_plugin, gate_precheck
+
+    cwd = _chat_project_cwd(ctx)
+    note: str | None = None
+    if action == "rc":
+        if cwd is None:
+            note = "No project folder for this chat, so there is nothing to check."
+        else:
+            gate_precheck.clear_cache(cwd)
+            runner, _model = _antigravity_runner_and_model(ctx, None)
+            if runner is None:
+                note = "Antigravity isn't set up on this Untether instance."
+            else:
+                with anyio.move_on_after(gate_precheck.HOOKS_TIMEOUT_S + 5):
+                    await gate_precheck.check(runner, cwd, use_cache=False)
+                logger.info(
+                    "config.agy_gate.rechecked",
+                    chat_id=ctx.message.channel_id,
+                    sender_id=ctx.message.sender_id,
+                )
+
+    install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
+    latest = gate_precheck.latest(cwd)
+    lines = [
+        "<b>🔐 Telegram approvals</b> <i>(Antigravity)</i>",
+        "",
+        "Untether's agy plugin lets an Antigravity run ask you questions"
+        " (buttons here, or reply with text), take a message while it works"
+        " (Follow-up: steer) and, in <b>Ask me</b> mode, ask before shell"
+        " commands, web, MCP and files outside the project. It only acts on"
+        " agy runs Untether starts.",
+        "",
+        f"Plugin: <b>{html.escape(install.summary())}</b>",
+    ]
+    if install.present:
+        lines.append(f"Approval and question wait: <b>{install.wait_s or '—'} s</b>")
+    if cwd is None:
+        lines.append("This chat: <i>no project folder</i>")
+    elif latest is None:
+        lines.append(
+            "This chat's project: <i>not checked yet</i> (checked before the"
+            " next Antigravity run, or tap Re-check)"
+        )
+    elif latest.ok and not install.ready:
+        # #1077: a cached pass predates the plugin's current state; runs
+        # check the plugin first, so the project isn't ready either.
+        lines.append(
+            "This chat's project: <b>not ready</b> — the plugin above isn't"
+            " ready (the last project check passed before that)"
+        )
+    elif latest.ok:
+        lines.append("This chat's project: <b>ready</b> (agy lists the hooks)")
+    else:
+        lines.append(
+            "This chat's project: <b>not ready</b> — "
+            + _code_spans(gate_precheck.reason_text(latest.reason))
+        )
+    if latest is not None and latest.foreign_sources:
+        shown = ", ".join(latest.foreign_sources[:5])
+        lines.append(f"Other agy hooks here: <code>{html.escape(shown)}</code>")
+    if note is not None:
+        lines += ["", html.escape(note)]
+    lines += [
+        "",
+        "Install writes only <code>~/.gemini/config/plugins/untether-gate/</code>"
+        " (three files), through agy's own <code>agy plugin install</code>. It"
+        " is host-wide, so it is done on the host, not from Telegram:",
+        "<code>untether agy-gate install</code>",
+        "<code>untether agy-gate uninstall</code>",
+        "<code>untether agy-gate status --project &lt;folder&gt;</code>",
+        "",
+        _learn_more("antigravity", "telegram-questions-and-steer"),
+    ]
+    buttons = [
+        [
+            {"text": "🔄 Re-check", "callback_data": "config:gt:rc"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ]
+    ]
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# #1115: what an unset Diff preview does (page text and its "Current:" line).
+_DP_UNSET_TEXT = "approval cards show the diff; edits aren't held to preview it"
+
+# #1147: Claude's diff gate (``claude.py`` stage 6) only sees an Edit, Write
+# or Bash that Claude Code itself sends for approval, only runs outside the
+# prompting modes (``not state.prompting_mode``), and stands down for the
+# rest of a reply once a plan or a held edit is approved
+# (``_PLAN_EXIT_APPROVED``, #283/#369). What On really holds therefore
+# depends on the chat's resolved permission mode. Antigravity's page keeps
+# the plain wording plus its own Ask me note; its home hint follows the
+# mode (#1167, :func:`_agy_dp_hint`).
+_DP_ON_TEXT = "edits wait for your approval, with the diff"
+_DP_ON_CLAUDE_TEXT = (
+    "an edit or command that reaches Untether for approval waits for your"
+    " tap, with the diff"
+)
+# Per-mode note tails, after "In this chat's Permission mode (<b>X</b>), ".
+# plan / plan-auto: the CLI sends a non-plan-file write to stage 6
+# (``decision_reason_type: "mode"``, CLI 2.1.285+) only before the plan is
+# approved; plan-auto's rubber stamp approves it for you. auto: in-project
+# edits are approved by the CLI itself and the rest go to its classifier;
+# only protected paths and the classifier's fallback prompt reach stage 6.
+_DP_ON_MODE_NOTES: dict[str, str] = {
+    "plan": (
+        "that's an edit or command Claude tries before you approve its plan."
+        " Once you approve the plan, or one held edit, the rest of that reply"
+        " runs without asking."
+    ),
+    CLAUDE_PLAN_AUTO_MODE: (
+        "the plan is approved for you, so only an edit or command Claude tries"
+        " before its plan is held; the edits that carry out the plan run"
+        " without asking."
+    ),
+    "auto": (
+        "Claude Code approves edits inside the project itself and sends other"
+        " actions to its classifier, so only what it still asks about reaches"
+        " Untether: protected files, or actions after repeated classifier"
+        " blocks."
+    ),
+    "dontAsk": (
+        "edits and commands are pre-approved and anything else is refused, so"
+        " On rarely holds anything."
+    ),
+    "bypassPermissions": (
+        "Claude Code skips its permission checks, so On rarely holds anything."
+    ),
+}
+_DP_ON_MODE_HINTS: dict[str, str] = {
+    "plan": "edits before plan approval wait",
+    CLAUDE_PLAN_AUTO_MODE: "rarely holds: plans auto-approved",
+    "auto": "only edits Claude Code asks about",
+    "dontAsk": "rarely holds in this mode",
+    "bypassPermissions": "rarely holds in this mode",
+}
+_DP_ON_PROMPTING_HINT = "nothing extra in this mode"
+_DP_ON_UNKNOWN_HINT = "edits sent for approval wait"
+
+
+# #1167: agy's gate shows cards only in Ask me (``GateRun.required``); in
+# Workspace, Plan first and Full access it gives no decision and agy's own
+# check (or the bypass flag) decides, so Diff preview — on, off or unset —
+# changes nothing there. Same wording as the Diff preview page's agy note.
+_DP_AGY_OTHER_MODE_HINT = "only in Ask me"
+
+
+def _agy_dp_hint(mode: str | None) -> str | None:
+    """The agy home hint for Diff preview outside Ask me, whatever its value;
+    ``None`` in Ask me, where the shared ``dp`` hints are true. *mode* is the
+    chat's effective stored mode (unknown → Workspace, as the runner)."""
+    if agy_mode.canonical_mode(mode) == "ask":
+        return None
+    return _DP_AGY_OTHER_MODE_HINT
+
+
+def _dp_home_suffix(hint: str | None, dp_label: str) -> str:
+    """The home-page Diff preview hint: the engine/mode-specific *hint* when
+    there is one (#1147, #1167), else the shared ``dp`` hint."""
+    return f"  · {hint}" if hint is not None else _home_hint("dp", dp_label)
+
+
+def _claude_resolved_mode(engine_override: Any, runtime: Any) -> str | None:
+    """The permission mode a plain Claude message in this chat runs with:
+    the chat's override, then ``[engines.claude] permission_mode`` (the
+    runner's own precedence in ``_effective_permission_mode``)."""
+    mode = getattr(engine_override, "permission_mode", None)
+    if isinstance(mode, str) and mode:
+        return mode
+    if runtime is None:
+        return None
+    try:
+        resolved = runtime.resolve_runner(resume_token=None, engine_override="claude")
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None
+    value = getattr(resolved.runner, "permission_mode", None)
+    return value if isinstance(value, str) and value else None
+
+
+def _claude_dp_on_hint(mode: str | None) -> str:
+    """#1147: the home-line hint for Claude's Diff preview On in *mode*."""
+    if mode is None:
+        return _DP_ON_UNKNOWN_HINT
+    if is_claude_prompting_mode(mode):
+        return _DP_ON_PROMPTING_HINT
+    return _DP_ON_MODE_HINTS.get(mode, _DP_ON_UNKNOWN_HINT)
+
+
+def _claude_dp_on_note(mode: str | None) -> str | None:
+    """#1147: the page note saying what Claude's Diff preview On holds in
+    *mode*, or None when the mode is unknown."""
+    if mode is None:
+        return None
+    ui_name = html.escape(mode_display(mode)[0])
+    lead = f"In this chat's Permission mode (<b>{ui_name}</b>), "
+    if is_claude_prompting_mode(mode):
+        # A prompting mode asks through Claude Code itself; the diff gate
+        # never runs there, so On adds no wait.
+        note = (
+            f"{lead}Claude Code asks you itself and its cards show the diff,"
+            " so On holds nothing extra"
+        )
+        if mode == "acceptEdits":
+            return note + ": edits inside the project still run without asking."
+        return note + "."
+    tail = _DP_ON_MODE_NOTES.get(mode)
+    return None if tail is None else lead + tail
+
+
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, with_override
+    from ..engine_overrides import diff_preview_supported, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1590,12 +2217,14 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude Code-only guard
+    # Claude Code, or Antigravity with Untether's agy plugin (#1090)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if current_engine not in DIFF_PREVIEW_SUPPORTED_ENGINES:
+    if not diff_preview_supported(current_engine):
         await _respond(
             ctx,
-            "<b>📝 Diff preview</b>\n\nOnly available for Claude Code.",
+            "<b>📝 Diff preview</b>\n\nAvailable for Claude Code, and for"
+            " Antigravity once Untether's agy plugin is installed on the host"
+            " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1606,32 +2235,55 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=True)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
+        logger.info(
+            "config.diff_preview.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=True,
+        )
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=False)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
+        logger.info(
+            "config.diff_preview.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=False,
+        )
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = with_override(current, diff_preview=None)
         await prefs.set_engine_override(chat_id, engine, updated)
-        logger.info("config.diff_preview.cleared", chat_id=chat_id)
+        logger.info(
+            "config.diff_preview.cleared",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+        )
         await _page_home(ctx)
         return
 
     override = await prefs.get_engine_override(chat_id, engine)
     dp = override.diff_preview if override else None
+    # #1115: unset isn't off — the cards that appear show the diff
+    # (``diff_preview is not False``), but no edit is held for a preview
+    # (``diff_preview is True``). Same for Claude and agy's Ask me.
     if dp is True:
-        current_label = "on"
+        current_label = "<b>on</b>"
     elif dp is False:
-        current_label = "off"
+        current_label = "<b>off</b>"
     else:
-        current_label = "off"
+        current_label = f"<b>default</b> — {_DP_UNSET_TEXT}"
+
+    on_text = _DP_ON_TEXT
+    on_note: str | None = None
+    if engine == "claude":
+        on_text = _DP_ON_CLAUDE_TEXT
+        on_note = _claude_dp_on_note(_claude_resolved_mode(override, ctx.runtime))
 
     lines = [
         "<b>📝 Diff preview</b>",
@@ -1639,10 +2291,23 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "See what the agent wants to change before you approve it.",
         "Shows a compact diff of edits and commands.",
         "",
-        "• <b>on</b> — show code changes in approval messages",
-        "• <b>off</b> — show approval buttons only (default)",
+        f"• <b>on</b> — {on_text}",
+        "• <b>off</b> — show approval buttons only, without the diff",
+        f"• <b>default</b> (not set) — {_DP_UNSET_TEXT}",
         "",
-        f"Current: <b>{current_label}</b>",
+    ]
+    if on_note is not None:
+        lines += [on_note, ""]  # #1147
+    if engine == "antigravity":
+        # #1090: the gate's cards exist only in Ask me.
+        lines += [
+            "Antigravity: only in <b>Ask me</b> (Permission mode). On, edits"
+            " inside the project ask too, with the diff; off, an edit card"
+            " names the file without the diff. Commands always show.",
+            "",
+        ]
+    lines += [
+        f"Current: {current_label}",
         "",
         _learn_more("interactive-approval", "diff-previews"),
     ]
@@ -1651,7 +2316,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         _toggle_row(
             "Diff",
             current=dp,
-            default=False,
+            default=None,
             on_data="config:dp:on",
             off_data="config:dp:off",
             clr_data="config:dp:clr",
@@ -1699,7 +2364,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
                 "<b>💰 Cost & usage</b>\n\n"
                 f"Not available for <b>{current_engine}</b>.\n"
                 "API cost works with Claude Code and OpenCode.\n"
-                "Subscription usage works with Claude Code.\n"
+                "Subscription usage needs an engine that reports its plan"
+                " limits.\n"
                 "Send /usage for this chat's last-session token totals."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
@@ -1717,16 +2383,36 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
         if prefix == "ac" and has_api_cost:
             ac_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.api_cost.set", chat_id=chat_id, value=ac_val)
+            logger.info(
+                "config.api_cost.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=ac_val,
+            )
         elif prefix == "su" and has_sub_usage:
             su_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.subscription_usage.set", chat_id=chat_id, value=su_val)
+            logger.info(
+                "config.subscription_usage.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=su_val,
+            )
         elif prefix == "bg":
             bg_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.budget_enabled.set", chat_id=chat_id, value=bg_val)
+            logger.info(
+                "config.budget_enabled.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=bg_val,
+            )
         elif prefix == "bc":
             bc_val = {"on": True, "off": False, "clr": None}[act]
-            logger.info("config.budget_auto_cancel.set", chat_id=chat_id, value=bc_val)
+            logger.info(
+                "config.budget_auto_cancel.set",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                value=bc_val,
+            )
 
         updated = with_override(
             current,
@@ -1904,7 +2590,12 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         new_val = {"on": True, "off": False, "clr": None}[action]
         updated = with_override(current, show_resume_line=new_val)
         await prefs.set_engine_override(chat_id, current_engine, updated)
-        logger.info("config.resume_line.set", chat_id=chat_id, value=new_val)
+        logger.info(
+            "config.resume_line.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=new_val,
+        )
         await _page_home(ctx)
         return
 
@@ -2059,6 +2750,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
         logger.info(
             "config.triggers.paused",
             chat_id=chat_id_int,
+            sender_id=ctx.message.sender_id,
             crons=cron_count,
             webhooks=webhook_count,
         )
@@ -2066,6 +2758,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
         logger.info(
             "config.triggers.resumed",
             chat_id=chat_id_int,
+            sender_id=ctx.message.sender_id,
             crons=cron_count,
             webhooks=webhook_count,
         )
@@ -2122,7 +2815,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     last = _format_trigger_relative(get_last_fired(cron.id))
                     # #743: free-form, so escaped (only shown when set).
                     model_seg = (
-                        f"model=<i>{html.escape(_truncate_field(cron.model))}</i> · "
+                        f"model=<i>{html.escape(_truncate_field(redact_url_secrets(cron.model)))}</i> · "
                         if cron.model
                         else ""
                     )
@@ -2207,7 +2900,107 @@ _PAGES: dict[str, object] = {
     "rl": _page_resume_line,
     "ab": _page_about,
     "loop": _page_loop,
+    "gt": _page_agy_gate,
 }
+
+# ---------------------------------------------------------------------------
+# Who may change settings (#1042)
+# ---------------------------------------------------------------------------
+#
+# In a group, the text commands that change a chat's settings (`/model set`,
+# `/reasoning set`, `/agent set`, `/listen`, bare `/steer` / `/queue`) need a
+# Telegram admin. `/config` changes the same settings and more, so every
+# action that changes something goes through the same admin-or-private check.
+# Opening the menu, moving between pages and reading a page stay open to any
+# allowlisted member.
+#
+# This is the one classification both entry paths consult — a button tap and a
+# typed `/config <page>:<action>` — via ``ConfigCommand.admin_gate``, which the
+# dispatch calls before the backend runs (and before a tap's early toast).
+#
+# Rule: an action on a page is a change unless it is listed in
+# ``_OPEN_ACTIONS``. The explicit ``_MUTATING_ACTIONS`` table exists so that
+# ``tests/test_config_admin_gate.py`` can prove every action a page handler
+# branches on has been looked at; an action added to a handler without an
+# entry here fails that test, and is refused to non-admins in the meantime.
+
+ConfigActionKind = Literal["open", "mutating"]
+
+_ON_OFF_CLR = frozenset({"on", "off", "clr"})
+
+_MUTATING_ACTIONS: dict[str, frozenset[str]] = {
+    # Permission / approval mode for every engine, incl. Antigravity Full
+    # access (`agf`) and Ask me (`aga`, #980).
+    "pm": frozenset(
+        {
+            *_PM_MODES,
+            *_CODEX_PM_MODES,
+            *_GEMINI_AM_MODES,
+            *agy_mode.ANTIGRAVITY_PM_ACTIONS,
+            "ro",
+            "clr",
+            "agc",  # #1060: the Antigravity page's own Clear override
+            "cxc",  # #1155: the Codex page's own Clear override
+        }
+    ),
+    "vb": _ON_OFF_CLR,
+    "tr": frozenset({"all", "men", "clr"}),
+    "fu": frozenset({"q", "s", "clr"}),
+    # Pause / resume stops or restarts every cron and webhook on the host,
+    # not only this chat's.
+    "tg": frozenset({"pause", "resume"}),
+    "md": frozenset({"clr"}),
+    "rs": frozenset({*_RS_ACTIONS, "clr"}),
+    "aq": _ON_OFF_CLR,
+    "dp": _ON_OFF_CLR,
+    # API cost, subscription usage, budget, Stop at limit.
+    "cu": frozenset(
+        f"{prefix}_{act}" for prefix in ("ac", "su", "bg", "bc") for act in _ON_OFF_CLR
+    ),
+    "rl": _ON_OFF_CLR,
+    "ab": frozenset(),
+    # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS.
+    "gt": frozenset(),
+    "loop": _ON_OFF_CLR,
+}
+
+# Pages whose action is a runtime value (Engine & model: an engine id, plus
+# `clr` / `md_clr`), so every action on them is a change.
+_DYNAMIC_ACTION_PAGES: frozenset[str] = frozenset({"ag"})
+
+# Actions that only read or navigate (most pages are opened with no action).
+_OPEN_ACTIONS: dict[str, frozenset[str]] = {
+    # #980: re-runs agy's own zero-token `-p /hooks` listing for this chat's
+    # project; changes no setting and writes nothing (REVIEW-2 m3).
+    "gt": frozenset({"rc"}),
+}
+
+CONFIG_ADMIN_GATE = SETTINGS_ADMIN_GATE
+
+
+def parse_config_args(args_text: str) -> tuple[str | None, str | None]:
+    """Split `/config` args (typed or callback data) into ``(page, action)``.
+
+    ``""`` → ``(None, None)`` (home); ``"pm"`` and ``"pm:"`` → ``("pm", None)``;
+    ``"pm:on"`` → ``("pm", "on")``. Used by both ``handle`` and
+    ``classify_config_action`` so the gate judges exactly what runs.
+    """
+    args = args_text.strip()
+    if not args:
+        return None, None
+    page, _, action = args.partition(":")
+    return page, action or None
+
+
+def classify_config_action(args_text: str) -> ConfigActionKind:
+    """Whether a `/config` invocation changes a setting or only shows a page."""
+    page, action = parse_config_args(args_text)
+    if action is None or page not in _PAGES:
+        # Home, a page with no action, or an unknown page (which renders home).
+        return "open"
+    if action in _OPEN_ACTIONS.get(page, frozenset()):
+        return "open"
+    return "mutating"
 
 
 class ConfigCommand:
@@ -2245,6 +3038,16 @@ class ConfigCommand:
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",
+                "cxc": "Approval policy: cleared",  # #1155
+                # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
+                # conversation keeps the agent it started with, so a switch
+                # across Workspace / Plan first ↔ Ask me / Full access
+                # needs /new.
+                "agw": agy_mode.WORKSPACE_TOAST,
+                "agf": agy_mode.FULL_ACCESS_TOAST,
+                "agc": agy_mode.CLEARED_TOAST,
+                "aga": agy_mode.ASK_TOAST,
+                "agp": agy_mode.PLAN_FIRST_TOAST,
             },
             "vb": {
                 "on": "Verbose: on",
@@ -2317,16 +3120,23 @@ class ConfigCommand:
             return f"Engine: {action}"
         return None
 
-    async def handle(self, ctx: CommandContext) -> CommandResult | None:
-        args = ctx.args_text.strip()
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: a settings change needs a group admin; navigation does not.
 
-        if not args or args == "home":
+        The dispatch calls this for taps and typed actions alike and runs the
+        admin-or-private check when it returns a gate.
+        """
+        if classify_config_action(args_text) == "mutating":
+            return CONFIG_ADMIN_GATE
+        return None
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        page, action = parse_config_args(ctx.args_text)
+
+        if page is None or page == "home":
             await _page_home(ctx)
             return None
-
-        parts = args.split(":", 1)
-        page = parts[0]
-        action = parts[1] if len(parts) > 1 else None
 
         handler = _PAGES.get(page)
         if handler is None:

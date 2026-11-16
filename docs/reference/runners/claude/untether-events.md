@@ -4,7 +4,7 @@ This document describes how the Claude Code runner translates Claude Code CLI JS
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/claude.py` and the translation logic is in `src/untether/runners/claude.py`. When in doubt, refer to the code.
 
-The goal is to make a Claude Code runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+The goal is to make a Claude Code runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialisation, single completed event).
 
 ---
 
@@ -61,9 +61,9 @@ Resume rules:
 
 ---
 
-## 3. Session lifecycle + serialization
+## 3. Session lifecycle + serialisation
 
-Untether requires **serialization per session id**:
+Untether requires **serialisation per session id**:
 
 - For new runs (`resume=None`), do **not** acquire a lock until a `session_id`
   is observed (usually the first `system.init` event).
@@ -73,7 +73,7 @@ Untether requires **serialization per session id**:
 - A `/continue` token carries no session id, so it is handled like a new run:
   the lock is taken on the id named by its first `started` event (#817).
 
-This matches the Codex runner behavior in `untether/runners/codex.py`.
+This matches the Codex runner behaviour in `untether/runners/codex.py`.
 
 ---
 
@@ -147,7 +147,7 @@ Claude Code emits a system init event early in the stream:
   turn opened during it. The bridge adds `⚠️ Not re-planned: the approved
   plan's background agents are still running. Plan mode resumes when they
   finish.` under the turn header (the whole header for a follow-up).
-- Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
+- Optional: emit a `note` action summarising tools/MCP servers (debug-only).
 
 A top-level `control_request` (control-channel mode) is answered on stdin.
 Housekeeping subtypes and the tool requests the mode doesn't route to the
@@ -171,7 +171,9 @@ The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
 throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
 `note` per window (`⚠️ 5h limit N% used — resets HH:MM`, rendered without a ✓ prefix, #868); only `rejected` not
 covered by overage emits a `⏳ Rate limited until …` note and latches the wait
-until `resetsAt`. Bare events emit nothing. Decision table:
+until `resetsAt`. Bare events emit nothing. Every snapshot is stashed on `ClaudeStreamState.rate_limit_windows`; with
+the usage footer off, the final's ≥70 % 5h warning is built from it, with no login-token read
+([#1150](https://github.com/littlebearapps/untether/issues/1150)). Decision table:
 [stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).
 
 ### 4.2 `assistant` / `user` message events

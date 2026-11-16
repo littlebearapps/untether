@@ -2,7 +2,10 @@
 
 Keep tabs on your Claude Code subscription from anywhere — Untether surfaces usage directly in [Telegram](https://telegram.org). This guide covers checking usage on demand and enabling automatic usage footers after every run.
 
-In Codex, OpenCode and other non-Claude chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
+In an Antigravity chat, `/usage` shows agy's own quota groups and AI credits — see [Cost budgets → Antigravity](cost-budgets.md#antigravity). The footer switch below also works for Antigravity, where the line shows what your last `/usage` fetched (up to 15 minutes old) — see [Use Antigravity CLI → Usage and quota](antigravity.md#usage-and-quota). In Codex, OpenCode and other chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
+
+<!-- TODO: capture screenshot: antigravity-quota-footer — the end of an Antigravity final answer with Subscription usage on: the footer and the `⚡ Gemini Models 5h: 12% | wk: 3%` quota line under it -->
+<!-- <img src="../assets/screenshots/antigravity-quota-footer.jpg" alt="Antigravity answer footer with the quota line built from the last /usage" width="360" loading="lazy" /> -->
 
 ## Check usage with /usage
 
@@ -52,7 +55,7 @@ When enabled, completed messages include a line like:
 
 This tells you how much of your 5-hour and 7-day rate limits you've used — all without leaving the chat. Once a window passes 50%, its reset time is added (`⚡ 5h: 72% (1h 14m) | 7d: 30%`).
 
-With the footer off, Untether still adds a warning line once the 5-hour window passes 70% (`⚡5h: 75% (1h 14m) | 7d: 30%`), turning to `⚠️` at 90% and `🛑 5h limit hit — resets in …` at 100%.
+With the footer off, Untether still adds a warning line once the 5-hour window passes 70% (`⚡5h: 75% (1h 14m) | 7d: 30%`), turning to `⚠️` at 90% and `🛑 5h limit hit — resets in …` at 100%. Since v0.36.1 those figures come from the rate-limit snapshot Claude Code itself sends during the run, so Untether doesn't read your Claude login or call Anthropic's usage endpoint unless the footer is on or you send `/usage` ([#1150](https://github.com/littlebearapps/untether/issues/1150)). A run that gets no snapshot (Claude Code sends one only when a figure changes, and none for API-key logins) shows no warning.
 
 !!! tip "Limit notes during a run"
     Separately from the footer, a running Claude session shows a one-off `⚠️ 5h limit 85% used — resets 17:30` note when Claude Code reports the window is nearly used, and `⏳ Rate limited until …` if a request is actually refused. Since v0.36.0 routine usage snapshots no longer show a false `Rate limited` wait ([#790](https://github.com/littlebearapps/untether/issues/790)). See [Troubleshooting → Rate-limit and API-retry notes](troubleshooting.md#rate-limit-and-api-retry-notes-claude).
@@ -105,7 +108,7 @@ Use this when subscription usage stops appearing in the footer or returns stale 
 
 ## Claude Code credentials
 
-The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see **"No Claude Code credentials found"**, sign in to Claude Code on that machine (run `claude` and follow the login prompt).
+The `/usage` command, and the footer when you turn it on, read your Claude Code OAuth credentials to fetch live data from the Anthropic API. Nothing else does: with the footer off, a run's near-limit warning uses the data Claude Code streams instead. If you see **"No Claude Code credentials found"**, sign in to Claude Code on that machine (run `claude` and follow the login prompt).
 
 Credential storage varies by platform:
 

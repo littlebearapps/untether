@@ -161,11 +161,18 @@ class TriggerDispatcher:
             if cron.fetch.on_failure == "abort":
                 # Notify user of the failure.
                 fail_label = f"\u274c cron:{cron.id} fetch failed: {error_msg}"
-                await self.transport.send(
+                sent = await self.transport.send(
                     channel_id=chat_id,
                     message=RenderedMessage(text=fail_label),
                     options=SendOptions(notify=True),
                 )
+                if sent is None:
+                    # #906: the cron is aborting and the chat was not told.
+                    logger.error(
+                        "triggers.cron.fetch_failed_notice_undelivered",
+                        cron_id=cron.id,
+                        chat_id=chat_id,
+                    )
                 return None
             # on_failure=run_with_error — inject error into prompt.
             data = f"[FETCH ERROR: {error_msg}]"

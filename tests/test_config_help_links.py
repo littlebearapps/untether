@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SYNCED_DIRS = ("tutorials", "how-to", "reference", "explanation", "faq")
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_ENGINES = ("claude", "codex", "opencode", "gemini")
+_ENGINES = ("claude", "codex", "opencode", "antigravity", "gemini")
 _CHAT = 123
 
 _REPO_URL = "https://github.com/littlebearapps/untether"
@@ -254,6 +254,10 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
         table[("rs", engine)] = _NONE
         table[("cu", engine)] = _NONE
         table[("pm", engine)] = _NONE
+        # #980: the read-only 🔐 page (Antigravity's, reachable by its key).
+        table[("gt", engine)] = frozenset(
+            {_u("antigravity", "telegram-questions-and-steer")}
+        )
     table[("pm", "claude")] = frozenset({_u("plan-mode")})
     table[("pm", "codex")] = frozenset(
         {_u("interactive-approval", "codex-cli--approval-policy")}
@@ -261,16 +265,21 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
     table[("pm", "gemini")] = frozenset(
         {_u("interactive-approval", "gemini-cli--approval-mode")}
     )
+    table[("pm", "antigravity")] = frozenset(
+        {_u("interactive-approval", "antigravity-cli--permission-mode")}
+    )
     table[("aq", "claude")] = frozenset(
         {_u("interactive-approval", "answering-questions")}
     )
     table[("dp", "claude")] = frozenset({_u("interactive-approval", "diff-previews")})
     table[("loop", "claude")] = frozenset({_u("schedule-tasks", "loop-mode")})
-    for engine in ("claude", "codex"):
+    # antigravity: its Effort page ships with #558 phase 05.
+    for engine in ("claude", "codex", "antigravity"):
         table[("rs", engine)] = frozenset(
             {_u("model-reasoning", "set-reasoning-level")}
         )
-    for engine in ("claude", "opencode", "gemini"):
+    # antigravity: its subscription-usage footer toggle ships with #979.
+    for engine in ("claude", "opencode", "gemini", "antigravity"):
         table[("cu", engine)] = frozenset({_u("cost-budgets")})
     return table
 
@@ -388,6 +397,26 @@ def test_no_satellite_triggers_in_docs() -> None:
             continue
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             assert "📡 Trigger" not in line, f"{path}:{n}: {line}"
+
+
+def test_help_urls_in_src_resolve() -> None:
+    """Every full help-centre URL written in ``src/`` (outside ``/config``'s
+    ``_learn_more`` calls) lands on one doc file and heading — e.g. the
+    Antigravity sign-in card and one-time notice (#558)."""
+    from untether.runners import antigravity as agy
+
+    assert _resolve(agy.SIGN_IN_HELP_URL) is not None
+    assert agy.SIGN_IN_HELP_URL in agy.AUTH_TEXT
+    assert agy.SIGN_IN_HELP_URL in agy.OAUTH_NOTICE_TEXT
+    found: set[str] = set()
+    for path in (_REPO_ROOT / "src" / "untether").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        found.update(
+            re.findall(r"https://littlebearapps\.com/help/untether/[\w/#.-]*", text)
+        )
+    assert agy.SIGN_IN_HELP_URL in found
+    for url in found - {_HELP_BASE}:
+        assert _resolve(url) is not None, url
 
 
 def test_readme_and_faq_help_links_resolve() -> None:

@@ -234,9 +234,10 @@ def _no_live_network(
 ) -> Iterator[None]:
     """#808: block every non-loopback httpx request.
 
-    Every Claude final runs ``_maybe_append_usage_footer``, which fetched
-    ``https://api.anthropic.com/api/oauth/usage`` with the host's real OAuth
-    token (and could 429 the live bots). Patching the real transports means
+    A Claude final with the subscription-usage footer on (and ``/usage``)
+    fetches ``https://api.anthropic.com/api/oauth/usage`` with the host's
+    real OAuth token (and could 429 the live bots); before #1150 every
+    Claude final did. Patching the real transports means
     ``httpx.MockTransport`` and loopback servers (trigger webhook tests) keep
     working; anything else raises ``httpx.ConnectError``, which the usage
     path already swallows. Opt out with ``@pytest.mark.allow_network``.
@@ -308,3 +309,60 @@ def _no_opencode_version_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     opencode_runner._VERSION_CACHE.clear()
     yield
     opencode_runner._VERSION_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_agy_version_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[None]:
+    """#558/#976: ``AntigravityRunner.run_impl`` asks ``agy --version`` (once
+    per binary) before every run. Unit tests must never spawn the host's real
+    agy (lba-1 has one), so the probe reports "unknown" (→ the run is allowed)
+    unless a test points it back at ``_run_agy_version`` with a fake agy."""
+    from untether.runners import antigravity as antigravity_runner
+
+    monkeypatch.setattr(antigravity_runner, "_probe_agy_version", lambda path: None)
+    antigravity_runner._VERSION_CACHE.clear()
+    # Phase 02: the cached `-p /config` check never asks the host's agy. It
+    # reports a healthy host — agy's defaults, as `agy -p /config` prints
+    # them — since #1044 made a failed check visible (a ⚠️ row; unattended
+    # Workspace runs held). A test of the failure stubs its own. The
+    # planted-config scan never looks at the host's real ~/.gemini/config.
+    from untether.utils import antigravity_quota, antigravity_scan
+
+    async def _default_config_probe(runner: object) -> object:
+        return antigravity_quota.parse_agy_config({"toolPermission": "request-review"})
+
+    monkeypatch.setattr(antigravity_quota, "_probe_agy_config", _default_config_probe)
+
+    # Phase 05: the /config Effort page never asks the host's agy either.
+    async def _no_effort_probe(runner: object, model: object) -> object:
+        raise antigravity_quota.AgySlashError("stubbed_in_tests")
+
+    monkeypatch.setattr(antigravity_quota, "_probe_model_efforts", _no_effort_probe)
+    antigravity_quota.clear_config_cache()
+    antigravity_quota.reset_quota_cache()
+    antigravity_quota.clear_effort_cache()
+    empty_config_dir = tmp_path_factory.mktemp("agy-user-config")
+    monkeypatch.setattr(antigravity_scan, "user_config_dir", lambda: empty_config_dir)
+    # #1039: /continue never reads the host's real last-conversations file.
+    from untether.utils import antigravity_continue
+
+    no_cache = empty_config_dir / "cache" / "last_conversations.json"
+    monkeypatch.setattr(
+        antigravity_continue, "last_conversations_path", lambda: no_cache
+    )
+    # #981: a Plan first result never reads the host's real plan artifacts,
+    # and no plan card outlives its test.
+    from untether.utils import antigravity_plan
+
+    monkeypatch.setattr(
+        antigravity_plan, "brain_root", lambda: empty_config_dir / "brain"
+    )
+    antigravity_plan._reset_for_tests()
+    yield
+    antigravity_plan._reset_for_tests()
+    antigravity_runner._VERSION_CACHE.clear()
+    antigravity_quota.clear_config_cache()
+    antigravity_quota.reset_quota_cache()
+    antigravity_quota.clear_effort_cache()

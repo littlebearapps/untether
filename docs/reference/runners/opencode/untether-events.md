@@ -1,6 +1,6 @@
 # OpenCode to Untether Event Mapping
 
-This document describes how OpenCode JSON events are translated to Untether's normalized event model.
+This document describes how OpenCode JSON events are translated to Untether's normalised event model.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/opencode.py` and the translation logic is in `src/untether/runners/opencode.py`. When in doubt, refer to the code.
 

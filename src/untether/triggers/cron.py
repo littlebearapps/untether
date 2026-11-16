@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import anyio
 
 from ..logging import get_logger
+from .cron_expr import CronExpressionError, parse_cron_expression
 from .dispatcher import DISPATCH_REFUSED, TriggerDispatcher
 from .manager import TriggerManager
 
@@ -22,42 +23,17 @@ RUN_ONCE_RETRY_WINDOW_S: float = 15 * 60
 _RUN_ONCE_RETRY_WINDOW = datetime.timedelta(seconds=RUN_ONCE_RETRY_WINDOW_S)
 
 
-def _parse_field(field: str, min_val: int, max_val: int) -> set[int]:
-    """Parse a single cron field into a set of matching integers."""
-    values: set[int] = set()
-    for part in field.split(","):
-        part = part.strip()
-        step = 1
-        if "/" in part:
-            part, step_s = part.split("/", 1)
-            step = int(step_s)
-            if step < 1:
-                return set()
-
-        if part == "*":
-            values.update(range(min_val, max_val + 1, step))
-        elif "-" in part:
-            lo, hi = part.split("-", 1)
-            values.update(range(int(lo), int(hi) + 1, step))
-        else:
-            values.add(int(part))
-    return values
-
-
 def cron_matches(expression: str, now: datetime.datetime) -> bool:
     """Check if a 5-field cron expression matches the given datetime.
 
     Fields: minute hour day-of-month month day-of-week (0=Sun or 7=Sun).
+    An invalid expression never matches (and never raises): config
+    schedules are rejected at parse time with the same grammar (#1144).
     """
-    fields = expression.split()
-    if len(fields) != 5:
+    try:
+        minutes, hours, days, months, weekdays = parse_cron_expression(expression)
+    except CronExpressionError:
         return False
-
-    minutes = _parse_field(fields[0], 0, 59)
-    hours = _parse_field(fields[1], 0, 23)
-    days = _parse_field(fields[2], 1, 31)
-    months = _parse_field(fields[3], 1, 12)
-    weekdays = _parse_field(fields[4], 0, 7)
     # Normalise Sunday: both 0 and 7 map to Sunday (isoweekday()=7, weekday()=6)
     dow = now.weekday()  # Monday=0 .. Sunday=6
     # Convert to cron convention: Sunday=0, Monday=1 .. Saturday=6

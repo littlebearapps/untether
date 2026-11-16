@@ -1,0 +1,94 @@
+sleep:2.758
+out:{"event":"init","conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","init":{"cwd":"<scratch>/proj-hooks","tools":["ask_custom_permission","ask_permission","ask_question","browser_click_element","browser_drag_pixel_to_pixel","browser_get_dom","browser_get_network_request","browser_input","browser_list_network_requests","browser_mouse_down","browser_mouse_up","browser_move_mouse","browser_press_key","browser_refresh_page","browser_resize_window","browser_scroll","browser_scroll_dom","browser_select_option","browser_subagent","call_mcp_tool","capture_browser_console_logs","capture_browser_screenshot","click_browser_pixel","command_status","define_subagent","delete_knowledge","execute_browser_javascript","find_by_name","finish","generate_image","grep_search","invoke_subagent","list_browser_pages","list_dir","list_permissions","list_plugin_accounts","list_resources","manage_inbox","manage_subagents","manage_task","multi_replace_file_content","notebook_edit","notebook_execution","open_browser_url","read_browser_page","read_resource","read_url_content","replace_file_content","run_command","run_workflow","schedule","search_marketplace","search_web","sed_file","send_command_input","send_message","view_file","wait","wait_5_seconds","write_to_file"],"permission_mode":"always-proceed"}}
+sleep:0.289
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":0,"state":"DONE","step_type":"user_input"}}
+sleep:2.440
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":1,"state":"DONE","step_type":"agent_response","duration_seconds":2.203012758,"usage":{"input_tokens":13134,"output_tokens":64,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":13198}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"AbsolutePath":"<scratch>/proj-hooks/README.md"}}}}
+sleep:0.410
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":2,"state":"DONE","step_type":"tool","tool_name":"view_file","duration_seconds":0.229053257,"tool_info":{"name":"view_file","parameters":{"AbsolutePath":"<scratch>/proj-hooks/README.md"},"output":"2 lines, 12 bytes"}}}
+sleep:0.416
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":3,"state":"DONE","step_type":"user_input","duration_seconds":0.0001406}}
+sleep:3.488
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":4,"state":"DONE","step_type":"agent_response","duration_seconds":3.487171369,"usage":{"input_tokens":13486,"output_tokens":130,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":13616}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":5,"state":"ACTIVE","step_type":"tool","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{"TargetFile":"<scratch>/proj-hooks/README.md"}}}}
+sleep:0.616
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":5,"state":"DONE","step_type":"tool","tool_name":"replace_file_content","duration_seconds":0.372344531,"tool_info":{"name":"replace_file_content","parameters":{"TargetFile":"<scratch>/proj-hooks/README.md"}}}}
+sleep:2.845
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":6,"state":"DONE","step_type":"agent_response","duration_seconds":2.1670419929999998,"usage":{"input_tokens":13843,"output_tokens":78,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":13921}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":7,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo allowme"}}}}
+sleep:45.535
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":7,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":45.397513309,"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo allowme"},"output":"allowme\r\n"}}}
+sleep:3.339
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":8,"state":"DONE","step_type":"agent_response","duration_seconds":2.945323818,"usage":{"input_tokens":14009,"output_tokens":78,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14087}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":9,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo askme"}}}}
+sleep:0.541
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":9,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":0.459715207,"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo askme"},"output":"askme\r\n"}}}
+sleep:3.495
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":10,"state":"DONE","step_type":"agent_response","duration_seconds":3.026641748,"usage":{"input_tokens":14175,"output_tokens":78,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14253}}}
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":11,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo denyme"}}}}
+sleep:0.368
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":11,"state":"ERROR","step_type":"tool","tool_name":"run_command","duration_seconds":0.379737477,"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo denyme"},"error":{"type":"TOOL_ERROR","message":"tool call denied by pre-tool hook: probe hook deny: the user refused this command"}}}}
+sleep:4.509
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"Here are the outcomes fo"}}
+sleep:0.029
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"r each step:\n\n1. **Repla"}}
+sleep:0.027
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"ce"}}
+sleep:0.182
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" text in [README.md](fil"}}
+sleep:0.025
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"e:///tmp/agy"}}
+sleep:0.028
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"-probe-2026100818"}}
+sleep:0.130
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"3126/proj-ho"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"oks/README.md)**: **Success** — Re"}}
+sleep:0.027
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"placed `'hello probe'` w"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"ith `'"}}
+sleep:0.157
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"hello edited probe'`.\n2."}}
+sleep:0.027
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" **Run `echo allowme`**:"}}
+sleep:0.028
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" **Success**"}}
+sleep:0.031
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" — Executed successful"}}
+sleep:0.028
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"ly with"}}
+sleep:0.051
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" output `allowme`.\n3. **"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"Run `echo askme`**: **Su"}}
+sleep:0.025
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"ccess** — "}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"Executed successfully wi"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"th output `a"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"skme`."}}
+sleep:0.154
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"\n4. **Run `echo denyme`*"}}
+sleep:0.027
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"*: **Refused** — Refused/denied by hook (`tool"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" call denied"}}
+sleep:0.029
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" by pre-tool hook: probe"}}
+sleep:0.026
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":" hook deny: the user ref"}}
+sleep:0.025
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"used this co"}}
+sleep:0.028
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"mmand`). Not retried.\n\nP"}}
+sleep:0.025
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"ACTIVE","step_type":"agent_response","text_delta":"INEAPPLE"}}
+sleep:0.310
+out:{"event":"step_update","step_update":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","step_index":12,"state":"DONE","step_type":"agent_response","text_delta":"\n","duration_seconds":5.28486907,"usage":{"input_tokens":14352,"output_tokens":168,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14520}}}
+sleep:0.445
+out:{"event":"result","result":{"conversation_id":"cb981499-d78c-4c66-9c56-29d1235fd74f","status":"SUCCESS","response":"Here are the outcomes for each step:\n\n1. **Replace text in [README.md](file://<scratch>/proj-hooks/README.md)**: **Success** — Replaced `'hello probe'` with `'hello edited probe'`.\n2. **Run `echo allowme`**: **Success** — Executed successfully with output `allowme`.\n3. **Run `echo askme`**: **Success** — Executed successfully with output `askme`.\n4. **Run `echo denyme`**: **Refused** — Refused/denied by hook (`tool call denied by pre-tool hook: probe hook deny: the user refused this command`). Not retried.\n\nPINEAPPLE\n","duration_seconds":69.82810442,"num_turns":2,"usage":{"input_tokens":82999,"output_tokens":596,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":83595}}}
+rc:0

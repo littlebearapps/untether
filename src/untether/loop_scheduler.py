@@ -54,6 +54,7 @@ from .logging import get_logger
 from .model import EngineId, ResumeToken
 from .transport import ChannelId, RenderedMessage, SendOptions, Transport
 from .triggers.cron import cron_matches
+from .triggers.cron_expr import CronExpressionError, parse_cron_expression
 from .utils.json_state import atomic_write_json
 
 logger = get_logger(__name__)
@@ -1097,6 +1098,76 @@ def _expire(entry: _LoopEntry, *, reason: str) -> None:
         reason=reason,
         iterations_completed=entry.iteration_count,
     )
+    # #1004: the fire path awaits ``_RUN_JOB`` before it expires an entry, so
+    # the last iteration's answer is already out when this is scheduled.
+    if reason in _EXPIRY_NOTICE_CAUSES and _TASK_GROUP is not None:
+        _TASK_GROUP.start_soon(_send_expiry_notice, entry, reason)
+
+
+# #1004: expiry reasons the chat is told about, as the clause that follows
+# "it". Every other reason stays silent: the user stopped the loop
+# (``user_cancel``, ``do_not_resume``), it ran as planned
+# (``one_shot_complete``, ``cli_fired_live``) or the bridge already announced
+# it (``wake_cap``).
+_EXPIRY_NOTICE_CAUSES: dict[str, str] = {
+    "max_iterations": "reached its limit of {runs}",
+    "max_total_duration": "reached its time limit of {hours}",
+    "expired_7d": "expired {days} after it was created",
+    "cron_unparseable": "has a schedule that could not be read",
+}
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _expiry_notice(entry: _LoopEntry, reason: str) -> str:
+    """One line naming the cap that ended ``entry`` and how to carry on."""
+    cause = _EXPIRY_NOTICE_CAUSES[reason].format(
+        runs=_plural(entry.max_iterations, "run"),
+        hours=_plural(entry.max_total_duration_hours, "hour"),
+        days=_plural(
+            round((entry.expires_at_wallclock - entry.created_at_wallclock) / 86_400),
+            "day",
+        ),
+    )
+    if entry.kind == "wakeup":
+        return (
+            f"\N{ALARM CLOCK} Scheduled wake-up cancelled — it {cause}. "
+            "Reply to continue."
+        )
+    if not entry.recurring:
+        # A one-shot dropped at a cap never ran, so "Loop finished" would
+        # misreport it.
+        return (
+            f"\N{ALARM CLOCK} Scheduled run cancelled — it {cause}. "
+            "Ask again to reschedule it."
+        )
+    return (
+        f"\N{ALARM CLOCK} Loop finished — it {cause}. "
+        "Send /loop again to start another."
+    )
+
+
+async def _send_expiry_notice(entry: _LoopEntry, reason: str) -> None:
+    """#1004: tell the chat its loop ended at a cap. Never raises."""
+    if _TRANSPORT is None:
+        return
+    try:
+        await _TRANSPORT.send(
+            channel_id=_as_channel_id(entry.chat_id),
+            message=RenderedMessage(text=_expiry_notice(entry, reason)),
+            options=SendOptions(notify=False, thread_id=entry.thread_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "loop.expiry_notice_failed",
+            token=entry.token,
+            chat_id=entry.chat_id,
+            reason=reason,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
 
 
 def _is_session_alive_safe(session_id: str) -> bool:
@@ -1162,10 +1233,11 @@ def _next_cron_fire(expression: str) -> float | None:
     the current minute) up to a 366-day horizon.  Returns ``None`` if the
     expression never matches in that window (almost certainly malformed).
     """
-    if not expression or not expression.strip():
-        return None
-    fields = expression.strip().split()
-    if len(fields) != 5:
+    # #1144: reject a malformed expression up front with the matcher's own
+    # grammar, rather than walking a year of minutes that can never match.
+    try:
+        parse_cron_expression(expression)
+    except CronExpressionError:
         return None
     now_monotonic = time.monotonic()
     now_wallclock_dt = datetime.datetime.now().replace(second=0, microsecond=0)

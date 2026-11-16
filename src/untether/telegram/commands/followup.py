@@ -48,9 +48,20 @@ def followup_state_text(
         f"follow-up mode **set to** `{mode}` ({scope}) — {_DESCRIPTIONS[mode]}",
         f"one-off: `/{other} <text>` · switch: `/{other}`",
     ]
-    if mode == "steer" and engine is not None and engine != "claude":
+    if mode == "steer" and engine == "antigravity":
+        from ..engine_overrides import ask_questions_supported
+
+        # #981: agy steers through Untether's agy plugin.
+        if not ask_questions_supported(engine):
+            lines.append(
+                "note: Antigravity steers once Untether's agy plugin is installed"
+                " on the host (`untether agy-gate install`); until then its runs"
+                " queue follow-ups."
+            )
+    elif mode == "steer" and engine is not None and engine != "claude":
         lines.append(
-            f"note: steer is Claude-only — {engine} runs still queue follow-ups."
+            "note: steer works on Claude Code and Antigravity only —"
+            f" {engine} runs still queue follow-ups."
         )
     return "\n\n".join(lines)
 
@@ -112,6 +123,7 @@ async def handle_followup_default_command(
     logger.info(
         "followup.set",
         chat_id=msg.chat_id,
+        sender_id=msg.sender_id,
         thread_id=tkey[1] if tkey is not None else None,
         mode=mode,
     )
@@ -142,6 +154,13 @@ class FollowupCommand:
             )
         prefs = ChatPrefsStore(resolve_prefs_path(ctx.config_path))
         await prefs.set_followup_mode(ctx.message.channel_id, self._mode)
+        logger.info(
+            "followup.set",
+            chat_id=ctx.message.channel_id,
+            sender_id=ctx.message.sender_id,
+            thread_id=None,
+            mode=self._mode,
+        )
         resolved = await resolve_followup_mode(
             chat_id=ctx.message.channel_id,
             thread_id=None,

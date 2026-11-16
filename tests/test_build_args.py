@@ -16,6 +16,8 @@ from untether.model import ResumeToken
 from untether.runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from untether.runners.run_options import EngineRunOptions as RunOptions
 
+_CODEX_THREAD = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b"
+
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
@@ -46,9 +48,9 @@ class TestClaudeBuildArgs:
         state = ClaudeStreamState()
         token = ResumeToken(engine="claude", value="sess123")
         args = runner.build_args("hello", token, state=state)
-        assert "--resume" in args
-        idx = args.index("--resume")
-        assert args[idx + 1] == "sess123"
+        # #1034: joined, never a separate value token.
+        assert "--resume=sess123" in args
+        assert "--resume" not in args and "sess123" not in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -58,7 +60,7 @@ class TestClaudeBuildArgs:
         token = ResumeToken(engine="claude", value="", is_continue=True)
         args = runner.build_args("hello", token, state=state)
         assert "--continue" in args
-        assert "--resume" not in args
+        assert not any(a.startswith("--resume") for a in args)
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -68,9 +70,8 @@ class TestClaudeBuildArgs:
         opts = RunOptions(model="opus-4")
         with patch("untether.runners.claude.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "opus-4"
+        assert "--model=opus-4" in args
+        assert "--model" not in args
 
     def test_permission_mode(self) -> None:
         runner = self._runner()
@@ -183,7 +184,7 @@ class TestClaudeBuildArgs:
         assert "--chrome" in args
         chrome_idx = args.index("--chrome")
         verbose_idx = args.index("--verbose")
-        resume_idx = args.index("--resume")
+        resume_idx = args.index("--resume=sess123")
         assert verbose_idx < chrome_idx < resume_idx
         # Prompt still last after `--`
         assert args[-2] == "--"
@@ -643,10 +644,11 @@ class TestCodexBuildArgs:
     def test_resume(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        token = ResumeToken(engine="codex", value="thread123")
+        # #1065: Codex resumes by thread UUID only.
+        token = ResumeToken(engine="codex", value=_CODEX_THREAD)
         args = runner.build_args("hello", token, state=state)
         assert "resume" in args
-        assert "thread123" in args
+        assert _CODEX_THREAD in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -663,9 +665,8 @@ class TestCodexBuildArgs:
         opts = RunOptions(model="gpt-4o")
         with patch("untether.runners.codex.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "gpt-4o"
+        assert "--model=gpt-4o" in args
+        assert "--model" not in args
 
     def test_reasoning_effort(self) -> None:
         runner = self._runner()
@@ -708,8 +709,8 @@ class TestCodexBuildArgs:
         assert "untrusted" not in args
 
     def test_permission_mode_safe_resume_sandbox_before_resume(self) -> None:
-        args = self._safe_args(ResumeToken(engine="codex", value="abc"))
-        assert args[-5:] == ["--sandbox", "read-only", "resume", "abc", "-"]
+        args = self._safe_args(ResumeToken(engine="codex", value=_CODEX_THREAD))
+        assert args[-5:] == ["--sandbox", "read-only", "resume", _CODEX_THREAD, "-"]
 
     def test_permission_mode_safe_continue(self) -> None:
         args = self._safe_args(ResumeToken(engine="codex", value="", is_continue=True))
@@ -821,9 +822,8 @@ class TestOpenCodeBuildArgs:
         state = runner.new_state("hello", None)
         token = ResumeToken(engine="opencode", value="ses_abc123")
         args = runner.build_args("hello", token, state=state)
-        assert "--session" in args
-        idx = args.index("--session")
-        assert args[idx + 1] == "ses_abc123"
+        assert "--session=ses_abc123" in args
+        assert "--session" not in args
 
     def test_continue(self) -> None:
         runner = self._runner()
@@ -831,7 +831,7 @@ class TestOpenCodeBuildArgs:
         token = ResumeToken(engine="opencode", value="", is_continue=True)
         args = runner.build_args("hello", token, state=state)
         assert "--continue" in args
-        assert "--session" not in args
+        assert not any(a.startswith("--session") for a in args)
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -839,9 +839,8 @@ class TestOpenCodeBuildArgs:
         opts = RunOptions(model="gpt-4o")
         with patch("untether.runners.opencode.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "gpt-4o"
+        assert "--model=gpt-4o" in args
+        assert "--model" not in args
 
 
 # ---------------------------------------------------------------------------
@@ -1108,12 +1107,14 @@ class TestPiBuildArgs:
 
     def test_resume(self) -> None:
         runner = self._runner()
-        token = ResumeToken(engine="pi", value="/path/to/session.jsonl")
+        # #1064: the id Untether saves after a Pi run (a session path must
+        # sit under Pi's sessions directory — see tests/test_engine_argv.py).
+        token = ResumeToken(engine="pi", value="019e81c8")
         state = runner.new_state("hello", token)
         args = runner.build_args("hello", token, state=state)
         assert "--session" in args
         idx = args.index("--session")
-        assert args[idx + 1] == "/path/to/session.jsonl"
+        assert args[idx + 1] == "019e81c8"
 
     def test_continue(self) -> None:
         runner = self._runner()

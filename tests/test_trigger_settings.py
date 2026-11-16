@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ConfigDict, ValidationError
 
 from untether.triggers.settings import (
     CronConfig,
@@ -221,6 +221,28 @@ class TestCronConfig:
                 permission_mode="yoloMode",
             )
 
+    @pytest.mark.parametrize("mode", ["workspace", "ask", "plan", "full"])
+    def test_cron_antigravity_permission_mode_validated(self, mode):
+        c = CronConfig(
+            id="cr",
+            schedule="* * * * *",
+            engine="antigravity",
+            prompt="Hi",
+            permission_mode=mode,
+        )
+        assert c.permission_mode == mode
+
+    @pytest.mark.parametrize("mode", ["yolo", "accept-edits", "bypassPermissions"])
+    def test_cron_antigravity_permission_mode_rejects_unknown(self, mode):
+        with pytest.raises(ValidationError, match="unknown permission_mode"):
+            CronConfig(
+                id="cr",
+                schedule="* * * * *",
+                engine="antigravity",
+                prompt="Hi",
+                permission_mode=mode,
+            )
+
     def test_permission_mode_accepts_anything_for_unknown_engine(self):
         # Forward-compatible behaviour: engines not in
         # VALID_PERMISSION_MODES_BY_ENGINE accept any non-empty string; the
@@ -286,6 +308,25 @@ class TestCronModelReasoning:
             id="x", schedule="* * * * *", prompt="Hi", engine=engine, reasoning=level
         )
         assert c.reasoning == level
+
+    def test_cron_antigravity_reasoning_high_accepted(self):
+        """#558 phase 05: agy joins the reasoning engines (low/medium/high)."""
+        c = CronConfig(
+            id="x",
+            schedule="* * * * *",
+            prompt="Hi",
+            engine="antigravity",
+            reasoning="high",
+        )
+        assert c.reasoning == "high"
+        with pytest.raises(ValidationError, match="allowed values"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine="antigravity",
+                reasoning="max",
+            )
 
     def test_743_reasoning_normalised_to_lower_case(self):
         c = CronConfig(
@@ -775,3 +816,322 @@ class TestChatFallback:
         hits = [e for e in logs if e["event"] == "trigger.webhook.chat_fallback"]
         assert len(hits) == 1
         assert hits[0]["webhook_id"] == "gh"
+
+
+# ── #1117: per-trigger isolation, secret hygiene, short-secret warning ──
+
+_LEAKY_SECRET = "s3cretVALUE123-do-not-log-me"
+
+
+def _cron(cron_id: str, **extra) -> dict:
+    return {"id": cron_id, "schedule": "0 9 * * *", "prompt": "hi", **extra}
+
+
+def _webhook(webhook_id: str, **extra) -> dict:
+    return {
+        "id": webhook_id,
+        "path": f"/hooks/{webhook_id}",
+        "secret": "x" * 40,
+        "prompt_template": "hi",
+        **extra,
+    }
+
+
+def _assert_secret_absent(text: str) -> None:
+    # Any 6-char window of the secret, so a truncated repr can't hide it.
+    for start in range(len(_LEAKY_SECRET) - 5):
+        assert _LEAKY_SECRET[start : start + 6] not in text, text
+
+
+class TestTriggerIsolation1117:
+    def test_one_invalid_cron_keeps_the_valid_ones(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {
+                "enabled": True,
+                "crons": [
+                    _cron("good-a"),
+                    {"id": "broken", "schedule": "0 9 * * *"},  # no prompt
+                    _cron("good-b"),
+                ],
+            }
+        )
+        assert [c.id for c in parsed.settings.crons] == ["good-a", "good-b"]
+        assert [(i.kind, i.trigger_id) for i in parsed.invalid] == [("cron", "broken")]
+        assert "prompt" in parsed.invalid[0].error
+
+    def test_unknown_key_in_one_cron_disables_only_that_cron(self):
+        """The upgrade trap: a key the running version doesn't know yet."""
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {"crons": [_cron("new", future_key=1), _cron("old")]}
+        )
+        assert [c.id for c in parsed.settings.crons] == ["old"]
+        assert parsed.invalid[0].trigger_id == "new"
+        assert "future_key" in parsed.invalid[0].error
+
+    def test_one_invalid_webhook_keeps_the_valid_ones(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {
+                "webhooks": [
+                    _webhook("ok"),
+                    _webhook("bad", path="no-slash"),
+                ]
+            }
+        )
+        assert [w.id for w in parsed.settings.webhooks] == ["ok"]
+        assert [(i.kind, i.trigger_id) for i in parsed.invalid] == [("webhook", "bad")]
+
+    def test_entry_without_usable_id_is_labelled_by_index(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated({"crons": [_cron("a"), "oops"]})
+        assert parsed.invalid[0].trigger_id == "crons[1]"
+
+    def test_parse_trigger_config_drops_invalid_entries(self):
+        s = parse_trigger_config({"crons": [_cron("a"), {"id": "b"}]})
+        assert [c.id for c in s.crons] == ["a"]
+
+    def test_server_error_still_fails_the_whole_block(self):
+        with pytest.raises(ValidationError):
+            parse_trigger_config({"server": {"port": "x"}, "crons": [_cron("a")]})
+
+    def test_duplicate_ids_still_fail_the_whole_block(self):
+        with pytest.raises(ValidationError, match="cron ids must be unique"):
+            parse_trigger_config({"crons": [_cron("a"), _cron("a")]})
+
+    def test_unknown_triggers_key_still_fails_the_whole_block(self):
+        with pytest.raises(ValidationError):
+            parse_trigger_config({"bogus": True, "crons": [_cron("a")]})
+
+
+class TestWebhookSecretHygiene1117:
+    def test_secret_is_secretstr(self):
+        from pydantic import SecretStr
+
+        w = WebhookConfig.model_validate(_webhook("a", secret=f"  {_LEAKY_SECRET}  "))
+        assert isinstance(w.secret, SecretStr)
+        assert w.secret.get_secret_value() == _LEAKY_SECRET  # stripped
+        _assert_secret_absent(repr(w))
+        _assert_secret_absent(str(w.model_dump()))
+
+    def test_blank_secret_rejected(self):
+        with pytest.raises(ValidationError):
+            WebhookConfig.model_validate(_webhook("a", secret="   "))
+
+    def test_model_level_error_does_not_leak_secret(self):
+        """The confirmed leak: a model-level validator error printed a
+        truncated dict repr, which broke the key name so redaction missed
+        the secret."""
+        bad = {"id": "a", "path": "/a", "secret": _LEAKY_SECRET}  # no template
+        with pytest.raises(ValidationError) as excinfo:
+            WebhookConfig.model_validate(bad)
+        _assert_secret_absent(str(excinfo.value))
+        with pytest.raises(ValidationError) as excinfo:
+            TriggersSettings.model_validate({"webhooks": [bad]})
+        _assert_secret_absent(str(excinfo.value))
+
+    def test_isolated_parse_error_does_not_leak_secret(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {
+                "webhooks": [
+                    {"id": "a", "path": "/a", "secret": _LEAKY_SECRET},
+                    _webhook("b", secret=_LEAKY_SECRET, auth="bogus"),
+                    _webhook("c", forward_headers={"Authorization": _LEAKY_SECRET}),
+                ]
+            }
+        )
+        assert len(parsed.invalid) == 2
+        for item in parsed.invalid:
+            _assert_secret_absent(item.error)
+
+    def test_format_trigger_error_drops_input(self):
+        from untether.triggers.settings import format_trigger_error
+
+        class _Probe(TriggersSettings):
+            model_config = ConfigDict(hide_input_in_errors=False)
+
+        with pytest.raises(ValidationError) as excinfo:
+            _Probe.model_validate(
+                {"webhooks": [{"id": "a", "path": "/a", "secret": _LEAKY_SECRET}]}
+            )
+        assert "do-not-log-me" in str(excinfo.value)  # pydantic's repr leaks
+        text = format_trigger_error(excinfo.value)
+        _assert_secret_absent(text)
+        assert "prompt_template is required" in text
+        assert "\n" not in text
+
+    def test_auth_uses_the_secret_value(self):
+        from untether.triggers.auth import verify_auth
+
+        w = WebhookConfig.model_validate(_webhook("a", secret=_LEAKY_SECRET))
+        assert verify_auth(w, {"authorization": f"Bearer {_LEAKY_SECRET}"}, b"")
+        assert not verify_auth(w, {"authorization": "Bearer nope"}, b"")
+
+
+class TestShortWebhookSecret1117:
+    def test_short_bearer_and_hmac_secrets_warn_but_load(self):
+        from structlog.testing import capture_logs
+
+        from untether.triggers.settings import warn_short_webhook_secrets
+
+        settings = parse_trigger_config(
+            {
+                "webhooks": [
+                    _webhook("short-bearer", secret=_LEAKY_SECRET[:10]),
+                    _webhook("short-hmac", secret="abc", auth="hmac-sha256"),
+                    _webhook("long", secret="y" * 32),
+                    _webhook("open", auth="none", secret=None),
+                ]
+            }
+        )
+        assert len(settings.webhooks) == 4  # still accepted in 0.36.1
+        with capture_logs() as logs:
+            flagged = warn_short_webhook_secrets(settings)
+        assert flagged == ["short-bearer", "short-hmac"]
+        hits = [e for e in logs if e["event"] == "triggers.webhook.short_secret"]
+        assert [e["webhook_id"] for e in hits] == ["short-bearer", "short-hmac"]
+        assert all(e["log_level"] == "warning" for e in hits)
+        assert all(e["min_length"] == 32 for e in hits)
+        for entry in hits:
+            _assert_secret_absent(str(entry))
+
+
+class TestServerExposed1119:
+    """#1119: ``[triggers.server] exposed`` and ``trusted_proxy_header``."""
+
+    def test_defaults(self):
+        s = parse_trigger_config({})
+        assert s.server.exposed is False
+        assert s.server.trusted_proxy_header is None
+
+    def test_accepts_exposed_and_header(self):
+        s = parse_trigger_config(
+            {"server": {"exposed": True, "trusted_proxy_header": "CF-Connecting-IP"}}
+        )
+        assert s.server.exposed is True
+        assert s.server.trusted_proxy_header == "CF-Connecting-IP"
+
+    @pytest.mark.parametrize(
+        "header", ["", "CF Connecting IP", "X-Real-IP:", "a" * 65, "X_Real_IP"]
+    )
+    def test_bad_header_name_fails_the_whole_block(self, header):
+        with pytest.raises(ValidationError):
+            parse_trigger_config(
+                {
+                    "server": {"exposed": True, "trusted_proxy_header": header},
+                    "crons": [_cron("a")],
+                }
+            )
+
+    def test_exposed_must_be_a_real_bool(self):
+        with pytest.raises(ValidationError):
+            parse_trigger_config({"server": {"exposed": "yes"}})
+
+
+class TestCronScheduleValidation1144:
+    """#1144: ``schedule`` is validated at parse time with the matcher's own
+    grammar, so a bad one is skipped and reported like any other bad entry."""
+
+    @pytest.mark.parametrize(
+        ("schedule", "needle"),
+        [
+            ("99 99 * * *", "minute field: 99 is out of range (0–59)"),
+            ("* *", "needs 5 fields"),
+            ("*/0 * * * *", "minute field: step must be a whole number of 1 or more"),
+            ("a b c d e", "minute field: 'a' isn't a number"),
+            ("5-1 * * * *", "minute field: range 5-1 runs backwards"),
+        ],
+    )
+    def test_cron_config_rejects_bad_schedule(self, schedule, needle):
+        with pytest.raises(ValidationError) as excinfo:
+            CronConfig(id="x", schedule=schedule, prompt="hi")
+        assert needle in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [
+            "0 3 * * 1-5",
+            "*/15 * * * *",
+            "0 0 1,15 * *",
+            "* * * * *",
+            "0 9 * * *",
+            "0 0 1 1 *",
+            "0 10 * * 7",
+            "30 13 * * *",
+        ],
+    )
+    def test_cron_config_accepts_good_schedule(self, schedule):
+        assert CronConfig(id="x", schedule=schedule, prompt="hi").schedule == schedule
+
+    def test_bad_schedule_is_isolated_and_reported(self):
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {
+                "enabled": True,
+                "crons": [
+                    _cron("good"),
+                    _cron("bad-sched", schedule="99 99 * * *"),
+                    _cron("bad-count", schedule="* *"),
+                    _cron("bad-step", schedule="*/0 * * * *"),
+                    _cron("bad-token", schedule="a b c d e"),
+                ],
+            }
+        )
+        assert [c.id for c in parsed.settings.crons] == ["good"]
+        assert [(i.kind, i.trigger_id) for i in parsed.invalid] == [
+            ("cron", "bad-sched"),
+            ("cron", "bad-count"),
+            ("cron", "bad-step"),
+            ("cron", "bad-token"),
+        ]
+        first = parsed.invalid[0].error
+        assert first.startswith("schedule:")
+        assert "minute field: 99 is out of range (0–59)" in first
+
+    def test_bad_schedule_appears_in_telegram_notice(self):
+        from untether.config_reload_notification import (
+            format_invalid_triggers_notice,
+        )
+        from untether.triggers.settings import parse_trigger_config_isolated
+
+        parsed = parse_trigger_config_isolated(
+            {"crons": [_cron("good"), _cron("it7-bad-sched", schedule="99 99 * * *")]}
+        )
+        from untether.markdown import MarkdownParts
+        from untether.telegram.render import prepare_telegram
+
+        notice = format_invalid_triggers_notice(parsed.invalid, phase="reload")
+        assert notice.startswith("⚠️ Trigger config: 1 trigger skipped (invalid)")
+        assert "• cron it7-bad-sched: schedule:" in notice
+        # The notice is markdown with user text escaped (#1144): check what
+        # Telegram shows.
+        rendered, _entities = prepare_telegram(MarkdownParts(header=notice))
+        assert "'99 99 * * *'" in rendered
+        assert "minute field: 99 is out of range (0–59)" in rendered
+
+    def test_bad_schedule_logs_trigger_invalid(self):
+        from structlog.testing import capture_logs
+
+        from untether.triggers.settings import (
+            log_invalid_triggers,
+            parse_trigger_config_isolated,
+        )
+
+        parsed = parse_trigger_config_isolated(
+            {"crons": [_cron("bad-sched", schedule="a b c d e")]}
+        )
+        with capture_logs() as logs:
+            log_invalid_triggers(parsed.invalid, phase="reload")
+        hits = [e for e in logs if e["event"] == "triggers.trigger_invalid"]
+        assert len(hits) == 1
+        assert hits[0]["trigger_id"] == "bad-sched"
+        assert hits[0]["kind"] == "cron"
+        assert "minute field: 'a' isn't a number" in hits[0]["error"]

@@ -14,12 +14,14 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 | `this version of amp is no longer supported` | AMP is refusing this client version. Run `amp update` to upgrade. The `amp` engine is deprecated in Untether and may stop working again without notice. | AMP (deprecated) |
 | `is no longer supported; remove this setting` | A setting in your Codex config (`~/.codex/config.toml`, a `--profile` file, or `[engines.codex] extra_args`) is no longer supported by the installed Codex CLI — remove the key the error names. | Codex |
 | `' for '--` / `a value is required for '--` / `error: unexpected argument '-` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Codex (clap argv errors) |
+| `flags provided but not defined` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Antigravity (agy argv errors) |
 | `no longer supported` | The engine CLI reports that this client version or account tier is no longer supported by its provider. Update the CLI, or switch engines via /config. | All |
 
 ## Authentication
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
+| `isn't signed in on this host` | On a server, the Gemini API key route (`modelProvider: "gemini"` + `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids interactive sign-in. | Antigravity |
 | `access token could not be refreshed` | Run `codex login --device-auth` to re-authenticate. | Codex |
 | `log out and sign in again` | Run `codex login` to re-authenticate. | Codex |
 | `anthropic_api_key` | Check that ANTHROPIC_API_KEY is set in your environment. | Claude, Pi |
@@ -39,6 +41,8 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 | `exceeded your current quota` | OpenAI billing quota exceeded. Check platform.openai.com and add credits. | Codex, OpenCode |
 | `billing_hard_limit_reached` | OpenAI billing hard limit reached. Increase your spend limit. | Codex, OpenCode |
 | `resource_exhausted` | Google API quota exhausted. Check console.cloud.google.com. | Gemini |
+| `quota is used up` | /usage shows each quota group and when it resets. | Antigravity |
+| `ai credits balance is too low` | /usage shows each quota group and when it resets. | Antigravity |
 
 ## API overload and server errors
 
@@ -60,12 +64,19 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 
 ## Model errors
 
+Every Antigravity model or effort rejection starts with `invalid model selection`, so the effort patterns are checked before it.
+
 | Pattern | Hint | Engines |
 |---------|------|---------|
+| `requires --effort` | That model needs an effort level — agy offers low, medium, high. Set one with `/reasoning set <level>` or in /config → Effort, then send your message again. The levels are the ones agy's refusal names, shown only when they are all levels Untether knows ([#1046](https://github.com/littlebearapps/untether/issues/1046)). | Antigravity |
+| `" effort (available:` / `invalid --effort` / `conflicts with --effort` | That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix. | Antigravity |
+| `invalid model selection` | Antigravity doesn't recognise that model. Run `agy models` on the host for the list, or `/model clear`. | Antigravity |
 | `model_not_found` | Model not available. Check the model name in `/config`. | All |
 | `invalid_model` | Model not available. Check the model name in `/config`. | All |
 | `model not available` | Model not available. Check the model name in `/config`. | All |
 | `does not exist` | The requested resource was not found. Check your model or configuration. | All |
+
+A model id or session id that could be read as a command-line flag is refused before the engine starts, on every engine ([#1034](https://github.com/littlebearapps/untether/issues/1034)): `🛑 That model id isn't valid, so nothing was started.` means the chat's, cron's or config's model id starts with a dash or contains spaces or control characters — fix it with `/model set <id>` or `/model clear`. `🛑 That session id isn't valid, so nothing was started. This chat's saved session isn't affected.` means the resume line you sent or replied to doesn't hold a real session id for that engine — a Pi resume also has to be a Pi session id or a file in Pi's sessions folder, and a Codex resume a thread id ([#1064](https://github.com/littlebearapps/untether/issues/1064), [#1065](https://github.com/littlebearapps/untether/issues/1065)). The chat's own session is kept: send your message without the resume line to carry on, or `/new` for a fresh one ([#1069](https://github.com/littlebearapps/untether/issues/1069)). Antigravity has its own wording for both (see [Antigravity messages](#antigravity-messages)).
 
 ## Context length
 
@@ -140,7 +151,7 @@ These are checked before the generic `invalid_request_error` pattern, because th
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. | Claude |
+| `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. When the same card says the saved session was already cleared, the hint says to just send your message again instead ([#1168](https://github.com/littlebearapps/untether/issues/1168)). Shown only when the run had no turns; a run that did work before failing gets no hint, and a session Untether closed at its time limit says so instead ([#887](https://github.com/littlebearapps/untether/issues/887)). When the failed session was named by a resume line and isn't the chat's saved one, the hint says the saved session isn't affected instead, on every engine, and the card carries no resume line for the failed session ([#1070](https://github.com/littlebearapps/untether/issues/1070)). | Claude |
 | `finished without a result event` | The engine exited before producing a final answer. Try sending a new message to resume. | All |
 | `finished but no session_id` | The engine crashed during startup. Check that the CLI is installed and working. | All |
 
@@ -150,7 +161,45 @@ These are checked before the generic `invalid_request_error` pattern, because th
 |---------|------|---------|
 | `require paid credits` | AMP execute mode requires paid credits. Add credits at ampcode.com/pay. | AMP (deprecated) |
 | `amp login` | Run `amp login` to authenticate with Sourcegraph. | AMP (deprecated) |
+| `antigravity ended with status canceled` | Antigravity cancelled the turn upstream (long turns sometimes do, antigravity-cli#902). Retry, or split the task into smaller steps. | Antigravity |
 | `gemini result status:` | Gemini returned an unexpected result. Try a fresh session with `/new`. | Gemini (deprecated) |
+
+## Antigravity messages
+
+Antigravity CLI (`agy`) errors are Untether's own messages, written when the runner recognises what went wrong. Where a hint above applies, it is shown with them. The agy output that triggers each one is listed in the [Antigravity runner reference](runners/antigravity/runner.md#errors).
+
+| Message starts | Meaning | What to do |
+|---|---|---|
+| `Antigravity CLI isn't signed in on this host` | agy wanted a browser sign-in | Sign in with `agy` in a terminal on the host, or use the API-key or Enterprise route |
+| `Google is asking this account to verify itself or appeal a Terms of Service block` | Google has blocked or challenged the account | Run `agy` in a terminal on the host to see Google's link. Untether won't retry |
+| `This Antigravity quota is used up` | A quota group is exhausted | `/usage` shows when each group resets |
+| `Antigravity's AI credits balance is too low to continue` | Out of AI credits | Top up, or wait for the quota reset |
+| `That Antigravity conversation no longer exists` | agy doesn't know the resume id | Send the message again; a new conversation starts |
+| `Antigravity was interrupted` | The run was cancelled or the process was signalled | Reply to the resume line to continue |
+| `🛑 That model id isn't valid for Antigravity, so nothing was started.` | The chat's, cron's or config's model id has a space, a leading dash or another character Antigravity model ids don't use | `/model set <id>` with a valid id (`agy models` lists them), or `/model clear` |
+| `🛑 That Antigravity conversation id isn't valid, so nothing was started.` | The resume line or saved session holds something that isn't a conversation id | `/new`, then send the message again |
+| `The conversation Antigravity had recorded for this project no longer exists, so nothing was resumed.` | `/continue` found this project's last conversation in agy's record, but agy no longer has it. The chat's saved session is untouched | Send a normal message to carry on from the chat's own conversation or start a new one, or reply to a resume line |
+| `No Antigravity conversation for this project yet` | `/continue` found no conversation run from this project's own directory. Conversations in a parent or child folder don't count | Send a normal message to start one, or reply to a resume line |
+| `Antigravity's most recent conversation in this folder has also been run from another folder` | `/continue` can't tell which project that conversation belongs to, so it wasn't resumed | Send a normal message, or reply to the resume line of the conversation you want |
+| `Untether couldn't read Antigravity's record of recent conversations` | agy's last-conversations file is unreadable or not in the expected form, so `/continue` resumed nothing | Send a normal message, or reply to a resume line. `antigravity.continue.refused` in the logs gives the reason |
+| `Antigravity needs a project` | The chat has no project directory, or its path can't be resolved | `/ctx set <project>`, or add a `[projects.*]` entry |
+| `🛑 Antigravity CLI <version> is older than 1.3.1` | agy is too old | `agy update` on the host |
+| `⚠️ Antigravity was blocked from using a …` | agy refused a tool in Workspace: usually a file outside the project; a shell command only in a conversation that isn't on Untether's no-shell agent | `/config` → Permission mode → Full access, then `/new` (agy keeps a conversation on the tools it started with). See [Troubleshooting](../how-to/troubleshooting.md#antigravity-cli) |
+| `Ask me needs Telegram approvals, which aren't set up on this host` | Untether's agy plugin isn't installed | Run `untether agy-gate install` on the host, or pick Workspace or Full access in `/config` |
+| `Ask me needs Telegram approvals, and they aren't ready for this project` | The plugin is disabled, edited or outdated, or agy doesn't list it for the project (the message gives the reason) | Run `untether agy-gate status --project <folder>` on the host and repair what it says |
+| `Ask me isn't available in this project` | The project contains Untether's own code, or agy hooks, plugins, agents or MCP servers Untether doesn't manage (named in the message) | Use Workspace or Full access there, or remove that config |
+| `Telegram approvals aren't running for this agy run` / `… stopped responding during this agy run` | An Ask me run whose hooks didn't reach Untether was stopped | `untether agy-gate status --project <folder>` on the host; reinstall the plugin if it was changed |
+| `⚠️ This plan card has expired` / `ℹ️ A newer plan replaced this one` | An Antigravity Plan first card was tapped after a restart, after 24 hours, or after a newer plan | Send a message to plan again, then use the new card |
+| `⚠️ This chat's project directory changed since the plan was written` | The project or branch path moved between the plan and the Approve tap | Send a message to plan again |
+| `agy's own settings change its permission checks` | agy's `toolPermission` setting would approve tools by itself | Set it back to `request-review`, or pick Full access |
+| `Untether couldn't confirm agy's tool-permission setting` | Neither the check before the run nor agy's first event gave agy's `toolPermission`, so a Workspace run was stopped | Try again in a few minutes. If it keeps happening, check `agy -p /config` works on the host and update Untether; or pick Full access |
+| `Untether couldn't read agy's tool-permission setting before this run` | A scheduled Workspace run was held because the `agy -p /config` check failed or returned no `toolPermission` | Nothing to change: the next fire checks again. If it persists, run `agy -p /config` on the host |
+| `agy's workspace config changed since someone last ran Antigravity` | A scheduled run was held because the project's agy hooks, plugins or MCP config changed | Check the listed files on the host if you didn't change them. The next message sent in the chat runs with the changed config and shows a ⚠️ row; the schedule then runs again. An `/at` or `/loop` run doesn't release it |
+| `Untether's agy plugin (untether-gate) isn't what Untether installed (…), so this scheduled run is held` | Untether's own agy plugin was edited, replaced or is from another version; its hooks run in every agy session on the host | Check what changed in `~/.gemini/config/plugins/untether-gate/`, then run the command the message names (`untether agy-gate install --force`). A message in the chat doesn't release this hold |
+| `Untether couldn't check agy's hooks, plugins and MCP servers` | Scheduled runs are held because the check couldn't finish | Trim the project's `.agents/` folder so the check can finish. A message sent in the chat still runs and shows why in a ⚠️ row, but doesn't release the hold |
+| `agy reported a model/agent error` | agy exited with a turn-level failure | Retry; check `/usage` |
+| `antigravity ended with status <status>` | agy finished with a status other than success or error | Retry, or split the task |
+| `antigravity failed (<exit>)` | agy exited without a result | Read the excerpt underneath; URLs, tokens and paths in it are redacted |
 
 ## Account errors
 

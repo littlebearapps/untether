@@ -96,8 +96,23 @@ In group chats, certain commands require admin or creator status:
 - `/agent` — change the default engine
 - `/listen` — change listen mode (also accepts the deprecated `/trigger`)
 - bare `/steer` / `/queue` — change the [follow-up mode](steer-follow-ups.md) (`/steer <text>` itself is open to everyone)
+- `/config` — every button or typed action that **changes** a setting ([#1042](https://github.com/littlebearapps/untether/issues/1042))
+- `/planmode` — change the Claude Code permission mode (`/planmode show` is open to everyone)
+- `/verbose` — change verbose progress for the chat, in every form
 
 In private chats, these commands are always available without restriction.
+
+### The `/config` menu in a group
+
+Anyone allowed to use the bot can open `/config`, move between its pages and read the current values. Changing something needs a group admin or the creator, the same as the text commands above. That covers every setting in the menu: permission or approval mode (including Antigravity **Full access**), engine and model, reasoning or effort, listen mode, follow-up mode, ask mode, diff preview, verbose, resume line, cost, budget and **Stop at limit**, loop mode, and **Pause triggers** / **Resume triggers**.
+
+When someone who isn't an admin taps a button that would change a setting, the tap is answered with `changing settings is restricted to group admins.` and nothing changes. A typed action such as `/config vb:on` gets the same reply, and so do `/planmode` and `/verbose`, which change the same settings as the menu's Permission mode and Verbose pages. If Untether can't confirm the sender's role with Telegram, it refuses with `failed to verify settings permissions.` rather than letting the change through.
+
+!!! note "Things to know"
+    - `/config` settings apply to the whole chat. In a forum group they also apply to every topic that has no override of its own, which is why changing them is limited to admins.
+    - **Pause triggers** stops every cron and webhook on the host, not only the ones that post to this chat.
+    - An admin who posts anonymously ("Remain anonymous") can't be identified from a typed command, so `/config vb:on` typed that way is refused. Tapping the menu buttons works, because Telegram reports the real account for a button tap.
+    - Each change is logged with the chat id and the sender's user id (`config.*` lines), and each refusal as a WARNING `command.admin_required`.
 
 ## File transfer in groups
 

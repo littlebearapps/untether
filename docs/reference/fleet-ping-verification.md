@@ -49,8 +49,9 @@ For each bot in the table:
    - a triggers line when crons/webhooks target that chat — `⏰ triggers: 1 cron (<id>, <schedule>)`
      or `⏰ triggers: 2 crons, 1 webhook`; while triggers are paused it reads
      `⏸ triggers paused: … (suspended)`
-   - `⏳ background: N tasks running` while a live Claude run in that chat holds background work
-     ([#777](https://github.com/littlebearapps/untether/issues/777))
+   - `⏳ background: N tasks running` while a live Claude run, or a running Antigravity turn, in that
+     chat holds background work ([#777](https://github.com/littlebearapps/untether/issues/777),
+     [#978](https://github.com/littlebearapps/untether/issues/978))
 
 Report a one-line-per-host result, e.g.:
 

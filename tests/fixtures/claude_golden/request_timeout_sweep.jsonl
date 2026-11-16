@@ -1,0 +1,16 @@
+{"_do":"config","permission_mode":"default","prompt":"add a notes file"}
+{"type":"system","subtype":"init","cwd":"/work/project","model":"claude-golden-1","tools":["Bash","Read","Edit","Write","Glob","Grep"],"permissionMode":"default"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_bash_1","name":"Bash","input":{"command":"touch notes.txt"}}]}}
+{"type":"control_request","request_id":"req-bash-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch notes.txt"},"tool_use_id":"toolu_bash_1"}}
+{"_do":"advance_time","s":301}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_read_1","name":"Read","input":{"file_path":"/work/project/parser.py"}}]}}
+{"type":"control_request","request_id":"req-read-1","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/work/project/parser.py"},"tool_use_id":"toolu_read_1"},"_stdin":1}
+{"_do":"tap","data":"claude_control:approve:req-bash-1","message_id":1}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash_1","content":"Request timed out.","is_error":true}]}}
+{"_do":"tap","data":"claude_control:approve:req-read-1","_stdin":1}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read_1","content":"def parse(src): ..."}]}}
+{"type":"assistant","message":{"id":"msg_03","role":"assistant","model":"claude-golden-1","content":[{"type":"text","text":"Read the parser."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"duration_api_ms":900,"num_turns":3,"result":"Read the parser.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}
+{"_do":"drain"}
+{"_do":"eof"}
+{"_do":"exit","rc":0}

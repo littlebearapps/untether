@@ -17,7 +17,9 @@ Send `/model` to see the override for the current engine and where it comes from
 
     defaults: topic: none, chat: sonnet
 
-    available engines: codex, claude, opencode, pi
+    available engines: antigravity, claude, codex, opencode, pi (not installed: amp, gemini)
+
+`available engines` lists only the engines that can run on this host; any that aren't installed or failed to load follow in brackets ([#1165](https://github.com/littlebearapps/untether/issues/1165)).
 
 `model: **default** (no override)` means no chat or topic override is set, so the engine uses its own default (see the resolution order below).
 
@@ -37,6 +39,8 @@ To target a specific engine, include the engine name:
 
 The override applies to the current chat (or topic, if you're in a forum thread).
 
+A model id can't start with a dash or contain spaces or control characters: `/model set` refuses such a value, and so does a run that gets one from a cron or `untether.toml` ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
+
 !!! note "OpenCode: use provider/model format"
     OpenCode requires the `provider/model` format for model overrides (e.g. `openai/gpt-5.5`, `anthropic/claude-sonnet-5-5`). Using just the model name will fail. Example: `/model set opencode openai/gpt-5.5`.
 
@@ -54,6 +58,11 @@ To clear the override for a specific engine:
 /model clear claude
 ```
 
+The reply tells you what the next run gets:
+
+- **A model is configured for the engine** (`model` in its `untether.toml` table, or a chat override under the topic override you cleared): Untether passes that model on every run, resumed ones included, and the reply names it. Like `/model set`, it also offers `/new` for a clean start, since a resumed session can keep the model it was using (Pi stores it in its session file) ([#1155](https://github.com/littlebearapps/untether/issues/1155)).
+- **Nothing is configured:** Untether passes no model and the engine decides. A resumed session may stay on the model it was using — Claude Code and Pi keep the session's model, while Codex resumes on its own configured model. Run `/new` to start a fresh session on the engine's default ([#998](https://github.com/littlebearapps/untether/issues/998)).
+
 ## Set reasoning level
 
 Some engines support reasoning levels that control how much thinking the model does before responding. Use `/reasoning set`:
@@ -66,10 +75,20 @@ Valid levels depend on the engine:
 
 - **Claude Code**: `low`, `medium`, `high`, `xhigh`, `max` (passed as `--effort`)
 - **Codex CLI**: `low`, `medium`, `high`, `xhigh`
+- **Antigravity CLI**: `low`, `medium`, `high` (passed as `--effort`), narrowed to what the chat's model accepts — see [Antigravity effort](#antigravity-effort)
 
 `minimal` was removed for Codex in v0.36.0: no current Codex model supports it, and it fails alongside Codex's default web search. A saved `minimal` is ignored with a one-line note on each run, and the run uses the engine default until you pick another level.
 
-Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.
+Other engines (OpenCode, Pi, and the deprecated Gemini CLI and Amp) ignore this setting.
+
+### Antigravity effort
+
+Antigravity models don't all take the same levels: some accept only two of the three, and some have a fixed effort. When you open `/config` → **Effort** in an Antigravity chat, Untether asks agy which levels the chat's model accepts (this uses no tokens) and shows only those buttons. A fixed-effort model shows none. If agy can't be asked, the page shows all three with a note.
+
+- If a saved level isn't one the model accepts, that run drops it and shows `⚠️ Effort high isn't available for <model>, so agy used its default`.
+- Untether learns a model's levels only when the Effort page is opened. On a model you switched to without opening it, a level the model refuses makes the run fail with `That effort level isn't available for this Antigravity model — pick another in /config → Effort, or use a model id without an effort suffix.` Open the page once, or clear the level with `/reasoning clear`.
+- A model id that already names its effort (ending `-low`, `-medium` or `-high`, as `agy models` lists them) fixes the level, and Untether doesn't pass `--effort` with it. The id without the suffix (for example `gemini-3.8-flash`) takes the level from `/config` → **Effort**; with no level set, agy 1.3.4 and newer use the model's default level. Older agy (1.3.1 to 1.3.3) refuses such a model without a level, and the run stops with `That model needs an effort level — agy offers low, medium, high. Set one with /reasoning set <level> or in /config → Effort, then send your message again.`
+- The footer shows what was used: model · effort · mode.
 
 ## Per-engine reasoning
 
@@ -106,7 +125,7 @@ The resolution order for model and reasoning is (highest priority first):
 1. **Cron override** — a `[[triggers.crons]]` entry's own `model` / `reasoning`, for that scheduled run only ([#743](https://github.com/littlebearapps/untether/issues/743); see [Schedule tasks](schedule-tasks.md#pick-a-model-per-cron))
 2. **Topic override** — set via `/model set` or `/reasoning set` in a forum topic
 3. **Chat default** — set via `/model set` or `/reasoning set` in a private or group chat
-4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]` or `[engines.pi]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
+4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]`, `[engines.pi]` or `[engines.antigravity]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
 5. **CLI default** — whatever the engine CLI picks on its own
 
 There is no per-project model setting; projects only pick a `default_engine`.

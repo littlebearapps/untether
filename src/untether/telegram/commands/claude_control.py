@@ -3,27 +3,34 @@
 from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
-from ...logging import get_logger
-from ...runner_bridge import delete_outline_messages, register_ephemeral_message
-from ...runners.claude import (
-    _ACTIVE_RUNNERS,
-    _DISCUSS_APPROVED,
-    _OUTLINE_PENDING,
+from ...interactive.registry import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     ControlLookup,
     ControlRequestStatus,
     ControlSendResult,
+    Decision,
     HandledControl,
     claim_control_request,
     classify_control_request,
     control_request_origin,
-    mark_outline_pending,
     mark_request_handled,
     new_control_claim_owner,
-    plan_approved_feedback,
+    on_session_dropped,
     release_control_claims,
+    respond,
     respond_to_control_request,
+    session_alive,
+)
+from ...logging import get_logger
+from ...runner_bridge import delete_outline_messages, register_ephemeral_message
+
+# Claude's plan flow (Pause & Outline, post-outline approval) stays Claude's.
+from ...runners.claude import (
+    _DISCUSS_APPROVED,
+    _OUTLINE_PENDING,
+    mark_outline_pending,
+    plan_approved_feedback,
 )
 from ...transport import MessageRef
 from .ask_question import _ALREADY_ANSWERED_TOAST
@@ -33,6 +40,18 @@ logger = get_logger(__name__)
 # Tracks the "📋 Asked Claude Code to outline the plan" message ref per session,
 # so the post-outline approve/deny can edit it instead of sending a 2nd message.
 _DISCUSS_FEEDBACK_REFS: dict[str, MessageRef] = {}
+
+
+def _drop_discuss_feedback_ref(session_id: str) -> str | None:
+    """Session cleanup: forget the session's discuss feedback ref (#960 —
+    run by the registry's ``drop_session``, so the runner needs no import
+    of Telegram code)."""
+    if _DISCUSS_FEEDBACK_REFS.pop(session_id, None) is not None:
+        return "discuss_feedback_ref"
+    return None
+
+
+on_session_dropped(_drop_discuss_feedback_ref)
 
 
 _DISCUSS_DENY_MESSAGE = (
@@ -100,6 +119,9 @@ _PRIOR_LABELS: dict[str, str] = {
     "auto": "answered automatically",
     "answer": "answered",
     "timeout": "timed out after 5 min (auto-denied)",
+    # #980: Antigravity's gate has its own deadline.
+    "gate_timeout": "timed out (denied)",
+    "always": "approved (always for this command)",
     "superseded": "replaced by the outlined plan",
 }
 
@@ -114,11 +136,13 @@ def _is_expired(prior: HandledControl | None) -> bool:
     return prior is not None and prior.outcome == "expired"
 
 
-def _toast_for(lookup: ControlLookup, action: str) -> str | None:
+def _toast_for(
+    lookup: ControlLookup, action: str, toasts: dict[str, str] = _EARLY_TOASTS
+) -> str | None:
     """Early toast for a tap on a request in state ``lookup`` (#685)."""
     match lookup.status:
         case ControlRequestStatus.PENDING:
-            return _EARLY_TOASTS.get(action)
+            return toasts.get(action)
         case ControlRequestStatus.CANCELLED:
             return _NO_LONGER_NEEDED_TOAST
         case ControlRequestStatus.NOT_FOUND:
@@ -206,6 +230,33 @@ def _unsent_result(
     return CommandResult(text=_NOT_FOUND_TEXT, notify=True)
 
 
+def _early_toast(
+    args_text: str,
+    toasts: dict[str, str],
+    *,
+    channel_id: int | None,
+    claim_owner: str | None,
+) -> str | None:
+    action, _, request_id = (args_text or "").partition(":")
+    action = action.lower()
+    if action not in toasts or not request_id:
+        return None
+    try:
+        if claim_owner is not None:
+            lookup = claim_control_request(
+                request_id,
+                action=action,
+                owner=claim_owner,
+                channel_id=channel_id,
+            )
+        else:
+            lookup = classify_control_request(request_id, channel_id=channel_id)
+        return _toast_for(lookup, action, toasts)
+    except Exception:  # noqa: BLE001 — a toast must never take out the tap
+        logger.debug("claude_control.early_toast_failed", exc_info=True)
+        return toasts.get(action)
+
+
 def _claim_synthetic(
     ctx: CommandContext, request_id: str, action: str
 ) -> CommandResult | None:
@@ -245,6 +296,8 @@ class ClaudeControlCommand:
     id = "claude_control"
     description = "Handle Claude Code permission requests"
     answer_early = True
+    # #1068: button taps only — not in the command menu.
+    callback_only = True
 
     @staticmethod
     def early_answer_toast(
@@ -263,24 +316,9 @@ class ClaudeControlCommand:
         a concurrent second tap then sees it in flight. ``channel_id`` scopes
         the resolved-request lookup (#715). Never raises.
         """
-        action, _, request_id = (args_text or "").partition(":")
-        action = action.lower()
-        if action not in _EARLY_TOASTS or not request_id:
-            return None
-        try:
-            if claim_owner is not None:
-                lookup = claim_control_request(
-                    request_id,
-                    action=action,
-                    owner=claim_owner,
-                    channel_id=channel_id,
-                )
-            else:
-                lookup = classify_control_request(request_id, channel_id=channel_id)
-            return _toast_for(lookup, action)
-        except Exception:  # noqa: BLE001 — a toast must never take out the tap
-            logger.debug("claude_control.early_toast_failed", exc_info=True)
-            return _EARLY_TOASTS.get(action)
+        return _early_toast(
+            args_text, _EARLY_TOASTS, channel_id=channel_id, claim_owner=claim_owner
+        )
 
     @staticmethod
     def release_early_claim(owner: str) -> None:
@@ -384,7 +422,7 @@ class ClaudeControlCommand:
 
             # Check if session is still alive — it may have ended
             # (context exhaustion) before the user clicked the button
-            if session_id not in _ACTIVE_RUNNERS:
+            if not session_alive(session_id):
                 logger.warning(
                     "claude_control.discuss_plan_session_ended",
                     session_id=session_id,
@@ -532,7 +570,7 @@ class ClaudeControlCommand:
             if (done := _claim_synthetic(ctx, request_id, "chat")) is not None:
                 return done
 
-            if session_id not in _ACTIVE_RUNNERS:
+            if not session_alive(session_id):
                 logger.warning(
                     "claude_control.discuss_plan_session_ended",
                     session_id=session_id,
@@ -618,3 +656,59 @@ class ClaudeControlCommand:
 
 
 BACKEND: CommandBackend = ClaudeControlCommand()
+
+
+_IA_TOASTS: dict[str, str] = {**_EARLY_TOASTS, "always": "Always allowed"}
+_ALWAYS_TEXT = (
+    "✅ Approved — this exact command runs without asking for the rest of "
+    "this conversation"
+)
+
+
+class IaControlCommand(ClaudeControlCommand):
+    """``ia:<action>:<request_id>`` — the engine-neutral approval buttons of
+    a request registered with its own responder (#960; Antigravity's gate,
+    #980). Same claim / toast / registry path as Claude's: the request's
+    responder delivers the decision. ``always`` (Antigravity's "Always allow
+    this command here") approves and tells the responder to remember it."""
+
+    id = "ia"
+    description = "Handle engine-neutral approval buttons"
+    # #1068: buttons only — never in the command menu, typed use is refused.
+    callback_only = True
+
+    @staticmethod
+    def early_answer_toast(
+        args_text: str,
+        *,
+        channel_id: int | None = None,
+        claim_owner: str | None = None,
+    ) -> str | None:
+        return _early_toast(
+            args_text, _IA_TOASTS, channel_id=channel_id, claim_owner=claim_owner
+        )
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        action, _, request_id = ctx.args_text.partition(":")
+        if action.lower() != "always" or not request_id:
+            return await super().handle(ctx)
+        channel_id = ctx.message.channel_id
+        sent = await respond(
+            request_id,
+            Decision(approved=True, action="always"),
+            channel_id=channel_id,
+            claim_owner=ctx.callback_query_id,
+        )
+        if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
+            return _unsent_result(sent, request_id, "always", channel_id=channel_id)
+        logger.info(
+            "claude_control.sent",
+            request_id=request_id,
+            approved=True,
+            action="always",
+            tool_name=sent.tool_name,
+        )
+        return CommandResult(text=_ALWAYS_TEXT, notify=True)
+
+
+IA_BACKEND: CommandBackend = IaControlCommand()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,10 +10,12 @@ import msgspec
 
 from ..backends import EngineBackend, EngineConfig
 from ..config import ConfigError
+from ..context import WEBHOOK_TRIGGER_PREFIX
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import ActionPhase, EngineId, ResumeToken, UntetherEvent
 from ..runner import (
+    _URL_RE,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
@@ -21,7 +24,8 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import codex as codex_schema
-from ..utils.paths import relativize_command
+from ..utils import engine_argv
+from ..utils.paths import relativize_command, relativize_path
 from .extra_args_guard import (
     SECURITY_DOC_REF,
     BlockedArg,
@@ -33,7 +37,7 @@ from .extra_args_guard import (
     normalise_value,
     option_value,
 )
-from .run_options import get_run_options
+from .run_options import EngineRunOptions, get_run_options
 
 logger = get_logger(__name__)
 
@@ -49,6 +53,20 @@ __all__ = [
 ]
 
 _RESUME_RE = re.compile(r"(?im)^\s*`?codex\s+resume\s+(?P<token>[^`\s]+)`?\s*$")
+# #1065: a Codex thread id (``thread.started.thread_id``, a UUID). `codex exec
+# resume` (0.162.1) also takes a thread *name*, but an unknown name silently
+# starts a new thread instead of failing, and Untether's session tracking
+# keys on the UUID the run reports — so a name never resumed under Untether
+# (it failed the "emitted session id … but expected …" check) and is refused
+# before spawning instead. Recorded in docs/reference/runners/codex/.
+_CODEX_THREAD_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# #1066: an absolute path inside a Codex warning's text (``user
+# (/home/<user>/.codex/config.toml): `project` is ignored.``). Not preceded
+# by a word character, ``~`` or ``.`` (so ``~/x``, ``a/b`` and ``./x`` are
+# left alone); stops at the punctuation that wraps a path in prose.
+_WARNING_PATH_RE = re.compile(r"(?<![\w~.])/[^\s'\"`<>()\[\]{},;:]+")
 _RECONNECTING_RE = re.compile(
     r"^Reconnecting\.{3}\s*(?P<attempt>\d+)/(?P<max>\d+)\s*$",
     re.IGNORECASE,
@@ -86,6 +104,47 @@ _CODEX_SAFE_SANDBOX = "read-only"
 # button to "auto" (stored as None); engine_overrides documents it too.
 _CODEX_FULL_AUTO_MODES = frozenset({"auto"})
 _UNKNOWN_PM_WARNED: set[str] = set()
+# #1142: (trigger, mode) pairs whose webhook run was moved to ``safe``.
+_WEBHOOK_UNKNOWN_PM_WARNED: set[tuple[str, str]] = set()
+_WEBHOOK_UNKNOWN_PM_WARNED_MAX = 256
+
+
+def _is_unknown_permission_mode(mode: str | None) -> bool:
+    return (
+        mode is not None
+        and mode != CODEX_SAFE_PERMISSION_MODE
+        and mode not in _CODEX_FULL_AUTO_MODES
+    )
+
+
+def _webhook_safe_trigger(options: EngineRunOptions | None) -> str | None:
+    """#1142: the webhook trigger when an unknown mode must run ``safe``.
+
+    Unknown modes fail open (full auto) for attended runs and crons; a
+    webhook's prompt is built from its payload, so it fails closed instead.
+    """
+    if options is None or not _is_unknown_permission_mode(options.permission_mode):
+        return None
+    trigger = options.unattended_trigger
+    if trigger is None or not trigger.startswith(WEBHOOK_TRIGGER_PREFIX):
+        return None
+    return trigger
+
+
+def _warn_webhook_unknown_mode(trigger: str, mode: str) -> None:
+    key = (trigger, mode)
+    if key in _WEBHOOK_UNKNOWN_PM_WARNED:
+        return
+    if len(_WEBHOOK_UNKNOWN_PM_WARNED) >= _WEBHOOK_UNKNOWN_PM_WARNED_MAX:
+        _WEBHOOK_UNKNOWN_PM_WARNED.clear()
+    _WEBHOOK_UNKNOWN_PM_WARNED.add(key)
+    logger.warning(
+        "codex.webhook_unknown_mode_safe",
+        trigger=trigger,
+        mode=mode,
+        note="unknown Codex permission_mode on a webhook run runs as safe "
+        "(--sandbox read-only), not full auto",
+    )
 
 
 def _warn_unknown_permission_mode(mode: str) -> None:
@@ -496,6 +555,7 @@ def _translate_item_event(
         case codex_schema.ErrorItem(id=action_id, message=message):
             if phase != "completed":
                 return []
+            message = _warning_display_text(message)
             # #987: a non-fatal warning (e.g. an ignored config key), not a
             # failed step — ok=True with a leading ⚠️ renders the ⚠️ as the
             # row's status instead of ✗ (#868).
@@ -680,6 +740,32 @@ def _translate_item_event(
     return []
 
 
+def _warning_display_text(message: str) -> str:
+    """#1066: a Codex warning as shown in Telegram — no home or host paths.
+
+    A path inside the run's project becomes relative, one under the home
+    directory becomes ``~/…`` (so ``~/.codex/config.toml`` still tells the
+    user which file to fix), any other absolute path ``[path]``, and URLs
+    ``[url]`` — the same treatment engine stderr gets (``_sanitise_stderr``,
+    #208 / #1033), kept readable for a row the user acts on.
+    """
+    text = _URL_RE.sub("[url]", message)
+    home = os.path.expanduser("~")
+
+    def _replace(match: re.Match[str]) -> str:
+        path = match.group(0)
+        if path.count("/") < 2:
+            return path  # ``/help``-style words, not a filesystem path
+        relative = relativize_path(path)
+        if relative != path:
+            return relative
+        if home not in ("", "/") and (path == home or path.startswith(f"{home}/")):
+            return f"~{path[len(home) :]}"
+        return "[path]"
+
+    return _WARNING_PATH_RE.sub(_replace, text)
+
+
 def translate_codex_event(
     event: codex_schema.ThreadEvent,
     *,
@@ -740,6 +826,14 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def command(self) -> str:
         return self.codex_cmd
 
+    def check_resume_value(self, value: Any) -> str:
+        """#1065: only a thread UUID — anything else would start an orphan
+        thread (see ``_CODEX_THREAD_ID_RE``)."""
+        engine_argv.check_resume(value)
+        if _CODEX_THREAD_ID_RE.fullmatch(value) is None:
+            raise engine_argv.EngineArgvError("resume", "not_a_session")
+        return value
+
     def build_args(
         self,
         prompt: str,
@@ -751,7 +845,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         args = [*self.extra_args]
         if run_options is not None:
             if run_options.model:
-                args.extend(["--model", str(run_options.model)])
+                # #1034: validated + joined, never a separate value token.
+                args.append(
+                    engine_argv.joined(
+                        "--model", engine_argv.check_model(str(run_options.model))
+                    )
+                )
             if run_options.reasoning:
                 args.extend(
                     [
@@ -769,22 +868,37 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "--color=never",
             ]
         )
-        mode = run_options.permission_mode if run_options is not None else None
+        raw_mode = run_options.permission_mode if run_options is not None else None
+        webhook = _webhook_safe_trigger(run_options)
+        if webhook is not None and raw_mode is not None:
+            _warn_webhook_unknown_mode(webhook, raw_mode)
+        mode = self._permission_mode()
         if mode == CODEX_SAFE_PERMISSION_MODE:
             # Must sit before `resume`: `codex exec resume` has no --sandbox.
             args.extend(["--sandbox", _CODEX_SAFE_SANDBOX])
-        elif mode is not None and mode not in _CODEX_FULL_AUTO_MODES:
+        elif mode is not None and _is_unknown_permission_mode(mode):
             _warn_unknown_permission_mode(mode)
         if resume:
             if resume.is_continue:
                 args.extend(["resume", "--last", "-"])
             else:
-                args.extend(["resume", resume.value, "-"])
+                # #1034: the session id is positional, so there is no joined
+                # form — clap (0.160.1) reads a dash-leading one as an option
+                # of `exec resume`. Validation is the whole defence here.
+                args.extend(["resume", self.check_resume_value(resume.value), "-"])
         else:
             args.append("-")
         if isinstance(state, CodexRunState):
             state.argv = list(args)
         return args
+
+    def _permission_mode(self) -> str | None:
+        """The run's Codex mode: the per-chat (or cron) value, except that a
+        webhook with an unknown mode runs ``safe`` (#1142)."""
+        run_options = get_run_options()
+        if _webhook_safe_trigger(run_options) is not None:
+            return CODEX_SAFE_PERMISSION_MODE
+        return run_options.permission_mode if run_options is not None else None
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
@@ -917,10 +1031,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if meta is None:
                 meta = {}
             meta["effort"] = run_options.reasoning
-        if (
-            run_options is not None
-            and run_options.permission_mode == CODEX_SAFE_PERMISSION_MODE
-        ):
+        if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
             if meta is None:
                 meta = {}
             meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE

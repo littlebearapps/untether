@@ -412,7 +412,8 @@ def test_build_args_resume_uses_session_path_verbatim() -> None:
     session *path* Untether owns, NOT a mangled short id (the rejected fix A).
     """
     runner = _pi_runner()
-    path = "/home/nathan/.pi/agent/sessions/--proj--/2026_abc.jsonl"
+    # Under Pi's own sessions folder for whoever runs the suite (#1064).
+    path = str(Path.home() / ".pi/agent/sessions/--proj--/2026_abc.jsonl")
     token = ResumeToken(engine=ENGINE, value=path)
     state = PiStreamState(resume=token)
     args = runner.build_args("hello", token, state=state)

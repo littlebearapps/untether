@@ -7,6 +7,7 @@ from typing import Literal
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...transport import ChannelId
+from .overrides import SETTINGS_ADMIN_GATE, AdminGate
 
 logger = get_logger(__name__)
 
@@ -28,13 +29,31 @@ class VerboseCommand:
     id = "verbose"
     description = "Toggle verbose progress mode on/off"
 
+    @staticmethod
+    def admin_gate(args_text: str) -> AdminGate | None:
+        """#1042: changing the chat's verbosity needs a group admin.
+
+        `/verbose` writes the setting `/config vb:*` writes, so it takes the
+        same gate (run by the dispatch before ``handle``). Every form changes
+        it — an unrecognised argument toggles, like the bare command — so
+        there is no read-only form to leave open.
+        """
+        return SETTINGS_ADMIN_GATE
+
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         chat_id = ctx.message.channel_id
+        # #1069: who changed it, like the `config.*` lines (#1042).
+        sender_id = ctx.message.sender_id
         args = ctx.args_text.strip().lower()
 
         if args in ("on", "verbose"):
             _VERBOSE_OVERRIDES[chat_id] = "verbose"
-            logger.info("verbose.set", chat_id=chat_id, verbosity="verbose")
+            logger.info(
+                "verbose.set",
+                chat_id=chat_id,
+                sender_id=sender_id,
+                verbosity="verbose",
+            )
             return CommandResult(
                 text="verbose mode <b>on</b> — progress messages will show tool details.",
                 notify=True,
@@ -43,7 +62,12 @@ class VerboseCommand:
 
         if args in ("off", "compact"):
             _VERBOSE_OVERRIDES[chat_id] = "compact"
-            logger.info("verbose.set", chat_id=chat_id, verbosity="compact")
+            logger.info(
+                "verbose.set",
+                chat_id=chat_id,
+                sender_id=sender_id,
+                verbosity="compact",
+            )
             return CommandResult(
                 text="verbose mode <b>off</b> — compact progress (default).",
                 notify=True,
@@ -52,7 +76,11 @@ class VerboseCommand:
 
         if args in ("clear", "reset"):
             _VERBOSE_OVERRIDES.pop(chat_id, None)
-            logger.info("verbose.cleared", chat_id=chat_id)
+            logger.info(
+                "verbose.cleared",
+                chat_id=chat_id,
+                sender_id=sender_id,
+            )
             return CommandResult(
                 text="verbose override <b>cleared</b> (using config default).",
                 notify=True,
@@ -63,7 +91,12 @@ class VerboseCommand:
         current = _VERBOSE_OVERRIDES.get(chat_id)
         if current == "verbose":
             _VERBOSE_OVERRIDES[chat_id] = "compact"
-            logger.info("verbose.toggled", chat_id=chat_id, verbosity="compact")
+            logger.info(
+                "verbose.toggled",
+                chat_id=chat_id,
+                sender_id=sender_id,
+                verbosity="compact",
+            )
             return CommandResult(
                 text="verbose mode <b>off</b>.",
                 notify=True,
@@ -71,7 +104,12 @@ class VerboseCommand:
             )
         else:
             _VERBOSE_OVERRIDES[chat_id] = "verbose"
-            logger.info("verbose.toggled", chat_id=chat_id, verbosity="verbose")
+            logger.info(
+                "verbose.toggled",
+                chat_id=chat_id,
+                sender_id=sender_id,
+                verbosity="verbose",
+            )
             return CommandResult(
                 text="verbose mode <b>on</b>.",
                 notify=True,
