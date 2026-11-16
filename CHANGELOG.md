@@ -1,6 +1,6 @@
 # changelog
 
-## v0.36.1 (unreleased)
+## v0.36.1 (2026-11-16)
 
 v0.36.1 adds Google's Antigravity CLI as its own engine, with Telegram approvals, questions, steer and a Plan first card,
 and tightens group chats, triggers and error output. Most installs need no config change, but read the
