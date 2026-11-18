@@ -49,3 +49,19 @@ async def test_poll_incoming_retries_on_none() -> None:
     assert sleeps == [2]
     assert msg is not None
     assert msg.chat_id == 123
+
+
+@pytest.mark.anyio
+async def test_1207_on_poll_ok_fires_only_after_a_good_poll() -> None:
+    bot = _Bot()
+    oks: list[int] = []
+
+    async def sleep(_delay: float) -> None:
+        assert oks == []  # the failed first poll never reports ok
+
+    async for _update in poll_incoming(
+        bot, sleep=sleep, on_poll_ok=lambda: oks.append(bot.calls)
+    ):
+        break
+
+    assert oks == [2]
