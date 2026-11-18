@@ -313,7 +313,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "",
         "kind": "tool",
         "request_id": "req-agent-1",
@@ -688,7 +690,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": "a1",
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "(command=`pytest -q`)",
         "kind": "tool",
         "request_id": "req-agent-bash-1",

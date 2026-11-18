@@ -275,8 +275,11 @@ class OrphanApprovalSurface:
             title=title,
             buttons=rows if rows is not None else synth_keyboard(request_id),
             tool_name=tool_name,
-            agent_id=_opt_str(detail.get("agent_id")),
-            reason=_opt_str(detail.get("decision_reason")),
+            # #1251: a follow-up turn's action is gone; the snapshot keeps who/why.
+            agent_id=_opt_str(detail.get("agent_id"))
+            or _opt_str(getattr(snap, "agent_id", None)),
+            reason=_opt_str(detail.get("decision_reason"))
+            or _opt_str(getattr(snap, "decision_reason", None)),
             source="rescue",
             queued_at=self._clock(),
         )

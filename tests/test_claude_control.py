@@ -4333,6 +4333,29 @@ def test_929_mapping_falls_back_for_unknown_native_id() -> None:
     assert state.control_action_for_tool == {"toolu_last": _started_action_id(events)}
 
 
+def test_1251_snapshot_carries_agent_and_reason() -> None:
+    """#1251: a rescue with no tracked action reads who/why from the
+    snapshot; the entry goes once the request is no longer registered."""
+    state, factory = _make_state_with_session("sess-1251s")
+    state.prompting_mode = True
+    for request in (
+        _929_request(
+            "r-agent", "Write", agent_id="a1", reason="outside cwd", file_path="/x"
+        ),
+        _929_request("r-main", command="ls"),
+    ):
+        translate_claude_event(request, title="claude", state=state, factory=factory)
+    snaps = {s.request_id: s for s in state.control_request_snapshot()}
+    assert (snaps["r-agent"].agent_id, snaps["r-agent"].decision_reason) == (
+        "a1",
+        "outside cwd",
+    )
+    assert (snaps["r-main"].agent_id, snaps["r-main"].decision_reason) == (None, None)
+    _REQUEST_TO_SESSION.pop("r-agent")
+    state.control_request_snapshot()
+    assert "r-agent" not in state.request_origin
+
+
 def test_929_live_idle_request_emits_action_without_turn() -> None:
     """Pins design A's routing assumption: a control request while the live
     session is idle yields the keyboard action and opens no turn."""

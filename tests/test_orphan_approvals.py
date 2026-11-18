@@ -465,6 +465,34 @@ async def test_rescue_prefers_tracked_keyboard() -> None:
     assert rows == [[{"text": "Option A", "callback_data": "aq:r-9:0"}]]
 
 
+async def test_rescue_without_action_uses_snapshot_agent_and_reason() -> None:
+    """#1251: a follow-up turn's request has no run-level action, so the
+    rescue reads who/why from the snapshot; the reason is never logged."""
+    surface, transport, _ = _surface()
+    snap = ControlRequestSnapshot(
+        request_id="r-9",
+        session_id="sess-1251",
+        age_s=40.0,
+        tool_name="Write",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=True,
+        agent_id="a1",
+        decision_reason="R1251-outside cwd",
+    )
+    assert surface.rescue(snap) is True
+    with structlog.testing.capture_logs() as logs:
+        await surface.flush()
+    (call,) = transport.send_calls
+    text = call["message"].text
+    assert "A background agent needs your approval" in text
+    assert "🤖 Plan the" in text
+    assert "🪝 R1251" in text and "outside cwd" in text
+    (sent,) = _events(logs, "approval_surface.sent")
+    assert sent["agent_id"] == "a1" and sent["source"] == "rescue"
+    assert "R1251" not in repr(logs)
+
+
 async def test_rescue_does_not_duplicate_offer() -> None:
     surface, _, _ = _surface()
     surface.offer(_action("r-9"))
