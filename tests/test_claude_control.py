@@ -1264,13 +1264,9 @@ def test_exit_plan_mode_auto_mode_skips_outline_gate() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_expired_control_request_queues_auto_deny() -> None:
-    """Expired control requests should be auto-denied, not just cleaned up.
-
-    Without sending a deny response, the subprocess hangs indefinitely
-    waiting for a control_response that never comes.
-    See: https://github.com/banteg/takopi/issues/215
-    """
+def test_844_old_control_request_is_not_auto_denied() -> None:
+    """#844: the 5-min expiry sweep is retired — the CLI has no permission
+    deadline, so an old request stays answerable when another arrives."""
     import time as _time
 
     state, factory = _make_state_with_session("sess-timeout")
@@ -1292,11 +1288,11 @@ def test_expired_control_request_queues_auto_deny() -> None:
     # Verify it was registered as pending
     assert "req-old" in state.pending_control_requests
 
-    # Backdate the request to be older than the 5-minute timeout
+    # Older than the retired 5-minute timeout.
     evt_data, _ = state.pending_control_requests["req-old"]
     state.pending_control_requests["req-old"] = (evt_data, _time.time() - 301.0)
 
-    # Trigger a NEW control request — the cleanup runs when processing new requests
+    # A sibling request used to trigger the sweep.
     new_event = _decode_event(
         {
             "type": "control_request",
@@ -1310,17 +1306,11 @@ def test_expired_control_request_queues_auto_deny() -> None:
     )
     translate_claude_event(new_event, title="claude", state=state, factory=factory)
 
-    # The expired request should have been removed from pending
-    assert "req-old" not in state.pending_control_requests
-
-    # CRITICAL: It should have been queued for auto-deny (not just discarded)
-    deny_ids = [rid for rid, _ in state.auto_deny_queue]
-    assert "req-old" in deny_ids, (
-        "Expired request must be auto-denied to unblock subprocess"
-    )
-
-    # The new request should still be pending
+    assert "req-old" in state.pending_control_requests
     assert "req-new" in state.pending_control_requests
+    assert state.auto_deny_queue == []
+    assert _REQUEST_TO_SESSION["req-old"] == "sess-timeout"
+    assert "req-old" not in _HANDLED_REQUESTS
 
 
 def test_handled_request_not_auto_denied_on_expiry() -> None:
@@ -1328,8 +1318,8 @@ def test_handled_request_not_auto_denied_on_expiry() -> None:
 
     When send_claude_control_response() handles a request, it adds it to
     _HANDLED_REQUESTS but can't clean up state.pending_control_requests.
-    The reconciliation in translate() should catch this and prevent the
-    5-minute expiry from sending a duplicate deny.
+    The reconciliation in translate() should catch this (an old request is
+    never auto-denied either, #844).
     See: https://github.com/littlebearapps/untether/issues/229
     """
     import time as _time
@@ -2976,29 +2966,6 @@ async def test_685_send_wrapper_cancelled_returns_false() -> None:
     assert await send_claude_control_response("r-wd", True) is False
 
 
-def _drive_sweep(
-    state: ClaudeStreamState, factory: EventFactory, old_id: str, new_id: str
-) -> list[Any]:
-    import time as _time
-
-    evt_data, _ = state.pending_control_requests[old_id]
-    state.pending_control_requests[old_id] = (evt_data, _time.time() - 301.0)
-    new_event = _decode_event(
-        {
-            "type": "control_request",
-            "request_id": new_id,
-            "request": {
-                "subtype": "can_use_tool",
-                "tool_name": "ExitPlanMode",
-                "input": {},
-            },
-        }
-    )
-    return translate_claude_event(
-        new_event, title="claude", state=state, factory=factory
-    )
-
-
 def _raise_exit_plan(
     state: ClaudeStreamState, factory: EventFactory, request_id: str
 ) -> list[Any]:
@@ -3014,79 +2981,6 @@ def _raise_exit_plan(
         }
     )
     return translate_claude_event(event, title="claude", state=state, factory=factory)
-
-
-def test_685_swept_request_is_expired_not_pending() -> None:
-    from untether.runners.claude import (
-        ControlRequestStatus,
-        classify_control_request,
-        pending_control_requests_for_session,
-    )
-    from untether.telegram.commands.claude_control import ClaudeControlCommand
-
-    state, factory = _make_state_with_session("sess-sweep")
-    _raise_exit_plan(state, factory, "r-old")
-    assert _REQUEST_TO_SESSION["r-old"] == "sess-sweep"
-    _drive_sweep(state, factory, "r-old", "r-new")
-
-    assert "r-old" in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-old" not in _REQUEST_TO_SESSION
-    lookup = classify_control_request("r-old")
-    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
-    assert lookup.prior is not None and lookup.prior.outcome == "expired"
-    assert (
-        ClaudeControlCommand.early_answer_toast("approve:r-old")
-        == "This request has expired"
-    )
-    assert pending_control_requests_for_session("sess-sweep") == 1
-
-
-def test_685_sweep_strips_keyboard_and_records_channel() -> None:
-    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
-
-    state, factory = _make_state_with_session("sess-strip")
-    started = _raise_exit_plan(state, factory, "r-kb")
-    kb_action_id = next(e.action.id for e in started if isinstance(e, ActionEvent))
-    token = set_run_channel_id(4242)
-    try:
-        events = _drive_sweep(state, factory, "r-kb", "r-kb2")
-    finally:
-        reset_run_channel_id(token)
-    completed = [
-        e
-        for e in events
-        if isinstance(e, ActionEvent)
-        and e.phase == "completed"
-        and e.action.id == kb_action_id
-    ]
-    assert completed, "the swept request's keyboard must be stripped"
-    assert "Timed out" in completed[0].action.title
-    record = _HANDLED_REQUESTS["r-kb"]
-    assert record is not None and record.channel_id == 4242
-    assert record.action == "timeout"
-
-
-def test_685_tap_vs_sweep_inflight_wins() -> None:
-    from untether.runners.claude import claim_control_request, mark_request_handled
-
-    state, factory = _make_state_with_session("sess-tvs")
-    _raise_exit_plan(state, factory, "r-tvs")
-    # A tap holds the claim (its write is in flight).
-    claim_control_request("r-tvs", action="approve", owner="cb-tvs")
-    _drive_sweep(state, factory, "r-tvs", "r-tvs-2")
-    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-tvs" in state.pending_control_requests
-    # The write completes: the record is the user's answer.
-    _REQUEST_TO_SESSION.pop("r-tvs", None)
-    mark_request_handled("r-tvs", action="approve")
-    _INFLIGHT_CONTROL_RESPONSES.pop("r-tvs", None)
-    record = _HANDLED_REQUESTS["r-tvs"]
-    assert record is not None and record.outcome == "answered"
-    # A later sweep does nothing for it (reconciled, never auto-denied).
-    state.auto_deny_queue.clear()
-    _raise_exit_plan(state, factory, "r-tvs-3")
-    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-tvs" not in state.pending_control_requests
 
 
 def test_685_cleanup_drops_claims_for_session() -> None:
@@ -3526,9 +3420,15 @@ async def test_684_inflight_cancel_tap_line_says_withdrawn() -> None:
 def test_684_cancel_after_timeout_keeps_expired() -> None:
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import mark_request_handled
+
     state, factory = _make_state_with_session("sess-to")
     _raise_exit_plan(state, factory, "r-to")
-    _drive_sweep(state, factory, "r-to", "r-to-2")
+    # An expired record (today only from a superseded ``da:`` request).
+    _REQUEST_TO_SESSION.pop("r-to", None)
+    state.pending_control_requests.pop("r-to", None)
+    state.request_to_action.pop("r-to", None)
+    mark_request_handled("r-to", action="superseded", outcome="expired")
     with capture_logs() as logs:
         assert _translate_cancel(state, factory, "r-to") == []
     record = _HANDLED_REQUESTS["r-to"]

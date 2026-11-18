@@ -322,20 +322,18 @@ async def test_outline_guard_auto_deny_drops_the_plan() -> None:
     assert LABEL not in _final(state)
 
 
-async def test_timed_out_request_drops_the_plan_without_rejecting_it() -> None:
+async def test_844_old_request_is_never_swept() -> None:
+    """#844: no 5-min expiry sweep — a request older than 5 min stays
+    answerable when a sibling request arrives (the CLI has no deadline)."""
     state, _ = _live_session()
     _exit_plan_mode(state, "req-old", PLAN_C1B)
     event, _ts = state.pending_control_requests["req-old"]
-    stale_ts = time.time() - claude_mod.CONTROL_REQUEST_TIMEOUT_SECONDS - 5
-    state.pending_control_requests["req-old"] = (event, stale_ts)
-    # The next interactive request sweeps the expired one.
+    state.pending_control_requests["req-old"] = (event, time.time() - 3600)
     _exit_plan_mode(state, "req-new", PLAN_C1B)
-    assert [rid for rid, _ in state.auto_deny_queue] == ["req-old"]
-    assert "req-old" not in state.exitplanmode_plans
-    assert LABEL not in _final(state)
-    # A timeout is not the user rejecting the plan: approving the identical
-    # plan afterwards is a real approval.
-    await _tap("approve", "req-new")
+    assert state.auto_deny_queue == []
+    assert "req-old" in state.pending_control_requests
+    assert "req-old" in state.exitplanmode_plans
+    await _tap("approve", "req-old")
     assert _final(state).startswith(LABEL)
 
 

@@ -224,13 +224,6 @@ class ControlRequestSnapshot:
     input_details: str = ""
 
 
-# Untether policy, event-driven: swept only when another interactive
-# control_request arrives (#684) — a lone request never expires. The CLI has
-# no deadline on a permission prompt (findings 2026-09-30 Q1 §5); a request
-# that can't be answered is reported by ``control_request.unanswerable``.
-CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
-
-
 class ControlLookup(NamedTuple):
     """Result of classifying a control request id (#685)."""
 

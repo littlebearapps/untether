@@ -73,7 +73,6 @@ from ..interactive.registry import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _TERMINAL_CONTROL_OUTCOMES,  # noqa: F401 — re-exported
-    CONTROL_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_CALLBACK_PREFIX,
     ControlLookup,  # noqa: F401 — re-exported
     ControlRequestSnapshot,
@@ -9452,54 +9451,11 @@ def _translate_claude_event_base(
                 )
 
             # Reconcile requests that were handled via Telegram callback
-            # (#229, #683): drop them from pending — no spurious
-            # expired_auto_deny below — and complete their keyboard actions.
+            # (#229, #683): drop them from pending and complete their
+            # keyboard actions. #844: no expiry sweep — the CLI has no
+            # permission deadline, so a request waits for the user, the
+            # reminder ladder or the 4 h cap.
             reconciled_events = _reconcile_handled_requests(state)
-
-            # Clean up expired requests (older than timeout).
-            # Send auto-deny to unblock the subprocess — without this,
-            # Claude Code blocks forever waiting for a response that never comes.
-            # See: https://github.com/banteg/takopi/issues/215
-            current_time = time.time()
-            expired = [
-                rid
-                for rid, (_, timestamp) in state.pending_control_requests.items()
-                if current_time - timestamp > CONTROL_REQUEST_TIMEOUT_SECONDS
-                and rid not in _HANDLED_REQUESTS  # belt-and-suspenders (#229)
-                # #685: a user's answer being written right now wins; the
-                # next sweep catches the id if it is somehow still pending.
-                and rid not in _INFLIGHT_CONTROL_RESPONSES
-            ]
-            for rid in expired:
-                del state.pending_control_requests[rid]
-                _drop_exitplanmode_plan(state, rid, rejected=False, reason="timeout")
-                _REQUEST_TO_INPUT.pop(rid, None)
-                _REQUEST_TO_TOOL_NAME.pop(rid, None)
-                # #685: the request is no longer answerable — drop the
-                # mapping (a later tap reads "expired", not "pending", and the
-                # entry stops pausing the live session) and record why.
-                _REQUEST_TO_SESSION.pop(rid, None)
-                mark_request_handled(rid, action="timeout", outcome="expired")
-                expired_action_id = state.request_to_action.pop(rid, None)
-                if expired_action_id:
-                    # #685: strip the swept request's Approve/Deny keyboard.
-                    state.control_action_for_tool = {
-                        k: v
-                        for k, v in state.control_action_for_tool.items()
-                        if v != expired_action_id
-                    }
-                    reconciled_events.append(
-                        factory.action_completed(
-                            action_id=expired_action_id,
-                            kind="warning",
-                            title="⏱️ Timed out: auto-denied after 5 min",
-                            ok=True,
-                        )
-                    )
-                state.auto_deny_queue.append(
-                    (rid, "Request timed out — no response from user within 5 minutes.")
-                )
-                logger.warning("control_request.expired_auto_deny", request_id=rid)
 
             # Check max pending limit
             if len(state.pending_control_requests) > 100:

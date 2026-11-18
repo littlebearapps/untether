@@ -81,7 +81,6 @@ class FakeResponder:
 
 
 REGISTRY_NAMES = (
-    "CONTROL_REQUEST_TIMEOUT_SECONDS",
     "ControlLookup",
     "ControlRequestSnapshot",
     "ControlRequestStatus",

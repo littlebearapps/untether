@@ -144,7 +144,7 @@ control_request via the Telegram buttons and watch for an immediate re-issue.
 After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (✅/❌/📋 emoji prefixes) appear in Telegram:
 - User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, outline-pending cleared
 - User clicks "Deny" → outline-pending cleared, no auto-approve flag set
-- User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; the 5-minute sweep (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) is event-driven (it runs when the next control event arrives, not on a timer) and records the request `expired`; a request nothing can answer is logged `control_request.unanswerable` by the bridge (#684, detect-only, `[watchdog] detect_unanswerable_control_requests`)
+- User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; nothing expires it (the 5-minute sweep was retired in #844 — the CLI has no permission deadline); a request nothing can answer is logged `control_request.unanswerable` by the bridge (#684, detect-only, `[watchdog] detect_unanswerable_control_requests`)
 - Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
 - #383: an approval not consumed when its turn ends survives exactly ONE live turn boundary (`_DISCUSS_CARRY`), then is cleared; consuming it discards both sets
 - Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)
