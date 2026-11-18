@@ -264,6 +264,69 @@ class TestUserExtensionLogging:
         assert ext_events == []
 
 
+def test_network_env_names_cover_codex_ca_and_proxy():
+    """#1241: Codex 0.170.0's ``CUSTOM_CA_ENV_KEYS`` and proxy keys, and none
+    of them is in the global allowlist (D3: per-engine only)."""
+    from untether.utils.env_policy import NETWORK_ENV_NAMES
+
+    expected = {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "CARGO_HTTP_CAINFO",
+        "BUNDLE_SSL_CA_CERT",
+        "npm_config_cafile",
+    }
+    assert expected <= set(NETWORK_ENV_NAMES)
+    assert not any(is_allowed(name) for name in NETWORK_ENV_NAMES)
+
+
+class TestLogDroppedOnce:
+    """#1241: ``env_policy.dropped`` names what an engine lost, once per engine."""
+
+    def setup_method(self):
+        _reset_log_latch_for_tests()
+
+    def teardown_method(self):
+        _reset_log_latch_for_tests()
+
+    def test_log_dropped_once_names_only(self):
+        from structlog.testing import capture_logs
+
+        from untether.utils.env_policy import log_dropped_once
+
+        source = {"PATH": "/bin", "ZZ_SECRET": "s3cret", "AWS_KEY": "k"}
+        with capture_logs() as logs:
+            log_dropped_once("codex", source, {"PATH": "/bin"})
+            log_dropped_once("codex", source, {"PATH": "/bin"})
+            log_dropped_once("opencode", source, {"PATH": "/bin"})
+        dropped = [r for r in logs if r.get("event") == "env_policy.dropped"]
+        assert [(r["engine"], r["names"]) for r in dropped] == [
+            ("codex", ["AWS_KEY", "ZZ_SECRET"]),
+            ("opencode", ["AWS_KEY", "ZZ_SECRET"]),
+        ]
+        assert "s3cret" not in repr(dropped)
+
+    def test_nothing_dropped_logs_nothing(self):
+        from structlog.testing import capture_logs
+
+        from untether.utils.env_policy import log_dropped_once
+
+        with capture_logs() as logs:
+            log_dropped_once("codex", {"PATH": "/bin"}, {"PATH": "/bin"})
+        assert not [r for r in logs if r.get("event") == "env_policy.dropped"]
+
+
 class TestApplyRunEnv:
     """#1120: run identity in the child env."""
 
