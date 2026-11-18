@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.common.normalize_url import validateLink
 from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 from sulguk import transform_html
@@ -103,6 +104,14 @@ else:
         "linkify-it-py not available — URLs will not be auto-linked"
     )
     _MD_RENDERER = MarkdownIt("commonmark", {"html": False})
+
+
+def _validate_link(url: str) -> bool:
+    # #1250: parse file: links too, so _sanitise_entities shows the label as code.
+    return url.strip().lower().startswith("file:") or validateLink(url)
+
+
+_MD_RENDERER.validateLink = _validate_link
 _BULLET_RE = re.compile(r"(?m)^(\s*)•")
 # CommonMark opener: 0-3 spaces, then 3+ backticks (no backtick in the info) or 3+ tildes.
 _FENCE_RE = re.compile(
