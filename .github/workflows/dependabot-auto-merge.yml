@@ -6,7 +6,9 @@ permissions: {}
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    # #1235: only PRs into dev. A PR retargeted to master (e.g. when dev was
+    # deleted on a release merge) must never auto-merge past the release.
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.base.ref == 'dev'
     runs-on: ubuntu-latest
     permissions:
       contents: write  # merge dependabot PRs
