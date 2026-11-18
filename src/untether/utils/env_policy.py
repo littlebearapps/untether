@@ -53,8 +53,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 from ..logging import get_logger
+
+if TYPE_CHECKING:
+    from ..context import RunContext
 
 logger = get_logger(__name__)
 
@@ -307,7 +311,39 @@ def _reset_log_latch_for_tests() -> None:
     _extension_logged = False
 
 
+#: #1120: run identity exported to an unattended trigger run's child.
+RUN_ID_ENV = "UNTETHER_RUN_ID"
+TRIGGER_ENV = "UNTETHER_TRIGGER"
+_RUN_ENV_NAMES = (RUN_ID_ENV, TRIGGER_ENV)
+
+
+def apply_run_env(
+    env: Mapping[str, str] | None, context: RunContext | None
+) -> dict[str, str] | None:
+    """*env* with this run's identity vars (#1120).
+
+    ``env`` is a runner's ``env()`` result; ``None`` means "inherit the
+    service env" (Codex, OpenCode). Inherited ``UNTETHER_RUN_ID`` /
+    ``UNTETHER_TRIGGER`` are always dropped (``UNTETHER_*`` passes the
+    filter), then assigned only for an unattended cron/webhook run, so a
+    human turn or ``/at`` fire never carries a stale or borrowed identity.
+    """
+    from ..context import unattended_trigger
+
+    source = unattended_trigger(context)
+    current = os.environ if env is None else env
+    if source is None and not any(name in current for name in _RUN_ENV_NAMES):
+        return None if env is None else dict(env)
+    out = {k: v for k, v in current.items() if k not in _RUN_ENV_NAMES}
+    if source is not None:
+        out[TRIGGER_ENV] = source
+        if context is not None and context.run_id:
+            out[RUN_ID_ENV] = context.run_id
+    return out
+
+
 __all__ = [
+    "apply_run_env",
     "filtered_env",
     "is_allowed",
     "is_allowed_with_extras",

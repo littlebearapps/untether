@@ -789,3 +789,38 @@ async def test_906_undelivered_fetch_failure_notice_is_logged(monkeypatch) -> No
     assert undelivered[0]["log_level"] == "error"
     assert undelivered[0]["cron_id"] == "test-cron"
     assert undelivered[0]["chat_id"] == 100
+
+
+# ── #1120: every fire gets its own run id, logged with its trigger ──
+
+
+@pytest.mark.anyio
+async def test_1120_each_fire_gets_a_distinct_run_id():
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            dispatcher = TriggerDispatcher(
+                run_job=run_job,
+                transport=transport,
+                default_chat_id=100,
+                task_group=tg,
+            )
+            await dispatcher.dispatch_cron(_make_cron())
+            await dispatcher.dispatch_cron(_make_cron())
+            await dispatcher.dispatch_webhook(_make_webhook(), "p")
+            await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+
+    run_ids = [call["context"].run_id for call in run_job.calls]
+    assert len(run_ids) == 3 and all(run_ids)
+    assert len(set(run_ids)) == 3
+    starting = [r for r in logs if r["event"] == "triggers.dispatch.starting"]
+    assert [(r["trigger"], r["run_id"]) for r in starting] == [
+        ("cron:test-cron", run_ids[0]),
+        ("cron:test-cron", run_ids[1]),
+        ("webhook:test-wh", run_ids[2]),
+    ]

@@ -878,6 +878,23 @@ Runs initiated by a cron, webhook, or `/at` show provenance in the meta footer a
 - `⚡ webhook:<id>` for webhook-initiated runs
 - `⏰ at:<token>` for `/at <duration>` one-shot delayed runs ([#271](https://github.com/littlebearapps/untether/issues/271) follow-up)
 
+### Run identity
+
+Each cron or webhook fire gets its own run id (a UUID,
+[#1120](https://github.com/littlebearapps/untether/issues/1120)). The engine
+process sees it as `UNTETHER_RUN_ID`, next to `UNTETHER_TRIGGER=cron:<id>` /
+`webhook:<id>`, for every engine, so a project hook or script can tell which
+fire it belongs to. The same `trigger` and `run_id` fields are on the
+`triggers.dispatch.starting` and `runner.completed` log lines:
+
+```sh
+journalctl --user -u untether -o cat | grep runner.completed | grep 'trigger=cron:daily-review'
+```
+
+A reply to a trigger run, `/at` and loop fires are attended runs and carry
+neither variable; a value inherited from Untether's own environment is
+removed rather than passed on.
+
 ### `/config` → ⏰ Triggers page (Tier 2)
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):

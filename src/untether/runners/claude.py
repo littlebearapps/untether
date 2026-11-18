@@ -128,8 +128,9 @@ from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
 from ..utils.env_audit import audit_proc_env
+from ..utils.env_policy import apply_run_env
 from ..utils.json_state import atomic_write_json
-from ..utils.paths import get_run_base_dir
+from ..utils.paths import get_run_base_dir, get_run_context
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -12460,7 +12461,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
-        env = self.env(state=state)
+        env = apply_run_env(self.env(state=state), get_run_context())  # #1120
         # #361 wrap with `env -i KEY=VAL ...` so Claude exec resolves with
         # exactly the allowlisted env. Blocks re-introduction from upstream
         # rc-file sourcing, /etc/environment, or wrapper scripts that the

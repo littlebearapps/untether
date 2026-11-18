@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
@@ -71,6 +72,7 @@ class TriggerDispatcher:
         context = RunContext(
             project=webhook.project,
             trigger_source=f"webhook:{webhook.id}",
+            run_id=str(uuid4()),  # #1120
         )
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
@@ -107,6 +109,7 @@ class TriggerDispatcher:
         context = RunContext(
             project=cron.project,
             trigger_source=f"cron:{cron.id}",
+            run_id=str(uuid4()),  # #1120
             permission_mode=cron.permission_mode,
             model=cron.model,
             reasoning=cron.reasoning,
@@ -226,6 +229,8 @@ class TriggerDispatcher:
             label=label,
             chat_id=chat_id,
             project=context.project if context else None,
+            trigger=context.trigger_source if context else None,
+            run_id=context.run_id if context else None,
             engine=engine_override,
         )
 
