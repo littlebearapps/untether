@@ -1876,6 +1876,6 @@ Preconditions: dev bot only; `[triggers] enabled = true` (turning it on needs a 
 | TR-1219b `secret_file` mode | `secret_file` at 0644 | Skipped; notice says `chmod 600 <path>` (`triggers.trigger_invalid`) |
 | TR-1219c config mode | `chmod 664 ~/.untether-dev/untether.toml`, change one key | One WARN and one `⚠️ Config file permissions` notice with the `chmod` fix; 0600 after Untether next writes the file (a hand edit keeps the mode); not posted twice on reload |
 | TR-1219d leak check | `journalctl --user -u untether-dev -o cat --since <start> \| grep -c <secret>` over TR-1219a–c | `0` |
-| R13 (regression) | Re-run R13 (#1142) | As written; a webhook never inherits bypass |
+| R13 (regression) | Re-run R13 (#1142); set `engine = "claude"` on the cron and webhook, or they run on the global default engine | As written; a webhook never inherits bypass |
 
 **Required for 0.36.2rc1:** the Minor tiers (Tier 7, Tier 1 on all five supported engines, Tier 2 C1–C7, Tier 3 T1–T10, S7, S8, B4, B5), B-LIVE-1…7, RC12-4…7, AG-1 and AG-12e, every row above, and the trigger regressions R1–R3, R5, R11–R14, R17-11a–g and R17-20a–i.
