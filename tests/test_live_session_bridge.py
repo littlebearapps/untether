@@ -2465,3 +2465,75 @@ async def test_1072_mid_turn_cap_notice_is_not_held(
         sent = [c["message"].text for c in transport.send_calls]
         assert any("Closing session" in t for t in sent)
         finish.set()
+
+
+_CODEX_LINE = (
+    "Codex plugin jobs stop when the session closes, and their results can't "
+    "be fetched afterwards."
+)
+
+
+def test_1186_closing_notice_names_codex_job() -> None:
+    """#1186 step 3: a Codex plugin job a close stops is named beside the
+    native tasks (same count and wording), plus one line saying its result
+    is gone; without jobs the text is exactly today's."""
+    job = "Codex Task task-mi3k2x-a8f9q1"
+    assert rb._live_closing_notice("cancel", [], codex_jobs=[job]) == (
+        f"\N{BLACK SQUARE FOR STOP} Stopped 1 background task: {job}.\n{_CODEX_LINE}"
+    )
+    # The abs_cap close that ends a hold: no native task, one job.
+    assert rb._live_closing_notice("abs_cap", [], codex_jobs=[job]) == (
+        "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task "
+        f"still running at the session time limit: {job}. Stopping it.\n{_CODEX_LINE}"
+    )
+    assert rb._live_closing_notice("drain", ["bg a"], codex_jobs=[job]) == (
+        "\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping "
+        f"2 background tasks: bg a, {job}.\n{_CODEX_LINE}"
+    )
+    for reason in ("cancel", "drain", "max_hold", "abs_cap"):
+        assert rb._live_closing_notice(
+            reason, ["a"], codex_jobs=[]
+        ) == rb._live_closing_notice(reason, ["a"])
+
+
+async def test_1186_closing_listener_announces_codex_job_only_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1186 step 3: a close whose only casualty is a Codex plugin job (no
+    native task, no hook) — the time-limit close that ends a hold — still
+    reaches the chat (it used to return early with nothing to name)."""
+    from untether.markdown import MarkdownPresenter
+    from untether.runners.mock import Return, ScriptRunner
+
+    listeners: list = []
+
+    class _Live:
+        def add_listener(self, sid: str, cb) -> bool:
+            listeners.append(cb)
+            return True
+
+    monkeypatch.setattr(rb, "live_backend", lambda engine: _Live())
+    transport = FakeTransport()
+    await rb.handle_message(
+        rb.ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=ScriptRunner([Return(answer="DONE")], engine="codex"),
+        incoming=rb.IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+    before = len(transport.send_calls)
+    with anyio.fail_after(2):
+        await listeners[0](
+            "closing",
+            {
+                "reason": "abs_cap",
+                "tasks": [],
+                "mid_turn": False,
+                "codex_jobs": ["Codex Task task-x"],
+            },
+        )
+    sent = [c["message"].text for c in transport.send_calls[before:]]
+    assert len(sent) == 1
+    assert "Codex Task task-x" in sent[0]
+    assert sent[0].endswith(_CODEX_LINE)

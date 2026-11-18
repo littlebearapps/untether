@@ -984,6 +984,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         log_dropped_once(ENGINE, os.environ, env)
         return env
 
+    @staticmethod
+    def _untrusted_usage(
+        state: CodexRunState, usage: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """#1240: rows aren't kept in the final, so the bridge's footer line
+        reads this flag from ``usage["project_config_untrusted"]``."""
+        if not state.untrusted_project_config:
+            return usage
+        return {**(usage or {}), "project_config_untrusted": True}
+
     def start_run(
         self,
         prompt: str,
@@ -1056,6 +1066,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         error=error.message,
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
+                        usage=self._untrusted_usage(state, None),
                     ),
                 ]
             case codex_schema.TurnStarted():
@@ -1077,7 +1088,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     factory.completed_ok(
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
-                        usage=msgspec.to_builtins(usage),
+                        usage=self._untrusted_usage(state, msgspec.to_builtins(usage)),
                     ),
                 ]
             case codex_schema.ItemCompleted(

@@ -2148,6 +2148,15 @@ def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+# #1240: Codex skipped an untrusted project's .codex/ folder. The progress row
+# isn't kept in the final, so the runner flags ``usage["project_config_untrusted"]``.
+_UNTRUSTED_PROJECT_FOOTER = (
+    "\n\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex skipped this project's"
+    " .codex/ settings (untrusted): https://littlebearapps.com/help/untether/"
+    "troubleshooting/#codex-ignores-my-projects-mcp-servers-or-codexconfigtoml"
+)
+
+
 # #835: unattended (cron / webhook) runs. The runner carries the turn's
 # denials on ``usage["unattended"]``; the final gets one footer line and, once
 # per trigger per process, what to change (bounded, oldest evicted first).
@@ -6279,6 +6288,12 @@ _CLOSING_NOTICE_FINAL_WAIT_S = 10.0
 _CLOSING_NOTICE_POLL_S = 0.05
 
 
+_CODEX_JOBS_CLOSED_LINE = (
+    "Codex plugin jobs stop when the session closes, and their results can't "
+    "be fetched afterwards."
+)
+
+
 def _live_closing_notice(
     reason: str,
     tasks: list[str],
@@ -6289,9 +6304,13 @@ def _live_closing_notice(
     rearm_on_progress: bool = True,
     mid_turn: bool = False,
     max_s: float | None = None,
+    codex_jobs: list[str] | None = None,
 ) -> str:
     """User-facing text for a live session closing over running background
     tasks (#776) or background hooks (#812, automatic closes only).
+
+    #1186 step 3: ``codex_jobs`` (Codex plugin jobs the close stops) are
+    named with the tasks, plus a line saying their results are gone.
 
     #829: it never promises "reply to continue" — whether the next message
     continues the same session is only known once the process has exited
@@ -6300,6 +6319,18 @@ def _live_closing_notice(
     #887: ``mid_turn`` — an ``abs_cap`` close cut a running turn short (it
     outlived the grace after ``max_s``, the session time limit). That is
     announced even with no task to name."""
+    if codex_jobs:
+        text = _live_closing_notice(
+            reason,
+            [*tasks, *codex_jobs],
+            hooks,
+            hook_count,
+            max_hold_s=max_hold_s,
+            rearm_on_progress=rearm_on_progress,
+            mid_turn=mid_turn,
+            max_s=max_s,
+        )
+        return f"{text}\n{_CODEX_JOBS_CLOSED_LINE}"
     if hooks:
         hook_text = _live_closing_hooks_notice(hooks, hook_count)
         if not tasks and not (reason == "abs_cap" and mid_turn):
@@ -8055,6 +8086,11 @@ async def handle_message(
                 final_rendered, _unattended_footer(unattended)
             )
 
+        if (completed.usage or {}).get("project_config_untrusted") is True:
+            final_rendered = _insert_footer_line(
+                final_rendered, _UNTRUSTED_PROJECT_FOOTER
+            )
+
         if plain_refusal:
             # #1047: the refusal's own text replaces the card — no header,
             # resume line or footers (nothing ran), and no Cancel button.
@@ -8383,6 +8419,7 @@ async def handle_message(
             return
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
         hooks = [h for h in payload.get("hooks", []) if isinstance(h, str)]
+        codex_jobs = [j for j in payload.get("codex_jobs", []) if isinstance(j, str)]
         raw_count = payload.get("hook_count")
         hook_count = (
             raw_count
@@ -8396,7 +8433,7 @@ async def handle_message(
         cap_mid_turn = (
             payload.get("reason") == "abs_cap" and payload.get("mid_turn") is True
         )
-        if not tasks and not hooks and not cap_mid_turn:
+        if not tasks and not hooks and not codex_jobs and not cap_mid_turn:
             if payload.get("reason") == "wake_cap":
                 # #925 §14.4: say why the self-paced loop stopped.
                 try:
@@ -8433,8 +8470,9 @@ async def handle_message(
                 if isinstance(raw_max, int | float) and not isinstance(raw_max, bool)
                 else None
             ),
+            codex_jobs=codex_jobs,
         )
-        if tasks or cap_mid_turn:
+        if tasks or codex_jobs or cap_mid_turn:
             closing_named_tasks["reason"] = str(payload.get("reason"))
         if payload.get("reason") == "abs_cap" and not cap_mid_turn:
             await _await_final_handed_off()

@@ -13080,6 +13080,46 @@ async def test_835_footer_hint_once_per_trigger(monkeypatch) -> None:
     assert "\N{ELECTRIC LIGHT BULB}" not in second
 
 
+# #1240: Codex's untrusted-project hint kept in the final footer
+async def _run_codex_final(usage: dict) -> str:
+    runner = ScriptRunner(
+        [Return(answer="Done.", usage=usage)],
+        engine="codex",
+        resume_value=f"t-1240-{uuid.uuid4().hex[:6]}",
+    )
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+    return transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_1240_final_footer_has_untrusted_project_line() -> None:
+    import untether.runner_bridge as rb
+    from tests.test_config_help_links import _resolve
+
+    text = await _run_codex_final({"project_config_untrusted": True})
+    line = rb._UNTRUSTED_PROJECT_FOOTER.strip()
+    assert line in text
+    assert line.startswith("\N{WARNING SIGN}")
+    assert "--trust" not in line
+    url = line.rsplit(" ", 1)[-1]
+    assert _resolve(url) is not None, url
+
+
+@pytest.mark.anyio
+async def test_1240_no_untrusted_line_without_flag() -> None:
+    text = await _run_codex_final({"input_tokens": 1})
+    assert "untrusted" not in text
+
+
 def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
     import untether.runner_bridge as rb
 

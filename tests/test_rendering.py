@@ -239,6 +239,61 @@ def test_render_markdown_keeps_valid_link() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #1250 — `[label](file:///…)` links (Antigravity answers) show their label
+# ---------------------------------------------------------------------------
+
+
+def test_1250_file_link_renders_label_as_code() -> None:
+    text, entities = render_markdown("Created [hello.txt](file:///h/x/hello.txt) ok")
+
+    assert text == "Created hello.txt ok"
+    assert entities == [{"type": "code", "offset": 8, "length": 9}]
+
+
+def test_1250_file_link_with_fragment_and_emphasis() -> None:
+    text, entities = render_markdown("**[a b](file:///x/a%20b.py#L3)**")
+
+    assert text == "a b"
+    types = sorted(e["type"] for e in entities)
+    assert types == ["bold", "code"]
+    assert all((e["offset"], e["length"]) == (0, 3) for e in entities)
+
+
+def test_1250_other_unsafe_schemes_still_unparsed() -> None:
+    md = "[x](javascript:alert(1)) [d](data:text/plain,hi) [y](https://e.com/z)"
+    text, entities = render_markdown(md)
+
+    assert text.startswith("[x](javascript:alert(1)) [d](data:text/plain,hi) y")
+    links = [e for e in entities if e.get("type") == "text_link"]
+    assert [e["url"] for e in links] == ["https://e.com/z"]
+
+
+def test_1250_file_link_in_code_and_bare_untouched() -> None:
+    text, _ = render_markdown("`[k](file:///x)` and bare file:///home/x/a.py here")
+
+    assert text == "[k](file:///x) and bare file:///home/x/a.py here"
+
+
+def test_1250_agy_fixture_answer_has_no_file_scheme() -> None:
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures/antigravity/subagent.jsonl"
+    line = fixture.read_text(encoding="utf-8").splitlines()[12]
+    response = json.loads(line)["result"]["response"]
+    assert "](file://" in response  # the fixture still carries agy's link
+
+    text, entities = render_markdown(response)
+
+    assert "file://" not in text
+    assert "spawned the subagent to read notes.txt." in text
+    assert not any(
+        e.get("type") == "text_link" and e.get("url", "").startswith("file:")
+        for e in entities
+    )
+
+
+# ---------------------------------------------------------------------------
 # #786 — model-emitted <br> renders as a line break, not literally
 # ---------------------------------------------------------------------------
 

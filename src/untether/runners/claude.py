@@ -126,7 +126,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
-from ..utils.codex_plugin_jobs import session_plugin_jobs
+from ..utils.codex_plugin_jobs import session_plugin_job_labels, session_plugin_jobs
 from ..utils.env_audit import audit_proc_env
 from ..utils.env_policy import apply_run_env
 from ..utils.json_state import atomic_write_json
@@ -589,6 +589,8 @@ class LiveSession:
     # gap between the CLI going idle and the budget check.
     accounting_armed: bool = False
     accounted_turns: int = 0
+    # #1186: the runner's Codex plugin state roots (None = the plugin's).
+    codex_plugin_roots: tuple[Path, ...] | None = None
     listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
 
     @property
@@ -775,6 +777,14 @@ async def close_live_session(
         shells = await _hook_processes(live.state, live.pid)
         if live.idle and shells is not None and not shells:
             release_settled_async_hooks(live.state)
+    codex_jobs: list[str] = []
+    if not live.closing:
+        # #1186 step 3: the plugin's SessionEnd hook kills these jobs and
+        # deletes their records, so this notice is the only trace (fails open).
+        with contextlib.suppress(Exception):
+            codex_jobs = await anyio.to_thread.run_sync(
+                session_plugin_job_labels, session_id, live.codex_plugin_roots
+            )
     async with live.lock:
         if live.closing:
             return False
@@ -813,6 +823,8 @@ async def close_live_session(
         turn_idle=live.closed_turn_idle,
         # #829: how long the background work had been quiet at the close.
         last_progress_age_s=_last_progress_age_s(live.state),
+        # #1186: only when a job was stopped (keeps other closes' lines as-is).
+        **({"codex_jobs": len(codex_jobs)} if codex_jobs else {}),
     )
     hooks = _hook_event_labels(live.close_hooks)
     if hooks:
@@ -828,8 +840,11 @@ async def close_live_session(
     # #812: an automatic close over a background hook tells the user its
     # feedback was lost (a user-initiated close already has its own notice).
     hook_notice = bool(hooks) and reason not in _USER_CLOSE_REASONS
-    if notice or hook_notice:
+    # #1186 step 3: a stopped Codex plugin job is announced on every close.
+    if notice or hook_notice or codex_jobs:
         payload: dict[str, Any] = {"reason": reason, "tasks": tasks}
+        if codex_jobs:
+            payload["codex_jobs"] = codex_jobs
         if reason == "max_hold":
             # #829: the notice says how long nothing progressed (or, with the
             # re-arm switched off, that the hold limit was reached).
@@ -1959,6 +1974,9 @@ class ClaudeStreamState:
     turn_command_uuid: str | None = None
     # Hints collected while idle, consumed when the next turn opens.
     pending_command_uuid: str | None = None
+    # #1252: injected lines that got their own ``started`` before the turn
+    # opened but lost the slot above to a later one — folded into that turn.
+    superseded_started: list[str] = field(default_factory=list)
     # #815: when the CLI announced the next turn (``command_lifecycle
     # {started}``). The turn only opens on its first frame — for a tool-free
     # turn that is the final assistant message, seconds later — so the
@@ -8072,25 +8090,13 @@ def _open_turn_events(
 ) -> list[UntetherEvent]:
     """Open turn N+1 and hand the new turn's tracker the session's current
     ``% ctx`` (#819) — the bridge's turn tracker starts empty."""
-    pending = state.pending_command_uuid
-    folded = _folded_before(state, pending) if pending is not None else []
     opened = _open_followup_turn(state, factory)
-    # #1173: lines written before this turn's own line were folded into it.
+    # #1173/#1252: lines that started before this turn's own line, each on its
+    # own ``started`` frame, were folded into it.
+    folded = [u for u in state.superseded_started if u in state.awaiting_injected]
+    state.superseded_started.clear()
     absorbed = [ev for u in folded for ev in _absorb_injected(state, factory, u)]
     return [opened, *absorbed, *_emit_context(state, factory, force=True)]
-
-
-def _folded_before(state: ClaudeStreamState, command_uuid: str) -> list[str]:
-    """#1173: injected lines still awaiting that were written before
-    *command_uuid*. The CLI consumes queued stdin lines in order and folds
-    several into one turn under a single ``command_lifecycle{started}``, so
-    once *command_uuid* starts, every earlier line has been taken too.
-
-    shortcut: FIFO inference, not a per-line CLI signal (no live capture yet
-    of folded lines' own frames); switch to native frames if a capture shows
-    the CLI emits ``started``/``completed`` for each folded line."""
-    keys = list(state.awaiting_injected)
-    return keys[: keys.index(command_uuid)] if command_uuid in keys else []
 
 
 # #1173: ``command_lifecycle`` states that end a line without a turn of its own.
@@ -8217,9 +8223,8 @@ def translate_claude_event(
     ):
         # #775: started while a turn is open → folded into it (probed on CLI
         # 2.1.284: queued at write, started after the running tool's result).
-        # #1173: earlier lines still awaiting were folded in with it.
-        uuids = [*_folded_before(state, event.command_uuid), event.command_uuid]
-        return [ev for u in uuids for ev in _absorb_injected(state, factory, u)]
+        # #1252: each folded line gets its own started frame (CLI 2.1.327).
+        return _absorb_injected(state, factory, event.command_uuid)
     if (
         isinstance(event, claude_schema.StreamCommandLifecycleMessage)
         and event.state in _LIFECYCLE_TERMINAL_STATES
@@ -8296,6 +8301,13 @@ def translate_claude_event(
     match event:
         case claude_schema.StreamCommandLifecycleMessage(state=cmd_state):
             if cmd_state == "started" and not state.turn_open:
+                prev = state.pending_command_uuid
+                if (
+                    prev is not None
+                    and prev != event.command_uuid
+                    and prev in state.awaiting_injected
+                ):
+                    state.superseded_started.append(prev)  # #1252
                 state.pending_command_uuid = event.command_uuid
                 if state.pending_turn_since is None:
                     state.pending_turn_since = time.monotonic()
@@ -10451,6 +10463,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             stdin=session_stdin,
                             pid=pid,
                             accounting_armed=_turn_accounting_wanted(),
+                            codex_plugin_roots=self._codex_plugin_state_roots,
                         )
                         # #812: MCP servers are up by system/init. Always
                         # captured: the close-grace check uses it even with
