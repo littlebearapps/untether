@@ -36,8 +36,8 @@ format. Built on [#766](https://github.com/littlebearapps/untether/pull/766) by
 - The version check runs `agy --version` once per agy binary (cached until the file changes). If the version can't
   be read, the run goes ahead: a slow or odd `--version` never blocks a run.
 - agy updates itself in place, roughly every 15 minutes. To pin a version, install it into a directory the service
-  user can't write. The version in use is logged as `agy_version` on every `antigravity.session.started` line, and
-  a version newer than the tested one logs `antigravity.version.newer_than_probed`.
+  user can't write. The version in use is logged as `agy_version` on every `antigravity.session.started` line (if
+  agy updated itself after the run's version check, the checked version, #1212), and a version newer than the tested one logs `antigravity.version.newer_than_probed`.
 - agy doesn't need to be installed on every host. Where it's missing, the startup message lists `antigravity`
   under "not installed".
 

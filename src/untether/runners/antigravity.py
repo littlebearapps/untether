@@ -1140,6 +1140,10 @@ _FROM_CONTINUE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "untether_agy_gate", default=None
 )
+# #1212: the version this run's pre-spawn check probed, read by ``start_run``.
+_PROBED_VERSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "untether_agy_probed_version", default=None
+)
 # #980 phase 14: same hand-off — how the run starts (``build_args``).
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
     "untether_agy_decision", default=None
@@ -2274,6 +2278,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         self, resume: ResumeToken | None
     ) -> UntetherEvent | None:
         version = await anyio.to_thread.run_sync(agy_cli_version, self.antigravity_cmd)
+        _PROBED_VERSION.set(version)
         parsed = parse_agy_version(version) if version else None
         if parsed is None:
             # Fail open: a slow or odd ``--version`` must never block a run;
@@ -2647,7 +2652,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AntigravityStreamState,
     ) -> None:
         state.t_spawn = time.monotonic()
-        state.agy_version = cached_agy_version(self.antigravity_cmd)
+        probed = _PROBED_VERSION.get()
+        _PROBED_VERSION.set(None)
+        # #1212: an agy self-update since the check above changes the mtime,
+        # so the cache misses; log the version the run was checked against
+        # (the pre-update one if the update landed in between).
+        state.agy_version = cached_agy_version(self.antigravity_cmd) or probed
 
     def on_spawned(self, *, state: Any, pid: int) -> None:
         if isinstance(state, AntigravityStreamState):
