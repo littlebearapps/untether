@@ -1775,6 +1775,10 @@ class ClaudeStreamState:
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
+    # #942: request_id -> ``turn`` its keyboard action was emitted in. A live
+    # session's state spans turns; completing the action from a later turn's
+    # tracker would add a stray "Permission resolved" row there.
+    request_turn: dict[str, int] = field(default_factory=dict)
     # #684: request_id -> time.monotonic() when it was registered for a user
     # answer (normal, hold-open and ``da:``), for the unanswerable detector.
     control_registered_at: dict[str, float] = field(default_factory=dict)
@@ -7224,6 +7228,7 @@ def _complete_control_action(
     next render — the only way buttons go (runner ``translate`` is sync and
     never calls Telegram).
     """
+    state.request_turn.pop(request_id, None)
     action_id = state.request_to_action.pop(request_id, None)
     if not action_id:
         return None
@@ -7264,10 +7269,13 @@ def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]
     ]
     for rid in handled:
         state.pending_control_requests.pop(rid, None)
+        # #942: an action from an earlier turn isn't in this turn's tracker —
+        # retire the mapping silently instead of adding a fresh row here.
+        same_turn = state.request_turn.get(rid, state.turn) == state.turn
         # Also drops the action from control_action_for_tool, so the tool's
         # result doesn't complete it a second time.
         completed = _complete_control_action(state, rid, title="Permission resolved")
-        if completed is not None:
+        if completed is not None and same_turn:
             events.append(completed)
         logger.debug(
             "control_request.reconciled",
@@ -9322,6 +9330,7 @@ def _translate_claude_event_base(
                         # uncompleted for the rest of the run, and its keyboard
                         # shadowed every later approval/option keyboard.
                         state.request_to_action[button_request_id] = synth_action_id
+                        state.request_turn[button_request_id] = state.turn
 
                         # Send full outline as a separate ephemeral message
                         # (progress message is limited to 4096 chars and truncates).
@@ -9520,6 +9529,7 @@ def _translate_claude_event_base(
                 state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)
             state.request_to_action[request_id] = action_id
+            state.request_turn[request_id] = state.turn
 
             # Include inline keyboard data in detail
             button_rows: list[list[dict[str, str]]] = [

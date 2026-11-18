@@ -726,6 +726,33 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
     assert "toolu_lifecycle" not in state.control_action_for_tool
 
 
+@pytest.mark.parametrize(("turn_advanced", "emitted"), [(False, True), (True, False)])
+def test_942_reconcile_completes_only_in_the_registering_turn(
+    turn_advanced: bool, emitted: bool
+) -> None:
+    """#942: a request answered after a live session moved to a later turn is
+    retired silently — no stray "Permission resolved" row in that turn."""
+    from untether.runners.claude import _reconcile_handled_requests
+
+    state, factory = _make_state_with_session("sess-942")
+    state.prompting_mode = True
+    translate_claude_event(
+        _929_request("r-942", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert "r-942" in state.request_to_action
+    if turn_advanced:
+        state.turn += 1
+    _HANDLED_REQUESTS["r-942"] = None
+    events = _reconcile_handled_requests(state)
+    assert bool(events) is emitted
+    assert "r-942" not in state.request_to_action
+    assert "r-942" not in state.request_turn
+    assert "r-942" not in state.pending_control_requests
+
+
 # ===========================================================================
 # F. Discuss Action & Custom Deny Message
 # ===========================================================================
