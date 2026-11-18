@@ -30,7 +30,7 @@ from ..transport import (
 )
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
-from .client_api import classify_benign_rejection
+from .client_api import SendOutcome, classify_benign_rejection
 from .outbox import SUPERSEDED
 from .pending_finals import PendingFinals
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
@@ -285,31 +285,39 @@ class TelegramTransport:
         # #1207: finals that certainly failed, sent again once Telegram is back.
         self.pending_finals = PendingFinals(wall_clock=wall_clock)
 
-    def _keep_failed_final(
+    def _final_keeper(
         self,
         *,
         chat_id: int,
-        chunks: list[RenderedMessage],
+        chunks: Callable[[], list[RenderedMessage]],
+        state: dict[str, bool],
         reply_to_message_id: int | None,
         message_thread_id: int | None,
         replace_message_id: int | None,
         notify: bool,
-    ) -> bool:
-        """#1207: store a final's unsent chunks when the send certainly
-        failed and is worth repeating (never sent, or an HTTP 5xx)."""
-        pop = getattr(self._bot, "pop_resendable_send", None)
-        resendable = bool(pop(chat_id)) if callable(pop) else False
-        if not resendable or current_message_kind() != "final":
-            return False
-        self.pending_finals.add(
-            chat_id=chat_id,
-            chunks=chunks,
-            reply_to_message_id=reply_to_message_id,
-            thread_id=message_thread_id,
-            replace_message_id=replace_message_id,
-            notify=notify,
-        )
-        return True
+    ) -> dict[str, Any]:
+        """#1207: ``send_message`` kwargs that keep a final's unsent
+        ``chunks()`` when its send certainly failed and is worth repeating
+        (never sent, or an HTTP 5xx). The outbox op reports it when it runs,
+        so it is kept even after the waiter was cut short (#928). Sets
+        ``state["kept"]``."""
+        if current_message_kind() != "final":
+            return {}
+
+        def keep(outcome: SendOutcome) -> None:
+            if outcome != "resendable":
+                return
+            state["kept"] = True
+            self.pending_finals.add(
+                chat_id=chat_id,
+                chunks=chunks(),
+                reply_to_message_id=reply_to_message_id,
+                thread_id=message_thread_id,
+                replace_message_id=replace_message_id,
+                notify=notify,
+            )
+
+        return {"on_failure": keep}
 
     def pop_unconfirmed_send(self, channel_id: int | str) -> bool:
         """#1029: True once if the latest ``send`` to the chat returned
@@ -423,25 +431,32 @@ class TelegramTransport:
             "notify": notify,
         }
         for index, followup in enumerate(followups):
+            # #1207: a failed chunk keeps itself and the rest (sent in order
+            # by the redelivery); once the rest are queued, only itself.
+            state = {"split": False, "kept": False}
+            keep = self._final_keeper(
+                chat_id=chat_id,
+                chunks=lambda i=index, st=state: (
+                    [followups[i]] if st["split"] else followups[i:]
+                ),
+                state=state,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                replace_message_id=None,
+                notify=notify,
+            )
             try:
                 sent = await self._bot.send_message(
-                    **self._followup_params(followup, **route)
+                    **self._followup_params(followup, **route), **keep
                 )
-                if sent is None and self._keep_failed_final(
-                    chat_id=chat_id,
-                    chunks=followups[index:],
-                    reply_to_message_id=reply_to_message_id,
-                    message_thread_id=message_thread_id,
-                    replace_message_id=None,
-                    notify=notify,
-                ):
-                    # #1207: the rest go out in order with the redelivery.
+                if sent is None and state["kept"]:
                     return
                 self._note_followup_sent(followup, chat_id, sent, message_thread_id)
             except anyio.get_cancelled_exc_class():
                 # #928: a bounded caller (the early final delivery) cut the
                 # send short. This chunk is already queued; queue the rest
                 # too, or the final would silently end part-way.
+                state["split"] = True
                 await self._queue_followups(followups=followups[index + 1 :], **route)
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -498,6 +513,15 @@ class TelegramTransport:
         )
         with anyio.CancelScope(shield=True):
             for followup in followups:
+                keep = self._final_keeper(
+                    chat_id=chat_id,
+                    chunks=lambda f=followup: [f],
+                    state={},
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                    replace_message_id=None,
+                    notify=notify,
+                )
                 try:
                     await self._bot.send_message(
                         **self._followup_params(
@@ -508,6 +532,7 @@ class TelegramTransport:
                             notify=notify,
                         ),
                         wait=False,
+                        **keep,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
@@ -566,6 +591,18 @@ class TelegramTransport:
         followups = self._extract_followups(message)
         self._unconfirmed_chats.discard(chat_id)
         sent_from = self._wall_clock()
+        # #1207: a failed first chunk keeps the whole final; once the
+        # follow-ups are queued on their own (cancelled waiter), only itself.
+        state = {"split": False, "kept": False}
+        keep = self._final_keeper(
+            chat_id=chat_id,
+            chunks=lambda: [message] if state["split"] else [message, *followups],
+            state=state,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+            replace_message_id=replace_message_id,
+            notify=notify,
+        )
         try:
             sent = await self._bot.send_message(
                 chat_id=chat_id,
@@ -577,10 +614,12 @@ class TelegramTransport:
                 message_thread_id=message_thread_id,
                 replace_message_id=replace_message_id,
                 disable_notification=not notify,
+                **keep,
             )
         except anyio.get_cancelled_exc_class():
             # #928: the first chunk is queued and still goes out — so must
             # the rest of a multi-chunk message.
+            state["split"] = True
             await self._queue_followups(
                 chat_id=chat_id,
                 followups=followups,
@@ -595,14 +634,6 @@ class TelegramTransport:
                 reply_markup=message.extra.get("reply_markup"),
                 sent_from=sent_from,
             )
-            pending_saved = not delivery_unknown and self._keep_failed_final(
-                chat_id=chat_id,
-                chunks=[message, *followups],
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-                replace_message_id=replace_message_id,
-                notify=notify,
-            )
             logger.warning(
                 "transport.send.failed",
                 kind=current_message_kind(),
@@ -611,7 +642,7 @@ class TelegramTransport:
                 text_len=len(message.text) if message.text else 0,
                 # #1029: True = Telegram may have posted it all the same.
                 delivery_unknown=delivery_unknown,
-                pending_saved=pending_saved,
+                pending_saved=state["kept"],
             )
             return None
         if followups:

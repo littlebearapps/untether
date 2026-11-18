@@ -566,6 +566,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             reply_markup: dict | None = None,
             *,
             replace_message_id: int | None = None,
+            on_failure: Any = None,
         ) -> Message | None:
             _ = reply_markup
             return None
