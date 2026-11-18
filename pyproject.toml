@@ -104,8 +104,8 @@ dev = [
 ]
 docs = [
     "mkdocstrings-python>=2.0.10",
-    "pymdown-extensions>=12.3",  # docs-only; ReDoS/path-traversal advisories (#875)
-    "zensical>=0.0.73",
+    "pymdown-extensions>=13.0",  # docs-only; ReDoS/path-traversal advisories (#875)
+    "zensical>=0.1.0",
 ]
 
 [tool.pytest.ini_options]
