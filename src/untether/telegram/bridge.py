@@ -32,6 +32,7 @@ from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .client_api import classify_benign_rejection
 from .outbox import SUPERSEDED
+from .pending_finals import PendingFinals
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
 
@@ -281,6 +282,34 @@ class TelegramTransport:
         self._unconfirmed_progress: deque[tuple[int, float, float]] = deque(
             maxlen=_UNCONFIRMED_MAX
         )
+        # #1207: finals that certainly failed, sent again once Telegram is back.
+        self.pending_finals = PendingFinals(wall_clock=wall_clock)
+
+    def _keep_failed_final(
+        self,
+        *,
+        chat_id: int,
+        chunks: list[RenderedMessage],
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        replace_message_id: int | None,
+        notify: bool,
+    ) -> bool:
+        """#1207: store a final's unsent chunks when the send certainly
+        failed and is worth repeating (never sent, or an HTTP 5xx)."""
+        pop = getattr(self._bot, "pop_resendable_send", None)
+        resendable = bool(pop(chat_id)) if callable(pop) else False
+        if not resendable or current_message_kind() != "final":
+            return False
+        self.pending_finals.add(
+            chat_id=chat_id,
+            chunks=chunks,
+            reply_to_message_id=reply_to_message_id,
+            thread_id=message_thread_id,
+            replace_message_id=replace_message_id,
+            notify=notify,
+        )
+        return True
 
     def pop_unconfirmed_send(self, channel_id: int | str) -> bool:
         """#1029: True once if the latest ``send`` to the chat returned
@@ -398,6 +427,16 @@ class TelegramTransport:
                 sent = await self._bot.send_message(
                     **self._followup_params(followup, **route)
                 )
+                if sent is None and self._keep_failed_final(
+                    chat_id=chat_id,
+                    chunks=followups[index:],
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                    replace_message_id=None,
+                    notify=notify,
+                ):
+                    # #1207: the rest go out in order with the redelivery.
+                    return
                 self._note_followup_sent(followup, chat_id, sent, message_thread_id)
             except anyio.get_cancelled_exc_class():
                 # #928: a bounded caller (the early final delivery) cut the
@@ -556,6 +595,14 @@ class TelegramTransport:
                 reply_markup=message.extra.get("reply_markup"),
                 sent_from=sent_from,
             )
+            pending_saved = not delivery_unknown and self._keep_failed_final(
+                chat_id=chat_id,
+                chunks=[message, *followups],
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                replace_message_id=replace_message_id,
+                notify=notify,
+            )
             logger.warning(
                 "transport.send.failed",
                 kind=current_message_kind(),
@@ -564,6 +611,7 @@ class TelegramTransport:
                 text_len=len(message.text) if message.text else 0,
                 # #1029: True = Telegram may have posted it all the same.
                 delivery_unknown=delivery_unknown,
+                pending_saved=pending_saved,
             )
             return None
         if followups:

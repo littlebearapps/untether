@@ -158,7 +158,7 @@ GOLDEN_SHA256: dict[str, str] = {
     "background_task_drain_notice.jsonl": "cef1c04c6f27e7206596703628ec00ac0e6a27b1713c5bc52f25b49b1fa5a97d",
     "background_task_options_changed.json": "00220f2888cbfd01fb6e6515b85a644d3933570f8c801faac8ce14f33d1dfff8",
     "background_task_options_changed.jsonl": "dda79cb9df8721ec285ecb43ad5ce683a300d6dec5f8d5359a8f9e14cdfcd4a3",
-    "cancel_with_pending_approval.json": "f114a62cf583c3a5097f92eb9b1b8636ee3c669eb53998e4259c80c000b12550",
+    "cancel_with_pending_approval.json": "41d579e4c8b4c32aefe72c7505edb38c755fac822ceb20059ee5f8965e7fa4b2",
     "cancel_with_pending_approval.jsonl": "f72dfa5b9cc8af2e0d4ff9ef6a41d22d856a2946c2c7a9092f5811438eb6a674",
     "idle_agent_approval.json": "33c5c68c76d4de9885d7c65d4be1d814b6ee056237eb38fe4200ade65dfda81f",
     "idle_agent_approval.jsonl": "06a22dd133572a3534b268d15cd75f444e2e37f3eaa45df3de8fc60f27a4efb8",

@@ -70,6 +70,7 @@ from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
 from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .pending_finals import PendingFinals, resolve_pending_finals_path
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
@@ -1157,6 +1158,11 @@ def _init_quarantine_store(config_path: Path) -> None:
         logger.warning("quarantine.startup_init_failed", exc_info=True)
 
 
+def _pending_finals_kick(cfg: TelegramBridgeConfig) -> Callable[[], None] | None:
+    pending = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+    return pending.kick if isinstance(pending, PendingFinals) else None
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -1208,6 +1214,7 @@ async def poll_updates(
             on_offset_advanced=(
                 offset_writer.note if offset_writer is not None else None
             ),
+            on_poll_ok=_pending_finals_kick(cfg),
         ):
             yield msg
     finally:
@@ -2357,6 +2364,10 @@ async def run_main_loop(
             from .progress_persistence import resolve_progress_path
 
             set_progress_persistence_path(resolve_progress_path(config_path))
+            # #1207: finals a previous run couldn't send go out once polling works.
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                pending_finals.attach(resolve_pending_finals_path(config_path))
 
             state.chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
             logger.info(
@@ -2711,6 +2722,10 @@ async def run_main_loop(
                         phase="startup",
                     )
                 )
+
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                tg.start_soon(pending_finals.run, cfg.bot)
 
             # Graceful drain-then-exit task
             async def _drain_and_exit() -> None:

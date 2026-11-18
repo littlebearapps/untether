@@ -277,7 +277,7 @@ async def test_838_concurrency_blocked_for_claude(
 
     assert len(events) == 1
     assert isinstance(events[0], CompletedEvent)
-    assert "Too many engine runs in flight (1/1)" in (events[0].error or "")
+    assert "Too many engine runs open on this host (1/1)" in (events[0].error or "")
     assert events[0].usage == {"prespawn_blocked": "concurrency"}
     blocked = [
         r for r in logs if r["event"] == "subprocess.prespawn.concurrency_blocked"
@@ -432,11 +432,11 @@ def _838_idle_claude_session(monkeypatch: pytest.MonkeyPatch, sid: str) -> None:
     monkeypatch.setitem(claude_runner._LIVE_SESSIONS, sid, session)
 
 
-def test_prespawn_message_claude_text_unchanged(
+def test_prespawn_message_claude_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """#977: the idle count comes through the live-session seam; the whole
-    message and the log line stay exactly as #838 shipped them."""
+    """#977: the idle count comes through the live-session seam; the log line
+    stays exactly as #838 shipped it (#1195: host-wide wording and advice)."""
     _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=2)
     _838_idle_claude_session(monkeypatch, "idle-977-a")
     _838_idle_claude_session(monkeypatch, "idle-977-b")
@@ -445,9 +445,10 @@ def test_prespawn_message_claude_text_unchanged(
 
     assert result is not None
     assert result.error == (
-        "🛑 Too many engine runs in flight (2/2) (including 2 idle Claude "
-        "session(s) kept open for background work — they close on their own). "
-        "Wait for one to finish, or /cancel an active run."
+        "🛑 Too many engine runs open on this host (2/2, including 2 idle "
+        "Claude session(s) kept open for background work — they close on "
+        "their own). Wait a minute and send it again, or /cancel a run in the "
+        "chat that started it."
     )
     assert result.usage == {"prespawn_blocked": "concurrency"}
     assert len(blocked) == 1
@@ -462,7 +463,7 @@ def test_prespawn_message_claude_text_unchanged(
     }
 
 
-def test_prespawn_message_without_idle_sessions_unchanged(
+def test_prespawn_message_without_idle_sessions(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=1)
@@ -471,8 +472,8 @@ def test_prespawn_message_without_idle_sessions_unchanged(
 
     assert result is not None
     assert result.error == (
-        "🛑 Too many engine runs in flight (1/1). Wait for one to finish, or "
-        "/cancel an active run."
+        "🛑 Too many engine runs open on this host (1/1). Wait a minute and "
+        "send it again, or /cancel a run in the chat that started it."
     )
     assert "idle_live_sessions" not in blocked[0]
 
@@ -497,7 +498,7 @@ def test_prespawn_message_mixed_engines_generic(
     result, blocked = _838_blocked_codex_spawn(3)
 
     assert result is not None
-    assert "(including 3 idle live session(s) kept open" in (result.error or "")
+    assert ", including 3 idle live session(s) kept open" in (result.error or "")
     assert "Claude" not in (result.error or "")
     assert blocked[0]["idle_live_sessions"] == 3
 

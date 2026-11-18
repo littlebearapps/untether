@@ -450,6 +450,17 @@ async def _antigravity_debug_lines(cmd: str) -> list[str]:
     return lines
 
 
+def _slash_error_reason(kind: str) -> str:
+    """#1195: a readable reason for a failed agy slash probe, never the
+    internal ``prespawn_blocked`` kind."""
+    if kind == "prespawn_blocked":
+        return (
+            "the host is short of memory or at its run limit right now;"
+            " try /usage again in a minute"
+        )
+    return html.escape(kind[:40])
+
+
 async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
     """``AI credits: N remaining`` from the zero-token ``agy -p /credits``
     (#979; cached 300 s). Asked only once the quota itself was read. A
@@ -463,7 +474,7 @@ async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
     except agy_quota.AntigravityNotSignedIn:
         return None
     except agy_quota.AgySlashError as exc:
-        return f"AI credits: couldn't read ({html.escape(exc.kind[:40])})."
+        return f"AI credits: couldn't read ({_slash_error_reason(exc.kind)})."
     except Exception as exc:  # noqa: BLE001 — logged by the cache
         return f"AI credits: couldn't read ({html.escape(type(exc).__name__)})."
     return agy_quota.format_credits_html(credits)
@@ -509,7 +520,7 @@ async def _antigravity_usage_reply(
                 )
             else:
                 lines.append(
-                    f"Couldn't read agy's quota ({html.escape(exc.kind[:40])})."
+                    f"Couldn't read agy's quota ({_slash_error_reason(exc.kind)})."
                 )
         except Exception as exc:  # noqa: BLE001 — logged by the cache
             lines.append(

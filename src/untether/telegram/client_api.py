@@ -278,6 +278,9 @@ class HttpBotClient:
         self._last_api_errors: dict[tuple[str, Any, Any], str] = {}
         # #1029: chats whose latest ``sendMessage`` has an unknown outcome.
         self._unconfirmed_sends: set[Any] = set()
+        # #1207: chats whose latest ``sendMessage`` certainly failed in a way
+        # worth repeating (never sent, or an HTTP 5xx).
+        self._resendable_sends: set[Any] = set()
         # #746: sliding window of benign rejections per (method, reason_class)
         # and the time of the last burst WARNING per key.
         self._clock = clock
@@ -311,6 +314,23 @@ class HttpBotClient:
             self._unconfirmed_sends.discard(chat_id)
             return True
         return False
+
+    def pop_resendable_send(self, chat_id: Any) -> bool:
+        """#1207: True once if the last ``sendMessage`` to ``chat_id`` failed
+        before it was sent, or with an HTTP 5xx (D1: a rare duplicate after a
+        5xx beats a lost answer). Timeouts and 4xx never count."""
+        if chat_id in self._resendable_sends:
+            self._resendable_sends.discard(chat_id)
+            return True
+        return False
+
+    def _note_resendable_send(self, method: str, request_payload: Any) -> None:
+        chat_id = _payload_target(request_payload)[0]
+        if method != "sendMessage" or chat_id is None:
+            return
+        self._resendable_sends.add(chat_id)
+        while len(self._resendable_sends) > 64:
+            self._resendable_sends.pop()
 
     def pop_last_api_error(
         self, method: str, chat_id: Any, message_id: Any
@@ -479,6 +499,7 @@ class HttpBotClient:
         if method == "sendMessage":
             # #1029: the flag describes the latest send to the chat only.
             self._unconfirmed_sends.discard(_payload_target(request_payload)[0])
+            self._resendable_sends.discard(_payload_target(request_payload)[0])
         timeout_kwargs: dict[str, Any] = {}
         if request_timeout is not None:
             timeout_kwargs["timeout"] = request_timeout
@@ -516,6 +537,8 @@ class HttpBotClient:
                 self._unconfirmed_sends.add(chat_id)
                 while len(self._unconfirmed_sends) > 64:
                     self._unconfirmed_sends.pop()
+            if isinstance(exc, _UNSENT_ERRORS):
+                self._note_resendable_send(method, request_payload)
             log: Callable[..., Any] = logger.error
             poll_fields: dict[str, Any] = {}
             if method == "getUpdates" and isinstance(exc, httpx.TransportError):
@@ -565,6 +588,8 @@ class HttpBotClient:
             body = resp.text
             chat_id, message_id = _payload_target(request_payload)
             description = _error_description(resp)
+            if resp.status_code >= 500:
+                self._note_resendable_send(method, request_payload)
             benign = (
                 classify_benign_rejection(method, description, message_id)
                 if resp.status_code == 400

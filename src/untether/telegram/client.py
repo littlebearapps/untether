@@ -269,6 +269,12 @@ class TelegramClient:
         pop = getattr(self._client, "pop_unconfirmed_send", None)
         return bool(pop(chat_id)) if callable(pop) else False
 
+    def pop_resendable_send(self, chat_id: int) -> bool:
+        """#1207: True once if the last ``sendMessage`` to the chat certainly
+        failed in a way worth repeating (never sent, or an HTTP 5xx)."""
+        pop = getattr(self._client, "pop_resendable_send", None)
+        return bool(pop(chat_id)) if callable(pop) else False
+
     async def edit_message_text(
         self,
         chat_id: int,

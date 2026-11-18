@@ -64,6 +64,21 @@ Only a run's progress message acts on it
   survive a restart: after one, the tap gets the usual `nothing is currently
   running for that message.`
 
+A final whose `sendMessage` **certainly failed in a way worth repeating** — it
+never left (connect error, after the one retry) or Telegram answered 5xx — is
+kept by `TelegramTransport.pending_finals` with the chunks still owed
+([#1207](https://github.com/littlebearapps/untether/issues/1207)). A rare
+duplicate after a 5xx is accepted over a lost answer; an unknown outcome or a 4xx
+is never stored. Entries live in `pending_finals.json` beside the config (WARNING
+`final.pending_saved`). After any successful `getUpdates` (and at the next start)
+a background pass, at most every 30 s, sends them again in order, as a reply to
+the original message, and the first chunk replaces the progress card (INFO
+`final.redelivered`). A 5xx again counts an attempt; an unknown or refused
+outcome drops the entry without a second send. After 5 attempts or 24 h the entry
+is dropped (ERROR `final.redelivery_abandoned`) and the card, if still there, is
+edited to the "couldn't be sent" note. A failed later chunk of a multi-chunk final
+keeps only that chunk and the ones after it, so nothing is posted twice.
+
 ## Incoming messages
 
 `parse_incoming_update` accepts text messages (and media captions), voice
