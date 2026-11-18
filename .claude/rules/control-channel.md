@@ -57,6 +57,9 @@ Read those before changing any of these areas.
 - `_SESSION_STDIN` means "a process owns this session"; ask `is_session_accepting()` before writing a follow-up.
 - Async hooks (#812): `has_pending_async_hooks()` is a sibling predicate — never part of `has_live_background_work()`.
   Hook release is all-or-nothing; **never bind a process to a hook**; never rely on `sh -c` to identify hook processes.
+- The idle close is held while a Codex plugin `--background` job owned by the session runs (#1186): the plugin's
+  `SessionEnd` hook kills them on any exit. `utils/codex_plugin_jobs.py` reads the plugin's private state **read-only**
+  and fails open (a recorded `shortcut:`, plan D12); never write or delete it. Remove when codex-plugin-cc#822 ships.
 - Timing knobs are slots-dataclass fields: set them on the instance in tests.
 
 ## Outline gate / post-outline approval

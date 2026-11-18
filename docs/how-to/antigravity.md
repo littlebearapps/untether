@@ -401,7 +401,8 @@ Sample output: [Cost budgets → Antigravity](cost-budgets.md#antigravity).
 Cron and webhook runs work with Antigravity, with these rules that differ from chat:
 
 - **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode` (`"full"` or
-  `"ask"`). A webhook run never gets either: webhooks have no `permission_mode` of their own. A chat's (or
+  `"ask"`), and a webhook the same way (from v0.36.2; `"full"` on a webhook also needs
+  `allow_unsafe_permission_mode = true`, see [Webhook run options](webhooks-and-cron.md#webhook-run-options)). A chat's (or
   `untether.toml`'s) Full access or Ask me runs a scheduled run as Workspace. A cron with `permission_mode = "ask"`
   has nobody to tap Approve: reads and in-project edits run, everything that would ask is denied at once, and the
   answer ends with a `🔒 unattended … nobody to approve` footer. A scheduled run in **Plan first** (the chat's mode or

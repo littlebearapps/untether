@@ -39,6 +39,15 @@ systemctl --user restart untether
     npm update -g @sourcegraph/amp     # deprecated, unsupported
     ```
 
+## Upgrading to v0.36.2
+
+No config change is needed. Worth knowing:
+
+- **Get webhooks ready for strict defaults.** Webhooks can now set their own `permission_mode`, `model`, `reasoning` and `allowed_tools`. Untether warns once about each webhook that relies on an unsafe default (no project, a short secret, or the chat's mode and tools); set `[triggers] webhook_defaults = "strict"` once you've fixed them, because strict becomes the default in v0.37.0. See [Webhook run options](webhooks-and-cron.md#webhook-run-options). ([#1118](https://github.com/littlebearapps/untether/issues/1118), [#1122](https://github.com/littlebearapps/untether/issues/1122))
+- **Secrets can leave `untether.toml`, and the file is kept private.** Webhook secrets can come from `secret_env` or `secret_file`, and the bot token from `UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN`. If your config is readable by other users you'll get one `⚠️ Config file permissions` notice with the `chmod` fix. `UNTETHER__*` variables no longer reach engine processes. See [Security](security.md#protect-your-bot-token). ([#1219](https://github.com/littlebearapps/untether/issues/1219))
+- **Codex `--trust` is refused in `extra_args`.** It's new in codex-cli 0.169.0 and saves project trust for every future chat; if you added it, Codex fails to load (Untether won't start when Codex is the default engine) until you remove it. ([#1040](https://github.com/littlebearapps/untether/issues/1040))
+- **Claude approvals wait for you.** An unanswered request is no longer denied after 5 minutes; it waits, with reminders, until you answer or the session reaches its 4-hour cap. ([#844](https://github.com/littlebearapps/untether/issues/844))
+
 ## Upgrading to v0.36.1
 
 Most installs need no config change. The exceptions are a webhook or cron trigger that targets a secret-style file name, a Claude webhook that relied on `bypassPermissions`, and a `model` value that looks like a flag; all are covered below. Two behaviour changes are worth reading before you upgrade a shared group or a host that runs Antigravity on a schedule: settings in a group now need an admin, and scheduled Antigravity runs can be held once.

@@ -169,7 +169,8 @@ UntetherSettings (pydantic-settings, TOML source)
 
 - Config loaded from `~/.untether/untether.toml`
 - Engine configs in `[engine_id]` sections (flat) or `[engines.engine_id]` (nested)
-- Environment overrides: `UNTETHER__` prefix with `__` nesting
+- Environment overrides: `UNTETHER__` prefix with `__` nesting; never passed to an engine (`apply_run_env`, #1219)
+- `untether.toml` and its backups are written owner-only (0600); a group/world-readable one warns once with the `chmod` fix (#1219)
 
 ### ChatPrefsStore
 
@@ -305,7 +306,7 @@ Triggers let external events or schedules start agent runs automatically. Opt-in
 
 ### Webhooks
 
-`run_webhook_server()` runs an aiohttp server. Each `[[triggers.webhooks]]` maps a URL path to auth (bearer/HMAC-SHA256/SHA1) + prompt template with `{{field.path}}` substitutions. Rate-limited per-webhook and globally.
+`run_webhook_server()` runs an aiohttp server. Each `[[triggers.webhooks]]` maps a URL path to auth (bearer/HMAC-SHA256/SHA1) + prompt template with `{{field.path}}` substitutions. Rate-limited per-webhook and globally. A secret can come from `secret_env` / `secret_file` instead of the toml (#1219). `[triggers] webhook_defaults = "strict"` gives `agent_run` webhooks safe defaults (asking mode, no pre-approved tools, unsafe modes need `allow_unsafe_permission_mode`, no project or a <32-char secret → skipped); the default `compat` only warns (#1118).
 
 ### Dispatch
 
@@ -316,7 +317,8 @@ Both crons and webhooks feed into `TriggerDispatcher.dispatch_cron()`/`dispatch_
   (`plan-auto`, `auto`, `dontAsk`). A reply to the run continues attended. `/at` runs still ask. Antigravity crons get
   Full access or Ask me only from their own `permission_mode` (otherwise Workspace); a gated cron denies every tool off the
   safe list, and a Plan first cron posts the plan with no card.
-- Per-cron `permission_mode` / `model` / `reasoning` overrides apply to that run only (`_apply_trigger_overrides`).
+- Per-trigger `permission_mode` / `model` / `reasoning` / `allowed_tools` (crons and webhooks alike, one builder: `dispatcher.build_run_context`, #1122) apply to that run only (`_apply_trigger_overrides`).
+- Each trigger run gets a `run_id`; the engine sees `UNTETHER_RUN_ID` / `UNTETHER_TRIGGER` (#1120). A webhook whose announce failed is not recorded as fired (#1123).
 
 ### Loop mode (`loop_scheduler.py`)
 

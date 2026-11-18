@@ -218,7 +218,7 @@ instead of disabling every trigger ([#751](https://github.com/littlebearapps/unt
 **Antigravity.** An Antigravity cron's value is validated too: `workspace`, `full`,
 `ask` or `plan`. A cron gets Full access or Ask me only from its own
 `permission_mode` (`"full"` / `"ask"`), never from the chat or `untether.toml`;
-webhook runs never get Full access. With `"ask"` there is nobody to tap a card, so
+a webhook the same way, with `allow_unsafe_permission_mode = true` for `full`. With `"ask"` there is nobody to tap a card, so
 reads and in-project edits run and everything that would ask is denied
 (`🔒 unattended` footer); with `"plan"` (or a chat in Plan first) the run posts its
 plan and changes nothing ([#980](https://github.com/littlebearapps/untether/issues/980),

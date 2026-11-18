@@ -8,7 +8,7 @@
 - **feat(triggers):** webhooks take the same run options as crons (`permission_mode`, `model`, `reasoning` and a per-trigger `allowed_tools`), and `/config → ⏰ Triggers` shows them [#1122](https://github.com/littlebearapps/untether/issues/1122)
 - **feat(security):** new `[triggers] webhook_defaults = "compat" | "strict"`. `strict` gives `agent_run` webhooks safe defaults: no mode of its own means the engine's asking mode with no tools pre-approved, a mode that skips approvals needs `allow_unsafe_permission_mode = true`, and a webhook without a project or with a secret under 32 characters is skipped. The default `compat` keeps today's behaviour and warns about each webhook that relies on an unsafe default; `strict` becomes the default in v0.37.0 [#1118](https://github.com/littlebearapps/untether/issues/1118)
 - **feat(security):** webhook secrets can come from `secret_env` or `secret_file` instead of sitting in `untether.toml`. Untether now writes `untether.toml` and its backups owner-only and warns once, with the `chmod` fix, when they're readable by others. `UNTETHER__*` config overrides (the bot token included) are no longer passed to engines [#1219](https://github.com/littlebearapps/untether/issues/1219)
-- **feat(codex):** groundwork for the Codex app-server transport: a zero-token schema drift probe and a pre-spawn support check that refuses a Codex CLI missing the protocol Untether needs, tested from codex-cli 0.169.0 [#961](https://github.com/littlebearapps/untether/issues/961)
+- **feat(codex):** groundwork for the Codex app-server transport: a zero-token schema drift probe and a pre-spawn support check that refuses a Codex CLI missing the protocol Untether needs, tested from codex-cli 0.169.0. The transport can't be selected yet; every Codex run still uses `codex exec` [#961](https://github.com/littlebearapps/untether/issues/961)
 - **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
 
@@ -29,6 +29,10 @@
 - **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
 - **fix(claude):** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines [#1194](https://github.com/littlebearapps/untether/issues/1194)
+
+### docs
+
+- upgrade notes for v0.36.2, troubleshooting entries for a resent or lost reply and the config-permission warning, and webhook Full access / own-mode statements brought up to date across the guides [#1122](https://github.com/littlebearapps/untether/issues/1122), [#1207](https://github.com/littlebearapps/untether/issues/1207), [#1219](https://github.com/littlebearapps/untether/issues/1219)
 
 ## v0.36.1 (2026-11-16)
 

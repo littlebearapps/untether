@@ -937,12 +937,12 @@ def denial_paragraph(
         else ""
     )
     if trigger is not None and trigger.startswith("webhook:"):
-        tail = (
-            f"{rule.removeprefix(', or ')}, or run it from the chat"
-            if rule
-            else "run it from the chat"
+        # #1118: a webhook keeps Full access only when it sets it itself.
+        return (
+            f'{head} To allow it, set `permission_mode = "full"` and'
+            f" `allow_unsafe_permission_mode = true` on this webhook{rule},"
+            " or run it from the chat."
         )
-        return f"{head} Webhook runs never get Full access; {tail}."
     if trigger is not None:
         return f'{head} To allow it, set `permission_mode = "full"` on this cron{rule}.'
     if kept_shell:

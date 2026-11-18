@@ -1,10 +1,15 @@
 # Codex runner
 
 Untether runs Codex over `codex exec --json` (the default; see [untether-events.md](untether-events.md) and
-[exec-json-cheatsheet.md](exec-json-cheatsheet.md)). The `codex app-server` transport, chosen per install with
-`[engines.codex] transport = "app-server"`, lands with [#962](https://github.com/littlebearapps/untether/issues/962);
+[exec-json-cheatsheet.md](exec-json-cheatsheet.md)). The `codex app-server` transport lands with
+[#962](https://github.com/littlebearapps/untether/issues/962), which adds the per-install `[engines.codex] transport`
+key (not added yet, so every run uses exec);
 it counts as native despite the CLI's Experimental label (stable-tier methods only, `experimentalApi` fields only
 for plan mode, #965). This page gains the transport, permission modes and the native-vs-custom register with #962.
+
+| | |
+|---|---|
+| Tested against | codex-cli **0.169.0** (exec flag snapshot `PROBED_CLI_VERSION` in `tests/test_codex_cli_schema_drift.py`; app-server schema `PROBED_APP_SERVER_VERSION` in `src/untether/schemas/codex_app_server.py`) |
 
 ## App-server drift probe and support gate ([#961](https://github.com/littlebearapps/untether/issues/961))
 

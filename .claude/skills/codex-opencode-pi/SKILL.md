@@ -45,6 +45,8 @@ A failed **resumed** run keeps the chat's saved session unless the error names t
 | `src/untether/schemas/codex.py` | msgspec structs for Codex events |
 | `docs/reference/runners/codex/exec-json-cheatsheet.md` | JSONL event shapes |
 | `docs/reference/runners/codex/untether-events.md` | Event mapping spec |
+| `docs/reference/runners/codex/runner.md` | App-server drift probe + pre-spawn support gate (#961); transport/register arrive with #962 |
+| `src/untether/runners/codex_app_server.py`, `src/untether/schemas/codex_app_server.py` | App-server support gate and the protocol contract it checks |
 
 ### CLI invocation
 
@@ -57,7 +59,7 @@ codex [extra_args…] [--profile P] [--model MODEL] [-c model_reasoning_effort=L
 - Prompt on stdin (trailing `-` means read stdin)
 - Resume: `resume <thread_id> -` (`resume --last -` for `/continue`)
 - Safe mode is genuinely read-only: `--sandbox read-only` (exec-level, so it outranks a root-level sandbox flag), only in `safe` permission mode and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
-- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209)
+- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209); `--trust` (0.169.0) is refused too, since it saves project trust for future chats (#1040)
 - `--skip-git-repo-check --color=never` for clean output
 
 ### JSONL events
