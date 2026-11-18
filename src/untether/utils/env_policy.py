@@ -315,26 +315,36 @@ def _reset_log_latch_for_tests() -> None:
 RUN_ID_ENV = "UNTETHER_RUN_ID"
 TRIGGER_ENV = "UNTETHER_TRIGGER"
 _RUN_ENV_NAMES = (RUN_ID_ENV, TRIGGER_ENV)
+#: #1219: Untether's own config overrides (``UNTETHER__TRANSPORTS__TELEGRAM__
+#: BOT_TOKEN`` and the like) are for Untether only; no engine gets them.
+CONFIG_OVERRIDE_PREFIX = "UNTETHER__"
+
+
+def _dropped(name: str) -> bool:
+    return name in _RUN_ENV_NAMES or name.startswith(CONFIG_OVERRIDE_PREFIX)
 
 
 def apply_run_env(
     env: Mapping[str, str] | None, context: RunContext | None
 ) -> dict[str, str] | None:
-    """*env* with this run's identity vars (#1120).
+    """*env* with this run's identity vars (#1120), minus Untether's config
+    overrides (#1219).
 
     ``env`` is a runner's ``env()`` result; ``None`` means "inherit the
     service env" (Codex, OpenCode). Inherited ``UNTETHER_RUN_ID`` /
     ``UNTETHER_TRIGGER`` are always dropped (``UNTETHER_*`` passes the
     filter), then assigned only for an unattended cron/webhook run, so a
     human turn or ``/at`` fire never carries a stale or borrowed identity.
+    ``UNTETHER__*`` overrides (which can hold the bot token) are always
+    dropped too.
     """
     from ..context import unattended_trigger
 
     source = unattended_trigger(context)
     current = os.environ if env is None else env
-    if source is None and not any(name in current for name in _RUN_ENV_NAMES):
+    if source is None and not any(_dropped(name) for name in current):
         return None if env is None else dict(env)
-    out = {k: v for k, v in current.items() if k not in _RUN_ENV_NAMES}
+    out = {k: v for k, v in current.items() if not _dropped(k)}
     if source is not None:
         out[TRIGGER_ENV] = source
         if context is not None and context.run_id:

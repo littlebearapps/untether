@@ -43,11 +43,30 @@ changes ([#506](https://github.com/littlebearapps/untether/issues/506)), but the
 service only sees its own environment, so set these in the unit (or a drop-in) and
 restart.
 
-!!! warning "Keep secrets in the config file"
-    Variables starting with `UNTETHER_` are on the environment allowlist that Claude Code
-    and Pi subprocesses inherit, so an `UNTETHER__*` override (a bot token or voice API key
-    included) is visible to those engines. Put secrets in `untether.toml` (mode `600`)
-    rather than in `UNTETHER__*` variables.
+### Bot token from the environment { #bot-token-env }
+
+`UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN` sets the bot token and wins over
+`bot_token` in `untether.toml`, so the file doesn't have to hold it (leave
+`bot_token` out of `[transports.telegram]`). With systemd, keep it in a file only
+your user can read and load it into the unit:
+
+```ini
+# systemctl --user edit untether
+[Service]
+EnvironmentFile=%h/.config/untether/secrets.env
+```
+
+where `secrets.env` (mode `600`) holds
+`UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN=…`. Restart the service from a terminal
+afterwards. Untether never passes `UNTETHER__*` variables to an engine process, for
+any engine ([#1219](https://github.com/littlebearapps/untether/issues/1219)); before 0.36.2, Claude Code, Pi and
+Antigravity received them through the `UNTETHER_` allowlist prefix, and Codex and
+OpenCode through Untether's whole environment.
+
+For webhook secrets, see `secret_env` / `secret_file` in the
+[Triggers reference](triggers/triggers.md#triggerswebhooks). A `secret_file` works
+with systemd's `LoadCredential=` (point it at `%d/<name>`, the credentials
+directory, written owner-only by systemd).
 
 ## Voice transcription
 

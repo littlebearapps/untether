@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from .triggers.settings import InvalidTrigger, StrictWebhookChange
 
 __all__ = [
+    "format_config_permissions_notice",
     "format_hot_reload_only_notice",
     "format_invalid_triggers_notice",
     "format_partial_reload_notice",
@@ -432,5 +433,22 @@ def format_strict_webhook_changes_notice(
             "Give each webhook its own project, permission_mode (with engine) "
             'and allowed_tools, then set webhook_defaults = "strict" in '
             "untether.toml.",
+        ]
+    )
+
+
+def format_config_permissions_notice(fixes: Sequence[str]) -> str:
+    """#1219: the config (or a backup) holding a secret is readable by other
+    local users. Names the ``chmod`` commands only, never a secret."""
+    commands = "\n".join(f"`{fix}`" for fix in fixes)
+    return "\n\n".join(
+        [
+            "⚠️ Config file permissions: other users on this host can read "
+            "untether.toml (it holds a secret) or one of its backups.",
+            f"To fix it, run:\n{commands}",
+            "Untether keeps the files it writes private (0600). You can also "
+            "move secrets out of the file: the bot token with "
+            "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN, webhook secrets with "
+            "secret_env or secret_file.",
         ]
     )

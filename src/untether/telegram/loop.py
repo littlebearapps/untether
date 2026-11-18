@@ -601,6 +601,49 @@ async def _notify_new_invalid_triggers(
         )
 
 
+async def _warn_config_permissions(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    config_path: Path | None,
+    *,
+    running_tasks: Mapping[MessageRef, object] | None = None,
+) -> None:
+    """#1219: warn (log + one Telegram notice) when the config holds an
+    inline secret and other local users can read it or its directory, or a
+    backup is readable. Only when the findings change. Never raises."""
+    if config_path is None:
+        return
+    from ..config import config_permission_fixes, read_config
+
+    try:
+        fixes = config_permission_fixes(
+            config_path, read_config(config_path, log_toml_errors=False)
+        )
+    except Exception:  # noqa: BLE001 — a permission check must never break a load
+        logger.debug("config.file_permissions.check_failed", exc_info=True)
+        return
+    if fixes == state.config_permission_fixes:
+        return
+    state.config_permission_fixes = fixes
+    if not fixes:
+        return
+    logger.warning(
+        "config.file_permissions",
+        path=str(config_path),
+        fixes=list(fixes),
+        hint=(
+            "The config holds a secret (bot token or webhook secret) other "
+            "local users can read; run the chmod commands, or move the secret "
+            "to the environment (see docs/reference/env-vars.md)."
+        ),
+    )
+    from ..config_reload_notification import format_config_permissions_notice
+
+    await _notify_trigger_config_problem(
+        cfg, format_config_permissions_notice(fixes), running_tasks=running_tasks
+    )
+
+
 async def _notify_strict_webhook_changes(
     cfg: TelegramBridgeConfig,
     changes: Sequence[StrictWebhookChange],
@@ -1295,6 +1338,9 @@ class TelegramLoopState:
     trigger_permission_risks_warned: set[TriggerRisk] = field(default_factory=set)
     # #1118: compat-mode webhooks already warned about (log + one notice).
     trigger_strict_changes_warned: set[StrictWebhookChange] = field(default_factory=set)
+    # #1219: the chmod fixes last warned about, so an unchanged reload
+    # doesn't repeat the warning or the notice.
+    config_permission_fixes: tuple[str, ...] = ()
     # #1117: invalid trigger entries / the block-level error already announced
     # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
     trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
@@ -2552,6 +2598,10 @@ async def run_main_loop(
                             "config.reload.applied_notify.crashed", exc_info=True
                         )
 
+                await _warn_config_permissions(
+                    cfg, state, reload.config_path, running_tasks=state.running_tasks
+                )
+
                 # --- Hot-reload trigger configuration ---
                 from ..triggers.settings import format_trigger_error
 
@@ -3094,6 +3144,11 @@ async def run_main_loop(
                 cfg.chat_id,
                 state_path=loop_state_path,
                 is_chat_busy=_is_chat_busy,
+            )
+
+            # #1219: a readable config holding a secret, or a readable backup.
+            tg.start_soon(
+                partial(_warn_config_permissions, cfg, state, cfg.runtime.config_path)
             )
 
             # --- Trigger system (webhooks + cron) ---

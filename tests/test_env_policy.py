@@ -305,3 +305,23 @@ class TestApplyRunEnv:
         monkeypatch.setenv("UNTETHER_TRIGGER", "cron:stale")
         env = apply_run_env(None, None)
         assert env is not None and "UNTETHER_TRIGGER" not in env
+
+
+class TestConfigOverridesNeverReachEngines:
+    """#1219: ``UNTETHER__*`` overrides (the bot token among them) are dropped
+    for every engine, attended or not, inherited env or filtered."""
+
+    def test_filtered_env_drops_overrides(self):
+        env = {"PATH": "/bin", "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN": "t"}
+        assert apply_run_env(env, None) == {"PATH": "/bin"}
+
+    def test_inherited_env_drops_overrides(self, monkeypatch):
+        monkeypatch.setenv("UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN", "t")
+        monkeypatch.setenv("UNTETHER_SESSION", "1")
+        env = apply_run_env(None, RunContext(trigger_source="cron:c"))
+        assert env is not None
+        assert "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN" not in env
+        assert env["UNTETHER_SESSION"] == "1"  # single underscore stays
+        attended = apply_run_env(None, None)
+        assert attended is not None
+        assert "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN" not in attended

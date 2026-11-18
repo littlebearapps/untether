@@ -63,6 +63,24 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
     assert settings.default_engine == "claude"
 
 
+def test_1219_bot_token_from_env_with_none_in_toml(tmp_path: Path, monkeypatch) -> None:
+    """#1219 (D8): the documented way to keep the token out of the file."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n'
+        "[transports.telegram]\n"
+        "chat_id = 123\n"
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN", "env-token")
+
+    settings, _ = load_settings(config_path)
+
+    assert settings.transports.telegram.bot_token.get_secret_value() == "env-token"
+    assert "bot_token" not in read_config(config_path)["transports"]["telegram"]
+
+
 def test_legacy_keys_migrated(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     config_path.write_text(

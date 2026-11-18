@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Annotated, Any, Literal, NamedTuple, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -223,8 +226,37 @@ class WebhookConfig(TriggerRunOptions):
     # #1117: SecretStr so the value never reaches a repr, a log line or a
     # validation error; read it with ``get_secret_value()`` at the auth check.
     secret: SecretStr | None = Field(default=None, min_length=1)
+    # #1219: read the secret from an environment variable or an owner-only
+    # file instead (one of the three); resolved into ``secret`` at parse.
+    secret_env: NonEmptyStr | None = Field(
+        default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    secret_file: NonEmptyStr | None = None
     prompt_template: NonEmptyStr | None = None
     event_filter: NonEmptyStr | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_secret_source(cls, data: Any) -> Any:
+        """#1219: ``secret_env`` / ``secret_file`` → ``secret``. Errors name
+        the variable or path and the fix, never the value."""
+        if not isinstance(data, dict):
+            return data
+        sources = [k for k in ("secret", "secret_env", "secret_file") if data.get(k)]
+        if len(sources) > 1:
+            raise ValueError(f"set only one of {', '.join(sources)}")
+        if sources == ["secret_env"]:
+            name = str(data["secret_env"]).strip()
+            value = os.environ.get(name, "").strip()
+            if not value:
+                raise ValueError(
+                    f"secret_env: environment variable {name} is not set or empty "
+                    "in Untether's environment"
+                )
+            return {**data, "secret": value}
+        if sources == ["secret_file"]:
+            return {**data, "secret": _read_secret_file(str(data["secret_file"]))}
+        return data
 
     # --- Multipart file upload fields ---
     accept_multipart: bool = False
@@ -318,6 +350,34 @@ class WebhookConfig(TriggerRunOptions):
         if self.action == "notify_only" and not self.message_template:
             raise ValueError("message_template is required when action='notify_only'")
         return self
+
+
+def _read_secret_file(raw_path: str) -> str:
+    """#1219: a webhook secret from an owner-only regular file (stripped)."""
+    path = Path(raw_path.strip()).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"secret_file must be an absolute path: {path}")
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise ValueError(f"secret_file {path} can't be read: {exc.strerror}") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"secret_file {path} is not a regular file")
+    if info.st_uid != os.getuid():
+        raise ValueError(
+            f"secret_file {path} must be owned by the user Untether runs as"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError(
+            f"secret_file {path} is readable by other users; run `chmod 600 {path}`"
+        )
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        raise ValueError(f"secret_file {path} can't be read as text") from None
+    if not value:
+        raise ValueError(f"secret_file {path} is empty")
+    return value
 
 
 class CronFetchConfig(BaseModel):

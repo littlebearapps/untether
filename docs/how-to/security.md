@@ -67,8 +67,23 @@ Your Telegram bot token grants full control over the bot. Keep it safe:
 - **Restrict file permissions** on your config file:
 
 ```bash
-chmod 600 ~/.untether/untether.toml
+chmod 700 ~/.untether
+chmod 600 ~/.untether/untether.toml ~/.untether/untether.toml.bak*
 ```
+
+Untether writes `untether.toml` and its onboarding backup owner-only (`0600`, a new
+`~/.untether` is `0700`), and tightens a group- or world-readable file the next time
+it saves it. At startup, and on a reload that changes the finding, it logs WARNING
+`config.file_permissions` and posts one Telegram notice with the `chmod` commands when
+the config holds a secret (the bot token or a webhook `secret`) and other local users
+can read it or its directory, or when a `untether.toml.bak*` backup is readable
+([#1219](https://github.com/littlebearapps/untether/issues/1219)). Backups made by other tools can only be warned about.
+
+- **Or keep the token out of the file**: set `UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN`
+  in the service environment (for example a systemd `EnvironmentFile=` only you can
+  read) and leave `bot_token` out of `untether.toml`. Untether never passes
+  `UNTETHER__*` variables to an engine. See
+  [Environment variables](../reference/env-vars.md#bot-token-env).
 
 If you store your config in a non-standard location, set the `UNTETHER_CONFIG_PATH` environment variable:
 
@@ -286,6 +301,21 @@ Available authentication modes:
 Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning, and the webhook is skipped with `[triggers] webhook_defaults = "strict"`. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
 
 Set `[triggers] webhook_defaults = "strict"` ([#1118](https://github.com/littlebearapps/untether/issues/1118), the default from 0.37.0): an `agent_run` webhook then needs a `project`, runs in a mode that asks (Claude `default`, Codex `safe`, Antigravity Workspace) unless it sets its own `permission_mode`, and pre-approves no Claude tools unless it lists its own `allowed_tools`. A mode that skips approvals (Claude `bypassPermissions`, Antigravity `full`, Codex `auto`) needs `allow_unsafe_permission_mode = true` on the webhook. See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
+
+### Securing webhooks
+
+- **Bind to loopback** (the default `127.0.0.1`) and put a reverse proxy or tunnel in
+  front if the sender is remote (see below).
+- **Prefer `hmac-sha256` over `bearer`**: the signature covers the body, so a
+  replayed or edited payload fails, and the secret itself never travels.
+- **Keep the secret out of `untether.toml`**: `secret_file = "~/.config/untether/gh.secret"`
+  (owner-only, `chmod 600`) or `secret_env = "GH_WEBHOOK_SECRET"`
+  ([#1219](https://github.com/littlebearapps/untether/issues/1219)). Codex and OpenCode inherit Untether's whole
+  environment, so prefer `secret_file` where they run.
+- **Send ids, not content**: let the payload carry ids (a commit SHA, an issue
+  number) and have the agent fetch the rest, so the prompt holds as little
+  attacker-controlled text as possible.
+- **Use strict defaults**: `[triggers] webhook_defaults = "strict"` (see above).
 
 ## Bind webhook server to localhost
 
