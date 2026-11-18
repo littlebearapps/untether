@@ -234,13 +234,17 @@ def _translate(state, factory, event) -> list[Any]:
     )
 
 
-def test_1173_turn_for_second_line_absorbs_the_first(cleanup) -> None:
+def test_1252_line_without_own_frame_is_not_guessed(cleanup) -> None:
     state, factory = _fold_state("u1", "u2")
     assert _translate(state, factory, _lifecycle("u2", "started")) == []
     events = claude_mod._open_turn_events(state, factory)
     assert state.turn_command_uuid == "u2"
+    # No FIFO inference: u1 had no frame of its own yet, so it still waits.
+    assert _absorbed_ids(events) == []
+    assert list(state.awaiting_injected) == ["u1"]
+    # Its own completed frame absorbs it.
+    events = _translate(state, factory, _lifecycle("u1", "completed"))
     assert _absorbed_ids(events) == ["u1"]
-    # Nothing holds the next queued follow-up any more.
     assert claude_mod._awaiting_injected(state) is False
     # The bridge drops u1's anchor, so it is never reported as not run.
     ref = MessageRef(channel_id=1, message_id=5)
@@ -257,15 +261,46 @@ def test_1173_two_started_frames_before_the_turn_opens(cleanup) -> None:
     _translate(state, factory, _lifecycle("u1", "started"))
     _translate(state, factory, _lifecycle("u2", "started"))
     events = claude_mod._open_turn_events(state, factory)
+    assert state.turn_command_uuid == "u2"
     assert _absorbed_ids(events) == ["u1"]
+    assert state.awaiting_injected == {}
+    assert state.superseded_started == []
+
+
+def test_1252_mid_turn_absorbs_each_line_on_its_own_started(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2", "u3", turn_open=True)
+    events = _translate(state, factory, _lifecycle("u2", "started"))
+    assert _absorbed_ids(events) == ["u2"]
+    events = _translate(state, factory, _lifecycle("u1", "started"))
+    assert _absorbed_ids(events) == ["u1"]
+    assert list(state.awaiting_injected) == ["u3"]
+
+
+def test_1252_capture_sequence_from_issue(cleanup) -> None:
+    """#1252 capture (CLI 2.1.327): A running; B, C, D each get queued,
+    started and completed before A's completed."""
+    state, factory = _fold_state("B", "C", "D", turn_open=True)
+    absorbed: list[str] = []
+    for uuid in ("B", "C", "D"):
+        assert _translate(state, factory, _lifecycle(uuid, "queued")) == []
+        absorbed += _absorbed_ids(
+            _translate(state, factory, _lifecycle(uuid, "started"))
+        )
+        assert _translate(state, factory, _lifecycle(uuid, "completed")) == []
+    assert _translate(state, factory, _lifecycle("A", "completed")) == []
+    assert absorbed == ["B", "C", "D"]
     assert state.awaiting_injected == {}
 
 
-def test_1173_mid_turn_fold_absorbs_earlier_lines_in_order(cleanup) -> None:
-    state, factory = _fold_state("u1", "u2", "u3", turn_open=True)
-    events = _translate(state, factory, _lifecycle("u2", "started"))
-    assert _absorbed_ids(events) == ["u1", "u2"]
-    assert list(state.awaiting_injected) == ["u3"]
+def test_1252_wakeup_started_is_not_superseded(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    _translate(state, factory, _lifecycle("wake", "started"))
+    _translate(state, factory, _lifecycle("u1", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert _absorbed_ids(events) == []
+    assert state.superseded_started == []
+    assert state.turn_reason == "followup"
+    assert state.turn_command_uuid == "u1"
 
 
 def test_1173_completed_without_start_is_absorbed(cleanup) -> None:
