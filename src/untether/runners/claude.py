@@ -2508,7 +2508,8 @@ _RESET_CLAUSE_RE = re.compile(
 #
 # Keyed by auth namespace like _RATE_LIMIT_RESET_LATCH. Value:
 # (monotonic expiry, model display or "" when the message names no model,
-# cap kind: model | model_credits | credits | spend | team_budget; #922).
+# cap kind: model | model_credits | credits | spend | usage_limit | team_budget;
+# #922, #1238).
 _RATE_LIMIT_ACTION_LATCH: dict[str, tuple[float, str, str]] = {}
 
 # Bounded TTL rather than a real deadline: this cap class has no reset time, and
@@ -2534,19 +2535,28 @@ _NOT_ACTION_API_ERRORS: frozenset[str] = frozenset({"long_context_credits_requir
 # alone also appears on time-based caps (#692's class). Fail closed to the 60s
 # default when either is absent.
 #
-# CLI 2.1.289 headless builder (what Untether runs), where ${K} is
-# ", or manage usage credits at <url>," or "" when the account can't buy credits:
-#   You've reached your Fable limit. Switch to another model${K} to continue.
+# CLI 2.1.327 headless wording (what Untether runs; #1238), where ${K} is
+# ", or manage usage credits at <url>," or "" when the account can't buy credits.
+# Credits builder:
 #   <Model> requires usage credits. Switch to another model${K} to continue.
 #   You're out of usage credits. Switch to another model${K} to continue.
 #   You've hit your [channel's ]monthly spend limit. Switch to another model${K} …
-#   You've hit your team's shared budget. Switch to another model${K} …
-# The interactive branch keeps the older "Run /usage-credits to continue or
-# switch models with /model." / "… /model to switch models." wording. The
-# ``cc_cli_limit_message`` URL marker is NOT stable (absent for Team/Enterprise
-# and when ${K} is empty), so it is never keyed on.
+#   You've hit your team's pooled group budget.[ It resets <t>.] Switch to …
+# Plan-limit path: the shared rate-limit head, with the same remedy appended
+# only on the Fable window:
+#   You've hit your <name> · resets <t>. Switch to another model${K} to continue.
+# where <name> is "Fable limit", a spend/usage limit ("individual spend limit",
+# "org's monthly usage limit", …) or a time-based window ("weekly limit",
+# "Opus limit"). So the model clause names a model family (bare "Opus limit" /
+# "Sonnet limit" are the weekly windows), and the no-model clauses go first.
+# Older CLIs and the interactive branch say "You've reached your Fable limit."
+# / "team's shared budget" and "Run /usage-credits to continue or switch models
+# with /model." / "… /model to switch models.". The ``cc_cli_limit_message``
+# URL marker is NOT stable (absent for Team/Enterprise and when ${K} is
+# empty), so it is never keyed on.
 _ACTION_CAP_RE = re.compile(
-    r"reached\s+your\s+(?P<model>[\w.\- ]{1,40}?)\s+limit",
+    r"(?:reached|hit)\s+your\s+(?P<model>(?:Fable|Haiku|Mythos)(?:\s[\w.\-]{1,12})?"
+    r"|(?:Opus|Sonnet)\s[\w.\-]{1,12})\s+limit",
     re.IGNORECASE,
 )
 _ACTION_MODEL_CREDITS_RE = re.compile(
@@ -2555,9 +2565,18 @@ _ACTION_MODEL_CREDITS_RE = re.compile(
 )
 # (pattern, kind) for the clauses that name no model, checked in order.
 _ACTION_CAP_CLAUSES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"out\s+of\s+usage\s+credits", re.IGNORECASE), "credits"),
-    (re.compile(r"monthly\s+spend\s+limit", re.IGNORECASE), "spend"),
-    (re.compile(r"shared\s+budget", re.IGNORECASE), "team_budget"),
+    (
+        re.compile(
+            r"out\s+of\s+usage\s+credits|org\s+is\s+out\s+of\s+usage", re.IGNORECASE
+        ),
+        "credits",
+    ),
+    (re.compile(r"(?:monthly|individual)\s+spend\s+limit", re.IGNORECASE), "spend"),
+    (
+        re.compile(r"(?:monthly|individual)\s+usage\s+limit", re.IGNORECASE),
+        "usage_limit",
+    ),
+    (re.compile(r"(?:shared|pooled\s+group)\s+budget", re.IGNORECASE), "team_budget"),
 )
 _ACTION_REMEDY_RE = re.compile(
     r"switch\s+to\s+another\s+model"
@@ -2666,13 +2685,13 @@ def _action_cap_clause(text: str | None) -> tuple[str, str] | None:
     None when the text names no action-required cap."""
     if not text:
         return None
+    for pattern, kind in _ACTION_CAP_CLAUSES:
+        if pattern.search(text) is not None:
+            return "", kind
     if (m := _ACTION_CAP_RE.search(text)) is not None:
         return m.group("model").strip(), "model"
     if (m := _ACTION_MODEL_CREDITS_RE.search(text)) is not None:
         return m.group("model").strip(), "model_credits"
-    for pattern, kind in _ACTION_CAP_CLAUSES:
-        if pattern.search(text) is not None:
-            return "", kind
     return None
 
 
@@ -2775,6 +2794,8 @@ def _format_action_required_title(model: str, kind: str = "model") -> str:
         subject = "Usage credits used up"
     elif kind == "spend":
         subject = "Monthly spend limit reached"
+    elif kind == "usage_limit":
+        subject = "Usage limit reached"
     elif kind == "team_budget":
         subject = "Team budget reached"
     elif kind == "model_credits":
