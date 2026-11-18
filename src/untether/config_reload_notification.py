@@ -440,7 +440,10 @@ def format_strict_webhook_changes_notice(
 def format_config_permissions_notice(fixes: Sequence[str]) -> str:
     """#1219: the config (or a backup) holding a secret is readable by other
     local users. Names the ``chmod`` commands only, never a secret."""
-    commands = "\n".join(f"`{fix}`" for fix in fixes)
+    from .markdown import HARD_BREAK
+
+    # Hard breaks: the renderer reflows a soft break after a long line (#870).
+    commands = HARD_BREAK.join(f"`{fix}`" for fix in fixes)
     return "\n\n".join(
         [
             "⚠️ Config file permissions: other users on this host can read "

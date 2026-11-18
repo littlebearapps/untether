@@ -611,7 +611,7 @@ async def _warn_config_permissions(
 ) -> None:
     """#1219: warn (log + one Telegram notice) when the config holds an
     inline secret and other local users can read it or its directory, or a
-    backup is readable. Only when the findings change. Never raises."""
+    backup is readable. Only when a finding is new. Never raises."""
     if config_path is None:
         return
     from ..config import config_permission_fixes, read_config
@@ -623,10 +623,10 @@ async def _warn_config_permissions(
     except Exception:  # noqa: BLE001 — a permission check must never break a load
         logger.debug("config.file_permissions.check_failed", exc_info=True)
         return
-    if fixes == state.config_permission_fixes:
-        return
+    previous = state.config_permission_fixes
     state.config_permission_fixes = fixes
-    if not fixes:
+    # Only a new finding warns; a partial fix just updates the state.
+    if not set(fixes) - set(previous):
         return
     logger.warning(
         "config.file_permissions",

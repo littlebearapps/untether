@@ -548,7 +548,13 @@ def strict_webhook_changes(webhook: WebhookConfig) -> tuple[str, ...]:
     if webhook.action == "agent_run":
         if webhook.project is None:
             changes.append("skipped: no project")
-        if webhook.permission_mode is None:
+        # Pi and OpenCode have no mode to change (and can't set one).
+        if webhook.permission_mode is None and webhook.engine in (
+            None,
+            "claude",
+            "codex",
+            "antigravity",
+        ):
             changes.append(
                 "runs in the engine's safe mode (Claude default, Codex safe, "
                 "Antigravity Workspace) instead of the chat's"

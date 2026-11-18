@@ -193,6 +193,22 @@ def test_permissions_notice_names_commands_only() -> None:
     assert "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN" in text
 
 
+def test_permissions_notice_keeps_each_command_on_its_own_line() -> None:
+    from untether.markdown import MarkdownParts
+    from untether.telegram.render import prepare_telegram
+
+    fixes = [
+        "chmod 600 /home/nathan/.untether-dev/untether.toml",
+        "chmod 700 /home/nathan/.untether-dev",
+        "chmod 600 /home/nathan/.untether-dev/untether.toml.bak*",
+    ]
+    text, _ = prepare_telegram(
+        MarkdownParts(header=format_config_permissions_notice(fixes))
+    )
+    lines = text.splitlines()
+    assert all(fix in lines for fix in fixes)
+
+
 # --- the loop's warning ----------------------------------------------------
 
 
@@ -227,3 +243,14 @@ async def test_loop_warns_once_per_finding(tmp_path: Path) -> None:
     assert len(transport.send_calls) == 2
     await _warn_config_permissions(cfg, state, None)
     assert len(transport.send_calls) == 2
+
+    # A partial fix (one finding of two gone) updates the state quietly.
+    backup = path.with_name("untether.toml.bak1")
+    backup.write_text("x", encoding="utf-8")
+    backup.chmod(0o644)
+    await _warn_config_permissions(cfg, state, path)
+    assert len(transport.send_calls) == 3
+    backup.chmod(0o600)
+    await _warn_config_permissions(cfg, state, path)
+    assert len(transport.send_calls) == 3
+    assert len(state.config_permission_fixes) == 1

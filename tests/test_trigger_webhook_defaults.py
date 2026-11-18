@@ -232,6 +232,9 @@ def test_strict_webhook_changes_lists_each_change() -> None:
     assert strict_webhook_changes(configured) == ()
     codex = _webhook(project="app", engine="codex", permission_mode="safe")
     assert strict_webhook_changes(codex) == ()
+    # Pi and OpenCode have no mode for strict to change.
+    for engine in ("pi", "opencode"):
+        assert strict_webhook_changes(_webhook(project="app", engine=engine)) == ()
 
 
 def test_warn_strict_webhook_changes_once_and_never_in_strict() -> None:

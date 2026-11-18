@@ -20,6 +20,7 @@
 - **fix(claude):** two steers folded into one turn no longer hold the next follow-up for 120 s or report the first as "not run" [#1173](https://github.com/littlebearapps/untether/issues/1173)
 - **fix(claude):** no more stray "✓ Permission resolved" rows in a later live-session turn [#942](https://github.com/littlebearapps/untether/issues/942)
 - **fix(codex):** Codex `--trust` (new in codex-cli 0.169.0) is refused in `[engines.codex] extra_args`, because it saves project trust for every future chat; set `trust_level` in `~/.codex/config.toml` instead [#1040](https://github.com/littlebearapps/untether/issues/1040)
+- **fix(triggers):** the config-permissions notice keeps each `chmod` command on its own line and isn't posted again when a finding is fixed; the strict-defaults warning no longer flags Pi or OpenCode webhooks, which have no mode to change [#1247](https://github.com/littlebearapps/untether/issues/1247)
 - **fix(triggers):** a webhook whose announcement failed is no longer recorded as fired [#1123](https://github.com/littlebearapps/untether/issues/1123)
 - **fix:** `/cancel` sent while a finished run is still shutting down now drops pending `/at` runs and always replies [#1176](https://github.com/littlebearapps/untether/issues/1176)
 - **fix:** RAM and run-limit block messages count idle live sessions, say the limit is host-wide and point `/cancel` at the chat that owns the run; `/usage` no longer shows `prespawn_blocked` [#1195](https://github.com/littlebearapps/untether/issues/1195)
