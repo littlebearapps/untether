@@ -9556,13 +9556,18 @@ def _translate_claude_event_base(
             # this state never saw as a tool_use (the sandbox network ask
             # sends a generated one no tool_result carries) falls back to the
             # old mapping; completion then comes via the #229 reconcile.
+            # #1251: never for an agent's request — the newest tool_use is
+            # another thread's, whose result would strip this approval.
             native_tool_use_id = getattr(request, "tool_use_id", None)
-            tool_key = (
-                native_tool_use_id
-                if isinstance(native_tool_use_id, str)
+            if (
+                isinstance(native_tool_use_id, str)
                 and native_tool_use_id in state.pending_actions
-                else state.last_tool_use_id
-            )
+            ):
+                tool_key = native_tool_use_id
+            elif getattr(request, "agent_id", None):
+                tool_key = None
+            else:
+                tool_key = state.last_tool_use_id
             if tool_key:
                 state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)

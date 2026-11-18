@@ -4356,6 +4356,47 @@ def test_1251_snapshot_carries_agent_and_reason() -> None:
     assert "r-agent" not in state.request_origin
 
 
+def test_1251_agent_request_does_not_steal_tool_mapping() -> None:
+    """#1251: an agent's request with an unseen ``tool_use_id`` must not take
+    over the main thread's tool mapping, or that tool's result strips the
+    agent's still-pending approval."""
+    state, factory = _make_state_with_session("sess-1251m")
+    state.prompting_mode = True
+    _929_seen_tool(state, "toolu_main")
+    main_action = _started_action_id(
+        translate_claude_event(
+            _929_request("r-main", tool_use_id="toolu_main", command="ls"),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    )
+    agent_action = _started_action_id(
+        translate_claude_event(
+            _929_request(
+                "r-agent",
+                "Write",
+                tool_use_id="toolu_agent_unseen",
+                agent_id="ad1",
+                file_path="/x",
+            ),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    )
+    assert state.control_action_for_tool == {"toolu_main": main_action}
+    out = translate_claude_event(
+        _929_tool_result("toolu_main"), title="claude", state=state, factory=factory
+    )
+    done = [
+        e.action.id
+        for e in out
+        if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    assert main_action in done and agent_action not in done
+
+
 def test_929_live_idle_request_emits_action_without_turn() -> None:
     """Pins design A's routing assumption: a control request while the live
     session is idle yields the keyboard action and opens no turn."""

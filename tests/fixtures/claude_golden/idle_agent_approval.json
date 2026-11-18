@@ -682,9 +682,6 @@
     "states": {
      "golden-session-1": {
       "awaiting_user_approval": true,
-      "control_action_for_tool": {
-       "toolu_agent_1": "claude.control.2"
-      },
       "control_registered": [
        "req-agent-bash-1"
       ],

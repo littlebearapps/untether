@@ -160,7 +160,7 @@ GOLDEN_SHA256: dict[str, str] = {
     "background_task_options_changed.jsonl": "dda79cb9df8721ec285ecb43ad5ce683a300d6dec5f8d5359a8f9e14cdfcd4a3",
     "cancel_with_pending_approval.json": "4e73fda85497c17717d54df09837f7114320979a0a10b2ae3836b3505e72e4b0",
     "cancel_with_pending_approval.jsonl": "f72dfa5b9cc8af2e0d4ff9ef6a41d22d856a2946c2c7a9092f5811438eb6a674",
-    "idle_agent_approval.json": "96f0251ce303dbe2b50567c35d14dfbb08d203e322b1ab3d0efdc77aeb0bf264",
+    "idle_agent_approval.json": "c863e6228112f38e1cd4906bb3daaacb5966f8743cc4d407bff65f7c671d0c65",
     "idle_agent_approval.jsonl": "06a22dd133572a3534b268d15cd75f444e2e37f3eaa45df3de8fc60f27a4efb8",
     "idle_close_no_tasks.json": "093fc408180dcd50262c58bf31de5705de727a184f8ea03a9a777caa0540dd3d",
     "idle_close_no_tasks.jsonl": "518075134a3dac8b7750956f3675d23e6610e2a41004812eae1e1ba759ffe6d6",
