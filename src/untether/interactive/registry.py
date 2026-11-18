@@ -222,6 +222,11 @@ class ControlRequestSnapshot:
     # #929: the key parameters Approve would allow (``_tool_input_details``),
     # so a rescued request with no tracked action still says what it is.
     input_details: str = ""
+    # #1251: who asks and why, for a rescue with no tracked action (the
+    # request arrived in a follow-up turn, whose tracker is gone). The reason
+    # is user-facing text: never log it.
+    agent_id: str | None = None
+    decision_reason: str | None = None
 
 
 class ControlLookup(NamedTuple):

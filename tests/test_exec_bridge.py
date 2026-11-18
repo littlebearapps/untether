@@ -14495,6 +14495,45 @@ async def test_929_rescue_uses_tracked_action() -> None:
     assert "A background agent needs your approval" in sent["message"].text
 
 
+@pytest.mark.anyio
+async def test_1251_rescue_of_followup_turn_request_keeps_agent_and_reason() -> None:
+    """#1251: a follow-up turn's action lives in that turn's tracker, so the
+    run-level tracker is empty at rescue; the card still names the agent
+    and shows why it asks, from the snapshot."""
+    from untether.orphan_approvals import OrphanApprovalSurface
+    from untether.runners.claude import ControlRequestSnapshot
+
+    snap = ControlRequestSnapshot(
+        request_id="r-1251",
+        session_id="sess-919",
+        age_s=31.0,
+        tool_name="Write",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=True,
+        agent_id="a1",
+        decision_reason="outside cwd",
+    )
+    transport = FakeTransport()
+    surface = OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=_FakeClock(start=100.0),
+        label_for=lambda agent_id: "Probe agent" if agent_id == "a1" else None,
+        anchor_for=lambda agent_id: None,
+    )
+    edits, _, _, _ = _edits_929(snaps=[snap], surface=surface)
+    edits.control_surface_probe = lambda: frozenset()
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    text = sent["message"].text
+    assert "A background agent needs your approval" in text
+    assert "🤖 Probe agent" in text
+    assert "🪝 outside cwd" in text
+
+
 def test_929_rescue_not_before_grace() -> None:
     edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=10.0))
     edits._check_unanswerable_control_requests()

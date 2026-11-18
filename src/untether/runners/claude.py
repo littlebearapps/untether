@@ -1783,6 +1783,11 @@ class ClaudeStreamState:
     # #684: request_id -> time.monotonic() when it was registered for a user
     # answer (normal, hold-open and ``da:``), for the unanswerable detector.
     control_registered_at: dict[str, float] = field(default_factory=dict)
+    # #1251: request_id -> (agent_id, decision_reason) of a can_use_tool
+    # request, for the snapshot; pruned with ``control_registered_at``.
+    request_origin: dict[str, tuple[str | None, str | None]] = field(
+        default_factory=dict
+    )
     # Auto-approve ExitPlanMode when permission_mode is `plan-auto` (#741;
     # spelled `auto` before 0.35.5rc8)
     auto_approve_exit_plan_mode: bool = False
@@ -2391,6 +2396,8 @@ class ClaudeStreamState:
         registered = self.control_registered_at
         for rid in [r for r in registered if r not in _REQUEST_TO_SESSION]:
             del registered[rid]
+        for rid in [r for r in self.request_origin if r not in _REQUEST_TO_SESSION]:
+            del self.request_origin[rid]
         writer_ok = sid in _SESSION_STDIN and sid in _ACTIVE_RUNNERS
         snaps: list[ControlRequestSnapshot] = []
         for rid, owner in list(_REQUEST_TO_SESSION.items()):
@@ -2400,6 +2407,7 @@ class ClaudeStreamState:
             if at is None:
                 continue
             synthetic = rid.startswith("da:")
+            origin = self.request_origin.get(rid, (None, None))
             if synthetic:
                 kind = "synthetic"
             elif self.request_to_action.get(rid, "").startswith(
@@ -2424,6 +2432,8 @@ class ClaudeStreamState:
                     input_details=""
                     if synthetic
                     else _tool_input_details(_REQUEST_TO_INPUT.get(rid)),
+                    agent_id=origin[0],
+                    decision_reason=origin[1],
                 )
             )
         return snaps
@@ -7371,6 +7381,7 @@ def _handle_control_cancel(
         return []
 
     registered_at = state.control_registered_at.pop(rid, None)
+    state.request_origin.pop(rid, None)
     age_s = (
         round(time.monotonic() - registered_at, 1)
         if registered_at is not None
@@ -9508,6 +9519,10 @@ def _translate_claude_event_base(
                         tool_name=getattr(request, "tool_name", ""),
                         tool_input=getattr(request, "input", {}),
                     )
+                    state.request_origin[request_id] = (
+                        getattr(request, "agent_id", None) or None,
+                        _control_reason_text(request),
+                    )
                 else:
                     register(request_id, session_key=session_id)
                 state.control_registered_at[request_id] = time.monotonic()  # #684
@@ -9541,13 +9556,18 @@ def _translate_claude_event_base(
             # this state never saw as a tool_use (the sandbox network ask
             # sends a generated one no tool_result carries) falls back to the
             # old mapping; completion then comes via the #229 reconcile.
+            # #1251: never for an agent's request — the newest tool_use is
+            # another thread's, whose result would strip this approval.
             native_tool_use_id = getattr(request, "tool_use_id", None)
-            tool_key = (
-                native_tool_use_id
-                if isinstance(native_tool_use_id, str)
+            if (
+                isinstance(native_tool_use_id, str)
                 and native_tool_use_id in state.pending_actions
-                else state.last_tool_use_id
-            )
+            ):
+                tool_key = native_tool_use_id
+            elif getattr(request, "agent_id", None):
+                tool_key = None
+            else:
+                tool_key = state.last_tool_use_id
             if tool_key:
                 state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)

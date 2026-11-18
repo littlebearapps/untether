@@ -399,7 +399,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": true,
+        "decision_reason": null,
         "input_details": "",
         "kind": "ask",
         "request_id": "req-ask-1",
@@ -879,7 +881,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": true,
+        "decision_reason": null,
         "input_details": "",
         "kind": "ask",
         "request_id": "req-ask-2",
