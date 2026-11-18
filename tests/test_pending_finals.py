@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from structlog.testing import capture_logs
@@ -18,6 +19,7 @@ from untether.runner_bridge import _FINAL_FAILED_NOTICE, _FINAL_UNCONFIRMED_NOTI
 from untether.telegram import pending_finals as pf
 from untether.telegram.api_models import Chat, Message
 from untether.telegram.bridge import TelegramTransport
+from untether.telegram.client import TelegramClient
 from untether.telegram.client_api import HttpBotClient
 from untether.transport import MessageRef, RenderedMessage, SendOptions, message_kind
 
@@ -28,15 +30,20 @@ USER_REF = MessageRef(channel_id=CHAT, message_id=10)
 CARD_REF = MessageRef(channel_id=CHAT, message_id=11)
 
 
+_OUTCOMES = {"resend": "resendable", "lost": "unknown", "rejected": "failed"}
+
+
 class _ScriptedBot(FakeBot):
     """``outcomes`` is consumed one per send: ``ok``; ``resend`` (5xx or never
-    sent); ``lost`` (unknown outcome); ``rejected`` (4xx). Then ``ok``."""
+    sent); ``lost`` (unknown outcome); ``rejected`` (4xx). Then ``ok``. A
+    failed send reports its outcome through ``on_failure``, as the client
+    does."""
 
     def __init__(self, outcomes: list[str]) -> None:
         super().__init__()
         self.outcomes = list(outcomes)
         self._next_id = 100
-        self._flags: dict[str, set[int]] = {"resend": set(), "lost": set()}
+        self._lost: set[int] = set()
 
     async def send_message(  # type: ignore[override]
         self,
@@ -50,9 +57,9 @@ class _ScriptedBot(FakeBot):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
+        on_failure: Any = None,
     ) -> Message | None:
-        for flags in self._flags.values():
-            flags.discard(chat_id)
+        self._lost.discard(chat_id)
         outcome = self.outcomes.pop(0) if self.outcomes else "ok"
         self.send_calls.append(
             {
@@ -63,21 +70,17 @@ class _ScriptedBot(FakeBot):
             }
         )
         if outcome != "ok":
-            if outcome in self._flags:
-                self._flags[outcome].add(chat_id)
+            if outcome == "lost":
+                self._lost.add(chat_id)
+            if on_failure is not None:
+                on_failure(_OUTCOMES[outcome])
             return None
         self._next_id += 1
         return Message(message_id=self._next_id, chat=Chat(id=chat_id, type="private"))
 
-    def pop_resendable_send(self, chat_id: int) -> bool:
-        return self._pop("resend", chat_id)
-
     def pop_unconfirmed_send(self, chat_id: int) -> bool:
-        return self._pop("lost", chat_id)
-
-    def _pop(self, kind: str, chat_id: int) -> bool:
-        found = chat_id in self._flags[kind]
-        self._flags[kind].discard(chat_id)
+        found = chat_id in self._lost
+        self._lost.discard(chat_id)
         return found
 
 
@@ -113,28 +116,66 @@ def _http_client(handler) -> HttpBotClient:
 
 
 @pytest.mark.parametrize(
-    ("respond", "resendable"),
+    ("respond", "outcome"),
     [
-        (lambda r: httpx.Response(502, json={"ok": False, "error_code": 502}), True),
-        (lambda r: httpx.Response(500, text="oops"), True),
-        (lambda r: (_ for _ in ()).throw(httpx.ConnectError("x", request=r)), True),
-        (lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("x", request=r)), False),
-        (lambda r: httpx.Response(400, json={"ok": False, "description": "x"}), False),
-        (lambda r: httpx.Response(403, json={"ok": False, "description": "x"}), False),
+        (
+            lambda r: httpx.Response(502, json={"ok": False, "error_code": 502}),
+            "resendable",
+        ),
+        (lambda r: httpx.Response(500, text="oops"), "resendable"),
+        (
+            lambda r: (_ for _ in ()).throw(httpx.ConnectError("x", request=r)),
+            "resendable",
+        ),
+        (lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("x", request=r)), "unknown"),
+        (
+            lambda r: httpx.Response(400, json={"ok": False, "description": "x"}),
+            "failed",
+        ),
+        (
+            lambda r: httpx.Response(403, json={"ok": False, "description": "x"}),
+            "failed",
+        ),
     ],
     ids=["502", "500", "connect_error", "read_timeout", "400", "403"],
 )
-async def test_send_outcome_classification(respond, resendable: bool) -> None:
+async def test_send_outcome_classification(respond, outcome: str) -> None:
     client = _http_client(respond)
-    assert await client.send_message(chat_id=CHAT, text="x") is None
-    assert client.pop_resendable_send(CHAT) is resendable
-    assert client.pop_resendable_send(CHAT) is False  # read once
+    seen: list[str] = []
+    assert (
+        await client.send_message(chat_id=CHAT, text="x", on_failure=seen.append)
+        is None
+    )
+    assert seen == [outcome]
 
 
-async def test_edit_5xx_is_never_a_resendable_send() -> None:
-    client = _http_client(lambda r: httpx.Response(502, text="bad gateway"))
-    assert await client.edit_message_text(chat_id=CHAT, message_id=1, text="x") is None
-    assert client.pop_resendable_send(CHAT) is False
+async def test_a_good_send_reports_nothing() -> None:
+    client = _http_client(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"message_id": 5, "chat": {"id": CHAT, "type": "private"}},
+            },
+        )
+    )
+    seen: list[str] = []
+    assert await client.send_message(chat_id=CHAT, text="x", on_failure=seen.append)
+    assert seen == []
+
+
+async def test_an_earlier_5xx_never_marks_a_later_refused_send() -> None:
+    """Each send starts clean: a 502 (send or edit) before a 400 send leaves
+    the 400 ``failed``."""
+    codes = iter([502, 502, 400])
+    client = _http_client(
+        lambda r: httpx.Response(next(codes), json={"ok": False, "description": "x"})
+    )
+    seen: list[str] = []
+    await client.edit_message_text(chat_id=CHAT, message_id=1, text="x")
+    await client.send_message(chat_id=CHAT, text="x", on_failure=seen.append)
+    await client.send_message(chat_id=CHAT, text="y", on_failure=seen.append)
+    assert seen == ["resendable", "failed"]
 
 
 # --- transport: store and redeliver -----------------------------------------
@@ -273,3 +314,101 @@ async def test_corrupt_state_file_loads_empty(tmp_path) -> None:
         pending.attach(path)
     assert len(pending) == 0
     assert any(log["event"] == "pending_finals.load_failed" for log in logs)
+
+
+# --- the real outbox: classification per request, not per chat --------------
+
+
+def _ok(message_id: int) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "ok": True,
+            "result": {
+                "message_id": message_id,
+                "chat": {"id": CHAT, "type": "private"},
+            },
+        },
+    )
+
+
+def _real_client(handler) -> TelegramClient:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return TelegramClient("123:abcDEF_ghij", http_client=http, private_chat_rps=0)
+
+
+def _sent_text(request: httpx.Request) -> str:
+    return json.loads(request.content)["text"]
+
+
+async def test_retry_and_live_send_to_one_chat_keep_their_own_outcomes() -> None:
+    """A redelivery that gets a 502 while a live send to the same chat times
+    out: the retry is counted (kept), never read as the live send's unknown
+    outcome and dropped; the live send is never stored."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _sent_text(request) == "live":
+            raise httpx.ReadTimeout("lost", request=request)
+        return httpx.Response(502, json={"ok": False, "error_code": 502})
+
+    client = _real_client(handler)
+    await client._outbox.ensure_worker()  # the worker lives in this task
+    transport = TelegramTransport(client)
+    transport.pending_finals.add(
+        chat_id=CHAT,
+        chunks=[RenderedMessage(text="answer")],
+        reply_to_message_id=USER_REF.message_id,
+        thread_id=None,
+        replace_message_id=CARD_REF.message_id,
+        notify=True,
+    )
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(transport.pending_finals.redeliver, client)
+        with message_kind("progress"):
+            await client.send_message(chat_id=CHAT, text="live", wait=False)
+    await client.flush_outbox(timeout=5)
+
+    (entry,) = transport.pending_finals._entries.values()
+    assert entry["attempts"] == 1
+    assert [c["text"] for c in entry["chunks"]] == ["answer"]
+    await client.close()
+
+
+async def test_cancelled_waiter_still_keeps_a_queued_final_that_fails() -> None:
+    """#928's early-delivery bound cancels the waiter while chunk 1 is in
+    flight; the rest are queued. Chunks that later fail with a 5xx are kept
+    one by one; the chunk that lands is never kept."""
+    unblock = anyio.Event()
+    started = anyio.Event()
+    replies = {"one": 502, "two": 200, "three": 502}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        text = _sent_text(request)
+        if text == "one":
+            started.set()
+            await unblock.wait()
+        if replies[text] == 200:
+            return _ok(50)
+        return httpx.Response(502, json={"ok": False, "error_code": 502})
+
+    client = _real_client(handler)
+    await client._outbox.ensure_worker()  # the worker lives in this task
+    transport = TelegramTransport(client)
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+
+            async def cut_short() -> None:
+                await started.wait()
+                tg.cancel_scope.cancel()
+
+            tg.start_soon(cut_short)
+            await _send_final(transport, _final("one", "two", "three"))
+    unblock.set()
+    await client.flush_outbox(timeout=5)
+
+    kept = sorted(
+        (e["chunks"][0]["text"], len(e["chunks"]), e["replace_message_id"])
+        for e in transport.pending_finals._entries.values()
+    )
+    assert kept == [("one", 1, CARD_REF.message_id), ("three", 1, None)]
+    await client.close()

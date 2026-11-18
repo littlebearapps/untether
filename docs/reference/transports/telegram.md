@@ -77,7 +77,7 @@ the original message, and the first chunk replaces the progress card (INFO
 outcome drops the entry without a second send. After 5 attempts or 24 h the entry
 is dropped (ERROR `final.redelivery_abandoned`) and the card, if still there, is
 edited to the "couldn't be sent" note. A failed later chunk of a multi-chunk final
-keeps only that chunk and the ones after it, so nothing is posted twice.
+keeps only that chunk and the ones after it, so nothing is posted twice. The outcome is reported by the request itself (`send_message(on_failure=…)`), inside the outbox op, so another send to the same chat can't blur it and a final is kept even when its waiter was cut short by the early-delivery bound; after such a cut each queued chunk is kept on its own, so a redelivered chunk may arrive out of order but never twice.
 
 ## Incoming messages
 

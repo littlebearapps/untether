@@ -4,7 +4,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 import httpx
 import msgspec
@@ -14,6 +14,9 @@ from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
 
 logger = get_logger(__name__)
+
+# #1207: how a failed ``sendMessage`` failed (see ``HttpBotClient._send_outcome``).
+SendOutcome = Literal["resendable", "unknown", "failed"]
 
 _BOT_TOKEN_RE = re.compile(r"/bot[^/]+/")
 
@@ -180,6 +183,7 @@ class BotClient(Protocol):
         *,
         replace_message_id: int | None = None,
         wait: bool = True,
+        on_failure: Callable[[SendOutcome], None] | None = None,
     ) -> Message | None: ...
 
     async def send_document(
@@ -315,14 +319,18 @@ class HttpBotClient:
             return True
         return False
 
-    def pop_resendable_send(self, chat_id: Any) -> bool:
-        """#1207: True once if the last ``sendMessage`` to ``chat_id`` failed
-        before it was sent, or with an HTTP 5xx (D1: a rare duplicate after a
-        5xx beats a lost answer). Timeouts and 4xx never count."""
+    def _send_outcome(self, chat_id: Any) -> SendOutcome:
+        """#1207: how the ``sendMessage`` that just failed failed. Read at
+        once, in the same task and with no await since ``_request``, so no
+        other send to the chat can have changed it. ``resendable``: never sent,
+        or an HTTP 5xx (D1: a rare duplicate after a 5xx beats a lost answer);
+        ``unknown``: it may have arrived (#1029); ``failed``: refused (4xx) or
+        anything else. Timeouts are never resendable."""
         if chat_id in self._resendable_sends:
-            self._resendable_sends.discard(chat_id)
-            return True
-        return False
+            return "resendable"
+        if chat_id in self._unconfirmed_sends:
+            return "unknown"
+        return "failed"
 
     def _note_resendable_send(self, method: str, request_payload: Any) -> None:
         chat_id = _payload_target(request_payload)[0]
@@ -805,7 +813,10 @@ class HttpBotClient:
         *,
         replace_message_id: int | None = None,
         wait: bool = True,
+        on_failure: Callable[[SendOutcome], None] | None = None,
     ) -> Message | None:
+        """``on_failure`` (#1207) gets the outcome of a send that returns
+        None, from inside the request — wherever the caller is by then."""
         params: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if disable_notification is not None:
             params["disable_notification"] = disable_notification
@@ -821,7 +832,12 @@ class HttpBotClient:
         if reply_markup is not None:
             params["reply_markup"] = reply_markup
         result = await self._post("sendMessage", params)
-        return self._decode_result(method="sendMessage", payload=result, model=Message)
+        message = self._decode_result(
+            method="sendMessage", payload=result, model=Message
+        )
+        if message is None and on_failure is not None:
+            on_failure(self._send_outcome(chat_id))
+        return message
 
     async def send_document(
         self,

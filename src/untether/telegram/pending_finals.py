@@ -39,11 +39,6 @@ def resolve_pending_finals_path(config_path: Path) -> Path:
     return config_path.with_name(STATE_FILENAME)
 
 
-def _pop(bot: Any, name: str, chat_id: int) -> bool:
-    pop = getattr(bot, name, None)
-    return bool(pop(chat_id)) if callable(pop) else False
-
-
 class PendingFinals:
     def __init__(self, *, wall_clock: Callable[[], float] = time.time) -> None:
         self._wall_clock = wall_clock
@@ -150,6 +145,9 @@ class PendingFinals:
         chunks: list[dict[str, Any]] = entry["chunks"]
         while chunks:
             chunk = chunks[0]
+            # Reported by the request itself, so no other send to the chat
+            # can blur it (#1207).
+            outcomes: list[str] = []
             with message_kind("final"):
                 sent = await bot.send_message(
                     chat_id=chat_id,
@@ -160,13 +158,16 @@ class PendingFinals:
                     message_thread_id=entry.get("thread_id"),
                     replace_message_id=entry.get("replace_message_id"),
                     disable_notification=not entry.get("notify", True),
+                    on_failure=outcomes.append,
                 )
             if sent is not None:
                 chunks.pop(0)
                 entry["replace_message_id"] = None  # the card went with chunk 1
                 self._save()
                 continue
-            if _pop(bot, "pop_resendable_send", chat_id):
+            if not outcomes:
+                return  # never ran (outbox closed or dropped): try again later
+            if outcomes[0] == "resendable":
                 entry["attempts"] = int(entry.get("attempts", 0)) + 1
                 if entry["attempts"] >= MAX_ATTEMPTS:
                     await self._drop(
@@ -181,9 +182,12 @@ class PendingFinals:
                     )
                 return
             # Unknown (it may be in the chat now) or refused: never resend.
-            unknown = _pop(bot, "pop_unconfirmed_send", chat_id)
             await self._drop(
-                bot, key, entry, event="final.redelivery_dropped", unknown=unknown
+                bot,
+                key,
+                entry,
+                event="final.redelivery_dropped",
+                unknown=outcomes[0] == "unknown",
             )
             return
         del self._entries[key]
