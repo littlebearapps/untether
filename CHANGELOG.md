@@ -15,6 +15,11 @@
 
 ### fixes
 
+- **fix(claude):** the "⛔ Fable limit reached" and "⛔ Team budget reached" notices work again with Claude Code 2.1.323 and later, which reworded those messages, and org, channel and individual usage caps now show "⛔ Usage limit reached" [#1238](https://github.com/littlebearapps/untether/issues/1238)
+- **fix(pi):** Pi's context compaction shows its 🗜️ row again. Newer Pi releases renamed the events to `compaction_start` / `compaction_end`, so Untether ignored them and logged a warning for each. Both names are now read, and a failed compaction says so [#1239](https://github.com/littlebearapps/untether/issues/1239)
+- **fix(triggers):** trigger config, safe-defaults and config-permission notices now go only to the admin DMs (`allowed_user_ids`, or the main `chat_id` when there are none), no longer into every project chat with a run in progress [#1248](https://github.com/littlebearapps/untether/issues/1248)
+- **fix:** an answer that ends inside a code block (for example a quoted README with its own code block) no longer swallows the footer. The block is now closed first, so the model, resume and cost lines render as usual on every engine [#1249](https://github.com/littlebearapps/untether/issues/1249)
+- **fix(codex):** a Codex run in a project Codex doesn't trust now shows a ⚠️ row saying its `.codex/` settings and MCP servers were skipped, and how to trust the project in `~/.codex/config.toml`. Untether never trusts projects for you [#1240](https://github.com/littlebearapps/untether/issues/1240)
 - **fix:** a final reply that certainly failed to send (connection refused or a Telegram 5xx) is kept and sent again once Telegram answers, or after a restart; timeouts and refusals are never re-sent, so a reply can't be posted twice by mistake [#1207](https://github.com/littlebearapps/untether/issues/1207)
 - **fix(claude):** Codex plugin `--background` jobs started from a Claude chat are no longer killed about a minute after the reply; the live session stays open while they run (up to the session cap) [#1186](https://github.com/littlebearapps/untether/issues/1186)
 - **fix(claude):** approval requests are no longer auto-denied after 5 minutes; they wait for your answer, the reminders or the 4-hour cap [#844](https://github.com/littlebearapps/untether/issues/844)

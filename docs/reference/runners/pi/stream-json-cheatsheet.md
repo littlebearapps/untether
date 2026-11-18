@@ -66,17 +66,23 @@ required `type` field. These are `AgentSessionEvent` objects from
 {"type":"tool_execution_end","toolCallId":"tool_1","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}],"details":{}},"isError":false}
 ```
 
-### `auto_compaction_start`
+### `compaction_start`
 
 ```json
-{"type":"auto_compaction_start","reason":"context_limit"}
+{"type":"compaction_start","reason":"threshold"}
 ```
 
-### `auto_compaction_end`
+`reason` is `manual`, `threshold` or `overflow`. Pi < 0.66.1 named this event
+`auto_compaction_start`; Untether still reads the old name (#1239).
+
+### `compaction_end`
 
 ```json
-{"type":"auto_compaction_end","result":{"tokensBefore":42000},"aborted":false}
+{"type":"compaction_end","reason":"threshold","result":{"summary":"...","firstKeptEntryId":"abc123","tokensBefore":150000,"estimatedTokensAfter":32000},"aborted":false,"willRetry":false}
 ```
+
+A failed compaction has no `result`, `aborted:false` and an `errorMessage`.
+Pi < 0.66.1 named this event `auto_compaction_end`.
 
 ### `auto_retry_start` / `auto_retry_end`
 

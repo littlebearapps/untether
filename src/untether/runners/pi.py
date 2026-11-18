@@ -414,7 +414,7 @@ def translate_pi_event(
             )
             return out
 
-        case pi_schema.AutoCompactionStart(reason=reason):
+        case pi_schema.CompactionStart(reason=reason):
             state.compaction_seq += 1
             action_id = f"compaction_{state.compaction_seq}"
             state.compaction_action_id = action_id
@@ -432,7 +432,9 @@ def translate_pi_event(
             )
             return out
 
-        case pi_schema.AutoCompactionEnd(result=result, aborted=aborted):
+        case pi_schema.CompactionEnd(
+            result=result, aborted=aborted, errorMessage=compaction_error
+        ):
             action_id = (
                 state.compaction_action_id or f"compaction_{state.compaction_seq}"
             )
@@ -440,8 +442,11 @@ def translate_pi_event(
             tokens_before = None
             if isinstance(result, dict):
                 tokens_before = result.get("tokensBefore")
+            failed = bool(aborted or compaction_error)
             if aborted:
                 title = "context compaction aborted"
+            elif compaction_error:
+                title = "context compaction failed"
             elif tokens_before:
                 title = f"context compacted ({tokens_before:,} tokens)"
             else:
@@ -455,7 +460,7 @@ def translate_pi_event(
                         title=title,
                         detail={"result": result} if result else {},
                     ),
-                    ok=not aborted,
+                    ok=not failed,
                 )
             )
             return out

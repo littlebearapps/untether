@@ -523,11 +523,11 @@ async def _notify_reload_applied(
 async def _notify_trigger_config_problem(
     cfg: TelegramBridgeConfig,
     text: str,
-    *,
-    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
     """#1117: post a trigger config problem (skipped entries, or a whole
-    ``[triggers]`` block that failed) to the reload-notice audience.
+    ``[triggers]`` block that failed) to the admin DMs (#1248): the
+    ``allowed_user_ids`` chats, or ``cfg.chat_id`` when there are none.
+    Busy project chats are left out; only the hot-reload cue goes there.
 
     Rendered from markdown into entities (no parse mode), so validation text
     full of ``_`` can't make the send fail; the formatters escape user text
@@ -538,7 +538,7 @@ async def _notify_trigger_config_problem(
 
     try:
         rendered, entities = prepare_telegram(MarkdownParts(header=text))
-        targets = _reload_notice_targets(cfg, running_tasks, restart_pending=False)
+        targets = _reload_notice_targets(cfg, None, restart_pending=False)
     except Exception:  # noqa: BLE001 — a notice must never break startup/reload
         logger.warning("triggers.config_notice.crashed", exc_info=True)
         return
@@ -598,7 +598,6 @@ async def _notify_new_invalid_triggers(
                 running=trigger_manager is not None,
                 webhook_server_running=not state.webhook_server_refused,
             ),
-            running_tasks=state.running_tasks,
         )
 
 
@@ -606,8 +605,6 @@ async def _warn_config_permissions(
     cfg: TelegramBridgeConfig,
     state: TelegramLoopState,
     config_path: Path | None,
-    *,
-    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
     """#1219: warn (log + one Telegram notice) when the config holds an
     inline secret and other local users can read it or its directory, or a
@@ -640,16 +637,12 @@ async def _warn_config_permissions(
     )
     from ..config_reload_notification import format_config_permissions_notice
 
-    await _notify_trigger_config_problem(
-        cfg, format_config_permissions_notice(fixes), running_tasks=running_tasks
-    )
+    await _notify_trigger_config_problem(cfg, format_config_permissions_notice(fixes))
 
 
 async def _notify_strict_webhook_changes(
     cfg: TelegramBridgeConfig,
     changes: Sequence[StrictWebhookChange],
-    *,
-    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
     """#1118: one notice listing the newly found compat-mode webhooks that
     ``webhook_defaults = "strict"`` would change. Nothing when none are new."""
@@ -658,9 +651,7 @@ async def _notify_strict_webhook_changes(
     from ..config_reload_notification import format_strict_webhook_changes_notice
 
     await _notify_trigger_config_problem(
-        cfg,
-        format_strict_webhook_changes_notice(changes),
-        running_tasks=running_tasks,
+        cfg, format_strict_webhook_changes_notice(changes)
     )
 
 
@@ -786,7 +777,6 @@ async def _notify_trigger_block_failure_on_reload(
             active_secret_webhook_ids=active,
             webhook_server_running=not state.webhook_server_refused,
         ),
-        running_tasks=state.running_tasks,
     )
 
 
@@ -2609,9 +2599,7 @@ async def run_main_loop(
                             "config.reload.applied_notify.crashed", exc_info=True
                         )
 
-                await _warn_config_permissions(
-                    cfg, state, reload.config_path, running_tasks=state.running_tasks
-                )
+                await _warn_config_permissions(cfg, state, reload.config_path)
 
                 # --- Hot-reload trigger configuration ---
                 from ..triggers.settings import format_trigger_error
@@ -2663,7 +2651,6 @@ async def run_main_loop(
                                     new_settings,
                                     warned=state.trigger_strict_changes_warned,
                                 ),
-                                running_tasks=state.running_tasks,
                             )
                             # #894: warn (once) about project-only triggers
                             # that will post to the default chat.

@@ -1,0 +1,13 @@
+{"type":"session","version":3,"id":"pi-1-5-session","timestamp":"2026-11-18T00:00:00.000Z","cwd":"/tmp/project"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool_1","name":"read","arguments":{"path":"README.md"}}],"provider":"openai","model":"gpt-5.4","usage":{"input":10,"output":4,"totalTokens":14},"stopReason":"toolUse","timestamp":1}}
+{"type":"tool_execution_start","toolCallId":"tool_1","toolName":"read","args":{"path":"README.md"}}
+{"type":"tool_execution_end","toolCallId":"tool_1","toolName":"read","result":{"content":[{"type":"text","text":"# Readme"}]},"isError":false}
+{"type":"turn_end","message":{"role":"assistant","content":[]},"toolResults":[]}
+{"type":"compaction_start","reason":"threshold"}
+{"type":"compaction_end","reason":"threshold","result":{"summary":"Summary of conversation...","firstKeptEntryId":"abc123","tokensBefore":150000,"estimatedTokensAfter":32000,"usage":{},"details":{}},"aborted":false,"willRetry":false}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"The README is short."}],"provider":"openai","model":"gpt-5.4","usage":{"input":12,"output":5,"totalTokens":17},"stopReason":"stop","timestamp":2}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"The README is short."}]},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"The README is short."}],"stopReason":"stop"}],"willRetry":false}

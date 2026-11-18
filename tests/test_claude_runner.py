@@ -7991,6 +7991,55 @@ _922_HEADLESS_CAPS = (
         "team_budget",
         "⛔ Team budget reached",
     ),
+    # #1238: CLI 2.1.326 renamed the team budget and added its reset.
+    (
+        "You've hit your team's pooled group budget.",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+    (
+        "You've hit your team's pooled group budget. It resets Dec 1, 9am (UTC).",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+    (
+        "You've hit your individual spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your org's monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your individual usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "You've hit your org's monthly usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "You've hit your channel's monthly usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "Your org is out of usage · add funds to continue.",
+        "",
+        "credits",
+        "⛔ Usage credits used up",
+    ),
 )
 
 
@@ -8101,6 +8150,15 @@ def test_922_interactive_wording_still_latches(
         "Switch to another model to continue.",
         "",
         None,
+        # #1238: time-based heads without the remedy stay #692's.
+        "You've hit your weekly limit · resets Nov 25, 5pm (Australia/Melbourne)",
+        "You've hit your Fable limit · resets Nov 25, 5pm (Australia/Melbourne)",
+        # Admin configuration, not a cap the user can act on.
+        "Your seat type doesn't include Opus 5.5. Switch to another model to continue.",
+        "This service is disabled for your org. Switch to another model to continue.",
+        "Your usage allocation has been disabled by your admin. Switch to another "
+        "model to continue.",
+        "Your group's usage limit is set to $0. Switch to another model to continue.",
     ],
 )
 def test_922_fail_closed(text: str | None) -> None:
@@ -8111,6 +8169,69 @@ def test_922_fail_closed(text: str | None) -> None:
 
     assert _parse_action_required_cap(text) is None
     assert _classify_action_required_cap(text) is None
+
+
+_1238_RESETS = " · resets Nov 25, 5pm (Australia/Melbourne)"
+
+
+@pytest.mark.parametrize("k_suffix", _922_K_VARIANTS)
+def test_1238_fable_plan_limit_wording_latches(
+    k_suffix: str, clean_action_latch, clean_reset_latch
+) -> None:
+    """CLI 2.1.323+ headless Fable cap: the shared rate-limit head plus the
+    plan-limit remedy."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _classify_action_required_cap
+
+    text = (
+        f"You've hit your Fable limit{_1238_RESETS}. "
+        f"Switch to another model{k_suffix} to continue."
+    )
+    assert _classify_action_required_cap(text) == ("Fable", "model", "result_text")
+    with capture_logs() as logs:
+        _922_feed(ClaudeStreamState(), _922_result(text))
+    (rec,) = _922_latched_logs(logs)
+    assert (rec["source"], rec["kind"], rec["model"]) == (
+        "result_text",
+        "model",
+        "Fable",
+    )
+
+
+# Every head the CLI 2.1.327 plan-limit builder can put the remedy on.
+_1238_PLAN_LIMIT_HEADS = (
+    ("Fable limit", ("Fable", "model")),
+    ("team's pooled group budget", ("", "team_budget")),
+    ("monthly spend limit", ("", "spend")),
+    ("channel's monthly spend limit", ("", "spend")),
+    ("individual spend limit", ("", "spend")),
+    ("org's monthly spend limit", ("", "spend")),
+    ("channel's monthly usage limit", ("", "usage_limit")),
+    ("individual usage limit", ("", "usage_limit")),
+    ("org's monthly usage limit", ("", "usage_limit")),
+    # Time-based windows and generic limits: never this class.
+    ("usage limit", None),
+    ("limit", None),
+    ("5-hour limit", None),
+    ("weekly limit", None),
+    ("Opus limit", None),
+    ("Sonnet limit", None),
+)
+
+
+@pytest.mark.parametrize(("name", "expected"), _1238_PLAN_LIMIT_HEADS)
+def test_1238_no_limit_name_is_a_model(
+    name: str, expected: tuple[str, str] | None
+) -> None:
+    from untether.runners.claude import _classify_action_required_cap
+
+    text = (
+        f"You've hit your {name}{_1238_RESETS}. Switch to another model, or manage "
+        "usage credits at https://claude.ai/settings/usage, to continue."
+    )
+    got = _classify_action_required_cap(text)
+    assert got == (None if expected is None else (*expected, "result_text"))
 
 
 def test_922_structured_api_error_latches_without_text(

@@ -479,3 +479,64 @@ class TestNotifyReloadApplied:
         sent = [e for e in logs if e["event"] == "config.reload.applied_notify.sent"]
         assert sent[0]["sent_count"] == 2
         assert sent[0]["targets"] == [[1, None], [2, None], [3, None]]
+
+
+class TestTriggerNoticeAudience:
+    """#1248: trigger config and config-permission problems need the admin,
+    not the agent, so they go to the admin DMs only, never into a project
+    chat just because it has a run in flight (that cue is the hot-reload
+    notice's, #547/#548)."""
+
+    @staticmethod
+    def _state(running_tasks: dict[MessageRef, RunningTask]) -> SimpleNamespace:
+        return SimpleNamespace(
+            running_tasks=running_tasks,
+            trigger_block_error_notified=None,
+            webhook_server_refused=False,
+            config_permission_fixes=(),
+        )
+
+    @pytest.mark.anyio
+    async def test_1248_trigger_notice_skips_busy_project_chats(self):
+        from untether.telegram.loop import _notify_trigger_block_failure_on_reload
+
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100, -200)
+        await _notify_trigger_block_failure_on_reload(
+            cfg, self._state(_run(-200, thread_id=37)), None, "bad [triggers]"
+        )
+        assert _targets(transport) == [(555, None)]
+
+    @pytest.mark.anyio
+    async def test_1248_open_bot_notice_goes_to_chat_id_only(self):
+        """Open bot (allow_any_user, no allowed_user_ids): keeps the
+        ``cfg.chat_id`` fallback, and busy chats are still left out."""
+        from untether.telegram.loop import _notify_trigger_block_failure_on_reload
+
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = ()
+        _with_project_chats(cfg, -100, -200)
+        await _notify_trigger_block_failure_on_reload(
+            cfg, self._state(_run(-200)), None, "bad [triggers]"
+        )
+        assert _targets(transport) == [(cfg.chat_id, None)]
+
+    @pytest.mark.anyio
+    async def test_1248_permissions_notice_admin_only(self, tmp_path: Path):
+        from untether.telegram.loop import _warn_config_permissions
+
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir(mode=0o700)
+        path = cfg_dir / "untether.toml"
+        path.write_text('[transports.telegram]\nbot_token = "x"\n', encoding="utf-8")
+        path.chmod(0o644)
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555,)
+        _with_project_chats(cfg, -100, -200)
+        state = self._state(_run(-200))
+        await _warn_config_permissions(cfg, state, path)
+        assert _targets(transport) == [(555, None)]

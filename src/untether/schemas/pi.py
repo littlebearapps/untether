@@ -69,14 +69,25 @@ class ToolExecutionEnd(_Event, tag="tool_execution_end"):
     isError: bool = False
 
 
-class AutoCompactionStart(_Event, tag="auto_compaction_start"):
+class CompactionStart(_Event, tag="compaction_start"):
     reason: str | None = None
 
 
-class AutoCompactionEnd(_Event, tag="auto_compaction_end"):
+class CompactionEnd(_Event, tag="compaction_end"):
+    reason: str | None = None
     result: dict[str, Any] | None = None
     aborted: bool | None = None
     willRetry: bool | None = None
+    errorMessage: str | None = None
+
+
+# #1239: Pi < 0.66.1 names; subclasses so one match arm covers both.
+class AutoCompactionStart(CompactionStart, tag="auto_compaction_start"):
+    pass
+
+
+class AutoCompactionEnd(CompactionEnd, tag="auto_compaction_end"):
+    pass
 
 
 class AutoRetryStart(_Event, tag="auto_retry_start"):
@@ -104,6 +115,8 @@ type PiEvent = (
     | ToolExecutionStart
     | ToolExecutionUpdate
     | ToolExecutionEnd
+    | CompactionStart
+    | CompactionEnd
     | AutoCompactionStart
     | AutoCompactionEnd
     | AutoRetryStart

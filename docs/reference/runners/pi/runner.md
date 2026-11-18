@@ -129,8 +129,9 @@ The runner should translate:
 
 For the final answer, use the most recent assistant message text (from
 `message_end` events). For errors, if the assistant stopReason is `error` or
-`aborted`, emit `completed(ok=false, error=...)`. `auto_compaction_*` and
-`auto_retry_*` become note actions; see [Untether events](untether-events.md)
+`aborted`, emit `completed(ok=false, error=...)`. `compaction_*` (Pi ≥ 0.66.1;
+the older `auto_compaction_*` names still decode, #1239) and `auto_retry_*`
+become note actions; see [Untether events](untether-events.md)
 for the full mapping.
 
 **Footer model display.** When no model override is set for the chat, Pi extracts the model name from the `message_end` JSONL event and emits a supplementary `StartedEvent` with populated `meta`. The base runner's `handle_started_event` passes this duplicate through whenever `event.meta` is truthy, and `ProgressTracker.note_event` merges meta idempotently, so the completion footer shows the actual default model instead of a blank. ([#225](https://github.com/littlebearapps/untether/issues/225))

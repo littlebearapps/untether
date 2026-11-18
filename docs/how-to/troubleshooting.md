@@ -348,6 +348,19 @@ Antigravity edits files where it runs, so it is refused in a chat with no projec
 
 A progress row such as `⚠️ Codex is ignoring …` is a non-fatal warning from Codex (for example a key in `~/.codex/config.toml` it doesn't recognise), not a failed step; the run carries on. Codex emits each config warning twice, and Untether shows it once ([#987](https://github.com/littlebearapps/untether/issues/987)). To make it go away, fix or remove the setting it names.
 
+### Codex ignores my project's MCP servers or `.codex/config.toml`
+
+Since codex-cli 0.169.0, Codex loads a project's `.codex/` folder (project config, MCP servers, hooks and rules) only when the project is **trusted**. In an untrusted project it skips them, says so only on stderr, and the run otherwise succeeds. Untether shows this as a `⚠️ Codex skipped this project's .codex/ settings …` row on the progress message and logs `codex.project_config_untrusted` ([#1240](https://github.com/littlebearapps/untether/issues/1240)).
+
+**Fix:** trust the project yourself, either by adding it to `~/.codex/config.toml`:
+
+```toml
+[projects."/path/to/repo-root"]
+trust_level = "trusted"
+```
+
+or by running `codex` in that folder once and accepting its "Trust this folder?" prompt. Codex keys trust on the project root (the nearest `.git`), not the subfolder. Untether never trusts a project for you: it doesn't pass `--trust`, and refuses it in `[engines.codex] extra_args` ([#1040](https://github.com/littlebearapps/untether/issues/1040)). See the official [project config](https://developers.openai.com/codex/config-advanced) and [`projects.<path>.trust_level`](https://developers.openai.com/codex/config-reference) docs.
+
 ### OpenCode: unsupported event warning
 
 If OpenCode emits a JSONL event type that Untether doesn't recognise (e.g. a `question` or `permission` event from a newer OpenCode version), Untether v0.35.0+ shows a visible warning in Telegram: "opencode emitted unsupported event: {type}". In older versions, these events were silently dropped, leaving the user with no feedback until the stall watchdog fired.

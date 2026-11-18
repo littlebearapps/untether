@@ -1189,33 +1189,64 @@ def test_743_effort_choices_match_untether_levels() -> None:
 
 # --- #922 (rc20) ---------------------------------------------------------------
 # The #701 action-required cap latch reads the result's `api_error*` fields
-# first and the headless cap wording second. Re-derived against CLI 2.1.289.
+# first and the headless cap wording second. Re-derived against CLI 2.1.327
+# (#1238).
 
-# The headless builder's templates: `<cap sentence> Switch to another model${K}
-# to continue.` — the cap sentence is a literal or a `${g}` / `${h}` placeholder.
+# The credits builder's templates: `<cap sentence> Switch to another model${K}
+# to continue.` — the cap sentence is a literal or a placeholder.
 _922_HEADLESS_TEMPLATE_RE = re.compile(
     rb"`([^`]{0,90}?) Switch to another model\$\{[\w$]{1,4}\} to continue\.`"
 )
 _922_PLACEHOLDER_RE = re.compile(r"\$\{[\w$]{1,4}\}")
-# What the builder's `${g}` / `${h}` expand to (each literal is asserted present).
+# What the builder's placeholders expand to.
 _922_CAP_SENTENCES = (
-    "You've reached your Fable limit.",
+    "You've hit your team's pooled group budget.",
+    "You've hit your team's pooled group budget. It resets Dec 1, 9am (UTC).",
     "Opus 5.5 requires usage credits.",
     "You've hit your monthly spend limit.",
     "You've hit your channel's monthly spend limit.",
 )
+# #1238: the plan-limit path (every other 429) appends the remedy to the shared
+# rate-limit head `You've hit your <name> · resets <time>` through a nested
+# `${cond?…:""}` template the regex above can't see.
+_1238_PLAN_LIMIT_REMEDY = b"`. Switch to another model${"
+# Head name -> expected (model, kind); None = never this class.
+_1238_PLAN_LIMIT_HEADS = {
+    "Fable limit": ("Fable", "model"),
+    "team's pooled group budget": ("", "team_budget"),
+    "monthly spend limit": ("", "spend"),
+    "channel's monthly spend limit": ("", "spend"),
+    "individual spend limit": ("", "spend"),
+    "org's monthly spend limit": ("", "spend"),
+    "channel's monthly usage limit": ("", "usage_limit"),
+    "individual usage limit": ("", "usage_limit"),
+    "org's monthly usage limit": ("", "usage_limit"),
+    "5-hour limit": None,
+    "weekly limit": None,
+    "Opus limit": None,
+    "Sonnet limit": None,
+}
 _922_CAP_LITERALS = (
-    b"You've reached your Fable limit.",
+    b"team's pooled group budget",
     b" requires usage credits.",
     b"You've hit your monthly spend limit.",
     b"You've hit your channel's monthly spend limit.",
+    b'"Fable limit"',
+    b"individual spend limit",
+    b"org's monthly spend limit",
+    b"individual usage limit",
+    b"channel's monthly usage limit",
+    b"org's monthly usage limit",
+    # The CLI's model-family regex; _ACTION_CAP_RE names the same families.
+    b"(?:Fable|Haiku|Mythos|Opus|Sonnet)",
 )
 # `${K}`: empty when the account can't buy credits, else the personal or the
 # Team/Enterprise usage URL.
 _922_K_VARIANTS = (
     "",
-    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
-    ", or manage usage credits at claude.ai/admin-settings/usage,",
+    ", or manage usage credits at "
+    "https://claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at https://claude.ai/admin-settings/usage,",
 )
 
 
@@ -1235,7 +1266,10 @@ def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
     """Every headless cap message the CLI can emit must arm the latch. This
     probe FAILS (never skips) when the wording moves — that is the drift it
     exists to catch (#922 review amendment 1)."""
-    from untether.runners.claude import _parse_action_required_cap
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _parse_action_required_cap,
+    )
 
     for literal in _922_CAP_LITERALS:
         assert cli_blob.find(literal) != -1, (
@@ -1258,6 +1292,22 @@ def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
         if _parse_action_required_cap(text) is None
     ]
     assert not unparsed, f"cap wording the latch no longer recognises: {unparsed}"
+
+    assert cli_blob.find(_1238_PLAN_LIMIT_REMEDY) != -1, (
+        "the plan-limit remedy `. Switch to another model${…}` moved — "
+        "re-derive _ACTION_REMEDY_RE (#1238)"
+    )
+    wrong = {}
+    for name, expected in _1238_PLAN_LIMIT_HEADS.items():
+        for k in _922_K_VARIANTS:
+            text = (
+                f"You've hit your {name} · resets Nov 25, 5pm "
+                f"(Australia/Melbourne). Switch to another model{k} to continue."
+            )
+            got = _classify_action_required_cap(text)
+            if got != (None if expected is None else (*expected, "result_text")):
+                wrong[text] = got
+    assert not wrong, f"plan-limit heads misclassified: {wrong}"
 
 
 def test_922_result_schema_carries_api_error_fields(cli_blob: mmap.mmap) -> None:

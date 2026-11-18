@@ -105,3 +105,57 @@ def test_compaction_sequence():
     assert len(end_events) == 1
     assert isinstance(end_events[0], ActionEvent)
     assert end_events[0].action.id == action_id
+
+
+# #1239: Pi >= 0.66.1 renamed auto_compaction_* to compaction_*.
+
+
+def test_compaction_start_current_tag():
+    event = pi_schema.decode_event('{"type":"compaction_start","reason":"threshold"}')
+    state = _make_state()
+    events = translate_pi_event(event, title="pi", meta=None, state=state)
+    assert len(events) == 1
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].phase == "started"
+    assert events[0].action.title == "compacting context… (threshold)"
+
+
+def test_compaction_end_current_tag():
+    event = pi_schema.decode_event(
+        '{"type":"compaction_end","reason":"threshold","result":{"summary":"s",'
+        '"firstKeptEntryId":"abc123","tokensBefore":150000,'
+        '"estimatedTokensAfter":32000,"usage":{},"details":{}},'
+        '"aborted":false,"willRetry":false}'
+    )
+    state = _make_state()
+    state.compaction_seq = 1
+    state.compaction_action_id = "compaction_1"
+    events = translate_pi_event(event, title="pi", meta=None, state=state)
+    assert len(events) == 1
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].phase == "completed"
+    assert events[0].action.id == "compaction_1"
+    assert "150,000 tokens" in events[0].action.title
+    assert events[0].ok is True
+
+
+def test_compaction_end_failed_error_message():
+    event = pi_schema.decode_event(
+        '{"type":"compaction_end","reason":"threshold","aborted":false,'
+        '"willRetry":false,"errorMessage":"summary model failed"}'
+    )
+    state = _make_state()
+    state.compaction_seq = 1
+    state.compaction_action_id = "compaction_1"
+    events = translate_pi_event(event, title="pi", meta=None, state=state)
+    assert len(events) == 1
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].action.title == "context compaction failed"
+    assert events[0].ok is False
+
+
+def test_legacy_compaction_tags_still_decode():
+    start = pi_schema.decode_event('{"type":"auto_compaction_start","reason":"x"}')
+    end = pi_schema.decode_event('{"type":"auto_compaction_end","aborted":false}')
+    assert isinstance(start, pi_schema.AutoCompactionStart)
+    assert isinstance(end, pi_schema.AutoCompactionEnd)
