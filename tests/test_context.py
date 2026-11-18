@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from untether.context import RunContext
+from dataclasses import fields, replace
+
+import pytest
+
+from untether.context import RunContext, attended_context
 
 
 def test_run_context_defaults_are_all_none():
@@ -41,3 +45,24 @@ def test_run_context_is_frozen():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("expected FrozenInstanceError on attribute assignment")
+
+
+# #1120: attended_context is generic, so no trigger-only field (including one
+# added to RunContext later) can leak into a human turn.
+def test_1120_run_id_carries():
+    assert RunContext(trigger_source="cron:x", run_id="abc").run_id == "abc"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [f.name for f in fields(RunContext) if f.name not in ("project", "branch")],
+)
+def test_1120_attended_context_strips_every_trigger_field(name: str):
+    ctx = replace(RunContext(project="p", branch="b"), **{name: "x"})
+    assert attended_context(ctx) == RunContext(project="p", branch="b")
+
+
+def test_1120_attended_context_keeps_plain_context():
+    plain = RunContext(project="p", branch="b")
+    assert attended_context(plain) is plain
+    assert attended_context(None) is None

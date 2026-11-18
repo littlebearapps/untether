@@ -1171,3 +1171,35 @@ async def test_closing_run_closes_run_impl_in_the_same_task(
             tg.cancel_scope.cancel()
 
     assert runner.closed_in_task == consumer_task[0]
+
+
+@pytest.mark.anyio
+async def test_1120_trigger_run_env_carries_run_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1120: a cron/webhook run's child env has UNTETHER_TRIGGER and
+    UNTETHER_RUN_ID; an engine that inherits the service env (env() is
+    None) still gets them."""
+    from untether.context import RunContext
+    from untether.utils.paths import reset_run_context, set_run_context
+
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_manage_subprocess(*args: Any, **kwargs: Any) -> Any:
+        seen["env"] = kwargs.get("env")
+        raise _Stop
+
+    monkeypatch.setattr(runner_module, "manage_subprocess", fake_manage_subprocess)
+    monkeypatch.delenv("UNTETHER_RUN_ID", raising=False)
+
+    token = set_run_context(RunContext(trigger_source="webhook:gh", run_id="rid-9"))
+    try:
+        with pytest.raises(_Stop):
+            _ = [evt async for evt in _RunJsonlRunner().run_impl("hi", None)]
+    finally:
+        reset_run_context(token)
+    assert seen["env"]["UNTETHER_TRIGGER"] == "webhook:gh"
+    assert seen["env"]["UNTETHER_RUN_ID"] == "rid-9"

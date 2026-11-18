@@ -348,6 +348,11 @@ async def _run_engine(
             if context is not None:
                 run_fields["project"] = context.project
                 run_fields["branch"] = context.branch
+                # #1120: so runner.completed can be tied to its trigger fire.
+                if context.trigger_source is not None:
+                    run_fields["trigger"] = context.trigger_source
+                if context.run_id is not None:
+                    run_fields["run_id"] = context.run_id
             if cwd is not None:
                 run_fields["cwd"] = str(cwd)
             bind_run_context(**run_fields)

@@ -2686,6 +2686,20 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
 _TRIGGER_LIST_CAP = 10
 
 
+def _trigger_run_option_segs(trigger: Any) -> str:
+    """``model=`` / ``effort=`` / ``mode=`` segments for a cron or webhook row,
+    only for the options it sets (#743, #1122). Free-form, so escaped."""
+    segs = ""
+    if trigger.model:
+        model = html.escape(_truncate_field(redact_url_secrets(trigger.model)))
+        segs += f"model=<i>{model}</i> · "
+    if trigger.reasoning:
+        segs += f"effort=<i>{html.escape(trigger.reasoning)}</i> · "
+    if trigger.permission_mode:
+        segs += f"mode=<i>{html.escape(trigger.permission_mode)}</i> · "
+    return segs
+
+
 def _format_trigger_relative(ts: float | None) -> str:
     """Render a unix timestamp as a relative-time hint for the triggers page.
 
@@ -2813,22 +2827,11 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                         cron.schedule, cron.timezone or default_tz
                     )
                     last = _format_trigger_relative(get_last_fired(cron.id))
-                    # #743: free-form, so escaped (only shown when set).
-                    model_seg = (
-                        f"model=<i>{html.escape(_truncate_field(redact_url_secrets(cron.model)))}</i> · "
-                        if cron.model
-                        else ""
-                    )
-                    effort_seg = (
-                        f"effort=<i>{html.escape(cron.reasoning)}</i> · "
-                        if cron.reasoning
-                        else ""
-                    )
                     lines.append(
                         f"<code>{cron.id}</code> · {schedule_text} · "
                         f"proj=<i>{_truncate_field(cron.project)}</i> · "
                         f"eng=<i>{_truncate_field(cron.engine)}</i> · "
-                        f"{model_seg}{effort_seg}"
+                        f"{_trigger_run_option_segs(cron)}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_crons) - _TRIGGER_LIST_CAP
@@ -2846,6 +2849,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                         f"auth=<i>{wh.auth}</i> · "
                         f"proj=<i>{_truncate_field(wh.project)}</i> · "
                         f"eng=<i>{_truncate_field(wh.engine)}</i> · "
+                        f"{_trigger_run_option_segs(wh)}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_webhooks) - _TRIGGER_LIST_CAP

@@ -29,8 +29,9 @@ from .model import (
     StartedEvent,
     UntetherEvent,
 )
+from .utils.env_policy import apply_run_env
 from .utils.error_display import redact_url_secrets
-from .utils.paths import get_run_base_dir
+from .utils.paths import get_run_base_dir, get_run_context
 from .utils.streams import drain_stderr, iter_bytes_lines
 from .utils.subprocess import (
     kill_process,
@@ -1952,7 +1953,8 @@ class JsonlSubprocessRunner(BaseRunner):
         logger = self.get_logger()
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
-        env = self.env(state=state)
+        # #1120: after env() so agy's own gate-key handling runs first.
+        env = apply_run_env(self.env(state=state), get_run_context())
         logger.info(
             "runner.start",
             engine=self.engine,

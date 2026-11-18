@@ -208,7 +208,7 @@ prompt = "Review last week's merged PRs for design problems."
 - `reasoning` must be a level the engine accepts — Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low` … `xhigh`; Antigravity `low`, `medium`, `high` — checked at config load when `engine` is set. OpenCode and Pi don't take it. Some models don't support every effort level (Claude Code says the levels available depend on the model), so pair `max` with a model that has it.
 - A reply to the cron's message runs on the **chat's** model, not the cron's; if the cron's session is still open for background work it is closed and resumed with the chat's settings.
 - The footer and the `runner.completed` log show the model that actually ran; `trigger.cron.model_override` / `trigger.cron.reasoning_override` are logged when the cron's value differs from the chat's, and `/config → ⏰ Triggers` shows `model=` / `effort=` on that cron's row.
-- Webhooks can't pick a model yet ([#332](https://github.com/littlebearapps/untether/issues/332)).
+- Webhooks take the same `model` / `reasoning` keys ([#1122](https://github.com/littlebearapps/untether/issues/1122)); see [Webhook run options](webhooks-and-cron.md#webhook-run-options).
 
 ## Trigger provenance and history
 

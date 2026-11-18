@@ -43,11 +43,30 @@ changes ([#506](https://github.com/littlebearapps/untether/issues/506)), but the
 service only sees its own environment, so set these in the unit (or a drop-in) and
 restart.
 
-!!! warning "Keep secrets in the config file"
-    Variables starting with `UNTETHER_` are on the environment allowlist that Claude Code
-    and Pi subprocesses inherit, so an `UNTETHER__*` override (a bot token or voice API key
-    included) is visible to those engines. Put secrets in `untether.toml` (mode `600`)
-    rather than in `UNTETHER__*` variables.
+### Bot token from the environment { #bot-token-env }
+
+`UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN` sets the bot token and wins over
+`bot_token` in `untether.toml`, so the file doesn't have to hold it (leave
+`bot_token` out of `[transports.telegram]`). With systemd, keep it in a file only
+your user can read and load it into the unit:
+
+```ini
+# systemctl --user edit untether
+[Service]
+EnvironmentFile=%h/.config/untether/secrets.env
+```
+
+where `secrets.env` (mode `600`) holds
+`UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN=…`. Restart the service from a terminal
+afterwards. Untether never passes `UNTETHER__*` variables to an engine process, for
+any engine ([#1219](https://github.com/littlebearapps/untether/issues/1219)); before 0.36.2, Claude Code, Pi and
+Antigravity received them through the `UNTETHER_` allowlist prefix, and Codex and
+OpenCode through Untether's whole environment.
+
+For webhook secrets, see `secret_env` / `secret_file` in the
+[Triggers reference](triggers/triggers.md#triggerswebhooks). A `secret_file` works
+with systemd's `LoadCredential=` (point it at `%d/<name>`, the credentials
+directory, written owner-only by systemd).
 
 ## Voice transcription
 
@@ -73,6 +92,8 @@ These variables are set (or removed) automatically by Untether in the engine sub
 | Variable | Set by | Description |
 |----------|--------|-------------|
 | `UNTETHER_SESSION` | Claude runner | Always set to `1` for Claude Code subprocesses. Enables Claude Code plugins to detect Untether sessions and adjust behaviour — for example, skipping blocking Stop hooks that would displace user-requested content in Telegram. |
+| `UNTETHER_TRIGGER` | every runner | `cron:<id>` or `webhook:<id>` for a cron or webhook run; absent for a person's message, a reply to a trigger run, `/at` and loop fires. Any value inherited from Untether's own environment is removed first ([#1120](https://github.com/littlebearapps/untether/issues/1120)). |
+| `UNTETHER_RUN_ID` | every runner | A new UUID for each cron or webhook fire, the same one logged as `run_id` on `triggers.dispatch.starting` and `runner.completed`. Same rules as `UNTETHER_TRIGGER` ([#1120](https://github.com/littlebearapps/untether/issues/1120)). |
 | `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Claude runner | Claude Code's stdout idle timeout. Default raised to `300000` (5 min) in v0.35.2 ([#342](https://github.com/littlebearapps/untether/issues/342)) — matches undici's idle-body timeout. The old 60 s default killed long-thinking runs. **As of v0.35.3 ([#438](https://github.com/littlebearapps/untether/issues/438))**, this is preferably set via `[watchdog] claude_stream_idle_timeout_ms` in `untether.toml` (range 30 s – 30 min). Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins via `setdefault`. Failures with `API Error: Stream idle timeout - partial response received` now classify as Type A (mid-generation — raising helps) or Type B (cold-start zero-byte — raising does NOT help; upstream API outage). |
 | `CLAUDE_ENABLE_STREAM_WATCHDOG` | Claude runner | Defaults to `1` (turns on Claude Code's own stream watchdog — [#322](https://github.com/littlebearapps/untether/issues/322)). A value already in Untether's environment wins. |
 | `MCP_TOOL_TIMEOUT` | Claude runner | Defaults to `120000` (ms). A value already in Untether's environment wins. |

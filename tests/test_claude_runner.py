@@ -9839,3 +9839,40 @@ class TestCronSuppressedSpawn:
             isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
             for e in events
         )
+
+
+@pytest.mark.anyio
+async def test_1120_claude_trigger_run_env_has_run_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1120: the `env -i` wrap carries UNTETHER_TRIGGER / UNTETHER_RUN_ID for
+    a trigger run and neither for an attended one."""
+    from untether.context import RunContext
+    from untether.utils.paths import reset_run_context, set_run_context
+
+    seen: list[list[str]] = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_manage_subprocess(cmd: list[str], *args: object, **kwargs: object):
+        seen.append(list(cmd))
+        raise _Stop
+
+    monkeypatch.setattr(claude_runner, "manage_subprocess", fake_manage_subprocess)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+
+    for ctx in (RunContext(trigger_source="cron:daily", run_id="rid-1"), None):
+        token = set_run_context(ctx)
+        try:
+            with contextlib.suppress(_Stop):
+                async for _evt in runner.run_impl("hi", None):
+                    pass
+        finally:
+            reset_run_context(token)
+
+    trigger_cmd, attended_cmd = seen
+    assert "UNTETHER_TRIGGER=cron:daily" in trigger_cmd
+    assert "UNTETHER_RUN_ID=rid-1" in trigger_cmd
+    assert not any(a.startswith("UNTETHER_RUN_ID=") for a in attended_cmd)
+    assert not any(a.startswith("UNTETHER_TRIGGER=") for a in attended_cmd)

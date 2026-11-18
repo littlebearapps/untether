@@ -38,6 +38,10 @@ class EngineRunOptions:
     # inherited from the chat or TOML look identical; only the agy runner
     # reads this, so unattended runs never inherit Full access.
     trigger_permission_mode: str | None = None
+    # #1118: a trigger's own Claude allowlist; replaces the engine-wide
+    # `allowed_tools` for that run (``()`` = send no ``--allowedTools``).
+    # ``None`` keeps the engine config. Only ClaudeRunner reads it.
+    allowed_tools: tuple[str, ...] | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.
