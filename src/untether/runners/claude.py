@@ -30,7 +30,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
-from ..background_status import CONTINUED_SUFFIX, format_tokens
+from ..background_status import CONTINUED_SUFFIX, escape_markdown, format_tokens
 from ..config import ConfigError
 from ..context import WEBHOOK_TRIGGER_PREFIX
 from ..events import EventFactory
@@ -1534,6 +1534,11 @@ def _control_reason_text(request: Any) -> str | None:
     if len(line) > _CONTROL_REASON_MAX_CHARS:
         line = line[: _CONTROL_REASON_MAX_CHARS - 1] + "…"
     return line or None
+
+
+def _reason_line(reason: str) -> str:
+    """#939: the ``🪝 …`` title line for a ``decision_reason`` (escaped)."""
+    return f"🪝 {escape_markdown(reason)}"
 
 
 def _tool_input_details(tool_input: Any) -> str:
@@ -9397,6 +9402,12 @@ def _translate_claude_event_base(
             warning_text = f"Permission Request [{request_type}]"
             if details:
                 warning_text += f" - {details}"
+            # #939: the CLI's own "why" (hook / rule / classifier text) in the
+            # in-turn title, not only on the standalone surface.
+            if isinstance(request, claude_schema.ControlCanUseToolRequest) and (
+                reason := _control_reason_text(request)
+            ):
+                warning_text += f"\n{_reason_line(reason)}"
             if diff_preview:
                 warning_text += f"\n{diff_preview}"
             is_exit_plan_mode = (

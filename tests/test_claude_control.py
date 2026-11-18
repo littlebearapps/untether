@@ -4293,6 +4293,36 @@ def test_929_detail_omits_absent_fields() -> None:
         assert key not in detail
 
 
+def test_939_in_turn_title_shows_escaped_reason() -> None:
+    """#939: the CLI's decision_reason appears in the in-turn approval title,
+    markdown-escaped, on its own line."""
+    state, factory = _make_state_with_session("sess-939a")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _929_request(
+            "r-939a", reason_type="rule", reason="ask rule `Bash(rm *)`", command="ls"
+        ),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    title = events[0].action.title
+    assert title.startswith("Permission Request [CanUseTool] - tool: Bash")
+    assert "\n🪝 ask rule \\`Bash\\(rm \\*\\)\\`\n" in title
+
+
+def test_939_in_turn_title_without_reason_unchanged() -> None:
+    state, factory = _make_state_with_session("sess-939b")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _929_request("r-939b", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert "🪝" not in events[0].action.title
+
+
 def test_929_received_log_names_agent_not_reason() -> None:
     from structlog.testing import capture_logs
 

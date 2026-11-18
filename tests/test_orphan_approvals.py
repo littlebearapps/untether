@@ -196,6 +196,18 @@ def test_render_escapes_reason_markdown() -> None:
     assert "a\\_b\\*c" in md
 
 
+def test_939_render_skips_reason_already_in_title() -> None:
+    """#939: the in-turn title carries the reason line; the surface must not
+    repeat it."""
+    md = render_surface_markdown(
+        "Permission Request [CanUseTool] - tool: Bash\n🪝 confirm \\*this\\*",
+        label=None,
+        reason="confirm *this*",
+        agent=True,
+    )
+    assert md.count("🪝") == 1
+
+
 def test_synth_keyboard_approve_deny() -> None:
     rows = synth_keyboard("r-5")
     data = [b["callback_data"] for row in rows for b in row]
