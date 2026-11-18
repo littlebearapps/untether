@@ -104,7 +104,10 @@ else:
     )
     _MD_RENDERER = MarkdownIt("commonmark", {"html": False})
 _BULLET_RE = re.compile(r"(?m)^(\s*)•")
-_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>[`~]{3,})(?P<info>.*)$")
+# CommonMark opener: 0-3 spaces, then 3+ backticks (no backtick in the info) or 3+ tildes.
+_FENCE_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<fence>`{3,}(?=[^`]*$)|~{3,})(?P<info>.*)$"
+)
 _ORDERED_ITEM_RE = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<marker>\d+[.)])\s+")
 _UNORDERED_ITEM_RE = re.compile(r"^(?P<indent>[ \t]{0,3})[-+*]\s+")
 
@@ -880,14 +883,25 @@ def _split_block(
 
 
 def _update_fence_state(line: str, state: _FenceState | None) -> _FenceState | None:
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return state
-    fence = match.group("fence")
-    indent = match.group("indent")
+    """Track a top-level fenced block the way CommonMark does (#1249).
+
+    shortcut: fences inside list items / blockquotes aren't modelled; a
+    container-aware scan is the follow-up if those start swallowing footers.
+    """
     if state is None:
-        return _FenceState(fence=fence, indent=indent, header=line)
-    if fence[0] == state.fence[0] and len(fence) >= len(state.fence):
+        match = _FENCE_RE.match(line)
+        if match is None:
+            return None
+        return _FenceState(
+            fence=match.group("fence"), indent=match.group("indent"), header=line
+        )
+    # Closer: 0-3 spaces, a run of the opener's char at least as long, then
+    # only whitespace (so ```sh inside a ``` block is content, not a closer).
+    rest = line.lstrip(" ")
+    if len(line) - len(rest) > 3:
+        return state
+    run = len(rest) - len(rest.lstrip(state.fence[0]))
+    if run >= len(state.fence) and not rest[run:].strip():
         return None
     return state
 
@@ -906,6 +920,12 @@ def _ensure_trailing_newline(text: str) -> str:
 
 def _close_fence_chunk(text: str, state: _FenceState) -> str:
     return _ensure_trailing_newline(text) + f"{state.indent}{state.fence}\n"
+
+
+def _close_open_fence(text: str) -> str:
+    """Close a fence the body leaves open, so the footer isn't code (#1249)."""
+    state = _scan_fence_state(text, None)
+    return text if state is None else _close_fence_chunk(text, state)
 
 
 def _reopen_fence_prefix(state: _FenceState) -> str:
@@ -961,9 +981,10 @@ def trim_body(body: str | None, *, max_chars: int = MAX_BODY_CHARS) -> str | Non
 
 
 def prepare_telegram(parts: MarkdownParts) -> tuple[str, list[dict[str, Any]]]:
+    trimmed_body = trim_body(parts.body, max_chars=MAX_BODY_CHARS)
     trimmed = MarkdownParts(
         header=parts.header or "",
-        body=trim_body(parts.body, max_chars=MAX_BODY_CHARS),
+        body=trimmed_body and _close_open_fence(trimmed_body),
         footer=parts.footer,
     )
     return render_markdown(assemble_markdown_parts(trimmed))
@@ -975,6 +996,8 @@ def prepare_telegram_multi(
     body = parts.body
     if body is not None and not body.strip():
         body = None
+    if body is not None:
+        body = _close_open_fence(body)
     body_chunks = split_markdown_body(body, max_body_chars) if body is not None else []
     if not body_chunks:
         body_chunks = [""]

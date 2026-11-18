@@ -213,6 +213,23 @@ async def test_near_limit_last_chunk_stays_under_telegram_limit(
     assert _resume_entity_ok(last)
 
 
+async def test_1249_cost_line_before_resume_after_open_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An answer ending inside a fence must not drag the footer into code, or
+    the 🔢/💰 lines can't find the resume marker and land after it."""
+    _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: None)
+
+    final = await _run("Run it with:\n\n```sh\npython hello.py")
+
+    text = final.text
+    assert text.index(META) < text.index(COST) < text.index(RESUME)
+    assert text.index("⚡") < text.index(RESUME)
+    assert _resume_entity_ok(final)
+
+
 # ── _insert_footer_line unit cases ──────────────────────────────────────────
 
 
