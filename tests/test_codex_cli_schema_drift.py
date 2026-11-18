@@ -31,7 +31,7 @@ from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas.codex import CODEX_USAGE_FIELDS
 
 # Last CLI these probes were re-derived against.
-PROBED_CLI_VERSION = "0.169.0"
+PROBED_CLI_VERSION = "0.170.0"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("codex") is None, reason="codex CLI not installed"

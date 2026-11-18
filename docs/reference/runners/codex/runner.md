@@ -9,7 +9,7 @@ for plan mode, #965). This page gains the transport, permission modes and the na
 
 | | |
 |---|---|
-| Tested against | codex-cli **0.169.0** (exec flag snapshot `PROBED_CLI_VERSION` in `tests/test_codex_cli_schema_drift.py`; app-server schema `PROBED_APP_SERVER_VERSION` in `src/untether/schemas/codex_app_server.py`) |
+| Tested against | codex-cli **0.170.0** (exec drift suite green on 2026-11-18, [#1254](https://github.com/littlebearapps/untether/issues/1254); exec flag snapshot `PROBED_CLI_VERSION` in `tests/test_codex_cli_schema_drift.py`; app-server schema `PROBED_APP_SERVER_VERSION` in `src/untether/schemas/codex_app_server.py`) |
 
 ## App-server drift probe and support gate ([#961](https://github.com/littlebearapps/untether/issues/961))
 

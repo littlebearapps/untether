@@ -4,6 +4,7 @@
 
 ### changes
 
+- **chore:** tested on agy 1.5.10 and codex-cli 0.170.0 (drift suites green, no flag or stream changes), so a current agy host no longer logs `antigravity.version.newer_than_probed` on every run [#1254](https://github.com/littlebearapps/untether/issues/1254)
 - **feat(triggers):** cron and webhook runs set `UNTETHER_RUN_ID` and `UNTETHER_TRIGGER` in the engine's environment, and `runner.completed` logs both, so a script can tell which trigger started it [#1120](https://github.com/littlebearapps/untether/issues/1120)
 - **feat(triggers):** webhooks take the same run options as crons (`permission_mode`, `model`, `reasoning` and a per-trigger `allowed_tools`), and `/config → ⏰ Triggers` shows them [#1122](https://github.com/littlebearapps/untether/issues/1122)
 - **feat(security):** new `[triggers] webhook_defaults = "compat" | "strict"`. `strict` gives `agent_run` webhooks safe defaults: no mode of its own means the engine's asking mode with no tools pre-approved, a mode that skips approvals needs `allow_unsafe_permission_mode = true`, and a webhook without a project or with a secret under 32 characters is skipped. The default `compat` keeps today's behaviour and warns about each webhook that relies on an unsafe default; `strict` becomes the default in v0.37.0 [#1118](https://github.com/littlebearapps/untether/issues/1118)
