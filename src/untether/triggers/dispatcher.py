@@ -38,6 +38,32 @@ type DispatchResult = bool | Literal["refused"]
 SEND_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0)
 
 
+def build_run_context(
+    trigger: CronConfig | WebhookConfig, *, strict: bool = False
+) -> RunContext:
+    """The one ``RunContext`` builder for crons and webhooks (#1122).
+
+    Every ``TriggerRunOptions`` field is forwarded the same way for both, so
+    a webhook gets exactly the run options a cron does. ``strict`` marks a
+    webhook fired under ``webhook_defaults = "strict"`` (#1118).
+    """
+    kind = "webhook" if isinstance(trigger, WebhookConfig) else "cron"
+    return RunContext(
+        project=trigger.project,
+        # rc4 (#271): always set, so the meta footer can render provenance
+        # even when no project is configured.
+        trigger_source=f"{kind}:{trigger.id}",
+        run_id=str(uuid4()),  # #1120
+        permission_mode=trigger.permission_mode,
+        model=trigger.model,
+        reasoning=trigger.reasoning,
+        allowed_tools=(
+            tuple(trigger.allowed_tools) if trigger.allowed_tools is not None else None
+        ),
+        strict_webhook=strict and kind == "webhook",
+    )
+
+
 @dataclass(slots=True)
 class TriggerDispatcher:
     """Bridge between trigger sources (webhooks/crons) and ``run_job()``."""
@@ -65,15 +91,12 @@ class TriggerDispatcher:
             )
             return False
 
-    async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
+    async def dispatch_webhook(
+        self, webhook: WebhookConfig, prompt: str, *, strict: bool = False
+    ) -> None:
+        """``strict``: ``[triggers] webhook_defaults = "strict"`` (#1118)."""
         chat_id = webhook.chat_id or self.default_chat_id
-        # rc4 (#271): always set trigger_source so the meta footer can render
-        # provenance even when no project is configured.
-        context = RunContext(
-            project=webhook.project,
-            trigger_source=f"webhook:{webhook.id}",
-            run_id=str(uuid4()),  # #1120
-        )
+        context = build_run_context(webhook, strict=strict)
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
@@ -106,14 +129,7 @@ class TriggerDispatcher:
         :data:`SEND_RETRY_DELAYS` (the scheduler's retry ticks pass ``()``).
         """
         chat_id = cron.chat_id or self.default_chat_id
-        context = RunContext(
-            project=cron.project,
-            trigger_source=f"cron:{cron.id}",
-            run_id=str(uuid4()),  # #1120
-            permission_mode=cron.permission_mode,
-            model=cron.model,
-            reasoning=cron.reasoning,
-        )
+        context = build_run_context(cron)
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 

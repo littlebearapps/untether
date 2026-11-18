@@ -10036,10 +10036,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # lives in `claude_sends_allowed_tools` so the #1145 webhook audit
         # (permission_audit.py) reads the same one.
         allowed_tools = _coerce_comma_list(self.allowed_tools)
+        explicit = self.allowed_tools_explicit
+        if run_options is not None and run_options.allowed_tools is not None:
+            # #1118: a trigger's own list replaces the engine-wide one (`()`
+            # sends none) and counts as explicit for the #749 rule.
+            allowed_tools = _coerce_comma_list(run_options.allowed_tools)
+            explicit = True
         if allowed_tools is not None and is_claude_prompting_mode(effective_mode):
-            if claude_sends_allowed_tools(
-                effective_mode, explicit=self.allowed_tools_explicit
-            ):
+            if claude_sends_allowed_tools(effective_mode, explicit=explicit):
                 # An explicit choice is honoured, but the interaction is
                 # surprising enough to deserve one line in the log.
                 if effective_mode not in _PROMPTING_MODE_ALLOWLIST_LOGGED:

@@ -71,6 +71,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `enabled` | bool | `false` | Master switch. When `false`, no server or cron loop starts. |
 | `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides this. |
 | `allow_unauthenticated_webhooks` | bool | `false` | Opt-in to serve `auth = "none"` webhooks on a non-loopback `host` (see [Authentication](#authentication)). Local demos only. |
+| `webhook_defaults` | string | `"compat"` | `"strict"` gives every webhook the safe defaults in [Webhook safe defaults](#webhook-safe-defaults); `"compat"` keeps the 0.36.1 behaviour and warns about each webhook that strict would change. `"strict"` becomes the default in 0.37.0. Hot-reloads ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 
 ### `[triggers.server]`
 
@@ -126,7 +127,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.36.0 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
-| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. Make it long and random (for example `openssl rand -hex 32`): a `bearer` or HMAC secret under 32 characters logs WARNING `triggers.webhook.short_secret` (still accepted for now, [#1117](https://github.com/littlebearapps/untether/issues/1117)). Never logged or shown in errors. |
+| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. Make it long and random (for example `openssl rand -hex 32`): a `bearer` or HMAC secret under 32 characters logs WARNING `triggers.webhook.short_secret` and is skipped with `webhook_defaults = "strict"` ([#1117](https://github.com/littlebearapps/untether/issues/1117), [#1118](https://github.com/littlebearapps/untether/issues/1118)). Never logged or shown in errors. |
 | `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
 | `event_filter` | string\|null | `null` | Only process requests matching this event type header. |
 | `accept_multipart` | bool | `false` | Accept `multipart/form-data` uploads (see [Multipart file uploads](#multipart-file-uploads)). |
@@ -141,8 +142,16 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `message_template` | string\|null | `null` | Message template for `notify_only`. Required when `action = "notify_only"`. |
 | `notify_on_success` | bool | `false` | Send Telegram notification on successful non-agent action. |
 | `notify_on_failure` | bool | `false` | Send Telegram notification on failed non-agent action. |
+| `permission_mode` | string\|null | `null` | (`agent_run` only, needs `engine`) This webhook's own permission mode, as for a cron: Claude's modes, Antigravity `workspace` / `plan` / `ask` / `full`, Codex `safe` / `auto`; other engines have none. `bypassPermissions`, `full` and Codex `auto` skip every approval, so they also need `allow_unsafe_permission_mode = true` ([#1118](https://github.com/littlebearapps/untether/issues/1118), [#1122](https://github.com/littlebearapps/untether/issues/1122)). |
+| `model` | string\|null | `null` | (`agent_run` only) Model for this webhook's runs, as for a cron ([#1122](https://github.com/littlebearapps/untether/issues/1122)). |
+| `reasoning` | string\|null | `null` | (`agent_run` only) Effort level for this webhook's runs, as for a cron ([#1122](https://github.com/littlebearapps/untether/issues/1122)). |
+| `allowed_tools` | string[]\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Tools pre-approved for this webhook's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing. Sent in every mode, like an explicit engine list ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
+| `allow_unsafe_permission_mode` | bool | `false` | Lets this webhook's own `permission_mode` be one that skips approvals. Needs `engine` and such a mode; anything else is an error ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 
-Webhook IDs and paths must each be unique across all configured webhooks.
+Webhook IDs and paths must each be unique across all configured webhooks. Run
+options (`permission_mode`, `model`, `reasoning`, `allowed_tools`,
+`allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
+`notify_only` webhook make that entry invalid, since nothing would use them.
 
 ### `[[triggers.crons]]`
 
@@ -171,6 +180,7 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state persists to `run_once_pending.json` (sibling of `untether.toml`): after a restart the retries resume on the first tick, or the one-shot is given up at once if its window has passed. A master pause during the window still allows one retry after resume before it is given up. A one-shot refused by the daily cost budget's **Stop at limit** is not consumed either: nothing is posted or run, any pending send retry is dropped, and it fires at its next schedule match (`triggers.cron.run_once_refused`, [#896](https://github.com/littlebearapps/untether/issues/896)). The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
 | `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`; and for **Antigravity**: `workspace`, `plan`, `ask` or `full` (the only way a cron gets Ask me or Full access). Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 | `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only (passed as the engine's `--model`). Free-form like `/model set`, but it can't start with `-` or contain whitespace/control characters. Set `engine` too so the name matches. |
+| `allowed_tools` | string[]\|null | `null` | (needs `engine = "claude"`) Tools pre-approved for this cron's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 | `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only. With `engine` set it must be one of that engine's levels (Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low`…`xhigh`; Antigravity `low`, `medium`, `high`; an engine without reasoning support is an error); without `engine`, one of `low`…`max`, and a level the resolved engine doesn't allow is ignored with a note in the run. Normalised to lower case. |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
@@ -216,9 +226,8 @@ plan and changes nothing ([#980](https://github.com/littlebearapps/untether/issu
 but only Claude and Antigravity validate it. Codex honours `safe` (read-only sandbox) and treats
 `auto` as full auto (any other value logs `codex.permission_mode.unknown` and
 runs full auto, except on a webhook run, which runs `safe`, #1142); the deprecated Gemini runner passes it through as
-`--approval-mode`; OpenCode, Pi and AMP ignore it. Webhooks have no
-`permission_mode`. Full cross-engine and webhook coverage is tracked in
-[#332](https://github.com/littlebearapps/untether/issues/332) (not shipped).
+`--approval-mode`; OpenCode, Pi and AMP ignore it. Webhooks take the same
+`permission_mode`, with stricter rules (see [Webhook safe defaults](#webhook-safe-defaults)).
 
 !!! warning "`auto` changed meaning in v0.36.0"
     Before 0.36.0, Untether's `auto` meant plan mode with the `ExitPlanMode`
@@ -236,7 +245,7 @@ at once ([#835](https://github.com/littlebearapps/untether/issues/835)). Set an
 explicit `permission_mode` on every Claude cron that should act unattended: without
 one the run takes the chat's `/planmode`, then `[engines.claude] permission_mode`
 (unset by default, which runs Claude non-interactively in `-p` mode with no approval
-prompts), and a `plan` cron's plan approval and file-changing tools are denied. Webhooks have no `permission_mode` and always inherit, except Claude's `bypassPermissions` (see below). Per requested mode:
+prompts), and a `plan` cron's plan approval and file-changing tools are denied. A webhook without its own `permission_mode` inherits the same way, except Claude's `bypassPermissions` (see below), unless `webhook_defaults = "strict"`. Per requested mode:
 
 | Mode | Denied in an unattended run |
 |---|---|
@@ -291,8 +300,54 @@ and that chat's permission mode the way a run does, and logs each finding once:
 | `trigger.webhook.no_project` | an `agent_run` webhook with no `project` (it runs in Untether's own working directory) |
 | `trigger.webhook.preapproved_tools` | an `agent_run` Claude webhook whose mode never asks (`plan`, `plan-auto`, `auto`, `dontAsk`, or unset) while `[engines.claude] allowed_tools` pre-approves bare `Bash`, `Edit` or `Write` (`tools=`); the default allowlist does. Also any `agent_run` Claude webhook, whatever its mode, when `allowed_tools` is set **explicitly** and pre-approves one of them: an explicit list is sent even in prompting modes ([#749](https://github.com/littlebearapps/untether/issues/749)), including the `default` a bypass webhook is downgraded to (`mode=bypassPermissions outcome=runs_as_default`) ([#1145](https://github.com/littlebearapps/untether/issues/1145)) |
 
-All three are warnings; nothing is rejected in 0.36.1 (stricter rules are
-[#1118](https://github.com/littlebearapps/untether/issues/1118)).
+All three are warnings. A webhook's own `permission_mode` and `allowed_tools`
+are what the audit reads when set; with `webhook_defaults = "strict"` a webhook
+without them is audited as `default` with nothing pre-approved.
+
+### Webhook safe defaults
+
+An `agent_run` webhook builds its prompt from the request payload, so with
+`[triggers] webhook_defaults = "strict"` Untether gives it safe defaults
+([#1118](https://github.com/littlebearapps/untether/issues/1118)):
+
+| Without… | Strict does |
+|---|---|
+| `project` | skips the webhook (it would run in Untether's own working directory) |
+| a secret of 32+ characters (`bearer` / HMAC) | skips the webhook |
+| its own `permission_mode` | runs Claude in `default` (prompt on stdin with the control channel, never the `-p` path), Codex in `safe`, Antigravity in Workspace, instead of the chat's or `untether.toml`'s mode; nobody is there to approve, so prompts are denied ([#835](https://github.com/littlebearapps/untether/issues/835)) |
+| its own `allowed_tools` | pre-approves no Claude tools (`[engines.claude] allowed_tools` and the default `Bash,Read,Edit,Write` aren't sent) |
+
+Skipped webhooks are reported like any invalid entry (ERROR
+`triggers.trigger_invalid` and a Telegram notice). A webhook can still opt
+into a mode that skips approvals with its own `permission_mode` plus
+`allow_unsafe_permission_mode = true`.
+
+`"compat"` (the default in 0.36.x) changes nothing, but logs WARNING
+`trigger.webhook.strict_defaults_change` (`webhook_id`, `changes`,
+`changes_in=0.37.0`) and posts one `⚠️ Trigger safety` notice listing each
+webhook strict would change, at startup and when a reload finds a new one.
+`"strict"` becomes the default in 0.37.0. To be ready:
+
+```toml
+[triggers]
+enabled = true
+webhook_defaults = "strict"
+
+[[triggers.webhooks]]
+id = "qa-after-deploy"
+path = "/hooks/qa"
+project = "myapp"
+engine = "claude"
+auth = "hmac-sha256"
+secret = "…64 hex characters from openssl rand -hex 32…"
+permission_mode = "auto"
+allowed_tools = ["Read", "Grep", "Glob"]
+model = "sonnet"
+prompt_template = "A deploy landed: {{deploy.head_sha}}. Check the release notes."
+```
+
+Logs for a webhook's own options are `trigger.webhook.<field>_override`
+(crons keep `trigger.cron.<field>_override`).
 
 ### `[triggers.crons.fetch]`
 

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from .triggers.settings import InvalidTrigger
+    from .triggers.settings import InvalidTrigger, StrictWebhookChange
 
 __all__ = [
     "format_hot_reload_only_notice",
@@ -44,6 +44,7 @@ __all__ = [
     "format_partial_reload_notice",
     "format_reload_notification",
     "format_restart_required_notice",
+    "format_strict_webhook_changes_notice",
     "format_trigger_block_failure_notice",
     "format_webhook_server_refused_notice",
 ]
@@ -402,3 +403,34 @@ def format_trigger_block_failure_notice(
         )
     paragraphs.append("Fix [triggers] in untether.toml; the fix applies on save.")
     return "\n\n".join(paragraphs)
+
+
+def format_strict_webhook_changes_notice(
+    changes: Sequence[StrictWebhookChange],
+) -> str:
+    """#1118: compat-mode webhooks that ``webhook_defaults = "strict"`` (the
+    default from 0.37.0) would change. Plain text, secret-free."""
+    from .triggers.settings import STRICT_WEBHOOK_DEFAULTS_RELEASE
+
+    count = len(changes)
+    noun = "webhook relies" if count == 1 else "webhooks rely"
+    lines = [
+        f"⚠️ Trigger safety: {count} {noun} on defaults that change in "
+        f"{STRICT_WEBHOOK_DEFAULTS_RELEASE}"
+    ]
+    lines.extend(
+        f"• webhook {_user_text(item.webhook_id)}: "
+        + "; ".join(_user_text(change) for change in item.changes)
+        for item in changes
+    )
+    return "\n\n".join(
+        [
+            "\n".join(lines),
+            "These webhooks build their prompt from the request payload. "
+            'With [triggers] webhook_defaults = "strict" they get the safe '
+            "defaults above; nothing changes until you set it or upgrade.",
+            "Give each webhook its own project, permission_mode (with engine) "
+            'and allowed_tools, then set webhook_defaults = "strict" in '
+            "untether.toml.",
+        ]
+    )

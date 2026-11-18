@@ -22,6 +22,11 @@ class RunContext:
     # #1120: one id per trigger fire (uuid4), exported to the child as
     # ``UNTETHER_RUN_ID`` and bound into the run's log context.
     run_id: str | None = None
+    # #1118: a trigger's own Claude allowlist (``()`` = pre-approve nothing).
+    allowed_tools: tuple[str, ...] | None = None
+    # #1118: a webhook fired under ``[triggers] webhook_defaults = "strict"``;
+    # ``_apply_trigger_overrides`` applies the engine's safe defaults.
+    strict_webhook: bool = False
 
 
 # #751 / #835: trigger sources with nobody present to answer a Telegram

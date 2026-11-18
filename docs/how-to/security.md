@@ -283,7 +283,9 @@ Available authentication modes:
 !!! warning "Never use `auth = \"none\"` in production"
     Without authentication, anyone who can reach the webhook endpoint can trigger arbitrary agent runs on your server.
 
-Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning; a future release will refuse it. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning, and the webhook is skipped with `[triggers] webhook_defaults = "strict"`. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+
+Set `[triggers] webhook_defaults = "strict"` ([#1118](https://github.com/littlebearapps/untether/issues/1118), the default from 0.37.0): an `agent_run` webhook then needs a `project`, runs in a mode that asks (Claude `default`, Codex `safe`, Antigravity Workspace) unless it sets its own `permission_mode`, and pre-approves no Claude tools unless it lists its own `allowed_tools`. A mode that skips approvals (Claude `bypassPermissions`, Antigravity `full`, Codex `auto`) needs `allow_unsafe_permission_mode = true` on the webhook. See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
 
 ## Bind webhook server to localhost
 
