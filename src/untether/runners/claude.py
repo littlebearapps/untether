@@ -12535,6 +12535,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 reap_orphans=self._reap_orphans,
                 orphan_pid_snapshot=state.orphan_pid_snapshot,
                 orphan_pid_starttimes=state.orphan_pid_starttimes,
+                # #1194: a cancelled run never reaches its own exit line.
+                log_teardown_exit=True,
                 stdin=stdin_arg,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,

@@ -1982,7 +1982,7 @@ class JsonlSubprocessRunner(BaseRunner):
             orphan_pid_starttimes=getattr(state, "orphan_pid_starttimes", None),
             # #1062: a cancelled run never reaches the ``subprocess.exit``
             # line below, so the teardown logs the exit of the process it
-            # stopped. (Claude's runner spawns on its own path.)
+            # stopped. (Claude's runner passes it on its own path, #1194.)
             log_teardown_exit=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
