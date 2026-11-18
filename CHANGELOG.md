@@ -1,5 +1,34 @@
 # changelog
 
+## v0.36.2 (unreleased)
+
+### changes
+
+- **feat(triggers):** cron and webhook runs set `UNTETHER_RUN_ID` and `UNTETHER_TRIGGER` in the engine's environment, and `runner.completed` logs both, so a script can tell which trigger started it [#1120](https://github.com/littlebearapps/untether/issues/1120)
+- **feat(triggers):** webhooks take the same run options as crons (`permission_mode`, `model`, `reasoning` and a per-trigger `allowed_tools`), and `/config → ⏰ Triggers` shows them [#1122](https://github.com/littlebearapps/untether/issues/1122)
+- **feat(security):** new `[triggers] webhook_defaults = "compat" | "strict"`. `strict` gives `agent_run` webhooks safe defaults: no mode of its own means the engine's asking mode with no tools pre-approved, a mode that skips approvals needs `allow_unsafe_permission_mode = true`, and a webhook without a project or with a secret under 32 characters is skipped. The default `compat` keeps today's behaviour and warns about each webhook that relies on an unsafe default; `strict` becomes the default in v0.37.0 [#1118](https://github.com/littlebearapps/untether/issues/1118)
+- **feat(security):** webhook secrets can come from `secret_env` or `secret_file` instead of sitting in `untether.toml`. Untether now writes `untether.toml` and its backups owner-only and warns once, with the `chmod` fix, when they're readable by others. `UNTETHER__*` config overrides (the bot token included) are no longer passed to engines [#1219](https://github.com/littlebearapps/untether/issues/1219)
+- **feat(codex):** groundwork for the Codex app-server transport: a zero-token schema drift probe and a pre-spawn support check that refuses a Codex CLI missing the protocol Untether needs, tested from codex-cli 0.169.0 [#961](https://github.com/littlebearapps/untether/issues/961)
+- **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
+- **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
+
+### fixes
+
+- **fix:** a final reply that certainly failed to send (connection refused or a Telegram 5xx) is kept and sent again once Telegram answers, or after a restart; timeouts and refusals are never re-sent, so a reply can't be posted twice by mistake [#1207](https://github.com/littlebearapps/untether/issues/1207)
+- **fix(claude):** approval requests are no longer auto-denied after 5 minutes; they wait for your answer, the reminders or the 4-hour cap [#844](https://github.com/littlebearapps/untether/issues/844)
+- **fix(claude):** two steers folded into one turn no longer hold the next follow-up for 120 s or report the first as "not run" [#1173](https://github.com/littlebearapps/untether/issues/1173)
+- **fix(claude):** no more stray "✓ Permission resolved" rows in a later live-session turn [#942](https://github.com/littlebearapps/untether/issues/942)
+- **fix(codex):** Codex `--trust` (new in codex-cli 0.169.0) is refused in `[engines.codex] extra_args`, because it saves project trust for every future chat; set `trust_level` in `~/.codex/config.toml` instead [#1040](https://github.com/littlebearapps/untether/issues/1040)
+- **fix(triggers):** a webhook whose announcement failed is no longer recorded as fired [#1123](https://github.com/littlebearapps/untether/issues/1123)
+- **fix:** `/cancel` sent while a finished run is still shutting down now drops pending `/at` runs and always replies [#1176](https://github.com/littlebearapps/untether/issues/1176)
+- **fix:** RAM and run-limit block messages count idle live sessions, say the limit is host-wide and point `/cancel` at the chat that owns the run; `/usage` no longer shows `prespawn_blocked` [#1195](https://github.com/littlebearapps/untether/issues/1195)
+- **fix:** a bare `/steer` in a project-bound chat names the project's engine, not the global default [#1174](https://github.com/littlebearapps/untether/issues/1174)
+- **fix:** a `/<engine>` message sent while another engine's run is busy in Steer mode no longer gets a wrong "queued instead" notice [#1177](https://github.com/littlebearapps/untether/issues/1177)
+- **fix(antigravity):** `untether agy-gate` uses the same agy binary as the runner, reading `[engines.antigravity]` or `[antigravity]` `cmd` from `--config-path`, `UNTETHER_CONFIG_PATH` or the home config [#1180](https://github.com/littlebearapps/untether/issues/1180)
+- **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
+- **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
+- **fix(claude):** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines [#1194](https://github.com/littlebearapps/untether/issues/1194)
+
 ## v0.36.1 (2026-11-16)
 
 v0.36.1 adds Google's Antigravity CLI as its own engine, with Telegram approvals, questions, steer and a Plan first card,
