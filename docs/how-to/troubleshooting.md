@@ -118,6 +118,25 @@ The version is checked again whenever the `opencode` binary changes, so the next
 - **Gemini CLI** (⚠️ deprecated): see below — individual Google accounts (free, Google AI Pro and Ultra) can no longer authenticate at all
 - **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
 
+## My engine can't see an environment variable
+
+**Symptoms:** a run fails with the engine's own "missing key" or auth error, an MCP server can't start or can't sign in, or a proxy or custom CA certificate is ignored, although the variable is set for Untether. Since v0.36.2 this can start after upgrading on Codex or OpenCode ([#1241](https://github.com/littlebearapps/untether/issues/1241)).
+
+Untether passes only an [allowlist](security.md#engine-subprocess-env-allowlist) of variables to Claude Code, Pi, Antigravity, Codex and OpenCode. To see what it removed, look for the first run's log line (names only, never values):
+
+```bash
+journalctl --user -u untether -o cat | grep env_policy.dropped
+```
+
+Add each name the engine needs to `untether.toml`, then send the next message (no restart needed):
+
+```toml
+[security]
+env_extra_allow = ["MY_PROVIDER_KEY"]
+```
+
+Typical cases: a Codex `model_providers.<id>.env_key`, an MCP server's `env_vars` or `bearer_token_env_var`, an `opencode.json` `{env:NAME}`, or a proxy for Claude, Pi or Antigravity (Codex and OpenCode get proxies and CA certificates already). The variable must also be in Untether's own environment (the service's `EnvironmentFile=`), not just your shell; see [Env for Codex and OpenCode](../reference/env-vars.md#env-codex-opencode).
+
 ## Why does my Gemini run stall, or my Amp run fail immediately?
 
 Both engines are **deprecated** and currently non-functional on ordinary accounts.

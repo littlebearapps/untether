@@ -120,6 +120,35 @@ Any other `type` is reported as an `opencode emitted unsupported event: <type>` 
 
 See [stream-json-cheatsheet.md](./stream-json-cheatsheet.md) for detailed event format documentation.
 
+## Spawn environment ([#1241](https://github.com/littlebearapps/untether/issues/1241))
+
+Since v0.36.2, `OpenCodeRunner.env()` spawns `opencode run` with the
+[env allowlist](../../env-vars.md#env-allowlist-claudepi) (`filtered_env()`),
+the `[security] env_extra_allow` / `env_extra_prefix_allow` extras, and:
+
+- prefix `OPENCODE_` (`OPENCODE_CONFIG`, `OPENCODE_PERMISSION`, …);
+- **any name ending in `_API_KEY`** (so an unrelated `STRIPE_API_KEY` in
+  Untether's environment still reaches OpenCode);
+- `_OPENCODE_PROVIDER_ENV`, a dated snapshot (opencode-ai 1.19.6,
+  2026-11-18) of the provider names that don't end in `_API_KEY`: the 34 in
+  its bundled models.dev catalogue plus the AWS, Vertex and SAP AI Core names
+  its loaders read. Refresh it with each OpenCode drift check; Untether never
+  reads OpenCode's catalogue at runtime;
+- the shared proxy/CA tuple `env_policy.NETWORK_ENV_NAMES`
+  (`NODE_EXTRA_CA_CERTS` passes by the `NODE_` prefix).
+
+The login (`auth.json`) is found through `HOME` / `XDG_DATA_HOME`. A variable
+`opencode.json` reads through `{env:NAME}` needs `env_extra_allow` unless it
+is covered above. The first spawn per process logs
+`env_policy.dropped engine=opencode names=[…]` (names only).
+
+Native-first record (opencode-ai 1.19.6, 2026-11-18): OpenCode 1.x has no
+documented env filter for the engine, its shell tool or its MCP servers
+(local MCP servers get the engine's env plus their `environment` map), so
+native is **missing** and the filter is Untether's own, on its cross-engine
+spawn surface. The `opencode --version` guard still inherits the full env (it
+runs no model or tools; see [#375](https://github.com/littlebearapps/untether/issues/375)).
+
 ## Known Limitations
 
 ### Compaction isn't shown
@@ -133,4 +162,4 @@ OpenCode compacts long sessions itself: v1 auto-compacts (the `compaction.auto` 
 ## See also
 
 - [Error Reference](../../errors.md) — actionable hints for common engine errors
-- [Env for Codex and OpenCode](../../env-vars.md#env-codex-opencode) — what OpenCode and its MCP servers inherit, and the `set -u` wrapper pattern
+- [Env for Codex and OpenCode](../../env-vars.md#env-codex-opencode) — what OpenCode and its MCP servers get, and the `set -u` wrapper pattern

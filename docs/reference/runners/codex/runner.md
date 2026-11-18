@@ -53,3 +53,25 @@ that, never a version comparison, to decide whether a CLI can run the app-server
 After a Codex upgrade on lba-1: `uv run pytest tests/test_codex_app_server_drift.py tests/test_codex_cli_schema_drift.py -v -rs`
 (a skip on lba-1 counts as a fail). On drift, re-derive the fixture with the script, bump `PROBED_APP_SERVER_VERSION`
 and review the transport before the next rc.
+
+## Spawn environment ([#1241](https://github.com/littlebearapps/untether/issues/1241))
+
+Since v0.36.2, `CodexRunner.env()` spawns `codex exec` with the [env allowlist](../../env-vars.md#env-allowlist-claudepi)
+(`filtered_env()`), the `[security] env_extra_allow` / `env_extra_prefix_allow` extras, and Codex's own extras:
+prefix `CODEX_` (`CODEX_HOME`, `CODEX_SQLITE_HOME`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_CA_CERTIFICATE`),
+`RUST_LOG`, `DBUS_SESSION_BUS_ADDRESS` (keyring credential store), the OpenAI workload-identity names and the shared
+proxy/CA tuple `env_policy.NETWORK_ENV_NAMES`. The ChatGPT login is found through `HOME` (`~/.codex`). The #962
+app-server child must reuse `_CODEX_ENV_EXTRAS` / `_CODEX_ENV_PREFIXES`, never a second list. The first spawn per
+process logs `env_policy.dropped engine=codex names=[…]` (names only).
+
+Names Codex reads under a user-chosen name (`model_providers.<id>.env_key`, MCP `env_vars`, `bearer_token_env_var`,
+`env_http_headers`) can't be listed, so they need `env_extra_allow`. Codex already starts stdio MCP servers with a
+minimal env of its own, so MCP needs no Untether work.
+
+Native-first record (codex-cli 0.170.0, 2026-11-18): Codex's `shell_environment_policy` (`inherit`, `filters`, `set`,
+`ignore_default_excludes`) is **partial** for this job. It is the user's own config, filters only what Codex's shell
+commands see (not the Codex process, hooks or `notify`), and its default `inherit = "all"` keeps KEY/SECRET/TOKEN
+names. Untether doesn't override it with `-c`; it stays the user's second layer, and Untether's filter only limits what
+Untether hands to Codex, as for Claude, Pi and Antigravity. The spawn environment is Untether's own cross-engine
+surface. Not covered: the `codex --version`, schema-probe and `/auth codex` calls still inherit the full env (they run
+no model or tools; see [#375](https://github.com/littlebearapps/untether/issues/375)).

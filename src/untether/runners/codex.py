@@ -25,6 +25,13 @@ from ..runner import (
 )
 from ..schemas import codex as codex_schema
 from ..utils import engine_argv
+from ..utils.env_policy import (
+    NETWORK_ENV_NAMES,
+    filtered_env,
+    load_env_extras,
+    log_dropped_once,
+    log_user_extensions_once,
+)
 from ..utils.paths import get_run_base_dir, relativize_command, relativize_path
 from .extra_args_guard import (
     SECURITY_DOC_REF,
@@ -42,6 +49,21 @@ from .run_options import EngineRunOptions, get_run_options
 logger = get_logger(__name__)
 
 ENGINE: EngineId = "codex"
+
+# #1241: Codex-only env names on top of the global allowlist (codex-cli
+# 0.170.0). ``CODEX_*`` covers CODEX_HOME, CODEX_SQLITE_HOME, CODEX_API_KEY,
+# CODEX_ACCESS_TOKEN and CODEX_CA_CERTIFICATE; the ChatGPT login is found via
+# HOME (~/.codex), and the keyring credential store needs D-Bus. The #962
+# app-server child reuses these two tuples.
+_CODEX_ENV_EXTRAS: tuple[str, ...] = (
+    "RUST_LOG",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "OPENAI_FEDERATION_RULE_ID",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    *NETWORK_ENV_NAMES,
+)
+_CODEX_ENV_PREFIXES: tuple[str, ...] = ("CODEX_",)
 
 __all__ = [
     "CODEX_SAFE_PERMISSION_MODE",
@@ -949,6 +971,18 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 level="warning",
             )
         ]
+
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        """#1241: the allowlisted env, not Untether's whole service env.
+        Codex's own ``shell_environment_policy`` stays the user's second layer."""
+        user_exact, user_prefix = load_env_extras()
+        log_user_extensions_once(user_exact, user_prefix)
+        env = filtered_env(
+            extra_allow=(*user_exact, *_CODEX_ENV_EXTRAS),
+            extra_prefix=(*user_prefix, *_CODEX_ENV_PREFIXES),
+        )
+        log_dropped_once(ENGINE, os.environ, env)
+        return env
 
     def start_run(
         self,

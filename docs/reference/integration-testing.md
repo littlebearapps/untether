@@ -1819,7 +1819,7 @@ Run in the Claude chat. The B-LIVE, RC12 and RC13 rows named here give the full 
 
 ## 0.36.2rc1 scenarios
 
-0.36.2rc1 resends finals that certainly failed (#1207), adds trigger run identity, webhook run options, strict webhook defaults and secrets from env or file (#1120, #1122, #1118, #1219, #1123), and fixes a batch of Claude, core and Antigravity issues (#844, #1173, #1186, #939, #942, #1177, #1174, #1176, #1194, #1195, #1180, #1181, #1212). Claude chat (`5284581592`) unless a row says otherwise; back up `~/.untether-dev/untether.toml` before any row that edits it, restore it afterwards, and restart the dev bot only from a terminal.
+0.36.2rc1 resends finals that certainly failed (#1207), adds trigger run identity, webhook run options, strict webhook defaults and secrets from env or file (#1120, #1122, #1118, #1219, #1123), gives Codex and OpenCode the env allowlist (#1241), and fixes a batch of Claude, core and Antigravity issues (#844, #1173, #1186, #939, #942, #1177, #1174, #1176, #1194, #1195, #1180, #1181, #1212). Claude chat (`5284581592`) unless a row says otherwise; back up `~/.untether-dev/untether.toml` before any row that edits it, restore it afterwards, and restart the dev bot only from a terminal.
 
 ### Core (#1207, #1174, #1176, #1194, #1195)
 
@@ -1835,6 +1835,15 @@ R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PRO
 | R362-1176 Q15 after a final (Pi chat) | `/at 60s reply A`, `/at 5m reply B`; `/cancel` within 2 s of A's final | Reply `❌ cancelled 1 pending /at run.` (never silence); no B run after 5 min |
 | R362-1194 spawn/exit balance | U6 on all five engines, then count `subprocess.spawn` and `subprocess.exit` in that window | Counts equal; each Claude cancel logs one `subprocess.exit reason=teardown` |
 | R362-1195 RAM block | Raise `[watchdog] prespawn_ram_block_mb` above free RAM (hot-reloads); send a prompt in the Claude and Codex chats; `/usage` in the Antigravity chat; restore | Block text counts idle live sessions, says `engine run(s) already open on this host`, points `/cancel` at `the chat that started it`, no "restart the service"; `/usage` shows `the host is short of memory or at its run limit right now…`, never `prespawn_blocked` |
+
+### Codex and OpenCode env (#1241)
+
+Setup (dev unit only): a drop-in for `untether-dev` with `Environment=ZZ_UNTETHER_CANARY=1 ZZ_FAKE_API_KEY=1`, then restart the dev unit from a terminal. Read names only (`tr '\0' '\n' </proc/<pid>/environ | cut -d= -f1`), never values. Remove the drop-in and restart afterwards. Costs about one small Codex and one small OpenCode turn.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R362-1241a Codex canary | Codex chat (`-4929463515`): `list the files here`; during the run read the names in `/proc/$(pgrep -n -f 'codex exec')/environ` | `ZZ_UNTETHER_CANARY` absent; the run authenticates (ChatGPT login via `~/.codex`) and answers; journal `env_policy.dropped engine=codex` lists `ZZ_UNTETHER_CANARY` |
+| R362-1241b OpenCode canary | OpenCode chat (`-5200822877`): a short task; during the run read the names in `/proc/<opencode pid>/environ` | `ZZ_UNTETHER_CANARY` absent, `ZZ_FAKE_API_KEY` present (the `*_API_KEY` rule); a normal answer from the dev provider; journal `env_policy.dropped engine=opencode` lists the canary |
 
 ### Claude (#844, #1173, #1186, #939, #942, #1177)
 
