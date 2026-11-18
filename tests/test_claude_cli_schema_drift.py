@@ -1516,3 +1516,39 @@ def test_926_recurring_max_age_default(cli_blob: mmap.mmap) -> None:
         (b"recurringMaxAgeMs:604800000",),
         "the CLI's session-cron max age moved — update CLI_CRON_MAX_AGE_S",
     )
+
+
+def test_882_decision_reason_types_and_ask_flags_present(cli_blob: mmap.mmap) -> None:
+    """#882: the ``can_use_tool`` reason enum and the four ask flags
+    ``_autonomous_ask_reason`` reads (CLI 2.1.327). A new reason value is a
+    card in plan anyway (fail-closed); this makes the drift visible."""
+    from untether.runners.claude import _NEVER_ROUTINE_REASONS
+
+    m = re.search(rb'\[((?:"[A-Za-z]+",)*"safetyCheck"(?:,"[A-Za-z]+")*)\]', cli_blob)
+    if m is None:
+        pytest.fail("the CLI's decision_reason_type enum moved — re-run the #882 probe")
+    declared = {v.decode() for v in re.findall(rb'"([^"]+)"', m.group(1))}
+    assert declared == {
+        "rule",
+        "mode",
+        "subcommandResults",
+        "permissionPromptTool",
+        "hook",
+        "asyncAgent",
+        "sandboxOverride",
+        "workingDir",
+        "safetyCheck",
+        "classifier",
+        "other",
+    }
+    assert declared >= _NEVER_ROUTINE_REASONS
+    _require_bytes(
+        cli_blob,
+        (
+            b"classifier_approvable",
+            b"matched_ask_rule",
+            b"requires_user_interaction",
+            b"default_to_no",
+        ),
+        "a #882 ask flag left the can_use_tool schema — re-run the probe",
+    )

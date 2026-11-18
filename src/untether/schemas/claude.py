@@ -347,6 +347,12 @@ class ControlCanUseToolRequest(
     agent_id: str | None = None
     decision_reason: Any = None
     decision_reason_type: Any = None
+    # #882: the CLI's ask flags (absent keys decode as None). Loose types for
+    # the same reason; the runner treats any value but the benign one as set.
+    matched_ask_rule: Any = None
+    classifier_approvable: Any = None
+    requires_user_interaction: Any = None
+    default_to_no: Any = None
 
 
 class ControlInitializeRequest(

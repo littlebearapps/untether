@@ -167,13 +167,17 @@ def test_751_after_mismatch_glob_and_bash_queue_telegram_approval() -> None:
 
 
 def test_751_control_without_mismatch_glob_is_auto_approved() -> None:
-    """Control case: on a model that honours `auto`, stage 6 still
-    blanket-approves (so the gate-level test fails on the old code)."""
+    """Control case: on a model that honours `auto` there is no prompting
+    re-arm. Since #882 what still reaches stage 6 in `auto` is ask-class and
+    gets a card from the autonomous path (logged `ask_class_prompt`)."""
     state = _state("auto")
     _feed(state, _init("auto", model="claude-opus-5-5"))
-    events = _feed(state, _can_use_tool("req-751-ctl", "Glob"))
-    assert events == []
-    assert "req-751-ctl" in state.auto_approve_queue
+    with capture_logs() as logs:
+        events = _feed(state, _can_use_tool("req-751-ctl", "Glob"))
+    assert state.prompting_mode is False
+    assert len(events) == 1
+    assert "req-751-ctl" not in state.auto_approve_queue
+    assert [e for e in logs if e["event"] == "control_request.ask_class_prompt"]
 
 
 def test_751_manual_requested_default_reported_no_row() -> None:

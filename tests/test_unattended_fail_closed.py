@@ -278,11 +278,14 @@ def test_835_plan_cron_write_after_exitplanmode_denied(tool: str) -> None:
     assert _deny_logs(logs)[0]["reason"] == "plan_mode"
 
 
-def test_835_attended_plan_write_unchanged() -> None:
-    """Guard: the attended Probe-G gap (#882) is not changed here."""
+def test_835_attended_plan_write_gets_card() -> None:
+    """#882 closed the attended Probe-G gap: a plan-mode write by an attended
+    run gets a card instead of being approved (and is never denied)."""
     state = _state("plan", trigger=None)
-    _feed(state, _can_use_tool("r1", "Write", file_path="/tmp/x"))
-    assert "r1" in state.auto_approve_queue
+    events = _feed(state, _can_use_tool("r1", "Write", file_path="/tmp/x"))
+    assert "r1" not in state.auto_approve_queue
+    assert _denied(state, "r1") is None
+    assert len(_keyboards(events)) == 1
 
 
 @pytest.mark.parametrize("mode", ["bypassPermissions", "auto", "dontAsk"])
@@ -302,10 +305,76 @@ def test_835_bypass_and_auto_cron_ask_class_request_denied(
 
 
 @pytest.mark.parametrize("mode", ["bypassPermissions", "auto", "dontAsk"])
-def test_835_attended_bypass_and_auto_unchanged(mode: str) -> None:
+def test_835_attended_bypass_and_auto_get_card(mode: str) -> None:
+    """#882: the attended counterpart shows a card (never a deny)."""
     state = _state(mode, trigger=None)
-    _feed(state, _can_use_tool("r1", "Bash"))
+    events = _feed(state, _can_use_tool("r1", "Bash"))
+    assert "r1" not in state.auto_approve_queue
+    assert _denied(state, "r1") is None
+    assert len(_keyboards(events)) == 1
+
+
+def _can_use_tool_with(rid: str, tool: str, **fields: Any) -> Any:
+    request: dict[str, Any] = {
+        "subtype": "can_use_tool",
+        "tool_name": tool,
+        "input": {"command": "ls"},
+    }
+    request.update(fields)
+    return _decode({"type": "control_request", "request_id": rid, "request": request})
+
+
+@pytest.mark.parametrize("mode", ["plan", "plan-auto"])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"decision_reason_type": "rule"},
+        {"decision_reason_type": "hook"},
+        {"decision_reason_type": "safetyCheck", "classifier_approvable": False},
+        {"decision_reason_type": "workingDir"},
+        {"decision_reason_type": "other"},
+        {"matched_ask_rule": {"source": "localSettings"}},
+    ],
+)
+def test_882_unattended_plan_ask_reason_now_denied(mode: str, fields: dict) -> None:
+    """BEHAVIOUR CHANGE (#882): unattended plan / plan-auto requests with a
+    non-routine reason or an ask flag used to be approved; now denied."""
+    state = _state(mode)
+    with capture_logs() as logs:
+        _feed(state, _can_use_tool_with("r1", "Glob", **fields))
+    assert _denied(state, "r1") is not None
+    assert "r1" not in state.auto_approve_queue
+    assert _deny_logs(logs)[0]["reason"] == "ask_class"
+
+
+def test_882_unattended_plan_mcp_write_now_denied() -> None:
+    """BEHAVIOUR CHANGE (#882): a no-reason MCP call in unattended `plan`
+    used to be approved; it is a possible write, so it is denied."""
+    state = _state("plan")
+    with capture_logs() as logs:
+        _feed(state, _can_use_tool_with("r1", "mcp__x__send"))
+    assert _denied(state, "r1") is not None
+    assert _deny_logs(logs)[0]["reason"] == "plan_mode"
+
+
+def test_882_unattended_plan_auto_edit_still_approved() -> None:
+    """D2-A: plan-auto's plan-mode edits stay approved unattended too."""
+    state = _state("plan-auto")
+    _feed(state, _can_use_tool_with("r1", "Write", decision_reason_type="mode"))
     assert "r1" in state.auto_approve_queue
+
+
+@pytest.mark.parametrize("mode", ["plan", "bypassPermissions", "default"])
+def test_882_unattended_person_only_denied(mode: str) -> None:
+    state = _state(mode)
+    with capture_logs() as logs:
+        _feed(
+            state,
+            _can_use_tool_with("r1", "mcp__x__consent", requires_user_interaction=True),
+        )
+    assert _denied(state, "r1") is not None
+    assert "r1" not in state.auto_approve_queue
+    assert _deny_logs(logs)[0]["reason"] == "person_only"
 
 
 def test_835_diff_preview_gate_denied_when_unattended() -> None:

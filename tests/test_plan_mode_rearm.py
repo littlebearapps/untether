@@ -87,6 +87,7 @@ def _live_session(session_id: str = SID) -> tuple[ClaudeStreamState, AsyncMock]:
     state.factory.started(ResumeToken(engine=ENGINE, value=session_id), title="claude")
     state.live_mode = True
     state.configured_plan_mode = True
+    state.requested_permission_mode = "plan"  # #882 reads the configured mode
     stdin = AsyncMock()
     _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
     _SESSION_STDIN[session_id] = stdin

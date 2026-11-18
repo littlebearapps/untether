@@ -244,11 +244,14 @@ prompt tool alongside *every* mode, and the two compose rather than conflict:
   consecutive block on, each blocked action arrives at Untether as a
   `can_use_tool` with `decision_reason_type: "classifier"` and a
   `decision_reason` like *"3 consecutive actions were blocked…"* (zero-token
-  probe, CLI 2.1.287, 2026-10-02). In an attended `auto` run Untether's
-  autonomous stage 6 still approves it (open gap, [#882](https://github.com/littlebearapps/untether/issues/882));
+  probe, CLI 2.1.287, 2026-10-02; re-confirmed on 2.1.327). In an attended
+  `auto` run it gets an Approve/Deny card ([#882](https://github.com/littlebearapps/untether/issues/882));
   in an unattended (cron / webhook) run it is denied ([#835](https://github.com/littlebearapps/untether/issues/835)).
+  An Approve does not reset the CLI's consecutive-block counter (the next
+  blocked action escalates again); a Deny lets routine calls carry on with no
+  cards (2026-11-18 probe rows A2c, A2f).
 
-**Plan re-arm in live sessions ([#383](https://github.com/littlebearapps/untether/issues/383), 0.35.5rc15).** An approved `ExitPlanMode` moves the CLI to `prePlanMode ?? "default"` — `default` for a session started in plan — and reports it as `system/status{status:null,permissionMode:"default"}`. A live session (#776) used to stay there for every later turn. The runner now tracks the effective mode (`ClaudeStreamState.effective_permission_mode`, from every `system/init.permissionMode`, `system/status` frames with a `permissionMode`, and the ack of its own request; `claude.permission_mode.changed`) and, in a chat whose configured mode maps to CLI `plan` (`plan`, `plan-auto`), sends the parent-initiated `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}` when the session has left plan. Never for prompting modes (`default` / `manual` / `acceptEdits`) or the other autonomous modes (`auto` / `dontAsk` / `bypassPermissions`), never outside a live session, and never unless the CLI reported `plan` at least once in this process (so it can't fight `--dangerously-skip-permissions`, which overrides `plan`). One request in flight at a time. `plan-auto` is re-armed before follow-ups and idle steers only, not at the idle boundary (Decision 6: its rubber stamp would approve a planned wake turn anyway, so planning it costs a plan-model call and an `ExitPlanMode` round trip for no check). Logs `claude.permission_mode.rearm_sent` (`reason` = `idle` / `agents_done` / `followup` / `steer`), `rearm_ack`, `rearm_failed` (WARN; the session is closed once idle and the next message resumes a fresh `--permission-mode plan` process), `rearm_write_failed`. Kill switch `[watchdog] rearm_plan_mode = false`. Plan mode switches a haiku session's model to `claude-sonnet-5-5` while planning, so re-planned follow-ups cost what they did before live sessions. **Known limit (CLI 2.1.285):** plan mode no longer blocks a `Write` internally — it raises `can_use_tool` with `decision_reason_type:"mode"`, which Untether's autonomous-mode stage-6 handler approves; the model's plan-mode instructions are what hold it back (see the findings addendum in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md`).
+**Plan re-arm in live sessions ([#383](https://github.com/littlebearapps/untether/issues/383), 0.35.5rc15).** An approved `ExitPlanMode` moves the CLI to `prePlanMode ?? "default"` — `default` for a session started in plan — and reports it as `system/status{status:null,permissionMode:"default"}`. A live session (#776) used to stay there for every later turn. The runner now tracks the effective mode (`ClaudeStreamState.effective_permission_mode`, from every `system/init.permissionMode`, `system/status` frames with a `permissionMode`, and the ack of its own request; `claude.permission_mode.changed`) and, in a chat whose configured mode maps to CLI `plan` (`plan`, `plan-auto`), sends the parent-initiated `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}` when the session has left plan. Never for prompting modes (`default` / `manual` / `acceptEdits`) or the other autonomous modes (`auto` / `dontAsk` / `bypassPermissions`), never outside a live session, and never unless the CLI reported `plan` at least once in this process (so it can't fight `--dangerously-skip-permissions`, which overrides `plan`). One request in flight at a time. `plan-auto` is re-armed before follow-ups and idle steers only, not at the idle boundary (Decision 6: its rubber stamp would approve a planned wake turn anyway, so planning it costs a plan-model call and an `ExitPlanMode` round trip for no check). Logs `claude.permission_mode.rearm_sent` (`reason` = `idle` / `agents_done` / `followup` / `steer`), `rearm_ack`, `rearm_failed` (WARN; the session is closed once idle and the next message resumes a fresh `--permission-mode plan` process), `rearm_write_failed`. Kill switch `[watchdog] rearm_plan_mode = false`. Plan mode switches a haiku session's model to `claude-sonnet-5-5` while planning, so re-planned follow-ups cost what they did before live sessions. **Plan-mode writes (CLI ≥ 2.1.285, [#882](https://github.com/littlebearapps/untether/issues/882)):** plan mode no longer blocks a `Write` internally — it raises `can_use_tool` with `decision_reason_type:"mode"`. Since #882 that request gets an Approve/Deny card in an attended `plan` chat (approved in `plan-auto`), instead of being approved; see "Ask-class requests in autonomous modes" below.
 
 Auto mode requires a supported model (Opus 4.6+/Sonnet 4.6+/Fable 5) and an
 organisation that has not set `permissions.disableAutoMode`. On CLI 2.1.285
@@ -261,7 +264,8 @@ with the request (see "Requested vs effective mode" above).
 | Point in stage 6 | Unattended behaviour | `reason` |
 |---|---|---|
 | Autonomous auto-approve, mode `auto` / `dontAsk` / `bypassPermissions` | deny every request (they're all ask-class: `ask` rules, hook `ask`, `requiresUserInteraction` MCP tools, critical-path `rm`, auto's classifier fallback; `dontAsk` auto-denies anything that would prompt, so whatever still arrives is ask-class too) | `ask_class` |
-| Autonomous auto-approve, mode `plan` | deny `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` (Probe-G regression: plan mode sends them to the host); read-only tools approved as before | `plan_mode` |
+| Autonomous auto-approve, mode `plan` / `plan-auto` | deny whatever an attended run would show a card for (the #882 table below): plan-mode edits and no-reason non-research tools in `plan` (`plan_mode`), and any non-routine reason or ask flag in either (`ask_class`). Research tools approved as before; `plan-auto`'s `mode` edits of the file/shell tools approved. **Changed in #882:** plan / plan-auto used to approve every non-routine reason, and `plan-auto` everything | `plan_mode` / `ask_class` |
+| Person-only request (`requires_user_interaction`), any mode | deny (#882) | `person_only` |
 | Diff-preview gate would fire | deny (skipping it would approve an unseen write) | `diff_preview` |
 | Anything left before the outline gate (ExitPlanMode in `plan`, AskUserQuestion, prompting-mode tools, a #751-re-armed downgraded `auto`, other request types) | deny | `would_wait` |
 
@@ -296,7 +300,7 @@ onto the run as `ClaudeStreamState.prompting_mode`):
 | Mode class | Modes | Stage 6 behaviour |
 |---|---|---|
 | **Prompting** | `default`, `manual`, `acceptEdits` | **Every** tool routes to a Telegram approval |
-| **Autonomous** | `plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions` | Only `ExitPlanMode` / `AskUserQuestion` route; the rest are approved |
+| **Autonomous** | `plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions` | `ExitPlanMode` / `AskUserQuestion` route; since #882 so does every ask-class request (table below); routine research is approved |
 
 Autonomous modes keep the narrow set deliberately. `DEFAULT_ALLOWED_TOOLS`
 only covers `Bash`/`Read`/`Edit`/`Write`, so `Glob`, `Grep`, `WebFetch` and
@@ -305,10 +309,8 @@ approval button per tool in the fleet's most-used mode while buying no safety
 — plan mode blocks writes internally, verified by probe G on CLI 2.1.228 (a
 `Write` was never created and never surfaced as a `can_use_tool`). **Probe G no
 longer holds on CLI 2.1.285:** plan mode now raises a `can_use_tool`
-(`decision_reason_type: "mode"`) for a non-plan-file `Write`, and this
-classification lets stage 6 approve it; the model's plan-mode instructions are
-what hold it back. This is an open issue, unchanged in 0.36.0 (see the #383
-"Known limit" above).
+(`decision_reason_type: "mode"`) for a non-plan-file `Write`. Since #882 that
+request gets a card (below).
 
 #### `--allowedTools` is mode-aware ([#749](https://github.com/littlebearapps/untether/issues/749))
 
@@ -322,7 +324,7 @@ contradict the mode.
 | `default` | ✗ | every tool prompts |
 | `manual` | ✗ | every tool prompts |
 | `acceptEdits` | ✗ | reads, in-scope edits and common filesystem commands auto-run in the CLI; every other tool prompts |
-| `plan` | ✓ | reads pre-approved; writes held back by plan mode (blocked internally on CLI 2.1.228; on 2.1.285 a `Write` reaches stage 6 and is approved — see above) |
+| `plan` | ✓ | reads pre-approved; file-tool writes reach stage 6 as `mode` and get a card (#882). With auto mode available the CLI drops `Bash` from the allowlist and its plan classifier reviews shell commands (2026-11-18 probe P3) |
 | `plan-auto` | ✓ | as `plan`, plus `ExitPlanMode` rubber-stamped |
 | `auto` | ✓ | classifier decides at stage 4; stage 6 is the fallback path |
 | `dontAsk` | ✓ | **only** the allowlisted tools can run — see below |
@@ -346,12 +348,43 @@ process) so the interaction is discoverable rather than silent.
 > read-only and closer to its documented "locked-down CI" purpose; revisit if
 > `dontAsk` acquires real usage.
 
-> **Known gap, carried to v0.36.2.** An explicit `permissions.ask` rule reaches
-> stage 6 *even under `bypassPermissions`* — the CLI deliberately overriding
-> the mode to honour the user's highest-priority rule. Because autonomous modes
-> retain both the two-tool gate and the stage-5 allowlist, such a rule is still
-> pre-empted for the four allowlisted tools. Closing that requires a stage-5
-> change, not a wider stage-6 gate.
+#### Ask-class requests in autonomous modes ([#882](https://github.com/littlebearapps/untether/issues/882), 0.36.2)
+
+Ask rules (stage 3) are decided before allow rules, so `--allowedTools` can't
+pre-empt them: the CLI hands the host exactly the calls it wants a person to
+decide, tagged with `decision_reason_type` and flags. `_autonomous_ask_reason`
+(`runners/claude.py`) reads those **raw** fields and is fail-closed: it lists
+what may be approved, and any mode, reason or flag value it doesn't know is an
+ask. Probe matrix (CLI 2.1.327, subscription):
+`docs/findings/2026-11-18-claude-882-ask-class-matrix.md`.
+
+| Configured mode | Request | Attended | Unattended |
+|---|---|---|---|
+| any (incl. prompting) | `requires_user_interaction` set (not `false`), tool not `ExitPlanMode` / `AskUserQuestion` | deny + 🔒 note with `claude --resume <id>` (no one-tap Approve; the CLI executes on `allow`) | deny `person_only` |
+| `bypassPermissions` / `auto` / `dontAsk` / unknown or unset | anything else (ask rule, hook ask, `safetyCheck`, classifier escalation, no reason) | card | deny `ask_class` |
+| `plan` / `plan-auto` | `matched_ask_rule` set, `classifier_approvable` ≠ `true`, or `default_to_no` ≠ `false` | card | deny `ask_class` |
+| `plan` / `plan-auto` | any reason other than `mode` (`rule`, `hook`, `safetyCheck`, `classifier`, `workingDir`, `other`, `asyncAgent`, a future value, a non-string) | card | deny `ask_class` |
+| `plan` | `mode` (any tool, incl. a subagent's with `agent_id`) | card | deny `plan_mode` |
+| `plan-auto` | `mode` on `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` | approve (D2-A: the plan is rubber-stamped anyway) | approve |
+| `plan-auto` | `mode` on any other tool (e.g. an MCP write) | card | deny `plan_mode` |
+| `plan` | no reason, CLI in `plan` (or before the first init), tool not in `_PLAN_READ_ONLY_TOOLS` (Glob, Grep, Read, WebFetch, Task, Agent, …) | card | deny `plan_mode` |
+| `plan` / `plan-auto` | no reason, otherwise (research, or `plan` after Approve Plan) | approve (diff preview still applies) | approve |
+
+`_PLAN_ROUTINE_REASONS` ships empty and can never hold a member of
+`_NEVER_ROUTINE_REASONS` (test-enforced); a value joins only when the docs don't
+call it a prompt, a probe sees it on routine research and the subscription
+dev-bot check agrees. Every card logs INFO `control_request.ask_class_prompt`
+(`request_id`, `tool_name`, `reason` = `ask_class` / `plan_mode`,
+`decision_reason_type`, `permission_mode`, `agent_id`; names only) — join on
+`request_id` with `control_request.received`. Person-only denials log INFO
+`control_request.person_only_denied`. `suppress_always_allow_rule` isn't read:
+the Claude keyboard has no "Always allow" button. `ExitPlanMode` also carries
+`requires_user_interaction: true` (probe EP), which is why both question tools
+are excluded before the flag is read. **Known limit:** a subagent still in plan
+after the parent left it sends `mode` (gated), but a subagent edit with no
+reason after the parent left plan is approved: Untether can't see a subagent's
+own mode. `--permission-prompts none` is not a replacement for #835: it also
+removes `ExitPlanMode` and `AskUserQuestion` from the tool set.
 
 **`--permission-prompt-tool` is a hidden flag** — it is absent from
 `claude --help`, so its continued existence can only be established by
