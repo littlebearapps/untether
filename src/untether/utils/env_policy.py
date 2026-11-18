@@ -21,8 +21,8 @@ Scope of this change
 --------------------
 
 Claude and Pi opted in via :func:`filtered_env` in v0.35.2, Antigravity
-with #558 and Codex with #1241. Other engines (OpenCode, Gemini, AMP)
-still return ``None`` from their ``env()`` hook and inherit the parent
+with #558, and Codex and OpenCode with #1241. The deprecated Gemini and
+AMP runners still return ``None`` from their ``env()`` hook and inherit the parent
 environment (minus :func:`apply_run_env`'s drops).
 
 Extending the allowlist
@@ -378,7 +378,7 @@ def apply_run_env(
     overrides (#1219).
 
     ``env`` is a runner's ``env()`` result; ``None`` means "inherit the
-    service env" (OpenCode). Inherited ``UNTETHER_RUN_ID`` /
+    service env" (Gemini, AMP). Inherited ``UNTETHER_RUN_ID`` /
     ``UNTETHER_TRIGGER`` are always dropped (``UNTETHER_*`` passes the
     filter), then assigned only for an unattended cron/webhook run, so a
     human turn or ``/at`` fire never carries a stale or borrowed identity.
