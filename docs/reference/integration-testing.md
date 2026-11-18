@@ -419,6 +419,11 @@ keys plus reverting `plan-auto` → `auto` in the toml, crons and chat prefs; th
 `journalctl --user -u untether --since "2 minutes ago" | grep -E "extra_forbidden|Extra inputs|triggers.init_failed|permission-mode"`
 after the restart.
 
+**Triggers, 0.36.2 → 0.36.1.** A cron or webhook that uses a 0.36.2 key (`secret_env`, `secret_file`, `allowed_tools`
+or run options on a webhook, `allow_unsafe_permission_mode`) is skipped on 0.36.1 with a notice, not a dead
+`[triggers]` block. Remove `[triggers] webhook_defaults` (a top-level key 0.36.1 doesn't know) before rolling back.
+`triggers_history.json` keeps its v1 shape.
+
 ### State file compatibility
 
 If any state files exist (chat preferences, topic state), verify they survive upgrade:
@@ -532,6 +537,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Voice (`voice.py`) | T1, R15-11 (vocabulary; supersedes RC12-10), R15-10 (endpoint), R17-19a…c (URL userinfo masked) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8, R17-14 (dev-ws forum) |
 | Directives (`directives.py`) | T9, T10 |
+| Triggers (`triggers/*.py`, trigger run options in `telegram/loop.py`) | R1–R5, R11–R14, TR-* (0.36.2rc1), R17-11a–g, R17-20a–i |
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, `runners/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
@@ -1810,3 +1816,66 @@ Run in the Claude chat. The B-LIVE, RC12 and RC13 rows named here give the full 
 | R3-SEAM-6 `/continue` | `/new`, then `/continue reply with the word continued` | Resumes the project's most recent Claude session and replies `continued` | `runner.start` args contain `--continue` |
 
 **Required for 0.36.1rc3:** the Minor tiers as for rc1 (Tier 7, Tier 1 on all five supported engines, Tier 2 C1/C2/C4), AG-1–AG-12f as a regression pass, AG-13a–AG-17, R3-906a–d, R3-1042a–c (d when a second account is available) and R3-SEAM-1–6, then the log sweep: every WARNING or ERROR is one a row provokes on purpose.
+
+## 0.36.2rc1 scenarios
+
+0.36.2rc1 resends finals that certainly failed (#1207), adds trigger run identity, webhook run options, strict webhook defaults and secrets from env or file (#1120, #1122, #1118, #1219, #1123), and fixes a batch of Claude, core and Antigravity issues (#844, #1173, #1186, #939, #942, #1177, #1174, #1176, #1194, #1195, #1180, #1181, #1212). Claude chat (`5284581592`) unless a row says otherwise; back up `~/.untether-dev/untether.toml` before any row that edits it, restore it afterwards, and restart the dev bot only from a terminal.
+
+### Core (#1207, #1174, #1176, #1194, #1195)
+
+R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PROXY` for `untether-dev` to a local CONNECT proxy you can switch to refuse (a refused CONNECT is a `ConnectError`, i.e. certainly unsent). Remove the drop-in afterwards; never touch staging. Known, accepted wrinkle: a redelivery cancelled by shutdown can send twice.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R362-1207a outage | Proxy refusing; a run ends; then let the proxy through | `final.pending_saved`, then `telegram.poll_recovered` and `final.redelivered`; one final in the chat (read the history), progress card gone |
+| R362-1207b restart mid-outage | As (a), but restart `untether-dev` while the proxy still refuses, then let it through | The final is delivered at startup; that card gets no `⚠️ interrupted by restart` |
+| R362-1207c multi-chunk | A U3 long final across the outage | Every chunk exactly once; none of the sent chunks resent |
+| R362-1207d healthy | A normal run with the proxy up (or the drop-in removed) | No `final.pending_saved`; `pending_finals.json` not written |
+| R362-1174 bare `/steer` | Bare `/steer` in the Claude chat (project-bound, topics off), then `/queue` | The steer note names the project's engine, not the global default |
+| R362-1176 Q15 after a final (Pi chat) | `/at 60s reply A`, `/at 5m reply B`; `/cancel` within 2 s of A's final | Reply `❌ cancelled 1 pending /at run.` (never silence); no B run after 5 min |
+| R362-1194 spawn/exit balance | U6 on all five engines, then count `subprocess.spawn` and `subprocess.exit` in that window | Counts equal; each Claude cancel logs one `subprocess.exit reason=teardown` |
+| R362-1195 RAM block | Raise `[watchdog] prespawn_ram_block_mb` above free RAM (hot-reloads); send a prompt in the Claude and Codex chats; `/usage` in the Antigravity chat; restore | Block text counts idle live sessions, says `engine run(s) already open on this host`, points `/cancel` at `the chat that started it`, no "restart the service"; `/usage` shows `the host is short of memory or at its run limit right now…`, never `prespawn_blocked` |
+
+### Claude (#844, #1173, #1186, #939, #942, #1177)
+
+| ID | Steps | Expected |
+|---|---|---|
+| R362-844 long-held approval | `/planmode off`; raise an approval (Write outside the project), hold it over 5 min, then have a parallel tool raise a second | The first request still answers when tapped; no auto-deny at 5 min |
+| R362-1173 folded steers | Steer mode, `/new`, send A then B, C, D about 1.4 s apart | B's final right after the C+D final; no `claude.live_session.injected_turn_timeout`; no `⚠ The session ended …` reply to C; `claude.live_session.injected_absorbed` for C |
+| R362-1186a Codex plugin job (**costs Codex quota: run once**) | Ask Claude to start `codex-companion.mjs task --background` with a ~3 min read-only prompt and end the turn; later ask for `result <id>` | `claude.live_session.hold reason=codex_plugin_job`, no `idle_no_tasks` while it runs, the worker alive past 60 s, `result <id>` works |
+| R362-939 approval reason | WebFetch to a non-allowlisted domain (or a dev-config `permissions.ask` rule) | The approval title carries a `🪝 <reason>` line when the CLI sends one; the standalone card doesn't repeat it |
+| R362-942 stray rows | After an approval answered in one turn (or a background agent's standalone approval), send a follow-up in the same live session | No `✓ Permission resolved` row in the later turn's progress |
+| R362-1177 T9 in Steer | Steer mode, start a long run, then `/codex list the files here` | Codex answers; no "queued instead" notice |
+
+### Antigravity (#1180, #1181, #1212)
+
+AG-1 (`agy_version=<v>` on every run, including the first after an agy self-update) and AG-12e (the invalid-model text lists `. _ - : / @ +`) already carry the new expectations: re-run both after updating agy on lba-1.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R362-1180 gate CLI uses the instance's agy | `UNTETHER_CONFIG_PATH=~/.untether-dev/untether.toml .venv/bin/untether agy-gate status --project <test project>` (read-only); repeat with `--config-path` | Prints the agy from the dev config's `[engines.antigravity]` (or `[antigravity]`) `cmd`, not the one on PATH; `--config-path` beats the env var |
+
+### Triggers (#1120, #1118, #1122, #1123, #1219)
+
+Preconditions: dev bot only; `[triggers] enabled = true` (turning it on needs a dev restart); the dev port from "0.36.1rc3 → Before the run"; every trigger sets `chat_id` **and** `project`; secrets of 32+ characters (`openssl rand -hex 32`). Settings hot-reload.
+
+| ID | Steps | Expected |
+|---|---|---|
+| TR-1120a cron run id | Cron (Claude) with a project `PreToolUse` hook `echo "$UNTETHER_RUN_ID $UNTETHER_TRIGGER" >> /tmp/tr1120.txt`; prompt runs one Bash | File has a uuid and `cron:<id>`; `runner.completed` logs the same trigger and run id |
+| TR-1120b webhook run id | Webhook to the Codex chat: `run printenv UNTETHER_TRIGGER` | Answer `webhook:<id>` |
+| TR-1120c human reply | Reply to TR-1120a's final: `run printenv UNTETHER_RUN_ID` | Empty; no trigger on that `runner.completed` |
+| TR-1118a compat (default) | Webhook with no mode, chat in `dontAsk`, prompt `touch /tmp/tr1118a` | Runs as in 0.36.1; WARN `trigger.webhook.strict_defaults_change … changes_in=0.37.0` once per reload, plus one Telegram notice listing the webhook |
+| TR-1118b strict | `[triggers] webhook_defaults = "strict"`, repeat TR-1118a | No `--allowedTools` in args; Bash denied (`permission.unattended_deny`, 🔒 footer); file absent |
+| TR-1118c strict, no mode | Claude chat `/planmode clear`, no engine mode; curl a webhook | Args `--permission-mode default --permission-prompt-tool stdio` |
+| TR-1118d strict skips | A project-less `agent_run` webhook and one with a 16-char secret | Both skipped (`triggers.trigger_invalid` ×2), notice names each with its fix; other triggers still serve |
+| TR-1118e unsafe mode opt-in | Webhook `engine = "antigravity"`, `permission_mode = "full"`; then add `allow_unsafe_permission_mode = true` | Skipped without the opt-in; runs Full access with it |
+| TR-1118f strict Codex | Codex webhook, no mode, prompt `touch tr1118f.txt` | Args `--sandbox read-only`; the write is blocked |
+| TR-1122a webhook run options | Webhook `engine = "claude"`, `permission_mode = "auto"`, `model = "sonnet"`, `reasoning = "low"` | `runner.start` args carry mode `auto`, model `sonnet`, effort `low`; footer shows the model; `/config` → ⏰ Triggers lists them |
+| TR-1123b failed announce | Webhook whose `chat_id` the bot can't post in; curl it | `202`; `/config` → ⏰ Triggers shows no new "last fired" |
+| TR-1219a `secret_env` | Webhook `secret_env = "R_WH_SECRET"`, set via a dev-unit drop-in (restart from a terminal); curl with the secret, then a wrong one | `202`, then `401` |
+| TR-1219b `secret_file` mode | `secret_file` at 0644 | Skipped; notice says `chmod 600 <path>` (`triggers.trigger_invalid`) |
+| TR-1219c config mode | `chmod 664 ~/.untether-dev/untether.toml`, change one key | One WARN and one `⚠️ Config file permissions` notice with the `chmod` fix; 0600 after Untether next writes the file (a hand edit keeps the mode); not posted twice on reload |
+| TR-1219d leak check | `journalctl --user -u untether-dev -o cat --since <start> \| grep -c <secret>` over TR-1219a–c | `0` |
+| R13 (regression) | Re-run R13 (#1142) | As written; a webhook never inherits bypass |
+
+**Required for 0.36.2rc1:** the Minor tiers (Tier 7, Tier 1 on all five supported engines, Tier 2 C1–C7, Tier 3 T1–T10, S7, S8, B4, B5), B-LIVE-1…7, RC12-4…7, AG-1 and AG-12e, every row above, and the trigger regressions R1–R3, R5, R11–R14, R17-11a–g and R17-20a–i.
