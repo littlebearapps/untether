@@ -3704,41 +3704,173 @@ def _translate_model_fallback(
     ]
 
 
-# #835: tools that change files or run commands. In an unattended `plan` run
-# they are denied at stage 6 — plan mode sends them to the host on current
-# CLIs (`decision_reason_type: "mode"`, the Probe-G regression), and stage 6
-# would otherwise approve them with nobody having seen a plan.
-_UNATTENDED_PLAN_DENIED_TOOLS = frozenset(
-    {"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"}
+# #835/#882: the file and shell tools. A plan-mode edit of one of these
+# (`decision_reason_type: "mode"`) is what `plan-auto` approves (D2-A).
+_PLAN_GATED_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"})
+# #882: tools approved with no reason while the CLI is in plan (probes H/I saw
+# research tools reach stage 6 there). Any other tool with no reason, an MCP
+# tool or one a future CLI adds, gets a card: fail closed.
+_PLAN_READ_ONLY_TOOLS = frozenset(
+    {
+        "Glob",
+        "Grep",
+        "Read",
+        "LS",
+        "NotebookRead",
+        "WebFetch",
+        "WebSearch",
+        "Task",
+        "Agent",
+        "TodoWrite",
+        "TaskOutput",
+        "BashOutput",
+        "ToolSearch",
+        "Skill",
+        "ListMcpResourcesTool",
+        "ReadMcpResourceTool",
+    }
 )
-# #835: modes where the CLI resolves permissions itself, so anything that
-# still reaches stage 6 is an ask-class request — an `ask` rule, a hook's
-# `ask`, a tool that requires user interaction, a critical-path rm, or (in
-# `auto`) the classifier falling back to prompting after repeated blocks
-# (probe 2026-10-02, CLI 2.1.287: `decision_reason_type: "classifier"`).
-# `dontAsk` auto-denies anything that would prompt, so a request that still
-# reaches stage 6 under it is ask-class too — never approved unattended.
-_UNATTENDED_DENY_ALL_MODES = frozenset({"bypassPermissions", "auto", "dontAsk"})
+# #835/#882: modes where the CLI resolves permissions itself, so anything that
+# still reaches stage 6 is an ask-class request: an `ask` rule, a hook's `ask`,
+# a safety check (critical-path / dangerous rm), or auto's classifier handing a
+# blocked action back after repeated blocks. `dontAsk` denies these in the CLI;
+# a request that still arrives is ask-class too. Probe 2026-11-18 (B4, A1): no
+# routine call reaches stage 6 in these modes.
+_ASK_CLASS_ALL_MODES = frozenset({"bypassPermissions", "auto", "dontAsk"})
+# #882: `decision_reason_type` values that are never routine (each is the CLI
+# asking for a person), whatever a probe observes.
+_NEVER_ROUTINE_REASONS = frozenset(
+    {
+        "rule",
+        "hook",
+        "safetyCheck",
+        "classifier",
+        "sandboxOverride",
+        "mode",
+        "workingDir",
+    }
+)
+# #882: reasons approved in plan like a no-reason request. Ships EMPTY; a value
+# joins only if the docs don't call it a prompt, a probe sees it on routine
+# research, and the subscription dev-bot check agrees (debug report Step 7.5).
+_PLAN_ROUTINE_REASONS: frozenset[str] = frozenset()
 
 
-def _unattended_autonomous_deny_reason(
-    state: ClaudeStreamState, tool_name: str, *, diff_gate: bool
+def _autonomous_ask_reason(
+    state: ClaudeStreamState, request: Any, tool_name: str, *, diff_gate: bool
 ) -> str | None:
-    """Why stage 6's autonomous auto-approve must deny in an unattended run.
+    """#882: why stage 6 must not auto-approve in an autonomous mode.
 
-    ``None`` means "approve as an attended run would" (e.g. Glob in `plan`,
-    anything in `plan-auto`). Never called for attended runs' decisions.
+    ``"ask_class"`` / ``"plan_mode"`` (a card attended, a deny unattended),
+    ``"diff_preview"``, or ``None`` (approve). Fail-closed: it lists what may
+    be approved, and any mode, reason or flag value it doesn't know is an ask.
+    Reads the raw request fields (``_control_reason_type`` coerces).
+    ``ExitPlanMode`` / ``AskUserQuestion`` and person-only requests are handled
+    before this is called.
     """
-    if state.unattended_trigger is None:
-        return None
-    mode = state.unattended_mode
-    if mode in _UNATTENDED_DENY_ALL_MODES:
+    # The CLI's ask flags, any mode: anything but the benign value counts.
+    approvable = getattr(request, "classifier_approvable", None)
+    default_to_no = getattr(request, "default_to_no", None)
+    if (
+        getattr(request, "matched_ask_rule", None) is not None
+        or (approvable is not None and approvable is not True)
+        or (default_to_no is not None and default_to_no is not False)
+    ):
         return "ask_class"
-    if mode == "plan" and tool_name in _UNATTENDED_PLAN_DENIED_TOOLS:
+    # The configured mode family (stable for the process: an option change
+    # respawns it). Unattended runs keep `plan-auto` distinct already.
+    if state.unattended_trigger is not None:
+        mode = state.unattended_mode
+    elif state.requested_permission_mode == "plan" and (
+        state.auto_approve_exit_plan_mode
+    ):
+        mode = "plan-auto"
+    else:
+        mode = state.requested_permission_mode
+    if mode not in ("plan", "plan-auto"):
+        # bypassPermissions / auto / dontAsk, and any unknown mode.
+        return "ask_class"
+    plan_auto = mode == "plan-auto"
+    reason = getattr(request, "decision_reason_type", None)
+    if reason == "mode":
+        if not (plan_auto and tool_name in _PLAN_GATED_TOOLS):
+            return "plan_mode"
+    elif reason is not None and not (
+        isinstance(reason, str)
+        and reason in _PLAN_ROUTINE_REASONS
+        and reason not in _NEVER_ROUTINE_REASONS
+    ):
+        return "ask_class"
+    # A no-reason (or routine) request: anything but research is gated while
+    # the CLI is in plan, or before the first init says otherwise. The live
+    # mode leaves plan when the plan is approved (`plan_exited_at` covers CLIs
+    # that emit no status frame; the #383 re-arm clears it).
+    if (
+        not plan_auto
+        and state.effective_permission_mode in ("plan", None)
+        and state.plan_exited_at is None
+        and tool_name not in _PLAN_READ_ONLY_TOOLS
+    ):
         return "plan_mode"
-    if diff_gate:
-        return "diff_preview"
-    return None
+    return "diff_preview" if diff_gate else None
+
+
+def _requires_person(request: Any) -> bool:
+    """#882: the CLI's ``requires_user_interaction`` is set (or malformed):
+    no one-tap Approve may answer it. Never true for ExitPlanMode /
+    AskUserQuestion here: callers exclude them first (both carry the flag)."""
+    flag = getattr(request, "requires_user_interaction", None)
+    return flag is not None and flag is not False
+
+
+def _person_only_deny(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    request_id: str,
+    tool_name: str,
+) -> list[UntetherEvent]:
+    """#882 (D3-C): an attended person-only request is denied with a note
+    pointing at a terminal; Untether never offers a one-tap Approve for it."""
+    session_id = factory.resume.value if factory.resume else None
+    resume = f"claude --resume {session_id}" if session_id else "claude --resume"
+    _REQUEST_TO_INPUT.pop(request_id, None)
+    _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+    state.auto_deny_queue.append(
+        (
+            request_id,
+            f"Untether: {tool_name} needs a person at the session, and Untether "
+            "can't offer a one-tap approval for it, so it was denied. Don't "
+            "retry it. Tell the user to run it from a terminal session "
+            f"(`{resume}`) if they want it.",
+        )
+    )
+    logger.info(
+        "control_request.person_only_denied",
+        request_id=request_id,
+        tool_name=tool_name,
+        session_id=session_id,
+        permission_mode=state.effective_permission_mode,
+    )
+    title = (
+        f"\N{LOCK} {tool_name} needs you at the session, so it was denied. "
+        f"To run it, open a terminal: {resume}"
+    )
+    state.note_seq += 1
+    action_id = f"claude.person_only.{state.note_seq}"
+    detail: dict[str, Any] = {"tool_name": tool_name, "reason": "person_only"}
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="warning",
+            detail=detail,
+        ),
+    ]
 
 
 def _unattended_deny(
@@ -9141,19 +9273,28 @@ def _translate_claude_event_base(
             # #749: in a prompting mode (`default`/`manual`/`acceptEdits`) the
             # user was promised an approval prompt, so NOTHING is auto-approved
             # here — a stage-6 request is unresolved permission work by
-            # definition (decisions.md D-1).  Autonomous modes retain the
-            # historical two-tool set: `DEFAULT_ALLOWED_TOOLS` only pre-approves
-            # Bash/Read/Edit/Write, so Glob/Grep/WebFetch/Task already arrive
-            # here in plan mode, and gating them would raise a button per tool
-            # in the fleet's most-used mode for no safety gain (probes G/H/I).
+            # definition (decisions.md D-1).
             #
-            # Known gap, carried to v0.36.2: an explicit `ask` rule reaches
-            # stage 6 even under `bypassPermissions`, and this branch still
-            # approves it.  Closing that needs a stage-5 change (the allowlist),
-            # not a wider handler gate.
+            # #882: autonomous modes approve only what `_autonomous_ask_reason`
+            # clears. The CLI sends the host exactly the calls it wants a
+            # person to decide (ask rules, hook asks, safety checks, auto's
+            # classifier escalation, plan-mode edits), tagged with
+            # `decision_reason_type` and flags; those get a card. Ask rules are
+            # decided before allow rules, so `--allowedTools` can't hide them.
             _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
+                # #882 (D3-C): person-only requests never get a one-tap
+                # Approve, in any mode. ExitPlanMode and AskUserQuestion carry
+                # the flag too; their own cards are the interaction surface.
+                if tool_name not in _TOOLS_REQUIRING_APPROVAL and _requires_person(
+                    request
+                ):
+                    if state.unattended_trigger is not None:
+                        return _unattended_deny(
+                            state, factory, request_id, request, reason="person_only"
+                        )
+                    return _person_only_deny(state, factory, request_id, tool_name)
                 if (
                     not state.prompting_mode
                     and tool_name not in _TOOLS_REQUIRING_APPROVAL
@@ -9173,20 +9314,32 @@ def _translate_claude_event_base(
                         and tool_name in _DIFF_PREVIEW_TOOLS
                         and not plan_approved
                     )
+                    ask_reason = _autonomous_ask_reason(
+                        state, request, tool_name, diff_gate=diff_gate
+                    )
                     # #835: an unattended run never waits for a tap and never
                     # approves what an attended run would have asked about.
-                    unattended_reason = _unattended_autonomous_deny_reason(
-                        state, tool_name, diff_gate=diff_gate
-                    )
-                    if unattended_reason is not None:
+                    if ask_reason is not None and state.unattended_trigger is not None:
                         return _unattended_deny(
                             state,
                             factory,
                             request_id,
                             request,
-                            reason=unattended_reason,
+                            reason=ask_reason,
                         )
-                    if diff_gate:
+                    if ask_reason in ("ask_class", "plan_mode"):
+                        # #882: falls through to the Approve/Deny card. Names
+                        # only, never the input (#822).
+                        logger.info(
+                            "control_request.ask_class_prompt",
+                            request_id=request_id,
+                            tool_name=tool_name,
+                            reason=ask_reason,
+                            decision_reason_type=_control_reason_type(request),
+                            permission_mode=state.effective_permission_mode,
+                            agent_id=getattr(request, "agent_id", None),
+                        )
+                    elif diff_gate:
                         logger.debug(
                             "control_request.diff_preview_gate",
                             request_id=request_id,

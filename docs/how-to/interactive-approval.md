@@ -6,11 +6,13 @@ When Claude Code runs in permission mode, Untether shows inline buttons in Teleg
 
 What raises a button depends on the permission mode:
 
-- **Plan mode** (`plan`) — when Claude Code wants to **exit plan mode** (ExitPlanMode) or **ask you a question** (AskUserQuestion). Every other tool request that reaches Untether is auto-approved by Untether.
-- **`plan-auto`** — only questions. Untether approves the plan itself.
-- **`auto`, `bypassPermissions`** — only questions; there is no plan step.
+- **Plan mode** (`plan`) — when Claude Code wants to **exit plan mode** (ExitPlanMode), **ask you a question** (AskUserQuestion), or tries an edit before you approve the plan.
+- **`plan-auto`** — questions, plus anything Claude Code itself asks about (see below). Untether approves the plan itself, and the edits that carry it out.
+- **`auto`, `bypassPermissions`** — questions, plus anything Claude Code itself asks about; there is no plan step.
 - **`dontAsk`** — nothing: only pre-approved tools run, and anything that would ask (questions included) is denied.
 - **Accept edits** (`/planmode off`) and `default` / `manual` — any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
+
+In the autonomous modes (`plan`, `plan-auto`, `auto`, `bypassPermissions`), Claude Code still hands some requests back to the host on purpose: one of your `permissions.ask` rules, a hook that answers `ask`, a risky `rm` its safety check can't rule out, or, in `auto`, an action its classifier blocked several times in a row. Untether shows Approve / Deny for these instead of approving them for you ([#882](https://github.com/littlebearapps/untether/issues/882)); routine work doesn't reach Untether in those modes, so no extra buttons appear for it. A few requests are marked by Claude Code as needing you at the session itself (for example an MCP tool flagged `requiresUserInteraction`). Untether denies those in every mode and shows the `claude --resume` line so you can finish them in a terminal. Cron and webhook runs deny all of these.
 
 With **Diff preview** turned on in `/config`, an Edit, Write or Bash request that reaches Untether in one of these autonomous modes waits for a tap, with the diff, instead of being approved for you. Which requests reach Untether is up to Claude Code and the mode ([#1147](https://github.com/littlebearapps/untether/issues/1147)):
 

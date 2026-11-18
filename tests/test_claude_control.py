@@ -69,6 +69,17 @@ def _make_state_with_session(
     return state, state.factory
 
 
+def _plan_approved_state(
+    session_id: str = "sess-1",
+) -> tuple[ClaudeStreamState, EventFactory]:
+    """#882: an attended plan chat after Approve Plan (the CLI is in
+    `default`): the autonomous state that approves a no-reason tool request."""
+    state, factory = _make_state_with_session(session_id)
+    state.requested_permission_mode = "plan"
+    state.effective_permission_mode = "default"
+    return state, factory
+
+
 # ---------------------------------------------------------------------------
 # Autouse fixture: clear global registries between tests
 # ---------------------------------------------------------------------------
@@ -219,8 +230,9 @@ def test_auto_approve_types_register_input(
     ],
 )
 def test_non_exit_plan_mode_tools_auto_approved(tool_name: str) -> None:
-    """CanUseTool requests for tools other than ExitPlanMode are auto-approved."""
-    state, factory = _make_state_with_session()
+    """CanUseTool requests for tools other than ExitPlanMode are auto-approved
+    (no ask reason, plan already approved; #882 gates the rest)."""
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1486,7 +1498,7 @@ def test_diff_preview_disabled_still_auto_approves(tool_name: str) -> None:
     """When diff_preview=False, Edit/Write/Bash are auto-approved as normal."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1510,7 +1522,7 @@ def test_diff_preview_disabled_still_auto_approves(tool_name: str) -> None:
 @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
 def test_diff_preview_default_auto_approves(tool_name: str) -> None:
     """When diff_preview=None (default), Edit/Write/Bash are auto-approved."""
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1536,7 +1548,7 @@ def test_diff_preview_enabled_non_previewable_still_auto_approved(
     """When diff_preview=True, non-previewable tools are still auto-approved."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1562,7 +1574,7 @@ def test_diff_preview_bypassed_after_plan_exit_approved(tool_name: str) -> None:
     """After ExitPlanMode is approved, diff_preview tools auto-approve (#283)."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     session_id = factory.resume.value
     # Simulate plan exit approval
     _PLAN_EXIT_APPROVED.add(session_id)
@@ -2307,11 +2319,9 @@ async def test_drain_hook_callbacks_writes_exact_control_response() -> None:
 # in plan mode — the fleet's primary mode.  See docs/plans/v0.35.5-rc9/
 # decisions.md D-1 and phase 02's risk section.
 #
-# KNOWN GAP (carry-forward, not fixed here): D-1's motivating case is an
-# explicit `ask` rule reaching stage 6 *even under bypassPermissions*.  With
-# the two-tool set retained AND phase 02 keeping `--allowedTools` for
-# autonomous modes, such a rule is still defeated at stage 5 by the
-# allowlist.  Closing that needs a stage-5 change, not a handler change.
+# #882 closed D-1's motivating case: an explicit `ask` rule is decided before
+# allow rules, reaches stage 6 even under bypassPermissions, and now gets a
+# card (see TestAttendedAskClass at the end of this file).
 # ===========================================================================
 
 
@@ -2403,11 +2413,14 @@ def test_749_accept_edits_mode_gates_out_of_scope_tool() -> None:
     assert "/etc/nope.conf" in events[0].action.title
 
 
-@pytest.mark.parametrize("tool_name", ["Bash", "Read", "Glob", "Task"])
+@pytest.mark.parametrize("tool_name", ["Read", "Glob", "Task"])
 def test_749_plan_mode_gate_unchanged_two_tools_only(tool_name: str) -> None:
-    """Plan mode keeps today's behaviour — no approval storm (D-3 H/I)."""
+    """Plan mode research keeps today's behaviour — no approval storm (D-3
+    H/I). Plan-mode writes get a card since #882 (TestAttendedAskClass)."""
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "plan"
+    state.effective_permission_mode = "plan"
 
     rid = f"req-749-plan-{tool_name}"
     events = translate_claude_event(
@@ -2422,13 +2435,15 @@ def test_749_plan_mode_gate_unchanged_two_tools_only(tool_name: str) -> None:
 
 
 def test_749_auto_mode_gate_unchanged() -> None:
-    """CLI `auto` is classifier-gated at stage 4; stage 6 stays cheap (D-1)."""
+    """CLI `auto` is classifier-gated at stage 4 and is not a prompting mode
+    (D-1); what still reaches stage 6 is ask-class and gets a card (#882)."""
     from untether.runners.run_options import is_claude_prompting_mode
 
     assert is_claude_prompting_mode("auto") is False
 
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "auto"
 
     rid = "req-749-auto-bash"
     events = translate_claude_event(
@@ -2438,16 +2453,15 @@ def test_749_auto_mode_gate_unchanged() -> None:
         factory=factory,
     )
 
-    assert events == []
-    assert rid in state.auto_approve_queue
+    _assert_routed_to_approval(events, state, rid)
 
 
 def test_749_bypass_mode_still_honours_stage6_request() -> None:
     """`bypassPermissions` must still *answer* a stage-6 request.
 
     The CLI blocks on stdin until the parent responds, so dropping the
-    request would hang the run.  Honouring it here means queueing a control
-    response — which under the retained two-tool set is an approval.
+    request would hang the run. Since #882 the answer comes from the user's
+    tap: the request is registered with a card, never silently dropped.
     """
     from untether.runners.run_options import is_claude_prompting_mode
 
@@ -2455,6 +2469,7 @@ def test_749_bypass_mode_still_honours_stage6_request() -> None:
 
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "bypassPermissions"
 
     rid = "req-749-bypass-bash"
     events = translate_claude_event(
@@ -2464,10 +2479,9 @@ def test_749_bypass_mode_still_honours_stage6_request() -> None:
         factory=factory,
     )
 
-    assert events == []
-    # The load-bearing assertion: a response is queued, the request is not
-    # silently dropped.
-    assert rid in state.auto_approve_queue
+    _assert_routed_to_approval(events, state, rid)
+    assert rid in state.pending_control_requests
+    assert _REQUEST_TO_SESSION.get(rid) == "sess-1"
 
 
 def test_749_exit_plan_mode_exception_survives_in_plan_auto() -> None:
@@ -3941,6 +3955,7 @@ def test_822_received_on_auto_approve_path() -> None:
     from structlog.testing import capture_logs
 
     state, factory = _make_state_with_session("sess-822a")
+    state.requested_permission_mode = "plan"
     state.effective_permission_mode = "plan"
     with capture_logs() as logs:
         events = translate_claude_event(
@@ -4590,3 +4605,375 @@ async def test_771_unrelated_pending_approval_keeps_its_buttons() -> None:
         "claude_control:approve:r-bash",
         "claude_control:deny:r-bash",
     ]
+
+
+# ===========================================================================
+# #882: attended ask-class requests in autonomous modes get a card
+# ===========================================================================
+#
+# The CLI hands Untether only the calls it wants a person to decide (an ask
+# rule, a hook `ask`, a safety check, auto's classifier escalation, a
+# plan-mode edit). Autonomous modes used to approve all of them. The decision
+# table is fail-closed: unknown modes, reasons and malformed flags are asks.
+# Shapes from docs/findings/2026-11-18-claude-882-ask-class-matrix.md.
+
+_882_ABSENT: Any = object()
+_882_CLI_REASON_TYPES = (
+    "rule",
+    "mode",
+    "subcommandResults",
+    "permissionPromptTool",
+    "hook",
+    "asyncAgent",
+    "sandboxOverride",
+    "workingDir",
+    "safetyCheck",
+    "classifier",
+    "other",
+)
+
+
+def _882_request(rid: str, tool: str, **fields: Any) -> Any:
+    """A ``can_use_tool`` frame; absent flags are missing keys (as on 2.1.327)."""
+    request: dict[str, Any] = {
+        "subtype": "can_use_tool",
+        "tool_name": tool,
+        "input": {"command": "ls"},
+    }
+    request.update(fields)
+    return _decode_event(
+        {"type": "control_request", "request_id": rid, "request": request}
+    )
+
+
+def _882_state(
+    mode: str | None, *, effective: Any = _882_ABSENT, unattended: bool = False
+) -> ClaudeStreamState:
+    state, _ = _make_state_with_session("sess-882")
+    cli_mode = "plan" if mode == "plan-auto" else mode
+    state.requested_permission_mode = cli_mode
+    state.auto_approve_exit_plan_mode = mode == "plan-auto"
+    state.effective_permission_mode = (
+        cli_mode if effective is _882_ABSENT else effective
+    )
+    if unattended:
+        state.unattended_trigger = "cron:c882"
+        state.unattended_mode = mode
+    return state
+
+
+def _882_feed(state: ClaudeStreamState, event: Any) -> list[Any]:
+    return translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+
+def _882_outcome(state: ClaudeStreamState, rid: str, events: list[Any]) -> str:
+    if rid in state.auto_approve_queue:
+        return "approve"
+    if rid in [r for r, _ in state.auto_deny_queue]:
+        return "deny"
+    if any(
+        isinstance(e, ActionEvent) and e.action.detail.get("inline_keyboard")
+        for e in events
+    ):
+        return "card"
+    return "none"
+
+
+def _882_buttons(events: list[Any]) -> list[str]:
+    return [
+        b["text"]
+        for e in events
+        if isinstance(e, ActionEvent)
+        for row in (e.action.detail.get("inline_keyboard") or {}).get("buttons", [])
+        for b in row
+    ]
+
+
+_A = _882_ABSENT
+
+
+class TestAttendedAskClass:
+    @pytest.mark.parametrize(
+        ("mode", "tool", "fields", "effective", "expected"),
+        [
+            # bypassPermissions: only ask-class calls reach stage 6 (B4).
+            ("bypassPermissions", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            (
+                "bypassPermissions",
+                "Bash",
+                {"decision_reason_type": "safetyCheck", "classifier_approvable": False},
+                _A,
+                "card",
+            ),
+            (
+                "bypassPermissions",
+                "Write",
+                {"decision_reason_type": "hook"},
+                _A,
+                "card",
+            ),
+            ("bypassPermissions", "Bash", {}, _A, "card"),
+            # auto: classifier escalation, ask rule, outside read, no reason.
+            ("auto", "Bash", {"decision_reason_type": "classifier"}, _A, "card"),
+            ("auto", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            ("auto", "Read", {"decision_reason_type": "workingDir"}, _A, "card"),
+            ("auto", "Bash", {}, _A, "card"),
+            # dontAsk: the CLI denies ask-class itself; defensive.
+            ("dontAsk", "Bash", {}, _A, "card"),
+            # plan: edits arrive with `mode` (P1, P6, P7).
+            ("plan", "Write", {"decision_reason_type": "mode"}, _A, "card"),
+            ("plan", "mcp__p__write", {"decision_reason_type": "mode"}, _A, "card"),
+            (
+                "plan",
+                "Write",
+                {"decision_reason_type": "mode", "agent_id": "a1"},
+                "default",
+                "card",
+            ),
+            # plan: routine research with no reason is approved.
+            ("plan", "Glob", {}, _A, "approve"),
+            ("plan", "WebFetch", {}, _A, "approve"),
+            ("plan", "Task", {}, _A, "approve"),
+            # plan: no-reason writes are gated while the CLI is in plan
+            # (or before the first init), approved after Approve Plan.
+            ("plan", "Write", {}, "plan", "card"),
+            ("plan", "Write", {}, None, "card"),
+            ("plan", "Write", {}, "default", "approve"),
+            ("plan", "mcp__x__y", {}, "plan", "card"),
+            ("plan", "mcp__x__y", {}, "default", "approve"),
+            ("plan", "SomeFutureWriteTool", {}, "plan", "card"),
+            # plan-auto (D2-A): plan edits approved; explicit asks still card.
+            ("plan-auto", "Write", {"decision_reason_type": "mode"}, _A, "approve"),
+            ("plan-auto", "Bash", {"decision_reason_type": "mode"}, _A, "approve"),
+            ("plan-auto", "mcp__x__w", {"decision_reason_type": "mode"}, _A, "card"),
+            ("plan-auto", "Write", {}, "plan", "approve"),
+            ("plan-auto", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            ("plan-auto", "Write", {"matched_ask_rule": {}}, _A, "card"),
+            # Unknown / missing mode: never "approve".
+            ("futureMode", "Bash", {}, _A, "card"),
+            (None, "Bash", {}, _A, "card"),
+            # Raw, malformed reasons and flags count as asks.
+            ("plan", "Glob", {"decision_reason_type": ""}, _A, "card"),
+            ("plan", "Glob", {"decision_reason_type": {}}, _A, "card"),
+            ("plan-auto", "Glob", {"decision_reason_type": "futureReason"}, _A, "card"),
+            ("plan", "Glob", {"classifier_approvable": "no"}, _A, "card"),
+            ("plan", "Glob", {"classifier_approvable": 1}, _A, "card"),
+            ("plan", "Glob", {"default_to_no": 1}, _A, "card"),
+            ("plan", "Glob", {"matched_ask_rule": {"source": "x"}}, _A, "card"),
+            # Explicitly benign flag values don't gate.
+            ("plan", "Glob", {"classifier_approvable": True}, _A, "approve"),
+            ("plan", "Glob", {"default_to_no": False}, _A, "approve"),
+            ("plan", "Glob", {"requires_user_interaction": False}, _A, "approve"),
+        ],
+    )
+    def test_decision_table(
+        self, mode: str | None, tool: str, fields: dict, effective: Any, expected: str
+    ) -> None:
+        state = _882_state(mode, effective=effective)
+        events = _882_feed(state, _882_request("r882", tool, **fields))
+        assert _882_outcome(state, "r882", events) == expected
+
+    @pytest.mark.parametrize("mode", ["plan", "plan-auto"])
+    @pytest.mark.parametrize("reason", _882_CLI_REASON_TYPES)
+    def test_every_cli_reason_type_cards_in_plan(self, mode: str, reason: str) -> None:
+        """No value of the CLI's enum is routine in plan (the set ships empty)."""
+        state = _882_state(mode)
+        events = _882_feed(
+            state, _882_request("r882", "Glob", decision_reason_type=reason)
+        )
+        assert _882_outcome(state, "r882", events) == "card"
+
+    def test_plan_routine_reasons_never_include_ask_reasons(self) -> None:
+        from untether.runners.claude import (
+            _NEVER_ROUTINE_REASONS,
+            _PLAN_ROUTINE_REASONS,
+        )
+
+        assert _PLAN_ROUTINE_REASONS.isdisjoint(_NEVER_ROUTINE_REASONS)
+        required = {
+            "rule",
+            "hook",
+            "safetyCheck",
+            "classifier",
+            "sandboxOverride",
+            "mode",
+            "workingDir",
+        }
+        assert required <= _NEVER_ROUTINE_REASONS
+        for routine in _PLAN_ROUTINE_REASONS:
+            state = _882_state("plan")
+            events = _882_feed(
+                state,
+                _882_request(
+                    "r882", "Glob", decision_reason_type=routine, matched_ask_rule={}
+                ),
+            )
+            assert _882_outcome(state, "r882", events) == "card"
+
+    def test_ask_class_prompt_logged_at_info(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("bypassPermissions")
+        with capture_logs() as logs:
+            _882_feed(
+                state,
+                _882_request(
+                    "r882",
+                    "Bash",
+                    decision_reason_type="rule",
+                    decision_reason="ask rule",
+                    input={"command": "secret-arg"},
+                ),
+            )
+        received = _events_named(logs, "control_request.received")
+        prompts = _events_named(logs, "control_request.ask_class_prompt")
+        assert [e["request_id"] for e in received] == ["r882"]
+        assert len(prompts) == 1
+        prompt = prompts[0]
+        assert prompt["log_level"] == "info"
+        assert prompt["request_id"] == "r882"
+        assert prompt["reason"] == "ask_class"
+        assert prompt["decision_reason_type"] == "rule"
+        assert prompt["permission_mode"] == "bypassPermissions"
+        assert "secret-arg" not in repr(prompt)
+
+    def test_plan_edit_prompt_reason_is_plan_mode(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("plan")
+        with capture_logs() as logs:
+            _882_feed(state, _882_request("r882", "Write", decision_reason_type="mode"))
+        (prompt,) = _events_named(logs, "control_request.ask_class_prompt")
+        assert prompt["reason"] == "plan_mode"
+
+    def test_routine_plan_research_logs_no_prompt(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("plan")
+        with capture_logs() as logs:
+            _882_feed(state, _882_request("r882", "Glob"))
+        assert _events_named(logs, "control_request.ask_class_prompt") == []
+
+    # --- person-only (requires_user_interaction): never one-tap Approve ----
+
+    @pytest.mark.parametrize(
+        ("mode", "fields"),
+        [
+            ("bypassPermissions", {"requires_user_interaction": True}),
+            (
+                "auto",
+                {
+                    "decision_reason_type": "classifier",
+                    "requires_user_interaction": True,
+                },
+            ),
+            ("plan", {"requires_user_interaction": "yes"}),
+            ("plan-auto", {"requires_user_interaction": True}),
+            ("acceptEdits", {"requires_user_interaction": True}),
+        ],
+    )
+    def test_person_only_denied_with_terminal_note(
+        self, mode: str, fields: dict
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state(mode)
+        state.prompting_mode = mode == "acceptEdits"
+        # U1's exact shape: no reason type, suppress flag, mcp_server set.
+        with capture_logs() as logs:
+            events = _882_feed(
+                state,
+                _882_request(
+                    "r882",
+                    "mcp__probe__probe_consent",
+                    suppress_always_allow_rule=True,
+                    mcp_server={"name": "probe"},
+                    **fields,
+                ),
+            )
+        assert _882_outcome(state, "r882", events) == "deny"
+        assert "✅ Approve" not in _882_buttons(events)
+        message = dict(state.auto_deny_queue)["r882"]
+        assert "terminal" in message
+        assert "claude --resume sess-882" in message
+        notes = [e for e in events if isinstance(e, ActionEvent)]
+        assert notes and all(e.action.kind == "note" for e in notes)
+        assert any("claude --resume sess-882" in e.action.title for e in notes)
+        (logged,) = _events_named(logs, "control_request.person_only_denied")
+        assert logged["request_id"] == "r882"
+        assert logged["tool_name"] == "mcp__probe__probe_consent"
+
+    def test_exitplanmode_with_requires_user_interaction_keeps_plan_card(
+        self,
+    ) -> None:
+        """EP row: ExitPlanMode carries requires_user_interaction=true and no
+        reason. It is excluded before the flag is read."""
+        state = _882_state("plan")
+        events = _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "ExitPlanMode",
+                input={"plan": "do it"},
+                requires_user_interaction=True,
+            ),
+        )
+        assert _882_outcome(state, "r882", events) == "card"
+        assert state.auto_deny_queue == []
+        assert any("Approve" in t for t in _882_buttons(events))
+
+    def test_plan_auto_exitplanmode_with_flag_still_rubber_stamped(self) -> None:
+        state = _882_state("plan-auto")
+        _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "ExitPlanMode",
+                input={"plan": "do it"},
+                requires_user_interaction=True,
+            ),
+        )
+        assert "r882" in state.auto_approve_queue
+
+    def test_ask_user_question_with_flag_not_denied(self) -> None:
+        state = _882_state("bypassPermissions")
+        events = _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "AskUserQuestion",
+                input={"questions": [{"question": "Which?", "options": []}]},
+                requires_user_interaction=True,
+            ),
+        )
+        assert state.auto_deny_queue == []
+        assert "r882" not in state.auto_approve_queue
+        assert _882_outcome(state, "r882", events) == "card"
+
+
+def test_882_schema_decodes_flags_in_odd_shapes() -> None:
+    request = _882_request(
+        "r882",
+        "Bash",
+        matched_ask_rule=["x"],
+        classifier_approvable="no",
+        requires_user_interaction={"a": 1},
+        default_to_no=[1],
+        decision_reason_rule_source="localSettings",
+        server_policy_ask_only=True,
+    ).request
+    assert isinstance(request, claude_schema.ControlCanUseToolRequest)
+    assert request.matched_ask_rule == ["x"]
+    assert request.classifier_approvable == "no"
+    assert request.requires_user_interaction == {"a": 1}
+    assert request.default_to_no == [1]
+
+
+def test_882_schema_absent_flags_are_none() -> None:
+    request = _882_request("r882", "Bash").request
+    assert request.matched_ask_rule is None
+    assert request.classifier_approvable is None
+    assert request.requires_user_interaction is None
+    assert request.default_to_no is None

@@ -245,11 +245,166 @@
    ]
   },
   {
-   "logs": [
-    "debug control_request.auto_approve_tool request_id=\"req-bash-1\" tool_name=\"Bash\" +[logger_name]",
-    "info control_request.received agent_id=null decision_reason_type=null permission_mode=\"plan\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" unattended=null +[logger_name]",
-    "info control_response.auto_approved channel=\"pipe\" request_id=\"req-bash-1\" +[logger_name]"
+   "events": [
+    {
+     "action": {
+      "detail": {
+       "inline_keyboard": {
+        "buttons": [
+         [
+          {
+           "callback_data": "claude_control:approve:req-bash-1",
+           "text": "✅ Approve"
+          },
+          {
+           "callback_data": "claude_control:deny:req-bash-1",
+           "text": "❌ Deny"
+          }
+         ]
+        ]
+       },
+       "request_id": "req-bash-1",
+       "request_type": "CanUseTool",
+       "tool_name": "Bash"
+      },
+      "id": "claude.control.1",
+      "kind": "warning",
+      "title": "Permission Request [CanUseTool] - tool: Bash (command=`sleep 8`)\n$ `sleep 8`"
+     },
+     "phase": "started",
+     "type": "action"
+    }
    ],
+   "logs": [
+    "debug action.recorded kind=\"warning\" +[logger_name,title]",
+    "debug control_request.registered request_id=\"req-bash-1\" session_id=\"golden-session-1\" +[logger_name]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info control_request.ask_class_prompt agent_id=null decision_reason_type=null permission_mode=\"plan\" reason=\"plan_mode\" request_id=\"req-bash-1\" tool_name=\"Bash\" +[logger_name]",
+    "info control_request.received agent_id=null decision_reason_type=null permission_mode=\"plan\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" unattended=null +[logger_name]",
+    "info progress_edits.keyboard_attach request_id=\"req-bash-1\" tool_name=\"Bash\" +[channel_id,keyboard_rows,logger_name,message_id]",
+    "info render_progress.inline_keyboard_found request_id=\"req-bash-1\" tool_name=\"Bash\" +[action_id,buttons,logger_name]"
+   ],
+   "registry": {
+    "request_to_channel": {
+     "req-bash-1": 123
+    },
+    "request_to_input": {
+     "req-bash-1": {
+      "command": "sleep 8"
+     }
+    },
+    "request_to_originator": {
+     "req-bash-1": 7001
+    },
+    "request_to_session": {
+     "req-bash-1": "golden-session-1"
+    },
+    "request_to_tool_name": {
+     "req-bash-1": "Bash"
+    },
+    "states": {
+     "golden-session-1": {
+      "awaiting_user_approval": true,
+      "control_action_for_tool": {
+       "toolu_sleep_1": "claude.control.1"
+      },
+      "control_registered": [
+       "req-bash-1"
+      ],
+      "control_request_snapshot": [
+       {
+        "agent_id": null,
+        "answerable_by_text": false,
+        "decision_reason": null,
+        "input_details": "(command=`sleep 8`)",
+        "kind": "tool",
+        "request_id": "req-bash-1",
+        "session_id": "golden-session-1",
+        "tool_name": "Bash",
+        "writer_ok": true
+       }
+      ],
+      "pending_control_requests": [
+       "req-bash-1"
+      ],
+      "request_to_action": {
+       "req-bash-1": "claude.control.1"
+      }
+     }
+    }
+   },
+   "step": "emit:control_request/can_use_tool/Bash/req-bash-1",
+   "telegram": [
+    {
+     "entities": [
+      "code@34+7",
+      "code@98+7",
+      "code@109+7",
+      "code@148+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "✅ Approve => claude_control:approve:req-bash-1",
+       "❌ Deny => claude_control:deny:req-bash-1"
+      ],
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t> · step 2\n\n▸ sleep 8\n▸ Permission Request [CanUseTool] - tool: Bash (command=sleep 8) $ sleep 8\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "chat": 123,
+     "id": 2,
+     "notify": true,
+     "op": "send",
+     "reply_to": 1,
+     "text": "Action required — approval needed"
+    }
+   ]
+  },
+  {
+   "logs": [
+    "debug callback.executed command=\"claude_control\" +[chat_id,logger_name]",
+    "info callback.answered command=\"claude_control\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
+    "info callback.dispatch command=\"claude_control\" +[chat_id,logger_name]",
+    "info claude_control.sent approved=true request_id=\"req-bash-1\" tool_name=\"Bash\" +[logger_name]",
+    "info control_response.sent approved=true channel=\"pipe\" permission_mode=\"plan\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" +[logger_name]"
+   ],
+   "registry": {
+    "handled": [
+     [
+      "req-bash-1",
+      {
+       "action": "approve",
+       "channel_id": 123,
+       "outcome": "answered"
+      }
+     ]
+    ],
+    "plan_exit_approved": [
+     "golden-session-1"
+    ],
+    "request_to_input": {
+     "req-bash-1": "<removed>"
+    },
+    "request_to_session": {
+     "req-bash-1": "<removed>"
+    },
+    "request_to_tool_name": {
+     "req-bash-1": "<removed>"
+    },
+    "states": {
+     "golden-session-1": {
+      "awaiting_user_approval": false,
+      "control_registered": [],
+      "control_request_snapshot": []
+     }
+    }
+   },
    "stdin": [
     {
      "response": {
@@ -265,7 +420,23 @@
      "type": "control_response"
     }
    ],
-   "step": "emit:control_request/can_use_tool/Bash/req-bash-1"
+   "step": "do:tap data=claude_control:approve:req-bash-1",
+   "telegram": [
+    {
+     "chat": 123,
+     "id": 3,
+     "notify": true,
+     "op": "send",
+     "reply_to": 1,
+     "text": "✅ Approved permission request"
+    },
+    {
+     "callback_query_id": "cb-1",
+     "op": "answer_callback",
+     "show_alert": null,
+     "text": "Approved"
+    }
+   ]
   },
   {
    "logs": [
@@ -304,7 +475,7 @@
    "telegram": [
     {
      "chat": 123,
-     "id": 2,
+     "id": 4,
      "notify": false,
      "op": "send",
      "reply_to": 30,
@@ -320,6 +491,17 @@
   },
   {
    "events": [
+    {
+     "action": {
+      "detail": {},
+      "id": "claude.control.1",
+      "kind": "warning",
+      "title": "Permission resolved"
+     },
+     "ok": true,
+     "phase": "completed",
+     "type": "action"
+    },
     {
      "action": {
       "detail": {
@@ -343,15 +525,31 @@
    ],
    "logs": [
     "debug action.recorded kind=\"command\" +[logger_name,title]",
+    "debug action.recorded kind=\"warning\" +[logger_name,title]",
+    "debug control_request.reconciled request_id=\"req-bash-1\" +[action_id,logger_name]",
+    "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]"
    ],
+   "registry": {
+    "states": {
+     "golden-session-1": {
+      "control_action_for_tool": {
+       "toolu_sleep_1": "<removed>"
+      },
+      "pending_control_requests": [],
+      "request_to_action": {
+       "req-bash-1": "<removed>"
+      }
+     }
+    }
+   },
    "step": "emit:user/tool_result:toolu_sleep_1",
    "telegram": [
     {
      "entities": [
       "code@34+7",
-      "code@73+32"
+      "code@95+32"
      ],
      "id": 1,
      "keyboard": [
@@ -360,7 +558,11 @@
       ]
      ],
      "op": "edit",
-     "text": "working · claude · <t> · step 1\n\n✓ sleep 8\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+     "text": "working · claude · <t> · step 2\n\n✓ sleep 8\n✓ Permission resolved\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "id": 2,
+     "op": "delete"
     }
    ]
   },
@@ -372,7 +574,7 @@
        "absorbed_command_uuid": "<uuid-1>",
        "steer": true
       },
-      "id": "claude.steer.1",
+      "id": "claude.steer.2",
       "kind": "note",
       "title": "↪️ steer received: also print the hostname"
      },
@@ -385,7 +587,7 @@
        "absorbed_command_uuid": "<uuid-1>",
        "steer": true
       },
-      "id": "claude.steer.1",
+      "id": "claude.steer.2",
       "kind": "note",
       "title": "↪️ steer received: also print the hostname"
      },
@@ -409,7 +611,7 @@
     {
      "entities": [
       "code@34+7",
-      "code@116+32"
+      "code@138+32"
      ],
      "id": 1,
      "keyboard": [
@@ -418,7 +620,7 @@
       ]
      ],
      "op": "edit",
-     "text": "working · claude · <t> · step 2\n\n✓ sleep 8\n↪️ steer received: also print the hostname\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+     "text": "working · claude · <t> · step 3\n\n✓ sleep 8\n✓ Permission resolved\n↪️ steer received: also print the hostname\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
     }
    ]
   },
@@ -493,13 +695,13 @@
      "entities": [
       "code@138+32"
      ],
-     "id": 3,
+     "id": 5,
      "keyboard": [],
      "notify": true,
      "op": "send",
      "replace": 1,
      "reply_to": 10,
-     "text": "done · claude · <t> · step 2\n\nDONE + also print the hostname\n\n🏷 claude-golden-1 · plan · ✓ turn complete\n💰$0.01 · 2 tn · 1.0s · 10/5\n\n↩️ claude --resume golden-session-1"
+     "text": "done · claude · <t> · step 3\n\nDONE + also print the hostname\n\n🏷 claude-golden-1 · plan · ✓ turn complete\n💰$0.01 · 2 tn · 1.0s · 10/5\n\n↩️ claude --resume golden-session-1"
     }
    ]
   },
@@ -553,6 +755,7 @@
     }
    ],
    "logs": [
+    "info claude.plan_approval.cleared reason=\"turn_boundary\" session_id=\"golden-session-1\" turn=2 +[cleared,logger_name,turn_reason]",
     "info claude.turn.started reason=\"followup\" session_id=\"golden-session-1\" turn=2 +[command_uuid,logger_name]",
     "info live_turn.started reason=\"followup\" turn=2 +[command_uuid,logger_name,push]"
    ],
@@ -563,6 +766,7 @@
       "idle": false
      }
     },
+    "plan_exit_approved": [],
     "states": {
      "golden-session-1": {
       "turn": 2,
@@ -632,7 +836,7 @@
      "entities": [
       "code@107+32"
      ],
-     "id": 4,
+     "id": 6,
      "keyboard": [],
      "notify": true,
      "op": "send",
@@ -763,7 +967,7 @@
      "entities": [
       "code@121+32"
      ],
-     "id": 5,
+     "id": 7,
      "keyboard": [],
      "notify": true,
      "op": "send",
@@ -781,7 +985,7 @@
    "telegram": [
     {
      "chat": 123,
-     "id": 6,
+     "id": 8,
      "notify": false,
      "op": "send",
      "reply_to": 32,
@@ -902,8 +1106,12 @@
    "step": "do:exit rc=0",
    "telegram": [
     {
+     "id": 3,
+     "op": "delete"
+    },
+    {
      "chat": 123,
-     "id": 7,
+     "id": 9,
      "keyboard": [
       [
        "cancel => untether:cancel"
@@ -998,7 +1206,7 @@
      "entities": [
       "code@53+32"
      ],
-     "id": 7,
+     "id": 9,
      "keyboard": [
       [
        "cancel => untether:cancel"
@@ -1080,11 +1288,11 @@
      "entities": [
       "code@107+32"
      ],
-     "id": 8,
+     "id": 10,
      "keyboard": [],
      "notify": true,
      "op": "send",
-     "replace": 7,
+     "replace": 9,
      "reply_to": 21,
      "text": "done · claude · <t>\n\nResumed.\n\n🏷 claude-golden-1 · plan · ✓ turn complete\n💰$0.01 · 1 tn · 1.0s · 10/5\n\n↩️ claude --resume golden-session-1"
     }

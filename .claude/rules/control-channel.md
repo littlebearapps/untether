@@ -38,6 +38,11 @@ Read those before changing any of these areas.
 - `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` — **`ExitPlanMode` is never auto-approved**.
 - Prompting modes (`default`/`manual`/`acceptEdits`) route every tool to Telegram (#749); `is_claude_prompting_mode()`
   in `runners/run_options.py` is the single classification point.
+- Autonomous modes approve at stage 6 **only** what `_autonomous_ask_reason` clears (#882). It reads the raw request
+  fields and fails closed: never add a "default approve" branch, and any new stage-6 branch must call it.
+  `_PLAN_ROUTINE_REASONS` ships empty and never overlaps `_NEVER_ROUTINE_REASONS` (test-enforced).
+- `requires_user_interaction` requests are never answered by a one-tap Approve, in any mode: deny with the terminal
+  note (#882). Exclude `ExitPlanMode` / `AskUserQuestion` before reading the flag (both carry it).
 
 ## Permission modes (#741)
 - Only `plan-auto` is translated (→ CLI `plan` + ExitPlanMode rubber stamp). Every genuine CLI mode passes through verbatim.

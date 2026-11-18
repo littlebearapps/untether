@@ -606,10 +606,10 @@
    ],
    "logs": [
     "debug action.recorded kind=\"warning\" +[logger_name,title]",
-    "debug control_request.diff_preview_gate request_id=\"req-edit-1\" tool_name=\"Edit\" +[logger_name]",
     "debug control_request.registered request_id=\"req-edit-1\" session_id=\"golden-session-1\" +[logger_name]",
     "debug runner.event.cli engine=\"claude\" +[event_type,line,logger_name]",
     "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
+    "info control_request.ask_class_prompt agent_id=null decision_reason_type=null permission_mode=\"plan\" reason=\"plan_mode\" request_id=\"req-edit-1\" tool_name=\"Edit\" +[logger_name]",
     "info control_request.received agent_id=null decision_reason_type=null permission_mode=\"plan\" request_id=\"req-edit-1\" session_id=\"golden-session-1\" tool_name=\"Edit\" unattended=null +[logger_name]",
     "info progress_edits.keyboard_attach request_id=\"req-edit-1\" tool_name=\"Edit\" +[channel_id,keyboard_rows,logger_name,message_id]",
     "info render_progress.inline_keyboard_found request_id=\"req-edit-1\" tool_name=\"Edit\" +[action_id,buttons,logger_name]"
