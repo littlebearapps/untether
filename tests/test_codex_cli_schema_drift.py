@@ -31,7 +31,7 @@ from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas.codex import CODEX_USAGE_FIELDS
 
 # Last CLI these probes were re-derived against.
-PROBED_CLI_VERSION = "0.157.1"
+PROBED_CLI_VERSION = "0.169.0"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("codex") is None, reason="codex CLI not installed"
@@ -169,6 +169,7 @@ _209_EXEC_FLAGS = (
     "--ignore-rules",
     "--ignore-user-config",
     "--ephemeral",
+    "--trust",
 )
 # Inherited into exec from the ROOT position, where extra_args sit.
 _209_ROOT_LIVE = (
@@ -180,18 +181,24 @@ _209_ROOT_LIVE = (
     "--worktree",
 )
 # Exec-only: at the root they already fail every run loudly.
-_209_ROOT_REJECTED = ("--ignore-rules", "--ignore-user-config", "--ephemeral")
+_209_ROOT_REJECTED = (
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--ephemeral",
+    "--trust",
+)
 
-# Every long flag in `codex --help` plus `codex exec --help` on 0.157.1, classified
+# Every long flag in `codex --help` plus `codex exec --help` on 0.169.0, classified
 # for #209: blocked (bypass/workspace), managed (Untether sets it / exec-only),
 # allowed (documented passthrough), d16 (non-security, deferred to #851), and
 # root-only (TUI/top-level; rejected or ignored by exec).
-CODEX_FLAGS_CLASSIFIED_0_157_1: dict[str, str] = {
+CODEX_FLAGS_CLASSIFIED_0_169_0: dict[str, str] = {
     "--dangerously-bypass-approvals-and-sandbox": "blocked",
     "--approve-for-me": "blocked",
     "--dangerously-bypass-hook-trust": "blocked",
     "--cd": "blocked",
     "--worktree": "blocked",
+    "--trust": "blocked",  # 0.169.0: persists project trust across chats (#1040)
     "--sandbox": "allowed",  # only the danger-full-access value is blocked (D3)
     "--config": "allowed",  # substring rule on the value (D5)
     "--ask-for-approval": "managed",
@@ -212,7 +219,7 @@ CODEX_FLAGS_CLASSIFIED_0_157_1: dict[str, str] = {
     "--local-provider": "allowed",
     "--profile": "allowed",
     "--search": "allowed",
-    "--cyber-access-program": "allowed",  # 0.162.1: model access tier, no sandbox/approval effect
+    "--cyber-access-program": "allowed",  # 0.162.1: server-authorised tier, no sandbox/approval effect
     "--help": "allowed",
     "--version": "allowed",
     "--ephemeral": "d16",
@@ -275,14 +282,14 @@ def test_209_codex_flag_snapshot(tmp_path: Path) -> None:
         assert proc.returncode == 0, _clap_error(proc.stderr)
         listed.update(_CODEX_HELP_FLAG_RE.findall(proc.stdout))
     assert listed, "parsed no flags from `codex --help` — the help layout moved"
-    unclassified = sorted(listed - CODEX_FLAGS_CLASSIFIED_0_157_1.keys())
+    unclassified = sorted(listed - CODEX_FLAGS_CLASSIFIED_0_169_0.keys())
     assert not unclassified, (
         f"new Codex flag(s) {unclassified} on the installed CLI — classify each "
         "for #209 (block / allow + document in docs/how-to/security.md) and add "
-        "it to CODEX_FLAGS_CLASSIFIED_0_157_1 (last green on codex-cli "
+        "it to CODEX_FLAGS_CLASSIFIED_0_169_0 (last green on codex-cli "
         f"{PROBED_CLI_VERSION})"
     )
-    removed = sorted(CODEX_FLAGS_CLASSIFIED_0_157_1.keys() - listed)
+    removed = sorted(CODEX_FLAGS_CLASSIFIED_0_169_0.keys() - listed)
     if removed:
         import warnings
 
@@ -292,7 +299,7 @@ def test_209_codex_flag_snapshot(tmp_path: Path) -> None:
 def test_209_snapshot_matches_the_deny_list() -> None:
     from untether.runners.codex import find_blocked_codex_args
 
-    for flag, cls in CODEX_FLAGS_CLASSIFIED_0_157_1.items():
+    for flag, cls in CODEX_FLAGS_CLASSIFIED_0_169_0.items():
         refused = bool(find_blocked_codex_args([flag]))
         assert refused is (cls in {"blocked", "managed"}), (flag, cls)
 
