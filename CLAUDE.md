@@ -66,7 +66,7 @@ runner.** Security and doc-accuracy fixes still apply. Both are excluded from ev
   carries question buttons and steer). One `agy` process per message: warm/live agy sessions are deferred (#977
   shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through
   `utils/antigravity_argv.py` (`--flag=value` only). Detail: the `antigravity-cli` skill.
-- Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
+- Engine parity roadmap: v0.36.1 Antigravity (#558, shipped 2026-11-16), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 - OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 
 ## Commands
