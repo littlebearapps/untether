@@ -15,6 +15,7 @@
 ### fixes
 
 - **fix:** a final reply that certainly failed to send (connection refused or a Telegram 5xx) is kept and sent again once Telegram answers, or after a restart; timeouts and refusals are never re-sent, so a reply can't be posted twice by mistake [#1207](https://github.com/littlebearapps/untether/issues/1207)
+- **fix(claude):** Codex plugin `--background` jobs started from a Claude chat are no longer killed about a minute after the reply; the live session stays open while they run (up to the session cap) [#1186](https://github.com/littlebearapps/untether/issues/1186)
 - **fix(claude):** approval requests are no longer auto-denied after 5 minutes; they wait for your answer, the reminders or the 4-hour cap [#844](https://github.com/littlebearapps/untether/issues/844)
 - **fix(claude):** two steers folded into one turn no longer hold the next follow-up for 120 s or report the first as "not run" [#1173](https://github.com/littlebearapps/untether/issues/1173)
 - **fix(claude):** no more stray "✓ Permission resolved" rows in a later live-session turn [#942](https://github.com/littlebearapps/untether/issues/942)
