@@ -24,6 +24,18 @@ required `type` field. These are `AgentSessionEvent` objects from
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop","timestamp":123}]} 
 ```
 
+Pi ≥ 0.75.4 adds `"willRetry":true|false`. `agent_end` closes one low-level
+run; Pi may still retry, compact or run queued messages after it.
+
+### `agent_settled`
+
+```json
+{"type":"agent_settled","aborted":false}
+```
+
+Pi ≥ 0.80.5: no automatic work is left. Untether completes the run here, or at
+process exit on older Pi (#1255).
+
 ### `turn_start` / `turn_end`
 
 ```json

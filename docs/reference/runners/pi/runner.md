@@ -125,7 +125,9 @@ The runner should translate:
 
 * `tool_execution_start` -> `action` (phase: started)
 * `tool_execution_end` -> `action` (phase: completed)
-* `agent_end` -> `completed`
+* `agent_settled` (Pi ≥ 0.80.5) or process exit (older Pi) -> `completed`,
+  using the last `agent_end`'s outcome; `agent_end` alone doesn't end the run,
+  because Pi may still retry or compact (#1255)
 
 For the final answer, use the most recent assistant message text (from
 `message_end` events). For errors, if the assistant stopReason is `error` or
