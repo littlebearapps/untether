@@ -80,7 +80,7 @@ from ..runner import (
 from ..schemas import antigravity as agy_schema
 from ..session_costs import RUN_TOKENS_KEY
 from ..utils import antigravity_context, antigravity_quota, antigravity_scan
-from ..utils.antigravity_argv import native_compact_prompt
+from ..utils.antigravity_argv import MODEL_ID_PUNCTUATION_TEXT, native_compact_prompt
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
@@ -206,7 +206,8 @@ INVALID_ARGUMENT_BLOCK = "invalid_argument"
 # (``utils/antigravity_argv.py``): refused before anything spawns.
 INVALID_MODEL_TEXT = (
     "🛑 That model id isn't valid for Antigravity, so nothing was started. "
-    "A model id uses letters, digits and . _ - : / only, with no spaces and "
+    "A model id uses letters, digits and "
+    f"{MODEL_ID_PUNCTUATION_TEXT} only, with no spaces and "
     "no leading dash (for example gemini-3.8-flash). Set one with /model set, "
     "or go back to the default with /model clear."
 )
@@ -1138,6 +1139,10 @@ _FROM_CONTINUE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # goes into agy's env).
 _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "untether_agy_gate", default=None
+)
+# #1212: the version this run's pre-spawn check probed, read by ``start_run``.
+_PROBED_VERSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "untether_agy_probed_version", default=None
 )
 # #980 phase 14: same hand-off — how the run starts (``build_args``).
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
@@ -2273,6 +2278,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         self, resume: ResumeToken | None
     ) -> UntetherEvent | None:
         version = await anyio.to_thread.run_sync(agy_cli_version, self.antigravity_cmd)
+        _PROBED_VERSION.set(version)
         parsed = parse_agy_version(version) if version else None
         if parsed is None:
             # Fail open: a slow or odd ``--version`` must never block a run;
@@ -2646,7 +2652,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AntigravityStreamState,
     ) -> None:
         state.t_spawn = time.monotonic()
-        state.agy_version = cached_agy_version(self.antigravity_cmd)
+        probed = _PROBED_VERSION.get()
+        _PROBED_VERSION.set(None)
+        # #1212: an agy self-update since the check above changes the mtime,
+        # so the cache misses; log the version the run was checked against
+        # (the pre-update one if the update landed in between).
+        state.agy_version = cached_agy_version(self.antigravity_cmd) or probed
 
     def on_spawned(self, *, state: Any, pid: int) -> None:
         if isinstance(state, AntigravityStreamState):
@@ -4662,7 +4673,8 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             )
             raise ConfigError(
                 f"Invalid `antigravity.model` in {config_path}; expected a model "
-                "id made of letters, digits and . _ - : / with no spaces and no "
+                "id made of letters, digits and "
+                f"{MODEL_ID_PUNCTUATION_TEXT} with no spaces and no "
                 "leading dash (for example gemini-3.8-flash)."
             ) from None
     raw_cmd = config.get("cmd")

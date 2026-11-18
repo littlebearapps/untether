@@ -662,6 +662,29 @@ def test_session_started_logs_agy_version(monkeypatch: pytest.MonkeyPatch) -> No
     assert started["session_id"] == "90ca6744-e8d4-46d4-b5fc-64a30ae2fa6d"
 
 
+@pytest.mark.anyio
+async def test_agy_version_survives_a_self_update_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #1212: agy updated itself (new mtime) between the version check and
+    # the spawn; the run still records the version it was checked against.
+    script = tmp_path / "agy"
+    script.write_text("#!/bin/sh\necho 1.4.10\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(agy, "_VERSION_CACHE", {})
+    monkeypatch.setattr(agy, "_probe_agy_version", agy._run_agy_version)
+    runner = AntigravityRunner(antigravity_cmd=str(script))
+    assert await runner._unsupported_version_event(None) is None
+    os.utime(script, (1, 1))
+    assert agy.cached_agy_version(str(script)) is None
+    state = runner.new_state("hi", None)
+    runner.start_run("hi", None, state=state)
+    assert state.agy_version == "1.4.10"
+    # Consumed: a later run in the same context never reuses it.
+    runner.start_run("hi", None, state=state)
+    assert state.agy_version is None
+
+
 # ── env ─────────────────────────────────────────────────────────────────────
 
 

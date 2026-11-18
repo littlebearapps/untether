@@ -31,7 +31,12 @@ PREVIEW_CHARS = 40
 # Model ids as agy lists them (``gemini-3.8-flash-high``, ``claude-opus-5-5``,
 # ``gpt-oss-120b``) plus ``/ : @ +`` for provider-qualified ids. ASCII only:
 # no whitespace, control characters or NUL, never a leading dash.
-_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}\Z")
+# The punctuation is shared with the refusal texts so they can't drift (#1181).
+MODEL_ID_PUNCTUATION = "._-:/@+"
+MODEL_ID_PUNCTUATION_TEXT = " ".join(MODEL_ID_PUNCTUATION)
+_MODEL_RE = re.compile(
+    rf"[A-Za-z0-9][A-Za-z0-9{re.escape(MODEL_ID_PUNCTUATION)}]{{0,127}}\Z"
+)
 # Conversation ids are UUIDs; the resume-line regex allows ``[0-9A-Za-z_-]``.
 _CONVERSATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _EFFORT_VALUES = frozenset({"low", "medium", "high", "xhigh", "max"})

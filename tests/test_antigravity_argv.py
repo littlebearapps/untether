@@ -326,6 +326,18 @@ def test_refusal_texts_are_plain_and_short() -> None:
     assert "/new" in agy.INVALID_CONVERSATION_TEXT
 
 
+def test_refusal_texts_list_every_allowed_model_punctuation(tmp_path: Path) -> None:
+    # #1181: the texts once omitted ``@`` and ``+``, which the check accepts.
+    with pytest.raises(ConfigError) as exc:
+        agy.build_runner({"model": "a b"}, tmp_path / "untether.toml")
+    for ch in argv_mod.MODEL_ID_PUNCTUATION:
+        assert f" {ch} " in agy.INVALID_MODEL_TEXT
+        assert f" {ch} " in str(exc.value)
+        assert agy_flag("--model", f"m{ch}1") == f"--model=m{ch}1"
+    with pytest.raises(AgyArgvError):
+        agy_flag("--model", "gemini$flash")
+
+
 @pytest.mark.anyio
 async def test_valid_values_still_run_and_reach_agy_joined(
     project: Path, record: Path, monkeypatch: pytest.MonkeyPatch
