@@ -388,6 +388,12 @@ async def maybe_steer(
     elif active is None:
         # Default steer mode with nothing running: the message simply runs.
         notify = False
+    elif (active_engine := getattr(running_tasks[active], "engine", None)) and (
+        active_engine != target_engine
+    ):
+        # #1177: a `/<engine>` directive for another engine was never a steer
+        # of the busy run — it starts on its own, so "queued instead" is wrong.
+        notify = False
     else:
         notify = _should_notice(
             (chat_id, thread_id, reason, target_engine, active.message_id)

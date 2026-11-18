@@ -125,11 +125,11 @@ Each request can be answered once. A second tap (yours or someone else's in a gr
 
 - **Already answered** — plus a silent `ℹ️ Already answered — approved` (or `denied`, …) line saying what the first tap did
 - **No longer needed** — Claude Code withdrew the request, for example because the turn ended; its buttons are removed
-- **This request has expired** — the request timed out, or Untether no longer knows about it (for example after a restart)
+- **This request has expired** — a newer request replaced it, or Untether no longer knows about it (for example after a restart)
 
 Buttons only work in the chat they were posted in: a forged approval sent from another chat reads as expired and changes nothing ([#388](https://github.com/littlebearapps/untether/issues/388)).
 
-An unanswered request is denied automatically after 5 minutes (`⏱️ Timed out: auto-denied after 5 min`). Untether checks for this when another approval request arrives, so a single request on its own waits for you.
+An unanswered request waits for you: Claude Code has no deadline on it, and Untether no longer denies it after 5 minutes ([#844](https://github.com/littlebearapps/untether/issues/844)). You get reminders while it waits, and the session closes at its 4-hour cap.
 
 ## Who can answer in a group
 

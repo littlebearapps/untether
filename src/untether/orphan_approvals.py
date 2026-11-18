@@ -91,8 +91,9 @@ def render_surface_markdown(
     if title.strip():
         blocks.append(title.strip())
     tail_lines: list[str] = []
-    if reason:
-        tail_lines.append(f"🪝 {escape_markdown(reason)}")
+    # #939: an in-turn action title already carries the reason line.
+    if reason and (line := f"🪝 {escape_markdown(reason)}") not in title:
+        tail_lines.append(line)
     if mins is None:
         tail_lines.append(
             "The agent is paused until you answer."

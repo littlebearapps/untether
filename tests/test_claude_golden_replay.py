@@ -178,8 +178,6 @@ GOLDEN_SHA256: dict[str, str] = {
     "plan_outline_hold.jsonl": "4920222856240ed72e4bff0a7696f99d145edb6138be3d78bd1dddc2e8cc8cee",
     "plan_rearm_refused.json": "840bbdf718e0001808796ed9ca60e6466060fd3dac431d6ffcc4f561f515cae9",
     "plan_rearm_refused.jsonl": "070ed57af149ff77c66a13b3c4925af6a142c99b966ddce1dc1f8d2ba52f8a92",
-    "request_timeout_sweep.json": "0745837b50ae886f8a0e31f40584b2af59588c120b8baa25a1f0217be255c525",
-    "request_timeout_sweep.jsonl": "d8f2aadb4a0fd74677aeb66868acb097f3f5272074f2511cafca43fe8c0dc80e",
     "resume_waits_for_background_owner.json": "84fe18e5595b062b98b891f8c83bb307a45c5a6cb9fd91a8f2f139e9bcb405ff",
     "resume_waits_for_background_owner.jsonl": "2a52fd6cb208882b289c27d8a73411cf02b2874ed7daa6a0429a54339c4a9acf",
     "tool_approve_deny.json": "dc2be9d459c94c570e1799f91d4b49b63fa6bd71757e3786b095f38abcdbbc4b",

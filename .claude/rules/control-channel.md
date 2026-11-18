@@ -62,7 +62,7 @@ Read those before changing any of these areas.
 ## Outline gate / post-outline approval
 - After "Pause & Outline", the gate is text-based (`_OUTLINE_MIN_CHARS`): short → auto-deny, written → hold open with buttons.
 - Synthetic buttons use the `da:` callback prefix (64-byte limit), handled in `claude_control.py` before approve/deny.
-- "Let's discuss" holds the request open; the 5-min sweep is event-driven, not a timer.
+- "Let's discuss" holds the request open; nothing expires it (the 5-min sweep was retired, #844) — only the user, a CLI cancel or the 4 h cap.
 
 ## Scheduling hooks (#925)
 - Every control-channel spawn registers `PreToolUse` hook callbacks `ut_loop_cron_create` / `ut_loop_cron_delete` in

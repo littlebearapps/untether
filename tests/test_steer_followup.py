@@ -209,9 +209,10 @@ def _cleanup():
 class _Busy:
     """A RunningTask stand-in doing work (not live-idle, not done)."""
 
-    def __init__(self) -> None:
+    def __init__(self, engine: str | None = None) -> None:
         self.done = anyio.Event()
         self.edits = None
+        self.engine = engine
 
 
 def _cfg(followup_mode: str = "queue") -> Any:
@@ -389,6 +390,29 @@ async def test_default_mode_notice_only_once_per_run() -> None:
     running = {MessageRef(channel_id=CHAT, message_id=10): _Busy()}
     await _steer(cfg, engine="codex", token=token, running=running)
     assert len(_texts(cfg)) == 2
+
+
+@pytest.mark.parametrize(
+    ("active_engine", "explicit", "noticed"),
+    [("claude", False, False), ("claude", True, True), ("codex", False, True)],
+)
+async def test_1177_directive_to_other_engine_is_silent(
+    active_engine: str, explicit: bool, noticed: bool
+) -> None:
+    """#1177: a default-mode ``/codex`` message while a Claude run is busy
+    starts on its own — no "queued instead" notice. Explicit ``/steer`` and a
+    busy run of the same engine keep it."""
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy(active_engine)}
+    ok = await _steer(
+        cfg,
+        engine="codex",
+        token=ResumeToken(engine="codex", value="thread-1"),
+        override="steer" if explicit else None,
+        running=running,
+    )
+    assert ok is False
+    assert _texts(cfg) == ([fallback_notice("engine", "codex")] if noticed else [])
 
 
 # ── #990: the busy-run lookup is scoped to the sender's thread ───────────────
