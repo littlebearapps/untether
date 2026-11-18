@@ -61,7 +61,7 @@ where `secrets.env` (mode `600`) holds
 afterwards. Untether never passes `UNTETHER__*` variables to an engine process, for
 any engine ([#1219](https://github.com/littlebearapps/untether/issues/1219)); before 0.36.2, Claude Code, Pi and
 Antigravity received them through the `UNTETHER_` allowlist prefix, and Codex and
-OpenCode through Untether's whole environment.
+OpenCode through Untether's whole environment (which they no longer get, [#1241](https://github.com/littlebearapps/untether/issues/1241)).
 
 For webhook secrets, see `secret_env` / `secret_file` in the
 [Triggers reference](triggers/triggers.md#triggerswebhooks). A `secret_file` works
@@ -82,7 +82,7 @@ directory, written owner-only by systemd).
 | `PI_CODING_AGENT_DIR` | Override Pi agent session directory base path (default `~/.pi/agent`). |
 | `GEMINI_API_KEY` | Antigravity CLI's API-key sign-in. Only used when agy's settings file also sets `"modelProvider": "gemini"`; `GOOGLE_API_KEY` is ignored by agy. `GOOGLE_GEMINI_BASE_URL` optionally overrides the endpoint. |
 | `AGY_ADC_AUTH` | Set to `true` for Antigravity CLI's Gemini Enterprise / Google Cloud sign-in (Application Default Credentials), with `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_CLOUD_LOCATION`. |
-| `DBUS_SESSION_BUS_ADDRESS` | Lets Antigravity CLI reach a Linux desktop keyring holding a Google account sign-in. Passed to agy only. |
+| `DBUS_SESSION_BUS_ADDRESS` | Lets Antigravity CLI reach a Linux desktop keyring holding a Google account sign-in, and Codex its keyring credential store. Passed to agy and Codex only. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's config directory. Untether reads it to recognise plan files under `$CLAUDE_CONFIG_DIR/plans/` (as well as `.claude/plans/`) and to keep a separate rate-limit state per Claude config directory. |
 
 ## Runner environment
@@ -105,14 +105,22 @@ These variables are set (or removed) automatically by Untether in the engine sub
 !!! note "Not a security concern"
     `UNTETHER_SESSION` is a simple signal variable, not a credential or secret. It tells Claude Code plugins that the session is running via Telegram so they can avoid interfering with Untether's single-message output model. Plugins like [PitchDocs](https://github.com/littlebearapps/lba-plugins) check for this variable and skip blocking hooks that would otherwise consume the final response with meta-commentary instead of the user's requested content. See the [PitchDocs interference audit](../audits/pitchdocs-context-guard-interference.md) for the full analysis.
 
-## Env allowlist (Claude/Pi/Antigravity) { #env-allowlist-claudepi }
+## Env allowlist (Claude/Pi/Antigravity/Codex/OpenCode) { #env-allowlist-claudepi }
 
-As of v0.35.2, arbitrary process env vars are **not** forwarded to Claude/Pi subprocesses (nor, from v0.36.1, to Antigravity CLI's) ([#198](https://github.com/littlebearapps/untether/issues/198)). Only the built-in allowlist in `src/untether/utils/env_policy.py` (plus your `[security]` extras) is passed through:
+As of v0.35.2, arbitrary process env vars are **not** forwarded to Claude/Pi subprocesses (nor, from v0.36.1, to Antigravity CLI's, or from v0.36.2 to Codex's and OpenCode's) ([#198](https://github.com/littlebearapps/untether/issues/198), [#1241](https://github.com/littlebearapps/untether/issues/1241)). Only the built-in allowlist in `src/untether/utils/env_policy.py` (plus your `[security]` extras) is passed through:
 
 - **Exact names:** OS essentials (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TMP`, `TEMP`, `TZ`); CLI output (`NO_COLOR`, `CI`, `FORCE_COLOR`, `COLORTERM`, `CLICOLOR`, `CLICOLOR_FORCE`); `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`; language runtimes (`PYTHONPATH`, `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYTHONIOENCODING`, `NODE_PATH`, `NODE_OPTIONS`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`); git/SSH (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`); provider keys (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`, `GEMINI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `FIREWORKS_API_KEY`); `GITHUB_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `GH_TOKEN`; `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `BWS_ACCESS_TOKEN` (a default since v0.35.3); `UNTETHER_SESSION`; `PROJECT_ROOT`, `DIRENV_DIR`.
 - **Prefixes:** `CLAUDE_`, `CLAUDE_CODE_`, `MCP_`, `MAX_MCP_`, `LC_`, `UV_`, `NPM_`, `PNPM_`, `NODE_`, `PIP_`, `UNTETHER_`.
 
 The Antigravity runner uses the same allowlist and your `[security]` extras, plus four names passed to agy only: `DBUS_SESSION_BUS_ADDRESS`, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_GEMINI_BASE_URL` ([#558](https://github.com/littlebearapps/untether/issues/558)). Proxy variables (`HTTPS_PROXY`, `NO_PROXY`) are not on the list; add them with `env_extra_allow` if agy needs them.
+
+The Codex and OpenCode runners also use the allowlist and your `[security]` extras ([#1241](https://github.com/littlebearapps/untether/issues/1241)), plus:
+
+- **Both:** proxy and CA-certificate names (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` in upper and lower case; `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `CARGO_HTTP_CAINFO`, `BUNDLE_SSL_CA_CERT`, `npm_config_cafile`; `NODE_EXTRA_CA_CERTS` already passes by the `NODE_` prefix).
+- **Codex:** prefix `CODEX_` (`CODEX_HOME`, `CODEX_API_KEY`, `CODEX_CA_CERTIFICATE`, …), `RUST_LOG`, `DBUS_SESSION_BUS_ADDRESS`, `OPENAI_FEDERATION_RULE_ID`, `OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_WORKLOAD_IDENTITY_CONTEXT`.
+- **OpenCode:** prefix `OPENCODE_`; **every name ending in `_API_KEY`** (so an unrelated `STRIPE_API_KEY` in Untether's environment reaches OpenCode too); and a dated snapshot of the other provider names OpenCode 1.19.6 knows (taken 2026-11-18 from its models.dev catalogue and provider loaders: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_PROFILE`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_VERTEX_PROJECT`, `GOOGLE_VERTEX_LOCATION`, `HF_TOKEN`, `DATABRICKS_TOKEN`, `GITLAB_TOKEN`, `AICORE_SERVICE_KEY` and about 30 more; the full list is `_OPENCODE_PROVIDER_ENV` in `src/untether/runners/opencode.py`).
+
+On the first Codex or OpenCode run after a start, Untether logs `env_policy.dropped engine=<engine> names=[…]` (names only, never values) so you can see what to add to `env_extra_allow`.
 
 The Claude runner always execs under `env -i KEY=VAL …`, so the resolved environment is exactly the allowlist ([#361](https://github.com/littlebearapps/untether/issues/361)). When `[security] env_audit = true` (default — see [config reference](config.md#security)), Untether also samples `/proc/<pid>/environ` once at session start and logs `claude.env_audit.leaked_var` for any non-allowlisted name it finds.
 
@@ -132,17 +140,17 @@ If you'd rather the new variable ship as a default for every Untether user, open
 
 ## Env for Codex and OpenCode { #env-codex-opencode }
 
-<!-- verified codex 0.157.1 / opencode 1.14.33, 2026-09-30 (#454); recheck on either CLI bump -->
+<!-- verified codex 0.170.0 / opencode 1.19.6, 2026-11-18 (#1241); recheck on either CLI bump -->
 
-Untether does not filter the Codex or OpenCode environment: both CLIs are spawned with Untether's full process environment (so are the deprecated, unsupported Gemini CLI and AMP engines). `[security] env_extra_allow` has no effect on them (there is no allowlist to extend). Per-runner filtering for these engines is tracked in [#375](https://github.com/littlebearapps/untether/issues/375).
+Since v0.36.2, Untether spawns Codex and OpenCode with the [env allowlist](#env-allowlist-claudepi) plus their own extras, not its full process environment ([#1241](https://github.com/littlebearapps/untether/issues/1241)); only the deprecated, unsupported Gemini CLI and AMP engines still get the full environment. A variable either engine reads under a name you chose (a Codex `model_providers.<id>.env_key`, an MCP server's `env_vars`, `bearer_token_env_var` or `env_http_headers`, an `opencode.json` `{env:NAME}`) needs `[security] env_extra_allow`.
 
 What an **MCP server** sees is decided by the engine, not by Untether, and the two engines differ:
 
 | Engine | Engine process gets | Its local (stdio) MCP servers get | To pass `BWS_ACCESS_TOKEN` to an MCP server |
 |---|---|---|---|
 | Claude | Untether's allowlist (see above) | whatever Claude Code passes on | Nothing — `BWS_ACCESS_TOKEN` is allowlisted for the engine process by default |
-| OpenCode | Untether's full env | the engine's full env, plus the server's `environment` map | Nothing, as long as Untether itself has it |
-| Codex | Untether's full env | **a clean env**: only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `USER`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `TZ` (plus custom CA-certificate vars), plus names in `env_vars` (read from Codex's env, i.e. Untether's) and pairs in `env` | Add `env_vars = ["BWS_ACCESS_TOKEN"]` to the server's `[mcp_servers.<name>]` table |
+| OpenCode | Untether's allowlist plus OpenCode's extras (see above) | the engine's env, plus the server's `environment` map | Nothing — `BWS_ACCESS_TOKEN` is allowlisted by default (any other name needs `env_extra_allow`) |
+| Codex | Untether's allowlist plus Codex's extras (see above) | **a clean env**: only `HOME`, `LOGNAME`, `PATH`, `SHELL`, `USER`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `TZ` (plus custom CA-certificate vars), plus names in `env_vars` (read from Codex's env, so the name must also pass Untether's allowlist or `env_extra_allow`) and pairs in `env` | Add `env_vars = ["BWS_ACCESS_TOKEN"]` to the server's `[mcp_servers.<name>]` table |
 
 ```toml title="~/.codex/config.toml"
 [mcp_servers.trello]

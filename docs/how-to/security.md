@@ -99,7 +99,7 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 
 ## Engine subprocess env allowlist
 
-Claude, Pi and Antigravity engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers. This reduces the blast radius of any tool call or MCP that exfiltrates process env.
+Claude, Pi, Antigravity and (since v0.36.2) Codex and OpenCode engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers (OpenCode's provider names are the exception, see below). This reduces the blast radius of any tool call or MCP that exfiltrates process env.
 
 If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), you have two options:
 
@@ -117,7 +117,13 @@ If a new engine or MCP genuinely needs a variable that isn't allowlisted (sympto
 
 Antigravity gets the same allowlist plus four names only it needs (`DBUS_SESSION_BUS_ADDRESS` for a desktop keyring, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT` and `GOOGLE_GEMINI_BASE_URL`), and honours `env_extra_allow`. Proxy variables such as `HTTPS_PROXY` aren't allowlisted: add them with `env_extra_allow` if agy needs a proxy.
 
-Codex and OpenCode (and the deprecated Gemini and AMP) still inherit Untether's full environment; per-runner filtering for them is tracked in [#375](https://github.com/littlebearapps/untether/issues/375). Codex itself starts its MCP servers with a minimal env, so a credential needs `env_vars` — see [Env for Codex and OpenCode](../reference/env-vars.md#env-codex-opencode).
+Since v0.36.2, Codex and OpenCode get the same allowlist and your `[security]` extras, plus a few names of their own ([#1241](https://github.com/littlebearapps/untether/issues/1241)):
+
+- **Both:** proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, upper and lower case) and CA certificates (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `CARGO_HTTP_CAINFO`, `BUNDLE_SSL_CA_CERT`, `npm_config_cafile`). Claude, Pi and Antigravity still need these added with `env_extra_allow`.
+- **Codex:** any `CODEX_*` name, `RUST_LOG`, `DBUS_SESSION_BUS_ADDRESS` (for the keyring credential store) and the OpenAI workload-identity names. A ChatGPT login keeps working through `~/.codex`.
+- **OpenCode:** any `OPENCODE_*` name, **any name ending in `_API_KEY`**, and the other provider names OpenCode 1.19.6 knows (such as `AWS_*`, `HF_TOKEN`, `GOOGLE_VERTEX_*` and `DATABRICKS_TOKEN`). The `_API_KEY` rule means an unrelated key such as `STRIPE_API_KEY` still reaches OpenCode if it's in Untether's environment: keep such keys out of the service environment.
+
+A variable Codex or OpenCode reads under a name you chose (a Codex provider `env_key`, an MCP server's `env_vars` or `bearer_token_env_var`, an `opencode.json` `{env:…}` reference) needs `env_extra_allow`. On the first run of each engine Untether logs the names it removed (`env_policy.dropped`, names only, never values). Codex itself starts its MCP servers with a minimal env, so a credential also needs `env_vars` — see [Env for Codex and OpenCode](../reference/env-vars.md#env-codex-opencode). The deprecated Gemini and AMP engines still inherit Untether's full environment.
 
 ### Boundary enforcement on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361))
 
@@ -310,8 +316,9 @@ Set `[triggers] webhook_defaults = "strict"` ([#1118](https://github.com/littleb
   replayed or edited payload fails, and the secret itself never travels.
 - **Keep the secret out of `untether.toml`**: `secret_file = "~/.config/untether/gh.secret"`
   (owner-only, `chmod 600`) or `secret_env = "GH_WEBHOOK_SECRET"`
-  ([#1219](https://github.com/littlebearapps/untether/issues/1219)). Codex and OpenCode inherit Untether's whole
-  environment, so prefer `secret_file` where they run.
+  ([#1219](https://github.com/littlebearapps/untether/issues/1219)). Before v0.36.2, Codex and OpenCode inherited
+  Untether's whole environment, secrets included; now a `secret_env` variable reaches them only if its name is allowlisted
+  (for OpenCode, avoid names ending in `_API_KEY`) ([#1241](https://github.com/littlebearapps/untether/issues/1241)).
 - **Send ids, not content**: let the payload carry ids (a commit SHA, an issue
   number) and have the agent fetch the rest, so the prompt holds as little
   attacker-controlled text as possible.
