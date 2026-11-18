@@ -181,6 +181,8 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | `loop_scheduler.py` | Untether-owned loop and wake-up scheduler (`active_loops.json`): `[loop]` caps, live-session fire path, per-loop cancel sentinel, cron-suppression records, session-scoped CronDelete stop, wake-cap expiry (#912, #925, #926) |
 | `runners/run_options.py` | Claude permission-mode allowlist, `is_claude_prompting_mode()` (#741, #742, #749) |
 | `runners/extra_args_guard.py` | Shared `extra_args` tokeniser and deny-list for Claude/Codex (#209) |
+| `runners/codex_app_server.py` | Codex app-server support gate: schema-subset probe of `generate-json-schema`, cached per binary, pre-spawn refusal (#961; transport lands with #962) |
+| `schemas/codex_app_server.py` | Codex app-server contract: methods with tiers, read types, sent enum values, probed/tested versions (#961) |
 | `telegram/steer.py` | Steer a follow-up into a live Claude session (#775) |
 | `telegram/followup_mode.py` | Per-chat/topic `followup_mode` prefs and resolution (#775) |
 | `telegram/commands/followup.py` | `/steer` and `/queue` commands (#775) |

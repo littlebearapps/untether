@@ -534,6 +534,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
+| Codex app-server contract / gate (`schemas/codex_app_server.py`, `runners/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
 
 ---

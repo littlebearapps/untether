@@ -1,0 +1,507 @@
+{
+ "codex_version": "0.169.0",
+ "subset": {
+  "client_notification initialized": {
+   "names": {},
+   "tier": "S"
+  },
+  "client_request initialize": {
+   "names": {
+    "params.capabilities": "S",
+    "params.clientInfo": "S",
+    "result.codexHome": "S",
+    "result.platformFamily": "S",
+    "result.platformOs": "S",
+    "result.userAgent": "S"
+   },
+   "tier": "S"
+  },
+  "client_request thread/list": {
+   "names": {
+    "params.ancestorThreadId": "E",
+    "params.archived": "S",
+    "params.attachedToThreadId": "E",
+    "params.currentAccountOnly": "S",
+    "params.cursor": "S",
+    "params.cwd": "S",
+    "params.excludedThreadIds": "S",
+    "params.includeAttachedThreads": "E",
+    "params.limit": "S",
+    "params.modelProviders": "S",
+    "params.originators": "S",
+    "params.parentThreadId": "E",
+    "params.projectId": "E",
+    "params.searchTerm": "S",
+    "params.sectionId": "S",
+    "params.sortDirection": "S",
+    "params.sortKey": "S",
+    "params.sourceKinds": "S",
+    "params.useStateDbOnly": "S",
+    "result.backwardsCursor": "S",
+    "result.data": "S",
+    "result.nextCursor": "S",
+    "result.readStates": "E"
+   },
+   "tier": "S"
+  },
+  "client_request thread/resume": {
+   "names": {
+    "params.approvalPolicy": "S",
+    "params.approvalsReviewer": "S",
+    "params.baseInstructions": "S",
+    "params.config": "S",
+    "params.cwd": "S",
+    "params.developerInstructions": "S",
+    "params.excludeTurns": "S",
+    "params.history": "E",
+    "params.initialTurnsPage": "E",
+    "params.model": "S",
+    "params.modelProvider": "S",
+    "params.path": "E",
+    "params.permissions": "E",
+    "params.personality": "S",
+    "params.runtimeWorkspaceRoots": "E",
+    "params.sandbox": "S",
+    "params.serviceTier": "S",
+    "params.threadId": "S",
+    "result.activePermissionProfile": "E",
+    "result.approvalPolicy": "S",
+    "result.approvalsReviewer": "S",
+    "result.collaborationMode": "S",
+    "result.cwd": "S",
+    "result.disabledPluginIds": "S",
+    "result.initialTurnsPage": "E",
+    "result.instructionSources": "S",
+    "result.itemsBackwardsCursor": "S",
+    "result.model": "S",
+    "result.modelProvider": "S",
+    "result.multiAgentMode": "E",
+    "result.reasoningEffort": "S",
+    "result.runtimeWorkspaceRoots": "E",
+    "result.sandbox": "S",
+    "result.serviceTier": "S",
+    "result.thread": "S",
+    "result.turnsBackwardsCursor": "S"
+   },
+   "tier": "S"
+  },
+  "client_request thread/start": {
+   "names": {
+    "params.allowProviderModelFallback": "E",
+    "params.approvalPolicy": "S",
+    "params.approvalsReviewer": "S",
+    "params.baseInstructions": "S",
+    "params.config": "S",
+    "params.cwd": "S",
+    "params.daybreakEnabled": "E",
+    "params.developerInstructions": "S",
+    "params.dynamicTools": "E",
+    "params.environments": "E",
+    "params.ephemeral": "S",
+    "params.experimentalRawEvents": "E",
+    "params.historyMode": "E",
+    "params.mockExperimentalField": "E",
+    "params.model": "S",
+    "params.modelProvider": "S",
+    "params.multiAgentMode": "E",
+    "params.permissions": "E",
+    "params.personality": "S",
+    "params.projectId": "E",
+    "params.runtimeWorkspaceRoots": "E",
+    "params.sandbox": "S",
+    "params.selectedCapabilityRoots": "E",
+    "params.serviceName": "S",
+    "params.serviceTier": "S",
+    "params.sessionStartSource": "S",
+    "params.threadSource": "S",
+    "result.activePermissionProfile": "E",
+    "result.approvalPolicy": "S",
+    "result.approvalsReviewer": "S",
+    "result.cwd": "S",
+    "result.disabledPluginIds": "S",
+    "result.instructionSources": "S",
+    "result.model": "S",
+    "result.modelProvider": "S",
+    "result.multiAgentMode": "E",
+    "result.reasoningEffort": "S",
+    "result.runtimeWorkspaceRoots": "E",
+    "result.sandbox": "S",
+    "result.serviceTier": "S",
+    "result.thread": "S"
+   },
+   "tier": "S"
+  },
+  "client_request turn/interrupt": {
+   "names": {
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "client_request turn/start": {
+   "names": {
+    "params.additionalContext": "E",
+    "params.approvalPolicy": "S",
+    "params.approvalsReviewer": "S",
+    "params.clientUserMessageId": "S",
+    "params.collaborationMode": "E",
+    "params.cwd": "S",
+    "params.cyberAccessProgram": "E",
+    "params.disabledPluginIds": "S",
+    "params.effort": "S",
+    "params.environments": "E",
+    "params.input": "S",
+    "params.model": "S",
+    "params.multiAgentMode": "E",
+    "params.outputSchema": "S",
+    "params.parentTurnId": "S",
+    "params.permissions": "E",
+    "params.personality": "S",
+    "params.responsesapiClientMetadata": "E",
+    "params.responsesapiClientMetadataPatch": "E",
+    "params.rootTurnId": "S",
+    "params.runtimeWorkspaceRoots": "E",
+    "params.sandboxPolicy": "S",
+    "params.serviceTier": "S",
+    "params.serviceTierForTurn": "S",
+    "params.summary": "S",
+    "params.threadId": "S",
+    "params.toolOutput": "S",
+    "params.turnTrigger": "S",
+    "result.turn": "S"
+   },
+   "tier": "S"
+  },
+  "enum ApprovalsReviewer": {
+   "names": {
+    "auto_review": "S",
+    "guardian_subagent": "S",
+    "user": "S"
+   },
+   "tier": "S"
+  },
+  "enum AskForApproval": {
+   "names": {
+    "never": "S",
+    "on-request": "S",
+    "untrusted": "S"
+   },
+   "tier": "S"
+  },
+  "enum CommandExecutionApprovalDecision": {
+   "names": {
+    "accept": "S",
+    "acceptForSession": "S",
+    "cancel": "S",
+    "decline": "S"
+   },
+   "tier": "S"
+  },
+  "enum FileChangeApprovalDecision": {
+   "names": {
+    "accept": "S",
+    "acceptForSession": "S",
+    "cancel": "S",
+    "decline": "S"
+   },
+   "tier": "S"
+  },
+  "enum McpServerElicitationAction": {
+   "names": {
+    "accept": "S",
+    "cancel": "S",
+    "decline": "S"
+   },
+   "tier": "S"
+  },
+  "enum ModeKind": {
+   "names": {
+    "default": "S",
+    "plan": "S"
+   },
+   "tier": "S"
+  },
+  "enum SandboxMode": {
+   "names": {
+    "danger-full-access": "S",
+    "read-only": "S",
+    "workspace-write": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification configWarning": {
+   "names": {
+    "params.details": "S",
+    "params.path": "S",
+    "params.range": "S",
+    "params.summary": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification deprecationNotice": {
+   "names": {
+    "params.details": "S",
+    "params.summary": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification error": {
+   "names": {
+    "params.error": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "params.willRetry": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification item/completed": {
+   "names": {
+    "params.completedAtMs": "S",
+    "params.contentTokenCount": "S",
+    "params.item": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification item/started": {
+   "names": {
+    "params.item": "S",
+    "params.startedAtMs": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification thread/started": {
+   "names": {
+    "params.thread": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification thread/tokenUsage/updated": {
+   "names": {
+    "params.threadId": "S",
+    "params.tokenUsage": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification turn/completed": {
+   "names": {
+    "params.threadId": "S",
+    "params.turn": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification turn/started": {
+   "names": {
+    "params.threadId": "S",
+    "params.turn": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification warning": {
+   "names": {
+    "params.message": "S",
+    "params.threadId": "S"
+   },
+   "tier": "S"
+  },
+  "server_request item/commandExecution/requestApproval": {
+   "names": {
+    "params.additionalPermissions": "E",
+    "params.approvalId": "S",
+    "params.availableDecisions": "E",
+    "params.command": "S",
+    "params.commandActions": "S",
+    "params.cwd": "S",
+    "params.environmentId": "S",
+    "params.itemId": "S",
+    "params.kind": "S",
+    "params.networkApprovalContext": "S",
+    "params.proposedExecpolicyAmendment": "S",
+    "params.proposedNetworkPolicyAmendments": "S",
+    "params.reason": "S",
+    "params.startedAtMs": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "result.decision": "S"
+   },
+   "tier": "S"
+  },
+  "server_request item/fileChange/requestApproval": {
+   "names": {
+    "params.grantRoot": "S",
+    "params.itemId": "S",
+    "params.reason": "S",
+    "params.startedAtMs": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "result.decision": "S"
+   },
+   "tier": "S"
+  },
+  "server_request mcpServer/elicitation/request": {
+   "names": {
+    "params.serverName": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "result._meta": "S",
+    "result.action": "S",
+    "result.content": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.agentMessage": {
+   "names": {
+    "delivery": "S",
+    "id": "S",
+    "memoryCitation": "S",
+    "moderation": "S",
+    "phase": "S",
+    "questions": "S",
+    "text": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.collabAgentToolCall": {
+   "names": {
+    "agentsStates": "S",
+    "id": "S",
+    "model": "S",
+    "prompt": "S",
+    "reasoningEffort": "S",
+    "receiverThreadIds": "S",
+    "senderThreadId": "S",
+    "status": "S",
+    "tool": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.commandExecution": {
+   "names": {
+    "aggregatedOutput": "S",
+    "command": "S",
+    "commandActions": "S",
+    "cwd": "S",
+    "durationMs": "S",
+    "exitCode": "S",
+    "id": "S",
+    "pluginId": "S",
+    "processId": "S",
+    "scriptPath": "S",
+    "source": "S",
+    "status": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.contextCompaction": {
+   "names": {
+    "id": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.fileChange": {
+   "names": {
+    "changes": "S",
+    "id": "S",
+    "status": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.imageView": {
+   "names": {
+    "id": "S",
+    "path": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.mcpToolCall": {
+   "names": {
+    "appContext": "S",
+    "arguments": "S",
+    "durationMs": "S",
+    "error": "S",
+    "id": "S",
+    "mcpAppResourceUri": "S",
+    "mcpAppUi": "S",
+    "pluginId": "S",
+    "readOnlyHint": "S",
+    "result": "S",
+    "server": "S",
+    "status": "S",
+    "tool": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.reasoning": {
+   "names": {
+    "content": "S",
+    "id": "S",
+    "summary": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadItem.webSearch": {
+   "names": {
+    "action": "S",
+    "id": "S",
+    "query": "S",
+    "results": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadTokenUsage": {
+   "names": {
+    "last": "S",
+    "modelContextWindow": "S",
+    "total": "S"
+   },
+   "tier": "S"
+  },
+  "type TokenUsageBreakdown": {
+   "names": {
+    "cacheWriteInputTokens": "S",
+    "cachedInputTokens": "S",
+    "inputTokens": "S",
+    "outputTokens": "S",
+    "reasoningOutputTokens": "S",
+    "totalTokens": "S"
+   },
+   "tier": "S"
+  },
+  "type Turn": {
+   "names": {
+    "completedAt": "S",
+    "durationMs": "S",
+    "error": "S",
+    "id": "S",
+    "items": "S",
+    "itemsView": "S",
+    "rootTurnId": "S",
+    "startedAt": "S",
+    "status": "S"
+   },
+   "tier": "S"
+  },
+  "type TurnError": {
+   "names": {
+    "additionalDetails": "S",
+    "codexErrorInfo": "S",
+    "message": "S",
+    "misalignment": "S"
+   },
+   "tier": "S"
+  }
+ }
+}

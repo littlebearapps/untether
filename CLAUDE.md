@@ -16,7 +16,7 @@ approvals, questions, steer and Plan first card; other engines run non-interacti
 |---|---|
 | What a feature does / which file owns it | `docs/reference/feature-catalog.md` |
 | What each test file covers (+ counts) | `docs/reference/test-catalog.md` |
-| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`, no `runner.md`) |
+| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`; its `runner.md` holds the app-server drift/gate notes) |
 | Claude permission modes, live sessions, control channel | `docs/reference/runners/claude/runner.md` |
 | Antigravity permission modes, agy gate, `/continue`, native-vs-custom register | `docs/reference/runners/antigravity/runner.md` |
 | Telegram transport | `docs/reference/transports/telegram.md` |
