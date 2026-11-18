@@ -190,6 +190,118 @@ def test_drain_followup_anchors_returns_leftovers_for_session() -> None:
     rb._FOLLOWUP_ANCHORS.clear()
 
 
+# ── #1173: several injected lines folded into one turn ─────────────────────
+
+
+def _fold_state(*uuids: str, turn_open: bool = False):
+    from untether.events import EventFactory
+
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open = turn_open
+    factory = EventFactory(engine="claude")
+    factory.started(ResumeToken(engine="claude", value="sid-fold"), title="claude")
+    for n, uuid in enumerate(uuids):
+        state.injected_commands[uuid] = time.monotonic() + n
+        state.awaiting_injected[uuid] = time.monotonic() + n
+    return state, factory
+
+
+def _lifecycle(uuid: str, cmd_state: str):
+    import msgspec
+
+    from untether.schemas import claude as claude_schema
+
+    line = {"type": "command_lifecycle", "command_uuid": uuid, "state": cmd_state}
+    return msgspec.json.decode(
+        msgspec.json.encode(line), type=claude_schema.StreamJsonMessage
+    )
+
+
+def _absorbed_ids(events: list[Any]) -> list[str]:
+    return [
+        e.action.detail["absorbed_command_uuid"]
+        for e in events
+        if getattr(e, "phase", None) == "completed"
+        and "absorbed_command_uuid" in (e.action.detail or {})
+    ]
+
+
+def _translate(state, factory, event) -> list[Any]:
+    return claude_mod.translate_claude_event(
+        event, title="claude", state=state, factory=factory
+    )
+
+
+def test_1173_turn_for_second_line_absorbs_the_first(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2")
+    assert _translate(state, factory, _lifecycle("u2", "started")) == []
+    events = claude_mod._open_turn_events(state, factory)
+    assert state.turn_command_uuid == "u2"
+    assert _absorbed_ids(events) == ["u1"]
+    # Nothing holds the next queued follow-up any more.
+    assert claude_mod._awaiting_injected(state) is False
+    # The bridge drops u1's anchor, so it is never reported as not run.
+    ref = MessageRef(channel_id=1, message_id=5)
+    rb.register_followup_anchor(
+        "u1", session_id="sid-fold", reply_to=ref, placeholder=None
+    )
+    for evt in events:
+        rb._consume_absorbed_anchor(evt)
+    assert rb.drain_followup_anchors("sid-fold") == []
+
+
+def test_1173_two_started_frames_before_the_turn_opens(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2")
+    _translate(state, factory, _lifecycle("u1", "started"))
+    _translate(state, factory, _lifecycle("u2", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert _absorbed_ids(events) == ["u1"]
+    assert state.awaiting_injected == {}
+
+
+def test_1173_mid_turn_fold_absorbs_earlier_lines_in_order(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2", "u3", turn_open=True)
+    events = _translate(state, factory, _lifecycle("u2", "started"))
+    assert _absorbed_ids(events) == ["u1", "u2"]
+    assert list(state.awaiting_injected) == ["u3"]
+
+
+def test_1173_completed_without_start_is_absorbed(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    events = _translate(state, factory, _lifecycle("u1", "completed"))
+    assert _absorbed_ids(events) == ["u1"]
+    assert state.awaiting_injected == {}
+
+
+@pytest.mark.parametrize("cmd_state", ["cancelled", "discarded", "refused"])
+def test_1173_line_that_never_ran_releases_the_hold_keeps_anchor(
+    cleanup, cmd_state: str
+) -> None:
+    state, factory = _fold_state("u1")
+    with capture_logs() as logs:
+        events = _translate(state, factory, _lifecycle("u1", cmd_state))
+    assert events == []
+    assert state.awaiting_injected == {}
+    assert "u1" not in state.absorbed_commands
+    assert any(
+        e["event"] == "claude.live_session.injected_not_run"
+        and e["lifecycle_state"] == cmd_state
+        for e in logs
+    )
+
+
+def test_1173_single_line_turn_unchanged(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    _translate(state, factory, _lifecycle("u1", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert _absorbed_ids(events) == []
+    assert state.turn_command_uuid == "u1"
+    # Its own completed frame after the turn opened changes nothing.
+    assert _translate(state, factory, _lifecycle("u1", "completed")) == []
+
+
 # ── end to end ──────────────────────────────────────────────────────────────
 
 

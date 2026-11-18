@@ -8038,10 +8038,31 @@ def _open_turn_events(
 ) -> list[UntetherEvent]:
     """Open turn N+1 and hand the new turn's tracker the session's current
     ``% ctx`` (#819) — the bridge's turn tracker starts empty."""
-    return [
-        _open_followup_turn(state, factory),
-        *_emit_context(state, factory, force=True),
-    ]
+    pending = state.pending_command_uuid
+    folded = _folded_before(state, pending) if pending is not None else []
+    opened = _open_followup_turn(state, factory)
+    # #1173: lines written before this turn's own line were folded into it.
+    absorbed = [ev for u in folded for ev in _absorb_injected(state, factory, u)]
+    return [opened, *absorbed, *_emit_context(state, factory, force=True)]
+
+
+def _folded_before(state: ClaudeStreamState, command_uuid: str) -> list[str]:
+    """#1173: injected lines still awaiting that were written before
+    *command_uuid*. The CLI consumes queued stdin lines in order and folds
+    several into one turn under a single ``command_lifecycle{started}``, so
+    once *command_uuid* starts, every earlier line has been taken too.
+
+    shortcut: FIFO inference, not a per-line CLI signal (no live capture yet
+    of folded lines' own frames); switch to native frames if a capture shows
+    the CLI emits ``started``/``completed`` for each folded line."""
+    keys = list(state.awaiting_injected)
+    return keys[: keys.index(command_uuid)] if command_uuid in keys else []
+
+
+# #1173: ``command_lifecycle`` states that end a line without a turn of its own.
+_LIFECYCLE_TERMINAL_STATES = frozenset(
+    {"completed", "cancelled", "discarded", "refused"}
+)
 
 
 _STEER_SNIPPET_CHARS = 80
@@ -8162,7 +8183,30 @@ def translate_claude_event(
     ):
         # #775: started while a turn is open → folded into it (probed on CLI
         # 2.1.284: queued at write, started after the running tool's result).
-        return _absorb_injected(state, factory, event.command_uuid)
+        # #1173: earlier lines still awaiting were folded in with it.
+        uuids = [*_folded_before(state, event.command_uuid), event.command_uuid]
+        return [ev for u in uuids for ev in _absorb_injected(state, factory, u)]
+    if (
+        isinstance(event, claude_schema.StreamCommandLifecycleMessage)
+        and event.state in _LIFECYCLE_TERMINAL_STATES
+        and event.command_uuid is not None
+        and event.command_uuid in state.awaiting_injected
+    ):
+        # #1173: a line that ends without having opened or joined a turn.
+        if event.state == "completed":
+            # It ran (folded into another line's turn): no separate reply owed.
+            return _absorb_injected(state, factory, event.command_uuid)
+        # Cancelled / discarded / refused: it never ran — stop holding the
+        # session for it, and keep its anchor so the "not run" notice is true.
+        state.awaiting_injected.pop(event.command_uuid, None)
+        state.unplanned_commands.pop(event.command_uuid, None)
+        logger.info(
+            "claude.live_session.injected_not_run",
+            session_id=factory.resume.value if factory.resume else None,
+            command_uuid=event.command_uuid,
+            lifecycle_state=event.state,
+        )
+        return []
     if (
         isinstance(event, claude_schema.StreamSystemMessage)
         and event.subtype == "task_notification"
