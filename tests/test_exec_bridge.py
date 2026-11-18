@@ -1842,7 +1842,7 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
     runner = ScriptRunner(
         [
             ErrorReturn(
-                error="🛑 Too many engine runs in flight (1/1).",
+                error="🛑 Too many engine runs open on this host (1/1).",
                 usage={"prespawn_blocked": "concurrency"},
             )
         ],

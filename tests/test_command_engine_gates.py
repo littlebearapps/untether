@@ -490,6 +490,12 @@ class TestUsageAntigravity:
                 "AI credits: couldn't read (timeout).",
             ),
             (
+                # #1195: never the internal kind.
+                lambda q: q.AgySlashError("prespawn_blocked"),
+                "AI credits: couldn't read (the host is short of memory or at"
+                " its run limit right now; try /usage again in a minute).",
+            ),
+            (
                 lambda q: RuntimeError("secret <path> /home/nathan/token"),
                 "AI credits: couldn't read (RuntimeError).",
             ),

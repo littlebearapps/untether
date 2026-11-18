@@ -779,6 +779,26 @@ def publish_run_stream(stream: JsonlStreamState, pid: int | None) -> None:
     handle.ready.set()
 
 
+def _guard_clauses(idle_by_engine: dict[str, int], live_runs: int) -> tuple[str, str]:
+    """#1195: the pre-spawn block's idle-session clause and advice, shared by
+    the concurrency and RAM messages. The runs that fill the count are often
+    in other chats, so /cancel is pointed at the chat that owns the run, and
+    a restart is never suggested (it is for config errors)."""
+    idle_live = sum(idle_by_engine.values())
+    idle_clause = ""
+    if idle_live:
+        # #838: named "Claude" while every idle session is Claude's.
+        kind = "Claude" if idle_by_engine.get("claude", 0) == idle_live else "live"
+        idle_clause = (
+            f", including {idle_live} idle {kind} session(s) kept open for "
+            f"background work — they close on their own"
+        )
+    advice = "Wait a minute and send it again"
+    if live_runs:
+        advice += ", or /cancel a run in the chat that started it"
+    return idle_clause, advice + "."
+
+
 class JsonlSubprocessRunner(BaseRunner):
     # Diagnostics only: the most recent spawn on this (shared) runner
     # instance, in ANY chat. Never cleared, and never read by the bridge —
@@ -1646,6 +1666,7 @@ class JsonlSubprocessRunner(BaseRunner):
         idle_by_engine = idle_live_session_counts()
         idle_live = sum(idle_by_engine.values())
         ctx: dict[str, Any] = {"idle_live_sessions": idle_live} if idle_live else {}
+        idle_clause, advice = _guard_clauses(idle_by_engine, live_runs)
         if max_runs > 0 and live_runs >= max_runs:
             logger.error(
                 "subprocess.prespawn.concurrency_blocked",
@@ -1654,25 +1675,14 @@ class JsonlSubprocessRunner(BaseRunner):
                 max_runs=max_runs,
                 **ctx,
             )
-            idle_clause = ""
-            if idle_live:
-                # Named "Claude" while every idle session is Claude's.
-                idle_kind = (
-                    "Claude" if idle_by_engine.get("claude", 0) == idle_live else "live"
-                )
-                idle_clause = (
-                    f" (including {idle_live} idle {idle_kind} session(s) kept open "
-                    f"for background work — they close on their own)"
-                )
             return CompletedEvent(
                 engine=self.engine,
                 ok=False,
                 answer="",
                 resume=resume,
                 error=(
-                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs})"
-                    f"{idle_clause}. Wait for one to finish, or /cancel an "
-                    f"active run."
+                    f"🛑 Too many engine runs open on this host "
+                    f"({live_runs}/{max_runs}{idle_clause}). {advice}"
                 ),
                 # #838: marks a guard block so the bridge never treats it as
                 # a broken resume (it would clear the chat's saved session).
@@ -1701,18 +1711,18 @@ class JsonlSubprocessRunner(BaseRunner):
                 warn_mb=warn_mb,
                 **ctx,
             )
+            # #1195: live_runs is host-wide (every engine, every chat).
+            runs = f"{live_runs} engine run(s) already open on this host{idle_clause}"
             if live_runs > 0 and effective_block_mb > block_mb:
                 msg = (
                     f"🛑 Insufficient RAM to start engine ({avail_mb} MB free; "
-                    f"need {effective_block_mb} MB with {live_runs} run(s) "
-                    f"already in flight). Wait for one to finish, or /cancel "
-                    f"an active run."
+                    f"need {effective_block_mb} MB with {runs}). {advice}"
                 )
             else:
                 msg = (
                     f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
-                    f"threshold {block_mb} MB). Cancel an active run or restart "
-                    f"the service."
+                    f"threshold {block_mb} MB{'; ' + runs if live_runs else ''}). "
+                    f"{advice}"
                 )
             return CompletedEvent(
                 engine=self.engine,
