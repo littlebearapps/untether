@@ -2148,6 +2148,15 @@ def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+# #1240: Codex skipped an untrusted project's .codex/ folder. The progress row
+# isn't kept in the final, so the runner flags ``usage["project_config_untrusted"]``.
+_UNTRUSTED_PROJECT_FOOTER = (
+    "\n\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex skipped this project's"
+    " .codex/ settings (untrusted): https://littlebearapps.com/help/untether/"
+    "troubleshooting/#codex-ignores-my-projects-mcp-servers-or-codexconfigtoml"
+)
+
+
 # #835: unattended (cron / webhook) runs. The runner carries the turn's
 # denials on ``usage["unattended"]``; the final gets one footer line and, once
 # per trigger per process, what to change (bounded, oldest evicted first).
@@ -8075,6 +8084,11 @@ async def handle_message(
         if unattended is not None:
             final_rendered = _insert_footer_line(
                 final_rendered, _unattended_footer(unattended)
+            )
+
+        if (completed.usage or {}).get("project_config_untrusted") is True:
+            final_rendered = _insert_footer_line(
+                final_rendered, _UNTRUSTED_PROJECT_FOOTER
             )
 
         if plain_refusal:

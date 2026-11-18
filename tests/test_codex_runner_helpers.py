@@ -824,3 +824,34 @@ def test_codex_env_logs_dropped_names_once(monkeypatch: pytest.MonkeyPatch) -> N
     assert dropped[0]["engine"] == "codex"
     assert "ZZ_CANARY_SECRET" in dropped[0]["names"]
     assert "leak-value" not in repr(dropped[0])
+
+
+def test_1240_completed_usage_carries_the_footer_flag() -> None:
+    """The ⚠️ row isn't kept in the final, so the flag rides on usage."""
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    ok = _run_lines_1240(runner, state, _STREAM_1240)[-1]
+    assert ok.usage["project_config_untrusted"] is True
+    assert ok.usage["input_tokens"] == 1
+
+    state = runner.new_state("hi", None)
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    failed = _run_lines_1240(
+        runner,
+        state,
+        [*_STREAM_1240[:2], {"type": "turn.failed", "error": {"message": "boom"}}],
+    )[-1]
+    assert failed.usage == {"project_config_untrusted": True}
+
+
+def test_1240_no_footer_flag_without_warning() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    ok = _run_lines_1240(runner, state, _STREAM_1240)[-1]
+    assert "project_config_untrusted" not in (ok.usage or {})
+    state = runner.new_state("hi", None)
+    failed = _run_lines_1240(
+        runner, state, [{"type": "turn.failed", "error": {"message": "boom"}}]
+    )[-1]
+    assert not failed.usage
