@@ -34,6 +34,7 @@
 
 ### docs
 
+- FAQ and Claude runner notes on the Codex plugin's shared per-repo helper: when any Claude session in a repo ends, the plugin stops every other session's background Codex job there (an upstream bug, openai/codex-plugin-cc#671). The workaround is one git repo per project, or `codex exec` for long jobs [#1253](https://github.com/littlebearapps/untether/issues/1253)
 - upgrade notes for v0.36.2, troubleshooting entries for a resent or lost reply and the config-permission warning, and webhook Full access / own-mode statements brought up to date across the guides [#1122](https://github.com/littlebearapps/untether/issues/1122), [#1207](https://github.com/littlebearapps/untether/issues/1207), [#1219](https://github.com/littlebearapps/untether/issues/1219)
 
 ## v0.36.1 (2026-11-16)
