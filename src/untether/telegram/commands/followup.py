@@ -107,10 +107,18 @@ async def handle_followup_default_command(
         return
     engine = None
     try:
+        # #1174: as /agent does, so a chat bound by `[projects.*] chat_id`
+        # (topics off) names its project's engine, not the global default.
+        resolved = cfg.runtime.resolve_message(
+            text="",
+            reply_text=msg.reply_to_text,
+            ambient_context=ambient_context,
+            chat_id=msg.chat_id,
+        )
         engine = (
             await resolve_engine_for_message(
                 runtime=cfg.runtime,
-                context=ambient_context,
+                context=resolved.context,
                 explicit_engine=None,
                 chat_id=msg.chat_id,
                 topic_key=tkey,

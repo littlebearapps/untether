@@ -849,6 +849,51 @@ async def test_bare_steer_on_non_claude_engine_notes_claude_only(
     assert "Claude Code and Antigravity only" in _texts(cfg)[0]
 
 
+@pytest.mark.parametrize(
+    ("project_engine", "note"), [("claude", None), ("pi", "pi runs still queue")]
+)
+async def test_1174_bare_steer_names_the_bound_projects_engine(
+    tmp_path: Path, project_engine: str, note: str | None
+) -> None:
+    """#1174: topics off, chat bound by `[projects.*] chat_id` — the note names
+    the project's engine, never the global default (codex)."""
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.router import AutoRouter, RunnerEntry
+    from untether.runners.mock import Return, ScriptRunner
+    from untether.transport_runtime import TransportRuntime
+
+    router = AutoRouter(
+        entries=[
+            RunnerEntry(engine=e, runner=ScriptRunner([Return(answer="ok")], engine=e))
+            for e in ("codex", "claude", "pi")
+        ],
+        default_engine="codex",
+    )
+    projects = ProjectsConfig(
+        projects={
+            "proj": ProjectConfig(
+                alias="proj",
+                path=tmp_path,
+                worktrees_dir=Path(".worktrees"),
+                default_engine=project_engine,
+                chat_id=CHAT,
+            )
+        },
+        chat_map={CHAT: "proj"},
+    )
+    cfg = _command_cfg()
+    cfg.runtime = TransportRuntime(router=router, projects=projects)
+    prefs = ChatPrefsStore(tmp_path / "prefs.json")
+    await handle_followup_default_command(
+        cfg, _cmd_msg("/steer"), "steer", None, None, prefs
+    )
+    (sent,) = _texts(cfg)
+    if note is None:
+        assert "still queue" not in sent
+    else:
+        assert note in sent
+
+
 async def test_bare_command_denied_for_group_non_admin(tmp_path: Path) -> None:
     prefs = ChatPrefsStore(tmp_path / "prefs.json")
     cfg = _command_cfg()
