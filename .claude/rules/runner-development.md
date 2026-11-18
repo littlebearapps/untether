@@ -41,7 +41,9 @@ test failed:
 
 - available in headless / stream-json mode (not TUI-, Remote-Control- or cloud-only);
 - available without a language binding Untether doesn't use (TypeScript-only SDK features don't count), and not
-  marked experimental;
+  marked experimental. One recorded exception (Nathan, 2026-11-18, v0.36.2): Codex `app-server` counts as native even
+  though the CLI labels the subcommand Experimental. Use its stable-tier methods only, and `experimentalApi` fields
+  only for plan mode (#965), where nothing stable exists; record both in the Codex register;
 - works with the user's own logged-in CLI (subscription auth), not API-key only;
 - meets the feature's real requirement — e.g. survives process exit and restarts, works unattended. Session-scoped
   scheduling that dies with the process is not a native replacement for a durable loop.

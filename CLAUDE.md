@@ -66,6 +66,10 @@ runner.** Security and doc-accuracy fixes still apply. Both are excluded from ev
   carries question buttons and steer). One `agy` process per message: warm/live agy sessions are deferred (#977
   shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through
   `utils/antigravity_argv.py` (`--flag=value` only). Detail: the `antigravity-cli` skill.
+- **Codex app-server** (v0.36.2, #1112) is not a new engine: it stays the `codex` id, chosen per install by
+  `[engines.codex] transport = "exec" | "app-server"` (exec is the default for all of v0.36.2). App-server counts as
+  native despite the CLI's Experimental label; use `experimentalApi` fields only for plan mode (#965). See the
+  exception in `.claude/rules/runner-development.md`.
 - Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).
 - OpenCode support means the 1.x CLI (npm `opencode-ai`); 2.x (`@opencode/cli`) is refused before spawning (#970).
 
