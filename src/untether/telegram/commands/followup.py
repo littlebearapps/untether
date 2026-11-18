@@ -33,8 +33,8 @@ logger = get_logger(__name__)
 
 _DESCRIPTIONS: dict[FollowupMode, str] = {
     "steer": (
-        "messages sent while a Claude run is working go straight into it — "
-        "Claude picks them up at its next step."
+        "messages sent while a run is working go straight into it — "
+        "the agent picks them up at its next step."
     ),
     "queue": "messages sent while a run is working wait until it finishes.",
 }

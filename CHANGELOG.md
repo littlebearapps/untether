@@ -24,12 +24,12 @@
 - **fix(triggers):** a webhook whose announcement failed is no longer recorded as fired [#1123](https://github.com/littlebearapps/untether/issues/1123)
 - **fix:** `/cancel` sent while a finished run is still shutting down now drops pending `/at` runs and always replies [#1176](https://github.com/littlebearapps/untether/issues/1176)
 - **fix:** RAM and run-limit block messages count idle live sessions, say the limit is host-wide and point `/cancel` at the chat that owns the run; `/usage` no longer shows `prespawn_blocked` [#1195](https://github.com/littlebearapps/untether/issues/1195)
-- **fix:** a bare `/steer` in a project-bound chat names the project's engine, not the global default [#1174](https://github.com/littlebearapps/untether/issues/1174)
+- **fix:** a bare `/steer` in a project-bound chat names the project's engine, not the global default, and the Steer description no longer says Claude in other engines' chats [#1174](https://github.com/littlebearapps/untether/issues/1174)
 - **fix:** a `/<engine>` message sent while another engine's run is busy in Steer mode no longer gets a wrong "queued instead" notice [#1177](https://github.com/littlebearapps/untether/issues/1177)
 - **fix(antigravity):** `untether agy-gate` uses the same agy binary as the runner, reading `[engines.antigravity]` or `[antigravity]` `cmd` from `--config-path`, `UNTETHER_CONFIG_PATH` or the home config [#1180](https://github.com/littlebearapps/untether/issues/1180)
 - **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
-- **fix(claude):** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines [#1194](https://github.com/littlebearapps/untether/issues/1194)
+- **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
 
 ### docs
 

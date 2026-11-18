@@ -107,6 +107,26 @@ async def test_manage_subprocess_logs_no_teardown_exit_after_a_clean_exit() -> N
 
 
 @pytest.mark.anyio
+async def test_manage_subprocess_logs_exit_when_cancelled_after_exit() -> None:
+    """A cancel landing after the process exited (the delivered-teardown
+    window) still logs one teardown exit."""
+    import anyio
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs:
+        with anyio.CancelScope() as scope:
+            async with subprocess_utils.manage_subprocess(
+                [sys.executable, "-c", "pass"], log_teardown_exit=True
+            ) as proc:
+                await proc.wait()
+                scope.cancel()
+                await anyio.sleep(5)
+    exits = [e for e in logs if e["event"] == "subprocess.exit"]
+    assert len(exits) == 1
+    assert exits[0]["rc"] == 0 and exits[0]["reason"] == "teardown"
+
+
+@pytest.mark.anyio
 async def test_manage_subprocess_teardown_exit_log_is_opt_in() -> None:
     """Callers that log their own exit (Claude's runner) are unchanged."""
     import anyio
