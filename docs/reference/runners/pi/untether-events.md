@@ -112,9 +112,27 @@ Example:
 {"type":"agent_end","messages":[...]} 
 ```
 
-Mapping:
+`agent_end` closes one low-level run only: Pi can still auto-retry, recover
+from an overflow by compacting and retrying, compact after the answer, or run
+queued messages (Pi's `docs/json.md` §Event sequence). So `agent_end` records
+the outcome and emits nothing; the run completes on:
+
+- `agent_settled` (Pi ≥ 0.80.5): `{"type":"agent_settled","aborted":false}`.
+  An `agent_settled` with no earlier `agent_end` emits nothing (the stream-end
+  path reports it).
+- process exit, for Pi < 0.80.5, which has no `agent_settled` (and for a later Pi
+  that exits without one). A non-zero exit after an `agent_end` also completes
+  with that outcome, as before #1255.
+
+Untether keeps reading stdout until then, so Pi never blocks on a full pipe
+while it retries (#1255). `agent_end.willRetry` (Pi ≥ 0.75.4) isn't used: it
+doesn't cover overflow recovery or queued messages, and its presence doesn't
+mean the build sends `agent_settled` (0.75.4–0.80.3 have one but not the other).
+
+Mapping (at completion, from the last `agent_end` / assistant `message_end`):
 - Emit a single `completed` event:
-  - `ok = true` unless the last assistant message has `stopReason` `error` or `aborted`.
+  - `ok = true` unless the last assistant message has `stopReason` `error` or `aborted`
+    (a successful retry clears the failed attempt's error).
   - `answer = last assistant text` (from `message_end` or `agent_end.messages`).
   - `error = errorMessage` if present.
   - `resume = ResumeToken(engine="pi", value=session_token)`.
@@ -189,8 +207,8 @@ action is emitted.
 If the first translated event is not the `session` header, `started` is emitted
 on that event instead.
 
-A non-zero exit code emits a warning action plus a failing `completed`
-(`pi failed (rc=…)` with a stderr excerpt).
+A non-zero exit code before any `agent_end` emits a warning action plus a
+failing `completed` (`pi failed (rc=…)` with a stderr excerpt).
 
 ### 4.8 Stream-end fallback diagnostics (no `agent_end`)
 

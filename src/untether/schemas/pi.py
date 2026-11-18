@@ -27,6 +27,11 @@ class AgentEnd(_Event, tag="agent_end"):
     messages: list[dict[str, Any]]
 
 
+# #1255: Pi >= 0.80.5 — no more automatic work (retry, compaction, queue).
+class AgentSettled(_Event, tag="agent_settled"):
+    aborted: bool | None = None
+
+
 class MessageEnd(_Event, tag="message_end"):
     message: dict[str, Any]
 
@@ -107,6 +112,7 @@ type PiEvent = (
     SessionHeader
     | AgentStart
     | AgentEnd
+    | AgentSettled
     | MessageStart
     | MessageUpdate
     | MessageEnd

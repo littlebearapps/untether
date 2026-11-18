@@ -248,6 +248,7 @@ async def test_pi_error_message_card_redacted() -> None:
         {"type": "agent_start"},
         {"type": "message_end", "message": message},
         {"type": "agent_end", "messages": [message]},
+        {"type": "agent_settled", "aborted": False},  # #1255: run ends here
     ):
         events.extend(
             translate_pi_event(
