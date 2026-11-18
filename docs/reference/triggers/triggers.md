@@ -954,8 +954,8 @@ removed rather than passed on.
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
 
-- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, last-fired relative time
-- **Webhooks**: id, path, auth scheme, project, engine, last-fired
+- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, `model=` / `effort=` / `mode=` when set, last-fired relative time
+- **Webhooks**: id, path, auth scheme, project, engine, `model=` / `effort=` / `mode=` when set ([#1122](https://github.com/littlebearapps/untether/issues/1122)), last-fired
 
 The engine column shows the trigger's own `engine` setting, not the engine it
 resolves to. The page also shows the status (active or paused) and total cron
@@ -977,7 +977,7 @@ The breakdown is appended after the actions, duration and last-run fields.
 
 Triggered counts include cron, webhook, and `/at` runs (any run carrying a trigger source); they are kept in the session stats store alongside the other `/stats` counters.
 
-The last-fired times on the ⏰ Triggers page come from a separate JSON history store at `<config_path>.with_name("triggers_history.json")`, which records wall time after each cron, webhook or non-agent action dispatch. Recording is best-effort — a transient disk failure logs `triggers.history.write_failed` and swallows so it can't break the cron loop or webhook server. Renaming a trigger ID in TOML leaves a stale entry that operators can manually delete (no auto-prune to avoid losing data on transient TOML errors).
+The last-fired times on the ⏰ Triggers page come from a separate JSON history store at `<config_path>.with_name("triggers_history.json")`, which records wall time after each cron, webhook or non-agent action dispatch. A webhook run whose `⚡ Trigger:` message couldn't be posted (after the send retries) never started, so it isn't recorded ([#1123](https://github.com/littlebearapps/untether/issues/1123)). Recording is best-effort — a transient disk failure logs `triggers.history.write_failed` and swallows so it can't break the cron loop or webhook server. Renaming a trigger ID in TOML leaves a stale entry that operators can manually delete (no auto-prune to avoid losing data on transient TOML errors).
 
 ### Human-friendly cron descriptions
 

@@ -102,10 +102,11 @@ class TriggerDispatcher:
 
         if await self._budget_refused(chat_id, context, engine_override):
             return  # #896: nothing ran, so nothing is recorded as fired
-        await self._dispatch(chat_id, label, prompt, context, engine_override)
-        # #271 Tier 3: record last-fired-at for the /config:tg page. Recorded
-        # after dispatch so a transport-send failure (logged inside _dispatch)
-        # doesn't pollute the history with a phantom entry.
+        if not await self._dispatch(chat_id, label, prompt, context, engine_override):
+            # #1123: the announce never landed, so nothing ran; recording it
+            # would show a phantom "last fired" on the /config:tg page.
+            return
+        # #271 Tier 3: record last-fired-at for the /config:tg page.
         from . import history
 
         history.record_fired(webhook.id)

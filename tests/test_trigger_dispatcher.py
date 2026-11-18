@@ -824,3 +824,33 @@ async def test_1120_each_fire_gets_a_distinct_run_id():
         ("cron:test-cron", run_ids[1]),
         ("webhook:test-wh", run_ids[2]),
     ]
+
+
+# ── #1123: a webhook whose announce never landed isn't recorded as fired ──
+
+
+@pytest.mark.anyio
+async def test_1123_failed_webhook_announce_is_not_recorded(monkeypatch, tmp_path):
+    from untether.triggers import dispatcher as dispatcher_mod
+    from untether.triggers import history
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0,))
+    history.reset_history()
+    history.init_history(tmp_path / "untether.toml")
+    try:
+        run_job = RunJobCapture()
+        async with anyio.create_task_group() as tg:
+            dispatcher = TriggerDispatcher(
+                run_job=run_job,
+                transport=FlakyTransport(fail_first=99),
+                default_chat_id=100,
+                task_group=tg,
+            )
+            await dispatcher.dispatch_webhook(_make_webhook(id="gone"), "x")
+            await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+
+        assert run_job.calls == []
+        assert history.get_last_fired("gone") is None
+    finally:
+        history.reset_history()
