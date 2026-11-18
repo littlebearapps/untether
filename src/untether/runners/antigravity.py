@@ -80,7 +80,7 @@ from ..runner import (
 from ..schemas import antigravity as agy_schema
 from ..session_costs import RUN_TOKENS_KEY
 from ..utils import antigravity_context, antigravity_quota, antigravity_scan
-from ..utils.antigravity_argv import native_compact_prompt
+from ..utils.antigravity_argv import MODEL_ID_PUNCTUATION_TEXT, native_compact_prompt
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
@@ -206,7 +206,8 @@ INVALID_ARGUMENT_BLOCK = "invalid_argument"
 # (``utils/antigravity_argv.py``): refused before anything spawns.
 INVALID_MODEL_TEXT = (
     "🛑 That model id isn't valid for Antigravity, so nothing was started. "
-    "A model id uses letters, digits and . _ - : / only, with no spaces and "
+    "A model id uses letters, digits and "
+    f"{MODEL_ID_PUNCTUATION_TEXT} only, with no spaces and "
     "no leading dash (for example gemini-3.8-flash). Set one with /model set, "
     "or go back to the default with /model clear."
 )
@@ -4662,7 +4663,8 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             )
             raise ConfigError(
                 f"Invalid `antigravity.model` in {config_path}; expected a model "
-                "id made of letters, digits and . _ - : / with no spaces and no "
+                "id made of letters, digits and "
+                f"{MODEL_ID_PUNCTUATION_TEXT} with no spaces and no "
                 "leading dash (for example gemini-3.8-flash)."
             ) from None
     raw_cmd = config.get("cmd")

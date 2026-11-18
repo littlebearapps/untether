@@ -116,7 +116,7 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 [--
   (`antigravity.argv.invalid_value` in the logs, without the raw value):
 
     > 🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and
-    > . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash). Set one with /model set,
+    > . _ - : / @ + only, with no spaces and no leading dash (for example gemini-3.8-flash). Set one with /model set,
     > or go back to the default with /model clear.
 
     > 🛑 That Antigravity conversation id isn't valid, so nothing was started. Send /new to start a fresh

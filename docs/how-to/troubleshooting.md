@@ -267,7 +267,7 @@ After `/continue` the message is `The conversation Antigravity had recorded for 
 
 ### "That model id isn't valid for Antigravity"
 
-**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash).`
+**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / @ + only, with no spaces and no leading dash (for example gemini-3.8-flash).`
 
 Untether checks the model id before it starts agy and refuses one that agy could misread. Set a valid id with `/model set <id>` (run `agy models` on the host for the list) or go back to the default with `/model clear`. For a cron, fix its `model`. The same check on `[antigravity] model` in `untether.toml` is a config error at startup.
 
