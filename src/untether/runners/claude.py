@@ -126,6 +126,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
+from ..utils.codex_plugin_jobs import session_plugin_jobs
 from ..utils.env_audit import audit_proc_env
 from ..utils.env_policy import apply_run_env
 from ..utils.json_state import atomic_write_json
@@ -10811,6 +10812,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #887: how long past ``live_session_max_s`` a turn already running may
     # take to reach its result before the session is closed under it.
     _abs_cap_turn_grace_s: float = 1800.0
+    # #1186: where the Codex plugin keeps its job state (None = its defaults;
+    # tests point it at a fixture tree).
+    _codex_plugin_state_roots: tuple[Path, ...] | None = None
 
     async def _live_session_lifecycle(
         self,
@@ -11115,6 +11119,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         await close_live_session(
                             sid, "wake_cap", notice=True, only_if_idle=True
+                        )
+                        continue
+                    if codex_jobs := await anyio.to_thread.run_sync(
+                        session_plugin_jobs, sid, self._codex_plugin_state_roots
+                    ):
+                        # #1186: the Codex plugin's SessionEnd hook would kill
+                        # these jobs; hold (re-checked each idle grace,
+                        # bounded by ``abs_cap`` above).
+                        live.idle_since = now
+                        run_logger.info(
+                            "claude.live_session.hold",
+                            session_id=sid,
+                            reason="codex_plugin_job",
+                            jobs=len(codex_jobs),
                         )
                         continue
                     await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
