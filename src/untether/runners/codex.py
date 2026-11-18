@@ -232,6 +232,13 @@ _CODEX_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
     # workspace
     "--cd": ("workspace", _CODEX_WORKSPACE_HINT),
     "--worktree": ("workspace", _CODEX_WORKSPACE_HINT),
+    # 0.169.0, exec-only: persists project trust for future chats (#1040)
+    "--trust": (
+        "workspace",
+        "saves project trust for this and future Codex chats and is not accepted"
+        ' in `extra_args`; set `[projects."<path>"] trust_level` in'
+        " `~/.codex/config.toml` yourself",
+    ),
     "--": (
         "separator",
         "is not accepted: a bare `--` would turn `exec …` into prompt text",

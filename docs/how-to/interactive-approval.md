@@ -25,7 +25,7 @@ A **background agent** can ask for approval after Claude has already replied —
 
 ## The approval buttons
 
-When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons:
+When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons. When Claude Code says why it's asking (a hook, a permission rule or the auto-mode classifier), that reason follows on a `🪝` line ([#939](https://github.com/littlebearapps/untether/issues/939)):
 
 | Button | What it does |
 |--------|-------------|
@@ -125,11 +125,11 @@ Each request can be answered once. A second tap (yours or someone else's in a gr
 
 - **Already answered** — plus a silent `ℹ️ Already answered — approved` (or `denied`, …) line saying what the first tap did
 - **No longer needed** — Claude Code withdrew the request, for example because the turn ended; its buttons are removed
-- **This request has expired** — the request timed out, or Untether no longer knows about it (for example after a restart)
+- **This request has expired** — a newer request replaced it, or Untether no longer knows about it (for example after a restart)
 
 Buttons only work in the chat they were posted in: a forged approval sent from another chat reads as expired and changes nothing ([#388](https://github.com/littlebearapps/untether/issues/388)).
 
-An unanswered request is denied automatically after 5 minutes (`⏱️ Timed out: auto-denied after 5 min`). Untether checks for this when another approval request arrives, so a single request on its own waits for you.
+An unanswered request waits for you: Claude Code has no deadline on it, and Untether no longer denies it after 5 minutes ([#844](https://github.com/littlebearapps/untether/issues/844)). You get reminders while it waits, and the session closes at its 4-hour cap.
 
 ## Who can answer in a group
 
@@ -283,7 +283,7 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
 
 **Allow rules.** Exact rules in `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`, only matter where agy has a shell tool to block, which is the cases in the paragraph above. A Workspace conversation on the no-shell agent has no shell tool, so an allow rule doesn't give it one; use Full access. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
 
-**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`, `"ask"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access or Ask me from the chat or `untether.toml`: a cron gets either only from its own `permission_mode`, and webhook runs never get Full access.
+**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`, `"ask"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access or Ask me from the chat or `untether.toml`: a cron gets either only from its own `permission_mode`, and a webhook gets Full access only from its own `permission_mode = "full"` with `allow_unsafe_permission_mode = true` (v0.36.2).
 
 **agy's own settings can override the mode.** If agy's settings file sets `toolPermission` to anything other than `request-review` or `strict` (for example `always-proceed`), agy would approve tools by itself, so Untether refuses to run Workspace and tells you to set it back or pick Full access.
 

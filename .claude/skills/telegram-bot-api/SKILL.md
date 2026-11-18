@@ -106,7 +106,7 @@ Key formats (include `chat_id` to avoid cross-chat collisions):
 - Per-chat pacing: `private_chat_rps` (default 1.0 msg/s), `group_chat_rps` (default 20/60 msg/s)
 - Per-chat `_next_at[chat_id]` timestamps — worker picks from unblocked chats; global `retry_at` blocks all on 429
 - On 429: `RetryAfter` raised using `parameters.retry_after`; op requeued if no newer op superseded it
-- Non-429 errors: logged and dropped. The HTTP layer retries a message call once on a fresh connection only when the request never left (edits/deletes/callback answers also after a read timeout; a `sendMessage` that may have arrived is never repeated, #861); error logs carry `chat_id`/`message_id` and `kind` — the surface (`progress`, `final`, `bg_status`, `approval_surface`, …) set by a `with message_kind("…")` block around the transport call (`transport.py`); the outbox op captures it at enqueue and re-applies it on the worker (#823)
+- Non-429 errors: logged and dropped, except a final that certainly failed (never sent or 5xx), which `telegram/pending_finals.py` keeps and redelivers (#1207). The HTTP layer retries a message call once on a fresh connection only when the request never left (edits/deletes/callback answers also after a read timeout; a `sendMessage` that may have arrived is never repeated, #861); error logs carry `chat_id`/`message_id` and `kind` — the surface (`progress`, `final`, `bg_status`, `approval_surface`, …) set by a `with message_kind("…")` block around the transport call (`transport.py`); the outbox op captures it at enqueue and re-applies it on the worker (#823)
 
 ## Replace progress messages
 

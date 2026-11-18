@@ -759,3 +759,28 @@ async def test_loop_refuses_prompt_and_routes_run_anyway(
     assert transport.send_calls[0]["message"].text == BLOCK_TEXT
     assert len(runner.calls) == 1
     assert cfg.bot.callback_calls[-1]["text"] == "Running once"
+
+
+# ---------------------------------------------------------------------------
+# #1120 — the run's log context carries its trigger and run id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_1120_run_engine_binds_trigger_and_run_id(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.telegram.commands import executor
+
+    bound: list[dict[str, Any]] = []
+    monkeypatch.setattr(executor, "bind_run_context", lambda **kw: bound.append(kw))
+    _write_config(cfg_path, None)
+    _runner, _transport, exec_cfg, runtime = _engine_kit()
+
+    await _run(
+        exec_cfg, runtime, context=RunContext(trigger_source="cron:d", run_id="r-1")
+    )
+    await _run(exec_cfg, runtime)
+
+    assert bound[0]["trigger"] == "cron:d" and bound[0]["run_id"] == "r-1"
+    assert "trigger" not in bound[1] and "run_id" not in bound[1]

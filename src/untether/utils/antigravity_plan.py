@@ -513,7 +513,13 @@ def approve_context(plan: PendingPlan) -> RunContext:
     base = plan.context if plan.context is not None else RunContext()
     # Not a trigger's run any more: an ``at:`` plan approved from the chat
     # is a person's decision.
-    return replace(base, permission_mode="workspace", trigger_source=None)
+    return replace(
+        base,
+        permission_mode="workspace",
+        trigger_source=None,
+        run_id=None,  # #1120
+        strict_webhook=False,  # #1118
+    )
 
 
 def _reset_for_tests() -> None:

@@ -127,6 +127,7 @@ class FakeBot(BotClient):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
+        on_failure: Any = None,
     ) -> Message:
         self.send_calls.append(
             {

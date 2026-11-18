@@ -47,6 +47,7 @@ class TriggerManager:
         "_run_once_pending_path",
         "_run_once_state_path",
         "_trusted_proxy_header",
+        "_webhook_defaults",
         "_webhooks_by_path",
     )
 
@@ -62,6 +63,8 @@ class TriggerManager:
         # can announce them in Telegram (not just the log).
         self._refused_webhook_ids: tuple[str, ...] = ()
         self._default_timezone: str | None = None
+        # #1118: `[triggers] webhook_defaults`, read by the server per request.
+        self._webhook_defaults: str = "compat"
         # #1119: the proxy header the webhook server trusts (exposed only).
         self._trusted_proxy_header: str | None = None
         # #294: master pause flag — in-memory only (no persistence). Triggers
@@ -149,6 +152,7 @@ class TriggerManager:
             wh.path: wh for wh in settings.webhooks if wh.id not in refused_unauth
         }
         self._default_timezone = settings.default_timezone
+        self._webhook_defaults = settings.webhook_defaults
 
         new_cron_ids = {c.id for c in self._crons}
         new_webhook_ids = {wh.id for wh in self._webhooks_by_path.values()}
@@ -214,6 +218,11 @@ class TriggerManager:
     @property
     def default_timezone(self) -> str | None:
         return self._default_timezone
+
+    @property
+    def strict_webhooks(self) -> bool:
+        """#1118: ``[triggers] webhook_defaults = "strict"`` is in effect."""
+        return self._webhook_defaults == "strict"
 
     def webhook_for_path(self, path: str) -> WebhookConfig | None:
         """Look up a webhook by its HTTP path."""

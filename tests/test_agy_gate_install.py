@@ -248,6 +248,60 @@ def test_cli_install_status_uninstall(fake_agy: Path) -> None:
     assert result.exit_code == 1 and "not installed" in result.output
 
 
+# ── which agy the CLI drives (#1180) ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "toml",
+    [
+        '[antigravity]\ncmd = "/flat/agy"\n',
+        '[engines.antigravity]\ncmd = "/nested/agy"\n',
+        '[antigravity]\ncmd = "/flat/agy"\n[engines.antigravity]\ncmd = "/nested/agy"\n',
+    ],
+)
+def test_agy_cmd_reads_either_table_nested_wins(
+    toml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.cli import agy_gate
+
+    cfg = tmp_path / "dev" / "untether.toml"
+    cfg.parent.mkdir()
+    cfg.write_text(toml)
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(cfg))
+    expected = "/nested/agy" if "engines" in toml else "/flat/agy"
+    assert agy_gate._agy_cmd(None) == expected
+    assert agy_gate._agy_cmd("/explicit/agy") == "/explicit/agy"
+
+
+def test_agy_cmd_config_path_beats_env_and_bad_config_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from untether.cli import agy_gate
+    from untether.runners.antigravity import default_antigravity_cmd
+
+    env_cfg, arg_cfg, bad = (tmp_path / n for n in ("env.toml", "arg.toml", "bad.toml"))
+    env_cfg.write_text('[antigravity]\ncmd = "/env/agy"\n')
+    arg_cfg.write_text('[engines.antigravity]\ncmd = "~/arg/agy"\n')
+    bad.write_text("[antigravity\n")
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(env_cfg))
+    assert agy_gate._agy_cmd(None, arg_cfg) == str(Path.home() / "arg" / "agy")
+    assert agy_gate._agy_cmd(None, bad) == default_antigravity_cmd()
+    assert "Using agy on PATH." in capsys.readouterr().err
+
+
+def test_cli_uses_the_config_path_agy(fake_agy: Path, tmp_path: Path) -> None:
+    cfg = tmp_path / "untether.toml"
+    cfg.write_text(f'[engines.antigravity]\ncmd = "{fake_agy}"\n')
+    app = create_app()
+    result = CliRunner().invoke(app, ["agy-gate", "install", "--config-path", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert any(call[:2] == ["plugin", "install"] for call in _calls(fake_agy))
+    result = CliRunner().invoke(
+        app, ["agy-gate", "uninstall", "--config-path", str(cfg)]
+    )
+    assert result.exit_code == 0 and "Uninstalled." in result.output
+
+
 def test_cli_name_does_not_collide_with_engine_command() -> None:
     from untether.engines import list_backend_ids
 

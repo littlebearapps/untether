@@ -209,9 +209,10 @@ def _cleanup():
 class _Busy:
     """A RunningTask stand-in doing work (not live-idle, not done)."""
 
-    def __init__(self) -> None:
+    def __init__(self, engine: str | None = None) -> None:
         self.done = anyio.Event()
         self.edits = None
+        self.engine = engine
 
 
 def _cfg(followup_mode: str = "queue") -> Any:
@@ -389,6 +390,29 @@ async def test_default_mode_notice_only_once_per_run() -> None:
     running = {MessageRef(channel_id=CHAT, message_id=10): _Busy()}
     await _steer(cfg, engine="codex", token=token, running=running)
     assert len(_texts(cfg)) == 2
+
+
+@pytest.mark.parametrize(
+    ("active_engine", "explicit", "noticed"),
+    [("claude", False, False), ("claude", True, True), ("codex", False, True)],
+)
+async def test_1177_directive_to_other_engine_is_silent(
+    active_engine: str, explicit: bool, noticed: bool
+) -> None:
+    """#1177: a default-mode ``/codex`` message while a Claude run is busy
+    starts on its own — no "queued instead" notice. Explicit ``/steer`` and a
+    busy run of the same engine keep it."""
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy(active_engine)}
+    ok = await _steer(
+        cfg,
+        engine="codex",
+        token=ResumeToken(engine="codex", value="thread-1"),
+        override="steer" if explicit else None,
+        running=running,
+    )
+    assert ok is False
+    assert _texts(cfg) == ([fallback_notice("engine", "codex")] if noticed else [])
 
 
 # ── #990: the busy-run lookup is scoped to the sender's thread ───────────────
@@ -847,6 +871,51 @@ async def test_bare_steer_on_non_claude_engine_notes_claude_only(
         cfg, _cmd_msg("/steer"), "steer", None, None, prefs
     )
     assert "Claude Code and Antigravity only" in _texts(cfg)[0]
+
+
+@pytest.mark.parametrize(
+    ("project_engine", "note"), [("claude", None), ("pi", "pi runs still queue")]
+)
+async def test_1174_bare_steer_names_the_bound_projects_engine(
+    tmp_path: Path, project_engine: str, note: str | None
+) -> None:
+    """#1174: topics off, chat bound by `[projects.*] chat_id` — the note names
+    the project's engine, never the global default (codex)."""
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.router import AutoRouter, RunnerEntry
+    from untether.runners.mock import Return, ScriptRunner
+    from untether.transport_runtime import TransportRuntime
+
+    router = AutoRouter(
+        entries=[
+            RunnerEntry(engine=e, runner=ScriptRunner([Return(answer="ok")], engine=e))
+            for e in ("codex", "claude", "pi")
+        ],
+        default_engine="codex",
+    )
+    projects = ProjectsConfig(
+        projects={
+            "proj": ProjectConfig(
+                alias="proj",
+                path=tmp_path,
+                worktrees_dir=Path(".worktrees"),
+                default_engine=project_engine,
+                chat_id=CHAT,
+            )
+        },
+        chat_map={CHAT: "proj"},
+    )
+    cfg = _command_cfg()
+    cfg.runtime = TransportRuntime(router=router, projects=projects)
+    prefs = ChatPrefsStore(tmp_path / "prefs.json")
+    await handle_followup_default_command(
+        cfg, _cmd_msg("/steer"), "steer", None, None, prefs
+    )
+    (sent,) = _texts(cfg)
+    if note is None:
+        assert "still queue" not in sent
+    else:
+        assert note in sent
 
 
 async def test_bare_command_denied_for_group_non_admin(tmp_path: Path) -> None:

@@ -50,8 +50,9 @@ from untether.schemas import antigravity as agy_schema
 # refusal pinned below, 1.3.5 the ``auto`` mode, #1091; 1.3.6 changed no
 # flag, #1156; 1.4.0 neither, but its ``plugin validate`` now applies the
 # loader's own rules, pinned below, #1160; 1.4.10 on 2026-10-30, no flag or
-# stream change, only a "no logo" validate note, #1209).
-PROBED_CLI_VERSION = "1.4.10"
+# stream change, only a "no logo" validate note, #1209; 1.5.10 on 2026-11-18,
+# no drift, gated tier green, #1254).
+PROBED_CLI_VERSION = "1.5.10"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"

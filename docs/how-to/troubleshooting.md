@@ -213,7 +213,7 @@ The `/config` toast says the same when you pick Full access (`Permission mode: f
 
 ### Antigravity says a shell command needs Full access
 
-The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, or to **Ask me** to approve each command from Telegram (needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)), then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access.
+The chat is in **Workspace** mode, which has no shell, web or MCP tools: the command doesn't run and Antigravity says so in plain words, with no ⚠️ notice. Workspace also can't delete or rename files (a "rename" is a copy; the original stays). Switch to **Full access** in `/config` → **Permission mode**, or to **Ask me** to approve each command from Telegram (needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer)), then send `/new`. For a cron, set `permission_mode = "full"` on the cron itself (a webhook also needs `allow_unsafe_permission_mode = true`).
 
 ### Antigravity was blocked from using a shell command or a file outside the project
 
@@ -222,7 +222,7 @@ The chat is in **Workspace** mode, which has no shell, web or MCP tools: the com
 - **A file outside the project.** Workspace only reaches the project. Switch to **Full access** in `/config` → **Permission mode**, then send `/new`.
 - **A shell command** (`⚠️ Blocked: shell command (RunCommand) — …`). Workspace conversations normally have no shell tool at all, so this means the conversation isn't on Untether's no-shell agent: it started in Full access, or the [agent file is unavailable](#antigravity-workspace-agent-file-unavailable). Send `/new` to get a clean Workspace conversation, or switch to Full access and send `/new`. When the conversation started in Full access, the notice itself says so and asks for `/new`. In these conversations an exact allow rule such as `command(git status)` in `permissions.allow` in agy's settings file also lets that one command through.
 
-For a cron, set `permission_mode = "full"` on the cron itself; webhook runs never get Full access. See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
+For a cron, set `permission_mode = "full"` on the cron itself (a webhook also needs `allow_unsafe_permission_mode = true`). See [Permission mode](interactive-approval.md#antigravity-cli-permission-mode).
 
 ### Antigravity Workspace agent file unavailable
 
@@ -267,7 +267,7 @@ After `/continue` the message is `The conversation Antigravity had recorded for 
 
 ### "That model id isn't valid for Antigravity"
 
-**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / only, with no spaces and no leading dash (for example gemini-3.8-flash).`
+**Symptoms:** `🛑 That model id isn't valid for Antigravity, so nothing was started. A model id uses letters, digits and . _ - : / @ + only, with no spaces and no leading dash (for example gemini-3.8-flash).`
 
 Untether checks the model id before it starts agy and refuses one that agy could misread. Set a valid id with `/model set <id>` (run `agy models` on the host for the list) or go back to the default with `/model clear`. For a cron, fix its `model`. The same check on `[antigravity] model` in `untether.toml` is a config error at startup.
 
@@ -498,6 +498,12 @@ If a button-click `control_response` is mid-flight when the deadline arrives, th
 
 When the watchdog actually closes stdin, Untether also sends one (and only one) Telegram closing message: `✓ turn complete · session closed after Nm idle`. While the watchdog is running, stall warnings are suppressed (`progress_edits.stall_post_result_suppressed`) so you don't get noise during the legitimate idle window — genuinely-frozen post-result sessions still warn via the frozen-ring escalation.
 
+## A reply arrived late, or "The reply couldn't be sent to Telegram"
+
+**Symptoms:** a run's answer turns up a while after the run finished (as a reply to your message), or the progress message ends with `⚠️ The reply couldn't be sent to Telegram. Reply here to ask for it again.`
+
+Since v0.36.2, when sending the final answer certainly failed (the connection was refused, or Telegram returned a 5xx error), the progress message shows that notice for now, and Untether keeps the answer and sends it again once Telegram answers, or after a restart, in place of the notice ([#1207](https://github.com/littlebearapps/untether/issues/1207)). After 5 attempts or 24 hours it gives up and the notice stays. A timeout or a refusal is never re-sent, because the reply might already have arrived: then the card reads `⚠️ Telegram didn't confirm that the reply arrived …`. Either way, reply to the message to ask for the answer again. Logs: `final.pending_saved`, `final.redelivered`, `final.redelivery_abandoned`.
+
 ## Messages too long or truncated
 
 **Symptoms:** The bot's response is cut off or split across multiple messages.
@@ -688,6 +694,12 @@ Since v0.36.0 an unattended run never waits on an approval nobody can tap ([#835
 
 Anthropic's safeguards stopped one of Claude's responses. Claude Code may retry once or switch to a fallback model; Untether reports which happened ([#814](https://github.com/littlebearapps/untether/issues/814)). The first time a session hits one, the footer links to guidance. If nothing was retried and no answer came back, the final explains that instead of showing an empty error. Rephrasing the request usually helps.
 
+## "⚠️ Config file permissions" warning
+
+**Symptoms:** at startup (or after a config reload) Telegram shows `⚠️ Config file permissions: other users on this host can read untether.toml (it holds a secret) or one of its backups.`, and the log has WARNING `config.file_permissions`.
+
+Your `untether.toml` holds the bot token or a webhook secret and other local users can read it, its folder or a `untether.toml.bak*` backup ([#1219](https://github.com/littlebearapps/untether/issues/1219)). Run the `chmod` commands in the notice (usually `chmod 700 ~/.untether` and `chmod 600` on the files). Untether writes the files it saves owner-only from v0.36.2. To keep secrets out of the file altogether, see [Security → Protect your bot token](security.md#protect-your-bot-token).
+
 ## Tapping an old approval button
 
 **Symptoms:** A button tap shows a short popup instead of doing anything.
@@ -696,7 +708,7 @@ Anthropic's safeguards stopped one of Claude's responses. Claude Code may retry 
 |---|---|
 | `Already answered` | Someone already answered this request. A silent `ℹ️ Already answered — <what the first tap did>` line follows; nothing more is sent to Claude Code ([#685](https://github.com/littlebearapps/untether/issues/685)). |
 | `No longer needed` | Claude Code withdrew the request (for example the turn ended) ([#684](https://github.com/littlebearapps/untether/issues/684)). |
-| `This request has expired` | The request timed out, or Untether no longer knows about it (for example after a restart). |
+| `This request has expired` | A newer request replaced it, or Untether no longer knows about it (for example after a restart). Requests no longer time out after 5 minutes ([#844](https://github.com/littlebearapps/untether/issues/844)). |
 
 A tap that lands while a request is being withdrawn is answered with `⏹️ Claude Code withdrew this request — nothing to answer.`
 

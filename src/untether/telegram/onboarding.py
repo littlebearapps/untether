@@ -185,6 +185,15 @@ class Services(Protocol):
     def write_config(self, path: Path, data: dict[str, Any]) -> None: ...
 
 
+def _copy_private(src: Path, dst: Path) -> None:
+    """Copy *src* to *dst* as an owner-only (0600) file (#1219): the config
+    holds the bot token, and a plain copy would take the umask (often 0644)."""
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # an existing backup keeps its old mode otherwise
+    with src.open("rb") as source, os.fdopen(fd, "wb") as target:
+        shutil.copyfileobj(source, target)
+
+
 def display_path(path: Path) -> str:
     home = Path.home()
     try:
@@ -947,7 +956,7 @@ async def step_save_config(ui: UI, svc: Services, state: OnboardingState) -> Non
             ui.print(render_config_malformed_warning(exc), markup=False)
             backup = state.config_path.with_suffix(".toml.bak")
             try:
-                shutil.copyfile(state.config_path, backup)
+                _copy_private(state.config_path, backup)
             except OSError as copy_exc:
                 ui.print(render_backup_failed_warning(copy_exc), markup=False)
             else:

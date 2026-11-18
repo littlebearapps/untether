@@ -566,6 +566,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             reply_markup: dict | None = None,
             *,
             replace_message_id: int | None = None,
+            on_failure: Any = None,
         ) -> Message | None:
             _ = reply_markup
             return None
@@ -7206,3 +7207,71 @@ async def test_1142_startup_audit_flags_bypass_cron_and_bare_webhook(
     assert manager is not None
     assert manager.webhook_for_path("/hooks/bare") is not None  # still starts
     assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]
+
+
+# --- #1176: /cancel while a delivered non-live run is torn down -------------
+
+
+@pytest.mark.anyio
+async def test_1176_cancel_after_final_drops_pending_at_and_replies() -> None:
+    """The rc10 Pi repro: final out, process still tearing down, a pending
+    /at — /cancel finishes the teardown, drops the /at and replies."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = RunningTask(final_sent=True, engine="pi")
+    running = {MessageRef(channel_id=123, message_id=42): task}
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(123, None, 300, "later")
+        await handle_cancel(cfg, _plain_cancel_msg(), running)
+        assert at_scheduler.pending_for_chat(123) == []
+
+    await _with_at_scheduler(transport, body)
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "\N{CROSS MARK} cancelled 1 pending /at run."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1176_cancel_after_final_alone_says_nothing_running() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = RunningTask(final_sent=True)
+
+    await handle_cancel(
+        cfg, _plain_cancel_msg(), {MessageRef(channel_id=123, message_id=42): task}
+    )
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "nothing running in this chat."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1176_delivered_run_beside_a_real_run_cancels_the_real_one() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    delivered = RunningTask(final_sent=True)
+    busy = RunningTask()
+    running = {
+        MessageRef(channel_id=123, message_id=1): delivered,
+        MessageRef(channel_id=123, message_id=2): busy,
+    }
+
+    await handle_cancel(cfg, _plain_cancel_msg(), running)
+
+    assert busy.cancel_requested.is_set()
+    assert transport.send_calls == []  # not "multiple runs active"
+
+
+def test_1176_a_live_session_is_never_a_delivered_teardown() -> None:
+    from untether.runner_bridge import running_task_is_delivered_teardown
+
+    task = _idle_live_task(idle=False)
+    task.final_sent = True
+    assert running_task_is_delivered_teardown(task) is False
+    assert running_task_is_delivered_teardown(RunningTask(final_sent=True)) is True
+    assert running_task_is_delivered_teardown(RunningTask()) is False

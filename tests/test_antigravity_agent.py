@@ -362,11 +362,16 @@ def test_denial_notice_points_at_new_and_keeps_the_rule_hint_for_shell() -> None
     hook = agy.denial_paragraph(
         ["file outside the project"], mode="workspace", trigger="webhook:x"
     )
-    assert hook.endswith("Webhook runs never get Full access; run it from the chat.")
+    assert hook.endswith(
+        "`allow_unsafe_permission_mode = true` on this webhook, or run it from the chat."
+    )
     hook_shell = agy.denial_paragraph(
         ["shell command"], mode="workspace", trigger="webhook:x"
     )
-    assert "; add an allow rule such as `command(git status)`" in hook_shell
+    assert (
+        "on this webhook, or add an allow rule such as `command(git status)`"
+        in hook_shell
+    )
     assert hook_shell.endswith(", or run it from the chat.")
 
 

@@ -1842,7 +1842,7 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
     runner = ScriptRunner(
         [
             ErrorReturn(
-                error="🛑 Too many engine runs in flight (1/1).",
+                error="🛑 Too many engine runs open on this host (1/1).",
                 usage={"prespawn_blocked": "concurrency"},
             )
         ],
@@ -15198,3 +15198,29 @@ def test_is_background_waiting_real_states() -> None:
     assert edits._is_background_waiting() is False
     state.bg_steps[2] = time.monotonic()
     assert edits._is_background_waiting() is True
+
+
+@pytest.mark.anyio
+async def test_1176_final_sent_is_marked_on_the_running_task() -> None:
+    """#1176: /cancel tells a delivered run in teardown from a real one."""
+    from untether.runner_bridge import RunningTask
+
+    seen: list[RunningTask] = []
+
+    class _Recording(dict):
+        def __setitem__(self, key, value) -> None:
+            seen.append(value)
+            super().__setitem__(key, value)
+
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=ScriptRunner([Return(answer="done")], engine=CODEX_ENGINE),
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+        running_tasks=_Recording(),
+    )
+    assert seen
+    assert all(task.final_sent for task in seen)

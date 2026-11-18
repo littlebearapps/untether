@@ -343,6 +343,12 @@ def build_webhook_app(
             return manager.trusted_proxy_header
         return trusted_proxy_header_in_effect(settings)
 
+    def _strict_webhooks() -> bool:
+        # #1118: read per request so a reload of webhook_defaults applies.
+        if manager is not None:
+            return manager.strict_webhooks
+        return settings.webhook_defaults == "strict"
+
     def _webhook_count() -> int:
         if manager is not None:
             return manager.webhook_count
@@ -594,10 +600,11 @@ def build_webhook_app(
         # work like Telegram outbox pacing or http_forward network calls.
         if webhook.action == "agent_run":
             prompt = render_prompt(webhook.prompt_template, payload)
+            strict = _strict_webhooks()
 
             async def _run_agent() -> None:
                 try:
-                    await dispatcher.dispatch_webhook(webhook, prompt)
+                    await dispatcher.dispatch_webhook(webhook, prompt, strict=strict)
                 except Exception:
                     logger.exception(
                         "triggers.webhook.dispatch_failed",

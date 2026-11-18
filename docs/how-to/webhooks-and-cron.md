@@ -381,11 +381,11 @@ permission_mode = "auto"
 !!! warning "Unattended runs deny instead of waiting"
     Cron and webhook runs never wait on an approval button nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). In `default` / `manual` / `acceptEdits` (what `/planmode off` sets) any tool the mode would ask about is denied; in `plan` the plan approval and the file-changing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) are denied; in `auto`, `dontAsk` and `bypassPermissions` only the requests the CLI still asks about (an `ask` rule, a hook's `ask`, a tool that needs a person, auto mode falling back after repeated blocks) are denied; with diff preview on, an edit awaiting its diff approval is denied. Questions are always denied. Claude is told to carry on without the denied action or stop and report; the final lists the denials (`🔒 unattended (cron:<id>) · denied …`) and each logs `permission.unattended_deny`. A reply to the run's message continues in an attended session with normal buttons. `/at` runs keep their buttons. For hands-off crons set `permission_mode` to `plan-auto`, `auto` or `bypassPermissions` (or pre-approve the tools). The first denial for each trigger adds a 💡 hint that names where the run's mode came from: the chat's `/planmode`, `[claude] permission_mode` in `untether.toml` (when the chat has none set), the trigger's own `permission_mode`, or, for a webhook, the guard that never lets it inherit `bypassPermissions`. Startup logs `trigger.unattended_approval_risk` for crons set to an asking mode, and the startup message lists them.
 
-!!! note "Webhooks have no `permission_mode`"
-    A webhook run always uses its chat's `/planmode`, then the engine default — so a webhook into a `plan` (or `/planmode off`) chat has its approvals denied the same way. Set the chat's mode with `/planmode plan-auto` or `/planmode auto` if the webhook should act on its own; per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). Webhooks aren't listed in the startup message.
+!!! note "Webhooks without their own `permission_mode`"
+    A webhook with no `permission_mode` of its own uses its chat's `/planmode`, then the engine default (or, with `webhook_defaults = "strict"`, the engine's asking mode) — so a webhook into a `plan` (or `/planmode off`) chat has its approvals denied the same way. Give the webhook its own `permission_mode` (with `engine`) if it should act on its own, or set the chat's mode with `/planmode plan-auto` or `/planmode auto`; see [Webhook run options](#webhook-run-options) ([#1122](https://github.com/littlebearapps/untether/issues/1122)). Webhooks aren't listed in the startup message.
 
 !!! warning "Webhooks never inherit bypass"
-    A webhook's prompt is built from the request it receives, so since v0.36.1 a Claude webhook run never inherits `bypassPermissions`: not from the chat's permission mode, `[engines.claude] permission_mode` or `dangerously_skip_permissions = true`. It runs in `default` mode instead, so anything that would ask for approval is denied, and Untether logs `claude.webhook_bypass_downgraded` once per webhook ([#1142](https://github.com/littlebearapps/untether/issues/1142)). Antigravity webhook runs never get Full access or Ask me: a chat's Full access or Ask me runs them as Workspace. A Codex webhook whose mode Untether doesn't recognise runs `safe` (read-only sandbox) instead of full auto (`codex.webhook_unknown_mode_safe`).
+    A webhook's prompt is built from the request it receives, so since v0.36.1 a Claude webhook run never inherits `bypassPermissions`: not from the chat's permission mode, `[engines.claude] permission_mode` or `dangerously_skip_permissions = true`. It runs in `default` mode instead, so anything that would ask for approval is denied, and Untether logs `claude.webhook_bypass_downgraded` once per webhook ([#1142](https://github.com/littlebearapps/untether/issues/1142)). Antigravity webhook runs never inherit Full access or Ask me: a chat's Full access or Ask me runs them as Workspace (a webhook's own `permission_mode` can set them; `full` needs `allow_unsafe_permission_mode = true`). A Codex webhook whose mode Untether doesn't recognise runs `safe` (read-only sandbox) instead of full auto (`codex.webhook_unknown_mode_safe`).
 
     Crons still inherit the chat's or engine's mode in v0.36.1. At startup (and when a reload changes the list) Untether logs:
 
@@ -395,7 +395,7 @@ permission_mode = "auto"
 
     These are warnings only; a later release makes them stricter ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
 
-Precedence (Claude and Antigravity): cron `permission_mode` > the chat's own mode (`/planmode`, or Antigravity's permission mode) > engine config default. Every run whose cron value differs from the chat's own setting logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)), except on a webhook run, which runs `safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)). On an Antigravity cron the valid values are `workspace`, `full`, `ask` and `plan`; a cron runs with Full access or Ask me only when it sets `permission_mode = "full"` or `"ask"` itself, and a webhook run never gets either. An unattended Ask me run denies everything that would need a tap, and a Plan first run only posts its plan ([#980](https://github.com/littlebearapps/untether/issues/980), [#981](https://github.com/littlebearapps/untether/issues/981)). A scheduled Antigravity run is also held when the project's agy hooks, plugins or MCP config changed since someone last ran Antigravity there from the chat; send a message in the chat to release it. Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
+Precedence (Claude and Antigravity): cron `permission_mode` > the chat's own mode (`/planmode`, or Antigravity's permission mode) > engine config default. Every run whose cron value differs from the chat's own setting logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)), except on a webhook run, which runs `safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)). On an Antigravity cron the valid values are `workspace`, `full`, `ask` and `plan`; a cron runs with Full access or Ask me only when it sets `permission_mode = "full"` or `"ask"` itself, and a webhook the same way (`full` also needs `allow_unsafe_permission_mode = true`, [#1118](https://github.com/littlebearapps/untether/issues/1118)). An unattended Ask me run denies everything that would need a tap, and a Plan first run only posts its plan ([#980](https://github.com/littlebearapps/untether/issues/980), [#981](https://github.com/littlebearapps/untether/issues/981)). A scheduled Antigravity run is also held when the project's agy hooks, plugins or MCP config changed since someone last ran Antigravity there from the chat; send a message in the chat to release it. Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Per-cron model and effort
 
@@ -412,7 +412,40 @@ permission_mode = "auto"
 prompt = "Triage new issues."
 ```
 
-Set `engine` alongside `model` so the name matches the engine. `reasoning` is checked against the engine's levels at config load when `engine` is set (Claude `low`…`max`, Codex `low`…`xhigh`, Antigravity `low`…`high`; OpenCode/Pi don't take it) — a bad value makes that cron invalid, the way a bad `permission_mode` does, so it is skipped and named in the Telegram notice while the other triggers keep running (see [When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)). A reply to the cron's message runs on the chat's model. Logs: `trigger.cron.model_override`, `trigger.cron.reasoning_override`. Webhooks have neither field yet — per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Pick a model per cron](schedule-tasks.md#pick-a-model-per-cron).
+Set `engine` alongside `model` so the name matches the engine. `reasoning` is checked against the engine's levels at config load when `engine` is set (Claude `low`…`max`, Codex `low`…`xhigh`, Antigravity `low`…`high`; OpenCode/Pi don't take it) — a bad value makes that cron invalid, the way a bad `permission_mode` does, so it is skipped and named in the Telegram notice while the other triggers keep running (see [When a trigger entry is invalid](#when-a-trigger-entry-is-invalid)). A reply to the cron's message runs on the chat's model. Logs: `trigger.cron.model_override`, `trigger.cron.reasoning_override`. Webhooks take the same `model`, `reasoning` and `permission_mode` keys (logged as `trigger.webhook.*_override`), plus `allowed_tools`; see [Webhook run options](#webhook-run-options) ([#1122](https://github.com/littlebearapps/untether/issues/1122)). See [Schedule tasks — Pick a model per cron](schedule-tasks.md#pick-a-model-per-cron).
+
+## Webhook run options
+
+An `agent_run` webhook can set the same run options as a cron
+([#1122](https://github.com/littlebearapps/untether/issues/1122)), and should,
+because its prompt comes from the request payload:
+
+```toml
+[triggers]
+webhook_defaults = "strict"   # safe defaults; the default from 0.37.0
+
+[[triggers.webhooks]]
+id = "qa-after-deploy"
+path = "/hooks/qa"
+project = "myapp"
+engine = "claude"
+auth = "hmac-sha256"
+secret = "…from openssl rand -hex 32…"
+permission_mode = "auto"
+allowed_tools = ["Read", "Grep", "Glob"]   # [] pre-approves nothing
+model = "sonnet"
+prompt_template = "A deploy landed: {{deploy.head_sha}}."
+```
+
+`permission_mode` on a webhook needs `engine`. A mode that skips every
+approval (Claude `bypassPermissions`, Antigravity `full`, Codex `auto`) also
+needs `allow_unsafe_permission_mode = true`. With `webhook_defaults =
+"strict"`, a webhook without its own mode runs in one that asks (Claude
+`default`, Codex `safe`, Antigravity Workspace) and pre-approves no Claude
+tools; one without a `project` or with a secret under 32 characters is
+skipped. Until you set it, Untether warns once about each webhook that strict
+would change ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
+See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
 
 ## Delayed runs with `/at`
 
@@ -448,7 +481,7 @@ See the [Triggers reference — Trigger visibility](../reference/triggers/trigge
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.
 - All secret comparisons use timing-safe comparison.
 - Rate limiting prevents abuse (token-bucket, per-webhook and global).
-- Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning at startup and on each reload; it still works for now, but a future release will refuse it ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+- Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning at startup and on each reload; with `webhook_defaults = "strict"` the webhook is skipped ([#1117](https://github.com/littlebearapps/untether/issues/1117), [#1118](https://github.com/littlebearapps/untether/issues/1118)).
 - Untether never writes a webhook secret to its logs or error messages, including when the webhook's entry is invalid.
 - Failed auth attempts are budgeted per webhook and client address (`rate_limit` a minute). A sender that connects directly and goes over gets `429` from that webhook — even with the right secret — until the limit refills; other senders are unaffected.
 - Behind a reverse proxy or tunnel on the same host (the usual setup), every request comes from a loopback address, so Untether never refuses the right secret there: only failed attempts over the budget get `429`. That does not cap guessing — rate-limit at the proxy, or set `exposed = true` and `trusted_proxy_header` so Untether counts each client behind the proxy separately (see [Behind a tunnel or reverse proxy](#behind-a-tunnel-or-reverse-proxy)). Otherwise Untether ignores `X-Forwarded-For` and similar headers. A proxy that reaches Untether on a non-loopback address (for example a container network) is treated as one sender, so bad requests through it can lock out legitimate ones; keep the proxy on the same host. See [Triggers reference — Security](../reference/triggers/triggers.md#security).

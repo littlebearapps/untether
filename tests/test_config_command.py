@@ -5106,6 +5106,38 @@ class TestTriggersPagePerChat:
         assert "/webhooks/github" in text
         assert "auth=<i>hmac-sha256</i>" in text
         assert "untether" in text
+        assert "model=" not in text and "mode=" not in text
+
+    @pytest.mark.anyio
+    async def test_1122_webhook_row_shows_run_options(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "webhooks": [
+                    {
+                        "id": "qa",
+                        "path": "/hooks/qa",
+                        "auth": "none",
+                        "prompt_template": "x",
+                        "chat_id": 123,
+                        "engine": "claude",
+                        "permission_mode": "auto",
+                        "model": "sonnet",
+                        "reasoning": "low",
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        (row,) = [line for line in text.splitlines() if line.startswith("<code>qa")]
+        assert "model=<i>sonnet</i> · effort=<i>low</i> · mode=<i>auto</i>" in row
 
     @pytest.mark.anyio
     async def test_filters_to_current_chat(self, tmp_path):

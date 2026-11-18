@@ -83,6 +83,7 @@ nav = [
         { "Untether events" = "reference/runners/claude/untether-events.md" },
       ] },
       { "Codex" = [
+        { "Runner" = "reference/runners/codex/runner.md" },
         { "Exec JSON cheatsheet" = "reference/runners/codex/exec-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/codex/untether-events.md" },
       ] },

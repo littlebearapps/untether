@@ -30,7 +30,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
-from ..background_status import CONTINUED_SUFFIX, format_tokens
+from ..background_status import CONTINUED_SUFFIX, escape_markdown, format_tokens
 from ..config import ConfigError
 from ..context import WEBHOOK_TRIGGER_PREFIX
 from ..events import EventFactory
@@ -73,7 +73,6 @@ from ..interactive.registry import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _TERMINAL_CONTROL_OUTCOMES,  # noqa: F401 — re-exported
-    CONTROL_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_CALLBACK_PREFIX,
     ControlLookup,  # noqa: F401 — re-exported
     ControlRequestSnapshot,
@@ -127,9 +126,11 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
+from ..utils.codex_plugin_jobs import session_plugin_jobs
 from ..utils.env_audit import audit_proc_env
+from ..utils.env_policy import apply_run_env
 from ..utils.json_state import atomic_write_json
-from ..utils.paths import get_run_base_dir
+from ..utils.paths import get_run_base_dir, get_run_context
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -1536,6 +1537,11 @@ def _control_reason_text(request: Any) -> str | None:
     return line or None
 
 
+def _reason_line(reason: str) -> str:
+    """#939: the ``🪝 …`` title line for a ``decision_reason`` (escaped)."""
+    return f"🪝 {escape_markdown(reason)}"
+
+
 def _tool_input_details(tool_input: Any) -> str:
     """``(file_path=`x`, command=`y`)`` for an approval title, or ``""``.
 
@@ -1770,6 +1776,10 @@ class ClaudeStreamState:
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
+    # #942: request_id -> ``turn`` its keyboard action was emitted in. A live
+    # session's state spans turns; completing the action from a later turn's
+    # tracker would add a stray "Permission resolved" row there.
+    request_turn: dict[str, int] = field(default_factory=dict)
     # #684: request_id -> time.monotonic() when it was registered for a user
     # answer (normal, hold-open and ``da:``), for the unanswerable detector.
     control_registered_at: dict[str, float] = field(default_factory=dict)
@@ -7219,6 +7229,7 @@ def _complete_control_action(
     next render — the only way buttons go (runner ``translate`` is sync and
     never calls Telegram).
     """
+    state.request_turn.pop(request_id, None)
     action_id = state.request_to_action.pop(request_id, None)
     if not action_id:
         return None
@@ -7259,10 +7270,13 @@ def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]
     ]
     for rid in handled:
         state.pending_control_requests.pop(rid, None)
+        # #942: an action from an earlier turn isn't in this turn's tracker —
+        # retire the mapping silently instead of adding a fresh row here.
+        same_turn = state.request_turn.get(rid, state.turn) == state.turn
         # Also drops the action from control_action_for_tool, so the tool's
         # result doesn't complete it a second time.
         completed = _complete_control_action(state, rid, title="Permission resolved")
-        if completed is not None:
+        if completed is not None and same_turn:
             events.append(completed)
         logger.debug(
             "control_request.reconciled",
@@ -8026,10 +8040,31 @@ def _open_turn_events(
 ) -> list[UntetherEvent]:
     """Open turn N+1 and hand the new turn's tracker the session's current
     ``% ctx`` (#819) — the bridge's turn tracker starts empty."""
-    return [
-        _open_followup_turn(state, factory),
-        *_emit_context(state, factory, force=True),
-    ]
+    pending = state.pending_command_uuid
+    folded = _folded_before(state, pending) if pending is not None else []
+    opened = _open_followup_turn(state, factory)
+    # #1173: lines written before this turn's own line were folded into it.
+    absorbed = [ev for u in folded for ev in _absorb_injected(state, factory, u)]
+    return [opened, *absorbed, *_emit_context(state, factory, force=True)]
+
+
+def _folded_before(state: ClaudeStreamState, command_uuid: str) -> list[str]:
+    """#1173: injected lines still awaiting that were written before
+    *command_uuid*. The CLI consumes queued stdin lines in order and folds
+    several into one turn under a single ``command_lifecycle{started}``, so
+    once *command_uuid* starts, every earlier line has been taken too.
+
+    shortcut: FIFO inference, not a per-line CLI signal (no live capture yet
+    of folded lines' own frames); switch to native frames if a capture shows
+    the CLI emits ``started``/``completed`` for each folded line."""
+    keys = list(state.awaiting_injected)
+    return keys[: keys.index(command_uuid)] if command_uuid in keys else []
+
+
+# #1173: ``command_lifecycle`` states that end a line without a turn of its own.
+_LIFECYCLE_TERMINAL_STATES = frozenset(
+    {"completed", "cancelled", "discarded", "refused"}
+)
 
 
 _STEER_SNIPPET_CHARS = 80
@@ -8150,7 +8185,30 @@ def translate_claude_event(
     ):
         # #775: started while a turn is open → folded into it (probed on CLI
         # 2.1.284: queued at write, started after the running tool's result).
-        return _absorb_injected(state, factory, event.command_uuid)
+        # #1173: earlier lines still awaiting were folded in with it.
+        uuids = [*_folded_before(state, event.command_uuid), event.command_uuid]
+        return [ev for u in uuids for ev in _absorb_injected(state, factory, u)]
+    if (
+        isinstance(event, claude_schema.StreamCommandLifecycleMessage)
+        and event.state in _LIFECYCLE_TERMINAL_STATES
+        and event.command_uuid is not None
+        and event.command_uuid in state.awaiting_injected
+    ):
+        # #1173: a line that ends without having opened or joined a turn.
+        if event.state == "completed":
+            # It ran (folded into another line's turn): no separate reply owed.
+            return _absorb_injected(state, factory, event.command_uuid)
+        # Cancelled / discarded / refused: it never ran — stop holding the
+        # session for it, and keep its anchor so the "not run" notice is true.
+        state.awaiting_injected.pop(event.command_uuid, None)
+        state.unplanned_commands.pop(event.command_uuid, None)
+        logger.info(
+            "claude.live_session.injected_not_run",
+            session_id=factory.resume.value if factory.resume else None,
+            command_uuid=event.command_uuid,
+            lifecycle_state=event.state,
+        )
+        return []
     if (
         isinstance(event, claude_schema.StreamSystemMessage)
         and event.subtype == "task_notification"
@@ -9317,6 +9375,7 @@ def _translate_claude_event_base(
                         # uncompleted for the rest of the run, and its keyboard
                         # shadowed every later approval/option keyboard.
                         state.request_to_action[button_request_id] = synth_action_id
+                        state.request_turn[button_request_id] = state.turn
 
                         # Send full outline as a separate ephemeral message
                         # (progress message is limited to 4096 chars and truncates).
@@ -9397,6 +9456,12 @@ def _translate_claude_event_base(
             warning_text = f"Permission Request [{request_type}]"
             if details:
                 warning_text += f" - {details}"
+            # #939: the CLI's own "why" (hook / rule / classifier text) in the
+            # in-turn title, not only on the standalone surface.
+            if isinstance(request, claude_schema.ControlCanUseToolRequest) and (
+                reason := _control_reason_text(request)
+            ):
+                warning_text += f"\n{_reason_line(reason)}"
             if diff_preview:
                 warning_text += f"\n{diff_preview}"
             is_exit_plan_mode = (
@@ -9432,54 +9497,11 @@ def _translate_claude_event_base(
                 )
 
             # Reconcile requests that were handled via Telegram callback
-            # (#229, #683): drop them from pending — no spurious
-            # expired_auto_deny below — and complete their keyboard actions.
+            # (#229, #683): drop them from pending and complete their
+            # keyboard actions. #844: no expiry sweep — the CLI has no
+            # permission deadline, so a request waits for the user, the
+            # reminder ladder or the 4 h cap.
             reconciled_events = _reconcile_handled_requests(state)
-
-            # Clean up expired requests (older than timeout).
-            # Send auto-deny to unblock the subprocess — without this,
-            # Claude Code blocks forever waiting for a response that never comes.
-            # See: https://github.com/banteg/takopi/issues/215
-            current_time = time.time()
-            expired = [
-                rid
-                for rid, (_, timestamp) in state.pending_control_requests.items()
-                if current_time - timestamp > CONTROL_REQUEST_TIMEOUT_SECONDS
-                and rid not in _HANDLED_REQUESTS  # belt-and-suspenders (#229)
-                # #685: a user's answer being written right now wins; the
-                # next sweep catches the id if it is somehow still pending.
-                and rid not in _INFLIGHT_CONTROL_RESPONSES
-            ]
-            for rid in expired:
-                del state.pending_control_requests[rid]
-                _drop_exitplanmode_plan(state, rid, rejected=False, reason="timeout")
-                _REQUEST_TO_INPUT.pop(rid, None)
-                _REQUEST_TO_TOOL_NAME.pop(rid, None)
-                # #685: the request is no longer answerable — drop the
-                # mapping (a later tap reads "expired", not "pending", and the
-                # entry stops pausing the live session) and record why.
-                _REQUEST_TO_SESSION.pop(rid, None)
-                mark_request_handled(rid, action="timeout", outcome="expired")
-                expired_action_id = state.request_to_action.pop(rid, None)
-                if expired_action_id:
-                    # #685: strip the swept request's Approve/Deny keyboard.
-                    state.control_action_for_tool = {
-                        k: v
-                        for k, v in state.control_action_for_tool.items()
-                        if v != expired_action_id
-                    }
-                    reconciled_events.append(
-                        factory.action_completed(
-                            action_id=expired_action_id,
-                            kind="warning",
-                            title="⏱️ Timed out: auto-denied after 5 min",
-                            ok=True,
-                        )
-                    )
-                state.auto_deny_queue.append(
-                    (rid, "Request timed out — no response from user within 5 minutes.")
-                )
-                logger.warning("control_request.expired_auto_deny", request_id=rid)
 
             # Check max pending limit
             if len(state.pending_control_requests) > 100:
@@ -9509,6 +9531,7 @@ def _translate_claude_event_base(
                 state.control_action_for_tool[tool_key] = action_id
             # Map request_id -> action_id for reconciling callback-handled requests (#229)
             state.request_to_action[request_id] = action_id
+            state.request_turn[request_id] = state.turn
 
             # Include inline keyboard data in detail
             button_rows: list[list[dict[str, str]]] = [
@@ -10035,10 +10058,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # lives in `claude_sends_allowed_tools` so the #1145 webhook audit
         # (permission_audit.py) reads the same one.
         allowed_tools = _coerce_comma_list(self.allowed_tools)
+        explicit = self.allowed_tools_explicit
+        if run_options is not None and run_options.allowed_tools is not None:
+            # #1118: a trigger's own list replaces the engine-wide one (`()`
+            # sends none) and counts as explicit for the #749 rule.
+            allowed_tools = _coerce_comma_list(run_options.allowed_tools)
+            explicit = True
         if allowed_tools is not None and is_claude_prompting_mode(effective_mode):
-            if claude_sends_allowed_tools(
-                effective_mode, explicit=self.allowed_tools_explicit
-            ):
+            if claude_sends_allowed_tools(effective_mode, explicit=explicit):
                 # An explicit choice is honoured, but the interaction is
                 # surprising enough to deserve one line in the log.
                 if effective_mode not in _PROMPTING_MODE_ALLOWLIST_LOGGED:
@@ -10785,6 +10812,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #887: how long past ``live_session_max_s`` a turn already running may
     # take to reach its result before the session is closed under it.
     _abs_cap_turn_grace_s: float = 1800.0
+    # #1186: where the Codex plugin keeps its job state (None = its defaults;
+    # tests point it at a fixture tree).
+    _codex_plugin_state_roots: tuple[Path, ...] | None = None
 
     async def _live_session_lifecycle(
         self,
@@ -11089,6 +11119,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         await close_live_session(
                             sid, "wake_cap", notice=True, only_if_idle=True
+                        )
+                        continue
+                    if codex_jobs := await anyio.to_thread.run_sync(
+                        session_plugin_jobs, sid, self._codex_plugin_state_roots
+                    ):
+                        # #1186: the Codex plugin's SessionEnd hook would kill
+                        # these jobs; hold (re-checked each idle grace,
+                        # bounded by ``abs_cap`` above).
+                        live.idle_since = now
+                        run_logger.info(
+                            "claude.live_session.hold",
+                            session_id=sid,
+                            reason="codex_plugin_job",
+                            jobs=len(codex_jobs),
                         )
                         continue
                     await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
@@ -12460,7 +12504,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
-        env = self.env(state=state)
+        env = apply_run_env(self.env(state=state), get_run_context())  # #1120
         # #361 wrap with `env -i KEY=VAL ...` so Claude exec resolves with
         # exactly the allowlisted env. Blocks re-introduction from upstream
         # rc-file sourcing, /etc/environment, or wrapper scripts that the
@@ -12535,6 +12579,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 reap_orphans=self._reap_orphans,
                 orphan_pid_snapshot=state.orphan_pid_snapshot,
                 orphan_pid_starttimes=state.orphan_pid_starttimes,
+                # #1194: a cancelled run never reaches its own exit line.
+                log_teardown_exit=True,
                 stdin=stdin_arg,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,

@@ -56,6 +56,7 @@ class FakeBot(BotClient):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
+        on_failure: Any = None,
     ) -> Message | None:
         _ = reply_to_message_id
         _ = disable_notification

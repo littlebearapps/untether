@@ -11,7 +11,7 @@ import httpx
 from ..logging import get_logger
 from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
-from .client_api import BotClient, HttpBotClient, TelegramRetryAfter
+from .client_api import BotClient, HttpBotClient, SendOutcome, TelegramRetryAfter
 from .outbox import (
     DELETE_PRIORITY,
     EDIT_PRIORITY,
@@ -187,8 +187,11 @@ class TelegramClient:
         *,
         replace_message_id: int | None = None,
         wait: bool = True,
+        on_failure: Callable[[SendOutcome], None] | None = None,
     ) -> Message | None:
-        """``wait=False`` queues the send and returns None at once (#928)."""
+        """``wait=False`` queues the send and returns None at once (#928).
+        ``on_failure`` (#1207) runs when the queued send itself fails, even
+        after its waiter has gone."""
 
         async def execute() -> Message | None:
             return await self._client.send_message(
@@ -201,6 +204,7 @@ class TelegramClient:
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
                 replace_message_id=replace_message_id,
+                **({"on_failure": on_failure} if on_failure is not None else {}),
             )
 
         if replace_message_id is not None:

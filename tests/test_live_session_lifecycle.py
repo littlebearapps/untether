@@ -301,6 +301,48 @@ def _events(logs: list[dict], name: str) -> list[dict]:
     return [e for e in logs if e.get("event") == name]
 
 
+@pytest.mark.parametrize("has_job", [True, False])
+async def test_1186_codex_plugin_job_holds_the_idle_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_job: bool
+) -> None:
+    """#1186: a running Codex plugin job owned by the session holds the idle
+    close (its SessionEnd hook would kill it); once it finishes the session
+    closes ``idle_no_tasks`` as before. No job → no hold."""
+    from structlog.testing import capture_logs
+
+    from tests.test_codex_plugin_jobs import job, write_state
+
+    _settings(monkeypatch)
+    jobs = [job("task-live", session=SID)] if has_job else []
+    state_file = write_state(tmp_path, jobs, workspace="project")
+    released: dict[str, float] = {}
+
+    async def finish_job() -> None:
+        await anyio.sleep(1.0)
+        state_file.write_text(
+            state_file.read_text().replace('"running"', '"completed"')
+        )
+        released["at"] = time.monotonic()
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(finish_job)
+            runner, _ = await _run(
+                "followup", timings={"_codex_plugin_state_roots": (tmp_path,)}
+            )
+            ended = time.monotonic()
+            tg.cancel_scope.cancel()
+    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    holds = _events(logs, "claude.live_session.hold")
+    if has_job:
+        assert holds and holds[0]["reason"] == "codex_plugin_job"
+        assert holds[0]["jobs"] == 1
+        assert ended >= released["at"]
+    else:
+        assert holds == []
+        assert "at" not in released
+
+
 async def test_idle_close_overrunning_grace_logs_diag_sigterms_no_quarantine(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:

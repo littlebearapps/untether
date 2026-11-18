@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
@@ -37,6 +38,32 @@ type DispatchResult = bool | Literal["refused"]
 SEND_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0)
 
 
+def build_run_context(
+    trigger: CronConfig | WebhookConfig, *, strict: bool = False
+) -> RunContext:
+    """The one ``RunContext`` builder for crons and webhooks (#1122).
+
+    Every ``TriggerRunOptions`` field is forwarded the same way for both, so
+    a webhook gets exactly the run options a cron does. ``strict`` marks a
+    webhook fired under ``webhook_defaults = "strict"`` (#1118).
+    """
+    kind = "webhook" if isinstance(trigger, WebhookConfig) else "cron"
+    return RunContext(
+        project=trigger.project,
+        # rc4 (#271): always set, so the meta footer can render provenance
+        # even when no project is configured.
+        trigger_source=f"{kind}:{trigger.id}",
+        run_id=str(uuid4()),  # #1120
+        permission_mode=trigger.permission_mode,
+        model=trigger.model,
+        reasoning=trigger.reasoning,
+        allowed_tools=(
+            tuple(trigger.allowed_tools) if trigger.allowed_tools is not None else None
+        ),
+        strict_webhook=strict and kind == "webhook",
+    )
+
+
 @dataclass(slots=True)
 class TriggerDispatcher:
     """Bridge between trigger sources (webhooks/crons) and ``run_job()``."""
@@ -64,23 +91,22 @@ class TriggerDispatcher:
             )
             return False
 
-    async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
+    async def dispatch_webhook(
+        self, webhook: WebhookConfig, prompt: str, *, strict: bool = False
+    ) -> None:
+        """``strict``: ``[triggers] webhook_defaults = "strict"`` (#1118)."""
         chat_id = webhook.chat_id or self.default_chat_id
-        # rc4 (#271): always set trigger_source so the meta footer can render
-        # provenance even when no project is configured.
-        context = RunContext(
-            project=webhook.project,
-            trigger_source=f"webhook:{webhook.id}",
-        )
+        context = build_run_context(webhook, strict=strict)
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
         if await self._budget_refused(chat_id, context, engine_override):
             return  # #896: nothing ran, so nothing is recorded as fired
-        await self._dispatch(chat_id, label, prompt, context, engine_override)
-        # #271 Tier 3: record last-fired-at for the /config:tg page. Recorded
-        # after dispatch so a transport-send failure (logged inside _dispatch)
-        # doesn't pollute the history with a phantom entry.
+        if not await self._dispatch(chat_id, label, prompt, context, engine_override):
+            # #1123: the announce never landed, so nothing ran; recording it
+            # would show a phantom "last fired" on the /config:tg page.
+            return
+        # #271 Tier 3: record last-fired-at for the /config:tg page.
         from . import history
 
         history.record_fired(webhook.id)
@@ -104,13 +130,7 @@ class TriggerDispatcher:
         :data:`SEND_RETRY_DELAYS` (the scheduler's retry ticks pass ``()``).
         """
         chat_id = cron.chat_id or self.default_chat_id
-        context = RunContext(
-            project=cron.project,
-            trigger_source=f"cron:{cron.id}",
-            permission_mode=cron.permission_mode,
-            model=cron.model,
-            reasoning=cron.reasoning,
-        )
+        context = build_run_context(cron)
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 
@@ -226,6 +246,8 @@ class TriggerDispatcher:
             label=label,
             chat_id=chat_id,
             project=context.project if context else None,
+            trigger=context.trigger_source if context else None,
+            run_id=context.run_id if context else None,
             engine=engine_override,
         )
 

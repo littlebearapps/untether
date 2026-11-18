@@ -16,7 +16,7 @@ approvals, questions, steer and Plan first card; other engines run non-interacti
 |---|---|
 | What a feature does / which file owns it | `docs/reference/feature-catalog.md` |
 | What each test file covers (+ counts) | `docs/reference/test-catalog.md` |
-| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`, no `runner.md`) |
+| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`; its `runner.md` holds the app-server drift/gate notes) |
 | Claude permission modes, live sessions, control channel | `docs/reference/runners/claude/runner.md` |
 | Antigravity permission modes, agy gate, `/continue`, native-vs-custom register | `docs/reference/runners/antigravity/runner.md` |
 | Telegram transport | `docs/reference/transports/telegram.md` |
@@ -67,7 +67,8 @@ runner.** Security and doc-accuracy fixes still apply. Both are excluded from ev
   shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through
   `utils/antigravity_argv.py` (`--flag=value` only). Detail: the `antigravity-cli` skill.
 - **Codex app-server** (v0.36.2, #1112) is not a new engine: it stays the `codex` id, chosen per install by
-  `[engines.codex] transport = "exec" | "app-server"` (exec is the default for all of v0.36.2). App-server counts as
+  `[engines.codex] transport = "exec" | "app-server"` (key and transport land with #962; only the #961 drift probe and
+  pre-spawn gate exist so far; exec is the default for all of v0.36.2). App-server counts as
   native despite the CLI's Experimental label; use `experimentalApi` fields only for plan mode (#965). See the
   exception in `.claude/rules/runner-development.md`.
 - Engine parity roadmap: v0.36.1 Antigravity (#558), v0.36.2 Codex app-server (#960–#968), v0.36.3 OpenCode ACP (#969–#974).

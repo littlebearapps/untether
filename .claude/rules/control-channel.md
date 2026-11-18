@@ -57,12 +57,15 @@ Read those before changing any of these areas.
 - `_SESSION_STDIN` means "a process owns this session"; ask `is_session_accepting()` before writing a follow-up.
 - Async hooks (#812): `has_pending_async_hooks()` is a sibling predicate — never part of `has_live_background_work()`.
   Hook release is all-or-nothing; **never bind a process to a hook**; never rely on `sh -c` to identify hook processes.
+- The idle close is held while a Codex plugin `--background` job owned by the session runs (#1186): the plugin's
+  `SessionEnd` hook kills them on any exit. `utils/codex_plugin_jobs.py` reads the plugin's private state **read-only**
+  and fails open (a recorded `shortcut:`, plan D12); never write or delete it. Remove when codex-plugin-cc#822 ships.
 - Timing knobs are slots-dataclass fields: set them on the instance in tests.
 
 ## Outline gate / post-outline approval
 - After "Pause & Outline", the gate is text-based (`_OUTLINE_MIN_CHARS`): short → auto-deny, written → hold open with buttons.
 - Synthetic buttons use the `da:` callback prefix (64-byte limit), handled in `claude_control.py` before approve/deny.
-- "Let's discuss" holds the request open; the 5-min sweep is event-driven, not a timer.
+- "Let's discuss" holds the request open; nothing expires it (the 5-min sweep was retired, #844) — only the user, a CLI cancel or the 4 h cap.
 
 ## Scheduling hooks (#925)
 - Every control-channel spawn registers `PreToolUse` hook callbacks `ut_loop_cron_create` / `ut_loop_cron_delete` in

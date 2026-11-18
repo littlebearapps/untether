@@ -305,8 +305,8 @@ def audit_runtime_permission_modes(
 # ── #1142: trigger security audit (startup + every trigger reload) ──────────
 #
 # Run from ``telegram/loop.py`` beside #894's chat-fallback warning, where the
-# trigger's chat and that chat's ``/planmode`` are known. Warnings only: in
-# 0.36.1 nothing is rejected (the breaking half is #1118, 0.36.2).
+# trigger's chat and that chat's ``/planmode`` are known. Warnings only;
+# ``[triggers] webhook_defaults = "strict"`` (#1118) is what changes behaviour.
 
 CLAUDE_BYPASS_MODE = "bypassPermissions"
 ANTIGRAVITY_ENGINE = "antigravity"
@@ -329,24 +329,26 @@ _RISK_NOTES: dict[str, str] = {
     WEBHOOK_NO_PROJECT: (
         "this agent_run webhook has no project, so it runs in Untether's own"
         " working directory; set project to the repo it should work in"
-        " (#1118 makes this an error)"
+        ' (skipped with [triggers] webhook_defaults = "strict", #1118)'
     ),
     WEBHOOK_PREAPPROVED_TOOLS: (
         "this agent_run webhook runs in a mode that never asks while these"
         " tools are pre-approved, so a prompt built from the request payload"
-        " can run commands or edit files; narrow [engines.claude]"
-        " allowed_tools or use a prompting mode"
+        " can run commands or edit files; narrow the"
+        " webhook's own allowed_tools (else [engines.claude] allowed_tools) or use"
+        " a prompting mode"
     ),
 }
 # #1145: the webhook runs in a prompting mode (its own, or `default` after
 # the #1142 bypass downgrade), but [engines.claude] allowed_tools was set
 # explicitly, so the runner still sends it (#749).
 WEBHOOK_EXPLICIT_ALLOWLIST_NOTE = (
-    "[engines.claude] allowed_tools was set explicitly, so it applies even in"
+    "allowed_tools was set explicitly (on the webhook or in [engines.claude]),"
+    " so it applies even in"
     " prompting modes: these tools run without an approval on this agent_run"
     " webhook, and a prompt built from the request payload can run commands"
-    " or edit files; remove them from allowed_tools (#1118 stops webhooks"
-    " inheriting the list)"
+    " or edit files; remove them from allowed_tools (with [triggers]"
+    ' webhook_defaults = "strict" a webhook no longer inherits the engine list)'
 )
 WEBHOOK_BYPASS_OUTCOME = "runs_as_default"
 
@@ -452,7 +454,15 @@ def audit_trigger_permission_risks(
             risks.append(
                 TriggerRisk(event=WEBHOOK_NO_PROJECT, trigger=source, engine=engine)
             )
-        risk = _webhook_tools_risk(source, engine, chat_id, pref, defaults)
+        risk = _webhook_tools_risk(
+            trigger,
+            source,
+            engine,
+            chat_id,
+            pref,
+            defaults,
+            strict=triggers.webhook_defaults == "strict",
+        )
         if risk is not None:
             risks.append(risk)
     return tuple(risks)
@@ -505,20 +515,43 @@ def _cron_bypass_risk(
 
 
 def _webhook_tools_risk(
+    hook: Any,
     source: str,
     engine: str,
     chat_id: int,
     pref: str | None,
     defaults: TriggerEngineDefaults,
+    *,
+    strict: bool = False,
 ) -> TriggerRisk | None:
     if engine != CLAUDE_ENGINE:
         return None
-    if pref is not None:
+    own_mode = hook.permission_mode
+    if own_mode is not None:
+        # #1118/#1122: the webhook's own mode; bypass needs an explicit
+        # opt-in and is honoured, so it skips every check anyway.
+        if own_mode == CLAUDE_BYPASS_MODE:
+            return None
+        mode, origin = own_mode, "trigger"
+    elif strict:
+        mode, origin = CLAUDE_WEBHOOK_BYPASS_FALLBACK_MODE, "webhook_defaults"
+    elif pref is not None:
         mode, origin = pref, "chat"
     else:
         mode, origin = defaults.claude_mode, "engine_config"
+    allowed, explicit = (
+        defaults.claude_allowed_tools,
+        defaults.claude_allowed_tools_explicit,
+    )
+    if hook.allowed_tools is not None:
+        # #1118: the webhook's own list replaces the engine's, sent as explicit.
+        allowed, explicit = tuple(hook.allowed_tools), True
+    elif strict:
+        return None  # strict: nothing pre-approved
     run_mode, outcome = mode, None
-    if defaults.claude_skip_permissions or mode == CLAUDE_BYPASS_MODE:
+    if own_mode is None and (
+        defaults.claude_skip_permissions or mode == CLAUDE_BYPASS_MODE
+    ):
         # The runtime guard runs it in `default`, which prompts (#1142).
         if defaults.claude_skip_permissions:
             mode, origin = CLAUDE_BYPASS_MODE, "dangerously_skip_permissions"
@@ -527,11 +560,9 @@ def _webhook_tools_risk(
     # #1145: the runner's own rule. The implicit default allowlist isn't sent
     # in prompting modes (#749), but an explicit one is sent in every mode,
     # the downgraded `default` included.
-    if not claude_sends_allowed_tools(
-        run_mode, explicit=defaults.claude_allowed_tools_explicit
-    ):
+    if not claude_sends_allowed_tools(run_mode, explicit=explicit):
         return None
-    tools = _preapproved_risky_tools(defaults.claude_allowed_tools)
+    tools = _preapproved_risky_tools(allowed)
     if not tools:
         return None
     return TriggerRisk(

@@ -8,6 +8,7 @@ from ...progress import ProgressTracker
 from ...runner_bridge import (
     RunningTask,
     RunningTasks,
+    running_task_is_delivered_teardown,
     running_task_is_idle_after_result,
 )
 from ...scheduler import ThreadJob, ThreadScheduler
@@ -116,6 +117,25 @@ async def handle_cancel(
             for ref, t in unique_running_tasks(running_tasks)
             if ref.channel_id == chat_id and (tf is None or tf(t.thread_id))
         ]
+        # #1176: a run whose final is out but whose process is still being
+        # torn down is not running either. Finish the teardown and carry on to
+        # the /at and /loop drops below, like the #902 idle case (not counted
+        # as an idle session: it is no live session).
+        delivered = [
+            (ref, t) for ref, t in matches if running_task_is_delivered_teardown(t)
+        ]
+        if delivered:
+            for _ref, task in delivered:
+                task.cancel_requested.set()
+            logger.info(
+                "cancel.delivered_run_teardown",
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                progress_message_ids=[ref.message_id for ref, _t in delivered],
+            )
+            matches = [
+                m for m in matches if not running_task_is_delivered_teardown(m[1])
+            ]
         # #902: live sessions idling after their answer are not runs the user
         # can see. Close them, then carry on to the pending /at and /loop
         # cancel below (the /at confirmation says "Cancel with /cancel"), and

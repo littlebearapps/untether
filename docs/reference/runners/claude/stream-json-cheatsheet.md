@@ -280,7 +280,7 @@ One line per input command (user line or scheduled wake-up):
 {"type":"command_lifecycle","command_uuid":"<uuid>","state":"completed"}
 ```
 
-`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued).
+`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued). The CLI 2.1.325 schema lists six states: `queued | started | completed | cancelled | discarded | refused`. When several queued lines are folded into one turn the turn is attributed to one uuid; Untether treats every line written before it as folded in, `completed` for a still-waiting line as folded, and `cancelled` / `discarded` / `refused` as not run ([#1173](https://github.com/littlebearapps/untether/issues/1173)).
 
 ### Multi-result streams (#776)
 

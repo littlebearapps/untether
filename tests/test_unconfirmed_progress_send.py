@@ -75,6 +75,7 @@ class _FlakyBot(FakeBot):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
+        on_failure: Any = None,
     ) -> Message | None:
         self._unconfirmed.discard(chat_id)
         outcome = self._outcomes.pop(0) if self._outcomes else "ok"

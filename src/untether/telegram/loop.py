@@ -14,7 +14,12 @@ from ..commands import list_command_ids
 from ..config import ConfigError
 from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
-from ..context import RunContext, attended_context, unattended_trigger
+from ..context import (
+    WEBHOOK_TRIGGER_PREFIX,
+    RunContext,
+    attended_context,
+    unattended_trigger,
+)
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..live_sessions import live_backend
@@ -65,6 +70,7 @@ from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
 from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .pending_finals import PendingFinals, resolve_pending_finals_path
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
@@ -219,7 +225,23 @@ async def _resolve_engine_run_options(
 
 # Trigger-level fields that win over the resolved chat/topic options for a
 # trigger's own run (#330 permission_mode). Each is copied from RunContext.
-_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode", "model", "reasoning")
+_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "permission_mode",
+    "model",
+    "reasoning",
+    "allowed_tools",  # #1118
+)
+
+# #1118: the mode a webhook with no own `permission_mode` runs in under
+# `[triggers] webhook_defaults = "strict"`, instead of the chat's /planmode or
+# engine config. Engines not listed are left alone.
+# shortcut: Codex `safe` is the exec runner's name; add the app-server mode
+# name here when #962/#963 change it.
+STRICT_WEBHOOK_DEFAULT_MODES: dict[str, str] = {
+    "claude": "default",
+    "codex": "safe",
+    "antigravity": "workspace",
+}
 
 
 def _apply_trigger_overrides(
@@ -248,6 +270,15 @@ def _apply_trigger_overrides(
         for name in _TRIGGER_OVERRIDE_FIELDS
         if (value := getattr(context, name, None)) is not None
     }
+    if context.strict_webhook and engine is not None:
+        # #1118 strict: a webhook never runs mode-less (Claude's legacy `-p`
+        # path) or in the chat's mode, and Claude pre-approves nothing
+        # unless the webhook lists its own tools.
+        strict_mode = STRICT_WEBHOOK_DEFAULT_MODES.get(engine)
+        if strict_mode is not None:
+            fields.setdefault("permission_mode", strict_mode)
+        if engine == "claude":
+            fields.setdefault("allowed_tools", ())
     # #835: derived, not configured — the shared predicate marks cron and
     # webhook runs so the runner denies anything that would wait for a tap.
     # Never logged as an "override".
@@ -277,7 +308,13 @@ def _apply_trigger_overrides(
     if log:
         # A run Untether starts itself with a fixed mode (an approved
         # Antigravity plan, #981) carries no trigger; don't log it as a cron.
-        prefix = "trigger.cron" if context.trigger_source is not None else "run"
+        source = context.trigger_source
+        if source is None:
+            prefix = "run"
+        elif source.startswith(WEBHOOK_TRIGGER_PREFIX):
+            prefix = "trigger.webhook"  # #1122; crons keep their names
+        else:
+            prefix = "trigger.cron"
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None
             if previous != value:
@@ -563,6 +600,68 @@ async def _notify_new_invalid_triggers(
             ),
             running_tasks=state.running_tasks,
         )
+
+
+async def _warn_config_permissions(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    config_path: Path | None,
+    *,
+    running_tasks: Mapping[MessageRef, object] | None = None,
+) -> None:
+    """#1219: warn (log + one Telegram notice) when the config holds an
+    inline secret and other local users can read it or its directory, or a
+    backup is readable. Only when a finding is new. Never raises."""
+    if config_path is None:
+        return
+    from ..config import config_permission_fixes, read_config
+
+    try:
+        fixes = config_permission_fixes(
+            config_path, read_config(config_path, log_toml_errors=False)
+        )
+    except Exception:  # noqa: BLE001 — a permission check must never break a load
+        logger.debug("config.file_permissions.check_failed", exc_info=True)
+        return
+    previous = state.config_permission_fixes
+    state.config_permission_fixes = fixes
+    # Only a new finding warns; a partial fix just updates the state.
+    if not set(fixes) - set(previous):
+        return
+    logger.warning(
+        "config.file_permissions",
+        path=str(config_path),
+        fixes=list(fixes),
+        hint=(
+            "The config holds a secret (bot token or webhook secret) other "
+            "local users can read; run the chmod commands, or move the secret "
+            "to the environment (see docs/reference/env-vars.md)."
+        ),
+    )
+    from ..config_reload_notification import format_config_permissions_notice
+
+    await _notify_trigger_config_problem(
+        cfg, format_config_permissions_notice(fixes), running_tasks=running_tasks
+    )
+
+
+async def _notify_strict_webhook_changes(
+    cfg: TelegramBridgeConfig,
+    changes: Sequence[StrictWebhookChange],
+    *,
+    running_tasks: Mapping[MessageRef, object] | None = None,
+) -> None:
+    """#1118: one notice listing the newly found compat-mode webhooks that
+    ``webhook_defaults = "strict"`` would change. Nothing when none are new."""
+    if not changes:
+        return
+    from ..config_reload_notification import format_strict_webhook_changes_notice
+
+    await _notify_trigger_config_problem(
+        cfg,
+        format_strict_webhook_changes_notice(changes),
+        running_tasks=running_tasks,
+    )
 
 
 def _allowed_tools_tuple(value: object) -> tuple[str, ...]:
@@ -1059,6 +1158,11 @@ def _init_quarantine_store(config_path: Path) -> None:
         logger.warning("quarantine.startup_init_failed", exc_info=True)
 
 
+def _pending_finals_kick(cfg: TelegramBridgeConfig) -> Callable[[], None] | None:
+    pending = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+    return pending.kick if isinstance(pending, PendingFinals) else None
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -1110,6 +1214,7 @@ async def poll_updates(
             on_offset_advanced=(
                 offset_writer.note if offset_writer is not None else None
             ),
+            on_poll_ok=_pending_finals_kick(cfg),
         ):
             yield msg
     finally:
@@ -1238,6 +1343,11 @@ class TelegramLoopState:
     # #1142: ``trigger.cron.inherits_bypass`` / ``trigger.webhook.*`` audit
     # findings already logged, so reloads don't repeat them.
     trigger_permission_risks_warned: set[TriggerRisk] = field(default_factory=set)
+    # #1118: compat-mode webhooks already warned about (log + one notice).
+    trigger_strict_changes_warned: set[StrictWebhookChange] = field(default_factory=set)
+    # #1219: the chmod fixes last warned about, so an unchanged reload
+    # doesn't repeat the warning or the notice.
+    config_permission_fixes: tuple[str, ...] = ()
     # #1117: invalid trigger entries / the block-level error already announced
     # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
     trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
@@ -1278,6 +1388,7 @@ if TYPE_CHECKING:
     from ..triggers.manager import TriggerManager
     from ..triggers.settings import (
         InvalidTrigger,
+        StrictWebhookChange,
         TriggerChatFallback,
         TriggersSettings,
     )
@@ -2253,6 +2364,10 @@ async def run_main_loop(
             from .progress_persistence import resolve_progress_path
 
             set_progress_persistence_path(resolve_progress_path(config_path))
+            # #1207: finals a previous run couldn't send go out once polling works.
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                pending_finals.attach(resolve_pending_finals_path(config_path))
 
             state.chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
             logger.info(
@@ -2494,6 +2609,10 @@ async def run_main_loop(
                             "config.reload.applied_notify.crashed", exc_info=True
                         )
 
+                await _warn_config_permissions(
+                    cfg, state, reload.config_path, running_tasks=state.running_tasks
+                )
+
                 # --- Hot-reload trigger configuration ---
                 from ..triggers.settings import format_trigger_error
 
@@ -2514,6 +2633,7 @@ async def run_main_loop(
                             log_invalid_triggers,
                             parse_trigger_config_isolated,
                             warn_short_webhook_secrets,
+                            warn_strict_webhook_changes,
                             warn_trigger_chat_fallbacks,
                         )
 
@@ -2537,6 +2657,14 @@ async def run_main_loop(
                                 exposed=new_settings.server.exposed,
                             )
                             warn_short_webhook_secrets(new_settings)
+                            await _notify_strict_webhook_changes(
+                                cfg,
+                                warn_strict_webhook_changes(
+                                    new_settings,
+                                    warned=state.trigger_strict_changes_warned,
+                                ),
+                                running_tasks=state.running_tasks,
+                            )
                             # #894: warn (once) about project-only triggers
                             # that will post to the default chat.
                             warn_trigger_chat_fallbacks(
@@ -2594,6 +2722,10 @@ async def run_main_loop(
                         phase="startup",
                     )
                 )
+
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                tg.start_soon(pending_finals.run, cfg.bot)
 
             # Graceful drain-then-exit task
             async def _drain_and_exit() -> None:
@@ -3029,6 +3161,11 @@ async def run_main_loop(
                 is_chat_busy=_is_chat_busy,
             )
 
+            # #1219: a readable config holding a secret, or a readable backup.
+            tg.start_soon(
+                partial(_warn_config_permissions, cfg, state, cfg.runtime.config_path)
+            )
+
             # --- Trigger system (webhooks + cron) ---
             trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
@@ -3046,6 +3183,7 @@ async def run_main_loop(
                     log_invalid_triggers,
                     parse_trigger_config_isolated,
                     warn_short_webhook_secrets,
+                    warn_strict_webhook_changes,
                     warn_trigger_chat_fallbacks,
                 )
 
@@ -3056,6 +3194,17 @@ async def run_main_loop(
                     log_invalid_triggers(parsed_triggers.invalid, phase="startup")
                     state.trigger_invalid_notified = set(parsed_triggers.invalid)
                     warn_short_webhook_secrets(trigger_settings)
+                    # #1118: compat webhooks that strict defaults would change.
+                    tg.start_soon(
+                        partial(
+                            _notify_strict_webhook_changes,
+                            cfg,
+                            warn_strict_webhook_changes(
+                                trigger_settings,
+                                warned=state.trigger_strict_changes_warned,
+                            ),
+                        )
+                    )
                     # #894: a project-only trigger posts to the default chat,
                     # not the project's — warn once so it isn't a surprise.
                     warn_trigger_chat_fallbacks(

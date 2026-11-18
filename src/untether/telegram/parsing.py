@@ -237,6 +237,7 @@ async def poll_incoming(
     offset: int | None = None,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
     on_offset_advanced: Callable[[int], None] | None = None,
+    on_poll_ok: Callable[[], None] | None = None,
 ) -> AsyncIterator[TelegramIncomingUpdate]:
     while True:
         updates = await bot.get_updates(
@@ -248,6 +249,9 @@ async def poll_incoming(
             logger.info("loop.get_updates.failed")
             await sleep(2)
             continue
+        if on_poll_ok is not None:
+            # #1207: Telegram answers again — lost finals can go out now.
+            on_poll_ok()
         logger.debug("loop.updates", updates=updates)
         resolved_chat_ids = chat_ids() if callable(chat_ids) else chat_ids
         allowed = set(resolved_chat_ids) if resolved_chat_ids is not None else None

@@ -555,6 +555,10 @@ class TestCodexBuildRunnerDenylist:
     def test_209_codex_workspace_flags_rejected(self, extra: list[str]) -> None:
         self._rejected(extra, match="working directory")
 
+    @pytest.mark.parametrize("extra", [["--trust"], ["--trust=true"]])
+    def test_1040_codex_trust_rejected(self, extra: list[str]) -> None:
+        self._rejected(extra, match="trust_level")
+
     @pytest.mark.parametrize(
         "extra",
         [

@@ -29,6 +29,8 @@ harder to wire up" and "we already built it for another engine" are not exceptio
    the CLI directly.
 3. Never, for new work: undocumented HTTP endpoints, reading the engine's credential or state files, or process
    signals where a native request does the same job.
+   The one recorded deviation is #1186's read-only look at the Codex *plugin's* job state (not the engine's; no native
+   signal exists), a `shortcut:` to remove when codex-plugin-cc#822 ships. Don't copy the pattern.
 
 Taking an engine's SDK **package** as a dependency (e.g. `claude-agent-sdk`) is an architecture decision for Nathan,
 not something this rule requires or permits on its own. Until then, "use the SDK feature" means "use the CLI/protocol
@@ -85,7 +87,7 @@ After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** 
 
 `JsonlStreamState` (defined in `src/untether/runner.py`) captures subprocess lifecycle data including `proc_returncode`. Signal deaths (rc>128 or rc<0) are NOT auto-continued — see `_is_signal_death()` in `runner_bridge.py`.
 
-Runner instances are **shared across chats**, so `runner.current_stream` / `runner.last_pid` mean "latest spawn in any chat" and are diagnostics only (#510). Each run's `run_impl` publishes its own stream + PID together via `publish_run_stream(stream, pid)` into the per-run `RunStreamHandle` that `runner_bridge.run_runner_with_cancel` binds through a ContextVar. Bridge code must read the handle, never the runner attributes. A new runner that spawns its own process outside the base `run_impl` must call `publish_run_stream` at spawn.
+Runner instances are **shared across chats**, so `runner.current_stream` / `runner.last_pid` mean "latest spawn in any chat" and are diagnostics only (#510). Each run's `run_impl` publishes its own stream + PID together via `publish_run_stream(stream, pid)` into the per-run `RunStreamHandle` that `runner_bridge.run_runner_with_cancel` binds through a ContextVar. Bridge code must read the handle, never the runner attributes. A new runner that spawns its own process outside the base `run_impl` must call `publish_run_stream` at spawn, and wrap its `env()` result in `utils/env_policy.apply_run_env()` (sets `UNTETHER_RUN_ID` / `UNTETHER_TRIGGER` for cron/webhook runs only, #1120, and strips `UNTETHER__*` config overrides, which can hold the bot token, #1219).
 
 ## Auto-continue
 
@@ -122,7 +124,7 @@ A failed resumed run clears the chat's saved session only through `_resume_failu
 `num_turns` decides (0 → clear); with none, only the turn-count engines in `_TURN_COUNT_ENGINES` (Claude, AMP) clear,
 and every other engine clears only when the error matches `_RESUME_FAILURE_RE` (the CLI's own "session not found"
 wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x, Antigravity's
-project/argv/gate refusals) never clears.
+project/argv/gate refusals, Codex app-server unsupported, #961) never clears.
 Neither does a failed `/continue` (`resume_token.is_continue`, #1039): the token names no session. The clear itself
 compares session ids (#1052): `on_resume_failed` returns whether it removed anything, and the stores'
 `clear_engine_session(..., resume=token.value)` keeps a saved session that isn't the one that failed (a stale resume

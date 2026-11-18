@@ -67,8 +67,23 @@ Your Telegram bot token grants full control over the bot. Keep it safe:
 - **Restrict file permissions** on your config file:
 
 ```bash
-chmod 600 ~/.untether/untether.toml
+chmod 700 ~/.untether
+chmod 600 ~/.untether/untether.toml ~/.untether/untether.toml.bak*
 ```
+
+Untether writes `untether.toml` and its onboarding backup owner-only (`0600`, a new
+`~/.untether` is `0700`), and tightens a group- or world-readable file the next time
+it saves it. At startup, and on a reload that changes the finding, it logs WARNING
+`config.file_permissions` and posts one Telegram notice with the `chmod` commands when
+the config holds a secret (the bot token or a webhook `secret`) and other local users
+can read it or its directory, or when a `untether.toml.bak*` backup is readable
+([#1219](https://github.com/littlebearapps/untether/issues/1219)). Backups made by other tools can only be warned about.
+
+- **Or keep the token out of the file**: set `UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN`
+  in the service environment (for example a systemd `EnvironmentFile=` only you can
+  read) and leave `bot_token` out of `untether.toml`. Untether never passes
+  `UNTETHER__*` variables to an engine. See
+  [Environment variables](../reference/env-vars.md#bot-token-env).
 
 If you store your config in a non-standard location, set the `UNTETHER_CONFIG_PATH` environment variable:
 
@@ -125,9 +140,9 @@ Operator mitigation: keep host-level secrets out of `~/.bashrc` / `~/.profile`. 
 | Engine | Refused in `extra_args` |
 |---|---|
 | Claude | Bypass: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`. Managed: `-p`/`--print`, `--output-format`, `--input-format`, `-r`/`--resume`, `-c`/`--continue`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools` (use `[engines.claude] allowed_tools`, which is permission-mode aware). A bare `--` (it would turn Untether's own flags into prompt text) |
-| Codex | Bypass: `--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--approve-for-me`/`--not-so-yolo`, `--dangerously-bypass-hook-trust`, `-s`/`--sandbox danger-full-access`, and any `-c`/`--config` value mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously` (sandbox modes, permission profiles, inline tables, `bypass_hook_trust`, the `dangerously_allow_*` keys). Workspace: `-C`/`--cd`, `--worktree` (Untether sets the working directory from the project). Managed: `-a`/`--ask-for-approval`, `--ignore-rules`, `--ignore-user-config`, `--json`, `--color`, `--skip-git-repo-check`, `--output-schema`, `-o`/`--output-last-message`. A bare `--` |
+| Codex | Bypass: `--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--approve-for-me`/`--not-so-yolo`, `--dangerously-bypass-hook-trust`, `-s`/`--sandbox danger-full-access`, and any `-c`/`--config` value mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously` (sandbox modes, permission profiles, inline tables, `bypass_hook_trust`, the `dangerously_allow_*` keys). Workspace: `-C`/`--cd`, `--worktree` (Untether sets the working directory from the project), `--trust` (saves project trust, including MCP commands outside the sandbox, for every future Codex chat; set `[projects."<path>"] trust_level` in `~/.codex/config.toml` yourself if you want it, [#1040](https://github.com/littlebearapps/untether/issues/1040)). Managed: `-a`/`--ask-for-approval`, `--ignore-rules`, `--ignore-user-config`, `--json`, `--color`, `--skip-git-repo-check`, `--output-schema`, `-o`/`--output-last-message`. A bare `--` |
 
-Still allowed, and documented: Codex `-s read-only|workspace-write` (the way to pick a full-auto sandbox; the **safe** approval policy's exec-level `--sandbox read-only` outranks it), `-c sandbox_mode="workspace-write"`, `-c approval_policy=…` (`codex exec` forces `never` anyway), `-c shell_environment_policy.*`, `-c sandbox_workspace_write.*` (except `dangerously_*` keys), `--add-dir`, `--enable`/`--disable`, `--profile`, `--model`, `--oss`, `--cyber-access-program`; Claude `--add-dir`, `--mcp-config`, `--settings`, `--setting-sources`, `--plugin-dir`, `--chrome`, `--autocompact`, `--include-hook-events` and other upstream flags.
+Still allowed, and documented: Codex `-s read-only|workspace-write` (the way to pick a full-auto sandbox; the **safe** approval policy's exec-level `--sandbox read-only` outranks it), `-c sandbox_mode="workspace-write"`, `-c approval_policy=…` (`codex exec` forces `never` anyway), `-c shell_environment_policy.*`, `-c sandbox_workspace_write.*` (except `dangerously_*` keys), `--add-dir`, `--enable`/`--disable`, `--profile`, `--model`, `--oss`, `--cyber-access-program` (asks for a server-authorised access programme; it grants nothing by itself and changes no sandbox or approval setting, and Untether never sets it); Claude `--add-dir`, `--mcp-config`, `--settings`, `--setting-sources`, `--plugin-dir`, `--chrome`, `--autocompact`, `--include-hook-events` and other upstream flags.
 
 **What happens when a config carries a refused flag:**
 
@@ -171,7 +186,7 @@ Antigravity (`agy`) runs headless and can't ask for approval by itself, so its m
 - **What Untether writes on the host.** The agent is one file, `~/.gemini/config/agents/untether-workspace/agent.md`, in agy's user-level custom-agent folder ([#1037](https://github.com/littlebearapps/untether/issues/1037)). It is inert unless selected: your own interactive `agy` isn't affected unless you pick that agent. Untether rewrites it whenever it differs from the expected text, so edits are overwritten. If the file can't be written, or the path is a symlink, the run goes ahead without `--agent` (agy's default agent under `--mode=accept-edits`, where a shell command is blocked rather than absent) and logs WARNING `antigravity.workspace_agent.unavailable`. The agent only narrows Workspace, never widens it.
 - **The bypass flag has one source.** One function (`decide_antigravity_mode`) decides whether a run gets `--dangerously-skip-permissions`: only for Full access, or for Ask me with its gate ready. Every other path — a direct call, an unknown mode, a refused Ask me — runs without it.
 - **Full access is always explicit.** It passes agy's `--dangerously-skip-permissions`: every tool is approved, including shell, network and files outside the project. It comes only from `/config`, `[antigravity] permission_mode = "full"` (logged once as `antigravity.full_access_from_toml`), or a cron's own `permission_mode = "full"`. It never passes `--agent`. agy keeps a conversation on the agent it started with, so a conversation that began in Workspace keeps its no-shell tools after a switch to Full access until you send `/new`.
-- **Scheduled runs never inherit it.** A cron or webhook run whose Full access would come from the chat or `untether.toml` runs as Workspace instead; webhooks never get Full access.
+- **Scheduled runs never inherit it.** A cron or webhook run whose Full access would come from the chat or `untether.toml` runs as Workspace instead; a webhook gets Full access only from its own `permission_mode = "full"` with `allow_unsafe_permission_mode = true`.
 - **Workspace is not a sandbox.** It doesn't stop a run writing files that something else executes later, and it doesn't stop agy's own hooks, plugins, custom agents or project MCP servers, which agy runs in every mode. Untether shows a ⚠️ row the first time a project carries such config and whenever a run changes it, and holds cron and webhook runs after a change until someone sends a message in that chat, or, when it can't check, until a check succeeds. That message runs with the changed config and shows the ⚠️ row; there is no preview, so read the files first if the change is unexpected. An `/at` or `/loop` re-fire doesn't count as someone looking. It also flags changes a run makes to files other engines act on, such as `.claude/`, `.mcp.json`, `.envrc`, `.github/workflows/`, `.git/hooks/` and `.git/config`. Where it can't be sure it reads a config file the way agy would (an agent file with unusual YAML, a command built from a variable), it reports "couldn't check" and holds scheduled runs instead of calling the project clean. Treat this as a tripwire with [known limits](../reference/runners/antigravity/runner.md#agy-hooks-plugins-and-mcp-servers): it notices changes, it can't prevent them. Run Antigravity only in projects you trust, and use an OS-level sandbox or container if you need isolation.
 - **agy's own settings are checked.** If agy's settings would approve tools by themselves (`toolPermission` other than `request-review` or `strict`), Untether refuses to run Workspace. Allow rules and `allowNonWorkspaceAccess` are shown as ⚠️ rows.
 - **An unconfirmed setting stops the run.** Untether reads that setting twice: from `agy -p /config` before the run and from agy's first event. If one of the two is missing, a run someone started from the chat goes ahead with a ⚠️ row; if both are missing, the Workspace run is stopped. A cron or webhook run is held as soon as the check before the run gives no value, since nobody would see the row ([#1044](https://github.com/littlebearapps/untether/issues/1044)).
@@ -283,7 +298,24 @@ Available authentication modes:
 !!! warning "Never use `auth = \"none\"` in production"
     Without authentication, anyone who can reach the webhook endpoint can trigger arbitrary agent runs on your server.
 
-Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning; a future release will refuse it. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+Use a long random secret (for example `openssl rand -hex 32`). A `bearer` or HMAC secret shorter than 32 characters logs a `triggers.webhook.short_secret` warning, and the webhook is skipped with `[triggers] webhook_defaults = "strict"`. Untether keeps the secret out of its logs and error messages, including when the webhook's entry fails validation. If a reload of `[triggers]` fails while you're rotating a leaked secret, the old secret keeps working, and the Telegram notice says which webhooks are affected ([#1117](https://github.com/littlebearapps/untether/issues/1117)).
+
+Set `[triggers] webhook_defaults = "strict"` ([#1118](https://github.com/littlebearapps/untether/issues/1118), the default from 0.37.0): an `agent_run` webhook then needs a `project`, runs in a mode that asks (Claude `default`, Codex `safe`, Antigravity Workspace) unless it sets its own `permission_mode`, and pre-approves no Claude tools unless it lists its own `allowed_tools`. A mode that skips approvals (Claude `bypassPermissions`, Antigravity `full`, Codex `auto`) needs `allow_unsafe_permission_mode = true` on the webhook. See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
+
+### Securing webhooks
+
+- **Bind to loopback** (the default `127.0.0.1`) and put a reverse proxy or tunnel in
+  front if the sender is remote (see below).
+- **Prefer `hmac-sha256` over `bearer`**: the signature covers the body, so a
+  replayed or edited payload fails, and the secret itself never travels.
+- **Keep the secret out of `untether.toml`**: `secret_file = "~/.config/untether/gh.secret"`
+  (owner-only, `chmod 600`) or `secret_env = "GH_WEBHOOK_SECRET"`
+  ([#1219](https://github.com/littlebearapps/untether/issues/1219)). Codex and OpenCode inherit Untether's whole
+  environment, so prefer `secret_file` where they run.
+- **Send ids, not content**: let the payload carry ids (a commit SHA, an issue
+  number) and have the agent fetch the rest, so the prompt holds as little
+  attacker-controlled text as possible.
+- **Use strict defaults**: `[triggers] webhook_defaults = "strict"` (see above).
 
 ## Bind webhook server to localhost
 

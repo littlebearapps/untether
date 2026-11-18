@@ -538,3 +538,22 @@ async def test_step_default_engine_no_installed(tmp_path: Path) -> None:
         await onboarding.step_default_engine(
             cast(onboarding.UI, ui), cast(onboarding.Services, svc), state
         )
+
+
+def test_1219_backup_copy_is_private(tmp_path: Path) -> None:
+    import os
+
+    src = tmp_path / "untether.toml"
+    src.write_text("x = 1\n", encoding="utf-8")
+    fresh, stale = tmp_path / "fresh.bak", tmp_path / "stale.bak"
+    stale.write_text("old\n", encoding="utf-8")
+    stale.chmod(0o644)
+    old_umask = os.umask(0o002)
+    try:
+        onboarding._copy_private(src, fresh)
+        onboarding._copy_private(src, stale)
+    finally:
+        os.umask(old_umask)
+    for backup in (fresh, stale):
+        assert backup.stat().st_mode & 0o777 == 0o600
+        assert backup.read_text(encoding="utf-8") == "x = 1\n"
