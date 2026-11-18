@@ -2357,6 +2357,8 @@ class RunningTask:
     # #1159: the run's engine, known before its session is — the drain-timeout
     # notice names it ("starting /codex"), never a hardcoded /claude.
     engine: str | None = None
+    # #1176: the run's final has been handed to the transport.
+    final_sent: bool = False
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -5995,6 +5997,15 @@ def running_task_shows_progress(task: Any, ref: MessageRef) -> bool:
     return not shows_final
 
 
+def running_task_is_delivered_teardown(task: Any) -> bool:
+    """#1176: a run (not a live session) whose final is out while its process
+    is still being torn down — nothing the user can see is running."""
+    if not getattr(task, "final_sent", False):
+        return False
+    stream = getattr(getattr(task, "edits", None), "stream", None)
+    return not getattr(getattr(stream, "engine_state", None), "live_mode", False)
+
+
 def running_task_is_idle_after_result(task: Any) -> bool:
     """#895: a live session that has answered and has nothing left in flight
     — between turns, no background task holding it open (#801) and no queued
@@ -8144,6 +8155,8 @@ async def handle_message(
         # multi-chunk final cut short part-way queues its remaining chunks
         # in the transport, so it is neither duplicated nor left partial.
         delivery["sent"] = True
+        if running_task is not None:
+            running_task.final_sent = True
         try:
             final_ref = await send_result_message(
                 cfg,
