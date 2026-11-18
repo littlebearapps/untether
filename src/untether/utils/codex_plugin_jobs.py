@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from .subprocess import _pid_alive
@@ -83,7 +83,25 @@ def session_plugin_jobs(
     """Ids of this session's queued/running Codex plugin jobs whose process is
     alive. Matched by ``sessionId`` across every workspace dir, so the
     plugin's workspace hash never has to be reproduced."""
-    found: list[str] = []
+    return [job["id"] for job in _session_jobs(session_id, roots)]
+
+
+def session_plugin_job_labels(
+    session_id: str, roots: Iterable[Path] | None = None
+) -> list[str]:
+    """``"<title> <id>"`` for each job ``session_plugin_jobs`` finds, as
+    ``/codex:status`` names it, for the close notice (#1186 step 3). Never
+    the prompt ``summary`` (user content)."""
+    labels = []
+    for job in _session_jobs(session_id, roots):
+        title = job.get("title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 40:
+            title = "Codex job"
+        labels.append(f"{title} {job['id']}")
+    return labels
+
+
+def _session_jobs(session_id: str, roots: Iterable[Path] | None) -> Iterator[dict]:
     for root in default_state_roots() if roots is None else roots:
         if not _owned_dir(root):
             continue
@@ -107,5 +125,4 @@ def session_plugin_jobs(
                     and pid > 0
                     and _pid_alive(pid)
                 ):
-                    found.append(job_id)
-    return found
+                    yield job

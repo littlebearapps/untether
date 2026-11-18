@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from untether.utils.codex_plugin_jobs import default_state_roots, session_plugin_jobs
+from untether.utils.codex_plugin_jobs import (
+    default_state_roots,
+    session_plugin_job_labels,
+    session_plugin_jobs,
+)
 
 SID = "sess-1186"
 
@@ -105,6 +109,49 @@ def test_never_writes_the_plugin_state(tmp_path: Path) -> None:
     session_plugin_jobs(SID, [tmp_path])
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert sorted(p.name for p in path.parent.iterdir()) == ["jobs", "state.json"]
+
+
+def test_job_labels_title_and_id(tmp_path: Path) -> None:
+    """#1186 step 3: the close notice names each job as ``<title> <id>`` (what
+    ``/codex:status`` prints); an unusable title falls back to "Codex job".
+    The prompt ``summary`` is user content and never appears."""
+    write_state(
+        tmp_path,
+        [
+            job("task-a") | {"summary": "SECRET PROMPT"},
+            job("task-b") | {"title": "Codex Review"},
+            {k: v for k, v in job("task-c").items() if k != "title"},
+            job("task-d") | {"title": "   "},
+            job("task-e") | {"title": 7},
+            job("task-f") | {"title": "x" * 41},
+            job("task-x", session="sess-other"),
+        ],
+        workspace="project",
+    )
+    labels = session_plugin_job_labels(SID, [tmp_path])
+    assert labels == [
+        "Codex task task-a",
+        "Codex Review task-b",
+        "Codex job task-c",
+        "Codex job task-d",
+        "Codex job task-e",
+        "Codex job task-f",
+    ]
+    assert not any("SECRET" in label for label in labels)
+    # The hold's id list is unchanged.
+    assert session_plugin_jobs(SID, [tmp_path]) == [
+        "task-a",
+        "task-b",
+        "task-c",
+        "task-d",
+        "task-e",
+        "task-f",
+    ]
+
+
+def test_job_labels_fail_open(tmp_path: Path) -> None:
+    assert session_plugin_job_labels(SID, [tmp_path / "absent"]) == []
+    assert session_plugin_job_labels(SID, ()) == []
 
 
 def test_default_root_is_the_plugin_data_dir_only() -> None:

@@ -126,7 +126,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import _resolve_config_path, load_settings_if_exists
 from ..utils import engine_argv
-from ..utils.codex_plugin_jobs import session_plugin_jobs
+from ..utils.codex_plugin_jobs import session_plugin_job_labels, session_plugin_jobs
 from ..utils.env_audit import audit_proc_env
 from ..utils.env_policy import apply_run_env
 from ..utils.json_state import atomic_write_json
@@ -589,6 +589,8 @@ class LiveSession:
     # gap between the CLI going idle and the budget check.
     accounting_armed: bool = False
     accounted_turns: int = 0
+    # #1186: the runner's Codex plugin state roots (None = the plugin's).
+    codex_plugin_roots: tuple[Path, ...] | None = None
     listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
 
     @property
@@ -775,6 +777,14 @@ async def close_live_session(
         shells = await _hook_processes(live.state, live.pid)
         if live.idle and shells is not None and not shells:
             release_settled_async_hooks(live.state)
+    codex_jobs: list[str] = []
+    if not live.closing:
+        # #1186 step 3: the plugin's SessionEnd hook kills these jobs and
+        # deletes their records, so this notice is the only trace (fails open).
+        with contextlib.suppress(Exception):
+            codex_jobs = await anyio.to_thread.run_sync(
+                session_plugin_job_labels, session_id, live.codex_plugin_roots
+            )
     async with live.lock:
         if live.closing:
             return False
@@ -813,6 +823,8 @@ async def close_live_session(
         turn_idle=live.closed_turn_idle,
         # #829: how long the background work had been quiet at the close.
         last_progress_age_s=_last_progress_age_s(live.state),
+        # #1186: only when a job was stopped (keeps other closes' lines as-is).
+        **({"codex_jobs": len(codex_jobs)} if codex_jobs else {}),
     )
     hooks = _hook_event_labels(live.close_hooks)
     if hooks:
@@ -828,8 +840,11 @@ async def close_live_session(
     # #812: an automatic close over a background hook tells the user its
     # feedback was lost (a user-initiated close already has its own notice).
     hook_notice = bool(hooks) and reason not in _USER_CLOSE_REASONS
-    if notice or hook_notice:
+    # #1186 step 3: a stopped Codex plugin job is announced on every close.
+    if notice or hook_notice or codex_jobs:
         payload: dict[str, Any] = {"reason": reason, "tasks": tasks}
+        if codex_jobs:
+            payload["codex_jobs"] = codex_jobs
         if reason == "max_hold":
             # #829: the notice says how long nothing progressed (or, with the
             # re-arm switched off, that the hold limit was reached).
@@ -10451,6 +10466,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             stdin=session_stdin,
                             pid=pid,
                             accounting_armed=_turn_accounting_wanted(),
+                            codex_plugin_roots=self._codex_plugin_state_roots,
                         )
                         # #812: MCP servers are up by system/init. Always
                         # captured: the close-grace check uses it even with

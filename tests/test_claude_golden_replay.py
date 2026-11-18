@@ -849,6 +849,8 @@ class _Replay:
         # Python 3.14 under coverage) a 2 s grace expired between them, so
         # the runner SIGINTed the puppet and the next emit hit a broken pipe.
         runner._live_close_grace_s = CLOSE_GRACE_S
+        # #1186: never read the host's Codex plugin job state.
+        runner._codex_plugin_state_roots = ()
         self.runner = runner
 
     # -- waiting -------------------------------------------------------------

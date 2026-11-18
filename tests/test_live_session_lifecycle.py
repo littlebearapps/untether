@@ -81,6 +81,8 @@ _TIMINGS = {
     "_hold_rearm_log_every_s": 0.0,
     # #872: the grace after a declared wait's deadline.
     "_declared_wait_grace_s": 0.2,
+    # #1186: never read the host's Codex plugin state.
+    "_codex_plugin_state_roots": (),
 }
 
 
@@ -341,6 +343,69 @@ async def test_1186_codex_plugin_job_holds_the_idle_close(
     else:
         assert holds == []
         assert "at" not in released
+
+
+async def _close_after_first_result(
+    tmp_path: Path, reason: str, notice: bool
+) -> tuple[ClaudeRunner, list[tuple[str, dict]], list[dict]]:
+    """#1186 step 3: subscribe at the first result, then close the session
+    the way ``reason``'s caller does, with the plugin state at ``tmp_path``."""
+    from structlog.testing import capture_logs
+
+    notices: list[tuple[str, dict]] = []
+
+    async def close_it(evt: Any) -> None:
+        if isinstance(evt, CompletedEvent):
+            add_live_session_listener(SID, lambda kind, p: notices.append((kind, p)))
+            await close_live_session(SID, reason, notice=notice)
+
+    with capture_logs() as logs:
+        runner, _ = await _run(
+            "followup",
+            on_event=close_it,
+            timings={"_codex_plugin_state_roots": (tmp_path,)},
+        )
+    return runner, notices, logs
+
+
+@pytest.mark.parametrize(("reason", "notice"), [("cancel", True), ("loop_fire", False)])
+async def test_1186_close_names_running_codex_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reason: str, notice: bool
+) -> None:
+    """#1186 step 3: a close that stops a running Codex plugin job — with or
+    without its own notice — sends one ``"closing"`` payload naming it (the
+    plugin's SessionEnd deletes the job record, so nothing else can)."""
+    from tests.test_codex_plugin_jobs import job, write_state
+
+    _settings(monkeypatch)
+    write_state(tmp_path, [job("task-live", session=SID)], workspace="project")
+    runner, notices, logs = await _close_after_first_result(tmp_path, reason, notice)
+    assert _engine_state(runner).live_close_reason == reason
+    closing = [p for kind, p in notices if kind == "closing"]
+    assert len(closing) == 1
+    assert closing[0]["codex_jobs"] == ["Codex task task-live"]
+    assert closing[0]["tasks"] == []
+    (closed,) = _events(logs, "claude.live_session.stdin_closed")
+    assert closed["codex_jobs"] == 1
+    assert closed["reason"] == reason
+
+
+async def test_1186_close_without_codex_job_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1186 step 3: no job → today's behaviour: a ``loop_fire`` close sends
+    no notice and the log line has no ``codex_jobs`` key."""
+    from tests.test_codex_plugin_jobs import job, write_state
+
+    _settings(monkeypatch)
+    write_state(tmp_path, [job("task-other", session="sess-other")], workspace="p")
+    runner, notices, logs = await _close_after_first_result(
+        tmp_path, "loop_fire", False
+    )
+    assert _engine_state(runner).live_close_reason == "loop_fire"
+    assert [kind for kind, _ in notices if kind == "closing"] == []
+    (closed,) = _events(logs, "claude.live_session.stdin_closed")
+    assert "codex_jobs" not in closed
 
 
 async def test_idle_close_overrunning_grace_logs_diag_sigterms_no_quarantine(
