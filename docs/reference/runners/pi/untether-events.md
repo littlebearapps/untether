@@ -120,13 +120,15 @@ Mapping:
   - `resume = ResumeToken(engine="pi", value=session_token)`.
   - `usage = last assistant usage`.
 
-### 4.5 `auto_compaction_start` / `auto_compaction_end`
+### 4.5 `compaction_start` / `compaction_end`
 
 When Pi compacts its context window to free tokens, it emits these events.
+Pi < 0.66.1 named them `auto_compaction_start` / `auto_compaction_end`; both
+names decode to the same handling (#1239).
 
-`auto_compaction_start` example:
+`compaction_start` example (`reason` is `manual`, `threshold` or `overflow`):
 ```json
-{"type":"auto_compaction_start","reason":"context_limit"}
+{"type":"compaction_start","reason":"threshold"}
 ```
 
 Mapping:
@@ -134,15 +136,16 @@ Mapping:
 - `action.title = "compacting context… (reason)"`.
 - Sequential action ids: `compaction_1`, `compaction_2`, etc.
 
-`auto_compaction_end` example:
+`compaction_end` example:
 ```json
-{"type":"auto_compaction_end","result":{"tokensBefore":42000},"aborted":false}
+{"type":"compaction_end","reason":"threshold","result":{"tokensBefore":42000},"aborted":false,"willRetry":false}
 ```
 
 Mapping:
-- Emit `action` with `phase="completed"`, `ok = !aborted`, reusing the start action id.
+- Emit `action` with `phase="completed"`, `ok = !(aborted or errorMessage)`, reusing the start action id.
 - `action.title = "context compacted (42,000 tokens)"` from `result.tokensBefore` (formatted with commas); `"context compacted"` when it is absent.
 - If `aborted=true`, title is `"context compaction aborted"`.
+- If `errorMessage` is set (a failed compaction: no `result`, `aborted=false`), title is `"context compaction failed"`.
 
 ### 4.6 `auto_retry_start` / `auto_retry_end`
 
