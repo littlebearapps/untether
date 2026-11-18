@@ -11,6 +11,17 @@ for plan mode, #965). This page gains the transport, permission modes and the na
 |---|---|
 | Tested against | codex-cli **0.170.0** (exec drift suite green on 2026-11-18, [#1254](https://github.com/littlebearapps/untether/issues/1254); exec flag snapshot `PROBED_CLI_VERSION` in `tests/test_codex_cli_schema_drift.py`; app-server schema `PROBED_APP_SERVER_VERSION` in `src/untether/schemas/codex_app_server.py`) |
 
+## Project trust ([#1240](https://github.com/littlebearapps/untether/issues/1240))
+
+codex-cli 0.169.0+ disables an untrusted project's `.codex/` layer (config, MCP servers, hooks, rules). Exec reports
+it on **stderr only**, before the JSON stream (`warning: Untrusted project-local configuration is disabled…`, checked
+on 0.170.0, 2026-11-18). `CodexRunner.on_stderr_line` matches that prefix, logs `codex.project_config_untrusted` once
+and emits one `⚠️` warning row right after `StartedEvent` (or before the final event if stderr arrives late). Native
+signal surfaced as-is; Untether never grants trust (no `--trust`, refused in `extra_args` by #1040). App-server:
+re-check with #962 (`config/read` layers carry `disabled_reason`). Docs:
+[project config](https://developers.openai.com/codex/config-advanced),
+[`projects.<path>.trust_level`](https://developers.openai.com/codex/config-reference).
+
 ## App-server drift probe and support gate ([#961](https://github.com/littlebearapps/untether/issues/961))
 
 Codex can print its own protocol for the installed version at no token cost:

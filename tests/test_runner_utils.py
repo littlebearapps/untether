@@ -762,18 +762,20 @@ async def test_base_run_impl_passes_hook_when_overridden(
     assert seen == ["hello stderr"]
 
 
-def test_only_antigravity_overrides_the_stderr_hook() -> None:
-    """Codex, OpenCode, Pi (and the deprecated engines) keep the base no-op,
-    so their stderr drain is unchanged (#558 phase 03, REVIEW M2)."""
+def test_only_antigravity_and_codex_override_the_stderr_hook() -> None:
+    """OpenCode, Pi (and the deprecated engines) keep the base no-op, so their
+    stderr drain is unchanged (#558 phase 03, REVIEW M2). Codex reads its
+    untrusted-project warning there (#1240)."""
     from untether.runners.antigravity import AntigravityRunner
     from untether.runners.codex import CodexRunner
     from untether.runners.opencode import OpenCodeRunner
     from untether.runners.pi import PiRunner
 
     base = JsonlSubprocessRunner.on_stderr_line
-    for cls in (CodexRunner, OpenCodeRunner, PiRunner):
+    for cls in (OpenCodeRunner, PiRunner):
         assert cls.on_stderr_line is base, cls
     assert AntigravityRunner.on_stderr_line is not base
+    assert CodexRunner.on_stderr_line is not base
 
 
 @pytest.mark.anyio

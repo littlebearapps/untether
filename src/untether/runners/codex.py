@@ -25,7 +25,7 @@ from ..runner import (
 )
 from ..schemas import codex as codex_schema
 from ..utils import engine_argv
-from ..utils.paths import relativize_command, relativize_path
+from ..utils.paths import get_run_base_dir, relativize_command, relativize_path
 from .extra_args_guard import (
     SECURITY_DOC_REF,
     BlockedArg,
@@ -773,6 +773,19 @@ def _warning_display_text(message: str) -> str:
     return _WARNING_PATH_RE.sub(_replace, text)
 
 
+# #1240: codex-cli >= 0.169.0 prints this on stderr only, before the JSON
+# stream, when an untrusted project has a .codex/ folder. Match the stable
+# prefix; the rest of the sentence changes between versions.
+_UNTRUSTED_PROJECT_PREFIX = "warning: Untrusted project-local configuration is disabled"
+_UNTRUSTED_PROJECT_NOTE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex skipped this project's"
+    " `.codex/` settings (MCP servers, hooks, rules) because the project isn't"
+    " trusted. Untether doesn't trust projects for you: add"
+    ' `[projects."<repo root>"] trust_level = "trusted"` to'
+    " `~/.codex/config.toml`."
+)
+
+
 def translate_codex_event(
     event: codex_schema.ThreadEvent,
     *,
@@ -811,6 +824,9 @@ class CodexRunState:
     # The argv build_args produced for this run (the prompt goes via stdin),
     # kept for the #830 `codex.argv.rejected` diagnostic.
     argv: list[str] | None = None
+    # #1240: Codex said on stderr that it disabled the project's .codex/ layer.
+    untrusted_project_config: bool = False
+    untrusted_note_sent: bool = False
 
 
 class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
@@ -910,6 +926,30 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
 
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        # #1240: Untether never grants trust (no `--trust`); it only reports it.
+        if state.untrusted_project_config or not line.startswith(
+            _UNTRUSTED_PROJECT_PREFIX
+        ):
+            return
+        state.untrusted_project_config = True
+        logger.info("codex.project_config_untrusted", cwd=str(get_run_base_dir()))
+
+    def _untrusted_note(self, state: CodexRunState) -> list[UntetherEvent]:
+        """The #1240 ⚠️ row, at most once per run."""
+        if not state.untrusted_project_config or state.untrusted_note_sent:
+            return []
+        state.untrusted_note_sent = True
+        return [
+            state.factory.action_completed(
+                action_id="codex.untrusted_project",
+                kind="warning",
+                title=_UNTRUSTED_PROJECT_NOTE,
+                ok=True,
+                level="warning",
+            )
+        ]
+
     def start_run(
         self,
         prompt: str,
@@ -977,11 +1017,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case codex_schema.TurnFailed(error=error):
                 resume_for_completed = found_session or resume
                 return [
+                    *self._untrusted_note(state),
                     factory.completed_error(
                         error=error.message,
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
-                    )
+                    ),
                 ]
             case codex_schema.TurnStarted():
                 action_id = f"turn_{state.turn_index}"
@@ -998,11 +1039,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case codex_schema.TurnCompleted(usage=usage):
                 resume_for_completed = found_session or resume
                 return [
+                    *self._untrusted_note(state),
                     factory.completed_ok(
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
                         usage=msgspec.to_builtins(usage),
-                    )
+                    ),
                 ]
             case codex_schema.ItemCompleted(
                 item=codex_schema.AgentMessageItem(text=text, phase=message_phase)
@@ -1043,12 +1085,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 meta = {}
             meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
 
-        return translate_codex_event(
+        events = translate_codex_event(
             data,
             title=self.session_title,
             factory=factory,
             meta=meta,
         )
+        if isinstance(data, codex_schema.ThreadStarted):
+            # #1240: the row goes right after StartedEvent (3-event contract).
+            events.extend(self._untrusted_note(state))
+        return events
 
     def process_error_events(
         self,
