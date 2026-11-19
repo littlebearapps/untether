@@ -685,6 +685,17 @@ def live_session_loop_closeable(session_id: str) -> bool:
     )
 
 
+async def close_idle_live_sessions_for_continue(cwd: Path | None) -> int:
+    """#1275: close the clean-idle live sessions spawned in *cwd* (reason
+    ``continue``), since a ``/continue`` there resumes one of them. Returns
+    how many were closed."""
+    closed = 0
+    for sid, live in list(_LIVE_SESSIONS.items()):
+        if live.state.spawn_cwd == cwd and live_session_loop_closeable(sid):
+            closed += await close_live_session(sid, "continue", only_if_idle=True)
+    return closed
+
+
 CONTINUE_BUSY_TEXT = (
     "⏳ A Claude run is still active in this project. Let it finish (or"
     " /cancel it), then send /continue again."
@@ -721,9 +732,8 @@ async def _release_live_sessions_for_continue(
         if not logged:
             logged = True
             logger.info("claude.live_session.continue_wait", sessions=len(owners))
-        for sid, _live in owners:
-            # A follow-up landing first makes it busy: refused next pass.
-            await close_live_session(sid, "continue", only_if_idle=True)
+        # A follow-up landing first makes it busy: refused next pass.
+        await close_idle_live_sessions_for_continue(cwd)
         await anyio.sleep(poll_s)
     return []
 

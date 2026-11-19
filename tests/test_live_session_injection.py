@@ -1530,3 +1530,56 @@ async def test_inject_live_followup_logs_use_engine_namespace(
     assert [(sid, text) for sid, text, _ in injected] == [("sid-inj", "again")] * 2
     assert injected[-1][2] == {"command_uuid": command_uuid}
     assert closes == []
+
+
+# ── #1275: a queued /continue doesn't wait for the idle timer ───────────────
+
+
+async def test_1275_queued_continue_closes_the_idle_live_session_at_once(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live QA: a /continue sent during a live /continue run's turn queues
+    behind it (every /continue shares one scheduler key). Once that turn
+    ends, the queued /continue closes the clean-idle session (``continue``)
+    instead of waiting ~60 s for its idle close, then runs."""
+    continue_token = ResumeToken(engine="claude", value="", is_continue=True)
+    live, _pipe = _install("sid-inj", idle=False)  # A: a turn in progress
+    session_closed = anyio.Event()
+    closes: list[tuple[str, str]] = []
+
+    async def close(sid: str, reason: str, **_: Any) -> bool:
+        closes.append((sid, reason))
+        claude_mod._LIVE_SESSIONS.pop(sid, None)  # A's process exits
+        session_closed.set()
+        return True
+
+    monkeypatch.setattr(claude_mod, "close_live_session", close)
+    ran: list[str] = []
+
+    async def run_job(job: ThreadJob) -> None:
+        ran.append(job.text)
+        if job.text == "first":
+            await session_closed.wait()  # A's live run lasts until it closes
+
+    def job(text: str, msg_id: int) -> ThreadJob:
+        return ThreadJob(
+            chat_id=123, user_msg_id=msg_id, text=text, resume_token=continue_token
+        )
+
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(
+            task_group=tg,
+            run_job=run_job,
+            inject_job=functools.partial(inject_live_followup, cwd_for=_cwd(None)),
+        )
+        sched._live_pump_interval_s = 0.01
+        await sched.enqueue(job("first", 10))
+        await anyio.sleep(0.05)
+        await sched.enqueue(job("hi", 11))
+        await anyio.sleep(0.1)
+        assert ran == ["first"] and closes == []  # busy: queued, not closed
+        live.state.turn_open = False  # the turn ends: clean idle
+        with anyio.fail_after(2):
+            while ran != ["first", "hi"]:
+                await anyio.sleep(0.01)
+    assert closes == [("sid-inj", "continue")]
