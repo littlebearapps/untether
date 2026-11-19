@@ -38,7 +38,9 @@ Untether appends a **single backticked** resume line at the end of the message, 
 Notes:
 
 * `pi --resume/-r` opens an interactive session picker, so Untether uses `--session <token>` instead.
-* The resume token is the **session id** (short prefix), derived from the session
+* The resume token is the **full session id** ([#1264](https://github.com/littlebearapps/untether/issues/1264): Pi's ids are UUIDv7, so the 8-hex prefix older Untether
+  versions saved was shared by every session started within about 65 s; those short tokens still resume, through
+  Pi's own prefix lookup), derived from the session
   header line (`{"type":"session", ...}`) emitted to stdout in `--mode json`.
   This requires **pi-coding-agent >= 0.45.1**.
 * If the path contains spaces, the runner will quote it.

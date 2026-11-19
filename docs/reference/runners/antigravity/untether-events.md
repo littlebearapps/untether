@@ -106,9 +106,9 @@ subagent row never does.
 | agy tool | Shown as |
 |---|---|
 | `run_command` | `bash` (the command line is the title) |
-| `view_file` | `read` |
-| `write_to_file` | `write` |
-| `replace_file_content`, `multi_replace_file_content`, `sed_file` | `edit` |
+| `view_file`, `read_file` (1.5.x) | `read` |
+| `write_to_file`, `write_file` (1.5.x) | `write` |
+| `replace_file_content`, `multi_replace_file_content`, `sed_file`, `edit_file` (1.5.x) | `edit` |
 | `list_dir` | `ls` |
 | `find_by_name` | `glob` |
 | `grep_search` | `grep` |
