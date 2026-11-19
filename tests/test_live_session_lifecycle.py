@@ -2500,3 +2500,39 @@ async def test_1275_continue_ignores_live_sessions_in_other_dirs(
     finally:
         claude_mod._LIVE_SESSIONS.pop("other", None)
     assert closed == []
+
+
+async def test_1275_continue_refuses_fast_behind_a_busy_live_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live session in the /continue's directory with a turn in progress
+    isn't waited out (that could take hours): the /continue refuses at once
+    with a notice, spawns nothing and closes nothing."""
+    from untether.model import ResumeToken
+    from untether.runner import PRESPAWN_BLOCKED_KEY
+
+    state = ClaudeStreamState()  # no completed turn yet: busy, not idle
+    state.spawn_cwd = None  # the run's base dir in tests
+    claude_mod._LIVE_SESSIONS["busy"] = LiveSession(
+        session_id="busy", state=state, stdin=None
+    )
+    closed: list[str] = []
+
+    async def fake_close(sid: str, reason: str, **_: Any) -> bool:
+        closed.append(sid)
+        return True
+
+    monkeypatch.setattr(claude_mod, "close_live_session", fake_close)
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    token = ResumeToken(engine="claude", value="", is_continue=True)
+    try:
+        with anyio.fail_after(3):
+            events = [evt async for evt in runner.run("again", token)]
+    finally:
+        claude_mod._LIVE_SESSIONS.pop("busy", None)
+    assert len(events) == 1 and isinstance(events[0], CompletedEvent)
+    assert events[0].ok is False
+    assert events[0].error == claude_mod.CONTINUE_BUSY_TEXT
+    assert events[0].usage == {PRESPAWN_BLOCKED_KEY: "continue_busy"}
+    assert runner.current_stream is None  # nothing spawned
+    assert closed == []

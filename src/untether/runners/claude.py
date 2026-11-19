@@ -112,6 +112,7 @@ from ..model import (
     UntetherEvent,
 )
 from ..runner import (
+    PRESPAWN_BLOCKED_KEY,
     JsonlStreamState,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
@@ -655,29 +656,47 @@ def live_session_loop_closeable(session_id: str) -> bool:
     )
 
 
+CONTINUE_BUSY_TEXT = (
+    "⏳ A Claude run is still active in this project. Let it finish (or"
+    " /cancel it), then send /continue again."
+)
+
+
 async def _release_live_sessions_for_continue(
     cwd: Path | None, *, poll_s: float = 0.25
-) -> None:
-    """#1275: wait until no live session spawned in *cwd* is left.
+) -> list[str]:
+    """#1275: clear the way for a ``/continue`` in *cwd*.
 
     ``claude --continue`` resumes the newest session in its directory, which
     is usually one a live process here still owns. A second process on that
     session would take over its registries before it could take the session
     lock (held by the live run), then block with nobody reading its output.
-    A clean-idle owner is closed now, like a due loop fire (#925); a busy one
-    is waited out until its own lifecycle closes it.
+    A clean-idle owner is closed now, like a due loop fire (#925), and waited
+    for until it has exited. A busy one (turn, background work, pending
+    approval) isn't waited out: its ids are returned and nothing spawns.
     """
     logged = False
     while owners := [
-        sid for sid, live in _LIVE_SESSIONS.items() if live.state.spawn_cwd == cwd
+        (sid, live)
+        for sid, live in _LIVE_SESSIONS.items()
+        if live.state.spawn_cwd == cwd
     ]:
+        busy = [
+            sid
+            for sid, live in owners
+            if not live.closing and not live_session_loop_closeable(sid)
+        ]
+        if busy:
+            logger.info("claude.live_session.continue_refused_busy", sessions=busy)
+            return busy
         if not logged:
             logged = True
             logger.info("claude.live_session.continue_wait", sessions=len(owners))
-        for sid in owners:
-            if live_session_loop_closeable(sid):
-                await close_live_session(sid, "continue", only_if_idle=True)
+        for sid, _live in owners:
+            # A follow-up landing first makes it busy: refused next pass.
+            await close_live_session(sid, "continue", only_if_idle=True)
         await anyio.sleep(poll_s)
+    return []
 
 
 def stop_live_session_input(session_id: str) -> bool:
@@ -12693,10 +12712,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # probe thread starts or a PTY opens; a block registers nothing.
         # Live follow-ups / steers inject into an existing process and never
         # reach run_impl, so they are never checked.
-        if resume is not None and resume.is_continue:
-            # #1275: first, so a closed idle session no longer counts toward
-            # the #838 ceiling either.
-            await _release_live_sessions_for_continue(get_run_base_dir())
+        # #1275: first, so a closed idle session no longer counts toward the
+        # #838 ceiling either. A busy one refuses before any spawn.
+        if (
+            resume is not None
+            and resume.is_continue
+            and await _release_live_sessions_for_continue(get_run_base_dir())
+        ):
+            yield EventFactory(self.engine).completed_error(
+                error=CONTINUE_BUSY_TEXT,
+                usage={PRESPAWN_BLOCKED_KEY: "continue_busy"},
+            )
+            return
         block_result = self._check_prespawn_ram_guard(resume)
         if block_result is not None:
             yield block_result
