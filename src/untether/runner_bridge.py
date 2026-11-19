@@ -50,7 +50,13 @@ from .model import (
 )
 from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
-from .progress import ProgressState, ProgressTracker, keyboard_action, keyboard_actions
+from .progress import (
+    ProgressState,
+    ProgressTracker,
+    close_open_actions,
+    keyboard_action,
+    keyboard_actions,
+)
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
@@ -8737,10 +8743,12 @@ async def handle_message(
             return
         # #890: a cancelled turn ends a run of capped repeats too.
         capped_wake_error.clear()
-        state = ctx.tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
+        state = close_open_actions(
+            ctx.tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
+            )
         )
         rendered = effective_presenter.render_progress(
             state,
@@ -9264,10 +9272,12 @@ async def handle_message(
                 session_id=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
-            state = progress_tracker.snapshot(
-                resume_formatter=runner.format_resume,
-                context_line=context_line,
-                meta_formatter=format_meta_line,
+            state = close_open_actions(
+                progress_tracker.snapshot(
+                    resume_formatter=runner.format_resume,
+                    context_line=context_line,
+                    meta_formatter=format_meta_line,
+                )
             )
             # #1061: an engine holding its answer for background work
             # (Antigravity) says where the answer went.
