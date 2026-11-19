@@ -6,7 +6,7 @@ so Untether's ``PreToolUse`` gate is the only thing that lets a tool run.
 This module is the policy half of that gate — pure, no I/O beyond resolving
 paths:
 
-- :func:`classify` — reads (``view_file``, ``list_dir`` …) and edits inside
+- :func:`classify` — reads (``read_file``, ``view_file``, ``list_dir`` …) and edits inside
   the project (or the conversation's own artifact folder) pass on Untether's
   safe list; everything else asks: shell, web, MCP, browser, subagents,
   timers, files outside the project (a nested checkout or an ``@branch``
@@ -59,7 +59,11 @@ from ..utils.paths import relativize_path
 # Read-only tools, matched by exact name. Every path they name must resolve
 # inside the project (or the conversation's artifact folder); a read
 # elsewhere asks.
-READ_TOOLS = frozenset({"view_file", "list_dir", "find_by_name", "grep_search"})
+# #1272: agy 1.5.x names its file tools ``read_file`` / ``write_file`` /
+# ``edit_file`` (path ``Path``); the 1.3.x names stay for older CLIs.
+READ_TOOLS = frozenset(
+    {"view_file", "list_dir", "find_by_name", "grep_search", "read_file"}
+)
 # Name no path and change nothing: status of a command agy already ran,
 # agy's own permission list, a pause, the end of the turn.
 NO_PATH_TOOLS = frozenset(
@@ -67,9 +71,15 @@ NO_PATH_TOOLS = frozenset(
 )
 # Path-checked: in the project (or the artifact folder) and not protected.
 EDIT_TOOLS = frozenset(
-    {"write_to_file", "replace_file_content", "multi_replace_file_content"}
+    {
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_file",
+        "edit_file",
+    }
 )
-_EDIT_PATH_KEYS = ("TargetFile", "AbsolutePath")
+_EDIT_PATH_KEYS = ("TargetFile", "AbsolutePath", "Path")
 # Argument keys that name a path (agy 1.3.x: ``TargetFile``, ``AbsolutePath``,
 # ``DirectoryPath``, ``SearchPath``, ``SearchDirectory``). Every one present
 # is checked, never only the first.
@@ -93,6 +103,14 @@ _RUN_COMMAND_KEYS = frozenset(
 _CHUNK_KEYS = frozenset(
     {"TargetContent", "ReplacementContent", "StartLine", "EndLine", "AllowMultiple"}
 )
+# agy 1.5.x ``edit_file``: one ``Target`` / ``Replacement`` pair, or a list
+# of them under ``Edits`` (field names from the 1.5.12 binary's schemas).
+_HUNK_KEYS = frozenset({"Target", "Replacement", "AllowMultiple"})
+# Argument lists of edit chunks, and the fields each chunk may carry.
+_CHUNK_LISTS: dict[str, frozenset[str]] = {
+    "ReplacementChunks": _CHUNK_KEYS,
+    "Edits": _HUNK_KEYS,
+}
 # Safe-listed tools may carry only these (anything else asks).
 _SAFE_KEYS: dict[str, frozenset[str]] = {
     "view_file": frozenset({"AbsolutePath", "StartLine", "EndLine"}),
@@ -157,6 +175,14 @@ _SAFE_KEYS: dict[str, frozenset[str]] = {
             "TargetLintErrorIds",
             "Complexity",
         }
+    ),
+    # agy 1.5.x (#1272).
+    "read_file": frozenset({"Path", "StartLine", "EndLine", "ByteOffset"}),
+    "write_file": frozenset(
+        {"Path", "Content", "Overwrite", "ArtifactMetadata", "Description"}
+    ),
+    "edit_file": frozenset(
+        {"Path", *_HUNK_KEYS, "Edits", "ArtifactMetadata", "Description"}
     ),
 }
 _KNOWN_KEYS: frozenset[str] = frozenset(
@@ -226,6 +252,8 @@ _LABELS: dict[str, str] = {
     "write_to_file": "write a file",
     "replace_file_content": "edit a file",
     "multi_replace_file_content": "edit a file",
+    "write_file": "write a file",
+    "edit_file": "edit a file",
     "sed_file": "edit a file (sed)",
     "notebook_edit": "edit a notebook",
 }
@@ -435,8 +463,10 @@ def normalise_args(args: Any) -> tuple[dict[str, Any] | None, str | None]:
             return None, f"{seen[fold]!r} and {key!r} name the same argument"
         seen[fold] = key
         out[_KNOWN_BY_FOLD.get(fold, key)] = value
-    chunks = out.get("ReplacementChunks")
-    if isinstance(chunks, list):
+    for list_key in _CHUNK_LISTS:
+        chunks = out.get(list_key)
+        if not isinstance(chunks, list):
+            continue
         clean: list[Any] = []
         for chunk in chunks:
             if isinstance(chunk, dict):
@@ -446,7 +476,7 @@ def normalise_args(args: Any) -> tuple[dict[str, Any] | None, str | None]:
                 clean.append(fixed)
             else:
                 clean.append(chunk)
-        out["ReplacementChunks"] = clean
+        out[list_key] = clean
     return out, None
 
 
@@ -790,11 +820,13 @@ def _keys_ok(args: Any, allowed: frozenset[str]) -> bool:
         return args is None
     if not set(args) <= allowed | _META_KEYS:
         return False
-    chunks = args.get("ReplacementChunks")
-    if chunks is not None:
-        if not isinstance(chunks, list):
+    for list_key, chunk_keys in _CHUNK_LISTS.items():
+        chunks = args.get(list_key)
+        if chunks is not None and not (
+            isinstance(chunks, list)
+            and all(isinstance(c, dict) and set(c) <= chunk_keys for c in chunks)
+        ):
             return False
-        return all(isinstance(c, dict) and set(c) <= _CHUNK_KEYS for c in chunks)
     return True
 
 
@@ -1101,6 +1133,11 @@ _COMMAND_SHOWN = frozenset({"CommandLine", "Cwd", "WaitMsBeforeAsync", "IsDaemon
 _EDIT_SHOWN = frozenset(
     {
         "TargetFile",
+        "Path",
+        "Content",
+        "Target",
+        "Replacement",
+        "Edits",
         "CodeContent",
         "Overwrite",
         "TargetContent",
@@ -1201,20 +1238,27 @@ def _edit_preview(tool: str, args: dict[str, Any], target: str) -> str:
                 "new_string": str(args.get("ReplacementContent") or ""),
             },
         )
-    if tool == "multi_replace_file_content":
-        chunks = args.get("ReplacementChunks")
+    if tool in ("multi_replace_file_content", "edit_file"):
+        old, new = (
+            ("TargetContent", "ReplacementContent")
+            if tool == "multi_replace_file_content"
+            else ("Target", "Replacement")
+        )
+        chunks = args.get("ReplacementChunks" if old == "TargetContent" else "Edits")
         chunks = (
             [c for c in chunks if isinstance(c, dict)]
             if isinstance(chunks, list)
             else []
         )
+        if tool == "edit_file" and (old in args or new in args):
+            chunks = [args, *chunks]
         blocks = [
             format_diff_preview(
                 "Edit",
                 {
                     "file_path": target if n == 0 else "",
-                    "old_string": str(chunk.get("TargetContent") or ""),
-                    "new_string": str(chunk.get("ReplacementContent") or ""),
+                    "old_string": str(chunk.get(old) or ""),
+                    "new_string": str(chunk.get(new) or ""),
                 },
             )
             for n, chunk in enumerate(chunks[:_MULTI_CHUNKS_SHOWN])
@@ -1223,10 +1267,10 @@ def _edit_preview(tool: str, args: dict[str, Any], target: str) -> str:
         if more > 0:
             blocks.append(f"…{more} more chunk{'s' if more > 1 else ''}")
         return "\n".join(b for b in blocks if b)
-    if tool == "write_to_file":
+    if tool in ("write_to_file", "write_file"):
+        content = args.get("CodeContent" if tool == "write_to_file" else "Content")
         text = format_diff_preview(
-            "Write",
-            {"file_path": target, "content": str(args.get("CodeContent") or "")},
+            "Write", {"file_path": target, "content": str(content or "")}
         )
         if args.get("Overwrite") is True and target and os.path.exists(target):
             text += "\n(overwrites an existing file)"

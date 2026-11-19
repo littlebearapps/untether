@@ -47,8 +47,6 @@ ENGINE: EngineId = "pi"
 
 _RESUME_RE = re.compile(r"(?im)^\s*`?pi\s+--session\s+(?P<token>.+?)`?\s*$")
 
-_SESSION_ID_PREFIX_LEN = 8
-
 # #1064: Pi's own session-id grammar (``assertValidSessionId`` in
 # ``core/session-manager.js``, pi 0.78.0). ``--session <id>`` only looks the
 # id (or a prefix of one) up among existing sessions and never writes a file.
@@ -164,16 +162,6 @@ def check_pi_resume(value: Any) -> str:
     raise engine_argv.EngineArgvError("resume", "not_a_session")
 
 
-def _short_session_id(session_id: str) -> str:
-    if not session_id:
-        return session_id
-    if "-" in session_id:
-        return session_id.split("-", 1)[0]
-    if len(session_id) > _SESSION_ID_PREFIX_LEN:
-        return session_id[:_SESSION_ID_PREFIX_LEN]
-    return session_id
-
-
 def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> None:
     if not session_id:
         return
@@ -186,7 +174,11 @@ def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> N
     if state.resume.value and not _looks_like_session_path(state.resume.value):
         return
     old_value = state.resume.value
-    state.resume = ResumeToken(engine=ENGINE, value=_short_session_id(session_id))
+    # #1264: the full id. Pi's ids are UUIDv7, so the old 8-hex prefix was
+    # a timestamp shared by every session started within ~65 s, and
+    # ``--session`` resolves a prefix to the newest match (any project).
+    # Short tokens saved before this still resume through that same lookup.
+    state.resume = ResumeToken(engine=ENGINE, value=session_id)
     state.allow_id_promotion = False
     logger.info("pi.session.promoted", old=old_value, new=state.resume.value)
 

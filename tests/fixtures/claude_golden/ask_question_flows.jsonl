@@ -3,11 +3,11 @@
 {"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_ask_1","name":"AskUserQuestion","input":{"questions":[{"question":"Which test runner?","header":"Runner","options":[{"label":"pytest","description":"Use pytest"},{"label":"unittest","description":"Use unittest"}],"multiSelect":false},{"question":"Which Python version?","header":"Python","options":[{"label":"3.12","description":"Oldest supported"},{"label":"3.14","description":"Newest"}],"multiSelect":false}]}}]}}
 {"type":"control_request","request_id":"req-ask-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which test runner?","header":"Runner","options":[{"label":"pytest","description":"Use pytest"},{"label":"unittest","description":"Use unittest"}],"multiSelect":false},{"question":"Which Python version?","header":"Python","options":[{"label":"3.12","description":"Oldest supported"},{"label":"3.14","description":"Newest"}],"multiSelect":false}]},"tool_use_id":"toolu_ask_1"}}
 {"_do":"steer","text":"also check lint"}
-{"_do":"tap","data":"aq:opt:1"}
-{"_do":"tap","data":"aq:other"}
+{"_do":"tap","data":"aq:opt:1:req-ask-1"}
+{"_do":"tap","data":"aq:other:req-ask-1"}
 {"_do":"typed_answer","text":"3.13, please","_stdin":1}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ask_1","content":"The user answered."}]}}
-{"_do":"tap","data":"aq:opt:0","message_id":1}
+{"_do":"tap","data":"aq:opt:0:req-ask-1","message_id":1}
 {"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-golden-1","content":[{"type":"tool_use","id":"toolu_ask_2","name":"AskUserQuestion","input":{"question":"Any deadline?"}}]}}
 {"type":"control_request","request_id":"req-ask-2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"question":"Any deadline?"},"tool_use_id":"toolu_ask_2"}}
 {"_do":"typed_answer","text":"Friday","_stdin":1}

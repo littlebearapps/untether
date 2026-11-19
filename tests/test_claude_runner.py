@@ -3136,6 +3136,49 @@ async def test_run_strips_anthropic_api_key_by_default(tmp_path, monkeypatch) ->
     assert answer == "api=set"
 
 
+def test_env_drops_inherited_child_session_and_entrypoint(monkeypatch) -> None:
+    """#1124: started from a Claude Code shell, Untether must not hand the
+    parent's CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_ENTRYPOINT to its own
+    spawn (both pass the `CLAUDE_CODE_` prefix allowlist)."""
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for runner in (
+        ClaudeRunner(claude_cmd="claude"),
+        ClaudeRunner(claude_cmd="claude", use_api_billing=True),
+    ):
+        env = runner.env(state=None)
+        assert env is not None
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env
+        assert "CLAUDE_CODE_ENTRYPOINT" not in env
+        # The prefix allowlist itself still works.
+        assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+def test_build_runner_fallback_model(monkeypatch) -> None:
+    """#1124: `[claude] fallback_model` is read, validated like `model`, and
+    makes a `--fallback-model` in extra_args a conflict."""
+    from untether.config import ConfigError
+
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _n: "claude")
+    path = Path("untether.toml")
+
+    def build(cfg: dict) -> ClaudeRunner:
+        return cast(ClaudeRunner, claude_runner.build_runner(cfg, path))
+
+    assert build({}).fallback_model is None
+    assert build({"fallback_model": ""}).fallback_model is None
+    assert build({"fallback_model": "sonnet,opus"}).fallback_model == "sonnet,opus"
+    for bad in ("--version", "son net", ["sonnet"], 3):
+        with pytest.raises(ConfigError, match=r"claude\.fallback_model"):
+            build({"fallback_model": bad})
+    # Without the key, extra_args may still pass it (existing configs).
+    assert build({"extra_args": ["--fallback-model", "sonnet"]}).extra_args
+    for spelling in (["--fallback-model", "opus"], ["--fallback-model=opus"]):
+        with pytest.raises(ConfigError, match="--fallback-model"):
+            build({"fallback_model": "sonnet", "extra_args": spelling})
+
+
 def test_env_sets_untether_session() -> None:
     """env() sets UNTETHER_SESSION=1 for Claude Code hook detection."""
     runner = ClaudeRunner(claude_cmd="claude")
@@ -9998,3 +10041,45 @@ async def test_1120_claude_trigger_run_env_has_run_identity(
     assert "UNTETHER_RUN_ID=rid-1" in trigger_cmd
     assert not any(a.startswith("UNTETHER_RUN_ID=") for a in attended_cmd)
     assert not any(a.startswith("UNTETHER_TRIGGER=") for a in attended_cmd)
+
+
+# ---------------------------------------------------------------------------
+# #1123: per-result throttle deltas on usage["throttle"]
+# ---------------------------------------------------------------------------
+
+
+def _ok_result(session_id: str = "s1123") -> dict:
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 1,
+        "duration_ms": 10,
+        "duration_api_ms": 5,
+        "session_id": session_id,
+        "result": "done",
+    }
+
+
+def _result_usage(events: list) -> dict:
+    (completed,) = [e for e in events if isinstance(e, CompletedEvent)]
+    return completed.usage or {}
+
+
+def test_1123_rejected_rate_limit_rides_on_ok_result(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    usage = _result_usage(_translate(state, _ok_result()))
+    throttle = usage["throttle"]
+    assert throttle["rate_limit_count"] >= 1
+    assert throttle["rejected"] is True
+    assert throttle["rate_limit_total_s"] > 0
+
+
+def test_1123_throttle_reports_only_this_results_delta(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    first = _result_usage(_translate(state, _ok_result()))
+    assert first["throttle"]["rate_limit_count"] == 1
+    # A clean second result in the same process reports nothing.
+    assert "throttle" not in _result_usage(_translate(state, _ok_result()))

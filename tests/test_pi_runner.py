@@ -163,7 +163,30 @@ def test_session_id_promotion_from_stdout() -> None:
         state=state,
     )
     started = next(evt for evt in events if isinstance(evt, StartedEvent))
-    assert started.resume.value == "ccd569e0"
+    assert started.resume.value == "ccd569e0-4e1b-4c7d-a981-637ed4107310"
+
+
+def test_1264_sessions_started_together_get_different_tokens() -> None:
+    """Pi ids are UUIDv7: two sessions 12 s apart share the first 8 hex
+    (live, Pi 1.5.2), so the token must be the whole id."""
+    tokens = []
+    for sid in (
+        "01a1f172-6e3b-77c3-8f00-000000000001",
+        "01a1f172-9e4b-72cc-8f00-000000000002",
+    ):
+        state = PiStreamState(
+            resume=ResumeToken(engine=ENGINE, value="/s/new.jsonl"),
+            allow_id_promotion=True,
+        )
+        translate_pi_event(
+            pi_schema.SessionHeader(id=sid, version=3, timestamp="t", cwd="/tmp"),
+            title="pi",
+            meta=None,
+            state=state,
+        )
+        tokens.append(state.resume.value)
+    assert tokens[0] != tokens[1]
+    assert tokens[0] == "01a1f172-6e3b-77c3-8f00-000000000001"
 
 
 def test_extract_resume_keeps_session_path(tmp_path: Path) -> None:
@@ -339,7 +362,7 @@ def test_continue_session_id_promoted_from_header() -> None:
         state=state,
     )
     started = next(e for e in events if isinstance(e, StartedEvent))
-    assert started.resume.value == "ccd569e0"
+    assert started.resume.value == "ccd569e0-4e1b-4c7d-a981-637ed4107310"
     assert started.resume.value != ""
 
 

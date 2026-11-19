@@ -32,6 +32,30 @@ _SAFE_PATH_RE = re.compile(r"^/[a-zA-Z0-9/_.-]+$")
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
+# #1121: a trigger's `env` names and `agent` value.
+_ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
+_AGENT_RE = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
+# Shell / loader / runtime hooks: setting one can run code or redirect tools.
+_RESERVED_ENV_EXACT = frozenset(
+    {"ENV", "BASH_ENV", "IFS", "PS4", "SHELLOPTS", "PROMPT_COMMAND", "CLAUDECODE"}
+)
+_RESERVED_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "NODE_", "GIT_", "BASH_", "SSH_")
+
+
+def reserved_trigger_env_name(name: str) -> bool:
+    """#1121: names a trigger's ``env`` may not set — everything the engine
+    env allowlist already passes (PATH, HOME, provider keys and tokens,
+    ``CLAUDE_*``, ``UNTETHER_*``…), proxy/CA names, and loader/shell hooks."""
+    from ..utils.env_policy import NETWORK_ENV_NAMES, is_allowed
+
+    return (
+        is_allowed(name)
+        or name in NETWORK_ENV_NAMES
+        or name in _RESERVED_ENV_EXACT
+        or name.startswith(_RESERVED_ENV_PREFIXES)
+    )
+
+
 class TriggerServerSettings(BaseModel):
     """HTTP server settings for webhook reception."""
 
@@ -77,6 +101,43 @@ class TriggerRunOptions(BaseModel):
     # #1118: Claude's pre-approved tools for this trigger's runs only. Replaces
     # `[engines.claude] allowed_tools`; `[]` pre-approves nothing.
     allowed_tools: list[str] | None = None
+    # #1121: literal env vars added to this trigger's runs (never templated,
+    # never logged), and a named Claude Code agent (`--agent=<name>`).
+    env: dict[str, str] | None = None
+    agent: NonEmptyStr | None = None
+
+    @field_validator("env")
+    @classmethod
+    def _validate_env(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        # Errors name the variable, never its value.
+        for name, value in (v or {}).items():
+            if not _ENV_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    f"invalid env name {name!r}: use A-Z, 0-9 and _ "
+                    "(not starting with a digit)"
+                )
+            if reserved_trigger_env_name(name):
+                raise ValueError(
+                    f"env {name} is reserved: a trigger can't set the "
+                    "service's own or engine-managed variables"
+                )
+            if "{{" in value or "\x00" in value:
+                raise ValueError(
+                    f"env {name}: values are literal text; "
+                    "'{{' and NUL characters aren't allowed"
+                )
+        return v
+
+    @field_validator("agent")
+    @classmethod
+    def _validate_agent(cls, v: str | None) -> str | None:
+        # Plugin agents look like `plugin:name`; joined as `--agent=<v>`.
+        if v is not None and (v.startswith("-") or not _AGENT_RE.fullmatch(v)):
+            raise ValueError(
+                f"invalid agent {v!r}: use letters, digits and . _ : / - "
+                "(not starting with '-')"
+            )
+        return v
 
     @field_validator("model")
     @classmethod
@@ -175,6 +236,8 @@ class TriggerRunOptions(BaseModel):
         # out to be another one.
         if self.allowed_tools is not None and self.engine != "claude":
             raise ValueError('allowed_tools needs engine = "claude"')
+        if self.agent is not None and self.engine != "claude":
+            raise ValueError('agent needs engine = "claude"')  # #1121
         return self
 
 
@@ -285,9 +348,17 @@ class WebhookConfig(TriggerRunOptions):
         own mode needs an explicit engine, an unsafe one an explicit opt-in."""
         set_options = [
             name
-            for name in ("permission_mode", "model", "reasoning", "allowed_tools")
+            for name in (
+                "permission_mode",
+                "model",
+                "reasoning",
+                "allowed_tools",
+                "agent",
+            )
             if getattr(self, name) is not None
         ]
+        if self.env:
+            set_options.append("env")  # #1121
         if self.allow_unsafe_permission_mode:
             set_options.append("allow_unsafe_permission_mode")
         if self.action != "agent_run":
@@ -618,6 +689,9 @@ class ParsedTriggerConfig(NamedTuple):
 
     settings: TriggersSettings
     invalid: tuple[InvalidTrigger, ...]
+    # #1279: every cron id written in the TOML, valid or skipped, so a
+    # skipped run_once entry keeps its fired state.
+    cron_ids: frozenset[str] = frozenset()
 
 
 def format_trigger_error(exc: BaseException) -> str:
@@ -690,7 +764,15 @@ def parse_trigger_config_isolated(raw: dict[str, Any]) -> ParsedTriggerConfig:
                 continue
             valid.append(parsed)
         data[key] = valid
-    return ParsedTriggerConfig(TriggersSettings.model_validate(data), tuple(invalid))
+    raw_crons = raw.get("crons")
+    cron_ids = frozenset(
+        entry["id"].strip()
+        for entry in (raw_crons if isinstance(raw_crons, list) else ())
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    )
+    return ParsedTriggerConfig(
+        TriggersSettings.model_validate(data), tuple(invalid), cron_ids
+    )
 
 
 def parse_trigger_config(raw: dict[str, Any]) -> TriggersSettings:

@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import Any, NamedTuple, Protocol
 
 from ..logging import get_logger
-from ..utils.paths import get_run_channel_id, get_run_sender_id
+from ..utils.paths import get_run_channel_id, get_run_sender_id, get_run_thread_id
 
 logger = get_logger(__name__)
 
@@ -101,6 +101,10 @@ _REQUEST_TO_CHANNEL_MAX = 512
 # webhook, /at, loop fires) means any allowed user may answer. Same liveness
 # rules and pruning as ``_REQUEST_TO_CHANNEL``.
 _REQUEST_TO_ORIGINATOR: dict[str, int] = {}
+# #1274: request_id -> the run's forum topic (``get_run_thread_id()``), bound
+# with the chat, so a typed reply in another topic of the same chat can't
+# answer this topic's question. Same liveness rules and pruning.
+_REQUEST_TO_THREAD: dict[str, int | None] = {}
 
 
 @dataclass(slots=True)
@@ -311,12 +315,14 @@ def bind_request_channel(request_id: str) -> None:
     channel = get_run_channel_id()
     _REQUEST_TO_CHANNEL.pop(request_id, None)
     _REQUEST_TO_ORIGINATOR.pop(request_id, None)
+    _REQUEST_TO_THREAD.pop(request_id, None)
     sender = get_run_sender_id()
     if sender is not None:
         _REQUEST_TO_ORIGINATOR[request_id] = sender
     if channel is None:
         return
     _REQUEST_TO_CHANNEL[request_id] = channel
+    _REQUEST_TO_THREAD[request_id] = get_run_thread_id()
     if len(_REQUEST_TO_CHANNEL) > _REQUEST_TO_CHANNEL_MAX:
         # Liveness pruning: drop entries no longer pending or claimed; a
         # live binding is never evicted.
@@ -326,6 +332,7 @@ def bind_request_channel(request_id: str) -> None:
             if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
         ]:
             del _REQUEST_TO_CHANNEL[rid]
+            _REQUEST_TO_THREAD.pop(rid, None)
     if len(_REQUEST_TO_ORIGINATOR) > _REQUEST_TO_CHANNEL_MAX:
         for rid in [
             rid
@@ -610,6 +617,10 @@ async def respond(
             )
 
         success = await responder.respond(request_id, session_id, decision)
+        # #1273: an answer by any path (a typed reply to an option question,
+        # a standalone tap) retires the question's flow with the request, so
+        # the chat's next question isn't answered by a tap on this stale one.
+        _drop_question_state(request_id, outcome="answered")
 
         # Clean up the mapping after use. ``pop``, not ``del``: the claim
         # makes a concurrent delete impossible, but it is cheap insurance.
@@ -765,9 +776,10 @@ def withdraw(
     return False
 
 
-def _drop_question_state(request_id: str) -> None:
-    """Retire a question's pending entry and flow; a flow is remembered as
-    ``cancelled`` so a late option tap reads "No longer needed" (#684)."""
+def _drop_question_state(request_id: str, *, outcome: str = "cancelled") -> None:
+    """Retire a question's pending entry and flow; a flow is remembered with
+    *outcome* so a late option tap reads "No longer needed" (#684) or
+    "Already answered" (#1273)."""
     from .questions import (
         _ASK_QUESTION_FLOWS,
         _PENDING_ASK_REQUESTS,
@@ -777,7 +789,7 @@ def _drop_question_state(request_id: str) -> None:
     _PENDING_ASK_REQUESTS.pop(request_id, None)
     flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
     if flow is not None:
-        _record_answered_ask_flow(request_id, flow.channel_id, outcome="cancelled")
+        _record_answered_ask_flow(request_id, flow.channel_id, outcome=outcome)
 
 
 def on_session_dropped(callback: Callable[[str], str | None]) -> None:
@@ -807,6 +819,7 @@ def drop_session(session_key: str) -> list[str]:
     for k in stale:
         del _REQUEST_TO_SESSION[k]
         _REQUEST_TO_CHANNEL.pop(k, None)  # #388
+        _REQUEST_TO_THREAD.pop(k, None)  # #1274
         _REQUEST_TO_ORIGINATOR.pop(k, None)
         # #685: a claim on a request whose session is gone can never
         # complete — drop it so the id doesn't read "in flight" for ever.

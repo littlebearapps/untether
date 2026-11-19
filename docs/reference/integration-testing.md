@@ -246,6 +246,32 @@ Run quickly to verify all commands respond.
 | Q15 | `/at 5m test` then `/cancel` | Scheduling confirmation; cancel drops pending; no run after 5m | 10s (skip 5m wait) |
 | Q16 | `/ping` in a chat a cron targets. The dev config has no crons: add a far-future `[[triggers.crons]]` with that chat's `chat_id` (e.g. `schedule = "0 3 1 1 *"`) and remove it afterwards. Crons hot-reload, but `[triggers] enabled` must already be on (turning it on needs a dev restart) | Pong + `⏰ triggers: 1 cron (<id>, <schedule>)` line appears; with no cron for the chat there is no ⏰ line, which is not a fail | 1s |
 
+### Codex app-server tier (CX, 0.36.2rc2+, [#962](https://github.com/littlebearapps/untether/issues/962))
+
+Run when any changed-area row below names CX-*, and for every 0.36.2 rc. Chat: **Codex CLI** (`-4929463515`),
+project `codex-test` → `test-projects/test-codex`. Setup: back up `~/.untether-dev/untether.toml`, add
+`transport = "app-server"` under `[engines.codex]` (it hot-reloads with `watch_config = true`; if not, restart
+`untether-dev` from a shell outside any dev-bot session). Logs:
+`journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E 'codex\.(app_server|rpc|compaction)'`.
+Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex with **both** transports.
+
+| # | Test | What to send / do | What to verify |
+|---|---|---|---|
+| CX-1 | **Transport on** | U1 | `runner.start` argv has `app-server --listen stdio://`; `codex.app_server.ready version=<installed>` once per binary; footer shows the real model (e.g. `gpt-6.1-sol`), resume line `` `codex resume <uuid>` ``; one `codex app-server` in `ps` during the run, none after |
+| CX-2 | **Core rows** | U2, U3, U4 (resume), U7 | All pass with the same rows as exec; U4 logs `thread/resume`; U7's error text is redacted and the saved session kept |
+| CX-3 | **Cross-transport resume** | U1 on exec → switch to app-server → reply to the resume line; then back to exec and reply again | The same thread id continues both ways |
+| CX-4 | **`% ctx`** ([#832](https://github.com/littlebearapps/untether/issues/832)) | U2 | The header shows `N% ctx` (no `~`), N = `last.totalTokens / modelContextWindow` of the last `thread/tokenUsage/updated` (debug log), half up; `runner.completed context_pct=N`. On exec, no `% ctx` |
+| CX-5 | **Compaction row** (#832) | `extra_args = ["-c","notify=[]","-c","model_auto_compact_token_limit=20000"]`, then a long multi-tool prompt (read several files, summarise each) | A `🗜️ Compacting context…` row becomes `🗜️ Context compacted`; `codex.compaction.completed count=1`; `runner.completed compactions=1 compaction_trigger=auto`; the run completes. Restore `extra_args` |
+| CX-6 | **Cancel mid-command** | U6 (`for i in $(seq 1 60); do echo $i; sleep 1; done`), `/cancel` at about 10 s | `codex.app_server.interrupt ok=true`; the command row closes as cancelled; no `sleep` child left (`ps`); the process exits within 5 s |
+| CX-7 | **Typed error** | `/model set gpt-nonexistent`, send a prompt, then `/model clear` | The model-not-found hint (from `usage.codex_error_info`), no retries, session kept |
+| CX-8 | **Unattended cron** | A `run_once = true`, `* * * * *` cron on `codex-test` (as R1/R4); wait ≤ 60 s | `codex.app_server.permissions` shows `approvalPolicy: never` requested and effective; the run finishes without waiting; any server request is declined with a ⚠️ row. Remove the cron |
+| CX-9 | **Safe on app-server** | `/config` → Approval policy → safe; R15-CS2 prompt | `thread/start` sends `sandbox: "read-only"` and the echo is `readOnly`; the `touch` fails inside Codex's sandbox |
+| CX-10 | **Flag guard** | `extra_args` with an exec-only flag (e.g. `--skip-git-repo-check`) on app-server; then `--trust` on exec | Both refused at load with the flag named; nothing spawned. Restore `extra_args` |
+
+Untrusted project (P1): CX-1 in a project with no `[projects]` entry in `~/.codex/config.toml` and a writable
+`sandbox_mode` shows the ⚠️ read-only row, and `~/.codex/config.toml` is unchanged afterwards (`cmp` against a
+backup). Never add the trust entry for a test project.
+
 ---
 
 ## rc4 scenarios (v0.35.1rc4)
@@ -540,7 +566,8 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Triggers (`triggers/*.py`, trigger run options in `telegram/loop.py`) | R1–R5, R11–R14, TR-* (0.36.2rc1), R17-11a–g, R17-20a–i |
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
-| Codex app-server contract / gate (`schemas/codex_app_server.py`, `runners/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
+| Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
+| Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, and the drift row above |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
 
 ---
@@ -1835,6 +1862,7 @@ R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PRO
 | R362-1176 Q15 after a final (Pi chat) | `/at 60s reply A`, `/at 5m reply B`; `/cancel` within 2 s of A's final | Reply `❌ cancelled 1 pending /at run.` (never silence); no B run after 5 min |
 | R362-1194 spawn/exit balance | U6 on all five engines, then count `subprocess.spawn` and `subprocess.exit` in that window | Counts equal; each Claude cancel logs one `subprocess.exit reason=teardown` |
 | R362-1195 RAM block | Raise `[watchdog] prespawn_ram_block_mb` above free RAM (hot-reloads); send a prompt in the Claude and Codex chats; `/usage` in the Antigravity chat; restore | Block text counts idle live sessions, says `engine run(s) already open on this host`, points `/cancel` at `the chat that started it`, no "restart the service"; `/usage` shows `the host is short of memory or at its run limit right now…`, never `prespawn_blocked` |
+| R362-1124 fallback model | Dev config `[engines.claude] fallback_model = "claude-haiku-5-5"` (restart the dev unit if the reload notice asks); run U1 in the Claude chat; remove the key | `subprocess.spawn` args contain `--fallback-model=claude-haiku-5-5`; the run answers as before; with the key gone the flag is absent |
 
 ### Codex and OpenCode env (#1241)
 

@@ -357,7 +357,7 @@ prompt = "Check today's deployment status"
 run_once = true
 ```
 
-After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
+After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. Turning `[triggers]` off and on again, or an edit that briefly makes the entry invalid, doesn't re-arm it ([#1279](https://github.com/littlebearapps/untether/issues/1279)). To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
 
 A one-shot only counts as fired once its run is dispatched, or once its fetch step fails with `on_failure = "abort"` (the failure notice is the one fire). If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state is saved to `run_once_pending.json` next to `untether.toml`, so a restart during that window carries on retrying on the first minute after startup, and a restart after the window closed gives the cron up straight away. A pause during the window still gets one retry after you resume before the cron is given up.
 
@@ -446,6 +446,34 @@ tools; one without a `project` or with a secret under 32 characters is
 skipped. Until you set it, Untether warns once about each webhook that strict
 would change ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
 See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
+
+## Per-trigger environment and Claude agent
+
+A cron or `agent_run` webhook can hand its runs a few environment variables and
+a named Claude Code agent, for "role desk" runs without a separate project
+([#1121](https://github.com/littlebearapps/untether/issues/1121)):
+
+```toml
+[[triggers.crons]]
+id = "qa-desk"
+schedule = "0 9 * * 1-5"
+project = "myapp"
+engine = "claude"
+env = { APP_SESSION_ROLE = "qa" }
+agent = "qa-desk"
+permission_mode = "auto"
+prompt = "Run the morning QA pass."
+```
+
+The run's engine process gets `APP_SESSION_ROLE=qa` (a project hook can read it)
+and Claude starts with `--agent=qa-desk`. `agent` needs `engine = "claude"`.
+`env` works with every engine, but only adds names: the service's own and
+engine-managed variables (`PATH`, `HOME`, `LD_*`, provider keys, `CLAUDE_*`,
+`UNTETHER_*`, …) are refused at config load, and that entry is skipped with a
+notice. Values are literal text, never filled from a webhook payload. Don't put
+secrets in `env`: values are visible in the process environment; pass a secret
+through with `[security] env_extra_allow` instead. A reply to the run uses the
+chat's own settings, without the variables or the agent.
 
 ## Delayed runs with `/at`
 

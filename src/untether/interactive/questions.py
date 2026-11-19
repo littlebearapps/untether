@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import html
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .registry import (
     _REQUEST_TO_INPUT,
     _REQUEST_TO_SESSION,
+    _REQUEST_TO_THREAD,
     Decision,
     answer_control_request,
 )
@@ -95,16 +97,28 @@ def pending_control_requests_for_session(session_id: str | None) -> int:
     return pending
 
 
+def _in_thread(
+    request_id: str, thread_filter: Callable[[int | None], bool] | None
+) -> bool:
+    # #1274: the topic the request was raised in (bound at registration).
+    return thread_filter is None or thread_filter(_REQUEST_TO_THREAD.get(request_id))
+
+
 def get_pending_ask_request(
     channel_id: int | None = None,
+    thread_filter: Callable[[int | None], bool] | None = None,
 ) -> tuple[str, str] | None:
     """Return the oldest pending AskUserQuestion for *channel_id*, or None.
 
     When *channel_id* is provided, only requests from that channel are
     returned — preventing cross-chat message stealing (#144).
+    ``thread_filter`` (``telegram.topics.thread_filter_for``) also limits it
+    to the message's forum topic (#1274).
     """
     for request_id, (ch, question) in _PENDING_ASK_REQUESTS.items():
         if channel_id is not None and ch != channel_id:
+            continue
+        if not _in_thread(request_id, thread_filter):
             continue
         return request_id, question
     return None
@@ -210,13 +224,45 @@ def recently_resolved_ask_flow(
 
 def get_ask_question_flow(
     channel_id: int | None = None,
+    thread_filter: Callable[[int | None], bool] | None = None,
 ) -> AskQuestionState | None:
-    """Return the active AskUserQuestion flow for *channel_id*, or None."""
+    """Return the active AskUserQuestion flow for *channel_id*, or None
+    (scoped to a forum topic by ``thread_filter``, #1274)."""
     for flow in _ASK_QUESTION_FLOWS.values():
         if channel_id is not None and flow.channel_id != channel_id:
             continue
+        if not _in_thread(flow.request_id, thread_filter):
+            continue
         return flow
     return None
+
+
+def parse_ask_callback(args_text: str) -> tuple[str, str | None, str | None]:
+    """Split ``aq:`` callback args into ``(action, option index, request id)``.
+
+    ``opt:N:ID`` / ``other:ID`` (#1274); the request id is absent on a
+    keyboard drawn before it was added (``opt:N`` / ``other``).
+    """
+    action, _, rest = (args_text or "").partition(":")
+    action = action.lower()
+    if action == "opt":
+        index, _, request_id = rest.partition(":")
+        return action, index or None, request_id or None
+    return action, None, rest or None
+
+
+def ask_flow_for_callback(
+    args_text: str, channel_id: int | None
+) -> AskQuestionState | None:
+    """The flow an ``aq:`` tap answers: the one its callback data names
+    (#1274; it must belong to the tapping chat, #715), else the chat's flow."""
+    _action, _index, request_id = parse_ask_callback(args_text)
+    if request_id is None:
+        return get_ask_question_flow(channel_id=channel_id)
+    flow = _ASK_QUESTION_FLOWS.get(request_id)
+    if flow is None or (channel_id is not None and flow.channel_id != channel_id):
+        return None
+    return flow
 
 
 def get_ask_question_flow_by_id(request_id: str) -> AskQuestionState | None:
@@ -281,6 +327,17 @@ def get_question_option_buttons(flow: AskQuestionState) -> list[list[dict[str, s
     buttons: list[list[dict[str, str]]] = []
     for i, opt in enumerate(options[:4]):
         label = option_label(opt, i)
-        buttons.append([{"text": label, "callback_data": f"aq:opt:{i}"}])
-    buttons.append([{"text": "Other (type reply)", "callback_data": "aq:other"}])
+        # #1274: the request id makes a tap name its own question; it fits
+        # the 64-byte limit whenever ``claude_control:approve:ID`` does.
+        buttons.append(
+            [{"text": label, "callback_data": f"aq:opt:{i}:{flow.request_id}"}]
+        )
+    buttons.append(
+        [
+            {
+                "text": "Other (type reply)",
+                "callback_data": f"aq:other:{flow.request_id}",
+            }
+        ]
+    )
     return buttons

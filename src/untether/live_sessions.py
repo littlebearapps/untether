@@ -92,6 +92,11 @@ class LiveSessionBackend(Protocol):
         """A reason the session must be closed instead of taking a follow-up."""
         ...
 
+    async def close_idle_for_continue(self, cwd: Path | None) -> int:
+        """Close clean-idle sessions spawned in ``cwd`` for a ``/continue``
+        there (#1275); returns how many were closed."""
+        ...
+
     async def inject_when_idle(
         self, session_id: str, text: str, *, command_uuid: str
     ) -> bool: ...
@@ -171,6 +176,9 @@ class _ClaudeLive:
         if live is not None and live.state.plan_rearm_failed:
             return "plan_rearm_failed"
         return None
+
+    async def close_idle_for_continue(self, cwd: Path | None) -> int:
+        return await self._claude().close_idle_live_sessions_for_continue(cwd)
 
     async def inject_when_idle(
         self, session_id: str, text: str, *, command_uuid: str

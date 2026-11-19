@@ -27,6 +27,10 @@ class RunContext:
     # #1118: a webhook fired under ``[triggers] webhook_defaults = "strict"``;
     # ``_apply_trigger_overrides`` applies the engine's safe defaults.
     strict_webhook: bool = False
+    # #1121: a trigger's own env vars (added by ``apply_run_env``, never over
+    # an existing name) and its Claude ``--agent``.
+    env: tuple[tuple[str, str], ...] = ()
+    agent: str | None = None
 
 
 # #751 / #835: trigger sources with nobody present to answer a Telegram

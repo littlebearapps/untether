@@ -7,6 +7,7 @@ from pathlib import Path
 from untether.runners.claude import (
     _CLAUDE_SHORT_ALIASES,
     _CLAUDE_SHORT_VALUE_FLAGS,
+    find_blocked_claude_args,
 )
 from untether.runners.codex import (
     _CODEX_SHORT_ALIASES,
@@ -122,3 +123,12 @@ def test_blocked_error_is_a_config_error() -> None:
     from untether.config import ConfigError
 
     assert issubclass(BlockedExtraArgsError, ConfigError)
+
+
+def test_fallback_model_managed_only_when_key_set() -> None:
+    """#1124: `--fallback-model` in extra_args is refused only alongside the
+    `fallback_model` key (no double flag); alone it still passes through."""
+    for args in (["--fallback-model", "opus"], ["--fallback-model=opus"]):
+        assert find_blocked_claude_args(args) == []
+        hits = find_blocked_claude_args(args, fallback_model_set=True)
+        assert [(h.flag, h.category) for h in hits] == [("--fallback-model", "managed")]

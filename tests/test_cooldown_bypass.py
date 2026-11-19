@@ -835,7 +835,7 @@ def test_reconcile_completes_synthetic_discuss_approve_action():
     ]
     assert ask_actions
     buttons = ask_actions[0].action.detail["inline_keyboard"]["buttons"]
-    assert buttons[0][0]["callback_data"] == "aq:opt:0"
+    assert buttons[0][0]["callback_data"] == "aq:opt:0:req_ask"
 
 
 # --- #685: synthetic da: buttons classify before acting ---

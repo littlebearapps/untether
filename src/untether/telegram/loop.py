@@ -31,7 +31,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
-from . import arrival_order, first_start
+from . import arrival_order, first_start, settings_barrier
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -230,6 +230,7 @@ _TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = (
     "model",
     "reasoning",
     "allowed_tools",  # #1118
+    "agent",  # #1121
 )
 
 # #1118: the mode a webhook with no own `permission_mode` runs in under
@@ -795,6 +796,9 @@ def _dispatch_builtin_command(
     scope_chat_ids = ctx.scope_chat_ids
     reply = ctx.reply
     task_group = ctx.task_group
+    if command_id in settings_barrier.SETTINGS_COMMANDS:
+        # #1265: later prompts in this chat wait for the change to land.
+        task_group = settings_barrier.Guarded(task_group, msg.chat_id, msg.message_id)
     if command_id == "file":
         if not cfg.files.enabled:
             handler = partial(
@@ -2367,9 +2371,11 @@ async def run_main_loop(
             from ..cost_tracker import init_daily_cost
             from ..session_stats import init_stats
             from ..triggers.history import init_history
+            from ..triggers.journal import init_journal
 
             init_stats(config_path)
             init_history(config_path)
+            init_journal(config_path)  # #1123
             init_daily_cost(config_path)  # #898
         if cfg.session_mode == "chat":
             if config_path is None:
@@ -2616,8 +2622,8 @@ async def run_main_loop(
                         )
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
+                        from ..triggers.history import prune_history
                         from ..triggers.settings import (
-                            TriggersSettings,
                             log_invalid_triggers,
                             parse_trigger_config_isolated,
                             warn_short_webhook_secrets,
@@ -2632,7 +2638,14 @@ async def run_main_loop(
                             )
                             new_settings = parsed_triggers.settings
                             if trigger_manager is not None:
-                                trigger_manager.update(new_settings)
+                                trigger_manager.update(
+                                    new_settings,
+                                    keep_fired=parsed_triggers.cron_ids,
+                                )
+                            prune_history(
+                                parsed_triggers.cron_ids,
+                                [wh.id for wh in new_settings.webhooks],
+                            )
                             state.trigger_block_error_notified = None
                             log_invalid_triggers(
                                 parsed_triggers.invalid, phase="reload"
@@ -2666,7 +2679,7 @@ async def run_main_loop(
                             )
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
-                            trigger_manager.update(TriggersSettings())
+                            trigger_manager.disable()
                             state.trigger_invalid_notified = set()
                             state.trigger_refused_notified = set()
                             state.trigger_block_error_notified = None
@@ -3218,6 +3231,14 @@ async def run_main_loop(
                     trigger_manager = TriggerManager(
                         trigger_settings,
                         config_path=cfg.runtime.config_path,
+                        keep_fired=parsed_triggers.cron_ids,
+                    )
+                    # #1123: forget last-fired entries of removed triggers.
+                    from ..triggers.history import prune_history
+
+                    prune_history(
+                        parsed_triggers.cron_ids,
+                        [wh.id for wh in trigger_settings.webhooks],
                     )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
@@ -3450,6 +3471,21 @@ async def run_main_loop(
                 dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if ticket is not None:
+                    # #1265: a settings command sent just before this prompt
+                    # (e.g. /planmode) lands first. Not for /continue (no
+                    # ticket), which runs inline in the update loop.
+                    await settings_barrier.wait_before(chat_id, user_msg_id)
+                if resolved.leaves_chat_context and chat_session_key is not None:
+                    # #1269: `/<other-project> …` in chat session mode runs
+                    # fresh and leaves the chat's own session alone; a reply
+                    # to its final (resume line) carries on there.
+                    logger.info(
+                        "session.chat_context_left",
+                        chat_id=chat_id,
+                        project=resolved.context.project if resolved.context else None,
+                    )
+                    chat_session_key = None
                 if dropped_in_line is not None:
                     # /cancel or /new while it waited behind an earlier
                     # prompt: no queued card or first-start wait had it yet.
@@ -4180,7 +4216,12 @@ async def run_main_loop(
                             chat_prefs=state.chat_prefs,
                             topic_store=state.topic_store,
                         )
-                        tg.start_soon(
+                        # #1265: settings commands hold the prompts after them.
+                        (
+                            settings_barrier.Guarded(tg, msg.chat_id, msg.message_id)
+                            if command_id in settings_barrier.SETTINGS_COMMANDS
+                            else tg
+                        ).start_soon(
                             # #950: /at freezes the engine + context a plain
                             # prompt here would use (topic/chat defaults).
                             partial(dispatch_command, ambient_context=ambient_context),
@@ -4237,8 +4278,12 @@ async def run_main_loop(
                         await reply(text=NOT_ORIGINATOR_TEXT)
                         return True
 
+                    # #1274: only a question raised in this message's topic.
+                    ask_thread_filter = thread_filter_for(msg)
                     # Check for active option flow in "Other" text mode first
-                    flow = get_ask_question_flow(channel_id=msg.chat_id)
+                    flow = get_ask_question_flow(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if flow is not None and flow.awaiting_text:
                         if await _ask_answer_refused(flow.request_id):
                             return
@@ -4272,7 +4317,9 @@ async def run_main_loop(
                                 await reply(text=_format_answered_echo(text))
                             return
 
-                    pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
+                    pending_ask = get_pending_ask_request(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if pending_ask is not None:
                         ask_req_id, _ask_question = pending_ask
                         if await _ask_answer_refused(ask_req_id):
@@ -4372,6 +4419,29 @@ async def run_main_loop(
                         callback_query_id=query_id,
                     )
 
+            # #1285: a voice note is transcribed (up to ~10 min) off the
+            # update loop. Later messages in the same chat/topic queue behind
+            # it so they keep their order; other chats and button taps don't.
+            voice_tails: dict[tuple[int, int | None], anyio.Event] = {}
+
+            def route_in_line(msg: TelegramIncomingMessage) -> None:
+                scope = (msg.chat_id, msg.thread_id)
+                prev = voice_tails.get(scope)
+                done = anyio.Event()
+                voice_tails[scope] = done
+
+                async def run() -> None:
+                    try:
+                        if prev is not None:
+                            await prev.wait()
+                        await route_message(msg)
+                    finally:
+                        done.set()
+                        if voice_tails.get(scope) is done:
+                            del voice_tails[scope]
+
+                tg.start_soon(run)
+
             async def route_update(update: TelegramIncomingUpdate) -> None:
                 current_allowed = frozenset(cfg.allowed_user_ids)
                 if current_allowed:
@@ -4456,7 +4526,15 @@ async def run_main_loop(
                                 else None
                             )
                             cb_stateful_mode = cb_topic_key is not None
-                            tg.start_soon(
+                            # #1265: a settings tap (/config pages) holds the
+                            # prompts sent after its menu until it lands.
+                            (
+                                settings_barrier.Guarded(
+                                    tg, update.chat_id, update.message_id
+                                )
+                                if cb_command_id in settings_barrier.SETTINGS_COMMANDS
+                                else tg
+                            ).start_soon(
                                 # #997: a tap sees the context the command
                                 # that drew the button saw (/browse root).
                                 partial(
@@ -4493,6 +4571,12 @@ async def run_main_loop(
                             update.callback_query_id,
                         )
                     return
+                if (
+                    update.voice is not None
+                    or (update.chat_id, update.thread_id) in voice_tails
+                ):
+                    route_in_line(update)
+                    return
                 await route_message(update)
 
             async for update in poller_fn(cfg):
@@ -4505,6 +4589,8 @@ async def run_main_loop(
             # triggering shutdown so _drain_and_exit() can exit.
             # #775: 50, not 10 — the dispatch chain now also resolves the
             # follow-up mode (chat/topic prefs reads) before queueing.
+            while voice_tails:  # #1285: voice notes still transcribing
+                await next(iter(voice_tails.values())).wait()
             for _ in range(50):
                 await anyio.lowlevel.checkpoint()
             while state.running_tasks:

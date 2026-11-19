@@ -492,6 +492,56 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
     assert session_id in last_edit
 
 
+@pytest.mark.anyio
+async def test_962_cancelled_card_closes_rows_left_running() -> None:
+    """#962 (CX-6): a row the cancel stopped is ✗ on the cancelled card,
+    not ▸; finished rows keep their own status."""
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner(
+        [
+            Emit(action_started("c0", "command", "echo ok")),
+            Emit(action_completed("c0", "command", "echo ok", ok=True)),
+            Emit(action_started("c1", "command", "sleep 60")),
+            Wait(hold),
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="019b66fc-64c2-7a71-81cd-081c504cfeb3",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+
+    async def run_handle_message() -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_handle_message)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        running_task = running_tasks[next(iter(running_tasks))]
+        with anyio.fail_after(1):
+            await running_task.resume_ready.wait()
+        for _ in range(50):
+            await anyio.lowlevel.checkpoint()
+        running_task.cancel_requested.set()
+
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last_edit.lower()
+    assert "✗ `sleep 60`" in last_edit
+    assert "✓ `echo ok`" in last_edit
+    assert "▸" not in last_edit
+
+
 @contextlib.contextmanager
 def _run_model(model: str | None):
     from untether.runners.run_options import (

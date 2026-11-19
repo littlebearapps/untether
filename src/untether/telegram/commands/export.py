@@ -160,11 +160,11 @@ def _format_export_markdown(
             token_part = " / ".join(token_parts) + " tokens"
         # Tokens are the latest run's too, except for engines that report a
         # running thread total (Codex, Antigravity).
-        from ...runner_bridge import _TOKEN_LEDGER_SCOPES
+        from ...session_costs import usage_scope
 
         engine = _session_engine(events)
         thread_total = token_part is not None and (
-            _TOKEN_LEDGER_SCOPES.get(engine or "") == "thread_cumulative"
+            usage_scope(engine or "", usage).get("tokens") == "thread_cumulative"
         )
         header = ""
         if thread_total and run_parts:

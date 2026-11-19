@@ -77,6 +77,22 @@ class ProgressState:
     context_estimated: bool = False
 
 
+def close_open_actions(state: ProgressState) -> ProgressState:
+    """A cancelled card: rows the run never finished show as failed (✗),
+    not still running (▸). A cancel stops the engine under them, and
+    neither exec's SIGTERM nor app-server's interrupt reaches the bridge
+    with a closing event once it has stopped reading (#962)."""
+    actions = tuple(
+        a
+        if a.completed
+        else replace(
+            a, phase="completed", display_phase="completed", completed=True, ok=False
+        )
+        for a in state.actions
+    )
+    return replace(state, actions=actions)
+
+
 class ProgressTracker:
     def __init__(
         self,

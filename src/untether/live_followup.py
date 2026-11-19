@@ -49,6 +49,21 @@ async def inject_live_followup(
 
     # Log events keep the engine's own namespace (``claude.live_session.*``).
     ns = f"{backend.log_ns}.live_session"
+    if token.is_continue:
+        # #1275: a /continue names no session, so it is never injected. Queued
+        # behind a live run (every /continue shares one scheduler key), it
+        # would wait for that session's idle timer: close a clean-idle one in
+        # its directory now, and it runs once that process has exited.
+        if backend.idle_count() == 0:
+            return False
+        try:
+            continue_cwd = await cwd_for(job) if cwd_for is not None else None
+        except Exception:  # noqa: BLE001 — unresolvable: the run reports it
+            return False
+        closed = await backend.close_idle_for_continue(continue_cwd)
+        if closed:
+            logger.info(f"{ns}.continue_closed", chat_id=job.chat_id, closed=closed)
+        return False
     session_id = token.value
     if not backend.is_accepting(session_id):
         live = backend.get(session_id)

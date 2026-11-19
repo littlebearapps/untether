@@ -228,6 +228,10 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "replace_file_content": "edit",
     "multi_replace_file_content": "edit",
     "sed_file": "edit",
+    # agy 1.5.x (#1272); path in ``Path``.
+    "read_file": "read",
+    "write_file": "write",
+    "edit_file": "edit",
     "list_dir": "ls",
     "find_by_name": "glob",
     "grep_search": "grep",
@@ -243,6 +247,7 @@ _PATH_KEYS = (
     "DirectoryPath",
     "SearchPath",
     "SearchDirectory",
+    "Path",
     "file_path",
     "path",
     "filePath",
@@ -251,22 +256,6 @@ _PATH_KEYS = (
 # 1.3.1 drift 1: a soft-denied step is ``DONE`` with no output and no error;
 # only ``result.denied_actions`` says it was denied. A DONE step of these
 # families with empty output is parked until a later step or the result.
-_DENIABLE_TOOLS = frozenset(
-    {
-        "run_command",
-        "read_url_content",
-        "search_web",
-        "call_mcp_tool",
-        "view_file",
-        "write_to_file",
-        "replace_file_content",
-        "multi_replace_file_content",
-        "sed_file",
-        "list_dir",
-        "find_by_name",
-        "grep_search",
-    }
-)
 _FILE_TOOLS = frozenset(
     {
         "view_file",
@@ -277,8 +266,18 @@ _FILE_TOOLS = frozenset(
         "list_dir",
         "find_by_name",
         "grep_search",
+        # agy 1.5.x names (#1272).
+        "read_file",
+        "write_file",
+        "edit_file",
     }
 )
+_DENIABLE_TOOLS = _FILE_TOOLS | {
+    "run_command",
+    "read_url_content",
+    "search_web",
+    "call_mcp_tool",
+}
 # ``result.denied_actions[].action`` → the tool names it covers (a trailing
 # ``*`` is a prefix) and how Telegram names it.
 _DENIED_FAMILY: dict[str, frozenset[str]] = {
@@ -496,8 +495,8 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
 # The newest agy the fixtures and drift notes were checked against (#1091,
-# #1156, #1160, #1209).
-PROBED_CLI_VERSION = "1.5.10"
+# #1156, #1160, #1209, #1272).
+PROBED_CLI_VERSION = "1.5.12"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -4737,4 +4736,6 @@ BACKEND = EngineBackend(
     cli_cmd="agy",
     install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
     resolve_cli_cmd=resolve_antigravity_cmd,
+    # #558: result.usage is cumulative across --conversation resumes.
+    usage_scope={"tokens": "thread_cumulative"},
 )

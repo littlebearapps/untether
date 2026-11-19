@@ -538,6 +538,7 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_301: dict[str, str] = {
     "--include-partial-messages": "allowed",
     "--json-schema": "allowed",
     "--max-budget-usd": "allowed",
+    "--max-turns": "allowed",  # hidden from --help since 2.1.325 (#1124)
     "--mcp-config": "allowed",
     "--model": "allowed",
     "--name": "allowed",
@@ -582,6 +583,9 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_301: dict[str, str] = {
 _209_HIDDEN = {
     "--permission-prompt-tool": "hidden since before 2.1.228 (#750)",
     "--client-data-url": "hidden since 2.1.301 (#1156)",
+    # Still parsed and honoured without -p (probe 8, CLI 2.1.328); #1125
+    # builds trigger turn caps on it, so its removal must fail loudly.
+    "--max-turns": "hidden since 2.1.325 (#1124 probe 8, gates #1125)",
 }
 
 _HELP_FLAG_RE = re.compile(
@@ -745,6 +749,27 @@ def test_209_hidden_flags_still_parsed(flag: str, tmp_path) -> None:
     pytest.skip(
         f"unexpected wording for {flag}: {blob.strip()[:200]!r} — re-derive the "
         f"probe (last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_1124_spawn_flags_listed_and_bare_not_print_default() -> None:
+    """#1124: Untether sends `--fallback-model` (config key) and documents
+    `--permission-prompts` as managed, so both must stay in `--help`. `--bare`
+    never reads OAuth/keychain: if the CLI ever makes it the `-p` default
+    (its help text says so, or a `--no-bare` opt-out appears), the legacy
+    `-p` path loses subscription auth — fail loudly instead of assuming."""
+    text = _claude_help().split("\nCommands:")[0]
+    for flag in ("--fallback-model", "--permission-prompts", "--bare"):
+        assert re.search(rf"^  {flag}\b", text, re.MULTILINE), (
+            f"{flag} is gone from `claude --help` — re-check #1124 (last green "
+            f"on CLI {PROBED_CLI_VERSION})"
+        )
+    bare = re.search(r"^  --bare\b.*?(?=^  -)", text, re.MULTILINE | re.DOTALL)
+    assert bare is not None
+    assert "--no-bare" not in text, "a --no-bare opt-out exists: --bare is a default"
+    assert not re.search(r"default|--print|\B-p\b", bare.group(0)), (
+        "the --bare help text now mentions a default / --print — check whether "
+        "the legacy `-p` path still reads OAuth (#1124, #1118)"
     )
 
 

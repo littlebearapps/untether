@@ -158,6 +158,27 @@ def _early_answer_toast(
         return hook(args_text)
 
 
+def _defers_answer(backend: object, args_text: str) -> bool:
+    """#1281: a backend may answer some taps after ``handle`` instead, with
+    the toast ``pop_late_toast(owner)`` returns for what it actually did."""
+    hook = getattr(backend, "defers_answer", None)
+    try:
+        return bool(hook(args_text)) if hook is not None else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pop_late_toast(backend: object, owner: str | None) -> str | None:
+    """#1281: the toast a deferred tap is answered with. Never raises."""
+    pop = getattr(backend, "pop_late_toast", None)
+    if pop is None or owner is None:
+        return None
+    try:
+        return pop(owner)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _release_early_claim(backend: object, owner: str | None) -> None:
     """Release any claim ``owner``'s early toast reserved (#685). Never raises."""
     if backend is None or owner is None:
@@ -591,7 +612,11 @@ async def _dispatch_callback(
         # latency_ms (HTTP round-trip) and total_ms (time since dispatch
         # entry); the `early=True` flag lets us split the metric by branch
         # when grepping.
-        if getattr(backend, "answer_early", False) and callback_query_id is not None:
+        if (
+            getattr(backend, "answer_early", False)
+            and callback_query_id is not None
+            and not _defers_answer(backend, args_text)
+        ):
             toast = _early_answer_toast(
                 backend, args_text, chat_id, claim_owner=callback_query_id
             )
@@ -686,4 +711,4 @@ async def _dispatch_callback(
         # #685: a claim the early toast reserved must never outlive this
         # callback — even when handle raised or was cancelled.
         _release_early_claim(backend, callback_query_id)
-        await _answer_callback()
+        await _answer_callback(_pop_late_toast(backend, callback_query_id))

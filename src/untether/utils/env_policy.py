@@ -393,6 +393,18 @@ def apply_run_env(
         return None if env is None else dict(env)
     out = {k: v for k, v in current.items() if not _dropped(k)}
     if source is not None:
+        if context is not None and context.env:
+            # #1121: a trigger's env adds names, never replaces one the
+            # service passed (validation already refuses managed names).
+            kept = [name for name, _ in context.env if name in out]
+            for name, value in context.env:
+                out.setdefault(name, value)
+            logger.debug(
+                "trigger.env_applied",
+                trigger=source,
+                names=[name for name, _ in context.env if name not in kept],
+                not_overridden=kept or None,
+            )
         out[TRIGGER_ENV] = source
         if context is not None and context.run_id:
             out[RUN_ID_ENV] = context.run_id

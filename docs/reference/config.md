@@ -552,23 +552,27 @@ runtime build) and once for any other engine. Built-in engines are listed here;
 plugin engines should document their own keys.
 
 An invalid engine table stops Untether from starting when it belongs to the
-default engine. For any other engine the table is ignored with a `setup.warning`
-log and the engine runs on its defaults — except a refused `extra_args` flag,
-which disables that engine (listed under `failed to load:` in the startup
-message) rather than dropping its other settings.
+default engine. Any other engine is disabled with a `setup.warning` log: the
+startup message lists it under `misconfigured:` (or `failed to load:` for a
+refused `extra_args` flag) and chats that use it get an "engine unavailable"
+reply naming the problem. It never runs on its defaults, which would silently
+drop restrictive settings such as `extra_args = ["-s", "read-only"]`
+([#1283](https://github.com/littlebearapps/untether/issues/1283)).
 
 ### `codex`
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `extra_args` | string[] | `["-c", "notify=[]"]` | Extra CLI args for `codex`, placed before `exec`. Setting the key replaces the default. Flags that bypass Codex's sandbox/approvals (`--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--approve-for-me`/`--not-so-yolo`, `--dangerously-bypass-hook-trust`, `-s`/`--sandbox danger-full-access`, a `-c` value mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), the working-directory flags (`-C`/`--cd`, `--worktree`), the flags Untether manages (`-a`/`--ask-for-approval`, `--ignore-rules`, `--ignore-user-config`, `--json`, `--color`, `--skip-git-repo-check`, `--output-schema`, `-o`/`--output-last-message`) and a bare `--` are rejected at config load ([#209](https://github.com/littlebearapps/untether/issues/209)) — see [Security → Engine CLI flags](../how-to/security.md#engine-cli-flags-extra_args). |
-| `profile` | string | (unset) | Passed as `--profile <name>` and used as the session title. |
+| `profile` | string | (unset) | Passed as `--profile <name>` and used as the session title. Not supported with `transport = "app-server"` (`codex app-server` has no `--profile`): the engine fails to load. |
+| `transport` | `"exec"` \| `"app-server"` | `"exec"` | How Untether talks to Codex ([#962](https://github.com/littlebearapps/untether/issues/962)). `"exec"` runs `codex exec --json` per message, as before. `"app-server"` (opt-in) runs a private `codex app-server --listen stdio://` per message and adds `N% ctx` to the progress header and a 🗜️ row when Codex compacts; approvals, live sessions and plan mode come in later releases; `extra_args` (placed before `app-server`) then accepts only `-c`, `--enable`, `--disable` and `--strict-config`. On app-server, Full auto keeps Codex's own sandbox only in projects listed under `[projects]` in `~/.codex/config.toml`: elsewhere a writable sandbox would make Codex trust the project, so Untether runs read-only and says why. A Codex CLI without the app-server protocol Untether needs is refused before anything starts. Resume lines work on both, so you can switch back at any time. Detail: [Codex runner](runners/codex/runner.md#transports). |
 
 === "untether config"
 
     ```sh
     untether config set codex.extra_args '["-c", "notify=[]"]'
     untether config set codex.profile "work"
+    untether config set codex.transport "app-server"
     ```
 
 === "toml"
@@ -576,7 +580,8 @@ message) rather than dropping its other settings.
     ```toml
     [codex]
     extra_args = ["-c", "notify=[]"]
-    profile = "work"
+    profile = "work"         # exec only
+    # transport = "app-server"
     ```
 
 ### `claude`
@@ -584,9 +589,10 @@ message) rather than dropping its other settings.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override. |
+| `fallback_model` | string | (unset) | Models Claude Code falls back to when the main model is busy or unavailable, in order: one id or a comma-separated list (`"claude-sonnet-5-5,claude-haiku-5-5"`). Sent as `--fallback-model` on every run; the main model is tried again at the start of each turn. While it is set, `--fallback-model` in `extra_args` is rejected at config load ([#1124](https://github.com/littlebearapps/untether/issues/1124)). |
 | `permission_mode` | string | (unset) | Default permission mode for Claude runs: `default`, `manual` (CLI alias of `default`), `acceptEdits`, `plan`, `plan-auto` (Untether only: `plan` with the plan approval auto-approved), `auto` (the CLI's classifier-gated mode — not plan mode since 0.36.0, [#741](https://github.com/littlebearapps/untether/issues/741)), `dontAsk` or `bypassPermissions`. Any other value is a config error naming the key ([#742](https://github.com/littlebearapps/untether/issues/742)). Unset = the non-interactive `-p` path with no control channel (no approvals, no plan mode, no live session). A per-chat `/planmode` or `/config` choice overrides it. A webhook run never inherits `bypassPermissions` from here, the chat or `dangerously_skip_permissions`: it runs in `default` ([#1142](https://github.com/littlebearapps/untether/issues/1142)). |
 | `allowed_tools` | string[] | `["Bash", "Read", "Edit", "Write"]` | Tools pre-approved via `--allowedTools`. **Since 0.36.0 the default is not sent in `default` / `manual` / `acceptEdits`** — pre-approving these would defeat the approval prompt those modes exist to give ([#749](https://github.com/littlebearapps/untether/issues/749)). Setting the key explicitly still applies in every mode, and logs `claude.allowed_tools.prompting_mode_override` once. |
-| `extra_args` | string[] | `[]` | Extra CLI args passed to `claude` (e.g. `["--chrome"]` to opt into the Claude-in-Chrome extension). ([#209](https://github.com/littlebearapps/untether/issues/209)) Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools` — use `allowed_tools`) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load, in every spelling (`--flag=value`, short clusters like `-pc`). See [Security → Engine CLI flags](../how-to/security.md#engine-cli-flags-extra_args). |
+| `extra_args` | string[] | `[]` | Extra CLI args passed to `claude` (e.g. `["--chrome"]` to opt into the Claude-in-Chrome extension). ([#209](https://github.com/littlebearapps/untether/issues/209)) Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools` — use `allowed_tools`; `--fallback-model` while `fallback_model` is set) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load, in every spelling (`--flag=value`, short clusters like `-pc`). See [Security → Engine CLI flags](../how-to/security.md#engine-cli-flags-extra_args). |
 | `dangerously_skip_permissions` | bool | `false` | Adds `--dangerously-skip-permissions`, which overrides `permission_mode` **and every `/planmode` choice** — no Telegram approvals are shown. Logs `claude.config.dangerously_skip_permissions` once at startup. |
 | `use_api_billing` | bool | `false` | Keep `ANTHROPIC_API_KEY` in the Claude subprocess environment for API billing. When `false` it is removed, so Claude Code uses its subscription login. |
 

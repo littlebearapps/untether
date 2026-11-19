@@ -344,6 +344,33 @@ def find_blocked_codex_args(extra_args: list[str]) -> list[BlockedArg]:
     return dedupe_hits(hits)
 
 
+# #962: `codex app-server --help` (0.170.0) options a user may set; the rest
+# are transport/auth plumbing Untether owns, or exec-only.
+_APP_SERVER_ALLOWED_FLAGS = frozenset(
+    {"--config", "--enable", "--disable", "--strict-config"}
+)
+
+
+def find_non_app_server_args(extra_args: list[str]) -> list[BlockedArg]:
+    """Flags `transport = "app-server"` refuses: everything but the allow-list."""
+    return dedupe_hits(
+        [
+            BlockedArg(
+                flag=tok.flag,
+                category="managed",
+                hint='is not accepted with `transport = "app-server"`; only'
+                " `-c`, `--enable`, `--disable` and `--strict-config` are",
+            )
+            for tok in iter_option_tokens(
+                extra_args,
+                short_aliases=_CODEX_SHORT_ALIASES,
+                short_value_flags=_CODEX_SHORT_VALUE_FLAGS,
+            )
+            if tok.flag not in _APP_SERVER_ALLOWED_FLAGS
+        ]
+    )
+
+
 def _parse_reconnect_message(message: str) -> tuple[int, int] | None:
     match = _RECONNECTING_RE.match(message)
     if not match:
@@ -856,6 +883,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     resume_re = _RESUME_RE
     model: str | None = None
     logger = logger
+    # How failures name the process ("codex app-server" on #962's transport).
+    process_label = "codex exec"
 
     def __init__(
         self,
@@ -1030,7 +1059,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
 
     def pipes_error_message(self) -> str:
-        return "codex exec failed to open subprocess pipes"
+        return f"{self.process_label} failed to open subprocess pipes"
 
     def translate(
         self,
@@ -1150,7 +1179,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: CodexRunState,
         stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        parts = [f"codex exec failed ({_rc_label(rc)})."]
+        parts = [f"{self.process_label} failed ({_rc_label(rc)})."]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
@@ -1237,7 +1266,23 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `codex.extra_args` in {config_path}; expected a list of strings."
         )
 
+    # #962: install-wide transport; exec stays the default (DEC-2).
+    transport = config.get("transport", "exec")
+    if transport not in ("exec", "app-server"):
+        logger.warning(
+            "codex.config.invalid",
+            error="transport must be exec or app-server",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f'Invalid `codex.transport` in {config_path}; expected "exec" or'
+            ' "app-server".'
+        )
+    app_server = transport == "app-server"
+
     blocked = find_blocked_codex_args(extra_args)
+    if app_server:
+        blocked = dedupe_hits([*blocked, *find_non_app_server_args(extra_args)])
     if blocked:
         # Flag names only — never the values (a `-c` value can hold a secret).
         logger.warning(
@@ -1251,6 +1296,17 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     title = "Codex"
     profile_value = config.get("profile")
+    if profile_value and app_server:
+        # DEC-19: `codex app-server` has no --profile; don't guess a mapping.
+        logger.warning(
+            "codex.config.invalid",
+            error="profile is not supported on the app-server transport",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `codex.profile` in {config_path}: `codex app-server` has no"
+            ' `--profile`. Remove it, or use `transport = "exec"`.'
+        )
     if profile_value:
         if not isinstance(profile_value, str):
             logger.warning(
@@ -1264,6 +1320,10 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         extra_args.extend(["--profile", profile_value])
         title = profile_value
 
+    if app_server:
+        from .codex_app_server import CodexAppServerRunner  # imports this module
+
+        return CodexAppServerRunner(codex_cmd=codex_cmd, extra_args=extra_args)
     return CodexRunner(codex_cmd=codex_cmd, extra_args=extra_args, title=title)
 
 
@@ -1271,4 +1331,6 @@ BACKEND = EngineBackend(
     id="codex",
     build_runner=build_runner,
     install_cmd="npm install -g @openai/codex",
+    # #419: turn.completed.usage is the thread's total, across exec resume.
+    usage_scope={"tokens": "thread_cumulative"},
 )

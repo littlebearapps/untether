@@ -424,7 +424,7 @@ def _pi_refused(value: str) -> None:
     "value",
     [
         _PI_UUID,
-        "019e81c8",  # Untether's saved short id (``_short_session_id``)
+        "019e81c8",  # a short id saved before #1264 (still resumable)
         "ccd569e0",
         "my-session_1.2",  # Pi's own grammar (``--session-id``)
     ],
@@ -512,7 +512,7 @@ def test_pi_new_run_path_and_saved_id_still_resume(
 ) -> None:
     """The path Untether hands a new Pi run, and the id it saves from the run
     (what a later message resumes), both pass the narrowed check."""
-    from untether.runners.pi import PiRunner, _short_session_id, check_pi_resume
+    from untether.runners.pi import PiRunner, check_pi_resume
     from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
     runner = PiRunner(extra_args=[], model=None, provider=None)
@@ -524,11 +524,14 @@ def test_pi_new_run_path_and_saved_id_still_resume(
         reset_run_base_dir(token)
     new_path = args[args.index("--session") + 1]
     assert new_path.startswith(str(pi_agent_dir / "sessions"))
-    saved = _short_session_id(_PI_UUID)
-    assert check_pi_resume(saved) == saved
-    resumed = ResumeToken(engine="pi", value=saved)
-    args = runner.build_args("again", resumed, state=runner.new_state("again", resumed))
-    assert args[args.index("--session") + 1] == saved
+    # #1264: the full id is saved now; a short prefix saved by an older
+    # Untether still resumes (Pi looks prefixes up itself).
+    for saved in (_PI_UUID, _PI_UUID.split("-", 1)[0]):
+        assert check_pi_resume(saved) == saved
+        resumed = ResumeToken(engine="pi", value=saved)
+        state = runner.new_state("again", resumed)
+        args = runner.build_args("again", resumed, state=state)
+        assert args[args.index("--session") + 1] == saved
 
 
 def test_pi_continue_is_untouched(pi_agent_dir: Path) -> None:

@@ -51,8 +51,7 @@ from ..interactive.questions import (
     get_ask_question_flow,  # noqa: F401 — re-exported
     get_ask_question_flow_by_id,  # noqa: F401 — re-exported
     get_pending_ask_request,  # noqa: F401 — re-exported
-    get_question_option_buttons,  # noqa: F401 — re-exported
-    option_label,
+    get_question_option_buttons,
     pending_control_requests_for_session,
     recently_answered_ask_flow,  # noqa: F401 — re-exported
     recently_resolved_ask_flow,  # noqa: F401 — re-exported
@@ -113,6 +112,7 @@ from ..model import (
     UntetherEvent,
 )
 from ..runner import (
+    PRESPAWN_BLOCKED_KEY,
     JsonlStreamState,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
@@ -240,8 +240,35 @@ _CLAUDE_SHORT_ALIASES: dict[str, str] = {
 _CLAUDE_SHORT_VALUE_FLAGS: frozenset[str] = frozenset({"d", "n", "r", "w"})
 
 
-def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
-    """Every blocked flag in *extra_args* (#209), deduped, in order."""
+def _without_agent_flag(extra_args: list[str]) -> list[str]:
+    """#1121: *extra_args* minus any ``--agent`` (both spellings), so a
+    trigger's own agent is the only one on that run's argv."""
+    out: list[str] = []
+    skip_value = False
+    for token in extra_args:
+        if skip_value:
+            skip_value = False
+        elif token == "--agent":
+            skip_value = True
+        elif not token.startswith("--agent="):
+            out.append(token)
+    return out
+
+
+_FALLBACK_MODEL_HINT = (
+    "is managed by Untether while `[claude] fallback_model` is set; use one or"
+    " the other"
+)
+
+
+def find_blocked_claude_args(
+    extra_args: list[str], *, fallback_model_set: bool = False
+) -> list[BlockedArg]:
+    """Every blocked flag in *extra_args* (#209), deduped, in order.
+
+    #1124: `--fallback-model` is refused only when the `fallback_model` key
+    also sets it, so configs that pass it through `extra_args` keep working.
+    """
     hits: list[BlockedArg] = []
     for tok in iter_option_tokens(
         extra_args,
@@ -249,6 +276,8 @@ def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
         short_value_flags=_CLAUDE_SHORT_VALUE_FLAGS,
     ):
         rule = _CLAUDE_BLOCKED.get(tok.flag)
+        if rule is None and fallback_model_set and tok.flag == "--fallback-model":
+            rule = ("managed", _FALLBACK_MODEL_HINT)
         if rule is not None:
             category, hint = rule
             hits.append(BlockedArg(flag=tok.flag, category=category, hint=hint))
@@ -656,6 +685,59 @@ def live_session_loop_closeable(session_id: str) -> bool:
     )
 
 
+async def close_idle_live_sessions_for_continue(cwd: Path | None) -> int:
+    """#1275: close the clean-idle live sessions spawned in *cwd* (reason
+    ``continue``), since a ``/continue`` there resumes one of them. Returns
+    how many were closed."""
+    closed = 0
+    for sid, live in list(_LIVE_SESSIONS.items()):
+        if live.state.spawn_cwd == cwd and live_session_loop_closeable(sid):
+            closed += await close_live_session(sid, "continue", only_if_idle=True)
+    return closed
+
+
+CONTINUE_BUSY_TEXT = (
+    "⏳ A Claude run is still active in this project. Let it finish (or"
+    " /cancel it), then send /continue again."
+)
+
+
+async def _release_live_sessions_for_continue(
+    cwd: Path | None, *, poll_s: float = 0.25
+) -> list[str]:
+    """#1275: clear the way for a ``/continue`` in *cwd*.
+
+    ``claude --continue`` resumes the newest session in its directory, which
+    is usually one a live process here still owns. A second process on that
+    session would take over its registries before it could take the session
+    lock (held by the live run), then block with nobody reading its output.
+    A clean-idle owner is closed now, like a due loop fire (#925), and waited
+    for until it has exited. A busy one (turn, background work, pending
+    approval) isn't waited out: its ids are returned and nothing spawns.
+    """
+    logged = False
+    while owners := [
+        (sid, live)
+        for sid, live in _LIVE_SESSIONS.items()
+        if live.state.spawn_cwd == cwd
+    ]:
+        busy = [
+            sid
+            for sid, live in owners
+            if not live.closing and not live_session_loop_closeable(sid)
+        ]
+        if busy:
+            logger.info("claude.live_session.continue_refused_busy", sessions=busy)
+            return busy
+        if not logged:
+            logged = True
+            logger.info("claude.live_session.continue_wait", sessions=len(owners))
+        # A follow-up landing first makes it busy: refused next pass.
+        await close_idle_live_sessions_for_continue(cwd)
+        await anyio.sleep(poll_s)
+    return []
+
+
 def stop_live_session_input(session_id: str) -> bool:
     """#896: refuse any further input into ``session_id`` (synchronous).
 
@@ -874,7 +956,9 @@ async def close_live_session(
 
 # #812: closes the user (or an operator restart) asked for — a hook they
 # cut short is expected, so it logs at INFO and gets no extra notice.
-_USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+_USER_CLOSE_REASONS = frozenset(
+    {"cancel", "new", "drain", "options_changed", "continue"}
+)
 # #829 B2: Untether-initiated closes that may stop cleanly on SIGINT (rc 0,
 # transcript complete, resumable — P0 G7-G9). ``error`` follows a failed run
 # and keeps the forced-teardown quarantine. #887: ``abs_cap`` qualifies like
@@ -894,6 +978,8 @@ _STOPPED_CLEAN_REASONS = frozenset(
         "loop_fire",
         "wake_cap",
         "cron_suppressed",
+        # #1275: a /continue closes the clean-idle session it will resume.
+        "continue",
     }
 )
 
@@ -1915,6 +2001,11 @@ class ClaudeStreamState:
     # Count of throttling rate_limit_events in this session (#349 v2); `allowed`
     # / `allowed_warning` snapshots and bare events are not counted (#790).
     rate_limit_count: int = 0
+    # #1123: how many of those were a ``status: "rejected"`` snapshot, and
+    # the five throttle counters at the previous result, so each result
+    # reports only its own delta (a live session spans several runs).
+    rate_limit_rejected_count: int = 0
+    throttle_at_last_result: tuple[int, float, int, float, int] = (0, 0.0, 0, 0.0, 0)
     # #790: latest quota snapshot from any rate_limit_event — `status` plus the
     # per-window {utilization, resets_at} from `unifiedWindows`, keyed by
     # window name (five_hour / seven_day / seven_day_overage_included).
@@ -3198,6 +3289,8 @@ def _translate_rate_limit_event(
     # "throttled upstream, will resume by itself" apart from "hung".
     state.rate_limit_wait_until = new_deadline
     state.rate_limit_count += 1
+    if info is not None and info.status == "rejected":
+        state.rate_limit_rejected_count += 1
     if action_id is None:
         state.note_seq += 1
         action_id = f"rate_limit_{state.note_seq}"
@@ -7624,9 +7717,12 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     # #409: pass user extras through so the audit doesn't flag names the
     # operator explicitly opted into via [security] env_extra_allow.
     user_exact, user_prefix = _load_env_extras()
+    # #1121: a trigger's own env names are expected, not leaks.
+    run_context = get_run_context()
+    trigger_env = tuple(name for name, _ in run_context.env) if run_context else ()
     leaked = audit_proc_env(
         state.pid,
-        expected_extras=("UNTETHER_SESSION",),
+        expected_extras=("UNTETHER_SESSION", *trigger_env),
         user_extra_exact=user_exact,
         user_extra_prefix=user_prefix,
     )
@@ -7722,6 +7818,30 @@ def _capture_mcp_catalog(
             status=status,
             source="system.init",
         )
+
+
+def _throttle_usage(state: ClaudeStreamState) -> dict[str, Any] | None:
+    """#1123: rate-limit / API-retry counts since the previous result (None
+    when there were none). Advances the baseline, so call once per result."""
+    now = (
+        state.rate_limit_count,
+        state.rate_limit_total_s,
+        state.api_retry_count,
+        state.api_retry_total_s,
+        state.rate_limit_rejected_count,
+    )
+    prev = state.throttle_at_last_result
+    state.throttle_at_last_result = now
+    delta = [a - b for a, b in zip(now, prev, strict=True)]
+    if not any(delta):
+        return None
+    return {
+        "rate_limit_count": delta[0],
+        "rate_limit_total_s": round(delta[1], 1),
+        "api_retry_count": delta[2],
+        "api_retry_total_s": round(delta[3], 1),
+        "rejected": delta[4] > 0,
+    }
 
 
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
@@ -9094,6 +9214,9 @@ def _translate_claude_event_base(
             # #835: the turn's unattended denials, for the final's footer.
             if (unattended := _unattended_usage_payload(state)) is not None:
                 usage["unattended"] = unattended
+            # #1123: this result's throttling, for runner.completed + journal.
+            if (throttle := _throttle_usage(state)) is not None:
+                usage["throttle"] = throttle
             if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.
@@ -9818,28 +9941,7 @@ def _translate_claude_event_base(
                             _ASK_QUESTION_FLOWS[request_id] = flow
                             ask_flow_created = True
                             # Replace Approve/Deny with option buttons
-                            button_rows.clear()
-                            for i, opt in enumerate(options[:4]):
-                                label = option_label(opt, i)
-                                # Truncate label to fit 64-byte callback limit
-                                # Format: aq:opt:N — very compact
-                                button_rows.append(
-                                    [
-                                        {
-                                            "text": label,
-                                            "callback_data": f"aq:opt:{i}",
-                                        }
-                                    ]
-                                )
-                            # Add "Other" button for free text
-                            button_rows.append(
-                                [
-                                    {
-                                        "text": "Other (type reply)",
-                                        "callback_data": "aq:other",
-                                    }
-                                ]
-                            )
+                            button_rows[:] = get_question_option_buttons(flow)
                         else:
                             # No options — keep Approve/Deny for text reply
                             pass
@@ -9928,6 +10030,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     claude_cmd: str = "claude"
     model: str | None = None
+    # #1124: `[claude] fallback_model` → `--fallback-model=<value>` (both argv
+    # paths; the CLI does not mark it print-only, probe 8 on 2.1.328).
+    fallback_model: str | None = None
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
     # #749 True when `allowed_tools` came from an explicit
@@ -10219,7 +10324,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Must sit after the Untether-managed I/O prelude but before
         # resume / model / effort / allowed-tools / permission so the final
         # prompt position (after `--`) is never displaced (#407).
-        args.extend(self.extra_args)
+        # #1121: a trigger's own agent replaces an engine-wide `--agent`.
+        agent = run_options.agent if run_options is not None else None
+        args.extend(_without_agent_flag(self.extra_args) if agent else self.extra_args)
         # #812: hook lifecycle frames let the live session hold stdin open
         # for a background (async / asyncRewake) hook. Control-channel mode
         # only (live sessions need it), behind the kill switch, only when the
@@ -10252,6 +10359,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(
                 engine_argv.joined("--model", engine_argv.check_model(str(model)))
             )
+        if agent:
+            # #1121: native `--agent <agent>` (2.1.328 --help), validated at
+            # config load and joined so it can't be re-read as a flag.
+            args.append(engine_argv.joined("--agent", agent))
+        if self.fallback_model:
+            args.append(engine_argv.joined("--fallback-model", self.fallback_model))
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning
@@ -10403,6 +10516,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
+        # #1124: both slip through the `CLAUDE_CODE_` prefix when Untether is
+        # started from a Claude Code shell. CHILD_SESSION silently turns the
+        # scheduled-run offer down; an inherited ENTRYPOINT (e.g. a hosted
+        # surface's) changes managed-settings and request attribution. Left
+        # unset, the CLI picks its own.
+        env.pop("CLAUDE_CODE_CHILD_SESSION", None)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         # #926: this spawn resumes a session that may still hold a CLI cron
         # job the CLI would resurrect and fire — switch its scheduler off.
         # Assignment, not setdefault: an inherited value must not re-enable
@@ -12686,6 +12806,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # probe thread starts or a PTY opens; a block registers nothing.
         # Live follow-ups / steers inject into an existing process and never
         # reach run_impl, so they are never checked.
+        # #1275: first, so a closed idle session no longer counts toward the
+        # #838 ceiling either. A busy one refuses before any spawn.
+        if (
+            resume is not None
+            and resume.is_continue
+            and await _release_live_sessions_for_continue(get_run_base_dir())
+        ):
+            yield EventFactory(self.engine).completed_error(
+                error=CONTINUE_BUSY_TEXT,
+                usage={PRESPAWN_BLOCKED_KEY: "continue_busy"},
+            )
+            return
         block_result = self._check_prespawn_ram_guard(resume)
         if block_result is not None:
             yield block_result
@@ -13198,15 +13330,29 @@ def _validate_permission_mode(value: object, config_path: Path) -> str | None:
     return mode
 
 
-def _check_config_model(model: Any, config_path: Path) -> None:
+def _check_config_model(model: Any, config_path: Path, key: str = "model") -> None:
     """#1034: refuse a `[claude] model` that could read as a CLI flag."""
     if model is None or model == "":
         return
     problem = engine_argv.model_problem(str(model))
     if problem is not None:
         raise ConfigError(
-            f"Invalid `claude.model` in {config_path}; a model id {problem}."
+            f"Invalid `claude.{key}` in {config_path}; a model id {problem}."
         )
+
+
+def _check_config_fallback_model(value: Any, config_path: Path) -> str | None:
+    """#1124: `[claude] fallback_model` — a model id or a comma-separated
+    list of them (the CLI's own format); unset or empty means no flag."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"Invalid `claude.fallback_model` in {config_path}; expected a string"
+            ' such as "claude-sonnet-5-5" or "model-a,model-b".'
+        )
+    _check_config_model(value, config_path, key="fallback_model")
+    return value
 
 
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
@@ -13214,6 +13360,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     model = config.get("model")
     _check_config_model(model, config_path)
+    fallback_model = _check_config_fallback_model(
+        config.get("fallback_model"), config_path
+    )
     # #749 remember which branch this came from: an explicit user choice
     # survives into prompting modes, the inherited default does not.
     allowed_tools_explicit = "allowed_tools" in config
@@ -13245,7 +13394,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `claude.extra_args` in {config_path}; expected a list of strings."
         )
 
-    blocked = find_blocked_claude_args(extra_args)
+    blocked = find_blocked_claude_args(
+        extra_args, fallback_model_set=fallback_model is not None
+    )
     if blocked:
         # Flag names only — never the values (#209).
         logger.warning(
@@ -13263,6 +13414,7 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     return ClaudeRunner(
         claude_cmd=claude_cmd,
         model=model,
+        fallback_model=fallback_model,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         allowed_tools_explicit=allowed_tools_explicit,
@@ -13277,6 +13429,8 @@ BACKEND = EngineBackend(
     id="claude",
     build_runner=build_runner,
     install_cmd="npm install -g @anthropic-ai/claude-code",
+    # #778: result.total_cost_usd is the session's total, across --resume.
+    usage_scope={"cost": "session_cumulative"},
 )
 
 

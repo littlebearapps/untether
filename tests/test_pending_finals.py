@@ -412,3 +412,58 @@ async def test_cancelled_waiter_still_keeps_a_queued_final_that_fails() -> None:
     )
     assert kept == [("one", 1, CARD_REF.message_id), ("three", 1, None)]
     await client.close()
+
+
+# --- #1286: finals the outbox drops before dispatch -------------------------
+
+
+async def test_1286_final_failed_by_flush_timeout_is_kept() -> None:
+    """Shutdown's bounded flush gives up while a final is still queued behind
+    a slow send: the outbox fails it without sending, so it is kept."""
+    unblock = anyio.Event()
+    started = anyio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if _sent_text(request) == "slow":
+            started.set()
+            await unblock.wait()
+        return _ok(50)
+
+    client = _real_client(handler)
+    await client._outbox.ensure_worker()  # the worker lives in this task
+    transport = TelegramTransport(client)
+    results: list[MessageRef | None] = []
+    with anyio.fail_after(5), capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            with message_kind("progress"):
+                await client.send_message(chat_id=CHAT, text="slow", wait=False)
+            await started.wait()
+
+            async def final() -> None:
+                results.append(await _send_final(transport, _final("answer")))
+
+            tg.start_soon(final)
+            await anyio.sleep(0.05)  # the final is queued, not dispatched
+            await client.flush_outbox(timeout=0.05)
+    unblock.set()
+
+    assert results == [None]
+    (entry,) = transport.pending_finals._entries.values()
+    assert [c["text"] for c in entry["chunks"]] == ["answer"]
+    assert entry["replace_message_id"] == CARD_REF.message_id
+    failed = [e for e in logs if e["event"] == "transport.send.failed"]
+    assert failed and failed[0]["pending_saved"] is True
+    await client.close()
+
+
+async def test_1286_final_enqueued_after_close_is_kept_progress_is_not() -> None:
+    client = _real_client(lambda r: _ok(50))
+    transport = TelegramTransport(client)
+    await client.close()
+
+    assert await _send_final(transport, _final("answer")) is None
+    with message_kind("progress"):
+        await client.send_message(chat_id=CHAT, text="card")
+
+    (entry,) = transport.pending_finals._entries.values()
+    assert [c["text"] for c in entry["chunks"]] == ["answer"]

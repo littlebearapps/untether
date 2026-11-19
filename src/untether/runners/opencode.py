@@ -920,4 +920,6 @@ BACKEND = EngineBackend(
     id="opencode",
     build_runner=build_runner,
     install_cmd="npm install -g opencode-ai@1",
+    # #417: tokens are per run; the ledger keeps the session total.
+    usage_scope={"tokens": "per_run"},
 )

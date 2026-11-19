@@ -411,7 +411,7 @@
      "id": 1,
      "keyboard": [],
      "op": "edit",
-     "text": "cancelled · claude · <t> · step 2\n\n▸ touch notes.txt\n▸ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+     "text": "cancelled · claude · <t> · step 2\n\n✗ touch notes.txt\n✗ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
     },
     {
      "id": 2,

@@ -35,6 +35,10 @@ class ResolvedMessage:
     engine_override: EngineId | None
     context: RunContext | None
     context_source: ContextSource = "none"
+    # #1269: a directive or a reply's `dir:` line chose another project or
+    # branch than the chat's own, so the chat's stored session (saved for
+    # the chat's own directory) must not be resumed or replaced by this run.
+    leaves_chat_context: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +227,14 @@ class TransportRuntime:
         engine_override = self._resolve_engine_override(
             directives_engine=directives.engine,
         )
+        chat_context, _ = self._resolve_context(
+            directives=ParsedDirectives(
+                prompt="", engine=None, project=None, branch=None
+            ),
+            reply_ctx=None,
+            ambient_context=ambient_context,
+            default_project=default_project,
+        )
 
         return ResolvedMessage(
             prompt=directives.prompt,
@@ -230,6 +242,7 @@ class TransportRuntime:
             engine_override=engine_override,
             context=context,
             context_source=context_source,
+            leaves_chat_context=context != chat_context,
         )
 
     def project_default_engine(self, context: RunContext | None) -> EngineId | None:

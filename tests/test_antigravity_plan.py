@@ -178,7 +178,11 @@ def test_note_plan_write_keeps_write_targets_only() -> None:
     plan_mod.note_plan_write(writes, "write_to_file", None)
     plan_mod.note_plan_write(writes, "write_to_file", {"TargetFile": "/c.md"})
     plan_mod.note_plan_write(writes, "replace_file_content", {"TargetFile": "/d.md"})
-    assert writes == ["/c.md", "/d.md"]
+    # #1272: agy 1.5.x ``write_file`` / ``edit_file`` with ``Path``.
+    plan_mod.note_plan_write(writes, "read_file", {"Path": "/e.md"})
+    plan_mod.note_plan_write(writes, "write_file", {"Path": "/f.md"})
+    plan_mod.note_plan_write(writes, "edit_file", {"Path": "/g.md"})
+    assert writes == ["/c.md", "/d.md", "/f.md", "/g.md"]
     for i in range(100):
         plan_mod.note_plan_write(writes, "write_to_file", {"TargetFile": f"/{i}"})
     assert len(writes) == 32
@@ -392,6 +396,23 @@ def test_plan_turn_posts_the_plan_and_a_card(home: Path, run_vars: RunContext) -
     events_seen = [r["event"] for r in logs]
     assert "antigravity.plan.detected" in events_seen
     assert "antigravity.plan.card" in events_seen
+
+
+def test_1272_plan_turn_with_agy_15_tool_names(home: Path) -> None:
+    """agy 1.5.x writes the plan with ``write_file`` (``Path``): the card
+    still comes (the same turn as ``context_turn``, renamed as 1.5.12 does)."""
+    lines = [
+        ln.replace('"write_to_file"', '"write_file"')
+        .replace('"view_file"', '"read_file"')
+        .replace('"TargetFile"', '"Path"')
+        .replace('"AbsolutePath"', '"Path"')
+        for ln in _lines("context_turn")
+    ]
+    _write_plan(home)
+    events, _ = _replay(lines, options=PLAN)
+    done = _completed(events)
+    assert done.answer.startswith(f"📋 **Plan** — `{PLAN_NAME}`")
+    assert review_card(done.usage) is not None
 
 
 def test_plan_turn_without_a_plan_is_an_ordinary_answer(home: Path) -> None:

@@ -148,11 +148,13 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `model` | string\|null | `null` | (`agent_run` only) Model for this webhook's runs, as for a cron ([#1122](https://github.com/littlebearapps/untether/issues/1122)). |
 | `reasoning` | string\|null | `null` | (`agent_run` only) Effort level for this webhook's runs, as for a cron ([#1122](https://github.com/littlebearapps/untether/issues/1122)). |
 | `allowed_tools` | string[]\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Tools pre-approved for this webhook's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing. Sent in every mode, like an explicit engine list ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
+| `env` | table\|null | `null` | (`agent_run` only) Literal environment variables added to this webhook's runs, e.g. `env = { APP_SESSION_ROLE = "qa" }`. Names are `A-Z`, `0-9`, `_`; values are never templated (`{{` is refused) and never logged. Names the service or engine manages are refused (`PATH`, `HOME`, `LD_*`, `DYLD_*`, `PYTHON*`, `NODE_*`, `GIT_*`, provider keys and tokens, `CLAUDE_*`, `UNTETHER_*`, proxy/CA names), and a name Untether already passes through keeps its own value. Not for secrets: values are visible in the process environment. A reply to the run doesn't get them ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
+| `agent` | string\|null | `null` | (`agent_run` only) (needs `engine = "claude"`) Claude Code agent for this webhook's runs, passed as `--agent=<name>` (letters, digits, `.` `_` `:` `/` `-`; plugin agents like `plugin:name` work). Replaces an `--agent` in `[claude] extra_args` for that run only. Not the same as `/agent`, which picks a chat's default engine ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
 | `allow_unsafe_permission_mode` | bool | `false` | Lets this webhook's own `permission_mode` be one that skips approvals. Needs `engine` and such a mode; anything else is an error ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 
 Webhook IDs and paths must each be unique across all configured webhooks. Run
-options (`permission_mode`, `model`, `reasoning`, `allowed_tools`,
-`allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
+options (`permission_mode`, `model`, `reasoning`, `allowed_tools`, `env`,
+`agent`, `allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
 `notify_only` webhook make that entry invalid, since nothing would use them.
 
 ### `[[triggers.crons]]`
@@ -179,10 +181,12 @@ options (`permission_mode`, `model`, `reasoning`, `allowed_tools`,
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
-| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state persists to `run_once_pending.json` (sibling of `untether.toml`): after a restart the retries resume on the first tick, or the one-shot is given up at once if its window has passed. A master pause during the window still allows one retry after resume before it is given up. A one-shot refused by the daily cost budget's **Stop at limit** is not consumed either: nothing is posted or run, any pending send retry is dropped, and it fires at its next schedule match (`triggers.cron.run_once_refused`, [#896](https://github.com/littlebearapps/untether/issues/896)). The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
+| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state persists to `run_once_pending.json` (sibling of `untether.toml`): after a restart the retries resume on the first tick, or the one-shot is given up at once if its window has passed. A master pause during the window still allows one retry after resume before it is given up. A one-shot refused by the daily cost budget's **Stop at limit** is not consumed either: nothing is posted or run, any pending send retry is dropped, and it fires at its next schedule match (`triggers.cron.run_once_refused`, [#896](https://github.com/littlebearapps/untether/issues/896)). The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload; turning `[triggers]` off, or an edit that briefly makes the entry invalid (skipped), keeps it, so neither re-arms a spent one-shot ([#1279](https://github.com/littlebearapps/untether/issues/1279)). |
 | `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`; and for **Antigravity**: `workspace`, `plan`, `ask` or `full` (the only way a cron gets Ask me or Full access). Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 | `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only (passed as the engine's `--model`). Free-form like `/model set`, but it can't start with `-` or contain whitespace/control characters. Set `engine` too so the name matches. |
 | `allowed_tools` | string[]\|null | `null` | (needs `engine = "claude"`) Tools pre-approved for this cron's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
+| `env` | table\|null | `null` | Literal environment variables added to this cron's runs, e.g. `env = { APP_SESSION_ROLE = "qa" }`. Names are `A-Z`, `0-9`, `_`; values are never templated (`{{` is refused) and never logged. Names the service or engine manages are refused (`PATH`, `HOME`, `LD_*`, `DYLD_*`, `PYTHON*`, `NODE_*`, `GIT_*`, provider keys and tokens, `CLAUDE_*`, `UNTETHER_*`, proxy/CA names), and a name Untether already passes through keeps its own value. Not for secrets: values are visible in the process environment. A reply to the run doesn't get them ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
+| `agent` | string\|null | `null` | (needs `engine = "claude"`) Claude Code agent for this cron's runs, passed as `--agent=<name>` (letters, digits, `.` `_` `:` `/` `-`; plugin agents like `plugin:name` work). Replaces an `--agent` in `[claude] extra_args` for that run only. Not the same as `/agent`, which picks a chat's default engine ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
 | `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only. With `engine` set it must be one of that engine's levels (Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low`…`xhigh`; Antigravity `low`, `medium`, `high`; an engine without reasoning support is an error); without `engine`, one of `low`…`max`, and a level the resolved engine doesn't allow is ignored with a note in the run. Normalised to lower case. |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
@@ -952,6 +956,42 @@ A reply to a trigger run, `/at` and loop fires are attended runs and carry
 neither variable; a value inherited from Untether's own environment is
 removed rather than passed on.
 
+### Run journal
+
+Every cron and webhook run adds one JSON line to `triggers_runs.jsonl`, next to
+`untether.toml` ([#1123](https://github.com/littlebearapps/untether/issues/1123)).
+The file is private to the service user (`0600`) and is rotated to
+`triggers_runs.jsonl.1` at 5 MiB (one old file is kept). A line never holds
+the prompt or the answer:
+
+```json
+{"v":1,"trigger_kind":"cron","trigger_id":"daily-review","run_id":"…","session_id":"…",
+ "project":"myapp","engine":"claude","model":"claude-opus-…","started_at":1795000000.0,
+ "finished_at":1795000042.5,"outcome":"ok","ok":true,"error":null,"num_turns":4,
+ "cost_usd":0.21,"rate_limit_count":1,"rate_limit_total_s":60.0,"api_retry_count":0,
+ "api_retry_total_s":0.0,"rejected":true}
+```
+
+| `outcome` | Meaning |
+|---|---|
+| `ok` / `error` | the run's first result (a live session's later turns aren't journaled) |
+| `cancelled` | the run was cancelled or its turn interrupted |
+| `refused` | the daily cost budget's **Stop at limit** refused it; nothing ran |
+| `announce_failed` | the `⏰ Scheduled:` / `⚡ Trigger:` message couldn't be posted, so nothing ran (a `run_once` cron's retries each add a line) |
+| `fetch_aborted` | the cron's fetch step failed with `on_failure = "abort"` |
+
+The throttle fields count Claude's rate-limit waits (`rejected` is true when
+Anthropic refused a request outright) and API retries during that run, so a
+run that ended `ok` after being throttled is visible. Other engines report
+zeros. The same fields appear on the `runner.completed` log line. An
+automatic retry of a run (auto-continue, empty-resume resend) adds its own
+line with the same `run_id`: the last line for a `run_id` is the final
+outcome. A restart mid-run writes no line.
+
+```sh
+tail -n 20 ~/.untether/triggers_runs.jsonl | jq -c '{trigger_id, outcome, cost_usd, rate_limit_count}'
+```
+
 ### `/config` → ⏰ Triggers page (Tier 2)
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
@@ -1205,6 +1245,7 @@ The `triggers.manager.updated` log line lists added/removed crons and webhooks a
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
 | `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. Shared with voice transcription. |
 | `src/untether/triggers/describe.py` | `describe_cron()`: human-friendly schedule text for `/ping` and `/config`. |
-| `src/untether/triggers/history.py` | Last-fired timestamps (`triggers_history.json`). |
+| `src/untether/triggers/history.py` | Last-fired timestamps (`triggers_history.json`), keyed `cron:<id>` / `webhook:<id>` (a 0.36.1 bare-id key is still read); entries for triggers removed from the config are pruned at startup and on reload ([#1123](https://github.com/littlebearapps/untether/issues/1123)). |
+| `src/untether/triggers/journal.py` | Run journal (`triggers_runs.jsonl`, [#1123](https://github.com/littlebearapps/untether/issues/1123)). |
 | `src/untether/triggers/run_once_state.py` | Fired `run_once` cron ids (`run_once_fired.json`) and one-shots pending a send retry (`run_once_pending.json`). |
 | `src/untether/permission_audit.py` | Config-time Claude permission-mode audit for crons (`auto_semantics_changed`, `unattended_approval_risk`, `permission_mode_invalid`) and the trigger security audit (`trigger.cron.inherits_bypass`, `trigger.webhook.no_project`, `trigger.webhook.preapproved_tools`, [#1142](https://github.com/littlebearapps/untether/issues/1142)). |

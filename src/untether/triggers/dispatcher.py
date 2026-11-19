@@ -13,6 +13,7 @@ from anyio.abc import TaskGroup
 from ..context import RunContext
 from ..logging import get_logger
 from ..transport import RenderedMessage, SendOptions, Transport
+from . import journal
 from .settings import CronConfig, WebhookConfig
 
 logger = get_logger(__name__)
@@ -61,6 +62,8 @@ def build_run_context(
             tuple(trigger.allowed_tools) if trigger.allowed_tools is not None else None
         ),
         strict_webhook=strict and kind == "webhook",
+        env=tuple(sorted((trigger.env or {}).items())),  # #1121
+        agent=trigger.agent,
     )
 
 
@@ -101,7 +104,11 @@ class TriggerDispatcher:
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
         if await self._budget_refused(chat_id, context, engine_override):
-            return  # #896: nothing ran, so nothing is recorded as fired
+            # #896: nothing ran, so nothing is recorded as fired
+            journal.record_run(
+                context, outcome="refused", ok=False, engine=engine_override
+            )
+            return
         if not await self._dispatch(chat_id, label, prompt, context, engine_override):
             # #1123: the announce never landed, so nothing ran; recording it
             # would show a phantom "last fired" on the /config:tg page.
@@ -109,7 +116,7 @@ class TriggerDispatcher:
         # #271 Tier 3: record last-fired-at for the /config:tg page.
         from . import history
 
-        history.record_fired(webhook.id)
+        history.record_fired("webhook", webhook.id)
 
     async def dispatch_cron(
         self,
@@ -135,13 +142,20 @@ class TriggerDispatcher:
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 
         if await self._budget_refused(chat_id, context, engine_override):
+            journal.record_run(
+                context, outcome="refused", ok=False, engine=engine_override
+            )
             return DISPATCH_REFUSED
 
         # If cron has a fetch step, execute it before rendering the prompt.
         if cron.fetch is not None:
             prompt = await self._fetch_and_render(cron)
             if prompt is None:
-                return True  # fetch failed with on_failure=abort (handled)
+                # fetch failed with on_failure=abort (handled)
+                journal.record_run(
+                    context, outcome="fetch_aborted", ok=False, engine=engine_override
+                )
+                return True
         elif cron.prompt_template:
             # prompt_template without fetch — render with empty payload.
             from .templating import render_template_fields
@@ -239,6 +253,10 @@ class TriggerDispatcher:
             )
         if notify_ref is None:
             logger.error("triggers.dispatch.send_failed", label=label, chat_id=chat_id)
+            # #1123: a run_once cron retrying this writes one line per attempt.
+            journal.record_run(
+                context, outcome="announce_failed", ok=False, engine=engine_override
+            )
             return False
 
         logger.info(
@@ -334,4 +352,4 @@ class TriggerDispatcher:
         # webhook still fired even if it didn't spawn a run.
         from . import history
 
-        history.record_fired(webhook.id)
+        history.record_fired("webhook", webhook.id)

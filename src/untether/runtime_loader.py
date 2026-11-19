@@ -145,7 +145,7 @@ def build_router(
                 continue
 
         cmd = backend.cli_command(runner_cfg)
-        if status != "load_error" and shutil.which(cmd) is None:
+        if status == "ok" and shutil.which(cmd) is None:
             status = "missing_cli"
             missing = _missing_cli_issue(cmd)
             issue = f"{issue}; {missing}" if issue else missing

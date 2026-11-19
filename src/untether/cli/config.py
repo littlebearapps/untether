@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
 import tomllib
@@ -24,7 +25,19 @@ _MISSING = object()
 _CONFIG_PATH_OPTION = typer.Option(
     None,
     "--config-path",
-    help="Override the default config path.",
+    help="Override the config path (default: UNTETHER_CONFIG_PATH, else"
+    " ~/.untether/untether.toml).",
+)
+_SHOW_SECRETS_OPTION = typer.Option(
+    False,
+    "--show-secrets",
+    help="Print secret values (tokens, keys, passwords) instead of masking them.",
+)
+# #1268: a leaf key that holds a credential (bot_token, *_api_key, webhook
+# `secret`, env names like GITHUB_TOKEN). `max_tokens` is a count, not a match.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(?:^|[_-])(?:token|secret|password|passwd|apikey|credentials?)(?:$|[_-])"
+    r"|(?:api|private|access)[_-]?key"
 )
 
 
@@ -46,8 +59,20 @@ def _fail_missing_config(path: Path) -> None:
 
 def _resolve_config_path_override(value: Path | None) -> Path:
     if value is None:
+        # #1268: the same order as `untether doctor` and the bot.
+        env_path = os.environ.get("UNTETHER_CONFIG_PATH")
+        if env_path:
+            return Path(env_path).expanduser()
         return _resolve_home_config_path()
     return value.expanduser()
+
+
+def _shown_literal(key: str, value: Any, *, show_secrets: bool) -> str:
+    """#1268: the TOML literal, or a mask for a credential's value."""
+    leaf = key.rsplit(".", 1)[-1].split("[", 1)[0]
+    if not show_secrets and _SECRET_KEY_RE.search(leaf):
+        return f'"***"  # redacted, {len(str(value))} chars; --show-secrets to show'
+    return _toml_literal(value)
 
 
 def _resolve_home_config_path() -> Path:
@@ -130,6 +155,14 @@ def _flatten_config(config: dict[str, Any]) -> list[tuple[str, Any]]:
                 path = f"{prefix}.{key}" if prefix else key
                 if isinstance(value, dict):
                     _walk(value, path)
+                elif (
+                    isinstance(value, list)
+                    and value
+                    and all(isinstance(item, dict) for item in value)
+                ):
+                    # #1268: an array of tables ([[triggers.crons]]).
+                    for index, item in enumerate(value):
+                        _walk(item, f"{path}[{index}]")
                 else:
                     items.append((path, value))
         elif prefix:
@@ -160,21 +193,23 @@ def config_path_cmd(
 
 def config_list(
     config_path: Path | None = _CONFIG_PATH_OPTION,
+    show_secrets: bool = _SHOW_SECRETS_OPTION,
 ) -> None:
-    """List config keys as flattened dot-paths."""
+    """List config keys as flattened dot-paths (secrets masked)."""
     path = _resolve_config_path_override(config_path)
     config = _load_config_or_exit(path, missing_code=1)
-    try:
-        for key, value in _flatten_config(config):
-            literal = _toml_literal(value)
-            typer.echo(f"{key} = {literal}")
-    except ConfigError as exc:
-        _exit_config_error(exc)
+    for key, value in _flatten_config(config):
+        try:
+            literal = _shown_literal(key, value, show_secrets=show_secrets)
+        except ConfigError:
+            literal = "# not shown: no TOML literal for this value"
+        typer.echo(f"{key} = {literal}")
 
 
 def config_get(
     key: str = typer.Argument(..., help="Dot-path key to fetch."),
     config_path: Path | None = _CONFIG_PATH_OPTION,
+    show_secrets: bool = _SHOW_SECRETS_OPTION,
 ) -> None:
     """Fetch a single config key."""
     path = _resolve_config_path_override(config_path)
@@ -203,7 +238,7 @@ def config_get(
         raise typer.Exit(code=2)
 
     try:
-        typer.echo(_toml_literal(node))
+        typer.echo(_shown_literal(key, node, show_secrets=show_secrets))
     except ConfigError as exc:
         _exit_config_error(exc)
 
@@ -258,7 +293,7 @@ def config_set(
     except ConfigError as exc:
         _exit_config_error(exc)
 
-    rendered = _toml_literal(parsed)
+    rendered = _shown_literal(key, parsed, show_secrets=False)
     typer.echo(f"updated {'.'.join(segments)} = {rendered}")
 
 
