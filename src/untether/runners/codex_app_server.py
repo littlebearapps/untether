@@ -32,8 +32,16 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 from .. import __version__
 from ..events import EventFactory
 from ..logging import get_logger
-from ..model import CompletedEvent, ResumeToken, UntetherEvent
+from ..model import (
+    ActionEvent,
+    ActionPhase,
+    CompletedEvent,
+    ResumeToken,
+    StartedEvent,
+    UntetherEvent,
+)
 from ..runner import PRESPAWN_BLOCKED_KEY, JsonlStreamState, JsonlSubprocessRunner
+from ..schemas import codex as codex_schema
 from ..schemas import codex_app_server as cas
 from ..schemas.codex_app_server import (
     CODEX_APP_SERVER_SENDS,
@@ -41,7 +49,8 @@ from ..schemas.codex_app_server import (
     CODEX_APP_SERVER_USED,
     MIN_TESTED_APP_SERVER_VERSION,
 )
-from ..utils.paths import get_run_base_dir
+from ..utils.error_display import redact_url_secrets
+from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
 from .codex import (
@@ -51,8 +60,11 @@ from .codex import (
     CodexRunner,
     CodexRunState,
     _AgentMessageSummary,
+    _parse_reconnect_message,
     _select_final_answer,
+    _translate_item_event,
     _warn_webhook_unknown_mode,
+    _warning_display_text,
     _webhook_safe_trigger,
 )
 from .codex_rpc import (
@@ -350,6 +362,107 @@ _NO_EARLIER_SESSION_NOTE = (
     "No earlier Codex session in this project; started a new one."
 )
 _UNKNOWN_MODE_SAFE_WARNED: set[str] = set()
+_WARNING = "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
+# #1240 on app-server: the untrusted-project notice is a configWarning here,
+# not exec's stderr line. Stable prefix only (codex-cli 0.170.0).
+_UNTRUSTED_CONFIG_WARNING_PREFIX = (
+    "Project-local config, hooks, and exec policies are disabled"
+)
+_APPROVAL_REQUESTS = frozenset(
+    {
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+        "mcpServer/elicitation/request",
+    }
+)
+_APPROVAL_DECLINED_NOTE = (
+    f"{_WARNING} Codex asked for approval; declined: this transport doesn't"
+    " support approvals yet"
+)
+# Items with no row: the prompt echo and hook text, plus the ones later
+# phases render (plan: #965; contextCompaction: 962-5).
+_SILENT_ITEM_TYPES = frozenset(
+    {"userMessage", "hookPrompt", "plan", "contextCompaction"}
+)
+_UNKNOWN_ITEMS_LOGGED: set[str] = set()
+# App-server names -> exec's, so exec's title helpers give the same rows.
+_EXEC_STATUS = {"inProgress": "in_progress"}
+_EXEC_WEB_ACTION = {"openPage": "open_page", "findInPage": "find_in_page"}
+
+
+def codex_error_code(info: Any) -> str | None:
+    """``TurnError.codexErrorInfo`` as one name: a string variant as is, an
+    object variant (``{"httpConnectionFailed": {...}}``) by its only key."""
+    if isinstance(info, str):
+        return info or None
+    if isinstance(info, dict) and len(info) == 1:
+        key = next(iter(info))
+        return key if isinstance(key, str) else None
+    return None
+
+
+def _exec_status(status: str) -> Any:
+    return _EXEC_STATUS.get(status, status)
+
+
+def _exec_item(item: cas.ThreadItem) -> codex_schema.ThreadItem | None:
+    """The exec item an app-server item corresponds to, so exec's own
+    translation renders it; None when exec has no such item."""
+    match item:
+        case cas.AgentMessageItem():
+            return codex_schema.AgentMessageItem(
+                id=item.id, text=item.text, phase=item.phase
+            )
+        case cas.CommandExecutionItem():
+            return codex_schema.CommandExecutionItem(
+                id=item.id,
+                command=item.command,
+                aggregated_output=item.aggregated_output or "",
+                exit_code=item.exit_code,
+                status=_exec_status(item.status),
+            )
+        case cas.FileChangeItem():
+            # Each change's ``kind`` is ``{"type": "add"}`` here, ``"add"`` on exec.
+            changes = [
+                {**c, "kind": c["kind"].get("type")}
+                if isinstance(c, dict) and isinstance(c.get("kind"), dict)
+                else c
+                for c in item.changes
+            ]
+            return codex_schema.FileChangeItem(
+                id=item.id, changes=changes, status=_exec_status(item.status)
+            )
+        case cas.McpToolCallItem():
+            result, error = item.result, item.error
+            if isinstance(error, dict):
+                error = error.get("message")
+            return codex_schema.McpToolCallItem(
+                id=item.id,
+                server=item.server,
+                tool=item.tool,
+                arguments=item.arguments,
+                result=codex_schema.McpToolCallItemResult(
+                    content=result.get("content") or [],
+                    structured_content=result.get("structuredContent"),
+                )
+                if isinstance(result, dict)
+                else None,
+                error=None
+                if error is None
+                else codex_schema.McpToolCallItemError(message=str(error)),
+                status=_exec_status(item.status),
+            )
+        case cas.WebSearchItem():
+            action = item.action
+            if isinstance(action, dict) and action.get("type") in _EXEC_WEB_ACTION:
+                action = {**action, "type": _EXEC_WEB_ACTION[action["type"]]}
+            return codex_schema.WebSearchItem(
+                id=item.id, query=item.query, action=action, results=item.results
+            )
+        case cas.ReasoningItem():
+            text = "\n".join(s for s in item.summary if isinstance(s, str)).strip()
+            return codex_schema.ReasoningItem(id=item.id, text=text)
+    return None
 
 
 def sandbox_policy_mode(policy: Any) -> str | None:
@@ -407,6 +520,11 @@ class AppServerRunState(CodexRunState):
     # Set when a write failed: the run ends with this error.
     stopped: str | None = None
     seen_unknown: set[str] = field(default_factory=set)
+    # item id -> (kind, title) of rows started but not completed (§0.5 rule 4).
+    open_items: dict[str, tuple[str, str]] = field(default_factory=dict)
+    retry_seen: bool = False
+    moderation_logged: bool = False
+    server_requests: int = 0
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -477,7 +595,13 @@ class CodexAppServerRunner(CodexRunner):
         # Stdin stays open. Only *write* initialize: the base starts reading
         # stdout after this returns, so nothing may wait for an answer here.
         state.proc = proc
-        state.peer = CodexRpcPeer(proc.stdin.send, write_timeout=self.write_timeout_s)
+        state.peer = CodexRpcPeer(
+            proc.stdin.send,
+            write_timeout=self.write_timeout_s,
+            on_server_request=lambda method, _params: self._on_server_request(
+                state, method
+            ),
+        )
         try:
             await state.peer.submit(
                 "initialize",
@@ -525,7 +649,10 @@ class CodexAppServerRunner(CodexRunner):
                 break
             try:
                 state.inbound = await peer.feed(line)
-                if state.inbound is not None:
+                # A server request yields no message, but its row does.
+                if state.inbound is not None or (
+                    state.pending_rows and state.thread_id is not None
+                ):
                     for evt in self._handle_jsonl_line(
                         raw_line=line,
                         stream=stream,
@@ -585,23 +712,204 @@ class CodexAppServerRunner(CodexRunner):
                         f"codex app-server sent an unreadable {msg.method} result",
                     )
                 ]
+        events: list[UntetherEvent] = []
         if isinstance(msg, Notification):
-            return self._on_notification(
+            events = self._on_notification(
                 msg, state=state, resume=resume, found_session=found_session
             )
-        return []
+        return self._flush_rows(state, events)
+
+    @staticmethod
+    def _flush_rows(
+        state: AppServerRunState, events: list[UntetherEvent]
+    ) -> list[UntetherEvent]:
+        """Rows raised outside a translated line (warnings before the thread,
+        server requests) go out once the StartedEvent has (3-event contract)."""
+        if state.thread_id is None or not state.pending_rows:
+            return events
+        if any(isinstance(e, StartedEvent) for e in events):
+            return events  # _on_thread placed them after it
+        rows = list(state.pending_rows)
+        state.pending_rows.clear()
+        return [*rows, *events]
+
+    def _rows(
+        self, state: AppServerRunState, rows: list[UntetherEvent]
+    ) -> list[UntetherEvent]:
+        if state.thread_id is None:
+            state.pending_rows.extend(rows)
+            return []
+        return rows
 
     def _error(
-        self, state: AppServerRunState, resume: ResumeToken | None, error: str
+        self,
+        state: AppServerRunState,
+        resume: ResumeToken | None,
+        error: str,
+        usage: dict[str, Any] | None = None,
     ) -> CompletedEvent:
         token = (
             ResumeToken(engine=ENGINE, value=state.thread_id)
             if state.thread_id
             else resume
         )
+        # An answer that arrived before the failure is kept; the bridge
+        # appends the error to it (#53760).
         return state.factory.completed_error(
-            error=error, answer=self._answer(state), resume=token
+            error=error,
+            answer=self._answer(state),
+            resume=token,
+            usage=self._untrusted_usage(state, usage),
         )
+
+    def _on_server_request(self, state: AppServerRunState, method: str) -> None:
+        """The peer already declined it; this only adds the row."""
+        state.server_requests += 1
+        title = (
+            _APPROVAL_DECLINED_NOTE
+            if method in _APPROVAL_REQUESTS
+            else f"{_WARNING} Codex sent a request Untether doesn't support yet"
+            f" (`{method}`); declined"
+        )
+        row = state.factory.action_completed(
+            action_id=f"codex.server_request.{state.server_requests}",
+            kind="warning",
+            title=title,
+            detail={"method": method},
+            ok=True,
+            level="warning",
+        )
+        state.pending_rows.append(row)
+
+    def _warning_rows(
+        self, state: AppServerRunState, method: str, text: str
+    ) -> list[UntetherEvent]:
+        """warning / configWarning / deprecationNotice: one ⚠️ row per
+        message per run (#987), paths and URLs masked (#1066, #1151)."""
+        if method == "deprecationNotice":
+            logger.info("codex.app_server.deprecation", summary=text[:200])
+        if not text or text in state.seen_warnings:
+            return []
+        state.seen_warnings.add(text)
+        if text.startswith(_UNTRUSTED_CONFIG_WARNING_PREFIX):
+            # #1240: the same row and footer as exec's stderr notice.
+            state.untrusted_project_config = True
+            logger.info("codex.project_config_untrusted", cwd=state.cwd)
+            return self._rows(state, self._untrusted_note(state))
+        message = redact_url_secrets(_warning_display_text(text))
+        row = state.factory.action_completed(
+            action_id=f"codex.warning.{len(state.seen_warnings)}",
+            kind="warning",
+            title=f"{_WARNING} {message}",
+            detail={"message": message, "source": method},
+            ok=True,
+            message=message,
+            level="warning",
+        )
+        return self._rows(state, [row])
+
+    def _item_rows(
+        self, phase: ActionPhase, raw: Any, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        item = cas.decode_thread_item(raw)
+        if isinstance(item, cas.AgentMessageItem):
+            # Text arrives whole on item/completed (deltas are opted out).
+            if phase != "completed":
+                return []
+            self._note_moderation(item, state)
+            state.turn_agent_messages.append(
+                _AgentMessageSummary(text=item.text, phase=item.phase)
+            )
+        exec_item = _exec_item(item)
+        if isinstance(exec_item, codex_schema.ReasoningItem) and not exec_item.text:
+            return []  # summaries arrive on item/completed, when enabled
+        if exec_item is not None:
+            rows = _translate_item_event(phase, exec_item, factory=state.factory)
+        else:
+            rows = self._other_item_rows(phase, item, state=state)
+        for row in rows:
+            if not isinstance(row, ActionEvent):
+                continue
+            if row.phase == "started":
+                state.open_items[row.action.id] = (row.action.kind, row.action.title)
+            elif row.phase == "completed":
+                state.open_items.pop(row.action.id, None)
+        return rows
+
+    def _other_item_rows(
+        self, phase: ActionPhase, item: cas.ThreadItem, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """Items exec never emits: sub-agent calls, image views, and a
+        generic row for any type Untether doesn't model (logged once)."""
+        if item.type in _SILENT_ITEM_TYPES or phase == "updated":
+            return []
+        kind = "tool"
+        status = ""
+        match item:
+            case cas.CollabAgentToolCallItem():
+                kind, status = "subagent", item.status
+                title = item.prompt or item.tool or "sub-agent"
+            case cas.ImageViewItem():
+                title = f"view image {relativize_path(item.path)}".strip()
+            case _:
+                item_type = item.type or "item"
+                if item_type not in _UNKNOWN_ITEMS_LOGGED:
+                    _UNKNOWN_ITEMS_LOGGED.add(item_type)
+                    logger.info("codex.app_server.unknown_item", item_type=item_type)
+                raw_status = (
+                    item.raw.get("status")
+                    if isinstance(item, cas.GenericItem)
+                    else None
+                )
+                status = raw_status if isinstance(raw_status, str) else ""
+                title = item_type
+        action_id = getattr(item, "id", None) or f"codex.item.{item.type}"
+        if phase == "started":
+            return [
+                state.factory.action_started(
+                    action_id=action_id, kind=kind, title=title
+                )
+            ]
+        return [
+            state.factory.action_completed(
+                action_id=action_id,
+                kind=kind,
+                title=title,
+                ok=status in {"", "completed"},
+            )
+        ]
+
+    def _note_moderation(
+        self, item: cas.AgentMessageItem, state: AppServerRunState
+    ) -> None:
+        # PLAN Q6: shown as sent; logged once per run (display is untyped, E2).
+        moderation = item.moderation or {}
+        if state.moderation_logged or moderation.get("moderated") is not True:
+            return
+        state.moderation_logged = True
+        display = moderation.get("display")
+        logger.info(
+            "codex.app_server.moderated",
+            mode=display.get("mode") if isinstance(display, dict) else None,
+        )
+
+    def _close_open_items(
+        self, state: AppServerRunState, status: str
+    ) -> list[UntetherEvent]:
+        """Codex leaves items open when a turn fails or is interrupted (D19):
+        close each before the final, so no row stays running."""
+        rows: list[UntetherEvent] = [
+            state.factory.action_completed(
+                action_id=action_id,
+                kind=kind,  # type: ignore[arg-type]
+                title=title,
+                detail={"status": status},
+                ok=False,
+            )
+            for action_id, (kind, title) in state.open_items.items()
+        ]
+        state.open_items.clear()
+        return rows
 
     @staticmethod
     def _answer(state: AppServerRunState) -> str:
@@ -821,32 +1129,88 @@ class CodexAppServerRunner(CodexRunner):
             return []
         if isinstance(params, cas.TurnParams) and params.thread_id != state.thread_id:
             return []  # a sub-agent thread's turn, not this run's
+        if (
+            isinstance(params, cas.ItemParams | cas.ErrorParams)
+            and params.thread_id
+            and params.thread_id != state.thread_id
+        ):
+            return []  # a sub-agent thread's item or error
         match msg.method:
             case "turn/started":
                 state.turn_id = params.turn.id
                 state.turn_agent_messages.clear()
+            case "item/started":
+                return self._item_rows("started", params.item, state=state)
             case "item/completed":
-                item = cas.decode_thread_item(params.item)
-                if isinstance(item, cas.AgentMessageItem) and (
-                    not params.thread_id or params.thread_id == state.thread_id
-                ):
-                    state.turn_agent_messages.append(
-                        _AgentMessageSummary(text=item.text, phase=item.phase)
-                    )
+                return self._item_rows("completed", params.item, state=state)
+            case "error":
+                return self._error_row(params, state=state)
+            case "warning":
+                return self._warning_rows(state, msg.method, params.message)
+            case "configWarning" | "deprecationNotice":
+                return self._warning_rows(state, msg.method, params.summary)
             case "turn/completed":
-                turn = params.turn
-                token = found_session or resume
-                if turn.status == "completed":
-                    return [
-                        state.factory.completed_ok(
-                            answer=self._answer(state), resume=token
-                        )
-                    ]
-                error = (turn.error.message if turn.error else "") or (
-                    f"Codex turn {turn.status}"
+                return self._on_turn_completed(
+                    params.turn, state=state, resume=resume, found_session=found_session
                 )
-                return [self._error(state, resume, error)]
         return []
+
+    def _error_row(
+        self, params: cas.ErrorParams, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """``error`` mid-turn. ``willRetry``: exec's reconnect row. Otherwise
+        a failed note, as exec shows its ``error`` line; turn/completed
+        carries the error that ends the run."""
+        message = params.error.message
+        if not params.will_retry:
+            return self._rows(state, [self.note_event(message, state=state, ok=False)])
+        reconnect = _parse_reconnect_message(message)
+        if reconnect is not None:
+            attempt, max_attempts = reconnect
+            phase: ActionPhase = "started" if attempt <= 1 else "updated"
+            detail: dict[str, Any] = {"attempt": attempt, "max": max_attempts}
+        else:
+            phase = "updated" if state.retry_seen else "started"
+            detail = {}
+        state.retry_seen = True
+        code = codex_error_code(params.error.codex_error_info)
+        if code:
+            detail["codex_error_info"] = code
+        row = state.factory.action(
+            phase=phase,
+            action_id="codex.reconnect",
+            kind="note",
+            title=redact_url_secrets(message),
+            detail=detail,
+            level="info",
+        )
+        return self._rows(state, [row])
+
+    def _on_turn_completed(
+        self,
+        turn: cas.Turn,
+        *,
+        state: AppServerRunState,
+        resume: ResumeToken | None,
+        found_session: ResumeToken | None,
+    ) -> list[UntetherEvent]:
+        if turn.status == "completed":
+            return [
+                state.factory.completed_ok(
+                    answer=self._answer(state),
+                    resume=found_session or resume,
+                    usage=self._untrusted_usage(state, None),
+                )
+            ]
+        rows = self._close_open_items(
+            state, "cancelled" if turn.status == "interrupted" else "failed"
+        )
+        error = (turn.error.message if turn.error else "") or (
+            f"Codex turn {turn.status}"
+        )
+        code = codex_error_code(turn.error.codex_error_info) if turn.error else None
+        usage = {"codex_error_info": code} if code else None
+        return [*rows, self._error(state, resume, error, usage)]
 
     # --- process end -----------------------------------------------------------
 

@@ -193,6 +193,7 @@ class WebSearchItem(_Wire):
     id: str
     query: str = ""
     action: Any = None
+    results: Any = None
     type: str = "webSearch"
 
 

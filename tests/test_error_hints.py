@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from untether.error_hints import _HINT_PATTERNS, get_error_hint
+import pytest
+
+from untether.error_hints import (
+    _HINT_PATTERNS,
+    CODEX_ERROR_INFO_HINTS,
+    codex_error_info_hint,
+    get_error_hint,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -629,3 +636,49 @@ class TestAntigravityHints:
         assert get_error_hint("gemini result status: weird") == (
             "Gemini returned an unexpected result. Try a fresh session with /new."
         )
+
+
+class TestCodexErrorInfoHints:
+    """#962: app-server's typed ``codexErrorInfo`` (codex-cli 0.170.0 schema)."""
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "usageLimitExceeded",
+            "rateLimitExceeded",
+            "serverOverloaded",
+            "policyCapacityUnavailable",
+            "contextWindowExceeded",
+            "modelNotFound",
+            "unauthorized",
+            "cyberPolicy",
+            "inferenceHookDenied",
+        ],
+    )
+    def test_each_code_has_a_hint(self, code: str) -> None:
+        hint = codex_error_info_hint(code)
+        assert hint
+        assert hint == CODEX_ERROR_INFO_HINTS[code]
+
+    def test_specific_wording(self) -> None:
+        assert "/model" in (codex_error_info_hint("modelNotFound") or "")
+        assert "codex login" in (codex_error_info_hint("unauthorized") or "")
+        assert "/new" in (codex_error_info_hint("contextWindowExceeded") or "")
+
+    @pytest.mark.parametrize("code", [None, "", "other", 3, {"x": 1}])
+    def test_unknown_or_missing_code_has_none(self, code: object) -> None:
+        assert codex_error_info_hint(code) is None
+
+    def test_typed_code_outranks_the_text_in_the_run_hint(self) -> None:
+        from untether.runner_bridge import _run_error_hint
+
+        # The text alone would match the generic rate-limit hint.
+        hint = _run_error_hint(
+            "rate limit: usage exceeded",
+            usage={"codex_error_info": "usageLimitExceeded"},
+            close_reason=None,
+        )
+        assert hint == CODEX_ERROR_INFO_HINTS["usageLimitExceeded"]
+        assert _run_error_hint(
+            "rate limit", usage=None, close_reason=None
+        ) == get_error_hint("rate limit")

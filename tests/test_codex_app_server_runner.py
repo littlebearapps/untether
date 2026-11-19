@@ -23,13 +23,22 @@ import pytest
 from structlog.testing import capture_logs
 
 from untether.config import ConfigError
-from untether.model import CompletedEvent, ResumeToken, StartedEvent
+from untether.error_hints import CODEX_ERROR_INFO_HINTS
+from untether.events import EventFactory
+from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
 from untether.runner import JsonlSubprocessRunner, prespawn_blocked_reason
-from untether.runner_bridge import _resume_failure_clears_session
+from untether.runner_bridge import _resume_failure_clears_session, _run_error_hint
 from untether.runners import codex_app_server as gate
-from untether.runners.codex import CodexRunner, build_runner
+from untether.runners.codex import (
+    _UNTRUSTED_PROJECT_NOTE,
+    CodexRunner,
+    build_runner,
+    translate_codex_event,
+)
+from untether.runners.codex_rpc import Notification
 from untether.runners.extra_args_guard import BlockedExtraArgsError
 from untether.runners.run_options import EngineRunOptions, apply_run_options
+from untether.schemas import codex as codex_schema
 from untether.schemas.codex_app_server import (
     CODEX_APP_SERVER_USED,
     MIN_TESTED_APP_SERVER_VERSION,
@@ -298,6 +307,8 @@ for line in sys.stdin:
             log.flush()
         out({"id": rid, "result": {"userAgent": "fake/0", "codexHome": "",
              "platformFamily": "unix", "platformOs": "linux"}})
+        for n in SC.get("after_init", []):
+            out(n)
         if SC.get("close_stdin_after_init"):
             os.close(0)
             time.sleep(30)
@@ -330,6 +341,8 @@ for line in sys.stdin:
         out({"method": "turn/started", "params": {"threadId": tid, "turn": turn}})
         if SC.get("unknown_notification"):
             out({"method": "brand/new", "params": {"x": 1}})
+        for n in SC.get("notifications", []):
+            out(n)
         # A sub-agent thread finishing must not end this run.
         out({"method": "turn/completed", "params": {"threadId": "subagent",
              "turn": {"id": "s", "status": "completed", "items": []}}})
@@ -853,3 +866,518 @@ async def test_gate_never_runs_on_exec(
     script.chmod(0o755)
     events = await _run(CodexRunner(codex_cmd=str(script), extra_args=[]))
     assert _completed(events).ok
+
+
+# --- 962-3: translation ---------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "codex_app_server"
+
+
+def _bare_runner() -> gate.CodexAppServerRunner:
+    return gate.CodexAppServerRunner(codex_cmd="codex", extra_args=[])
+
+
+def _translate(runner: Any, state: Any, method: str, params: dict) -> list[Any]:
+    state.inbound = Notification(method, params)
+    try:
+        return runner.translate(b"", state=state, resume=None, found_session=None)
+    finally:
+        state.inbound = None
+
+
+def _app_state(runner: Any, thread: str = THREAD) -> Any:
+    state = runner.new_state("p", None)
+    state.thread_id = thread
+    return state
+
+
+def _item(method: str, item: dict, thread: str = THREAD) -> tuple[str, dict]:
+    return method, {"threadId": thread, "turnId": "turn-1", "item": item}
+
+
+def _rows(events: list[Any]) -> list[tuple]:
+    return [
+        (e.phase, e.action.kind, e.action.title, e.ok, e.action.detail)
+        for e in events
+        if isinstance(e, ActionEvent)
+    ]
+
+
+def _exec_rows(phase: str, item: dict) -> list[tuple]:
+    tag = {"started": "item.started", "completed": "item.completed"}[phase]
+    event = codex_schema.decode_event(json.dumps({"type": tag, "item": item}))
+    return _rows(
+        translate_codex_event(event, title="Codex", factory=EventFactory("codex"))
+    )
+
+
+_PARITY = [
+    pytest.param(
+        "started",
+        {
+            "type": "commandExecution",
+            "id": "c1",
+            "command": "bash -lc ls",
+            "status": "inProgress",
+            "exitCode": None,
+            "aggregatedOutput": None,
+            "commandActions": [{"type": "listFiles", "command": "ls"}],
+        },
+        {
+            "type": "command_execution",
+            "id": "c1",
+            "command": "bash -lc ls",
+            "aggregated_output": "",
+            "exit_code": None,
+            "status": "in_progress",
+        },
+        id="command-started",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "commandExecution",
+            "id": "c1",
+            "command": "bash -lc false",
+            "status": "failed",
+            "exitCode": 1,
+            "aggregatedOutput": "",
+            "durationMs": 4,
+            "startedAtMs": 1,
+            "completedAtMs": 5,
+        },
+        {
+            "type": "command_execution",
+            "id": "c1",
+            "command": "bash -lc false",
+            "aggregated_output": "",
+            "exit_code": 1,
+            "status": "failed",
+        },
+        id="command-failed",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "fileChange",
+            "id": "f1",
+            "status": "completed",
+            "changes": [
+                {
+                    "path": "src/a.py",
+                    "kind": {"type": "update", "move_path": None},
+                    "diff": "+x",
+                },
+                {"path": "b.txt", "kind": {"type": "add"}},
+            ],
+        },
+        {
+            "type": "file_change",
+            "id": "f1",
+            "status": "completed",
+            "changes": [
+                {"path": "src/a.py", "kind": "update"},
+                {"path": "b.txt", "kind": "add"},
+            ],
+        },
+        id="file-change-kind-object",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "mcpToolCall",
+            "id": "t1",
+            "server": "docs",
+            "tool": "search",
+            "status": "completed",
+            "arguments": {"q": "x"},
+            "result": {"content": [{"type": "text"}], "structuredContent": {"a": 1}},
+            "error": None,
+        },
+        {
+            "type": "mcp_tool_call",
+            "id": "t1",
+            "server": "docs",
+            "tool": "search",
+            "status": "completed",
+            "arguments": {"q": "x"},
+            "result": {"content": [{"type": "text"}], "structured_content": {"a": 1}},
+            "error": None,
+        },
+        id="mcp-ok",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "mcpToolCall",
+            "id": "t1",
+            "server": "docs",
+            "tool": "search",
+            "status": "failed",
+            "arguments": {},
+            "result": None,
+            "error": {"message": "boom"},
+        },
+        {
+            "type": "mcp_tool_call",
+            "id": "t1",
+            "server": "docs",
+            "tool": "search",
+            "status": "failed",
+            "arguments": {},
+            "result": None,
+            "error": {"message": "boom"},
+        },
+        id="mcp-failed",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "webSearch",
+            "id": "w1",
+            "query": "",
+            "action": {"type": "openPage", "url": "https://example.com/x"},
+        },
+        {
+            "type": "web_search",
+            "id": "w1",
+            "query": "",
+            "action": {"type": "open_page", "url": "https://example.com/x"},
+        },
+        id="web-open-page",
+    ),
+    pytest.param(
+        "started",
+        {"type": "webSearch", "id": "w2", "query": "", "action": None},
+        {"type": "web_search", "id": "w2", "query": ""},
+        id="web-started-placeholder",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "reasoning",
+            "id": "r1",
+            "summary": ["**Planning** the fix"],
+            "content": [],
+        },
+        {"type": "reasoning", "id": "r1", "text": "**Planning** the fix"},
+        id="reasoning",
+    ),
+    pytest.param(
+        "completed",
+        {
+            "type": "agentMessage",
+            "id": "m1",
+            "text": "Looking at the tests",
+            "phase": "commentary",
+        },
+        {
+            "type": "agent_message",
+            "id": "m1",
+            "text": "Looking at the tests",
+            "phase": "commentary",
+        },
+        id="commentary-note",
+    ),
+]
+
+
+@pytest.mark.parametrize(("phase", "app_item", "exec_item"), _PARITY)
+def test_item_rows_match_exec(phase: str, app_item: dict, exec_item: dict) -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    rows = _rows(_translate(runner, state, *_item(f"item/{phase}", app_item)))
+    assert rows
+    assert rows == _exec_rows(phase, exec_item)
+
+
+def test_items_exec_shows_no_started_row_for_have_none_here() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    for item in (
+        {"type": "fileChange", "id": "f", "status": "inProgress", "changes": []},
+        {"type": "reasoning", "id": "r", "summary": [], "content": []},
+        {"type": "agentMessage", "id": "m", "text": "", "phase": None},
+        {"type": "userMessage", "id": "u", "content": []},
+    ):
+        assert _translate(runner, state, *_item("item/started", item)) == []
+
+
+def test_unknown_item_type_gets_a_generic_row_and_one_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gate, "_UNKNOWN_ITEMS_LOGGED", set())
+    runner = _bare_runner()
+    state = _app_state(runner)
+    with capture_logs() as logs:
+        for phase in ("started", "completed", "started"):
+            item = {"type": "brandNewThing", "id": f"x-{phase}", "status": "completed"}
+            rows = _rows(_translate(runner, state, *_item(f"item/{phase}", item)))
+            assert [r[:3] for r in rows] == [(phase, "tool", "brandNewThing")]
+    logged = [e for e in logs if e["event"] == "codex.app_server.unknown_item"]
+    assert [e["item_type"] for e in logged] == ["brandNewThing"]
+
+
+def test_subagent_and_image_view_rows() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    sub = {
+        "type": "collabAgentToolCall",
+        "id": "a1",
+        "tool": "spawnAgent",
+        "status": "completed",
+        "prompt": "check the docs",
+    }
+    img = {"type": "imageView", "id": "i1", "path": "shot.png"}
+    sub_rows = _rows(_translate(runner, state, *_item("item/completed", sub)))
+    assert sub_rows[0][:4] == ("completed", "subagent", "check the docs", True)
+    img_rows = _rows(_translate(runner, state, *_item("item/completed", img)))
+    assert img_rows[0][1:3] == ("tool", "view image shot.png")
+
+
+def test_items_of_another_thread_are_ignored() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    item = {
+        "type": "commandExecution",
+        "id": "c",
+        "command": "ls",
+        "status": "inProgress",
+    }
+    assert _translate(runner, state, *_item("item/started", item, OTHER_THREAD)) == []
+    assert state.open_items == {}
+
+
+def test_replay_of_the_probe_turn_closes_the_open_command() -> None:
+    """codex-cli 0.169.0 capture: a fileChange, a `sleep 30` the probe
+    interrupted (never item/completed, D19), and one config warning sent
+    twice (configWarning, then warning)."""
+    text = (FIXTURES / "live-2-turns-experimental-0.169.0.jsonl").read_text()
+    lines = [json.loads(x) for x in text.splitlines()]
+    end = next(i for i, x in enumerate(lines) if "TURN 2" in json.dumps(x))
+    runner = _bare_runner()
+    state = _app_state(runner, "01a1e886-cabf-71e2-b75f-163eeec13b3f")
+    events: list[Any] = []
+    for line in lines[:end]:
+        msg = line.get("msg", {})
+        if line.get("dir") == "s2c" and "id" not in msg and "method" in msg:
+            events += _translate(runner, state, msg["method"], msg.get("params") or {})
+    rows = _rows(events)
+    warnings = [r for r in rows if r[1] == "warning"]
+    assert len(warnings) == 1
+    assert "`project` is ignored" in warnings[0][2]
+    assert (
+        "completed",
+        "file_change",
+        "/tmp/codexplan-scratch/probe.txt",
+        True,
+    ) in [r[:4] for r in rows]
+    command = [r for r in rows if r[1] == "command"]
+    assert [(r[0], r[2], r[3]) for r in command] == [
+        ("started", "/usr/bin/zsh -lc 'sleep 30'", None),
+        ("completed", "/usr/bin/zsh -lc 'sleep 30'", False),
+    ]
+    assert command[1][4] == {"status": "cancelled"}
+    done = _completed(events)
+    assert not done.ok
+    assert done.error == "Codex turn interrupted"
+
+
+def _cmd_started(cid: str = "c1") -> dict:
+    return {
+        "method": "item/started",
+        "params": {
+            "threadId": THREAD,
+            "turnId": "turn-1",
+            "item": {
+                "type": "commandExecution",
+                "id": cid,
+                "command": "sleep 60",
+                "status": "inProgress",
+            },
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_failed_turn_closes_open_rows_and_carries_the_typed_error(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        notifications=[_cmd_started()],
+        status="failed",
+        turn_error={
+            "message": "model gpt-x not found",
+            "codexErrorInfo": "modelNotFound",
+        },
+    )
+    events = await _run(_runner(fake))
+    done = _completed(events)
+    rows = [e for e in events if isinstance(e, ActionEvent) and e.action.id == "c1"]
+    assert [(r.phase, r.ok) for r in rows] == [("started", None), ("completed", False)]
+    assert rows[1].action.detail == {"status": "failed"}
+    assert events.index(rows[1]) == len(events) - 2  # just before the final
+    assert done.usage == {"codex_error_info": "modelNotFound"}
+    hint = _run_error_hint(done.error or "", usage=done.usage, close_reason=None)
+    assert hint == CODEX_ERROR_INFO_HINTS["modelNotFound"]
+
+
+@pytest.mark.anyio
+async def test_final_answer_is_kept_when_the_turn_then_fails(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        messages=[["the answer", "final_answer"]],
+        status="failed",
+        turn_error={
+            "message": "stream disconnected",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+        },
+    )
+    done = _completed(await _run(_runner(fake)))
+    assert not done.ok
+    assert done.answer == "the answer"
+    assert done.error == "stream disconnected"
+    assert done.usage == {"codex_error_info": "responseStreamDisconnected"}
+
+
+_SAFE = EngineRunOptions(permission_mode="safe")
+
+
+@pytest.mark.anyio
+async def test_warnings_dedupe_redact_and_wait_for_the_started_event(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    text = "Codex is ignoring 1 unrecognized configuration setting."
+    fake = Fake(
+        tmp_path,
+        after_init=[{"method": "configWarning", "params": {"summary": text}}],
+        notifications=[
+            {"method": "warning", "params": {"threadId": THREAD, "message": text}},
+            {
+                "method": "deprecationNotice",
+                "params": {
+                    "summary": "see https://example.com/d?token=s3cret",
+                    "details": None,
+                },
+            },
+        ],
+    )
+    with capture_logs() as logs:
+        events = await _run(_runner(fake), options=_SAFE)
+    assert isinstance(events[0], StartedEvent)
+    titles = [e.action.title for e in events if isinstance(e, ActionEvent)]
+    assert titles[0] == f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} {text}"
+    assert len(titles) == 2
+    assert "s3cret" not in titles[1]
+    assert any(e["event"] == "codex.app_server.deprecation" for e in logs)
+
+
+@pytest.mark.anyio
+async def test_untrusted_config_warning_gives_the_exec_note_and_footer_flag(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    summary = (
+        "Project-local config, hooks, and exec policies are disabled in the "
+        f"following folders until the project is trusted.\n 1. {project}/.codex\n"
+    )
+    fake = Fake(
+        tmp_path,
+        after_init=[{"method": "configWarning", "params": {"summary": summary}}],
+    )
+    events = await _run(_runner(fake), options=_SAFE)
+    assert isinstance(events[0], StartedEvent)
+    rows = [e for e in events if isinstance(e, ActionEvent)]
+    assert [r.action.title for r in rows] == [_UNTRUSTED_PROJECT_NOTE]
+    assert _completed(events).usage == {"project_config_untrusted": True}
+
+
+def _retry(message: str) -> dict:
+    return {
+        "method": "error",
+        "params": {
+            "threadId": THREAD,
+            "turnId": "turn-1",
+            "willRetry": True,
+            "error": {"message": message, "codexErrorInfo": "serverOverloaded"},
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_retrying_error_is_a_reconnect_row(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        notifications=[_retry("Reconnecting... 1/5"), _retry("Reconnecting... 2/5")],
+    )
+    events = await _run(_runner(fake), options=_SAFE)
+    rows = [e for e in events if isinstance(e, ActionEvent)]
+    assert [(r.phase, r.action.id, r.action.kind, r.action.title) for r in rows] == [
+        ("started", "codex.reconnect", "note", "Reconnecting... 1/5"),
+        ("updated", "codex.reconnect", "note", "Reconnecting... 2/5"),
+    ]
+    assert rows[0].action.detail["codex_error_info"] == "serverOverloaded"
+    assert _completed(events).ok
+
+
+@pytest.mark.anyio
+async def test_server_requests_mid_turn_add_one_row_each_and_one_reply(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        notifications=[
+            {
+                "id": 7,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": THREAD, "turnId": "turn-1", "itemId": "c"},
+            },
+            {"id": 8, "method": "item/tool/requestUserInput", "params": {}},
+        ],
+    )
+    events = await _run(_runner(fake), options=_SAFE)
+    titles = [e.action.title for e in events if isinstance(e, ActionEvent)]
+    assert titles == [
+        gate._APPROVAL_DECLINED_NOTE,
+        "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex sent a request Untether"
+        " doesn't support yet (`item/tool/requestUserInput`); declined",
+    ]
+    assert _completed(events).ok
+    replies = [
+        m for m in fake.received() if m.get("id") in (7, 8) and "method" not in m
+    ]
+    assert len(replies) == 2
+    assert replies[0] == {"id": 7, "result": {"decision": "decline"}}
+    assert replies[1]["error"]["code"] == -32601
+
+
+@pytest.mark.anyio
+async def test_moderated_answer_is_shown_and_logged_once(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    moderated = {"moderated": True, "display": {"mode": "hide", "version": 1}}
+    msg = {
+        "method": "item/completed",
+        "params": {
+            "threadId": THREAD,
+            "turnId": "turn-1",
+            "item": {
+                "type": "agentMessage",
+                "id": "mm",
+                "text": "kept as sent",
+                "phase": "final_answer",
+                "moderation": moderated,
+            },
+        },
+    }
+    fake = Fake(tmp_path, notifications=[msg, msg], messages=[])
+    with capture_logs() as logs:
+        done = _completed(await _run(_runner(fake), options=_SAFE))
+    assert done.ok
+    assert done.answer == "kept as sent"
+    moderation = [e for e in logs if e["event"] == "codex.app_server.moderated"]
+    assert [e["mode"] for e in moderation] == ["hide"]

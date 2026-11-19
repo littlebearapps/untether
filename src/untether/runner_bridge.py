@@ -32,6 +32,7 @@ from .background_status import (
 )
 from .context import RunContext
 from .error_hints import SESSION_NOT_LOADED_HINT as _SESSION_NOT_LOADED_HINT
+from .error_hints import codex_error_info_hint as _codex_error_info_hint
 from .error_hints import get_error_hint as _get_error_hint
 from .events import EventFactory
 from .interactive.buttons import CONTROL_CALLBACK_PREFIXES
@@ -6274,7 +6275,10 @@ def _run_error_hint(
       user to send /new would throw away a resumable conversation."""
     if close_reason == "abs_cap":
         return _ABS_CAP_HINT
-    hint = _get_error_hint(raw_error)
+    # #962: Codex app-server's typed error outranks the text patterns.
+    hint = _codex_error_info_hint(
+        (usage or {}).get("codex_error_info")
+    ) or _get_error_hint(raw_error)
     if hint == _SESSION_NOT_LOADED_HINT:
         turns = (usage or {}).get("num_turns")
         if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
