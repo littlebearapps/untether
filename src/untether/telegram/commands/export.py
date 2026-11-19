@@ -142,10 +142,19 @@ def _format_export_markdown(
         counts = token_counts(usage) or {}
         input_tokens = counts.get("input_tokens")
         output_tokens = counts.get("output_tokens")
-        # The transcript spans every run of the session, but cost, turns and
-        # duration are the latest run's (rc15 integration finding).
+        # Tokens are the latest run's too, except for engines that report a
+        # running thread total (Codex, Antigravity).
+        from ...runner_bridge import _TOKEN_LEDGER_SCOPES
+
+        engine = _session_engine(events)
+        # #1266: Claude's total_cost_usd is session-cumulative, whereas turns
+        # and duration are per-run.
+        claude_session_cost = engine == "claude" and cost is not None
+        # The transcript spans every run of the session, but cost (for
+        # non-Claude engines), turns and duration are the latest run's
+        # (rc15 integration finding).
         run_parts: list[str] = []
-        if cost is not None:
+        if cost is not None and not claude_session_cost:
             run_parts.append(f"${cost:.4f}")
         if turns:
             run_parts.append(f"{turns} turns")
@@ -158,16 +167,17 @@ def _format_export_markdown(
             if output_tokens is not None:
                 token_parts.append(f"{output_tokens} out")
             token_part = " / ".join(token_parts) + " tokens"
-        # Tokens are the latest run's too, except for engines that report a
-        # running thread total (Codex, Antigravity).
-        from ...runner_bridge import _TOKEN_LEDGER_SCOPES
-
-        engine = _session_engine(events)
         thread_total = token_part is not None and (
             _TOKEN_LEDGER_SCOPES.get(engine or "") == "thread_cumulative"
         )
         header = ""
-        if thread_total and run_parts:
+        if claude_session_cost:
+            cost_part = f"${cost:.4f}"
+            if run_parts:
+                header = f"{cost_part} (session total) · {' · '.join(run_parts)} (last run)"
+            else:
+                header = f"{cost_part} · session total"
+        elif thread_total and run_parts:
             # #1158: agy's last-run duration sits beside thread-total
             # tokens, so each figure names its own scope.
             header = f"{' · '.join(run_parts)} (last run) · {token_part} (thread total)"
