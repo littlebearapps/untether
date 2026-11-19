@@ -189,7 +189,8 @@ See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` 
 | `runners/run_options.py` | Claude permission-mode allowlist, `is_claude_prompting_mode()` (#741, #742, #749) |
 | `runners/extra_args_guard.py` | Shared `extra_args` tokeniser and deny-list for Claude/Codex (#209) |
 | `runners/codex_app_server.py` | Codex app-server support gate: schema-subset probe of `generate-json-schema`, cached per binary, pre-spawn refusal (#961; transport lands with #962) |
-| `schemas/codex_app_server.py` | Codex app-server contract: methods with tiers, read types, sent enum values, probed/tested versions (#961) |
+| `schemas/codex_app_server.py` | Codex app-server contract: methods with tiers, read types, sent enum values, probed/tested versions (#961); lenient msgspec structs for the results, notifications and `ThreadItem` variants the transport reads, unknown items → `GenericItem` (#962) |
+| `runners/codex_rpc.py` | Codex app-server JSON-RPC peer: single reader (`submit` never waits, `feed` returns responses/notifications), fail-closed answers to every server request, locked bounded writes, `-32001` back-off helper (#962) |
 | `telegram/steer.py` | Steer a follow-up into a live Claude session (#775) |
 | `telegram/followup_mode.py` | Per-chat/topic `followup_mode` prefs and resolution (#775) |
 | `telegram/commands/followup.py` | `/steer` and `/queue` commands (#775) |
