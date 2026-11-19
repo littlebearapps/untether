@@ -11777,6 +11777,55 @@ def test_572_budget_guard_blocks_on_per_run_cap(monkeypatch) -> None:
     assert _stream_idle_retry_budget_blocked({"total_cost_usd": 1.0}) is False
 
 
+def test_1322_budget_guard_uses_claude_per_run_delta(monkeypatch) -> None:
+    """#1322: Claude's total_cost_usd is session-cumulative; the stream-idle
+    retry budget guard must compare the per-run delta (ledger or baseline),
+    not the cumulative session total, against max_cost_per_run."""
+    from types import SimpleNamespace
+
+    from untether.runner_bridge import _stream_idle_retry_budget_blocked
+    from untether.session_costs import get_session_cost_ledger
+
+    cost_budget = SimpleNamespace(
+        enabled=True,
+        max_cost_per_run=5.0,
+        max_cost_per_day=None,
+        warn_at_pct=80.0,
+        auto_cancel=False,
+    )
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists",
+        lambda: (SimpleNamespace(cost_budget=cost_budget), None),
+    )
+    ledger = get_session_cost_ledger()
+    ledger.record("claude", "sess-1322", 12.0, resumed=False)
+    assert (
+        _stream_idle_retry_budget_blocked(
+            {"total_cost_usd": 12.30},
+            engine="claude",
+            session_id="sess-1322",
+        )
+        is False
+    )
+    assert (
+        _stream_idle_retry_budget_blocked(
+            {"total_cost_usd": 12.30, "session_cost_baseline": 12.0},
+            engine="claude",
+            session_id="sess-1322-unknown",
+        )
+        is False
+    )
+    assert (
+        _stream_idle_retry_budget_blocked(
+            {"total_cost_usd": 17.50},
+            engine="claude",
+            session_id="sess-1322",
+        )
+        is True
+    )
+    assert ledger.last("claude", "sess-1322") == 12.0
+
+
 def test_572_watchdog_settings_defaults() -> None:
     """The new [watchdog] keys default to off / 1 attempt."""
     from untether.settings import WatchdogSettings

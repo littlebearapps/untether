@@ -770,7 +770,39 @@ def _format_stream_idle_retry_notice(retried_count: int) -> str:
     return notice
 
 
-def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
+def _claude_per_run_cost_usage(
+    usage: dict[str, Any] | None,
+    *,
+    engine: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any] | None:
+    """#1322: return a shallow copy of ``usage`` with Claude's cumulative
+    ``total_cost_usd`` replaced by the read-only per-run delta."""
+    if engine != "claude" or usage is None:
+        return usage
+    raw_cost = usage.get("total_cost_usd")
+    if not isinstance(raw_cost, (int, float)) or isinstance(raw_cost, bool):
+        return usage
+    from .session_costs import get_session_cost_ledger
+
+    previous = (
+        get_session_cost_ledger().last(engine, session_id) if session_id else None
+    )
+    if previous is None:
+        baseline = usage.get("session_cost_baseline")
+        if isinstance(baseline, (int, float)) and not isinstance(baseline, bool):
+            previous = float(baseline)
+    if previous is None:
+        return usage
+    return {**usage, "total_cost_usd": max(0.0, float(raw_cost) - float(previous))}
+
+
+def _stream_idle_retry_budget_blocked(
+    usage: dict[str, Any] | None,
+    *,
+    engine: str | None = None,
+    session_id: str | None = None,
+) -> bool:
     """#572: read-only cost-budget guard for the Type-A auto-retry.
 
     True when the failed run's cost already trips the per-run cap or the
@@ -796,7 +828,10 @@ def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
             budget_enabled = budget_cfg.enabled
         if not budget_enabled:
             return False
-        cost = float((usage or {}).get("total_cost_usd") or 0.0)
+        effective_usage = _claude_per_run_cost_usage(
+            usage, engine=engine, session_id=session_id
+        )
+        cost = float((effective_usage or {}).get("total_cost_usd") or 0.0)
         budget = CostBudget(
             max_cost_per_run=budget_cfg.max_cost_per_run,
             max_cost_per_day=budget_cfg.max_cost_per_day,
@@ -821,6 +856,8 @@ def _should_stream_idle_retry(
     retried_count: int,
     proc_returncode: int | None,
     usage: dict[str, Any] | None,
+    engine: str | None = None,
+    session_id: str | None = None,
 ) -> bool:
     """#572: whether the bounded Type-A stream-idle auto-retry acts on a
     failed result. Type-B (cold-start zero-byte stall) never retries.
@@ -839,7 +876,10 @@ def _should_stream_idle_retry(
         return False
     if _is_signal_death(proc_returncode):
         return False
-    return not _stream_idle_retry_budget_blocked(usage)
+    effective_usage = _claude_per_run_cost_usage(
+        usage, engine=engine, session_id=session_id
+    )
+    return not _stream_idle_retry_budget_blocked(effective_usage)
 
 
 _PREAMBLE_HEAD = (
@@ -8556,16 +8596,19 @@ async def handle_message(
         completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
     ) -> bool:
         stream = edits.stream
+        resume = completed.resume or run_outcome.resume
         return _should_stream_idle_retry(
             watchdog=watchdog,
             # #905: the run's own class, not the engine state's latest.
             stream_idle_class=run_outcome.stream_idle_class,
             run_ok=completed.ok,
             cancelled=run_outcome.cancelled,
-            resume_present=(completed.resume or run_outcome.resume) is not None,
+            resume_present=resume is not None,
             retried_count=_stream_idle_retried_count,
             proc_returncode=stream.proc_returncode if stream else None,
             usage=completed.usage,
+            engine=completed.engine,
+            session_id=resume.value if resume is not None else None,
         )
 
     def _deliver_error_early(
