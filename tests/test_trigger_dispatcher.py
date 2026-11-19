@@ -374,7 +374,7 @@ async def test_dispatch_webhook_records_last_fired(tmp_path):
             await anyio.sleep(0.01)
             tg.cancel_scope.cancel()
 
-        assert history.get_last_fired("gh") is not None
+        assert history.get_last_fired("webhook", "gh") is not None
     finally:
         history.reset_history()
 
@@ -387,7 +387,7 @@ async def test_dispatch_webhook_history_failure_does_not_raise(monkeypatch, tmp_
     history.init_history(tmp_path / "untether.toml")
     try:
 
-        def boom(self, trigger_id: str) -> None:
+        def boom(self, kind: str, trigger_id: str) -> None:
             raise OSError("disk full")
 
         monkeypatch.setattr(
@@ -851,6 +851,6 @@ async def test_1123_failed_webhook_announce_is_not_recorded(monkeypatch, tmp_pat
             tg.cancel_scope.cancel()
 
         assert run_job.calls == []
-        assert history.get_last_fired("gone") is None
+        assert history.get_last_fired("webhook", "gone") is None
     finally:
         history.reset_history()

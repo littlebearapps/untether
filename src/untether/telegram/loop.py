@@ -2367,9 +2367,11 @@ async def run_main_loop(
             from ..cost_tracker import init_daily_cost
             from ..session_stats import init_stats
             from ..triggers.history import init_history
+            from ..triggers.journal import init_journal
 
             init_stats(config_path)
             init_history(config_path)
+            init_journal(config_path)  # #1123
             init_daily_cost(config_path)  # #898
         if cfg.session_mode == "chat":
             if config_path is None:
@@ -2616,6 +2618,7 @@ async def run_main_loop(
                         )
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
+                        from ..triggers.history import prune_history
                         from ..triggers.settings import (
                             log_invalid_triggers,
                             parse_trigger_config_isolated,
@@ -2635,6 +2638,10 @@ async def run_main_loop(
                                     new_settings,
                                     keep_fired=parsed_triggers.cron_ids,
                                 )
+                            prune_history(
+                                parsed_triggers.cron_ids,
+                                [wh.id for wh in new_settings.webhooks],
+                            )
                             state.trigger_block_error_notified = None
                             log_invalid_triggers(
                                 parsed_triggers.invalid, phase="reload"
@@ -3221,6 +3228,13 @@ async def run_main_loop(
                         trigger_settings,
                         config_path=cfg.runtime.config_path,
                         keep_fired=parsed_triggers.cron_ids,
+                    )
+                    # #1123: forget last-fired entries of removed triggers.
+                    from ..triggers.history import prune_history
+
+                    prune_history(
+                        parsed_triggers.cron_ids,
+                        [wh.id for wh in trigger_settings.webhooks],
                     )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.

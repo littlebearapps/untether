@@ -952,6 +952,42 @@ A reply to a trigger run, `/at` and loop fires are attended runs and carry
 neither variable; a value inherited from Untether's own environment is
 removed rather than passed on.
 
+### Run journal
+
+Every cron and webhook run adds one JSON line to `triggers_runs.jsonl`, next to
+`untether.toml` ([#1123](https://github.com/littlebearapps/untether/issues/1123)).
+The file is private to the service user (`0600`) and is rotated to
+`triggers_runs.jsonl.1` at 5 MiB (one old file is kept). A line never holds
+the prompt or the answer:
+
+```json
+{"v":1,"trigger_kind":"cron","trigger_id":"daily-review","run_id":"…","session_id":"…",
+ "project":"myapp","engine":"claude","model":"claude-opus-…","started_at":1795000000.0,
+ "finished_at":1795000042.5,"outcome":"ok","ok":true,"error":null,"num_turns":4,
+ "cost_usd":0.21,"rate_limit_count":1,"rate_limit_total_s":60.0,"api_retry_count":0,
+ "api_retry_total_s":0.0,"rejected":true}
+```
+
+| `outcome` | Meaning |
+|---|---|
+| `ok` / `error` | the run's first result (a live session's later turns aren't journaled) |
+| `cancelled` | the run was cancelled or its turn interrupted |
+| `refused` | the daily cost budget's **Stop at limit** refused it; nothing ran |
+| `announce_failed` | the `⏰ Scheduled:` / `⚡ Trigger:` message couldn't be posted, so nothing ran (a `run_once` cron's retries each add a line) |
+| `fetch_aborted` | the cron's fetch step failed with `on_failure = "abort"` |
+
+The throttle fields count Claude's rate-limit waits (`rejected` is true when
+Anthropic refused a request outright) and API retries during that run, so a
+run that ended `ok` after being throttled is visible. Other engines report
+zeros. The same fields appear on the `runner.completed` log line. An
+automatic retry of a run (auto-continue, empty-resume resend) adds its own
+line with the same `run_id`: the last line for a `run_id` is the final
+outcome. A restart mid-run writes no line.
+
+```sh
+tail -n 20 ~/.untether/triggers_runs.jsonl | jq -c '{trigger_id, outcome, cost_usd, rate_limit_count}'
+```
+
 ### `/config` → ⏰ Triggers page (Tier 2)
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
@@ -1205,6 +1241,7 @@ The `triggers.manager.updated` log line lists added/removed crons and webhooks a
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
 | `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. Shared with voice transcription. |
 | `src/untether/triggers/describe.py` | `describe_cron()`: human-friendly schedule text for `/ping` and `/config`. |
-| `src/untether/triggers/history.py` | Last-fired timestamps (`triggers_history.json`). |
+| `src/untether/triggers/history.py` | Last-fired timestamps (`triggers_history.json`), keyed `cron:<id>` / `webhook:<id>` (a 0.36.1 bare-id key is still read); entries for triggers removed from the config are pruned at startup and on reload ([#1123](https://github.com/littlebearapps/untether/issues/1123)). |
+| `src/untether/triggers/journal.py` | Run journal (`triggers_runs.jsonl`, [#1123](https://github.com/littlebearapps/untether/issues/1123)). |
 | `src/untether/triggers/run_once_state.py` | Fired `run_once` cron ids (`run_once_fired.json`) and one-shots pending a send retry (`run_once_pending.json`). |
 | `src/untether/permission_audit.py` | Config-time Claude permission-mode audit for crons (`auto_semantics_changed`, `unattended_approval_risk`, `permission_mode_invalid`) and the trigger security audit (`trigger.cron.inherits_bypass`, `trigger.webhook.no_project`, `trigger.webhook.preapproved_tools`, [#1142](https://github.com/littlebearapps/untether/issues/1142)). |

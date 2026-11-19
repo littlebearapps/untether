@@ -5233,7 +5233,7 @@ class TestTriggersPagePerChat:
         from untether.triggers.settings import parse_trigger_config
 
         history.init_history(tmp_path / "untether.toml")
-        history.record_fired("morning")
+        history.record_fired("cron", "morning")
 
         cfg = parse_trigger_config(
             {

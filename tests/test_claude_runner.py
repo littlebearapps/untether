@@ -9998,3 +9998,45 @@ async def test_1120_claude_trigger_run_env_has_run_identity(
     assert "UNTETHER_RUN_ID=rid-1" in trigger_cmd
     assert not any(a.startswith("UNTETHER_RUN_ID=") for a in attended_cmd)
     assert not any(a.startswith("UNTETHER_TRIGGER=") for a in attended_cmd)
+
+
+# ---------------------------------------------------------------------------
+# #1123: per-result throttle deltas on usage["throttle"]
+# ---------------------------------------------------------------------------
+
+
+def _ok_result(session_id: str = "s1123") -> dict:
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 1,
+        "duration_ms": 10,
+        "duration_api_ms": 5,
+        "session_id": session_id,
+        "result": "done",
+    }
+
+
+def _result_usage(events: list) -> dict:
+    (completed,) = [e for e in events if isinstance(e, CompletedEvent)]
+    return completed.usage or {}
+
+
+def test_1123_rejected_rate_limit_rides_on_ok_result(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    usage = _result_usage(_translate(state, _ok_result()))
+    throttle = usage["throttle"]
+    assert throttle["rate_limit_count"] >= 1
+    assert throttle["rejected"] is True
+    assert throttle["rate_limit_total_s"] > 0
+
+
+def test_1123_throttle_reports_only_this_results_delta(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    first = _result_usage(_translate(state, _ok_result()))
+    assert first["throttle"]["rate_limit_count"] == 1
+    # A clean second result in the same process reports nothing.
+    assert "throttle" not in _result_usage(_translate(state, _ok_result()))

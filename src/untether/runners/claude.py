@@ -1915,6 +1915,11 @@ class ClaudeStreamState:
     # Count of throttling rate_limit_events in this session (#349 v2); `allowed`
     # / `allowed_warning` snapshots and bare events are not counted (#790).
     rate_limit_count: int = 0
+    # #1123: how many of those were a ``status: "rejected"`` snapshot, and
+    # the five throttle counters at the previous result, so each result
+    # reports only its own delta (a live session spans several runs).
+    rate_limit_rejected_count: int = 0
+    throttle_at_last_result: tuple[int, float, int, float, int] = (0, 0.0, 0, 0.0, 0)
     # #790: latest quota snapshot from any rate_limit_event — `status` plus the
     # per-window {utilization, resets_at} from `unifiedWindows`, keyed by
     # window name (five_hour / seven_day / seven_day_overage_included).
@@ -3198,6 +3203,8 @@ def _translate_rate_limit_event(
     # "throttled upstream, will resume by itself" apart from "hung".
     state.rate_limit_wait_until = new_deadline
     state.rate_limit_count += 1
+    if info is not None and info.status == "rejected":
+        state.rate_limit_rejected_count += 1
     if action_id is None:
         state.note_seq += 1
         action_id = f"rate_limit_{state.note_seq}"
@@ -7724,6 +7731,30 @@ def _capture_mcp_catalog(
         )
 
 
+def _throttle_usage(state: ClaudeStreamState) -> dict[str, Any] | None:
+    """#1123: rate-limit / API-retry counts since the previous result (None
+    when there were none). Advances the baseline, so call once per result."""
+    now = (
+        state.rate_limit_count,
+        state.rate_limit_total_s,
+        state.api_retry_count,
+        state.api_retry_total_s,
+        state.rate_limit_rejected_count,
+    )
+    prev = state.throttle_at_last_result
+    state.throttle_at_last_result = now
+    delta = [a - b for a, b in zip(now, prev, strict=True)]
+    if not any(delta):
+        return None
+    return {
+        "rate_limit_count": delta[0],
+        "rate_limit_total_s": round(delta[1], 1),
+        "api_retry_count": delta[2],
+        "api_retry_total_s": round(delta[3], 1),
+        "rejected": delta[4] > 0,
+    }
+
+
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     for key in (
@@ -9094,6 +9125,9 @@ def _translate_claude_event_base(
             # #835: the turn's unattended denials, for the final's footer.
             if (unattended := _unattended_usage_payload(state)) is not None:
                 usage["unattended"] = unattended
+            # #1123: this result's throttling, for runner.completed + journal.
+            if (throttle := _throttle_usage(state)) is not None:
+                usage["throttle"] = throttle
             if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.
