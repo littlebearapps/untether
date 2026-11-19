@@ -190,7 +190,7 @@ Give every Claude cron that should act on its own an explicit `permission_mode`.
 
 ## Can a scheduled run use a cheaper model than the chat?
 
-Yes. Add `model = "sonnet"` (and optionally `reasoning = "low"`) to the `[[triggers.crons]]` entry, with `engine` set so the name matches. The cron's run uses that model and effort while the chat keeps its own `/model` for everything you send; a reply to the cron's message goes back to the chat's model. From v0.36.2, a `[[triggers.webhooks]]` entry takes the same `model`, `reasoning`, `permission_mode` and `allowed_tools` keys. Details: [Schedule tasks — Pick a model per cron](https://littlebearapps.com/help/untether/schedule-tasks/#pick-a-model-per-cron).
+Yes. Add `model = "sonnet"` (and optionally `reasoning = "low"`) to the `[[triggers.crons]]` entry, with `engine` set so the name matches. The cron's run uses that model and effort while the chat keeps its own `/model` for everything you send; a reply to the cron's message goes back to the chat's model. From v0.36.2, a `[[triggers.webhooks]]` entry takes the same `model`, `reasoning`, `permission_mode` and `allowed_tools` keys. A cron or webhook can also set its own `env` (a few literal environment variables) and, for Claude, an `agent` (`--agent`) for its runs only. Every cron and webhook run is also logged as one JSON line in `triggers_runs.jsonl` next to `untether.toml`, with its outcome, cost and any rate-limit waits. Details: [Schedule tasks — Pick a model per cron](https://littlebearapps.com/help/untether/schedule-tasks/#pick-a-model-per-cron).
 
 ## Can I send voice notes instead of typing?
 

@@ -62,6 +62,8 @@ def build_run_context(
             tuple(trigger.allowed_tools) if trigger.allowed_tools is not None else None
         ),
         strict_webhook=strict and kind == "webhook",
+        env=tuple(sorted((trigger.env or {}).items())),  # #1121
+        agent=trigger.agent,
     )
 
 

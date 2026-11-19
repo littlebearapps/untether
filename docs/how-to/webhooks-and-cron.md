@@ -447,6 +447,34 @@ skipped. Until you set it, Untether warns once about each webhook that strict
 would change ([#1118](https://github.com/littlebearapps/untether/issues/1118)).
 See [Webhook safe defaults](../reference/triggers/triggers.md#webhook-safe-defaults).
 
+## Per-trigger environment and Claude agent
+
+A cron or `agent_run` webhook can hand its runs a few environment variables and
+a named Claude Code agent, for "role desk" runs without a separate project
+([#1121](https://github.com/littlebearapps/untether/issues/1121)):
+
+```toml
+[[triggers.crons]]
+id = "qa-desk"
+schedule = "0 9 * * 1-5"
+project = "myapp"
+engine = "claude"
+env = { APP_SESSION_ROLE = "qa" }
+agent = "qa-desk"
+permission_mode = "auto"
+prompt = "Run the morning QA pass."
+```
+
+The run's engine process gets `APP_SESSION_ROLE=qa` (a project hook can read it)
+and Claude starts with `--agent=qa-desk`. `agent` needs `engine = "claude"`.
+`env` works with every engine, but only adds names: the service's own and
+engine-managed variables (`PATH`, `HOME`, `LD_*`, provider keys, `CLAUDE_*`,
+`UNTETHER_*`, …) are refused at config load, and that entry is skipped with a
+notice. Values are literal text, never filled from a webhook payload. Don't put
+secrets in `env`: values are visible in the process environment; pass a secret
+through with `[security] env_extra_allow` instead. A reply to the run uses the
+chat's own settings, without the variables or the agent.
+
 ## Delayed runs with `/at`
 
 For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TOML edit required:

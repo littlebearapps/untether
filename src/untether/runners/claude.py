@@ -240,6 +240,21 @@ _CLAUDE_SHORT_ALIASES: dict[str, str] = {
 _CLAUDE_SHORT_VALUE_FLAGS: frozenset[str] = frozenset({"d", "n", "r", "w"})
 
 
+def _without_agent_flag(extra_args: list[str]) -> list[str]:
+    """#1121: *extra_args* minus any ``--agent`` (both spellings), so a
+    trigger's own agent is the only one on that run's argv."""
+    out: list[str] = []
+    skip_value = False
+    for token in extra_args:
+        if skip_value:
+            skip_value = False
+        elif token == "--agent":
+            skip_value = True
+        elif not token.startswith("--agent="):
+            out.append(token)
+    return out
+
+
 def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
     """Every blocked flag in *extra_args* (#209), deduped, in order."""
     hits: list[BlockedArg] = []
@@ -7631,9 +7646,12 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     # #409: pass user extras through so the audit doesn't flag names the
     # operator explicitly opted into via [security] env_extra_allow.
     user_exact, user_prefix = _load_env_extras()
+    # #1121: a trigger's own env names are expected, not leaks.
+    run_context = get_run_context()
+    trigger_env = tuple(name for name, _ in run_context.env) if run_context else ()
     leaked = audit_proc_env(
         state.pid,
-        expected_extras=("UNTETHER_SESSION",),
+        expected_extras=("UNTETHER_SESSION", *trigger_env),
         user_extra_exact=user_exact,
         user_extra_prefix=user_prefix,
     )
@@ -10253,7 +10271,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Must sit after the Untether-managed I/O prelude but before
         # resume / model / effort / allowed-tools / permission so the final
         # prompt position (after `--`) is never displaced (#407).
-        args.extend(self.extra_args)
+        # #1121: a trigger's own agent replaces an engine-wide `--agent`.
+        agent = run_options.agent if run_options is not None else None
+        args.extend(_without_agent_flag(self.extra_args) if agent else self.extra_args)
         # #812: hook lifecycle frames let the live session hold stdin open
         # for a background (async / asyncRewake) hook. Control-channel mode
         # only (live sessions need it), behind the kill switch, only when the
@@ -10286,6 +10306,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(
                 engine_argv.joined("--model", engine_argv.check_model(str(model)))
             )
+        if agent:
+            # #1121: native `--agent <agent>` (2.1.328 --help), validated at
+            # config load and joined so it can't be re-read as a flag.
+            args.append(engine_argv.joined("--agent", agent))
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning

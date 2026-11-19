@@ -42,6 +42,9 @@ class EngineRunOptions:
     # `allowed_tools` for that run (``()`` = send no ``--allowedTools``).
     # ``None`` keeps the engine config. Only ClaudeRunner reads it.
     allowed_tools: tuple[str, ...] | None = None
+    # #1121: a trigger's own Claude Code agent (``--agent=<name>``) for that
+    # run only. Only ClaudeRunner reads it.
+    agent: str | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.
