@@ -166,7 +166,10 @@ class PendingFinals:
                 self._save()
                 continue
             if not outcomes:
-                return  # never ran (outbox closed or dropped): try again later
+                # Superseded before it ran: try again later. A send the
+                # outbox drops at close reports resendable (#1286), so it
+                # uses an attempt but stays kept.
+                return
             if outcomes[0] == "resendable":
                 entry["attempts"] = int(entry.get("attempts", 0)) + 1
                 if entry["attempts"] >= MAX_ATTEMPTS:

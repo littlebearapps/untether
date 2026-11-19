@@ -44,7 +44,9 @@ Messages that should auto-delete when a run finishes:
 - Non-429 errors: logged and dropped. One exception (#1207): a **final** whose `sendMessage` certainly failed (never
   sent, or HTTP 5xx) is kept in `pending_finals.json` (`telegram/pending_finals.py`, via the send's `on_failure`
   callback, which fires inside the outbox op even after its waiter is cancelled) and redelivered after the next good
-  `getUpdates` or restart. Never keep a timeout or 4xx: it may already be in the chat, or fails the same way again
+  `getUpdates` or restart. Never keep a timeout or 4xx: it may already be in the chat, or fails the same way again.
+  An op the outbox fails before dispatch (close, flush timeout, fatal worker) must go through `OutboxOp.drop()` so
+  `on_dropped` keeps it (#1286); never `set_result(None)` such an op directly
 - Error lines carry `kind` (#823): wrap the transport calls for an Untether surface in `with message_kind("…")`
   (`transport.py`). The outbox op captures the kind at enqueue and re-applies it on the worker, so set it around the
   `transport.*` call, not inside the outbox

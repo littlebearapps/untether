@@ -117,6 +117,7 @@ class TelegramClient:
         chat_id: int | None,
         wait: bool = True,
         superseded_result: Any = None,
+        on_dropped: Callable[[], None] | None = None,
     ) -> Any:
         request = OutboxOp(
             execute=execute,
@@ -126,6 +127,7 @@ class TelegramClient:
             label=label,
             kind=current_message_kind(),
             superseded_result=superseded_result,
+            on_dropped=on_dropped,
         )
         return await self._outbox.enqueue(key=key, op=request, wait=wait)
 
@@ -220,6 +222,10 @@ class TelegramClient:
             priority=SEND_PRIORITY,
             chat_id=chat_id,
             wait=wait,
+            # #1286: a send the outbox drops before dispatch was never sent.
+            on_dropped=(
+                (lambda: on_failure("resendable")) if on_failure is not None else None
+            ),
         )
         if replace_message_id is not None and result is not None:
             # #928: queue the replaced message's delete without awaiting it —
