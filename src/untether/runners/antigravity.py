@@ -4736,4 +4736,6 @@ BACKEND = EngineBackend(
     cli_cmd="agy",
     install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
     resolve_cli_cmd=resolve_antigravity_cmd,
+    # #558: result.usage is cumulative across --conversation resumes.
+    usage_scope={"tokens": "thread_cumulative"},
 )

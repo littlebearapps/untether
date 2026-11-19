@@ -63,7 +63,7 @@ from .runner import (
     review_card,
     set_run_stream_handle,
 )
-from .session_costs import RUN_TOKENS_KEY, TokenScope, token_counts
+from .session_costs import RUN_TOKENS_KEY, token_counts, usage_scope
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -1326,11 +1326,13 @@ def _apply_cost_delta(
     """Return ``usage`` with ``total_cost_usd`` replaced by the spend since
     the previous result of the same session (#778).
 
-    Claude only: its ``total_cost_usd`` is session-cumulative (probe F12).
-    Other engines' values are per-run as far as we know and pass through.
-    The cumulative value is kept as ``session_total_cost_usd``.
+    Only for an engine whose runner declares ``cost="session_cumulative"``
+    (#850; Claude, probe F12). Other engines' values are per-run and pass
+    through. The cumulative value is kept as ``session_total_cost_usd``.
     """
-    if engine != "claude" or not usage or not session_id:
+    if not usage or not session_id:
+        return usage
+    if usage_scope(engine, usage).get("cost") != "session_cumulative":
         return usage
     raw = usage.get("total_cost_usd")
     if not isinstance(raw, (int, float)):
@@ -1379,18 +1381,6 @@ def _engine_note(stream: Any, name: str) -> str | None:
     return note if isinstance(note, str) and note else None
 
 
-# #419: engines whose CompletedEvent token usage needs the session ledger.
-# Codex's turn.completed.usage is the thread's running total (every earlier
-# ``exec resume`` run included), so runs report the delta.
-_TOKEN_LEDGER_SCOPES: dict[str, TokenScope] = {
-    "codex": "thread_cumulative",
-    # #558: agy's result.usage is cumulative across --conversation resumes.
-    "antigravity": "thread_cumulative",
-    # #417: OpenCode reports per run; the ledger keeps a session total.
-    "opencode": "per_run",
-}
-
-
 def _apply_token_delta(
     engine: str,
     session_id: str | None,
@@ -1400,10 +1390,12 @@ def _apply_token_delta(
 ) -> dict[str, Any] | None:
     """Return ``usage`` with its token fields rewritten to this run's share
     (#419). Passthrough (the same object, no ``token_delta_source``) when the
-    engine is not in ``_TOKEN_LEDGER_SCOPES``, there is no session id, or the
-    usage carries no token counts."""
-    scope = _TOKEN_LEDGER_SCOPES.get(engine)
-    if scope is None or not usage or not session_id:
+    runner declares no ``tokens`` usage scope (#850), there is no session id,
+    or the usage carries no token counts."""
+    if not usage or not session_id:
+        return usage
+    scope = usage_scope(engine, usage).get("tokens")
+    if scope is None:
         return usage
     counts = token_counts(usage)
     if counts is None:
@@ -8068,7 +8060,8 @@ async def handle_message(
             cost_line = _format_run_cost(
                 run_usage,
                 thread_cumulative=(
-                    _TOKEN_LEDGER_SCOPES.get(runner.engine) == "thread_cumulative"
+                    usage_scope(runner.engine, run_usage).get("tokens")
+                    == "thread_cumulative"
                 ),
             )
             if cost_line:

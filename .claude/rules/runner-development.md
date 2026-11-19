@@ -174,7 +174,9 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 1. Create `src/untether/runners/myengine.py` extending `JsonlSubprocessRunner`
 2. Create `src/untether/schemas/myengine.py` with msgspec structs
 3. Override: `command()`, `build_args()`, `translate()`, `new_state()`
-4. Export `BACKEND = EngineBackend(id="myengine", build_runner=..., cli_cmd="myengine")`
+4. Export `BACKEND = EngineBackend(id="myengine", build_runner=..., cli_cmd="myengine")`; if its completion cost or
+   tokens are cumulative across resumes (or per run with a session total wanted), declare `usage_scope=` (#850),
+   never a bridge engine table
 5. Register in `pyproject.toml` entry points: `myengine = "untether.runners.myengine:BACKEND"`
 6. Add reference docs in `docs/reference/runners/myengine/`
 7. Add tests mirroring the Codex suite's patterns (`tests/test_codex_runner_helpers.py`, `tests/test_codex_schema.py`, `tests/test_codex_tool_result_summary.py`)
