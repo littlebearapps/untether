@@ -75,3 +75,24 @@ names. Untether doesn't override it with `-c`; it stays the user's second layer,
 Untether hands to Codex, as for Claude, Pi and Antigravity. The spawn environment is Untether's own cross-engine
 surface. Not covered: the `codex --version`, schema-probe and `/auth codex` calls still inherit the full env (they run
 no model or tools; see [#375](https://github.com/littlebearapps/untether/issues/375)).
+
+## App-server cancel and open items (draft, [#962](https://github.com/littlebearapps/untether/issues/962))
+
+`/cancel` on an app-server run sends `turn/interrupt {threadId, turnId}` and keeps reading the same buffered stdout
+reader until `turn/completed` (any status: `interrupted`, or a finish that won the race; an error answer such as
+`no active turn` is ignored), then closes stdin so Codex exits by itself. It runs shielded and bounded at 3 s; if the
+bound runs out, the base teardown's SIGTERM is the fallback. A cancel before the turn id is known (during the
+handshake) is a plain teardown. Logged as `codex.app_server.interrupt ok=… elapsed_s=… open_items_closed=…`. The base
+`run_impl` closes the reader in the run's own task (`aclosing`), so a cancel that lands in the bridge rather than in
+the read (a stalled Telegram send, #614) interrupts the same way.
+
+A failed `thread/resume` ends the run with Codex's own text (`no rollout found for thread id …`, `invalid session id:
+…`) inside `codex app-server thread/resume failed: …`, which `_resume_failure_clears_session` matches. Resume tokens are
+the thread UUIDs on both transports, so a chat can switch transport and keep its session.
+
+### Native-vs-custom register (draft; finalised in 962-6)
+
+| Piece | Kind | Checked | Why custom |
+|---|---|---|---|
+| Cancel | native: `turn/interrupt` (stable) | codex-cli 0.170.0, 2026-11-19 | SIGTERM only as the fallback when the turn doesn't end within 3 s |
+| Closing items Codex leaves open after an interrupt or a failed turn | custom | codex-cli 0.170.0, 2026-11-18 (Δ D19) | no native signal: an interrupted `commandExecution` never gets `item/completed`. A failed turn's open rows are closed (`ok: false`, `failed` / `cancelled`) before the error final; on `/cancel` the bridge has stopped reading, so they're only counted in the log |

@@ -27,7 +27,11 @@ from untether.error_hints import CODEX_ERROR_INFO_HINTS
 from untether.events import EventFactory
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
 from untether.runner import JsonlSubprocessRunner, prespawn_blocked_reason
-from untether.runner_bridge import _resume_failure_clears_session, _run_error_hint
+from untether.runner_bridge import (
+    _close_runner_events,
+    _resume_failure_clears_session,
+    _run_error_hint,
+)
 from untether.runners import codex_app_server as gate
 from untether.runners.codex import (
     _UNTRUSTED_PROJECT_NOTE,
@@ -276,6 +280,7 @@ OTHER_THREAD = "01a1f1dc-09ac-7ec3-851e-ef00717cb6a2"
 _FAKE_APP_SERVER = r"""
 import json, os, sys, time
 SC = json.load(open(SC_PATH))
+CUR = {}
 log = open(LOG_PATH, "a")
 with open(ARGV_PATH, "w") as fh:
     json.dump(sys.argv[1:], fh)
@@ -312,13 +317,28 @@ for line in sys.stdin:
         if SC.get("close_stdin_after_init"):
             os.close(0)
             time.sleep(30)
+        if SC.get("hang_after_init"):
+            time.sleep(30)
+    elif method == "turn/interrupt":
+        if SC.get("ignore_interrupt"):
+            continue
+        if SC.get("partial"):
+            sys.stdout.write(SC["partial"][20:] + "\n")
+        if SC.get("interrupt_error"):
+            out({"id": rid, "error": {"code": -32600, "message": "no active turn"}})
+        else:
+            out({"id": rid, "result": {}})
+        out({"method": "turn/completed", "params": {"threadId": CUR.get("tid"), "turn": {
+            "id": "turn-1", "status": SC.get("interrupt_status", "interrupted"),
+            "items": [], "error": None}}})
     elif method == "config/read":
         out({"id": rid, "result": {"config": SC.get("config", {}), "origins": {}}})
     elif method in ("thread/start", "thread/resume"):
         p = msg["params"]
         if method == "thread/resume" and SC.get("resume_error"):
             out({"id": rid, "error": {"code": -32600,
-                 "message": "no rollout found for thread id " + p["threadId"]}})
+                 "message": SC.get("resume_error_message",
+                     "no rollout found for thread id " + p["threadId"])}})
             continue
         tid = p.get("threadId", SC.get("thread_id", "THREAD"))
         sandbox = SC.get("echo_sandbox") or POLICY.get(
@@ -333,7 +353,7 @@ for line in sys.stdin:
     elif method == "thread/list":
         out({"id": rid, "result": {"data": [thread(t) for t in SC.get("listed", [])]}})
     elif method == "turn/start":
-        tid = msg["params"]["threadId"]
+        tid = CUR["tid"] = msg["params"]["threadId"]
         turn = {"id": "turn-1", "status": "inProgress", "items": []}
         out({"id": rid, "result": {"turn": turn}})
         if "exit_after_turn_start" in SC:
@@ -343,6 +363,11 @@ for line in sys.stdin:
             out({"method": "brand/new", "params": {"x": 1}})
         for n in SC.get("notifications", []):
             out(n)
+        if SC.get("hold_turn"):
+            if SC.get("partial"):
+                sys.stdout.write(SC["partial"][:20])
+                sys.stdout.flush()
+            continue  # until turn/interrupt or EOF
         # A sub-agent thread finishing must not end this run.
         out({"method": "turn/completed", "params": {"threadId": "subagent",
              "turn": {"id": "s", "status": "completed", "items": []}}})
@@ -1381,3 +1406,221 @@ async def test_moderated_answer_is_shown_and_logged_once(
     assert done.answer == "kept as sent"
     moderation = [e for e in logs if e["event"] == "codex.app_server.moderated"]
     assert [e["mode"] for e in moderation] == ["hide"]
+
+
+# --- 962-4: /cancel via turn/interrupt, resume ------------------------------------
+
+
+async def _cancel_when(
+    runner: Any,
+    when: Any = None,
+    *,
+    after_s: float | None = None,
+    resume: ResumeToken | None = None,
+) -> list[Any]:
+    """Consume a run like the bridge and cancel it (its task group) when
+    ``when(evt)`` holds or after ``after_s``."""
+    events: list[Any] = []
+    with apply_run_options(_SAFE), anyio.fail_after(20):
+        async with anyio.create_task_group() as tg:
+
+            async def consume() -> None:
+                async for evt in runner.run("hello", resume):
+                    events.append(evt)
+                    if when is not None and when(evt):
+                        tg.cancel_scope.cancel()
+
+            tg.start_soon(consume)
+            if after_s is not None:
+                await anyio.sleep(after_s)
+                tg.cancel_scope.cancel()
+    return events
+
+
+def _command_started(evt: Any) -> bool:
+    return (
+        isinstance(evt, ActionEvent)
+        and evt.phase == "started"
+        and evt.action.kind == "command"
+    )
+
+
+def _interrupt_logs(logs: list[dict]) -> list[dict]:
+    return [e for e in logs if e["event"] == "codex.app_server.interrupt"]
+
+
+def _teardown_exit(logs: list[dict]) -> dict:
+    exits = [
+        e
+        for e in logs
+        if e["event"] == "subprocess.exit" and e.get("reason") == "teardown"
+    ]
+    assert len(exits) == 1
+    return exits[0]
+
+
+@pytest.mark.anyio
+async def test_cancel_interrupts_the_turn_and_codex_exits_by_itself(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path, hold_turn=True, notifications=[_cmd_started()])
+    with capture_logs() as logs:
+        events = await _cancel_when(_runner(fake), _command_started)
+    assert not any(isinstance(e, CompletedEvent) for e in events)
+    assert fake.requests("turn/interrupt") == [{"threadId": THREAD, "turnId": "turn-1"}]
+    [log] = _interrupt_logs(logs)
+    assert log["ok"] is True
+    assert log["open_items_closed"] == 1
+    assert log["elapsed_s"] < 3
+    # stdin closed, the process exited 0 on its own: no SIGTERM.
+    exit_log = _teardown_exit(logs)
+    assert exit_log["rc"] == 0
+    assert exit_log["killed"] is False
+
+
+@pytest.mark.anyio
+async def test_cancel_falls_back_to_teardown_when_the_turn_never_ends(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path, hold_turn=True, ignore_interrupt=True, notifications=[_cmd_started()]
+    )
+    with capture_logs() as logs:
+        await _cancel_when(_runner(fake, interrupt_bound_s=0.3), _command_started)
+    assert len(fake.requests("turn/interrupt")) == 1
+    [log] = _interrupt_logs(logs)
+    assert log["ok"] is False
+    assert 0.25 <= log["elapsed_s"] < 2
+    assert _teardown_exit(logs)["rc"] != 0  # SIGTERM
+
+
+@pytest.mark.anyio
+async def test_cancel_during_the_handshake_is_a_plain_teardown(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path, hang_after_init=True)
+    with capture_logs() as logs:
+        events = await _cancel_when(_runner(fake), after_s=0.5)
+    assert events == []
+    assert fake.requests("turn/interrupt") == []
+    assert _interrupt_logs(logs) == []
+    assert _teardown_exit(logs)["rc"] != 0
+
+
+@pytest.mark.anyio
+async def test_cancel_after_the_final_sends_no_interrupt(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path, linger=True)
+    with capture_logs() as logs:
+        events = await _cancel_when(
+            _runner(fake), lambda e: isinstance(e, CompletedEvent)
+        )
+    assert _completed(events).ok
+    assert fake.requests("turn/interrupt") == []
+    assert _interrupt_logs(logs) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"interrupt_status": "completed"}, id="finish-wins-race"),
+        pytest.param({"interrupt_error": True}, id="interrupt-error-ignored"),
+    ],
+)
+async def test_interrupt_ends_on_any_turn_completed(
+    tmp_path: Path, project: Path, gate_calls: list[str], scenario: dict
+) -> None:
+    fake = Fake(tmp_path, hold_turn=True, notifications=[_cmd_started()], **scenario)
+    with capture_logs() as logs:
+        events = await _cancel_when(_runner(fake), _command_started)
+    assert not any(isinstance(e, CompletedEvent) for e in events)
+    [log] = _interrupt_logs(logs)
+    assert log["ok"] is True
+    assert _teardown_exit(logs)["rc"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_line_part_read_before_the_cancel_is_still_parsed(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    partial = json.dumps(
+        {"method": "warning", "params": {"threadId": THREAD, "message": "late"}}
+    )
+    fake = Fake(
+        tmp_path, hold_turn=True, notifications=[_cmd_started()], partial=partial
+    )
+    with capture_logs() as logs:
+        await _cancel_when(_runner(fake), _command_started)
+    [log] = _interrupt_logs(logs)
+    assert log["ok"] is True
+    assert not any(e["event"] == "codex.rpc.bad_line" for e in logs)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"no rollout found for thread id {THREAD}",
+        f"invalid session id: {THREAD}",
+    ],
+)
+async def test_resume_errors_keep_codex_text_and_clear_the_session(
+    tmp_path: Path, project: Path, gate_calls: list[str], message: str
+) -> None:
+    fake = Fake(tmp_path, resume_error=True, resume_error_message=message)
+    token = ResumeToken(engine="codex", value=THREAD)
+    done = _completed(await _run(_runner(fake), resume=token, options=_SAFE))
+    assert not done.ok
+    assert message in (done.error or "")
+    assert _resume_failure_clears_session("codex", done.usage, done.error)
+
+
+@pytest.mark.anyio
+async def test_full_auto_resume_runs_read_only_where_codex_would_save_trust(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path, config={"sandbox_mode": "workspace-write"})
+    token = ResumeToken(engine="codex", value=THREAD)
+    events = await _run(_runner(fake), resume=token)
+    assert _completed(events).ok
+    assert fake.requests("thread/resume")[0]["sandbox"] == "read-only"
+
+
+@pytest.mark.anyio
+async def test_resume_lines_cross_transports(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    exec_runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    app_runner = _bare_runner()
+    token = ResumeToken(engine="codex", value=THREAD)
+    assert app_runner.extract_resume(exec_runner.format_resume(token)) == token
+    assert exec_runner.extract_resume(app_runner.format_resume(token)) == token
+    fake = Fake(tmp_path)
+    events = await _run(_runner(fake), resume=token, options=_SAFE)
+    assert fake.requests("thread/resume")[0]["threadId"] == THREAD
+    assert _completed(events).resume == token
+
+
+@pytest.mark.anyio
+async def test_cancel_while_the_bridge_is_busy_still_interrupts(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """The cancel lands in the bridge (e.g. a stalled Telegram send), not in
+    the runner's read: the generator is then closed at its yield (#614)."""
+    fake = Fake(tmp_path, hold_turn=True, notifications=[_cmd_started()])
+    with capture_logs() as logs, apply_run_options(_SAFE), anyio.fail_after(20):
+        events = _runner(fake).run("hello", None)
+        with anyio.CancelScope() as scope:
+            try:
+                async for evt in events:
+                    if _command_started(evt):
+                        scope.cancel()
+                        await anyio.sleep(5)  # cancelled here
+            finally:
+                await _close_runner_events(events)
+    [log] = _interrupt_logs(logs)
+    assert log["ok"] is True
+    # exited by itself (a GeneratorExit close logs no teardown exit line)
+    assert not [e for e in logs if e["event"] == "subprocess.exit" and e["rc"] != 0]

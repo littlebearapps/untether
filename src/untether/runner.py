@@ -2078,15 +2078,21 @@ class JsonlSubprocessRunner(BaseRunner):
                     logger,
                     proc.pid,
                 )
-                async for evt in self._iter_jsonl_events(
-                    stdout=proc.stdout,
-                    stream=stream,
-                    state=state,
-                    resume=resume,
-                    logger=logger,
-                    pid=proc.pid,
-                ):
-                    yield evt
+                # #962: close the reader in this task, before teardown, when
+                # the run is closed at a yield (a cancel landing in the bridge,
+                # #614): Codex app-server's reader sends turn/interrupt there.
+                async with contextlib.aclosing(
+                    self._iter_jsonl_events(
+                        stdout=proc.stdout,
+                        stream=stream,
+                        state=state,
+                        resume=resume,
+                        logger=logger,
+                        pid=proc.pid,
+                    )
+                ) as jsonl_events:
+                    async for evt in jsonl_events:
+                        yield evt
                 reader_done.set()
                 # #502 — Close our read end of stderr so drain_stderr
                 # exits even when a child (e.g. an MCP server) inherited

@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -362,6 +363,7 @@ _NO_EARLIER_SESSION_NOTE = (
     "No earlier Codex session in this project; started a new one."
 )
 _UNKNOWN_MODE_SAFE_WARNED: set[str] = set()
+_INTERRUPT_BOUND_S = 3.0
 _WARNING = "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
 # #1240 on app-server: the untrusted-project notice is a configWarning here,
 # not exec's stderr line. Stable prefix only (codex-cli 0.170.0).
@@ -536,6 +538,7 @@ class CodexAppServerRunner(CodexRunner):
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
+    interrupt_bound_s = _INTERRUPT_BOUND_S
 
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
@@ -642,37 +645,102 @@ class CodexAppServerRunner(CodexRunner):
         # 962-4) never loses bytes this one buffered.
         state.reader = BufferedByteReceiveStream(stdout)
         peer: CodexRpcPeer = state.peer
-        while state.stopped is None and not stream.did_emit_completed:
-            try:
-                line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
-            except (anyio.IncompleteRead, anyio.ClosedResourceError):
-                break
-            try:
-                state.inbound = await peer.feed(line)
-                # A server request yields no message, but its row does.
-                if state.inbound is not None or (
-                    state.pending_rows and state.thread_id is not None
-                ):
-                    for evt in self._handle_jsonl_line(
-                        raw_line=line,
-                        stream=stream,
-                        state=state,
-                        resume=resume,
-                        logger=logger,
-                        pid=pid,
+        try:
+            while state.stopped is None and not stream.did_emit_completed:
+                try:
+                    line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
+                except (anyio.IncompleteRead, anyio.ClosedResourceError):
+                    break
+                try:
+                    state.inbound = await peer.feed(line)
+                    # A server request yields no message, but its row does.
+                    if state.inbound is not None or (
+                        state.pending_rows and state.thread_id is not None
                     ):
-                        yield evt
-                state.inbound = None
-                while state.outbox and not stream.did_emit_completed:
-                    kind, method, params = state.outbox.pop(0)
-                    if kind == "notify":
-                        await peer.notify(method, params)
-                    else:
-                        await peer.submit(method, params)
-            except (CodexRpcClosed, CodexRpcWriteTimeout) as exc:
-                self._stop(state, exc)
+                        for evt in self._handle_jsonl_line(
+                            raw_line=line,
+                            stream=stream,
+                            state=state,
+                            resume=resume,
+                            logger=logger,
+                            pid=pid,
+                        ):
+                            yield evt
+                    state.inbound = None
+                    while state.outbox and not stream.did_emit_completed:
+                        kind, method, params = state.outbox.pop(0)
+                        if kind == "notify":
+                            await peer.notify(method, params)
+                        else:
+                            await peer.submit(method, params)
+                except (CodexRpcClosed, CodexRpcWriteTimeout) as exc:
+                    self._stop(state, exc)
+        except (anyio.get_cancelled_exc_class(), GeneratorExit):
+            # /cancel: the bridge cancelled the run (at a read) or closed this
+            # generator (at a yield). Stop the turn natively, then re-raise.
+            await self._interrupt(state, stream)
+            raise
         peer.close("done" if stream.did_emit_completed else "eof")
         await self._close_process(state.proc)
+
+    async def _interrupt(
+        self, state: AppServerRunState, stream: JsonlStreamState
+    ) -> None:
+        """``turn/interrupt``, bounded and shielded: Codex ends the turn in
+        ~0.1 s and exits once stdin closes, so teardown finds it gone. On
+        timeout the base teardown's SIGTERM is the fallback."""
+        peer = state.peer
+        if (
+            stream.did_emit_completed
+            or state.stopped is not None
+            or state.thread_id is None
+            or state.turn_id is None
+        ):
+            peer.close("cancelled")  # handshake cancel: plain teardown
+            return
+        started = time.monotonic()
+        ok = False
+        with (
+            anyio.CancelScope(shield=True),
+            anyio.move_on_after(self.interrupt_bound_s),
+        ):
+            try:
+                # Never await the answer: this loop is the only reader.
+                await peer.submit(
+                    "turn/interrupt",
+                    {"threadId": state.thread_id, "turnId": state.turn_id},
+                )
+                # The same buffered reader, so a part-read line isn't lost.
+                while not ok:
+                    line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
+                    msg = await peer.feed(line)
+                    # An error answer ("no active turn") is ignored; any
+                    # turn/completed (interrupted, or a finish that won the
+                    # race) ends the turn.
+                    ok = (
+                        isinstance(msg, Notification)
+                        and msg.method == "turn/completed"
+                        and msg.params.get("threadId") == state.thread_id
+                    )
+                peer.close("cancelled")
+                with contextlib.suppress(Exception):
+                    await state.proc.stdin.aclose()
+                await state.proc.wait()
+            except Exception as exc:  # noqa: BLE001 — best effort; teardown follows
+                logger.warning(
+                    "codex.app_server.interrupt_failed", error=type(exc).__name__
+                )
+        peer.close("cancelled")
+        # Codex never completes items open at an interrupt (D19); the bridge
+        # has stopped reading, so they're closed here and not shown.
+        closed = len(state.open_items)
+        state.open_items.clear()
+        logger.info(
+            "codex.app_server.interrupt",
+            ok=ok,
+            elapsed_s=round(time.monotonic() - started, 3),
+            open_items_closed=closed,
+        )
 
     async def _close_process(self, proc: Any) -> None:
         """Close stdin (the app-server exits in ~0.1 s), then a bounded wait:
