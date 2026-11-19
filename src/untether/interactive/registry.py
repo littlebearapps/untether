@@ -610,6 +610,10 @@ async def respond(
             )
 
         success = await responder.respond(request_id, session_id, decision)
+        # #1273: an answer by any path (a typed reply to an option question,
+        # a standalone tap) retires the question's flow with the request, so
+        # the chat's next question isn't answered by a tap on this stale one.
+        _drop_question_state(request_id, outcome="answered")
 
         # Clean up the mapping after use. ``pop``, not ``del``: the claim
         # makes a concurrent delete impossible, but it is cheap insurance.
@@ -765,9 +769,10 @@ def withdraw(
     return False
 
 
-def _drop_question_state(request_id: str) -> None:
-    """Retire a question's pending entry and flow; a flow is remembered as
-    ``cancelled`` so a late option tap reads "No longer needed" (#684)."""
+def _drop_question_state(request_id: str, *, outcome: str = "cancelled") -> None:
+    """Retire a question's pending entry and flow; a flow is remembered with
+    *outcome* so a late option tap reads "No longer needed" (#684) or
+    "Already answered" (#1273)."""
     from .questions import (
         _ASK_QUESTION_FLOWS,
         _PENDING_ASK_REQUESTS,
@@ -777,7 +782,7 @@ def _drop_question_state(request_id: str) -> None:
     _PENDING_ASK_REQUESTS.pop(request_id, None)
     flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
     if flow is not None:
-        _record_answered_ask_flow(request_id, flow.channel_id, outcome="cancelled")
+        _record_answered_ask_flow(request_id, flow.channel_id, outcome=outcome)
 
 
 def on_session_dropped(callback: Callable[[str], str | None]) -> None:

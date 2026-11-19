@@ -1673,3 +1673,43 @@ def test_715_dispatch_hook_falls_back_to_legacy_signature() -> None:
         == f"scoped:opt:0:{CHAT_A}"
     )
     assert _early_answer_toast(NoHookBackend(), "opt:0", CHAT_A) is None
+
+
+# ── #1273: a typed answer retires the option flow ──
+
+
+@pytest.mark.anyio
+async def test_1273_typed_answer_retires_option_flow(monkeypatch) -> None:
+    """Typing a reply to an option question (without "Other") answers the
+    request; its flow must go with it. Before the fix the flow stayed, so the
+    chat's NEXT question's option tap resolved to the stale flow, reported
+    "Answers sent" and left the new question blocked."""
+    from untether.runners import claude as claude_mod
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    mock_runner = AsyncMock()
+    mock_runner.write_control_response.return_value = True
+    _ACTIVE_RUNNERS["sess-1"] = (mock_runner, 0.0)
+    for rid, text in (("q1", "First?"), ("q2", "Second?")):
+        _REQUEST_TO_SESSION[rid] = "sess-1"
+        _PENDING_ASK_REQUESTS[rid] = (CHAT_A, text)
+        _ASK_QUESTION_FLOWS[rid] = AskQuestionState(
+            request_id=rid,
+            channel_id=CHAT_A,
+            questions=[{"question": text, "options": [{"label": "A"}, {"label": "B"}]}],
+        )
+
+    assert await answer_ask_question("q1", "typed answer") is True
+    assert "q1" not in _ASK_QUESTION_FLOWS
+    assert recently_answered_ask_flow(CHAT_A) == "q1"
+
+    answered: list[str] = []
+
+    async def fake_answer(request_id: str) -> bool:
+        answered.append(request_id)
+        _ASK_QUESTION_FLOWS.pop(request_id, None)
+        return True
+
+    monkeypatch.setattr(claude_mod, "answer_ask_question_with_options", fake_answer)
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:1"))
+    assert answered == ["q2"]
