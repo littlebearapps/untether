@@ -1138,3 +1138,65 @@ async def test_runner_completed_logs_context_pct() -> None:
     assert len(done) == 2
     assert done[0]["context_pct"] == 62
     assert "context_pct" not in done[1]
+
+
+# ── #832: Codex app-server's native value (``N% ctx``, no ``~``) ────────────
+
+
+def _codex_app_server_telemetry() -> list[Any]:
+    from untether.runners.codex_app_server import CodexAppServerRunner
+    from untether.runners.codex_rpc import Notification
+
+    runner = CodexAppServerRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("p", None)
+    state.thread_id = "t1"
+    usage = {"totalTokens": 62_000, "inputTokens": 62_000, "outputTokens": 0}
+    state.inbound = Notification(
+        "thread/tokenUsage/updated",
+        {
+            "threadId": "t1",
+            "turnId": "u1",
+            "tokenUsage": {
+                "total": usage,
+                "last": usage,
+                "modelContextWindow": 100_000,
+            },
+        },
+    )
+    return runner.translate(b"", state=state, resume=None, found_session=None)
+
+
+@pytest.mark.parametrize("show", [True, False])
+def test_codex_app_server_header_shows_native_ctx(show: bool) -> None:
+    tracker = ProgressTracker(engine="codex")
+    for evt in _codex_app_server_telemetry():
+        tracker.note_event(evt)
+    state = tracker.snapshot()
+    formatter = MarkdownFormatter(show_context_usage=show)
+    header = formatter.render_progress_parts(state, elapsed_s=12.0).header
+    final = formatter.render_final_parts(
+        state, elapsed_s=12.0, status="done", answer="ok"
+    ).header
+    if show:
+        assert header == "working · codex · 12s · 62% ctx"
+        assert final == "done · codex · 12s · 62% ctx"
+    else:
+        assert "ctx" not in header and "ctx" not in final
+
+
+def test_codex_exec_has_no_ctx() -> None:
+    from untether.events import EventFactory
+    from untether.runners.codex import translate_codex_event
+    from untether.schemas import codex as codex_schema
+
+    raw = {
+        "type": "turn.completed",
+        "usage": {"input_tokens": 9, "cached_input_tokens": 0, "output_tokens": 1},
+    }
+    event = codex_schema.decode_event(json.dumps(raw))
+    tracker = ProgressTracker(engine="codex")
+    for evt in translate_codex_event(
+        event, title="Codex", factory=EventFactory("codex")
+    ):
+        tracker.note_event(evt)
+    assert tracker.context_pct is None

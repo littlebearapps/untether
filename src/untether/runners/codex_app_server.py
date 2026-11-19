@@ -50,6 +50,7 @@ from ..schemas.codex_app_server import (
     CODEX_APP_SERVER_USED,
     MIN_TESTED_APP_SERVER_VERSION,
 )
+from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
 from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
@@ -381,11 +382,12 @@ _APPROVAL_DECLINED_NOTE = (
     f"{_WARNING} Codex asked for approval; declined: this transport doesn't"
     " support approvals yet"
 )
-# Items with no row: the prompt echo and hook text, plus the ones later
-# phases render (plan: #965; contextCompaction: 962-5).
-_SILENT_ITEM_TYPES = frozenset(
-    {"userMessage", "hookPrompt", "plan", "contextCompaction"}
-)
+# Items with no row: the prompt echo and hook text, plus plan (#965).
+_SILENT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt", "plan"})
+# #832: Claude's 🗜️ wording (#819), so both engines read the same.
+_COMPACTING_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Compacting context…"
+_COMPACTED_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
+_CONTEXT_ACTION_ID = "codex.context"
 _UNKNOWN_ITEMS_LOGGED: set[str] = set()
 # App-server names -> exec's, so exec's title helpers give the same rows.
 _EXEC_STATUS = {"inProgress": "in_progress"}
@@ -527,6 +529,14 @@ class AppServerRunState(CodexRunState):
     retry_seen: bool = False
     moderation_logged: bool = False
     server_requests: int = 0
+    model: str | None = None
+    # #832: the latest thread/tokenUsage/updated. ``tokens`` is its
+    # thread-cumulative ``total`` (exec's footer meaning, PLAN Q3);
+    # ``context`` is (pct, used, window) from ``last``.
+    tokens: cas.TokenUsageBreakdown | None = None
+    context: tuple[int, int, int] | None = None
+    ctx_emitted: tuple[int, int] | None = None
+    compactions: int = 0
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -827,8 +837,32 @@ class CodexAppServerRunner(CodexRunner):
             error=error,
             answer=self._answer(state),
             resume=token,
-            usage=self._untrusted_usage(state, usage),
+            usage=self._run_usage(state, usage),
         )
+
+    def _run_usage(
+        self, state: AppServerRunState, usage: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """``CompletedEvent.usage``: exec's five token keys from ``total``
+        (thread-cumulative, the backend's declared scope, #850), plus
+        ``context`` and ``compaction`` for the ``runner.completed`` log
+        (#832), *usage* and the #1240 flag."""
+        out: dict[str, Any] = {}
+        if state.tokens is not None:
+            out = {f: getattr(state.tokens, f) for f in codex_schema.CODEX_USAGE_FIELDS}
+        if state.context is not None:
+            pct, used, window = state.context
+            out["context"] = {
+                "pct": pct,
+                "used": used,
+                "window": window,
+                "model": state.model,
+            }
+        if state.compactions:
+            # Untether never starts one itself (manual /compact is #964).
+            out["compaction"] = {"count": state.compactions, "trigger": "auto"}
+        out.update(usage or {})
+        return self._untrusted_usage(state, out or None)
 
     def _on_server_request(self, state: AppServerRunState, method: str) -> None:
         """The peer already declined it; this only adds the row."""
@@ -914,6 +948,18 @@ class CodexAppServerRunner(CodexRunner):
         kind = "tool"
         status = ""
         match item:
+            case cas.ContextCompactionItem():
+                # #832: Codex compacting mid-turn (auto); same row as Claude.
+                kind = "note"
+                title = _COMPACTING_TITLE
+                if phase == "completed":
+                    state.compactions += 1
+                    title = _COMPACTED_TITLE
+                    logger.info(
+                        "codex.compaction.completed",
+                        thread_id=state.thread_id,
+                        count=state.compactions,
+                    )
             case cas.CollabAgentToolCallItem():
                 kind, status = "subagent", item.status
                 title = item.prompt or item.tool or "sub-agent"
@@ -1103,6 +1149,7 @@ class CodexAppServerRunner(CodexRunner):
         state.thread_id = result.thread.id
         run_options = get_run_options()
         meta: dict[str, Any] = {"model": result.model or result.thread.model or "codex"}
+        state.model = meta["model"]
         if run_options is not None and run_options.reasoning:
             meta["effort"] = run_options.reasoning
         if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
@@ -1195,8 +1242,11 @@ class CodexAppServerRunner(CodexRunner):
                     )
                 ]
             return []
-        if isinstance(params, cas.TurnParams) and params.thread_id != state.thread_id:
-            return []  # a sub-agent thread's turn, not this run's
+        if (
+            isinstance(params, cas.TurnParams | cas.TokenUsageUpdatedParams)
+            and params.thread_id != state.thread_id
+        ):
+            return []  # a sub-agent thread's turn or usage, not this run's
         if (
             isinstance(params, cas.ItemParams | cas.ErrorParams)
             and params.thread_id
@@ -1217,11 +1267,43 @@ class CodexAppServerRunner(CodexRunner):
                 return self._warning_rows(state, msg.method, params.message)
             case "configWarning" | "deprecationNotice":
                 return self._warning_rows(state, msg.method, params.summary)
+            case "thread/tokenUsage/updated":
+                return self._on_token_usage(params.token_usage, state=state)
             case "turn/completed":
                 return self._on_turn_completed(
                     params.turn, state=state, resume=resume, found_session=found_session
                 )
         return []
+
+    def _on_token_usage(
+        self, usage: cas.ThreadTokenUsage, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#832: the header's ``N% ctx`` from this update's ``last`` (one
+        model request) and its own window; ``total`` is thread-cumulative
+        and kept for the footer. The telemetry action goes out only when
+        (pct, window) changes."""
+        state.tokens = usage.total
+        window = usage.model_context_window
+        if not window or window <= 0:
+            return []
+        used = usage.last.total_tokens
+        pct = context_pct(used, window)  # half up, clamped to 100, as the other engines
+        state.context = (pct, used, window)
+        if state.ctx_emitted == (pct, window):
+            return []
+        state.ctx_emitted = (pct, window)
+        row = state.factory.action_updated(
+            action_id=_CONTEXT_ACTION_ID,
+            kind="telemetry",
+            title="context",
+            detail={
+                "context_pct": pct,
+                "context_used": used,
+                "context_window": window,
+                "model": state.model,
+            },
+        )
+        return self._rows(state, [row])
 
     def _error_row(
         self, params: cas.ErrorParams, *, state: AppServerRunState
@@ -1267,7 +1349,7 @@ class CodexAppServerRunner(CodexRunner):
                 state.factory.completed_ok(
                     answer=self._answer(state),
                     resume=found_session or resume,
-                    usage=self._untrusted_usage(state, None),
+                    usage=self._run_usage(state, None),
                 )
             ]
         rows = self._close_open_items(

@@ -1,6 +1,6 @@
 # Codex -> Untether event mapping
 
-This document describes how Codex exec --json events are translated to Untether's normalised event model.
+This document describes how Codex exec --json events are translated to Untether's normalised event model. The opt-in app-server transport (#962) is mapped in [its own section](#app-server-transport-962) at the end.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/codex.py` and the translation logic is in `src/untether/runners/codex.py`. When in doubt, refer to the code.
 
@@ -464,21 +464,27 @@ That still matches your intent (“completed is when we get final answer”) bec
 
 ---
 
-## App-server transport (draft, [#962](https://github.com/littlebearapps/untether/issues/962))
+## App-server transport ([#962](https://github.com/littlebearapps/untether/issues/962))
 
-With `[engines.codex] transport = "app-server"`, the same engine id runs `codex app-server --listen stdio://` and
+With `transport = "app-server"` under `[codex]`, the same engine id runs `codex app-server --listen stdio://` and
 reads JSON-RPC notifications instead of `exec --json` lines (checked on codex-cli 0.170.0). Every item is mapped to
 the exec item it corresponds to and rendered by the exec translation, so the rows, titles and `ok` values are the
-same on both transports. Finalised in 962-6.
+same on both transports. Transport choice, permissions and the native-vs-custom register: [runner.md](runner.md).
+
+Handshake: `initialize` (`experimentalApi: false`, deltas opted out) → `config/read` (Full auto only, for the trust
+check) → `thread/start`, `thread/resume` or `thread/list` (`/continue`) → `turn/start {threadId, input, effort?,
+turnTrigger: "untether"}`. Stdin closes after `turn/completed` and Codex exits by itself.
 
 | App-server message | Untether |
 |---|---|
 | `thread/start` / `thread/resume` result | `started`; `meta.model` is the result's `model` (the real model in the footer) |
 | `item/started`, `item/completed` | `action` started/completed, via exec's item translation: `commandExecution` (`inProgress` → `in_progress`), `fileChange` (`kind {type}` → `kind`; completed only, like exec), `mcpToolCall` (`structuredContent`), `webSearch` (`openPage`/`findInPage` → exec's names), `reasoning` (summary text; completed only), `agentMessage` with `phase: "commentary"` (note row) |
 | `collabAgentToolCall`, `imageView` | a `subagent` / `tool` row (exec has no such items) |
-| any other item type | a generic `tool` row titled with the type; `codex.app_server.unknown_item` logged once per type. `userMessage`, `hookPrompt`, `plan` and `contextCompaction` get no row here |
+| any other item type | a generic `tool` row titled with the type; `codex.app_server.unknown_item` logged once per type. `userMessage`, `hookPrompt` and `plan` get no row |
+| `contextCompaction` | a `note` row: `🗜️ Compacting context…` on `item/started`, `🗜️ Context compacted` on `item/completed` (Claude's wording); `usage.compaction = {count, trigger: "auto"}` → `runner.completed compactions=N` (#832) |
+| `thread/tokenUsage/updated` | a `telemetry` action (`context_pct`, `context_used`, `context_window`, `model`) from `last.totalTokens / modelContextWindow`, only when (pct, window) changes and never without a window; the header's `N% ctx`. `total` is kept for the final's usage |
 | `agentMessage` | the answer: the last `phase: "final_answer"`, else the last unnamed message, else the last message. `moderation.moderated` logs `codex.app_server.moderated mode=…` once per run; the text is shown as sent |
-| `turn/completed` `completed` | `completed` ok |
+| `turn/completed` `completed` | `completed` ok; `usage` carries exec's five token keys from the last update's `total` (thread-cumulative, as exec's `turn.completed.usage`), `context {pct, used, window, model}` and `compaction` when there was one |
 | `turn/completed` `failed` / `interrupted` | every row still open is closed (`ok: false`, `detail.status` `failed` / `cancelled`; Codex never completes them, Δ D19), then `completed` error with the turn's message and any answer so far. `usage.codex_error_info` carries `TurnError.codexErrorInfo` (an object variant by its key), which picks the hint (`error_hints.CODEX_ERROR_INFO_HINTS`) |
 | `error` `willRetry: true` | exec's reconnect row (`codex.reconnect`, started then updated) |
 | `error` `willRetry: false` | a failed note, as exec shows its `error` line |
@@ -486,4 +492,5 @@ same on both transports. Finalised in 962-6.
 | server request (approval, user input, …) | declined by the peer (approvals are #963), plus one ⚠️ row per request |
 
 Rows raised before the thread exists (a `configWarning` right after `initialize`) wait until `started` has gone out.
-Items, errors and turns of another thread (a sub-agent's) are ignored.
+Items, errors, usage updates and turns of another thread (a sub-agent's) are ignored. A notification Untether
+doesn't read is logged once per method at debug (`codex.app_server.notification_ignored`).
