@@ -101,6 +101,7 @@ Recommended v1 schema:
 
     [claude]
     model = "claude-sonnet-5-5" # optional (Claude Code supports model override in settings too)
+    fallback_model = "claude-haiku-5-5" # optional: --fallback-model (comma-separated list allowed)
     permission_mode = "plan-auto"        # optional — see "Permission modes" below
     allowed_tools = ["Bash", "Read", "Edit", "Write"] # optional but strongly recommended for automation
     extra_args = ["--chrome"]           # optional: extra upstream CLI flags (e.g. --chrome opts into Claude-in-Chrome)
@@ -113,11 +114,12 @@ Notes:
 * `--allowedTools` exists specifically to auto-approve tools in programmatic runs. ([Claude Code][1])
 * Claude Code tools (Bash/Edit/Write/WebSearch/etc.) and whether permission is required are documented. ([Claude Code][2])
 * If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
-* Untether reads `model`, `permission_mode`, `allowed_tools`, `extra_args`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
+* Untether reads `model`, `fallback_model`, `permission_mode`, `allowed_tools`, `extra_args`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
 * `permission_mode` is validated at config load against the same allowlist crons use ([#742](https://github.com/littlebearapps/untether/issues/742)); an unknown value raises a `ConfigError` instead of failing at subprocess spawn. See "Permission modes" below.
-* `extra_args` lets you pass additional upstream `claude` CLI flags that Untether doesn't expose directly — for example `["--chrome"]` opts into the Claude-in-Chrome extension (otherwise gated off by Claude Code 2.1.x), or `["--strict-mcp-config"]` / `["--mcp-config", "path"]` for MCP tweaks. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools`) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load with a `ConfigError` naming the flag (never its value), in every spelling — `--flag=value` and short clusters such as `-pc` included ([#209](https://github.com/littlebearapps/untether/issues/209); see [Security → Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). A default engine with a refused flag won't start; any other engine is disabled (`failed to load`). Mirrors `codex.extra_args`. `--include-hook-events` is **not** reserved: Untether adds it itself in control-channel mode (see "Async hooks" under Live sessions) and skips its own copy when `extra_args` already carries it, so configs that already pass it keep working ([#812](https://github.com/littlebearapps/untether/issues/812)).
+* `extra_args` lets you pass additional upstream `claude` CLI flags that Untether doesn't expose directly — for example `["--chrome"]` opts into the Claude-in-Chrome extension (otherwise gated off by Claude Code 2.1.x), or `["--strict-mcp-config"]` / `["--mcp-config", "path"]` for MCP tweaks. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools`, and `--fallback-model` while `fallback_model` is set) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load with a `ConfigError` naming the flag (never its value), in every spelling — `--flag=value` and short clusters such as `-pc` included ([#209](https://github.com/littlebearapps/untether/issues/209); see [Security → Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). A default engine with a refused flag won't start; any other engine is disabled (`failed to load`). Mirrors `codex.extra_args`. `--include-hook-events` is **not** reserved: Untether adds it itself in control-channel mode (see "Async hooks" under Live sessions) and skips its own copy when `extra_args` already carries it, so configs that already pass it keep working ([#812](https://github.com/littlebearapps/untether/issues/812)).
 * `dangerously_skip_permissions = true` adds `--dangerously-skip-permissions`, which outranks `permission_mode` and every `/planmode` choice (the CLI reports `bypassPermissions`), so no Telegram approvals are shown. Since 0.36.0 Untether logs one `claude.config.dangerously_skip_permissions` WARN per process when it is set ([#209](https://github.com/littlebearapps/untether/issues/209)). It is the only accepted way to request a bypass; the same flag in `extra_args` is refused.
 * By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude Code uses subscription billing. Set `use_api_billing = true` to keep the key.
+* `fallback_model` adds `--fallback-model=<value>` on both the control-channel and legacy `-p` paths ([#1124](https://github.com/littlebearapps/untether/issues/1124)). It is validated like `model` (no leading `-`, no spaces) and may be a comma-separated list. The CLI does not mark the flag print-only; probe 8 (CLI 2.1.328) ran a control-channel spawn with it. When the CLI switches models it emits `system/model_fallback`, which the existing model-safeguard row already renders ([#814](https://github.com/littlebearapps/untether/issues/814)).
 
 ### Permission modes
 
@@ -405,6 +407,7 @@ The Claude runner modifies the subprocess environment before spawning `claude`:
 | Variable | Behaviour |
 |----------|-----------|
 | `UNTETHER_SESSION` | Set to `1`. Signals to Claude Code plugins (hooks, rules, agents) that the session is running via Untether/Telegram. Plugins can check `[ -n "${UNTETHER_SESSION:-}" ]` in shell hooks to adjust behaviour — e.g. skip blocking Stop hooks that would displace the user's requested content in Telegram's single-message output. See [PitchDocs](https://github.com/littlebearapps/lba-plugins) for a reference implementation. |
+| `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_ENTRYPOINT` | Removed when inherited ([#1124](https://github.com/littlebearapps/untether/issues/1124)): both pass the `CLAUDE_CODE_` prefix allowlist when Untether is started from a Claude Code shell. `CHILD_SESSION` makes the CLI silently decline the scheduled-run offer; an inherited entrypoint (for example a hosted surface's) changes managed-settings loading and request attribution. Untether sets no entrypoint of its own, so the CLI picks its default. |
 | `ANTHROPIC_API_KEY` | Stripped from the environment by default so Claude Code uses subscription billing. Set `use_api_billing = true` in `[claude]` config to keep the key and use API billing instead. |
 | `CLAUDE_ENABLE_STREAM_WATCHDOG` | Set to `1` via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). Enables the upstream stream watchdog so Claude Code aborts cleanly on SSE idle timeout instead of hanging. User overrides via shell env still win. |
 | `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Set to `300000` (5 min) via `setdefault` ([#342](https://github.com/littlebearapps/untether/issues/342)). Matches the undici idle-body timeout that motivated [#322](https://github.com/littlebearapps/untether/issues/322) and Untether's `[watchdog] stuck_after_tool_result_timeout` default. As of v0.35.3 ([#438](https://github.com/littlebearapps/untether/issues/438)) this default is user-configurable via `[watchdog] claude_stream_idle_timeout_ms` (range 30 s – 30 min) for deployments that hit upstream Anthropic API stalls on long opus 4.7 1M plan-mode generations. Shell-set values still win via `setdefault`. The earlier 60 s value tripped on `opus · max` legitimate chain-of-thought windows. |
@@ -986,12 +989,12 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 
 | Untether feature | Custom today | Native | Catch |
 |---|---|---|---|
-| `max_cost_per_run` | checked after a result is delivered | `--max-budget-usd` → result `error_max_budget_usd` | client-side estimate, can overshoot; spend restored on resume isn't counted |
+| `max_cost_per_run` | checked after a result is delivered | `--max-budget-usd` → result `error_max_budget_usd` | client-side estimate, can overshoot; spend restored on resume isn't counted. Works on the control-channel spawn despite "(only works with --print)" (probe 8, below) |
 | Preamble | prepended to the user prompt | `--append-system-prompt[-file]` | fixed at process start |
-| `% ctx` | derived from `usage` + `context_windows.json` | `get_context_usage` request | makes token-counting API calls |
+| `% ctx` | derived from `usage` + `context_windows.json` | `get_context_usage` request | `detail:"full"` (the default) makes token-counting API calls; `detail:"summary"` answers from the last response's usage and local estimates (CLI 2.1.328 schema, #1124) |
 | `/cancel` of a running turn | SIGINT / SIGTERM | `interrupt` request (session survives) | the interrupted turn's messages must be drained |
 | `/model` on a live session | close and resume with `--model=<id>` | `set_model` request (`model` omitted = back to the CLI's default) | not live-tested. On 2.1.296 a resume without `--model` keeps the session's last model and `--model` on resume switches it (probed 2026-10-11), so after `/model clear` with no `[claude] model` the session keeps its model until `/new` ([#998](https://github.com/littlebearapps/untether/issues/998)) |
-| Steer / queue | own steer window, no `priority` sent | user-message `priority` (`now` / `next` / `later`) | documented for TypeScript only |
+| Steer / queue | own steer window, no `priority` sent | user-message `priority` (`now` / `next` / `later`) | documented for TypeScript only, but the CLI's stdin user-message schema accepts it (2.1.328, #1124); not live-tested |
 | `/export` | Untether's recorded events | the CLI's session transcript | no export API |
 | Stopping one background task | not offered | `stop_task` request | — |
 | Ending a turn that outlives the session time limit's grace (#887) | close stdin, then SIGINT | `interrupt` request, then close at the idle boundary | same catch as `/cancel`: the interrupted turn's messages must be drained; needs a dev-bot run |
@@ -1007,7 +1010,7 @@ CLI that folds without per-line frames would leave the line waiting until the 12
 
 | Untether feature | Why native doesn't count |
 |---|---|
-| `/usage` and the opt-in `[footer] show_subscription_usage` line (OAuth usage endpoint + credentials file) | on-demand `usage_report` is TypeScript-only and experimental; `rate_limit_event` fires on status change only. Existing exception to the "no undocumented endpoints" tier — don't extend it. The default near-limit warning on finals is native: built from the run's `rate_limit_event` snapshot, no token read ([#1150](https://github.com/littlebearapps/untether/issues/1150)) |
+| `/usage` and the opt-in `[footer] show_subscription_usage` line (OAuth usage endpoint + credentials file) | the on-demand `get_usage` control request is on the CLI's stdin (2.1.328) but experimental in the SDK; `rate_limit_event` fires on status change only. Existing exception to the "no undocumented endpoints" tier — don't extend it. The default near-limit warning on finals is native: built from the run's `rate_limit_event` snapshot, no token read ([#1150](https://github.com/littlebearapps/untether/issues/1150)) |
 | Loop mode owning the schedule | `CronCreate` / `ScheduleWakeup` fire only while the process is alive and idle, with no catch-up |
 | Outbox file delivery | `SendUserFile` needs a Remote Control client or cloud session |
 | Holding a live session open while a session-owned Codex plugin job runs ([#1186](https://github.com/littlebearapps/untether/issues/1186), 2026-11-18, CLI 2.1.325, `codex@openai-codex` 1.0.6) | The plugin's `SessionEnd` hook kills the session's `queued`/`running` `--background` jobs on every process exit and ignores `SessionEnd.reason`; no flag or env lets a host say "the session continues" (`disableAllHooks` drops every hook, `--bare` drops OAuth). **Exception to native-first (D12, Nathan 2026-11-18):** `utils/codex_plugin_jobs.py` reads the plugin's private job state read-only (`~/.claude/plugins/data/codex-openai-codex/state/*/state.json`; the plugin's world-writable `$TMPDIR/codex-companion` fallback, used only outside Claude Code, is never read) — never writes or deletes it, and skips a symlinked root, a symlinked / non-regular / foreign-owned / over-1 MiB `state.json` (opened `O_NOFOLLOW | O_NONBLOCK`); missing or unreadable files mean no hold (today's behaviour). The idle close (`idle_no_tasks`) is deferred while a job for this session is queued/running with a live pid, re-checked each idle grace and still bounded by `live_session_max_s`; logs `claude.live_session.hold reason=codex_plugin_job jobs=<n>`. Other closes (cap, `/cancel`, `/new`, changed settings, restart) still stop the job, and the closing notice names it (#1186 step 3); the plugin's `SessionEnd` deletes the job record, so `/codex:result` can't fetch a stopped job. Remove when openai/codex-plugin-cc#822 ships. Not covered ([#1253](https://github.com/littlebearapps/untether/issues/1253), option A, 2026-11-18): the plugin runs one broker per git toplevel and any session's `SessionEnd` shuts it down, so another session (Untether or terminal) ending in the same repo stops this session's job; no hold for that (upstream openai/codex-plugin-cc#671, PR #623). Workaround in the FAQ: one git repo per project, `codex exec` for long jobs. |
@@ -1018,6 +1021,26 @@ loop ends at a `[loop]` cap ([#1004](https://github.com/littlebearapps/untether/
 caps are Untether's own, and in a Loop-on chat the CLI holds no job to expire. Its own 7-day expiry is silent on the
 stream anyway — CLI 2.1.296 writes a debug line and the `tengu_scheduled_task_expired` telemetry event, no
 stream-json event or hook; nothing in `--help`; re-checked 2026-10-12 against the binary and the scheduled-tasks docs).
+
+### Probe 8: print-only flags on the control-channel spawn ([#1124](https://github.com/littlebearapps/untether/issues/1124))
+
+Run 2026-11-19 on CLI **2.1.328**, subscription login, `haiku`, spawned the way Untether's control channel spawns
+(no `-p`, stream-json both ways, PIPE stdin, `initialize` + user message on stdin). Eight tiny runs.
+
+- The control-channel spawn **is print mode** to the CLI: with no stdin input it fails with "Input must be provided …
+  when using --print". So the flags `--help` marks "(only works with --print)" apply.
+- `--max-turns` is **hidden from `--help` (by 2.1.325) but still parsed and honoured**: `--max-turns 1` on a
+  two-call prompt → result `error_max_turns`, `terminal_reason: "max_turns"`. It counts per query: with
+  `--max-turns 2`, a follow-up user message in the same live process ran its own two calls. A run-wide cap needs
+  Untether's own guard on top (#1125). `tests/test_claude_cli_schema_drift.py` pins it in `_209_HIDDEN`.
+- `--max-budget-usd` is honoured: `0.0001` → `error_max_budget_usd`, `terminal_reason: "budget_exhausted"`, after the
+  first call (overshoots, as documented). Whether it caps per query or per live process was not checked.
+- `--permission-prompts none` works without `-p`: a prompting tool is denied with no `can_use_tool` request
+  (candidate for native unattended denial, #1121). `--permission-prompts host` **alone** does not route
+  `can_use_tool` to stdin (the tool was refused with the CLI's default text), so it is **not** a replacement for
+  `--permission-prompt-tool stdio` (#750); keep the hidden flag.
+- `--fallback-model=sonnet,opus` is accepted on the control-channel spawn; a fallback equal to `--model` is not
+  rejected at parse time.
 
 Adopting the `claude-agent-sdk` Python package in place of the hand-written control channel is deferred (Nathan,
 2026-10-11).
