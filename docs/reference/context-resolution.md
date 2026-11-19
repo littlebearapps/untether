@@ -107,6 +107,11 @@ Rules:
   non-directive token.
 - At most one engine directive, one project directive, and one `@branch` are
   allowed (duplicates are errors).
+- A leading bot mention such as `@untether_bot` (a Telegram bot username:
+  5–32 letters, digits or `_`, ending in `bot`) is how a `/listen mentions` group
+  addresses the bot. It's dropped from the prompt and is never read as an `@branch`
+  ([#1278](https://github.com/littlebearapps/untether/issues/1278)), so a branch
+  can't have a name of that shape.
 - If a reply contains a `dir:` line, Untether **ignores new directives** and uses
   the reply context.
 

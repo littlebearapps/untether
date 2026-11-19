@@ -114,6 +114,23 @@ def test_parse_directives_bot_suffix() -> None:
     assert directives.prompt == "hi"
 
 
+@pytest.mark.parametrize(
+    ("text", "branch", "prompt"),
+    [
+        ("@untether_dev_bot fix the failing tests", None, "fix the failing tests"),
+        ("@TetrisBot @feat/api go", "feat/api", "go"),
+        ("@feat/robot go", "feat/robot", "go"),
+        ("@develop go", "develop", "go"),
+    ],
+)
+def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
+    directives = parse_directives(
+        text, engine_ids=("claude",), projects=_empty_projects()
+    )
+    assert directives.branch == branch
+    assert directives.prompt == prompt
+
+
 def test_parse_directives_only_first_non_empty_line() -> None:
     directives = parse_directives(
         "hello\n/claude hi",

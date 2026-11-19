@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .config import ProjectsConfig
@@ -17,6 +18,10 @@ class ParsedDirectives:
 
 class DirectiveError(RuntimeError):
     pass
+
+
+# A Telegram bot username: 5-32 letters, digits or `_`, ending in "bot".
+_BOT_MENTION = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,28}bot", re.IGNORECASE)
 
 
 def parse_directives(
@@ -73,6 +78,11 @@ def parse_directives(
             value = token[1:]
             if not value:
                 break
+            if _BOT_MENTION.fullmatch(value):
+                # #1278: `@untether_bot fix it` (how a `/listen mentions`
+                # group talks to the bot) addresses a bot; it isn't a branch.
+                consumed += 1
+                continue
             if branch is not None:
                 raise DirectiveError("multiple @branch directives")
             branch = value
