@@ -269,6 +269,8 @@ _PARITY_VALUES: dict[str, Any] = {
     "model": "sonnet",
     "reasoning": "low",
     "allowed_tools": ["Read"],
+    "env": {"TR_ROLE": "qa"},  # #1121
+    "agent": "qa-desk",  # #1121
 }
 
 

@@ -190,7 +190,7 @@ async def run_cron_scheduler(
             # the run later fails.
             from . import history
 
-            history.record_fired(cron.id)
+            history.record_fired("cron", cron.id)
             # #288: one-shot crons are removed from the active list
             # after firing; they stay in the TOML and re-activate on
             # the next config reload or restart.

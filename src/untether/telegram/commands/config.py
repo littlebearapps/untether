@@ -2826,7 +2826,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     schedule_text = describe_cron(
                         cron.schedule, cron.timezone or default_tz
                     )
-                    last = _format_trigger_relative(get_last_fired(cron.id))
+                    last = _format_trigger_relative(get_last_fired("cron", cron.id))
                     lines.append(
                         f"<code>{cron.id}</code> · {schedule_text} · "
                         f"proj=<i>{_truncate_field(cron.project)}</i> · "
@@ -2843,7 +2843,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             if chat_webhooks:
                 lines += ["", "<b>Webhooks</b>"]
                 for wh in chat_webhooks[:_TRIGGER_LIST_CAP]:
-                    last = _format_trigger_relative(get_last_fired(wh.id))
+                    last = _format_trigger_relative(get_last_fired("webhook", wh.id))
                     lines.append(
                         f"<code>{wh.id}</code> · <code>{wh.path}</code> · "
                         f"auth=<i>{wh.auth}</i> · "

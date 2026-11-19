@@ -60,7 +60,7 @@ This deletes:
 | `stats.json` | Per-engine run counts and usage statistics |
 | `session_costs.json`, `session_quarantine.json` | Per-session cost baselines and quarantined Claude sessions |
 | `daily_cost.json` | Today's running API cost total, used by `max_cost_per_day` and `/health` |
-| `triggers_history.json`, `run_once_fired.json`, `run_once_pending.json` | Last-fired times for crons and webhooks, spent `run_once` crons, `run_once` crons waiting on a send retry |
+| `triggers_history.json`, `triggers_runs.jsonl` (+ `.1`), `run_once_fired.json`, `run_once_pending.json` | Last-fired times for crons and webhooks, the trigger run journal, spent `run_once` crons, `run_once` crons waiting on a send retry |
 | `last_update_id.json`, `untether.lock` | Telegram update offset and the single-instance lock |
 | `antigravity_seen_config.json`, `antigravity_notices.json` | Antigravity: the agy project config each chat has seen, and chats already shown the Google sign-in notice |
 

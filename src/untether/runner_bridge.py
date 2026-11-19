@@ -7444,6 +7444,17 @@ async def handle_message(
     # when that early path did not run or failed — from the post-return
     # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
     final_delivery = {"sent": False}
+    # #1123: the run's triggers_runs.jsonl line is written once.
+    journal_state = {"written": False}
+
+    def _journal(outcome: str, *, ok: bool, **fields: Any) -> None:
+        if journal_state["written"] or not (context and context.trigger_source):
+            return
+        journal_state["written"] = True
+        from .triggers.journal import record_run
+
+        record_run(context, outcome=outcome, ok=ok, engine=runner.engine, **fields)
+
     # #596: set by _deliver_final when an empty-result no-op resume is detected
     # and eligible for a single automatic resend. Read by the post-return
     # auto-resend block below (independent of final_delivery["sent"], since the
@@ -7560,6 +7571,10 @@ async def handle_message(
         if (compaction := _compaction_usage(completed.usage)) is not None:
             usage_log["compactions"] = compaction.get("count")
             usage_log["compaction_trigger"] = compaction.get("trigger")
+        # #1123: this result's throttling (Claude reports a per-result delta).
+        throttle = (completed.usage or {}).get("throttle")
+        if isinstance(throttle, dict):
+            usage_log.update(throttle)
         logger.info(
             "runner.completed",
             ok=completed.ok,
@@ -7574,6 +7589,26 @@ async def handle_message(
             # previously logged with no record of which model produced it.
             **_model_log_fields(t_tracker.meta),
         )
+        if turn is None:
+            # #1123: the run's first result is its journal line; a live
+            # session's later turns are human follow-ups or wake turns.
+            from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+            aborted = (completed.usage or {}).get(
+                "terminal_reason"
+            ) in CLAUDE_ABORTED_TERMINAL_REASONS
+            _journal(
+                "cancelled" if aborted else ("ok" if completed.ok else "error"),
+                ok=bool(completed.ok),
+                error=completed.error,
+                session_id=resume_value,
+                model=_model_log_fields(t_tracker.meta).get("model"),
+                elapsed_s=elapsed_s,
+                usage={
+                    **(completed.usage or {}),
+                    "total_cost_usd": (cost_usage or {}).get("total_cost_usd"),
+                },
+            )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
 
@@ -9142,6 +9177,13 @@ async def handle_message(
 
         if error is not None:
             release_reason = "error"
+            _journal(
+                "error",
+                ok=False,
+                error=f"{error.__class__.__name__}: {error}",
+                session_id=outcome.resume.value if outcome.resume else None,
+                elapsed_s=elapsed,
+            )
             sync_resume_token(progress_tracker, outcome.resume)
             raw_err = _format_error(error)
             hint = _get_error_hint(raw_err)
@@ -9218,6 +9260,12 @@ async def handle_message(
             logger.info(
                 "handle.cancelled",
                 resume=resume.value if resume else None,
+                elapsed_s=elapsed,
+            )
+            _journal(
+                "cancelled",
+                ok=False,
+                session_id=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
             state = progress_tracker.snapshot(

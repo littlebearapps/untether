@@ -240,6 +240,21 @@ _CLAUDE_SHORT_ALIASES: dict[str, str] = {
 _CLAUDE_SHORT_VALUE_FLAGS: frozenset[str] = frozenset({"d", "n", "r", "w"})
 
 
+def _without_agent_flag(extra_args: list[str]) -> list[str]:
+    """#1121: *extra_args* minus any ``--agent`` (both spellings), so a
+    trigger's own agent is the only one on that run's argv."""
+    out: list[str] = []
+    skip_value = False
+    for token in extra_args:
+        if skip_value:
+            skip_value = False
+        elif token == "--agent":
+            skip_value = True
+        elif not token.startswith("--agent="):
+            out.append(token)
+    return out
+
+
 def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
     """Every blocked flag in *extra_args* (#209), deduped, in order."""
     hits: list[BlockedArg] = []
@@ -1915,6 +1930,11 @@ class ClaudeStreamState:
     # Count of throttling rate_limit_events in this session (#349 v2); `allowed`
     # / `allowed_warning` snapshots and bare events are not counted (#790).
     rate_limit_count: int = 0
+    # #1123: how many of those were a ``status: "rejected"`` snapshot, and
+    # the five throttle counters at the previous result, so each result
+    # reports only its own delta (a live session spans several runs).
+    rate_limit_rejected_count: int = 0
+    throttle_at_last_result: tuple[int, float, int, float, int] = (0, 0.0, 0, 0.0, 0)
     # #790: latest quota snapshot from any rate_limit_event — `status` plus the
     # per-window {utilization, resets_at} from `unifiedWindows`, keyed by
     # window name (five_hour / seven_day / seven_day_overage_included).
@@ -3198,6 +3218,8 @@ def _translate_rate_limit_event(
     # "throttled upstream, will resume by itself" apart from "hung".
     state.rate_limit_wait_until = new_deadline
     state.rate_limit_count += 1
+    if info is not None and info.status == "rejected":
+        state.rate_limit_rejected_count += 1
     if action_id is None:
         state.note_seq += 1
         action_id = f"rate_limit_{state.note_seq}"
@@ -7624,9 +7646,12 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     # #409: pass user extras through so the audit doesn't flag names the
     # operator explicitly opted into via [security] env_extra_allow.
     user_exact, user_prefix = _load_env_extras()
+    # #1121: a trigger's own env names are expected, not leaks.
+    run_context = get_run_context()
+    trigger_env = tuple(name for name, _ in run_context.env) if run_context else ()
     leaked = audit_proc_env(
         state.pid,
-        expected_extras=("UNTETHER_SESSION",),
+        expected_extras=("UNTETHER_SESSION", *trigger_env),
         user_extra_exact=user_exact,
         user_extra_prefix=user_prefix,
     )
@@ -7722,6 +7747,30 @@ def _capture_mcp_catalog(
             status=status,
             source="system.init",
         )
+
+
+def _throttle_usage(state: ClaudeStreamState) -> dict[str, Any] | None:
+    """#1123: rate-limit / API-retry counts since the previous result (None
+    when there were none). Advances the baseline, so call once per result."""
+    now = (
+        state.rate_limit_count,
+        state.rate_limit_total_s,
+        state.api_retry_count,
+        state.api_retry_total_s,
+        state.rate_limit_rejected_count,
+    )
+    prev = state.throttle_at_last_result
+    state.throttle_at_last_result = now
+    delta = [a - b for a, b in zip(now, prev, strict=True)]
+    if not any(delta):
+        return None
+    return {
+        "rate_limit_count": delta[0],
+        "rate_limit_total_s": round(delta[1], 1),
+        "api_retry_count": delta[2],
+        "api_retry_total_s": round(delta[3], 1),
+        "rejected": delta[4] > 0,
+    }
 
 
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
@@ -9094,6 +9143,9 @@ def _translate_claude_event_base(
             # #835: the turn's unattended denials, for the final's footer.
             if (unattended := _unattended_usage_payload(state)) is not None:
                 usage["unattended"] = unattended
+            # #1123: this result's throttling, for runner.completed + journal.
+            if (throttle := _throttle_usage(state)) is not None:
+                usage["throttle"] = throttle
             if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.
@@ -10219,7 +10271,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Must sit after the Untether-managed I/O prelude but before
         # resume / model / effort / allowed-tools / permission so the final
         # prompt position (after `--`) is never displaced (#407).
-        args.extend(self.extra_args)
+        # #1121: a trigger's own agent replaces an engine-wide `--agent`.
+        agent = run_options.agent if run_options is not None else None
+        args.extend(_without_agent_flag(self.extra_args) if agent else self.extra_args)
         # #812: hook lifecycle frames let the live session hold stdin open
         # for a background (async / asyncRewake) hook. Control-channel mode
         # only (live sessions need it), behind the kill switch, only when the
@@ -10252,6 +10306,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(
                 engine_argv.joined("--model", engine_argv.check_model(str(model)))
             )
+        if agent:
+            # #1121: native `--agent <agent>` (2.1.328 --help), validated at
+            # config load and joined so it can't be re-read as a flag.
+            args.append(engine_argv.joined("--agent", agent))
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning
