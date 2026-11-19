@@ -655,6 +655,31 @@ def live_session_loop_closeable(session_id: str) -> bool:
     )
 
 
+async def _release_live_sessions_for_continue(
+    cwd: Path | None, *, poll_s: float = 0.25
+) -> None:
+    """#1275: wait until no live session spawned in *cwd* is left.
+
+    ``claude --continue`` resumes the newest session in its directory, which
+    is usually one a live process here still owns. A second process on that
+    session would take over its registries before it could take the session
+    lock (held by the live run), then block with nobody reading its output.
+    A clean-idle owner is closed now, like a due loop fire (#925); a busy one
+    is waited out until its own lifecycle closes it.
+    """
+    logged = False
+    while owners := [
+        sid for sid, live in _LIVE_SESSIONS.items() if live.state.spawn_cwd == cwd
+    ]:
+        if not logged:
+            logged = True
+            logger.info("claude.live_session.continue_wait", sessions=len(owners))
+        for sid in owners:
+            if live_session_loop_closeable(sid):
+                await close_live_session(sid, "continue", only_if_idle=True)
+        await anyio.sleep(poll_s)
+
+
 def stop_live_session_input(session_id: str) -> bool:
     """#896: refuse any further input into ``session_id`` (synchronous).
 
@@ -873,7 +898,9 @@ async def close_live_session(
 
 # #812: closes the user (or an operator restart) asked for — a hook they
 # cut short is expected, so it logs at INFO and gets no extra notice.
-_USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+_USER_CLOSE_REASONS = frozenset(
+    {"cancel", "new", "drain", "options_changed", "continue"}
+)
 # #829 B2: Untether-initiated closes that may stop cleanly on SIGINT (rc 0,
 # transcript complete, resumable — P0 G7-G9). ``error`` follows a failed run
 # and keeps the forced-teardown quarantine. #887: ``abs_cap`` qualifies like
@@ -893,6 +920,8 @@ _STOPPED_CLEAN_REASONS = frozenset(
         "loop_fire",
         "wake_cap",
         "cron_suppressed",
+        # #1275: a /continue closes the clean-idle session it will resume.
+        "continue",
     }
 )
 
@@ -12664,6 +12693,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # probe thread starts or a PTY opens; a block registers nothing.
         # Live follow-ups / steers inject into an existing process and never
         # reach run_impl, so they are never checked.
+        if resume is not None and resume.is_continue:
+            # #1275: first, so a closed idle session no longer counts toward
+            # the #838 ceiling either.
+            await _release_live_sessions_for_continue(get_run_base_dir())
         block_result = self._check_prespawn_ram_guard(resume)
         if block_result is not None:
             yield block_result

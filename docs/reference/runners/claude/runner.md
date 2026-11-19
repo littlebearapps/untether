@@ -819,7 +819,7 @@ Must match Untether runner contract:
 * When resuming:
 
   * acquire lock before spawning subprocess.
-  * a `/continue` token carries no session id, so it is treated like a new run and locks the id named by its first `StartedEvent` ([#817](https://github.com/littlebearapps/untether/issues/817)).
+  * a `/continue` token carries no session id, so it is treated like a new run and locks the id named by its first `StartedEvent` ([#817](https://github.com/littlebearapps/untether/issues/817)). Because that lock comes after the spawn, a Claude `/continue` first waits until no live session spawned in its directory is left: a clean-idle one is closed (reason `continue`, a clean stop), a busy one is waited out until its own lifecycle closes it (INFO `claude.live_session.continue_wait`). Otherwise the new process would take over the live session's registries and then block on its lock ([#1275](https://github.com/littlebearapps/untether/issues/1275)).
 * When starting a new session:
 
   * you don’t know session_id until `system/init`, so:
