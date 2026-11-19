@@ -1184,6 +1184,86 @@ class TestLiveFirePath:
             finally:
                 tg.cancel_scope.cancel()
 
+    @pytest.mark.parametrize("kind", ["wakeup", "cron"])
+    async def test_one_shot_retries_while_chat_busy(self, monkeypatch, kind):
+        """#1287: a busy chat never completes a one-shot unrun; it fires once
+        the chat is free."""
+        recorder = RunJobRecorder()
+        busy = {"value": True}
+        _patch_live(monkeypatch, alive=lambda sid: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(
+                tg, recorder, FakeTransport(), 1, is_chat_busy=lambda _c: busy["value"]
+            )
+            try:
+                if kind == "wakeup":
+                    token = loop_scheduler.register_pending_wakeup(
+                        session_id="s1287",
+                        tool_use_id="t1287",
+                        delay_seconds=60,
+                        prompt="resume task",
+                        chat_id=1287,
+                    )
+                else:
+                    token = _register_simple_cron(
+                        chat_id=1287, session_id="s1287", recurring=False
+                    )
+                tg.start_soon(loop_scheduler._fire, token)
+                await anyio.sleep(0.05)
+                assert recorder.calls == []
+                assert loop_scheduler.active_count() == 1
+                busy["value"] = False
+                with anyio.fail_after(2):
+                    while not recorder.calls:
+                        await anyio.sleep(0.01)
+                await anyio.sleep(0.03)
+                assert len(recorder.calls) == 1
+                assert token not in loop_scheduler._PENDING_BY_TOKEN
+            finally:
+                tg.cancel_scope.cancel()
+
+    @pytest.mark.parametrize("failure", ["notify_none", "notify_raises", "run_raises"])
+    async def test_one_shot_retries_after_failed_attempt(self, monkeypatch, failure):
+        """#1287: a failed notice or a raised run_job retries the one-shot
+        instead of expiring it as ``one_shot_complete``."""
+        attempts = {"n": 0}
+        runs: list[tuple] = []
+
+        class FlakyTransport(FakeTransport):
+            async def send(self, *, channel_id, message, options=None, **_):
+                attempts["n"] += 1
+                if attempts["n"] == 1 and failure == "notify_none":
+                    return None
+                if attempts["n"] == 1 and failure == "notify_raises":
+                    raise RuntimeError("telegram down")
+                return await super().send(
+                    channel_id=channel_id, message=message, options=options
+                )
+
+        async def run_job(*args, **kwargs):
+            if failure == "run_raises" and attempts["n"] == 1:
+                raise RuntimeError("boom")
+            runs.append(args)
+
+        _patch_live(monkeypatch, alive=lambda sid: False)
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, run_job, FlakyTransport(), 1)
+            try:
+                token = loop_scheduler.register_pending_wakeup(
+                    session_id="s1287b",
+                    tool_use_id="t1287b",
+                    delay_seconds=60,
+                    prompt="resume task",
+                    chat_id=1288,
+                )
+                with anyio.fail_after(2):
+                    await loop_scheduler._fire(token)
+                assert attempts["n"] == 2
+                assert len(runs) == 1
+                assert token not in loop_scheduler._PENDING_BY_TOKEN
+            finally:
+                tg.cancel_scope.cancel()
+
 
 class TestCancelReason:
     @pytest.fixture(autouse=True)
