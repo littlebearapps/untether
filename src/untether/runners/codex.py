@@ -1271,4 +1271,6 @@ BACKEND = EngineBackend(
     id="codex",
     build_runner=build_runner,
     install_cmd="npm install -g @openai/codex",
+    # #419: turn.completed.usage is the thread's total, across exec resume.
+    usage_scope={"tokens": "thread_cumulative"},
 )

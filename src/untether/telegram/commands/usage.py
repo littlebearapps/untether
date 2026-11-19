@@ -349,8 +349,7 @@ def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
     """The #417 block for the chat's last session of ``engine`` (header line
     first), or ``None`` when this chat has no completed run of it. Shared by
     the token-only reply and Antigravity's quota reply (#558)."""
-    from ...runner_bridge import _TOKEN_LEDGER_SCOPES
-    from ...session_costs import get_session_cost_ledger, token_counts
+    from ...session_costs import get_session_cost_ledger, token_counts, usage_scope
     from .export import latest_session_for_chat
 
     esc_engine = html.escape(engine)
@@ -383,7 +382,7 @@ def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
         if counts is not None:
             label = (
                 "Session total"
-                if _TOKEN_LEDGER_SCOPES.get(engine) == "thread_cumulative"
+                if usage_scope(engine, sess.usage).get("tokens") == "thread_cumulative"
                 else "Last run"
             )
             lines.append(

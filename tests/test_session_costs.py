@@ -558,3 +558,56 @@ def test_apply_token_delta_antigravity_footer_is_the_run_not_the_thread() -> Non
     assert out["token_delta_source"] == "engine_run"
     line = rb._format_run_cost(out, thread_cumulative=True)
     assert line == "14.5k/41"
+
+
+# --- #850: runner-declared usage scope replaces the bridge engine tables ---
+
+
+@pytest.mark.parametrize(
+    ("engine", "scope"),
+    [
+        ("claude", {"cost": "session_cumulative"}),
+        ("codex", {"tokens": "thread_cumulative"}),
+        ("antigravity", {"tokens": "thread_cumulative"}),
+        ("opencode", {"tokens": "per_run"}),
+        ("pi", {}),
+        ("no-such-engine", {}),
+    ],
+)
+def test_usage_scope_comes_from_the_engine_backend(
+    engine: str, scope: dict[str, str]
+) -> None:
+    from untether.session_costs import usage_scope
+
+    assert usage_scope(engine) == scope
+
+
+def test_no_engine_table_for_usage_scope_in_the_bridge() -> None:
+    assert not hasattr(rb, "_TOKEN_LEDGER_SCOPES")
+
+
+@pytest.mark.parametrize("engine", ["pi", "no-such-engine"])
+def test_engine_without_a_declaration_gets_no_delta(engine: str) -> None:
+    sid = f"undeclared-{engine}"
+    for i, cost in enumerate((1.0, 3.0)):
+        usage = {"total_cost_usd": cost, "input_tokens": 10 * (i + 1)}
+        usage["output_tokens"] = 1
+        assert rb._apply_cost_delta(engine, sid, usage, resumed=i > 0) is usage
+        assert rb._apply_token_delta(engine, sid, usage, resumed=i > 0) is usage
+    assert get_session_cost_ledger().session_tokens(engine, sid) is None
+
+
+def test_usage_marker_overrides_the_backend_declaration() -> None:
+    """A result can declare its own scope (e.g. a second transport for the
+    same engine): the marker wins over the backend's declaration."""
+    marker = {"usage_scope": {"tokens": "thread_cumulative"}}
+    first = {**marker, "input_tokens": 100, "output_tokens": 10}
+    rb._apply_token_delta("pi", "pi-marked", first, resumed=False)
+    second = {**marker, "input_tokens": 250, "output_tokens": 30}
+    out = rb._apply_token_delta("pi", "pi-marked", second, resumed=True)
+    assert out is not None
+    assert (out["input_tokens"], out["output_tokens"]) == (150, 20)
+    assert out["token_delta_source"] == "ledger"
+    # An explicit empty marker turns a declared engine's delta off.
+    claude = {"usage_scope": {}, "total_cost_usd": 2.0}
+    assert rb._apply_cost_delta("claude", "c-marked", claude, resumed=True) is claude

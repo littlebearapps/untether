@@ -13335,6 +13335,8 @@ BACKEND = EngineBackend(
     id="claude",
     build_runner=build_runner,
     install_cmd="npm install -g @anthropic-ai/claude-code",
+    # #778: result.total_cost_usd is the session's total, across --resume.
+    usage_scope={"cost": "session_cumulative"},
 )
 
 
