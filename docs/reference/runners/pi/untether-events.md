@@ -36,7 +36,7 @@ Notes:
 `pi --session <id>`
 ```
 
-The token is the **short session id**, derived from the session header line
+The token is the **full session id** ([#1264](https://github.com/littlebearapps/untether/issues/1264); a short prefix saved by an older Untether still resumes), derived from the session header line
 (`{"type":"session", ...}`) emitted on stdout when running in `--mode json`.
 This requires **pi-coding-agent >= 0.45.1**.
 

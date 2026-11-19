@@ -29,7 +29,7 @@ A failed **resumed** run keeps the chat's saved session unless the error names t
 | **CLI** | `codex exec --json` | `opencode run --format json` | `pi --print --mode json` |
 | **Event model** | Turn-based (items in turns) | Step-based (tools in steps) | Agent-based (messages + tools) |
 | **Resume line** | `` `codex resume <thread_id>` `` | `` `opencode --session ses_XXX` `` | `` `pi --session <token>` `` |
-| **Resume token** | thread_id (UUID) | ses_XXXX (26+ chars) | UUID short (8 chars) or path |
+| **Resume token** | thread_id (UUID) | ses_XXXX (26+ chars) | full session UUID (#1264) or path |
 | **Final answer** | `agent_message` item | Accumulated `text` events | `message_end` assistant content |
 | **Error signal** | `turn.failed` | `error` event / missing `step_finish` | `stopReason` in `message_end` |
 
@@ -192,7 +192,7 @@ pi --print --mode json [--session SESSION_PATH] \
 ```
 
 - Prompt as positional arg (prefixed with space if starts with `-`)
-- Resume: `--session <token>` (short ID or full path)
+- Resume: `--session <token>` (full session id, an older short prefix, or a session-file path)
 - Minimum version: 0.45.1
 - Environment: `NO_COLOR=1`, `CI=1` (set by runner)
 
@@ -211,9 +211,9 @@ pi --print --mode json [--session SESSION_PATH] \
 
 Pi has a unique resume mechanism:
 1. For new runs, Untether generates a session `.jsonl` file path
-2. If a `session` header arrives with a UUID, the resume token is promoted to the 8-char short ID
+2. If a `session` header arrives with a UUID, the resume token is promoted to the full session id (#1264: a UUIDv7's 8-hex prefix collides within ~65 s)
 3. `allow_id_promotion` flag ensures this only happens once
-4. This gives a user-friendly resume token instead of a long path
+4. This gives an id resume token instead of a long path
 
 Session path format: `~/.pi/agent/sessions/--<sanitized-cwd>--/<date>-<uuid>.jsonl`
 
