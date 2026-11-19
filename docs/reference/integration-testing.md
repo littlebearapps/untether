@@ -1835,6 +1835,7 @@ R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PRO
 | R362-1176 Q15 after a final (Pi chat) | `/at 60s reply A`, `/at 5m reply B`; `/cancel` within 2 s of A's final | Reply `❌ cancelled 1 pending /at run.` (never silence); no B run after 5 min |
 | R362-1194 spawn/exit balance | U6 on all five engines, then count `subprocess.spawn` and `subprocess.exit` in that window | Counts equal; each Claude cancel logs one `subprocess.exit reason=teardown` |
 | R362-1195 RAM block | Raise `[watchdog] prespawn_ram_block_mb` above free RAM (hot-reloads); send a prompt in the Claude and Codex chats; `/usage` in the Antigravity chat; restore | Block text counts idle live sessions, says `engine run(s) already open on this host`, points `/cancel` at `the chat that started it`, no "restart the service"; `/usage` shows `the host is short of memory or at its run limit right now…`, never `prespawn_blocked` |
+| R362-1124 fallback model | Dev config `[engines.claude] fallback_model = "claude-haiku-5-5"` (restart the dev unit if the reload notice asks); run U1 in the Claude chat; remove the key | `subprocess.spawn` args contain `--fallback-model=claude-haiku-5-5`; the run answers as before; with the key gone the flag is absent |
 
 ### Codex and OpenCode env (#1241)
 

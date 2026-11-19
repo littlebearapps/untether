@@ -255,8 +255,20 @@ def _without_agent_flag(extra_args: list[str]) -> list[str]:
     return out
 
 
-def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
-    """Every blocked flag in *extra_args* (#209), deduped, in order."""
+_FALLBACK_MODEL_HINT = (
+    "is managed by Untether while `[claude] fallback_model` is set; use one or"
+    " the other"
+)
+
+
+def find_blocked_claude_args(
+    extra_args: list[str], *, fallback_model_set: bool = False
+) -> list[BlockedArg]:
+    """Every blocked flag in *extra_args* (#209), deduped, in order.
+
+    #1124: `--fallback-model` is refused only when the `fallback_model` key
+    also sets it, so configs that pass it through `extra_args` keep working.
+    """
     hits: list[BlockedArg] = []
     for tok in iter_option_tokens(
         extra_args,
@@ -264,6 +276,8 @@ def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
         short_value_flags=_CLAUDE_SHORT_VALUE_FLAGS,
     ):
         rule = _CLAUDE_BLOCKED.get(tok.flag)
+        if rule is None and fallback_model_set and tok.flag == "--fallback-model":
+            rule = ("managed", _FALLBACK_MODEL_HINT)
         if rule is not None:
             category, hint = rule
             hits.append(BlockedArg(flag=tok.flag, category=category, hint=hint))
@@ -9980,6 +9994,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     claude_cmd: str = "claude"
     model: str | None = None
+    # #1124: `[claude] fallback_model` → `--fallback-model=<value>` (both argv
+    # paths; the CLI does not mark it print-only, probe 8 on 2.1.328).
+    fallback_model: str | None = None
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
     # #749 True when `allowed_tools` came from an explicit
@@ -10310,6 +10327,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # #1121: native `--agent <agent>` (2.1.328 --help), validated at
             # config load and joined so it can't be re-read as a flag.
             args.append(engine_argv.joined("--agent", agent))
+        if self.fallback_model:
+            args.append(engine_argv.joined("--fallback-model", self.fallback_model))
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning
@@ -10461,6 +10480,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
+        # #1124: both slip through the `CLAUDE_CODE_` prefix when Untether is
+        # started from a Claude Code shell. CHILD_SESSION silently turns the
+        # scheduled-run offer down; an inherited ENTRYPOINT (e.g. a hosted
+        # surface's) changes managed-settings and request attribution. Left
+        # unset, the CLI picks its own.
+        env.pop("CLAUDE_CODE_CHILD_SESSION", None)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         # #926: this spawn resumes a session that may still hold a CLI cron
         # job the CLI would resurrect and fire — switch its scheduler off.
         # Assignment, not setdefault: an inherited value must not re-enable
@@ -13256,15 +13282,29 @@ def _validate_permission_mode(value: object, config_path: Path) -> str | None:
     return mode
 
 
-def _check_config_model(model: Any, config_path: Path) -> None:
+def _check_config_model(model: Any, config_path: Path, key: str = "model") -> None:
     """#1034: refuse a `[claude] model` that could read as a CLI flag."""
     if model is None or model == "":
         return
     problem = engine_argv.model_problem(str(model))
     if problem is not None:
         raise ConfigError(
-            f"Invalid `claude.model` in {config_path}; a model id {problem}."
+            f"Invalid `claude.{key}` in {config_path}; a model id {problem}."
         )
+
+
+def _check_config_fallback_model(value: Any, config_path: Path) -> str | None:
+    """#1124: `[claude] fallback_model` — a model id or a comma-separated
+    list of them (the CLI's own format); unset or empty means no flag."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"Invalid `claude.fallback_model` in {config_path}; expected a string"
+            ' such as "claude-sonnet-5-5" or "model-a,model-b".'
+        )
+    _check_config_model(value, config_path, key="fallback_model")
+    return value
 
 
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
@@ -13272,6 +13312,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     model = config.get("model")
     _check_config_model(model, config_path)
+    fallback_model = _check_config_fallback_model(
+        config.get("fallback_model"), config_path
+    )
     # #749 remember which branch this came from: an explicit user choice
     # survives into prompting modes, the inherited default does not.
     allowed_tools_explicit = "allowed_tools" in config
@@ -13303,7 +13346,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `claude.extra_args` in {config_path}; expected a list of strings."
         )
 
-    blocked = find_blocked_claude_args(extra_args)
+    blocked = find_blocked_claude_args(
+        extra_args, fallback_model_set=fallback_model is not None
+    )
     if blocked:
         # Flag names only — never the values (#209).
         logger.warning(
@@ -13321,6 +13366,7 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     return ClaudeRunner(
         claude_cmd=claude_cmd,
         model=model,
+        fallback_model=fallback_model,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         allowed_tools_explicit=allowed_tools_explicit,

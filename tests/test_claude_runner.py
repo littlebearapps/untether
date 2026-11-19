@@ -3136,6 +3136,49 @@ async def test_run_strips_anthropic_api_key_by_default(tmp_path, monkeypatch) ->
     assert answer == "api=set"
 
 
+def test_env_drops_inherited_child_session_and_entrypoint(monkeypatch) -> None:
+    """#1124: started from a Claude Code shell, Untether must not hand the
+    parent's CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_ENTRYPOINT to its own
+    spawn (both pass the `CLAUDE_CODE_` prefix allowlist)."""
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for runner in (
+        ClaudeRunner(claude_cmd="claude"),
+        ClaudeRunner(claude_cmd="claude", use_api_billing=True),
+    ):
+        env = runner.env(state=None)
+        assert env is not None
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env
+        assert "CLAUDE_CODE_ENTRYPOINT" not in env
+        # The prefix allowlist itself still works.
+        assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+def test_build_runner_fallback_model(monkeypatch) -> None:
+    """#1124: `[claude] fallback_model` is read, validated like `model`, and
+    makes a `--fallback-model` in extra_args a conflict."""
+    from untether.config import ConfigError
+
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _n: "claude")
+    path = Path("untether.toml")
+
+    def build(cfg: dict) -> ClaudeRunner:
+        return cast(ClaudeRunner, claude_runner.build_runner(cfg, path))
+
+    assert build({}).fallback_model is None
+    assert build({"fallback_model": ""}).fallback_model is None
+    assert build({"fallback_model": "sonnet,opus"}).fallback_model == "sonnet,opus"
+    for bad in ("--version", "son net", ["sonnet"], 3):
+        with pytest.raises(ConfigError, match=r"claude\.fallback_model"):
+            build({"fallback_model": bad})
+    # Without the key, extra_args may still pass it (existing configs).
+    assert build({"extra_args": ["--fallback-model", "sonnet"]}).extra_args
+    for spelling in (["--fallback-model", "opus"], ["--fallback-model=opus"]):
+        with pytest.raises(ConfigError, match="--fallback-model"):
+            build({"fallback_model": "sonnet", "extra_args": spelling})
+
+
 def test_env_sets_untether_session() -> None:
     """env() sets UNTETHER_SESSION=1 for Claude Code hook detection."""
     runner = ClaudeRunner(claude_cmd="claude")
