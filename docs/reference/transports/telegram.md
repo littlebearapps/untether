@@ -105,6 +105,9 @@ no context. See [Chat sessions → Replying to a message or a quote](../../how-t
 If voice transcription is enabled, untether downloads the voice payload from Telegram,
 transcribes it with OpenAI, and routes the transcript through the same command and
 directive pipeline as typed text.
+Transcription runs off the update loop, so a slow speech-to-text endpoint holds up only
+the chat or topic the voice note came from: later messages there wait their turn, while
+other chats and button taps carry on ([#1285](https://github.com/littlebearapps/untether/issues/1285)).
 
 Configuration (under `[transports.telegram]`):
 
