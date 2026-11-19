@@ -674,6 +674,7 @@ async def test_resume_uses_thread_resume_with_the_same_overrides(
     assert fake.requests("thread/resume") == [
         {
             "threadId": THREAD,
+            "excludeTurns": True,  # no history, no deprecationNotice (#962 QA)
             "cwd": str(project),
             "approvalPolicy": "never",
             "approvalsReviewer": "user",
@@ -716,6 +717,7 @@ async def test_continue_lists_with_all_four_source_kinds_then_resumes(
         }
     ]
     assert fake.requests("thread/resume")[0]["threadId"] == OTHER_THREAD
+    assert fake.requests("thread/resume")[0]["excludeTurns"] is True
     assert events[0].resume.value == OTHER_THREAD
     assert _completed(events).ok
 

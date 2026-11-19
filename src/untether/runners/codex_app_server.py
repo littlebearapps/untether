@@ -1060,8 +1060,13 @@ class CodexAppServerRunner(CodexRunner):
             case "thread/list":
                 listed = cas.decode_result("thread/list", msg.result)
                 if listed.data:
-                    params = {"threadId": listed.data[0].id, **self._overrides(state)}
-                    state.outbox.append(("request", "thread/resume", params))
+                    state.outbox.append(
+                        (
+                            "request",
+                            "thread/resume",
+                            self._resume_params(state, listed.data[0].id),
+                        )
+                    )
                 else:
                     state.pending_rows.append(
                         self.note_event(_NO_EARLIER_SESSION_NOTE, state=state, ok=True)
@@ -1119,6 +1124,13 @@ class CodexAppServerRunner(CodexRunner):
             params["model"] = str(run_options.model)
         return params
 
+    def _resume_params(
+        self, state: AppServerRunState, thread_id: str
+    ) -> dict[str, Any]:
+        # ``excludeTurns`` (stable, 0.169.0+): Untether never reads the
+        # history, and full hydration draws a deprecationNotice (#962 QA).
+        return {"threadId": thread_id, "excludeTurns": True, **self._overrides(state)}
+
     def _open_thread(
         self, state: AppServerRunState, resume: ResumeToken | None
     ) -> None:
@@ -1140,8 +1152,9 @@ class CodexAppServerRunner(CodexRunner):
                 )
             )
         else:
-            params = {"threadId": resume.value, **self._overrides(state)}
-            state.outbox.append(("request", "thread/resume", params))
+            state.outbox.append(
+                ("request", "thread/resume", self._resume_params(state, resume.value))
+            )
 
     def _on_thread(
         self, result: cas.ThreadOpenResult, *, state: AppServerRunState
