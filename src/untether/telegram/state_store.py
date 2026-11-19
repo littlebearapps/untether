@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -53,23 +55,26 @@ class JsonStateStore[T: _VersionedState]:
         self._load_locked()
 
     def _load_locked(self) -> None:
-        self._loaded = True
-        self._mtime_ns = self._stat_mtime_ns()
-        if self._mtime_ns is None:
+        mtime_ns = self._stat_mtime_ns()
+        if mtime_ns is None:
+            self._loaded = True
+            self._mtime_ns = None
             self._state = self._state_factory()
             return
         try:
-            payload = msgspec.json.decode(
-                self._path.read_bytes(), type=self._state_type
-            )
+            raw = self._path.read_bytes()
+        except OSError as exc:
+            # #1277: a failed read (EIO, EMFILE, ...) says nothing about the
+            # file. Keep the last good state, retry on the next access and
+            # refuse saves until then, so the file is never overwritten.
+            self._loaded = False
+            self._log_load_failed(exc)
+            return
+        try:
+            payload = msgspec.json.decode(raw, type=self._state_type)
         except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                f"{self._log_prefix}.load_failed",
-                path=str(self._path),
-                error=str(exc),
-                error_type=exc.__class__.__name__,
-            )
-            self._state = self._state_factory()
+            self._log_load_failed(exc)
+            self._quarantine_locked()
             return
         if payload.version != self._version:
             self._logger.warning(
@@ -78,11 +83,47 @@ class JsonStateStore[T: _VersionedState]:
                 version=payload.version,
                 expected=self._version,
             )
-            self._state = self._state_factory()
+            self._quarantine_locked()
             return
+        self._loaded = True
+        self._mtime_ns = mtime_ns
         self._state = payload
 
+    def _log_load_failed(self, exc: Exception) -> None:
+        self._logger.warning(
+            f"{self._log_prefix}.load_failed",
+            path=str(self._path),
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+
+    def _quarantine_locked(self) -> None:
+        """#1277: move an undecodable (or other-version) file aside before
+        starting fresh, so its bytes survive for a manual restore."""
+        backup = self._path.with_name(f"{self._path.name}.corrupt-{time.time_ns()}")
+        try:
+            os.replace(self._path, backup)
+        except OSError as exc:
+            # Can't move it: stay unloaded (saves refused) rather than
+            # overwrite the only copy.
+            self._loaded = False
+            self._log_load_failed(exc)
+            return
+        self._logger.warning(
+            f"{self._log_prefix}.quarantined", path=str(self._path), backup=str(backup)
+        )
+        self._loaded = True
+        self._mtime_ns = None
+        self._state = self._state_factory()
+
     def _save_locked(self) -> None:
+        if not self._loaded:
+            # #1277: the last read failed, so in-memory state may be stale or
+            # empty; writing it would wipe the file.
+            self._logger.warning(
+                f"{self._log_prefix}.save_skipped", path=str(self._path)
+            )
+            return
         payload = msgspec.to_builtins(self._state)
         atomic_write_json(self._path, payload)
         self._mtime_ns = self._stat_mtime_ns()

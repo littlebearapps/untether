@@ -78,7 +78,7 @@ By default, the bot responds to every message (`all` mode). In busy groups, swit
 !!! tip "What triggers a response in mentions mode"
     In `mentions` mode, the bot responds when any of these conditions are met:
 
-    - **@mention** — include `@your_bot_name` anywhere in the message
+    - **@mention** — include `@your_bot_name` anywhere in the message (a leading mention is dropped from the prompt, so `@your_bot_name fix the tests` sends `fix the tests`)
     - **Reply to the bot** — reply to any message the bot sent
     - **Slash command** — use a known command like `/claude`, `/cancel`, `/usage`, or a project alias like `/myproject`
 

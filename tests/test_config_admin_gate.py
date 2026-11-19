@@ -230,14 +230,9 @@ class TestClassification:
 
     def test_every_toast_action_is_classified(self):
         """The early toast announces a change, so each one must be gated."""
-        func = next(
-            n
-            for n in ast.walk(ast.parse(inspect.getsource(config_mod)))
-            if isinstance(n, ast.FunctionDef) and n.name == "early_answer_toast"
-        )
         table = next(
             n.value
-            for n in ast.walk(func)
+            for n in ast.walk(ast.parse(inspect.getsource(config_mod)))
             if isinstance(n, ast.AnnAssign)
             and isinstance(n.target, ast.Name)
             and n.target.id == "_TOAST_LABELS"
@@ -417,8 +412,14 @@ async def test_group_admin_is_allowed_on_both_paths(monkeypatch, status, args):
 
     assert spy.calls == [args, args]
     assert DENIED not in _sent_texts(transport)
-    # The tap still gets its early toast, exactly as before.
-    assert bot.callback_calls[0]["text"] == BACKEND.early_answer_toast(args)  # type: ignore[attr-defined]
+    # The tap still gets its early toast, exactly as before; #1281 pages
+    # answer after the (spied) handler with what it did, here nothing.
+    expected = (
+        None
+        if BACKEND.defers_answer(args)  # type: ignore[attr-defined]
+        else BACKEND.early_answer_toast(args)  # type: ignore[attr-defined]
+    )
+    assert bot.callback_calls[0]["text"] == expected
 
 
 @pytest.mark.anyio
@@ -635,3 +636,23 @@ def test_every_settings_change_log_line_carries_the_sender_id():
             assert "sender_id" in keywords, (page, event)
             checked += 1
     assert checked >= 35
+
+
+@pytest.mark.anyio
+async def test_1281_state_dependent_tap_is_answered_after_handle(monkeypatch):
+    """#1281: a pm/ag/tg change is toasted with what the handler did, once."""
+    order: list[str] = []
+
+    async def _handle(_self, ctx):
+        order.append(f"handle:{len(bot.callback_calls)}")
+        config_mod._set_late_toast(ctx, "what it did")
+
+    monkeypatch.setattr(config_mod.ConfigCommand, "handle", _handle)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: BACKEND)
+    cfg, _transport, bot = _cfg(status="administrator")
+
+    await _tap(cfg, "pm:safe", sender_id=ADMIN)
+
+    assert order == ["handle:0"]  # not answered before the handler ran
+    assert [c["text"] for c in bot.callback_calls] == ["what it did"]
+    assert config_mod._LATE_TOASTS == {}

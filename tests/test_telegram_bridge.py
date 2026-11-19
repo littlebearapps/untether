@@ -114,6 +114,23 @@ def test_parse_directives_bot_suffix() -> None:
     assert directives.prompt == "hi"
 
 
+@pytest.mark.parametrize(
+    ("text", "branch", "prompt"),
+    [
+        ("@untether_dev_bot fix the failing tests", None, "fix the failing tests"),
+        ("@TetrisBot @feat/api go", "feat/api", "go"),
+        ("@feat/robot go", "feat/robot", "go"),
+        ("@develop go", "develop", "go"),
+    ],
+)
+def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
+    directives = parse_directives(
+        text, engine_ids=("claude",), projects=_empty_projects()
+    )
+    assert directives.branch == branch
+    assert directives.prompt == prompt
+
+
 def test_parse_directives_only_first_non_empty_line() -> None:
     directives = parse_directives(
         "hello\n/claude hi",
@@ -3736,6 +3753,76 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
         "</replied_message>\n"
         "</telegram_reply_context>"
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("text", "leaves"), [("/other list the files", True), ("/proj hi", False)]
+)
+async def test_1269_project_directive_never_resumes_the_chats_session(
+    tmp_path: Path, text: str, leaves: bool
+) -> None:
+    """#1269: in chat session mode, `/<other-project> …` starts fresh in that
+    project and leaves the chat's own stored session as it was."""
+    state_path = tmp_path / "untether.toml"
+    store = ChatSessionStore(resolve_sessions_path(state_path))
+    saved = ResumeToken(engine=CODEX_ENGINE, value="proj-session")
+    await store.set_session_resume(123, None, saved)
+
+    runner = ScriptRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="new-session"
+    )
+    projects = ProjectsConfig(
+        projects={
+            alias: ProjectConfig(
+                alias=alias, path=tmp_path / alias, worktrees_dir=Path(".worktrees")
+            )
+            for alias in ("proj", "other")
+        },
+        default_project="proj",
+    )
+    for alias in ("proj", "other"):
+        (tmp_path / alias).mkdir()
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=TransportRuntime(
+            router=_make_router(runner), projects=projects, config_path=state_path
+        ),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        session_mode="chat",
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text=text,
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+
+    await run_main_loop(cfg, poller)
+
+    _prompt, resume = runner.calls[0]
+    stored = await ChatSessionStore(
+        resolve_sessions_path(state_path)
+    ).get_session_resume(123, None, CODEX_ENGINE)
+    if leaves:
+        assert resume is None
+        assert stored == saved
+    else:
+        assert resume == saved
 
 
 @pytest.mark.anyio

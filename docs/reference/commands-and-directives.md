@@ -84,10 +84,10 @@ Untether’s CLI is an auto-router by default; engine subcommands override the d
 |---------|-------------|
 | `untether` | Start Untether (runs onboarding if setup/config is missing and you’re in a TTY). |
 | `untether <engine>` | Run with a specific engine (e.g. `untether codex`). |
-| `untether config path` | Print the resolved config file path. |
-| `untether config list` | List config keys as flattened dot-paths. |
-| `untether config get <key>` | Fetch a single config key (dot-path). |
-| `untether config set <key> <value>` | Set a config value (value is auto-parsed). |
+| `untether config path` | Print the resolved config file path: `--config-path`, then `UNTETHER_CONFIG_PATH`, then `~/.untether/untether.toml` (all `config` subcommands use this order; [#1268](https://github.com/littlebearapps/untether/issues/1268)). |
+| `untether config list` | List config keys as flattened dot-paths; arrays of tables show as `triggers.crons[0].id`. Secrets (`bot_token`, API keys, webhook `secret`, any key named like a token, secret, password or credential) print as `"***"` with their length; `--show-secrets` prints them ([#1268](https://github.com/littlebearapps/untether/issues/1268)). |
+| `untether config get <key>` | Fetch a single config key (dot-path); secrets masked unless `--show-secrets`. |
+| `untether config set <key> <value>` | Set a config value (value is auto-parsed); a secret is masked in the confirmation. |
 | `untether config unset <key>` | Remove a config key. |
 | `untether init <alias>` | Register the current repo as a project (`--default` also sets it as `default_project`). |
 | `untether chat-id` | Capture the current chat id. |
