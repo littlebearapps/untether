@@ -578,3 +578,74 @@ def test_1082_running_task_defaults_have_no_edits() -> None:
     task = RunningTask(thread_id=3)
     assert task.edits is None
     assert running_task_is_idle_after_result(task) is False
+
+
+# --- #1284: a run whose first progress send fails ----------------------------
+
+
+class _NoCardTransport(_PacedTransport):
+    """Every send fails (returns None): the run gets no progress message."""
+
+    async def send(self, **kwargs: Any) -> MessageRef | None:  # type: ignore[override]
+        await self._pace()
+        self.send_calls.append(kwargs)
+        return None
+
+
+async def test_1284_run_without_progress_message_stays_cancellable(
+    monkeypatch,
+) -> None:
+    """The run stays under its start-up key, so a /cancel after the engine
+    has started still stops it, and its stall watchdog runs."""
+    from untether.runner_bridge import ProgressEdits
+    from untether.runners.mock import Wait
+
+    monitored = anyio.Event()
+
+    async def _monitor(self: ProgressEdits) -> None:
+        monitored.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(ProgressEdits, "_stall_monitor", _monitor)
+    transport = _NoCardTransport()
+    hold = anyio.Event()  # never set: the engine "hangs"
+    runner = ScriptRunner([Wait(hold), Return(answer="x")], engine="codex")
+    running_tasks: dict = {}
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            await _start(tg, transport, runner, running_tasks)
+            (task,) = running_tasks.values()
+            transport.release.set()
+            await task.resume_ready.wait()  # the engine is running
+            await monitored.wait()
+            assert list(running_tasks.values()) == [task]
+            assert task.edits is not None and task.edits.progress_ref is None
+            assert _cancel_chat_tasks(CHAT, running_tasks) == 1
+
+    assert len(runner.calls) == 1
+    assert running_tasks == {}
+
+
+async def test_1284_events_feed_stall_bookkeeping_without_a_card() -> None:
+    from untether.events import EventFactory
+    from untether.progress import ProgressTracker
+    from untether.runner_bridge import ProgressEdits
+
+    now = [100.0]
+    edits = ProgressEdits(
+        transport=_NoCardTransport(),
+        presenter=MarkdownPresenter(),
+        channel_id=CHAT,
+        progress_ref=None,
+        tracker=ProgressTracker(engine="codex"),
+        started_at=0.0,
+        clock=lambda: now[0],
+        last_rendered=None,
+    )
+    factory = EventFactory(engine="codex")
+    await edits.on_event(
+        factory.action_started(action_id="a1", kind="command", title="ls")
+    )
+    assert edits._last_event_at == 100.0
+    assert edits.engine_event_count == 1

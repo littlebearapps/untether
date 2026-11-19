@@ -4390,6 +4390,29 @@ async def run_main_loop(
                         callback_query_id=query_id,
                     )
 
+            # #1285: a voice note is transcribed (up to ~10 min) off the
+            # update loop. Later messages in the same chat/topic queue behind
+            # it so they keep their order; other chats and button taps don't.
+            voice_tails: dict[tuple[int, int | None], anyio.Event] = {}
+
+            def route_in_line(msg: TelegramIncomingMessage) -> None:
+                scope = (msg.chat_id, msg.thread_id)
+                prev = voice_tails.get(scope)
+                done = anyio.Event()
+                voice_tails[scope] = done
+
+                async def run() -> None:
+                    try:
+                        if prev is not None:
+                            await prev.wait()
+                        await route_message(msg)
+                    finally:
+                        done.set()
+                        if voice_tails.get(scope) is done:
+                            del voice_tails[scope]
+
+                tg.start_soon(run)
+
             async def route_update(update: TelegramIncomingUpdate) -> None:
                 current_allowed = frozenset(cfg.allowed_user_ids)
                 if current_allowed:
@@ -4511,6 +4534,12 @@ async def run_main_loop(
                             update.callback_query_id,
                         )
                     return
+                if (
+                    update.voice is not None
+                    or (update.chat_id, update.thread_id) in voice_tails
+                ):
+                    route_in_line(update)
+                    return
                 await route_message(update)
 
             async for update in poller_fn(cfg):
@@ -4523,6 +4552,8 @@ async def run_main_loop(
             # triggering shutdown so _drain_and_exit() can exit.
             # #775: 50, not 10 — the dispatch chain now also resolves the
             # follow-up mode (chat/topic prefs reads) before queueing.
+            while voice_tails:  # #1285: voice notes still transcribing
+                await next(iter(voice_tails.values())).wait()
             for _ in range(50):
                 await anyio.lowlevel.checkpoint()
             while state.running_tasks:

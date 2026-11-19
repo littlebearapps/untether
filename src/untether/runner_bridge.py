@@ -2681,6 +2681,9 @@ class ProgressEdits:
 
     async def run(self) -> None:
         if self.progress_ref is None:
+            # #1284: no card to repaint, but the run still needs its stall
+            # watchdog (notices and auto-cancel are separate messages).
+            await self._stall_monitor()
             return
         stall_scope = anyio.CancelScope()
 
@@ -5088,8 +5091,8 @@ class ProgressEdits:
                 and evt.action.detail.get("inline_keyboard")
             ):
                 orphans.offer(evt.action)
-        if self.progress_ref is None:
-            return
+        # #1284: stall bookkeeping runs without a progress message too, or
+        # the monitor would read a busy run as silent.
         now = self.clock()
         if self._stall_warned:
             elapsed_stall = now - self._last_event_at
@@ -7343,16 +7346,13 @@ async def handle_message(
         # fails.
         min_render_interval=progress_cfg.min_render_interval,
     )
-    if running_task is not None and running_tasks is not None:
-        # #1082: from the start-up key to the run's progress message.
-        if progress_ref is not None:
-            running_task.edits = edits
-            running_tasks[progress_ref] = running_task
-        elif not running_task.cancel_requested.is_set():
-            # No progress message: untracked, as before. A cancel asked for
-            # during start-up is still honoured (the runner never starts).
-            running_task.done.set()
-            running_task = None
+    # #1082: from the start-up key to the run's progress message. #1284:
+    # with no progress message the run stays under its start-up key, so
+    # /cancel and the stall watchdog still reach it.
+    task_ref = progress_ref or starting_ref
+    if running_task is not None and running_tasks is not None and task_ref:
+        running_task.edits = edits
+        running_tasks[task_ref] = running_task
 
     # Apply watchdog settings to runner and edits
     edits.run_level = True
@@ -9098,8 +9098,7 @@ async def handle_message(
     error: Exception | None = None
 
     async with anyio.create_task_group() as tg:
-        if progress_ref is not None:
-            tg.start_soon(run_edits)
+        tg.start_soon(run_edits)
         tg.start_soon(_run_bg_status)
         turn_task_group["tg"] = tg
         turn_router.bind_task_group(tg)
@@ -9141,8 +9140,8 @@ async def handle_message(
             unregister_live_count_source(_bg_count_token)
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
-                if progress_ref is not None:
-                    running_tasks.pop(progress_ref, None)
+                if task_ref is not None and running_tasks.get(task_ref) is running_task:
+                    running_tasks.pop(task_ref, None)
             if not outcome.cancelled and error is None:
                 # Give pending progress edits a chance to flush if they're ready.
                 await anyio.lowlevel.checkpoint()
