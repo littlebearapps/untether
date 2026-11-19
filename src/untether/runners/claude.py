@@ -51,8 +51,7 @@ from ..interactive.questions import (
     get_ask_question_flow,  # noqa: F401 — re-exported
     get_ask_question_flow_by_id,  # noqa: F401 — re-exported
     get_pending_ask_request,  # noqa: F401 — re-exported
-    get_question_option_buttons,  # noqa: F401 — re-exported
-    option_label,
+    get_question_option_buttons,
     pending_control_requests_for_session,
     recently_answered_ask_flow,  # noqa: F401 — re-exported
     recently_resolved_ask_flow,  # noqa: F401 — re-exported
@@ -113,6 +112,7 @@ from ..model import (
     UntetherEvent,
 )
 from ..runner import (
+    PRESPAWN_BLOCKED_KEY,
     JsonlStreamState,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
@@ -685,6 +685,49 @@ def live_session_loop_closeable(session_id: str) -> bool:
     )
 
 
+CONTINUE_BUSY_TEXT = (
+    "⏳ A Claude run is still active in this project. Let it finish (or"
+    " /cancel it), then send /continue again."
+)
+
+
+async def _release_live_sessions_for_continue(
+    cwd: Path | None, *, poll_s: float = 0.25
+) -> list[str]:
+    """#1275: clear the way for a ``/continue`` in *cwd*.
+
+    ``claude --continue`` resumes the newest session in its directory, which
+    is usually one a live process here still owns. A second process on that
+    session would take over its registries before it could take the session
+    lock (held by the live run), then block with nobody reading its output.
+    A clean-idle owner is closed now, like a due loop fire (#925), and waited
+    for until it has exited. A busy one (turn, background work, pending
+    approval) isn't waited out: its ids are returned and nothing spawns.
+    """
+    logged = False
+    while owners := [
+        (sid, live)
+        for sid, live in _LIVE_SESSIONS.items()
+        if live.state.spawn_cwd == cwd
+    ]:
+        busy = [
+            sid
+            for sid, live in owners
+            if not live.closing and not live_session_loop_closeable(sid)
+        ]
+        if busy:
+            logger.info("claude.live_session.continue_refused_busy", sessions=busy)
+            return busy
+        if not logged:
+            logged = True
+            logger.info("claude.live_session.continue_wait", sessions=len(owners))
+        for sid, _live in owners:
+            # A follow-up landing first makes it busy: refused next pass.
+            await close_live_session(sid, "continue", only_if_idle=True)
+        await anyio.sleep(poll_s)
+    return []
+
+
 def stop_live_session_input(session_id: str) -> bool:
     """#896: refuse any further input into ``session_id`` (synchronous).
 
@@ -903,7 +946,9 @@ async def close_live_session(
 
 # #812: closes the user (or an operator restart) asked for — a hook they
 # cut short is expected, so it logs at INFO and gets no extra notice.
-_USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+_USER_CLOSE_REASONS = frozenset(
+    {"cancel", "new", "drain", "options_changed", "continue"}
+)
 # #829 B2: Untether-initiated closes that may stop cleanly on SIGINT (rc 0,
 # transcript complete, resumable — P0 G7-G9). ``error`` follows a failed run
 # and keeps the forced-teardown quarantine. #887: ``abs_cap`` qualifies like
@@ -923,6 +968,8 @@ _STOPPED_CLEAN_REASONS = frozenset(
         "loop_fire",
         "wake_cap",
         "cron_suppressed",
+        # #1275: a /continue closes the clean-idle session it will resume.
+        "continue",
     }
 )
 
@@ -9884,28 +9931,7 @@ def _translate_claude_event_base(
                             _ASK_QUESTION_FLOWS[request_id] = flow
                             ask_flow_created = True
                             # Replace Approve/Deny with option buttons
-                            button_rows.clear()
-                            for i, opt in enumerate(options[:4]):
-                                label = option_label(opt, i)
-                                # Truncate label to fit 64-byte callback limit
-                                # Format: aq:opt:N — very compact
-                                button_rows.append(
-                                    [
-                                        {
-                                            "text": label,
-                                            "callback_data": f"aq:opt:{i}",
-                                        }
-                                    ]
-                                )
-                            # Add "Other" button for free text
-                            button_rows.append(
-                                [
-                                    {
-                                        "text": "Other (type reply)",
-                                        "callback_data": "aq:other",
-                                    }
-                                ]
-                            )
+                            button_rows[:] = get_question_option_buttons(flow)
                         else:
                             # No options — keep Approve/Deny for text reply
                             pass
@@ -12770,6 +12796,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # probe thread starts or a PTY opens; a block registers nothing.
         # Live follow-ups / steers inject into an existing process and never
         # reach run_impl, so they are never checked.
+        # #1275: first, so a closed idle session no longer counts toward the
+        # #838 ceiling either. A busy one refuses before any spawn.
+        if (
+            resume is not None
+            and resume.is_continue
+            and await _release_live_sessions_for_continue(get_run_base_dir())
+        ):
+            yield EventFactory(self.engine).completed_error(
+                error=CONTINUE_BUSY_TEXT,
+                usage={PRESPAWN_BLOCKED_KEY: "continue_busy"},
+            )
+            return
         block_result = self._check_prespawn_ram_guard(resume)
         if block_result is not None:
             yield block_result

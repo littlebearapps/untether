@@ -822,7 +822,7 @@ Must match Untether runner contract:
 * When resuming:
 
   * acquire lock before spawning subprocess.
-  * a `/continue` token carries no session id, so it is treated like a new run and locks the id named by its first `StartedEvent` ([#817](https://github.com/littlebearapps/untether/issues/817)).
+  * a `/continue` token carries no session id, so it is treated like a new run and locks the id named by its first `StartedEvent` ([#817](https://github.com/littlebearapps/untether/issues/817)). Because that lock comes after the spawn, a Claude `/continue` first waits until no live session spawned in its directory is left: a clean-idle one is closed (reason `continue`, a clean stop) and waited for (INFO `claude.live_session.continue_wait`); a busy one (a turn, background work or a pending approval) refuses the `/continue` at once, before anything spawns, with `⏳ A Claude run is still active in this project. Let it finish (or /cancel it), then send /continue again.` (pre-spawn block `continue_busy`, INFO `claude.live_session.continue_refused_busy`). Otherwise the new process would take over the live session's registries and then block on its lock ([#1275](https://github.com/littlebearapps/untether/issues/1275)).
 * When starting a new session:
 
   * you don’t know session_id until `system/init`, so:
@@ -944,7 +944,7 @@ When Claude Code calls `AskUserQuestion`, the control request is intercepted and
 Flow:
 1. Claude Code emits `control_request` with `tool_name: "AskUserQuestion"`
 2. Runner registers in `_PENDING_ASK_REQUESTS[request_id] = (channel_id, question_text)` (channel-scoped, so one chat can't answer another's question)
-3. Telegram shows the question (`❓ Question 1 of N: …` for several). When it has `options`, the Approve/Deny row is replaced by up to four option buttons (`aq:opt:<i>`) plus **Other (type reply)** (`aq:other`), driven by an `AskQuestionState` flow; without options the Approve/Deny buttons stay
+3. Telegram shows the question (`❓ Question 1 of N: …` for several). When it has `options`, the Approve/Deny row is replaced by up to four option buttons (`aq:opt:<i>:<request_id>`) plus **Other (type reply)** (`aq:other:<request_id>`; the request id makes a tap answer its own question, [#1274](https://github.com/littlebearapps/untether/issues/1274)), driven by an `AskQuestionState` flow; without options the Approve/Deny buttons stay
 4. Option taps advance the flow question by question; when every question is answered, `answer_ask_question_with_options()` approves the request with `updatedInput.answers` set to the collected answers
 5. A typed reply → `telegram/loop.py` intercepts via `get_pending_ask_request(channel_id)`, and `answer_ask_question()` sends a deny response (`write_control_response(..., approved=False, deny_message="The user answered...")`, wire `{"behavior":"deny","message":…}`) — the answer is in the denial message so Claude Code reads it and continues
 

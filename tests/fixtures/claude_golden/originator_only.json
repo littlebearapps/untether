@@ -597,19 +597,19 @@
         "buttons": [
          [
           {
-           "callback_data": "aq:opt:0",
+           "callback_data": "aq:opt:0:req-ask-1",
            "text": "pytest"
           }
          ],
          [
           {
-           "callback_data": "aq:opt:1",
+           "callback_data": "aq:opt:1:req-ask-1",
            "text": "unittest"
           }
          ],
          [
           {
-           "callback_data": "aq:other",
+           "callback_data": "aq:other:req-ask-1",
            "text": "Other (type reply)"
           }
          ]
@@ -726,13 +726,13 @@
      "id": 1,
      "keyboard": [
       [
-       "pytest => aq:opt:0"
+       "pytest => aq:opt:0:req-ask-1"
       ],
       [
-       "unittest => aq:opt:1"
+       "unittest => aq:opt:1:req-ask-1"
       ],
       [
-       "Other (type reply) => aq:other"
+       "Other (type reply) => aq:other:req-ask-1"
       ],
       [
        "cancel => untether:cancel"
@@ -755,7 +755,7 @@
    "logs": [
     "warning callback.not_originator command=\"aq\" request_id=\"req-ask-1\" +[chat_id,logger_name,originator_id,sender_id]"
    ],
-   "step": "do:tap data=aq:opt:0",
+   "step": "do:tap data=aq:opt:0:req-ask-1",
    "telegram": [
     {
      "callback_query_id": "cb-3",
@@ -854,7 +854,7 @@
      "type": "control_response"
     }
    ],
-   "step": "do:tap data=aq:opt:0",
+   "step": "do:tap data=aq:opt:0:req-ask-1",
    "telegram": [
     {
      "extra": {

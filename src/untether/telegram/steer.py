@@ -249,7 +249,10 @@ async def maybe_steer(
         # in live-session state.
         from ..interactive.questions import get_pending_ask_request
 
-        if get_pending_ask_request(channel_id=chat_id) is not None:
+        if (
+            get_pending_ask_request(channel_id=chat_id, thread_filter=thread_filter)
+            is not None
+        ):
             # The CLI is blocked on the question; an answer, not a steer, is
             # what it needs. Plain text already answered it upstream.
             logger.info("steer.skipped", chat_id=chat_id, reason="ask_pending")

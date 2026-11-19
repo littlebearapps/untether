@@ -258,7 +258,7 @@ Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
 - `claude_control:discuss:<request_id>` — pause & outline plan
 - `claude_control:chat:<request_id>` — let's discuss (holds the request open)
 - `ia:<approve|deny|always>:<request_id>` — engine-neutral approval card (Antigravity's agy gate)
-- synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>` / `aq:other`
+- synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>:<request_id>` / `aq:other:<request_id>` (#1274)
 - opt-in `[transports.telegram] approval_originator_only` (#388): `claude_control:` / `ia:` / `aq:` / `agy_plan:` taps (and typed AskUserQuestion answers) are accepted only from the user whose message started the run; cron / webhook / `/at` / loop runs have no originator, so any allowed user may answer
 
 ## Running tasks
