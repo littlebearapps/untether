@@ -272,14 +272,24 @@ def test_209_non_default_engine_with_bypass_flag_is_disabled(
     assert "read-only" not in warn["issue"]
 
 
-def test_209_other_config_errors_keep_bad_config_fallback(
+def test_1283_other_config_errors_disable_the_engine(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    router = _build(monkeypatch, tmp_path, {"codex": {"extra_args": "not-a-list"}})
+    """#1283: a bad config table fails closed instead of running on defaults,
+    which would drop the user's restrictive `-s read-only`."""
+    from untether.router import RunnerUnavailableError
+
+    router = _build(
+        monkeypatch,
+        tmp_path,
+        {"codex": {"extra_args": ["-s", "read-only"], "profile": 5}},
+    )
     entry = router.entry_for_engine("codex")
     assert entry.status == "bad_config"
-    assert entry.available
-    assert entry.runner.extra_args == ["-c", "notify=[]"]
+    assert not entry.available
+    assert "codex" not in [e.engine for e in router.available_entries]
+    with pytest.raises(RunnerUnavailableError, match="profile"):
+        router.runner_for(ResumeToken(engine="codex", value="t"))
 
 
 def test_209_load_error_shows_in_startup_status(

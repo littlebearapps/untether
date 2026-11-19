@@ -552,10 +552,12 @@ runtime build) and once for any other engine. Built-in engines are listed here;
 plugin engines should document their own keys.
 
 An invalid engine table stops Untether from starting when it belongs to the
-default engine. For any other engine the table is ignored with a `setup.warning`
-log and the engine runs on its defaults — except a refused `extra_args` flag,
-which disables that engine (listed under `failed to load:` in the startup
-message) rather than dropping its other settings.
+default engine. Any other engine is disabled with a `setup.warning` log: the
+startup message lists it under `misconfigured:` (or `failed to load:` for a
+refused `extra_args` flag) and chats that use it get an "engine unavailable"
+reply naming the problem. It never runs on its defaults, which would silently
+drop restrictive settings such as `extra_args = ["-s", "read-only"]`
+([#1283](https://github.com/littlebearapps/untether/issues/1283)).
 
 ### `codex`
 
