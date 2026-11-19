@@ -3450,6 +3450,16 @@ async def run_main_loop(
                 dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if resolved.leaves_chat_context and chat_session_key is not None:
+                    # #1269: `/<other-project> …` in chat session mode runs
+                    # fresh and leaves the chat's own session alone; a reply
+                    # to its final (resume line) carries on there.
+                    logger.info(
+                        "session.chat_context_left",
+                        chat_id=chat_id,
+                        project=resolved.context.project if resolved.context else None,
+                    )
+                    chat_session_key = None
                 if dropped_in_line is not None:
                     # /cancel or /new while it waited behind an earlier
                     # prompt: no queued card or first-start wait had it yet.

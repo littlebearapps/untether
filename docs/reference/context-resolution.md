@@ -199,7 +199,12 @@ message continues when it carries no resume line.
 - **`session_mode = "chat"`**: sessions are stored per scope and engine — per chat in a private
   chat's main thread, per topic in a private chat's topics
   ([#734](https://github.com/littlebearapps/untether/issues/734)), and per sender in a group
-  without topics. The topic store wins when both apply.
+  without topics. The topic store wins when both apply. The stored session belongs to the
+  chat's own context (its `/ctx` binding, else its project, else `default_project`): a
+  message whose `/<project>` or `@branch` directive, or replied-to `dir:` line, picks
+  another project or branch starts a fresh session there and leaves the stored one as it
+  was ([#1269](https://github.com/littlebearapps/untether/issues/1269)). Reply to that
+  run's final to carry on in it.
 - **`session_mode = "stateless"`** (default): without topics, each message starts a new session
   unless it carries or replies to a resume line.
 
