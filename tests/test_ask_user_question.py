@@ -418,7 +418,8 @@ def test_ask_question_without_options_no_flow() -> None:
 
 
 def test_option_buttons_callback_data_format() -> None:
-    """Option button callback_data should be 'aq:opt:N'."""
+    """Option button callback_data is 'aq:opt:N:ID' / 'aq:other:ID' (#1274),
+    within Telegram's 64-byte limit."""
     state, factory = _make_state_with_session()
     event = _decode_event(
         {
@@ -447,10 +448,13 @@ def test_option_buttons_callback_data_format() -> None:
     detail = events[0].action.detail
     kb = detail["inline_keyboard"]["buttons"]
     cb_data = [b["callback_data"] for row in kb for b in row]
-    assert "aq:opt:0" in cb_data
-    assert "aq:opt:1" in cb_data
-    assert "aq:opt:2" in cb_data
-    assert "aq:other" in cb_data
+    assert cb_data == [
+        "aq:opt:0:req-cb-1",
+        "aq:opt:1:req-cb-1",
+        "aq:opt:2:req-cb-1",
+        "aq:other:req-cb-1",
+    ]
+    assert all(len(c.encode()) <= 64 for c in cb_data)
 
 
 # ===========================================================================
@@ -1713,3 +1717,106 @@ async def test_1273_typed_answer_retires_option_flow(monkeypatch) -> None:
     monkeypatch.setattr(claude_mod, "answer_ask_question_with_options", fake_answer)
     await cmd_mod.AskQuestionCommand().handle(_make_command_ctx("opt:1"))
     assert answered == ["q2"]
+
+
+# ── #1274: questions are scoped by forum topic, not just chat ──
+
+
+def _register_ask_in_topic(request_id: str, thread_id: int | None) -> None:
+    """Register an option question the way a run in *thread_id* does."""
+    from untether.interactive.registry import register
+    from untether.utils.paths import reset_run_thread_id, set_run_thread_id
+
+    token = set_run_thread_id(thread_id)
+    try:
+        register(request_id, session_key=f"sess-{request_id}", kind="ask")
+    finally:
+        reset_run_thread_id(token)
+    _PENDING_ASK_REQUESTS[request_id] = (CHAT_A, request_id)
+    _ASK_QUESTION_FLOWS[request_id] = AskQuestionState(
+        request_id=request_id,
+        channel_id=CHAT_A,
+        questions=[
+            {"question": request_id, "options": [{"label": "A"}, {"label": "B"}]}
+        ],
+    )
+
+
+def _forum_msg(thread_id: int | None):
+    from untether.telegram.types import TelegramIncomingMessage
+
+    return TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=CHAT_A,
+        message_id=1,
+        text="a new task",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+        thread_id=thread_id,
+        chat_type="supergroup",
+        is_forum=True,
+    )
+
+
+def test_1274_typed_reply_only_answers_its_own_topic() -> None:
+    """A message typed in topic C must not be taken as topic A's answer."""
+    from untether.telegram.topics import thread_filter_for
+
+    _register_ask_in_topic("req-topic-a", 11)
+
+    other = thread_filter_for(_forum_msg(33))
+    own = thread_filter_for(_forum_msg(11))
+    assert get_pending_ask_request(CHAT_A, thread_filter=other) is None
+    assert get_ask_question_flow(CHAT_A, thread_filter=other) is None
+    assert get_pending_ask_request(CHAT_A, thread_filter=own) == (
+        "req-topic-a",
+        "req-topic-a",
+    )
+    assert get_ask_question_flow(CHAT_A, thread_filter=own).request_id == (
+        "req-topic-a"
+    )
+    # General (no thread) is topic 1, not "any topic".
+    assert (
+        get_pending_ask_request(
+            CHAT_A, thread_filter=thread_filter_for(_forum_msg(None))
+        )
+        is None
+    )
+
+
+@pytest.mark.anyio
+async def test_1274_option_tap_answers_the_question_it_names(monkeypatch) -> None:
+    """Two topics of one chat each hold a question; a tap on topic B's card
+    names B's request, so it answers B even though A's flow came first."""
+    from untether.interactive.questions import get_question_option_buttons
+    from untether.runners import claude as claude_mod
+    from untether.telegram.commands import ask_question as cmd_mod
+
+    _register_ask_in_topic("req-topic-a", 11)
+    _register_ask_in_topic("req-topic-b", 22)
+    data = get_question_option_buttons(_ASK_QUESTION_FLOWS["req-topic-b"])[1][0][
+        "callback_data"
+    ]
+    assert data == "aq:opt:1:req-topic-b"
+
+    answered: list[str] = []
+
+    async def fake_answer(request_id: str) -> bool:
+        answered.append(request_id)
+        _ASK_QUESTION_FLOWS.pop(request_id, None)
+        return True
+
+    monkeypatch.setattr(claude_mod, "answer_ask_question_with_options", fake_answer)
+    args = data.removeprefix("aq:")
+    assert cmd_mod.AskQuestionCommand.early_answer_toast(args, channel_id=CHAT_A) == (
+        "Selected"
+    )
+    await cmd_mod.AskQuestionCommand().handle(_make_command_ctx(args))
+    assert answered == ["req-topic-b"]
+    assert _ASK_QUESTION_FLOWS["req-topic-a"].answers == {}
+
+    # A tap naming an answered request never falls through to another flow.
+    result = await cmd_mod.AskQuestionCommand().handle(_make_command_ctx(args))
+    assert answered == ["req-topic-b"]
+    assert result is not None and result.text != "Answers sent"

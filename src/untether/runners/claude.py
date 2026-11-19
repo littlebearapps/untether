@@ -51,8 +51,7 @@ from ..interactive.questions import (
     get_ask_question_flow,  # noqa: F401 — re-exported
     get_ask_question_flow_by_id,  # noqa: F401 — re-exported
     get_pending_ask_request,  # noqa: F401 — re-exported
-    get_question_option_buttons,  # noqa: F401 — re-exported
-    option_label,
+    get_question_option_buttons,
     pending_control_requests_for_session,
     recently_answered_ask_flow,  # noqa: F401 — re-exported
     recently_resolved_ask_flow,  # noqa: F401 — re-exported
@@ -9818,28 +9817,7 @@ def _translate_claude_event_base(
                             _ASK_QUESTION_FLOWS[request_id] = flow
                             ask_flow_created = True
                             # Replace Approve/Deny with option buttons
-                            button_rows.clear()
-                            for i, opt in enumerate(options[:4]):
-                                label = option_label(opt, i)
-                                # Truncate label to fit 64-byte callback limit
-                                # Format: aq:opt:N — very compact
-                                button_rows.append(
-                                    [
-                                        {
-                                            "text": label,
-                                            "callback_data": f"aq:opt:{i}",
-                                        }
-                                    ]
-                                )
-                            # Add "Other" button for free text
-                            button_rows.append(
-                                [
-                                    {
-                                        "text": "Other (type reply)",
-                                        "callback_data": "aq:other",
-                                    }
-                                ]
-                            )
+                            button_rows[:] = get_question_option_buttons(flow)
                         else:
                             # No options — keep Approve/Deny for text reply
                             pass

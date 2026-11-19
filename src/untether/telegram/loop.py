@@ -4237,8 +4237,12 @@ async def run_main_loop(
                         await reply(text=NOT_ORIGINATOR_TEXT)
                         return True
 
+                    # #1274: only a question raised in this message's topic.
+                    ask_thread_filter = thread_filter_for(msg)
                     # Check for active option flow in "Other" text mode first
-                    flow = get_ask_question_flow(channel_id=msg.chat_id)
+                    flow = get_ask_question_flow(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if flow is not None and flow.awaiting_text:
                         if await _ask_answer_refused(flow.request_id):
                             return
@@ -4272,7 +4276,9 @@ async def run_main_loop(
                                 await reply(text=_format_answered_echo(text))
                             return
 
-                    pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
+                    pending_ask = get_pending_ask_request(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if pending_ask is not None:
                         ask_req_id, _ask_question = pending_ask
                         if await _ask_answer_refused(ask_req_id):
