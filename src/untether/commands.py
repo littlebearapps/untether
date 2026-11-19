@@ -136,6 +136,9 @@ class CommandBackend(Protocol):
       reaching ``handle`` (#1068).
     - ``answer_early: bool`` + ``early_answer_toast(...)`` — answer the
       button tap before ``handle`` runs (#247).
+    - ``defers_answer(args_text) -> bool`` + ``pop_late_toast(owner)`` — for
+      those taps, answer after ``handle`` with the toast it left for the
+      callback query id instead (#1281).
     """
 
     id: str
