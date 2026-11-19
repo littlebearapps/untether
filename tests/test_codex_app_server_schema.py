@@ -73,6 +73,9 @@ def test_fixture_pins_the_fields_rc1_relies_on(fixture: dict) -> None:
     start = fixture["client_request thread/start"]["names"]
     assert start["params.developerInstructions"] == "S"
     assert start["result.model"] == "S"
+    # Sent on every resume (#962 QA): must stay stable.
+    resume = fixture["client_request thread/resume"]["names"]
+    assert resume["params.excludeTurns"] == "S"
     # Plan mode is experimental-only on turn/start (#965, DEC-3).
     assert (
         fixture["client_request turn/start"]["names"]["params.collaborationMode"] == "E"

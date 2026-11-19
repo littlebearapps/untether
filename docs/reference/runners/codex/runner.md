@@ -33,7 +33,8 @@ switch transport without losing its session.
 | Before spawning | nothing | the #961 support gate (below) |
 
 Every `thread/start` and `thread/resume` sends `approvalPolicy: "never"`, `approvalsReviewer: "user"`, the cwd, the
-sandbox (when set) and the chat's model, and compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
+sandbox (when set) and the chat's model (`thread/resume` adds `excludeTurns: true`: Untether never reads the
+history, and full-history hydration draws a deprecation warning on 0.170.0), and compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
 adds a ⚠️ row. A server request (approval, user input, …) is declined with one ⚠️ row until approvals land (#963).
 `/continue` lists the project's most recent thread (`thread/list`, source kinds `cli`, `vscode`, `exec`, `appServer`)
 and resumes it, or starts a new one with a note.
