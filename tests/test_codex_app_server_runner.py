@@ -1624,3 +1624,192 @@ async def test_cancel_while_the_bridge_is_busy_still_interrupts(
     assert log["ok"] is True
     # exited by itself (a GeneratorExit close logs no teardown exit line)
     assert not [e for e in logs if e["event"] == "subprocess.exit" and e["rc"] != 0]
+
+
+# --- 962-5: % ctx, compaction row, footer tokens (#832) -----------------------
+
+P8 = "live-turn-compact-stable-0.170.0.jsonl"
+P8_THREAD = "01a1f210-f3f7-7552-94ed-7056e743e68d"
+
+
+def _p8_segments() -> tuple[list[dict], list[dict]]:
+    """codex-cli 0.170.0 capture (P8): "Reply with the word hi.", then
+    ``thread/compact/start`` on the same thread. Server notifications only,
+    split at the probe's COMPACT note."""
+    lines = [json.loads(x) for x in (FIXTURES / P8).read_text().splitlines()]
+    split = next(i for i, x in enumerate(lines) if "COMPACT" in json.dumps(x))
+
+    def notes(part: list[dict]) -> list[dict]:
+        return [
+            x["msg"]
+            for x in part
+            if x["dir"] == "s2c" and "id" not in x["msg"] and "method" in x["msg"]
+        ]
+
+    return notes(lines[:split]), notes(lines[split:])
+
+
+def _replay(messages: list[dict]) -> tuple[Any, list[Any]]:
+    runner = _bare_runner()
+    state = _app_state(runner, P8_THREAD)
+    state.model = "gpt-6.1-sol"
+    events: list[Any] = []
+    for msg in messages:
+        events += _translate(runner, state, msg["method"], msg.get("params") or {})
+    return state, events
+
+
+def _telemetry_rows(events: list[Any]) -> list[dict]:
+    return [
+        e.action.detail
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.kind == "telemetry"
+    ]
+
+
+def _usage_update(
+    last: int, window: int | None, *, total: int = 0, thread: str = THREAD
+) -> tuple[str, dict]:
+    def breakdown(n: int) -> dict:
+        return {"totalTokens": n, "inputTokens": n, "outputTokens": 0}
+
+    return "thread/tokenUsage/updated", {
+        "threadId": thread,
+        "turnId": "turn-1",
+        "tokenUsage": {
+            "total": breakdown(total or last),
+            "last": breakdown(last),
+            "modelContextWindow": window,
+        },
+    }
+
+
+def _turn_completed(status: str = "completed", **turn: Any) -> tuple[str, dict]:
+    return "turn/completed", {
+        "threadId": THREAD,
+        "turn": {"id": "turn-1", "status": status, **turn},
+    }
+
+
+def test_p8_turn_gives_ctx_pct_and_exec_footer_keys() -> None:
+    turn, _ = _p8_segments()
+    _, events = _replay(turn)
+    assert _telemetry_rows(events) == [
+        {
+            "context_pct": 3,  # last.totalTokens 13447 / 475000
+            "context_used": 13447,
+            "context_window": 475000,
+            "model": "gpt-6.1-sol",
+        }
+    ]
+    done = _completed(events)
+    assert done.ok and done.answer == "hi"
+    usage = done.usage or {}
+    assert {k: usage[k] for k in codex_schema.CODEX_USAGE_FIELDS} == {
+        "input_tokens": 13442,
+        "cached_input_tokens": 7936,
+        "output_tokens": 5,
+        "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    assert usage["context"] == {
+        "pct": 3,
+        "used": 13447,
+        "window": 475000,
+        "model": "gpt-6.1-sol",
+    }
+    assert "compaction" not in usage
+
+
+def test_p8_compaction_row_and_count() -> None:
+    _, compact = _p8_segments()
+    with capture_logs() as logs:
+        state, events = _replay(compact)
+    rows = [r for r in _rows(events) if r[1] == "note"]
+    assert [(r[0], r[2], r[3]) for r in rows] == [
+        ("started", gate._COMPACTING_TITLE, None),
+        ("completed", gate._COMPACTED_TITLE, True),
+    ]
+    assert state.open_items == {}
+    done = _completed(events)
+    assert done.ok
+    assert done.usage["compaction"] == {"count": 1, "trigger": "auto"}
+    # the compaction turn's ``last`` (24777, breakdown all zero) is what it reports
+    assert done.usage["context"]["pct"] == 5
+    counts = [e["count"] for e in logs if e["event"] == "codex.compaction.completed"]
+    assert counts == [1]
+
+
+def test_compaction_wording_matches_claude() -> None:
+    from untether.runners import claude
+
+    assert gate._COMPACTING_TITLE == claude._COMPACTING_TITLE
+    assert gate._COMPACTED_TITLE == claude._COMPACTED_TITLE
+
+
+def test_compaction_interrupted_closes_the_row() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    item = {"type": "contextCompaction", "id": "cc1"}
+    _translate(runner, state, *_item("item/started", item))
+    events = _translate(runner, state, *_turn_completed("interrupted"))
+    closed = [r for r in _rows(events) if r[1] == "note"]
+    assert [(r[0], r[2], r[3]) for r in closed] == [
+        ("completed", gate._COMPACTING_TITLE, False)
+    ]
+    assert "compaction" not in (_completed(events).usage or {})
+
+
+def test_ctx_emitted_only_on_change_and_per_update_window() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    pcts = []
+    for last, window in [
+        (1000, 100_000),  # 1%
+        (1200, 100_000),  # still 1%: no event
+        (5000, 100_000),  # 5%
+        (5000, 50_000),  # the window changed: 10%
+        (5000, 50_000),  # same: no event
+    ]:
+        events = _translate(runner, state, *_usage_update(last, window))
+        pcts += [d["context_pct"] for d in _telemetry_rows(events)]
+    assert pcts == [1, 5, 10]
+
+
+@pytest.mark.parametrize("window", [None, 0])
+def test_no_ctx_without_a_window(window: int | None) -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    assert _translate(runner, state, *_usage_update(5000, window)) == []
+    usage = _completed(_translate(runner, state, *_turn_completed())).usage or {}
+    assert "context" not in usage
+    assert usage["input_tokens"] == 5000  # footer tokens are still known
+
+
+def test_ctx_clamped_and_nothing_before_the_first_update() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    assert _completed(_translate(runner, state, *_turn_completed())).usage is None
+    state = _app_state(runner)
+    events = _translate(runner, state, *_usage_update(900, 600))
+    assert _telemetry_rows(events)[0]["context_pct"] == 100
+
+
+def test_subagent_usage_update_is_ignored() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    update = _usage_update(5000, 100_000, thread=OTHER_THREAD)
+    assert _translate(runner, state, *update) == []
+    assert state.tokens is None and state.context is None
+
+
+def test_failed_turn_keeps_usage_and_error_info() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    _translate(runner, state, *_usage_update(5000, 100_000, total=9000))
+    error = {"message": "boom", "codexErrorInfo": "usageLimitExceeded"}
+    events = _translate(runner, state, *_turn_completed("failed", error=error))
+    usage = _completed(events).usage or {}
+    assert usage["codex_error_info"] == "usageLimitExceeded"
+    assert usage["input_tokens"] == 9000  # ``total``, not ``last``
+    assert usage["context"]["pct"] == 5

@@ -156,7 +156,7 @@ def test_unsupported_methods_names_missing_and_demoted() -> None:
 
 # --- #962 msgspec structs ----------------------------------------------------
 
-LIVE_FIXTURES = sorted(FIXTURE.parent.glob("live-*-0.169.0.jsonl"))
+LIVE_FIXTURES = sorted(FIXTURE.parent.glob("live-*.jsonl"))
 
 
 def _wire_names(cls: type) -> set[str]:
@@ -203,7 +203,7 @@ def test_every_used_notification_and_item_has_a_struct() -> None:
 
 
 def test_live_transcripts_decode() -> None:
-    assert len(LIVE_FIXTURES) == 3
+    assert len(LIVE_FIXTURES) == 4
     decoded: dict[str, int] = {}
     for path in LIVE_FIXTURES:
         sent: dict = {}
