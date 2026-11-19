@@ -500,6 +500,35 @@ def _needs_effort_hint(error_message: str) -> str:
     )
 
 
+# Codex app-server's typed ``TurnError.codexErrorInfo`` (#962), which the
+# runner passes as ``usage["codex_error_info"]``. Checked before the text
+# patterns: the type is exact, Codex's wording isn't stable.
+CODEX_ERROR_INFO_HINTS: dict[str, str] = {
+    "usageLimitExceeded": "Codex usage limit reached. Your session is saved"
+    " \N{EM DASH} wait for the limit to reset, then resume.",
+    "rateLimitExceeded": "Codex is rate limiting requests. Your session is saved"
+    " \N{EM DASH} try again in a minute.",
+    "serverOverloaded": "The Codex service is overloaded. This is temporary"
+    " \N{EM DASH} your session is saved. Try again in a few minutes.",
+    "policyCapacityUnavailable": "Codex has no capacity for this request right"
+    " now. Your session is saved \N{EM DASH} try again in a few minutes.",
+    "contextWindowExceeded": "Session context is too long. Start a fresh"
+    " session with /new.",
+    "modelNotFound": "Codex doesn't recognise that model. Check the name with"
+    " /model, or `/model clear` to use Codex's default.",
+    "unauthorized": "Run `codex login` to re-authenticate.",
+    "cyberPolicy": "Codex declined this request under OpenAI's cybersecurity"
+    " policy. Try rephrasing it.",
+    "inferenceHookDenied": "Your Codex workspace's inference hook denied this"
+    " request. Check the hook in your Codex config.",
+}
+
+
+def codex_error_info_hint(code: object) -> str | None:
+    """The hint for a Codex ``codexErrorInfo`` name, or None."""
+    return CODEX_ERROR_INFO_HINTS.get(code) if isinstance(code, str) else None
+
+
 def get_error_hint(error_message: str) -> str | None:
     """Return an actionable hint for a known error pattern, or None."""
     lower = error_message.lower()

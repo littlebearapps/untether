@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import msgspec
 import pytest
 
 from untether.runners.codex_app_server import schema_subset, unsupported_methods
+from untether.schemas import codex_app_server as cas
 from untether.schemas.codex_app_server import (
     CODEX_APP_SERVER_SENDS,
     CODEX_APP_SERVER_TYPES,
@@ -150,3 +152,175 @@ def test_unsupported_methods_names_missing_and_demoted() -> None:
     assert "`turn/interrupt` is experimental-only" in problems
     assert "`thread/start` missing" in problems
     assert not any("turn/start`" in p for p in problems)
+
+
+# --- #962 msgspec structs ----------------------------------------------------
+
+LIVE_FIXTURES = sorted(FIXTURE.parent.glob("live-*-0.169.0.jsonl"))
+
+
+def _wire_names(cls: type) -> set[str]:
+    return {f.encode_name for f in msgspec.structs.fields(cls)}
+
+
+# struct → (fixture key, name prefix): every field must exist in the schema.
+_STRUCT_KEYS: list[tuple[type, str, str]] = [
+    (cas.TokenUsageBreakdown, "type TokenUsageBreakdown", ""),
+    (cas.ThreadTokenUsage, "type ThreadTokenUsage", ""),
+    (cas.TurnError, "type TurnError", ""),
+    (cas.Turn, "type Turn", ""),
+    *(
+        (cls, f"type ThreadItem.{tag}", "")
+        for tag, cls in cas.THREAD_ITEM_TYPES.items()
+    ),
+    (cas.InitializeResult, "client_request initialize", "result."),
+    (cas.ThreadOpenResult, "client_request thread/start", "result."),
+    (cas.ThreadOpenResult, "client_request thread/resume", "result."),
+    (cas.ThreadListResult, "client_request thread/list", "result."),
+    (cas.TurnStartResult, "client_request turn/start", "result."),
+    *(
+        (cls, f"server_notification {method}", "params.")
+        for method, cls in cas.NOTIFICATION_TYPES.items()
+    ),
+]
+
+
+@pytest.mark.parametrize(("cls", "key", "prefix"), _STRUCT_KEYS)
+def test_every_struct_field_exists_in_the_fixture(
+    fixture: dict, cls: type, key: str, prefix: str
+) -> None:
+    names = fixture[key]["names"]
+    missing = {n for n in _wire_names(cls) if f"{prefix}{n}" not in names}
+    assert missing == set(), (cls.__name__, key)
+    # Stable connection only: never read an experimental-only field.
+    assert all(names[f"{prefix}{n}"] == "S" for n in _wire_names(cls))
+
+
+def test_every_used_notification_and_item_has_a_struct() -> None:
+    used = {m for (k, m) in CODEX_APP_SERVER_USED if k == "server_notification"}
+    assert used == set(cas.NOTIFICATION_TYPES)
+    assert set(cas.THREAD_ITEM_TYPES) == set(CODEX_APP_SERVER_TYPES["ThreadItem"])
+
+
+def test_live_transcripts_decode() -> None:
+    assert len(LIVE_FIXTURES) == 3
+    decoded: dict[str, int] = {}
+    for path in LIVE_FIXTURES:
+        sent: dict = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            rec = json.loads(line)
+            msg = rec["msg"]
+            if rec["dir"] == "c2s" and "id" in msg and "method" in msg:
+                sent[msg["id"]] = msg["method"]
+            elif rec["dir"] == "s2c" and "result" in msg and msg["id"] in sent:
+                method = sent[msg["id"]]
+                assert cas.decode_result(method, msg["result"]) is not None
+                decoded[method] = decoded.get(method, 0) + 1
+            elif rec["dir"] == "s2c" and "method" in msg and "id" not in msg:
+                params = cas.decode_notification(msg["method"], msg.get("params"))
+                if params is not None:
+                    decoded[msg["method"]] = decoded.get(msg["method"], 0) + 1
+                if isinstance(params, cas.ItemParams):
+                    cas.decode_thread_item(params.item)
+                if isinstance(params, cas.TurnParams):
+                    for item in params.turn.items:
+                        cas.decode_thread_item(item)
+    # The transcripts exercise the core of the stable surface.
+    for method in (
+        "initialize",
+        "thread/start",
+        "turn/start",
+        "thread/started",
+        "turn/completed",
+        "item/started",
+        "item/completed",
+        "thread/tokenUsage/updated",
+        "configWarning",
+        "warning",
+    ):
+        assert decoded.get(method), method
+
+
+def test_thread_open_result_keeps_the_sandbox_policy_object() -> None:
+    result = cas.decode_result(
+        "thread/start",
+        {
+            "thread": {"id": "t1", "source": "vscode"},
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "sandbox": {"type": "readOnly", "networkAccess": False},
+            "model": "m",
+        },
+    )
+    assert isinstance(result, cas.ThreadOpenResult)
+    assert result.sandbox == {"type": "readOnly", "networkAccess": False}
+    assert result.thread.id == "t1" and result.thread.source == "vscode"
+
+
+def test_unknown_item_type_decodes_to_the_generic_struct() -> None:
+    item = cas.decode_thread_item({"type": "hookPrompt", "id": "i1", "x": 1})
+    assert isinstance(item, cas.GenericItem)
+    assert (item.type, item.id, item.raw["x"]) == ("hookPrompt", "i1", 1)
+    # A known type whose shape no longer fits is generic too, never an error.
+    bad = cas.decode_thread_item({"type": "agentMessage", "id": 5})
+    assert isinstance(bad, cas.GenericItem) and bad.id is None
+    assert isinstance(cas.decode_thread_item(None), cas.GenericItem)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        "contextWindowExceeded",
+        {"httpConnectionFailed": {"httpStatusCode": 502}},
+        {"somethingNew": {"a": [1, 2]}},
+        None,
+    ],
+)
+def test_unknown_codex_error_info_decodes(info: object) -> None:
+    params = cas.decode_notification(
+        "error",
+        {
+            "error": {"message": "boom", "codexErrorInfo": info},
+            "willRetry": False,
+            "threadId": "t",
+            "turnId": "u",
+        },
+    )
+    assert isinstance(params, cas.ErrorParams)
+    assert params.error.codex_error_info == info
+
+
+def test_extra_top_level_fields_are_ignored() -> None:
+    params = cas.decode_notification(
+        "turn/completed",
+        {
+            "threadId": "t",
+            "turn": {"id": "u", "status": "completed", "items": [], "new": 1},
+            "brandNew": {"x": 1},
+        },
+    )
+    assert isinstance(params, cas.TurnParams) and params.turn.status == "completed"
+
+
+@pytest.mark.parametrize(
+    "display",
+    [
+        # 0.169.0
+        {"action": "show", "blockType": None, "cyberTrustedAccess": None},
+        # 0.170.0: a versioned union on `mode`
+        {"mode": "hide", "version": 1, "replacement": {"kind": "x"}},
+        {"mode": "block", "version": 1, "reason": {"kind": "cyber"}},
+    ],
+)
+def test_both_moderation_display_shapes_decode(display: dict) -> None:
+    item = cas.decode_thread_item(
+        {
+            "type": "agentMessage",
+            "id": "m1",
+            "text": "hi",
+            "phase": "final_answer",
+            "moderation": {"moderated": True, "display": display},
+        }
+    )
+    assert isinstance(item, cas.AgentMessageItem)
+    assert item.moderation is not None and item.moderation["display"] == display

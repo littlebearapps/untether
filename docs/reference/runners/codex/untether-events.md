@@ -461,3 +461,29 @@ Even though you *learn* the final answer at `agent_message`, you generally want 
 * you still use `agent_message` as the authoritative answer payload.
 
 That still matches your intent (“completed is when we get final answer”) because the answer comes from `agent_message`; you just *publish* it at the terminal boundary.
+
+---
+
+## App-server transport (draft, [#962](https://github.com/littlebearapps/untether/issues/962))
+
+With `[engines.codex] transport = "app-server"`, the same engine id runs `codex app-server --listen stdio://` and
+reads JSON-RPC notifications instead of `exec --json` lines (checked on codex-cli 0.170.0). Every item is mapped to
+the exec item it corresponds to and rendered by the exec translation, so the rows, titles and `ok` values are the
+same on both transports. Finalised in 962-6.
+
+| App-server message | Untether |
+|---|---|
+| `thread/start` / `thread/resume` result | `started`; `meta.model` is the result's `model` (the real model in the footer) |
+| `item/started`, `item/completed` | `action` started/completed, via exec's item translation: `commandExecution` (`inProgress` → `in_progress`), `fileChange` (`kind {type}` → `kind`; completed only, like exec), `mcpToolCall` (`structuredContent`), `webSearch` (`openPage`/`findInPage` → exec's names), `reasoning` (summary text; completed only), `agentMessage` with `phase: "commentary"` (note row) |
+| `collabAgentToolCall`, `imageView` | a `subagent` / `tool` row (exec has no such items) |
+| any other item type | a generic `tool` row titled with the type; `codex.app_server.unknown_item` logged once per type. `userMessage`, `hookPrompt`, `plan` and `contextCompaction` get no row here |
+| `agentMessage` | the answer: the last `phase: "final_answer"`, else the last unnamed message, else the last message. `moderation.moderated` logs `codex.app_server.moderated mode=…` once per run; the text is shown as sent |
+| `turn/completed` `completed` | `completed` ok |
+| `turn/completed` `failed` / `interrupted` | every row still open is closed (`ok: false`, `detail.status` `failed` / `cancelled`; Codex never completes them, Δ D19), then `completed` error with the turn's message and any answer so far. `usage.codex_error_info` carries `TurnError.codexErrorInfo` (an object variant by its key), which picks the hint (`error_hints.CODEX_ERROR_INFO_HINTS`) |
+| `error` `willRetry: true` | exec's reconnect row (`codex.reconnect`, started then updated) |
+| `error` `willRetry: false` | a failed note, as exec shows its `error` line |
+| `warning`, `configWarning`, `deprecationNotice` | one ⚠️ row per message per run (#987), paths and URLs masked (#1066, #1151); `deprecationNotice` also logs `codex.app_server.deprecation`. The untrusted-project `configWarning` gives exec's #1240 row and footer instead |
+| server request (approval, user input, …) | declined by the peer (approvals are #963), plus one ⚠️ row per request |
+
+Rows raised before the thread exists (a `configWarning` right after `initialize`) wait until `started` has gone out.
+Items, errors and turns of another thread (a sub-agent's) are ignored.
