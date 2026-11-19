@@ -536,6 +536,10 @@ def test_tool_name_mapping() -> None:
         ("view_file", {"AbsolutePath": "/x/test.py"}, "tool", "test.py"),
         ("write_to_file", {"TargetFile": "/x/foo.py"}, "file_change", "foo.py"),
         ("replace_file_content", {"TargetFile": "/x/foo.py"}, "file_change", "foo.py"),
+        # #1272: agy 1.5.x names (live on 1.5.12), path in ``Path``.
+        ("read_file", {"Path": "/x/hello.py"}, "tool", "hello.py"),
+        ("write_file", {"Path": "/x/new.py"}, "file_change", "new.py"),
+        ("edit_file", {"Path": "/x/foo.py"}, "file_change", "foo.py"),
         ("run_command", {"CommandLine": "ls -la"}, "command", "ls -la"),
         ("grep_search", {"Query": "needle", "SearchPath": "/x"}, "tool", "needle"),
         ("find_by_name", {"Pattern": "*.py", "SearchDirectory": "/x"}, "tool", "*.py"),
@@ -907,17 +911,17 @@ async def test_version_guard_fails_open_on_garbage(
 async def test_version_guard_quiet_on_probed_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091, #1156, #1160, #1209, #1254: the drift suite was re-run on agy
-    1.5.10, so neither a 1.5.10 run nor an older one logs ``newer_than_probed``
-    on every message."""
-    for version in ("1.3.5", "1.3.6", "1.4.0", "1.4.10", "1.5.10"):
+    """#1091, #1156, #1160, #1209, #1254, #1272: the drift suite was re-run
+    on agy 1.5.12, so neither a 1.5.12 run nor an older one logs
+    ``newer_than_probed`` on every message."""
+    for version in ("1.3.5", "1.3.6", "1.4.0", "1.4.10", "1.5.10", "1.5.12"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None
         assert not any(
             e["event"] == "antigravity.version.newer_than_probed" for e in logs
         ), version
-    for version in ("1.5.11", "1.6.0"):
+    for version in ("1.5.13", "1.6.0"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None

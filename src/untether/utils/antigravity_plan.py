@@ -59,8 +59,16 @@ CALLBACK_PREFIX = "agy_plan"
 ACTIONS = ("approve", "deny", "discuss")
 
 # The write tools agy uses for artifacts (and for project files).
+# #1272: agy 1.5.x renamed them ``write_file`` / ``edit_file`` (path in
+# ``Path``, not ``TargetFile``); both sets are accepted.
 PLAN_WRITE_TOOLS = frozenset(
-    {"write_to_file", "replace_file_content", "multi_replace_file_content"}
+    {
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_file",
+        "edit_file",
+    }
 )
 # Artifacts agy writes that are never a plan (P-H3c: ``walkthrough.md`` after
 # an approved run; ``task.md`` is agy's own checklist).
@@ -92,11 +100,11 @@ def escape_slash(prompt: str) -> str:
 
 
 def note_plan_write(writes: list[str], tool_name: str, params: Any) -> None:
-    """Remember a finished artifact-capable write's ``TargetFile`` (the
+    """Remember a finished artifact-capable write's target file (the
     runner calls this for every DONE tool step of a plan run)."""
     if tool_name not in PLAN_WRITE_TOOLS or not isinstance(params, dict):
         return
-    target = params.get("TargetFile")
+    target = params.get("TargetFile") or params.get("Path")
     if not isinstance(target, str) or not target or len(writes) >= _MAX_WRITES:
         return
     writes.append(target)

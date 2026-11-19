@@ -109,6 +109,61 @@ def test_edit_in_project_allowed(root: Path) -> None:
     assert not verdict.allow and verdict.why == "unclear"
 
 
+def test_1272_agy_15_file_tools(root: Path, tmp_path: Path) -> None:
+    """agy 1.5.x ``read_file`` / ``write_file`` / ``edit_file`` (``Path``)
+    get the same safe list as the 1.3.x names."""
+    inside, outside = str(root / "README.md"), str(tmp_path / "other.txt")
+    hunk = {"Target": "a", "Replacement": "b"}
+    allowed = (
+        ("read_file", {"Path": inside, "StartLine": 1}),
+        ("read_file", {"Path": str(root)}),  # read_file lists folders too
+        ("write_file", {"Path": str(root / "new.py"), "Content": "x"}),
+        ("edit_file", {"Path": inside, **hunk, "AllowMultiple": True}),
+        ("edit_file", {"Path": inside, "Edits": [hunk, hunk]}),
+        # Go reads field names case-insensitively, so does the gate.
+        ("edit_file", {"path": inside, "edits": [{"target": "a", "replacement": ""}]}),
+    )
+    for tool, args in allowed:
+        normalised, why = gate_policy.normalise_args(args)
+        assert why is None
+        assert classify(tool, normalised, root=root, conversation_id=CID).allow, args
+    for tool, args in (
+        ("read_file", {"Path": outside}),
+        ("write_file", {"Path": outside, "Content": "x"}),
+        ("edit_file", {"Path": outside, **hunk}),
+    ):
+        verdict = classify(tool, args, root=root, conversation_id=CID)
+        assert not verdict.allow and verdict.why == "outside", tool
+    for args in (
+        {"Path": inside, "Edits": [{**hunk, "TargetFile": "/etc/x"}]},
+        {"Path": inside, "Edits": "x"},
+        {"Path": inside, "CodeContent": "x"},
+    ):
+        verdict = classify("edit_file", args, root=root, conversation_id=CID)
+        assert not verdict.allow and verdict.why == "unclear", args
+    assert (
+        classify(
+            "edit_file",
+            {"Path": str(root / ".git" / "config"), **hunk},
+            root=root,
+            conversation_id=CID,
+        ).why
+        == "protected"
+    )
+    assert gate_policy.tool_label("write_file", {}) == "write a file"
+    write = gate_policy.preview(
+        "write_file", {"Path": inside, "Content": "new\n", "Overwrite": True}, root=root
+    )
+    assert "+ new" in write and "(overwrites an existing file)" in write
+    edit = gate_policy.preview(
+        "edit_file",
+        {"Path": inside, **hunk, "Edits": [{"Target": "c", "Replacement": "d"}]},
+        root=root,
+    )
+    assert "- a" in edit and "+ b" in edit and "- c" in edit and "+ d" in edit
+    assert "⚠️" not in edit  # every argument is a known one
+
+
 def test_edit_outside_project_asks(root: Path, tmp_path: Path) -> None:
     for target in (tmp_path / "other.txt", "/etc/passwd"):
         verdict = classify_edit(_edit(target), root=root, conversation_id=CID)
