@@ -31,7 +31,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
-from . import arrival_order, first_start
+from . import arrival_order, first_start, settings_barrier
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -795,6 +795,9 @@ def _dispatch_builtin_command(
     scope_chat_ids = ctx.scope_chat_ids
     reply = ctx.reply
     task_group = ctx.task_group
+    if command_id in settings_barrier.SETTINGS_COMMANDS:
+        # #1265: later prompts in this chat wait for the change to land.
+        task_group = settings_barrier.Guarded(task_group, msg.chat_id, msg.message_id)
     if command_id == "file":
         if not cfg.files.enabled:
             handler = partial(
@@ -3450,6 +3453,11 @@ async def run_main_loop(
                 dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if ticket is not None:
+                    # #1265: a settings command sent just before this prompt
+                    # (e.g. /planmode) lands first. Not for /continue (no
+                    # ticket), which runs inline in the update loop.
+                    await settings_barrier.wait_before(chat_id, user_msg_id)
                 if dropped_in_line is not None:
                     # /cancel or /new while it waited behind an earlier
                     # prompt: no queued card or first-start wait had it yet.
@@ -4180,7 +4188,12 @@ async def run_main_loop(
                             chat_prefs=state.chat_prefs,
                             topic_store=state.topic_store,
                         )
-                        tg.start_soon(
+                        # #1265: settings commands hold the prompts after them.
+                        (
+                            settings_barrier.Guarded(tg, msg.chat_id, msg.message_id)
+                            if command_id in settings_barrier.SETTINGS_COMMANDS
+                            else tg
+                        ).start_soon(
                             # #950: /at freezes the engine + context a plain
                             # prompt here would use (topic/chat defaults).
                             partial(dispatch_command, ambient_context=ambient_context),
@@ -4462,7 +4475,15 @@ async def run_main_loop(
                                 else None
                             )
                             cb_stateful_mode = cb_topic_key is not None
-                            tg.start_soon(
+                            # #1265: a settings tap (/config pages) holds the
+                            # prompts sent after its menu until it lands.
+                            (
+                                settings_barrier.Guarded(
+                                    tg, update.chat_id, update.message_id
+                                )
+                                if cb_command_id in settings_barrier.SETTINGS_COMMANDS
+                                else tg
+                            ).start_soon(
                                 # #997: a tap sees the context the command
                                 # that drew the button saw (/browse root).
                                 partial(
