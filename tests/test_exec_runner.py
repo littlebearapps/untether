@@ -1152,12 +1152,14 @@ async def test_base_runner_publishes_paired_pid_and_stream(tmp_path) -> None:
     seen_at_send: list[tuple[object, object]] = []
 
     class _Probe(CodexRunner):
-        async def _send_payload(self, proc, payload, *, logger, resume) -> None:
+        async def _send_payload(
+            self, proc, payload, *, logger, resume, state=None
+        ) -> None:
             handle = current_run_stream_handle()
             assert handle is not None
             seen_at_send.append((handle.pid, handle.stream))
             await CodexRunner._send_payload(
-                self, proc, payload, logger=logger, resume=resume
+                self, proc, payload, logger=logger, resume=resume, state=state
             )
 
     runner = _Probe(codex_cmd=str(codex_path), extra_args=[])

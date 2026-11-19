@@ -1120,7 +1120,10 @@ class JsonlSubprocessRunner(BaseRunner):
         *,
         logger: Any,
         resume: ResumeToken | None,
+        state: Any = None,
     ) -> None:
+        # ``state``: the run's own state, for runners that keep stdin open
+        # and talk to the process (Codex app-server, #962).
         if payload is not None:
             assert proc.stdin is not None
             await proc.stdin.send(payload)
@@ -2037,7 +2040,9 @@ class JsonlSubprocessRunner(BaseRunner):
             publish_run_stream(stream, proc.pid)
             self.on_spawned(state=state, pid=proc.pid)
 
-            await self._send_payload(proc, payload, logger=logger, resume=resume)
+            await self._send_payload(
+                proc, payload, logger=logger, resume=resume, state=state
+            )
 
             reader_done = anyio.Event()
 
