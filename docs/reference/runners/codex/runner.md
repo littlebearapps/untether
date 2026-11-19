@@ -1,15 +1,57 @@
 # Codex runner
 
-Untether runs Codex over `codex exec --json` (the default; see [untether-events.md](untether-events.md) and
-[exec-json-cheatsheet.md](exec-json-cheatsheet.md)). The `codex app-server` transport lands with
-[#962](https://github.com/littlebearapps/untether/issues/962), which adds the per-install `[engines.codex] transport`
-key (not added yet, so every run uses exec);
-it counts as native despite the CLI's Experimental label (stable-tier methods only, `experimentalApi` fields only
-for plan mode, #965). This page gains the transport, permission modes and the native-vs-custom register with #962.
+Untether runs Codex over one of two transports, chosen per install by `transport` in the `[codex]` (or
+`[engines.codex]`) table ([#962](https://github.com/littlebearapps/untether/issues/962)):
+
+- **`exec`** (the default): one `codex exec --json` per message. See [untether-events.md](untether-events.md) and
+  [exec-json-cheatsheet.md](exec-json-cheatsheet.md).
+- **`app-server`** (opt-in): one private `codex app-server --listen stdio://` per message, spoken to over JSON-RPC
+  (stable-tier methods only, `experimentalApi: false`). It counts as native despite the CLI's Experimental label
+  (Nathan, 2026-11-18, DEC-1); `experimentalApi` fields are reserved for plan mode (#965). See
+  [Transports](#transports) below and the app-server section of [untether-events.md](untether-events.md#app-server-transport-962).
+
+The engine id stays `codex` on both, resume lines (`codex resume <thread uuid>`) work across them, and a chat can
+switch transport without losing its session.
 
 | | |
 |---|---|
 | Tested against | codex-cli **0.170.0** (exec drift suite green on 2026-11-18, [#1254](https://github.com/littlebearapps/untether/issues/1254); exec flag snapshot `PROBED_CLI_VERSION` in `tests/test_codex_cli_schema_drift.py`; app-server schema `PROBED_APP_SERVER_VERSION` in `src/untether/schemas/codex_app_server.py`) |
+
+## Transports
+
+| | `exec` | `app-server` |
+|---|---|---|
+| Process | `codex [extra_args] exec --json … -` per message | `codex [extra_args] app-server --listen stdio://` per message (DEC-4; live sessions are #964) |
+| `extra_args` | the #209 guard (bypass and managed flags refused) | only `-c`, `--enable`, `--disable`, `--strict-config` (the #209 `-c` rule still applies) |
+| `profile` | `--profile <name>` | refused at load (`codex app-server` has no `--profile`, DEC-19) |
+| Full auto | no sandbox flag (Codex's own setting) | `sandbox` omitted only when `config/read` shows a `[projects]` entry for the cwd or a parent, else `read-only` with a ⚠️ row when the user sandbox is writable (P1: a writable sandbox in an unlisted project makes Codex save it as trusted) |
+| Safe | `--sandbox read-only` | `sandbox: "read-only"` on `thread/start` / `thread/resume` |
+| Unknown `permission_mode` | runs full auto, logs `codex.permission_mode.unknown` | runs read-only, logs `codex.app_server.unknown_mode_safe` once (DEC-5, fail closed) |
+| Final answer | `_select_final_answer` over `agent_message` items | `agentMessage.phase = "final_answer"` |
+| `/cancel` | SIGTERM | `turn/interrupt`, SIGTERM after 3 s |
+| `% ctx` / 🗜️ row | none | `thread/tokenUsage/updated` / `contextCompaction` item (#832) |
+| Before spawning | nothing | the #961 support gate (below) |
+
+Every `thread/start` and `thread/resume` sends `approvalPolicy: "never"`, `approvalsReviewer: "user"`, the cwd, the
+sandbox (when set) and the chat's model, and compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
+adds a ⚠️ row. A server request (approval, user input, …) is declined with one ⚠️ row until approvals land (#963).
+`/continue` lists the project's most recent thread (`thread/list`, source kinds `cli`, `vscode`, `exec`, `appServer`)
+and resumes it, or starts a new one with a note.
+
+**Switching.** Set `transport = "app-server"` under `[codex]`; with `watch_config = true` the engine table is rebuilt
+and the next message uses it (a run already working keeps its transport), otherwise restart. Set `"exec"` (or remove
+the key) to go back. Logs: `codex.app_server.ready version=…` once per binary, then `codex.app_server.*` and
+`codex.rpc.*` per run.
+
+**Context and compaction (#832, app-server only).** Each `thread/tokenUsage/updated` gives the header
+`N% ctx` = `last.totalTokens / modelContextWindow` of that update (half up, clamped to 100; native, so no `~`), sent
+only when it changes and never without a window. `total` is thread-cumulative and becomes the footer's five token
+keys (exec's meaning; the backend declares `usage_scope = {"tokens": "thread_cumulative"}`, #850). A
+`contextCompaction` item opens `🗜️ Compacting context…` and closes as `🗜️ Context compacted`; the count goes to
+`runner.completed compactions=N`. P8 (0.170.0) found that a compaction turn reports `last` as the compaction
+request's size with the breakdown zeroed, so the value after a compaction is that size until the next request
+updates it. Exec gets neither: #832's exec half (reading Codex's rollout files) is won't-do under the native-first
+rule (DEC-13).
 
 ## Project trust ([#1240](https://github.com/littlebearapps/untether/issues/1240))
 
@@ -17,8 +59,8 @@ codex-cli 0.169.0+ disables an untrusted project's `.codex/` layer (config, MCP 
 it on **stderr only**, before the JSON stream (`warning: Untrusted project-local configuration is disabled…`, checked
 on 0.170.0, 2026-11-18). `CodexRunner.on_stderr_line` matches that prefix, logs `codex.project_config_untrusted` once
 and emits one `⚠️` warning row right after `StartedEvent` (or before the final event if stderr arrives late). Native
-signal surfaced as-is; Untether never grants trust (no `--trust`, refused in `extra_args` by #1040). App-server:
-re-check with #962 (`config/read` layers carry `disabled_reason`). Docs:
+signal surfaced as-is; Untether never grants trust (no `--trust`, refused in `extra_args` by #1040). On app-server
+the same notice arrives as a `configWarning` and gives the same row and footer. Docs:
 [project config](https://developers.openai.com/codex/config-advanced),
 [`projects.<path>.trust_level`](https://developers.openai.com/codex/config-reference).
 
@@ -76,7 +118,7 @@ Untether hands to Codex, as for Claude, Pi and Antigravity. The spawn environmen
 surface. Not covered: the `codex --version`, schema-probe and `/auth codex` calls still inherit the full env (they run
 no model or tools; see [#375](https://github.com/littlebearapps/untether/issues/375)).
 
-## App-server cancel and open items (draft, [#962](https://github.com/littlebearapps/untether/issues/962))
+## App-server cancel and resume failures
 
 `/cancel` on an app-server run sends `turn/interrupt {threadId, turnId}` and keeps reading the same buffered stdout
 reader until `turn/completed` (any status: `interrupted`, or a finish that won the race; an error answer such as
@@ -90,9 +132,20 @@ A failed `thread/resume` ends the run with Codex's own text (`no rollout found f
 …`) inside `codex app-server thread/resume failed: …`, which `_resume_failure_clears_session` matches. Resume tokens are
 the thread UUIDs on both transports, so a chat can switch transport and keep its session.
 
-### Native-vs-custom register (draft; finalised in 962-6)
+## Native-vs-custom register
 
-| Piece | Kind | Checked | Why custom |
+What the Codex runner builds itself, and why (native-first rule, step 4). Checked against codex-cli 0.170.0.
+
+| Piece | Kind | Checked | Why custom / notes |
 |---|---|---|---|
-| Cancel | native: `turn/interrupt` (stable) | codex-cli 0.170.0, 2026-11-19 | SIGTERM only as the fallback when the turn doesn't end within 3 s |
-| Closing items Codex leaves open after an interrupt or a failed turn | custom | codex-cli 0.170.0, 2026-11-18 (Δ D19) | no native signal: an interrupted `commandExecution` never gets `item/completed`. A failed turn's open rows are closed (`ok: false`, `failed` / `cancelled`) before the error final; on `/cancel` the bridge has stopped reading, so they're only counted in the log |
+| App-server transport | native by exception | 0.170.0, 2026-11-18 (DEC-1) | The CLI still labels `codex app-server` Experimental (fails the "not marked experimental" test); Nathan accepted it. Stable-tier methods only, `experimentalApi: false`; experimental fields only for plan mode (#965) |
+| One app-server process per run | custom (process model) | 0.170.0, 2026-11-18 (DEC-4) | Native would be a long-lived session; per-session processes come with live sessions (#964). Stdio exit on stdin close is about 0.1 s |
+| Cancel | native: `turn/interrupt` (stable) | 0.170.0, 2026-11-19 | SIGTERM only as the fallback when the turn doesn't end within 3 s |
+| Closing items Codex leaves open after an interrupt or a failed turn | custom | 0.170.0, 2026-11-18 (Δ D19) | No native signal: an interrupted `commandExecution` never gets `item/completed`. A failed turn's open rows are closed (`ok: false`, `failed` / `cancelled`) before the error final; on `/cancel` the bridge has stopped reading, so they're only counted in the log |
+| Full auto read-only in an untrusted project | custom (policy) | 0.170.0, 2026-11-19 (P1, DEC-7) | Codex saves `trust_level = "trusted"` for an unlisted project when a thread starts there with a writable sandbox, sent or inherited. Untether never grants trust, so it sends `read-only` unless `config/read` lists the project (or a parent); unknown or missing config fails closed. The native signal (`config/read`) decides; only the fallback is custom |
+| Unknown `permission_mode` runs read-only | custom (policy) | 0.170.0, 2026-11-18 (DEC-5) | No native notion of Untether's mode names. Fail closed (exec keeps its old fail-open for now) |
+| Preamble | custom (prompt prefix) | 0.170.0, 2026-11-18 (DEC-15, PLAN Q2) | Native `thread/start.developerInstructions` exists, so this fails "no instructions prepended when a system-prompt option exists". The MVP keeps the bridge's prefix, as for every engine, because moving one engine needs a bridge seam; owed as a follow-up |
+| Moderated answers | native passthrough | 0.170.0, 2026-11-18 (E2, PLAN Q6) | `agentMessage.moderation` is untyped (its `display` shape changed in one release); the text is shown as sent and `codex.app_server.moderated` logged once per run |
+| Rows for items exec never emits | custom (rendering) | 0.170.0, 2026-11-19 | `collabAgentToolCall` (sub-agent row), `imageView`, and one generic row per unknown item type (logged once). Untether's own progress surface, fed from native items |
+| Declined server requests | custom (policy) | 0.170.0, 2026-11-19 | Approvals and user input aren't wired until #963 / #965, so every server request is declined (fail closed) with one ⚠️ row |
+| `% ctx`, compaction row | native | 0.170.0, 2026-11-19 (P8) | `thread/tokenUsage/updated` and the `contextCompaction` item (#832); no rollout-file reading (DEC-13) |
