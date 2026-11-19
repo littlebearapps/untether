@@ -17,7 +17,10 @@ from untether.triggers.run_once_state import (
     resolve_state_path,
     save_fired_state,
 )
-from untether.triggers.settings import parse_trigger_config
+from untether.triggers.settings import (
+    parse_trigger_config,
+    parse_trigger_config_isolated,
+)
 
 
 def test_resolve_state_path_is_sibling_of_config() -> None:
@@ -213,6 +216,64 @@ def test_manager_drops_stale_fired_entries_on_reload(tmp_path: Path) -> None:
     assert mgr.fired_run_once_ids() == ["still-here"]
     on_disk = load_fired_state(resolve_state_path(config_path))
     assert list(on_disk) == ["still-here"]
+
+
+def _run_once_raw(schedule: str = "0 9 * * *") -> dict:
+    return {
+        "enabled": True,
+        "crons": [
+            {
+                "id": "deploy-once",
+                "schedule": schedule,
+                "prompt": "deploy",
+                "run_once": True,
+            }
+        ],
+    }
+
+
+def test_disable_then_enable_keeps_fired_one_shot(tmp_path: Path) -> None:
+    """#1279: turning triggers off and on must not re-arm a fired one-shot."""
+    config_path = tmp_path / "untether.toml"
+    mgr = TriggerManager(
+        _make_run_once_settings(["deploy-once"]), config_path=config_path
+    )
+    assert mgr.remove_cron("deploy-once") is True
+
+    mgr.disable()
+    assert mgr.crons == []
+    assert mgr.fired_run_once_ids() == ["deploy-once"]
+
+    mgr.update(_make_run_once_settings(["deploy-once"]))
+    assert mgr.cron_ids() == []
+    # A restart after the toggle still sees it as fired.
+    assert "deploy-once" in load_fired_state(resolve_state_path(config_path))
+
+
+def test_briefly_invalid_entry_keeps_fired_one_shot(tmp_path: Path) -> None:
+    """#1279: a skipped (invalid) entry is still in the TOML, so its fired
+    state survives; fixing the typo doesn't re-arm the one-shot."""
+    config_path = tmp_path / "untether.toml"
+    first = parse_trigger_config_isolated(_run_once_raw())
+    mgr = TriggerManager(
+        first.settings, config_path=config_path, keep_fired=first.cron_ids
+    )
+    assert mgr.remove_cron("deploy-once") is True
+
+    typo = parse_trigger_config_isolated(_run_once_raw("0 0 9 * * *"))
+    assert typo.settings.crons == [] and typo.invalid
+    assert typo.cron_ids == {"deploy-once"}
+    mgr.update(typo.settings, keep_fired=typo.cron_ids)
+    assert mgr.fired_run_once_ids() == ["deploy-once"]
+
+    fixed = parse_trigger_config_isolated(_run_once_raw())
+    mgr.update(fixed.settings, keep_fired=fixed.cron_ids)
+    assert mgr.cron_ids() == []
+
+    # Removing it from the TOML still frees the id (#317 behaviour kept).
+    gone = parse_trigger_config_isolated({"enabled": True, "crons": []})
+    mgr.update(gone.settings, keep_fired=gone.cron_ids)
+    assert mgr.fired_run_once_ids() == []
 
 
 @pytest.mark.anyio

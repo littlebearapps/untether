@@ -618,6 +618,9 @@ class ParsedTriggerConfig(NamedTuple):
 
     settings: TriggersSettings
     invalid: tuple[InvalidTrigger, ...]
+    # #1279: every cron id written in the TOML, valid or skipped, so a
+    # skipped run_once entry keeps its fired state.
+    cron_ids: frozenset[str] = frozenset()
 
 
 def format_trigger_error(exc: BaseException) -> str:
@@ -690,7 +693,15 @@ def parse_trigger_config_isolated(raw: dict[str, Any]) -> ParsedTriggerConfig:
                 continue
             valid.append(parsed)
         data[key] = valid
-    return ParsedTriggerConfig(TriggersSettings.model_validate(data), tuple(invalid))
+    raw_crons = raw.get("crons")
+    cron_ids = frozenset(
+        entry["id"].strip()
+        for entry in (raw_crons if isinstance(raw_crons, list) else ())
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    )
+    return ParsedTriggerConfig(
+        TriggersSettings.model_validate(data), tuple(invalid), cron_ids
+    )
 
 
 def parse_trigger_config(raw: dict[str, Any]) -> TriggersSettings:

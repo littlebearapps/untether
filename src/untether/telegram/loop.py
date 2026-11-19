@@ -2617,7 +2617,6 @@ async def run_main_loop(
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
                         from ..triggers.settings import (
-                            TriggersSettings,
                             log_invalid_triggers,
                             parse_trigger_config_isolated,
                             warn_short_webhook_secrets,
@@ -2632,7 +2631,10 @@ async def run_main_loop(
                             )
                             new_settings = parsed_triggers.settings
                             if trigger_manager is not None:
-                                trigger_manager.update(new_settings)
+                                trigger_manager.update(
+                                    new_settings,
+                                    keep_fired=parsed_triggers.cron_ids,
+                                )
                             state.trigger_block_error_notified = None
                             log_invalid_triggers(
                                 parsed_triggers.invalid, phase="reload"
@@ -2666,7 +2668,7 @@ async def run_main_loop(
                             )
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
-                            trigger_manager.update(TriggersSettings())
+                            trigger_manager.disable()
                             state.trigger_invalid_notified = set()
                             state.trigger_refused_notified = set()
                             state.trigger_block_error_notified = None
@@ -3218,6 +3220,7 @@ async def run_main_loop(
                     trigger_manager = TriggerManager(
                         trigger_settings,
                         config_path=cfg.runtime.config_path,
+                        keep_fired=parsed_triggers.cron_ids,
                     )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
