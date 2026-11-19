@@ -24,6 +24,7 @@
 
 ### fixes
 
+- **fix:** a cancelled run's progress card shows the step it stopped as ✗ instead of still running, on every engine [#962](https://github.com/littlebearapps/untether/issues/962)
 - **security(config):** an engine with an invalid config section is now disabled ("misconfigured") instead of running on its defaults, which dropped restrictive settings such as `extra_args = ["-s", "read-only"]` [#1283](https://github.com/littlebearapps/untether/issues/1283)
 - **fix(antigravity):** support agy 1.5.x's renamed file tools (`read_file` / `write_file` / `edit_file`), so Plan first shows its Approve card again and Ask me reads and edits project files without asking [#1272](https://github.com/littlebearapps/untether/issues/1272)
 - **fix(pi):** resume lines carry Pi's full session id, so two Pi sessions started within about a minute no longer share a resume token (or resume each other's conversation) [#1264](https://github.com/littlebearapps/untether/issues/1264)
