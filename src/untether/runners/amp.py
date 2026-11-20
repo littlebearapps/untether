@@ -13,6 +13,7 @@ Session IDs use the format: T-<uuid> (e.g., T-2775dc92-90ed-4f85-8b73-8f9766029e
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,12 +43,27 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import amp as amp_schema
+from ..utils.env_policy import (
+    NETWORK_ENV_NAMES,
+    filtered_env,
+    load_env_extras,
+    log_dropped_once,
+    log_user_extensions_once,
+)
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
 
 ENGINE: EngineId = "amp"
+
+# #1354: Amp CLI names. Source: ampcode.com/docs/cli (+ /settings): AMP_API_KEY and every other
+# documented variable start with AMP_; NODE_EXTRA_CA_CERTS is documented for corporate proxies.
+_AMP_ENV_EXTRAS: tuple[str, ...] = (
+    "NODE_EXTRA_CA_CERTS",
+    *NETWORK_ENV_NAMES,
+)
+_AMP_ENV_PREFIXES: tuple[str, ...] = ("AMP_",)
 
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?amp\s+threads\s+continue\s+(?P<token>T-[A-Za-z0-9-]+)`?\s*$"
@@ -336,6 +352,18 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def command(self) -> str:
         return self.amp_cmd
+
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        """#1354: the allowlisted env, not Untether's whole service env (the #198
+        leak #1241 closed for Codex and OpenCode). Security fix on a deprecated runner."""
+        user_exact, user_prefix = load_env_extras()
+        log_user_extensions_once(user_exact, user_prefix)
+        env = filtered_env(
+            extra_allow=(*user_exact, *_AMP_ENV_EXTRAS),
+            extra_prefix=(*user_prefix, *_AMP_ENV_PREFIXES),
+        )
+        log_dropped_once(ENGINE, os.environ, env)
+        return env
 
     def build_args(
         self,

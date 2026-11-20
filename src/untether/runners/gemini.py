@@ -15,6 +15,7 @@ Session IDs are short alphanumeric strings (e.g., abc123def).
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,12 +46,33 @@ from ..runner import (
 )
 from ..schemas import gemini as gemini_schema
 from ..utils import engine_argv
+from ..utils.env_policy import (
+    NETWORK_ENV_NAMES,
+    filtered_env,
+    load_env_extras,
+    log_dropped_once,
+    log_user_extensions_once,
+)
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
 
 ENGINE: EngineId = "gemini"
+
+# #1354: Gemini CLI names beyond filtered_env's defaults (which already carry GEMINI_API_KEY,
+# GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION).
+# Source: geminicli.com/docs get-started/authentication + reference/configuration. GEMINI_* covers
+# model, sandbox, telemetry and GEMINI_CLI_* settings paths.
+_GEMINI_ENV_EXTRAS: tuple[str, ...] = (
+    "GOOGLE_CLOUD_PROJECT_ID",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GOOGLE_VERTEX_BASE_URL",
+    "CODE_ASSIST_ENDPOINT",
+    "GOOGLE_GENAI_API_VERSION",
+    *NETWORK_ENV_NAMES,
+)
+_GEMINI_ENV_PREFIXES: tuple[str, ...] = ("GEMINI_",)
 
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?gemini\s+--resume\s+(?P<token>[A-Za-z0-9_-]+)`?\s*$"
@@ -334,6 +356,18 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def command(self) -> str:
         return self.gemini_cmd
+
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        """#1354: the allowlisted env, not Untether's whole service env (the #198
+        leak #1241 closed for Codex and OpenCode). Security fix on a deprecated runner."""
+        user_exact, user_prefix = load_env_extras()
+        log_user_extensions_once(user_exact, user_prefix)
+        env = filtered_env(
+            extra_allow=(*user_exact, *_GEMINI_ENV_EXTRAS),
+            extra_prefix=(*user_prefix, *_GEMINI_ENV_PREFIXES),
+        )
+        log_dropped_once(ENGINE, os.environ, env)
+        return env
 
     def build_args(
         self,
