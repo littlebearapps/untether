@@ -11728,7 +11728,7 @@ async def test_572_budget_blocked_no_retry(monkeypatch) -> None:
     _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
     monkeypatch.setattr(
         "untether.runner_bridge._stream_idle_retry_budget_blocked",
-        lambda usage: True,
+        lambda usage, **_kwargs: True,
     )
     transport = FakeTransport()
     runner = _StreamIdleThenAnswerRunner(fail_times=99)

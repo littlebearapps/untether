@@ -876,10 +876,11 @@ def _should_stream_idle_retry(
         return False
     if _is_signal_death(proc_returncode):
         return False
-    effective_usage = _claude_per_run_cost_usage(
+    # The guard derives Claude's per-run delta itself; passing engine/session_id
+    # through keeps that the single place the baseline is subtracted.
+    return not _stream_idle_retry_budget_blocked(
         usage, engine=engine, session_id=session_id
     )
-    return not _stream_idle_retry_budget_blocked(effective_usage)
 
 
 _PREAMBLE_HEAD = (
