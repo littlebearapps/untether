@@ -21,9 +21,8 @@ Scope of this change
 --------------------
 
 Claude and Pi opted in via :func:`filtered_env` in v0.35.2, Antigravity
-with #558, and Codex and OpenCode with #1241. The deprecated Gemini and
-AMP runners still return ``None`` from their ``env()`` hook and inherit the parent
-environment (minus :func:`apply_run_env`'s drops).
+with #558, Codex and OpenCode with #1241, and the deprecated Gemini and AMP
+runners with #1354. No runner inherits the parent environment any more.
 
 Extending the allowlist
 -----------------------
