@@ -278,6 +278,42 @@ async def test_codex_runner_preserves_warning_order(tmp_path) -> None:
 
 
 @pytest.mark.anyio
+async def test_1240_codex_untrusted_stderr_warning_one_row(tmp_path) -> None:
+    """#1240: Codex's stderr-only untrusted-project warning becomes one ⚠️ row
+    after StartedEvent, and the run still completes ok."""
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "sys.stdin.read()\n"
+        "print('warning: Untrusted project-local configuration is disabled. Run ...', file=sys.stderr, flush=True)\n"
+        "print(json.dumps({'type': 'thread.started', 'thread_id': 't-1240'}), flush=True)\n"
+        "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_0', 'type': 'agent_message', 'text': 'ok'}}), flush=True)\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    seen = [evt async for evt in runner.run("hi", None)]
+
+    assert isinstance(seen[0], StartedEvent)
+    assert isinstance(seen[-1], CompletedEvent)
+    assert seen[-1].ok is True
+    assert seen[-1].answer == "ok"
+    rows = [
+        e
+        for e in seen
+        if isinstance(e, ActionEvent) and e.action.id == "codex.untrusted_project"
+    ]
+    assert len(rows) == 1
+    assert rows[0].action.title.startswith("\N{WARNING SIGN}")
+
+
+@pytest.mark.anyio
 async def test_codex_runner_reconnect_notice_is_non_fatal(tmp_path) -> None:
     thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
 
@@ -1116,12 +1152,14 @@ async def test_base_runner_publishes_paired_pid_and_stream(tmp_path) -> None:
     seen_at_send: list[tuple[object, object]] = []
 
     class _Probe(CodexRunner):
-        async def _send_payload(self, proc, payload, *, logger, resume) -> None:
+        async def _send_payload(
+            self, proc, payload, *, logger, resume, state=None
+        ) -> None:
             handle = current_run_stream_handle()
             assert handle is not None
             seen_at_send.append((handle.pid, handle.stream))
             await CodexRunner._send_payload(
-                self, proc, payload, logger=logger, resume=resume
+                self, proc, payload, logger=logger, resume=resume, state=state
             )
 
     runner = _Probe(codex_cmd=str(codex_path), extra_args=[])

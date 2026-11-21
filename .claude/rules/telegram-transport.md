@@ -41,7 +41,12 @@ Messages that should auto-delete when a run finishes:
 
 - Per-chat pacing: private 1.0 msg/s, groups 20/60 msg/s
 - On 429: `RetryAfter` raised, op requeued unless superseded
-- Non-429 errors: logged and dropped
+- Non-429 errors: logged and dropped. One exception (#1207): a **final** whose `sendMessage` certainly failed (never
+  sent, or HTTP 5xx) is kept in `pending_finals.json` (`telegram/pending_finals.py`, via the send's `on_failure`
+  callback, which fires inside the outbox op even after its waiter is cancelled) and redelivered after the next good
+  `getUpdates` or restart. Never keep a timeout or 4xx: it may already be in the chat, or fails the same way again.
+  An op the outbox fails before dispatch (close, flush timeout, fatal worker) must go through `OutboxOp.drop()` so
+  `on_dropped` keeps it (#1286); never `set_result(None)` such an op directly
 - Error lines carry `kind` (#823): wrap the transport calls for an Untether surface in `with message_kind("…")`
   (`transport.py`). The outbox op captures the kind at enqueue and re-applies it on the worker, so set it around the
   `transport.*` call, not inside the outbox
@@ -130,7 +135,8 @@ Plan outlines render as formatted Telegram text via `render_markdown()` + `split
 An idle Claude live session (answered, no in-flight turn or background task; `running_task_is_idle_after_result`) is
 not a "running" task for wording or ambiguity: `/new` says `closed the idle session` (#895), and `/cancel` closes it
 (`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
-Never return early from `/cancel` after closing an idle session.
+Never return early from `/cancel` after closing an idle session. The same holds for any engine's run whose final is out
+while its process is still torn down (`running_task_is_delivered_teardown`, #1176).
 
 A message sent while a chat's first run hasn't reported its session yet waits on that run (`telegram/first_start.py`,
 #1157) and has no queued card, so the job-queue cancel paths never see it. Every way `/cancel` or `/new` stops a

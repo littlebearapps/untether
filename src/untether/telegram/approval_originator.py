@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 from ..interactive.buttons import APPROVAL_COMMAND_IDS
-from ..interactive.questions import get_ask_question_flow
+from ..interactive.questions import ask_flow_for_callback
 from ..interactive.registry import control_request_originator
 from ..logging import get_logger
 
@@ -84,7 +84,7 @@ def callback_originator_mismatch(
             return None
         return request_id, originator
     elif command_id == "aq":
-        flow = get_ask_question_flow(channel_id=chat_id)
+        flow = ask_flow_for_callback(args_text, chat_id)
         if flow is None:
             return None
         request_id = flow.request_id

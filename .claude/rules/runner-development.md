@@ -29,6 +29,8 @@ harder to wire up" and "we already built it for another engine" are not exceptio
    the CLI directly.
 3. Never, for new work: undocumented HTTP endpoints, reading the engine's credential or state files, or process
    signals where a native request does the same job.
+   The one recorded deviation is #1186's read-only look at the Codex *plugin's* job state (not the engine's; no native
+   signal exists), a `shortcut:` to remove when codex-plugin-cc#822 ships. Don't copy the pattern.
 
 Taking an engine's SDK **package** as a dependency (e.g. `claude-agent-sdk`) is an architecture decision for Nathan,
 not something this rule requires or permits on its own. Until then, "use the SDK feature" means "use the CLI/protocol
@@ -41,7 +43,9 @@ test failed:
 
 - available in headless / stream-json mode (not TUI-, Remote-Control- or cloud-only);
 - available without a language binding Untether doesn't use (TypeScript-only SDK features don't count), and not
-  marked experimental;
+  marked experimental. One recorded exception (Nathan, 2026-11-18, v0.36.2): Codex `app-server` counts as native even
+  though the CLI labels the subcommand Experimental. Use its stable-tier methods only, and `experimentalApi` fields
+  only for plan mode (#965), where nothing stable exists; record both in the Codex register;
 - works with the user's own logged-in CLI (subscription auth), not API-key only;
 - meets the feature's real requirement — e.g. survives process exit and restarts, works unattended. Session-scoped
   scheduling that dies with the process is not a native replacement for a durable loop.
@@ -83,7 +87,7 @@ After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** 
 
 `JsonlStreamState` (defined in `src/untether/runner.py`) captures subprocess lifecycle data including `proc_returncode`. Signal deaths (rc>128 or rc<0) are NOT auto-continued — see `_is_signal_death()` in `runner_bridge.py`.
 
-Runner instances are **shared across chats**, so `runner.current_stream` / `runner.last_pid` mean "latest spawn in any chat" and are diagnostics only (#510). Each run's `run_impl` publishes its own stream + PID together via `publish_run_stream(stream, pid)` into the per-run `RunStreamHandle` that `runner_bridge.run_runner_with_cancel` binds through a ContextVar. Bridge code must read the handle, never the runner attributes. A new runner that spawns its own process outside the base `run_impl` must call `publish_run_stream` at spawn.
+Runner instances are **shared across chats**, so `runner.current_stream` / `runner.last_pid` mean "latest spawn in any chat" and are diagnostics only (#510). Each run's `run_impl` publishes its own stream + PID together via `publish_run_stream(stream, pid)` into the per-run `RunStreamHandle` that `runner_bridge.run_runner_with_cancel` binds through a ContextVar. Bridge code must read the handle, never the runner attributes. A new runner that spawns its own process outside the base `run_impl` must call `publish_run_stream` at spawn, and wrap its `env()` result in `utils/env_policy.apply_run_env()` (sets `UNTETHER_RUN_ID` / `UNTETHER_TRIGGER` for cron/webhook runs only, #1120, and strips `UNTETHER__*` config overrides, which can hold the bot token, #1219).
 
 ## Auto-continue
 
@@ -120,7 +124,7 @@ A failed resumed run clears the chat's saved session only through `_resume_failu
 `num_turns` decides (0 → clear); with none, only the turn-count engines in `_TURN_COUNT_ENGINES` (Claude, AMP) clear,
 and every other engine clears only when the error matches `_RESUME_FAILURE_RE` (the CLI's own "session not found"
 wording). A pre-spawn block (`usage[PRESPAWN_BLOCKED_KEY]`, #838 — RAM, concurrency, OpenCode 2.x, Antigravity's
-project/argv/gate refusals) never clears.
+project/argv/gate refusals, Codex app-server unsupported, #961) never clears.
 Neither does a failed `/continue` (`resume_token.is_continue`, #1039): the token names no session. The clear itself
 compares session ids (#1052): `on_resume_failed` returns whether it removed anything, and the stores'
 `clear_engine_session(..., resume=token.value)` keeps a saved session that isn't the one that failed (a stale resume
@@ -170,7 +174,9 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 1. Create `src/untether/runners/myengine.py` extending `JsonlSubprocessRunner`
 2. Create `src/untether/schemas/myengine.py` with msgspec structs
 3. Override: `command()`, `build_args()`, `translate()`, `new_state()`
-4. Export `BACKEND = EngineBackend(id="myengine", build_runner=..., cli_cmd="myengine")`
+4. Export `BACKEND = EngineBackend(id="myengine", build_runner=..., cli_cmd="myengine")`; if its completion cost or
+   tokens are cumulative across resumes (or per run with a session total wanted), declare `usage_scope=` (#850),
+   never a bridge engine table
 5. Register in `pyproject.toml` entry points: `myengine = "untether.runners.myengine:BACKEND"`
 6. Add reference docs in `docs/reference/runners/myengine/`
 7. Add tests mirroring the Codex suite's patterns (`tests/test_codex_runner_helpers.py`, `tests/test_codex_schema.py`, `tests/test_codex_tool_result_summary.py`)

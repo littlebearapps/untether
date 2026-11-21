@@ -86,7 +86,8 @@ class AskQuestionCommand:
     def early_answer_toast(
         args_text: str, *, channel_id: int | None = None
     ) -> str | None:
-        from ...runners.claude import get_ask_question_flow, recently_resolved_ask_flow
+        from ...interactive.questions import ask_flow_for_callback
+        from ...runners.claude import recently_resolved_ask_flow
 
         action = args_text.split(":", 1)[0].lower() if args_text else ""
         # #698: the early answer fires before `handle` runs, so this toast is
@@ -95,24 +96,23 @@ class AskQuestionCommand:
         # #715: both lookups are channel-scoped. Unscoped, a chat with no
         # outstanding question would see another chat's live flow and toast
         # "Selected" for a tap that `handle` then rejects.
-        if get_ask_question_flow(channel_id=channel_id) is None:
+        if ask_flow_for_callback(args_text, channel_id) is None:
             resolved = recently_resolved_ask_flow(channel_id=channel_id)
             if resolved is not None:
                 return _resolved_toast(resolved[1])
         return _EARLY_TOASTS.get(action)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        from ...interactive.questions import ask_flow_for_callback, parse_ask_callback
         from ...runner_bridge import advance_ask_action_model, clear_ask_action_model
         from ...runners.claude import (
             answer_ask_question_with_options,
             format_question_message,
-            get_ask_question_flow,
             get_question_option_buttons,
             recently_resolved_ask_flow,
         )
 
-        parts = ctx.args_text.split(":", 1)
-        action = parts[0].lower() if parts else ""
+        action, option_idx_str, _request_id = parse_ask_callback(ctx.args_text)
 
         # #715: scope the lookup to the chat the tap came from. The resolver
         # returns the FIRST flow in the registry when unscoped, so with two
@@ -122,8 +122,10 @@ class AskQuestionCommand:
         # positional and so never fails. #698 already channel-scoped the
         # sibling `recently_answered_ask_flow` lookup for exactly this
         # reason; the live-flow lookup one line up was left unscoped.
+        # #1274: a tap names its request in the callback data, so a forum
+        # topic's tap can't answer another topic's question in the same chat.
         channel_id = ctx.message.channel_id
-        flow = get_ask_question_flow(channel_id=channel_id)
+        flow = ask_flow_for_callback(ctx.args_text, channel_id)
         if flow is None:
             # #698: an option tap that lost the race against the (async, outbox-
             # queued) keyboard strip is an expected user race, not an unexplained
@@ -143,7 +145,7 @@ class AskQuestionCommand:
 
         if action == "opt":
             # Option selected: "opt:N"
-            option_idx_str = parts[1] if len(parts) > 1 else "0"
+            option_idx_str = option_idx_str or "0"
             try:
                 option_idx = int(option_idx_str)
             except ValueError:

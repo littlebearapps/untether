@@ -132,3 +132,110 @@ def test_838_guard_is_not_overridden() -> None:
             ):
                 offenders.append(f"{module.__name__}.{cls.__name__}")
     assert not offenders, offenders
+
+
+# --- #1195: the block messages name idle sessions and give advice that works --
+
+_SUPPORTED = ("claude", "codex", "opencode", "pi", "antigravity")
+
+
+class _IdleBackend:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    def idle_count(self) -> int:
+        return self._count
+
+
+def _guard_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **kw) -> None:
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+    from untether.utils import proc_diag
+
+    class _Settings:
+        watchdog = WatchdogSettings(**kw)
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Settings(), tmp_path / "untether.toml"),
+    )
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 100 * 1024)
+
+
+@pytest.mark.parametrize("engine", _SUPPORTED)
+@pytest.mark.parametrize("block", ["ram", "concurrency"])
+@pytest.mark.parametrize(
+    ("idle", "clause"),
+    [
+        ({}, None),
+        ({"claude": 2}, ", including 2 idle Claude session(s) kept open"),
+        ({"claude": 1, "other": 1}, ", including 2 idle live session(s)"),
+    ],
+    ids=["no_idle", "idle_claude", "idle_mixed"],
+)
+def test_1195_block_message_names_idle_sessions_and_host_wide_runs(
+    engine: str,
+    block: str,
+    idle: dict[str, int],
+    clause: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five runs open on this host (any engine, any chat) block this
+    engine's spawn: the message says they are host-wide, names the idle
+    sessions on both blocks, and never suggests restarting the service."""
+    from untether import live_sessions
+    from untether.engines import get_backend
+    from untether.utils import subprocess as sp
+
+    if block == "concurrency":
+        _guard_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=5)
+    else:
+        _guard_settings(monkeypatch, tmp_path, prespawn_ram_block_mb=500)
+    monkeypatch.setattr(
+        live_sessions,
+        "_BACKENDS",
+        {name: _IdleBackend(count) for name, count in idle.items()},
+    )
+
+    runner = get_backend(engine).build_runner({}, tmp_path / "untether.toml")
+    sp._incr_live_engine_subprocesses(5)
+    try:
+        result = runner._check_prespawn_ram_guard(resume=None)
+    finally:
+        sp._incr_live_engine_subprocesses(-5)
+
+    assert result is not None and result.ok is False
+    error = result.error or ""
+    assert result.usage == {"prespawn_blocked": block}
+    if block == "concurrency":
+        assert "runs open on this host (5/5" in error
+    else:
+        assert "5 engine run(s) already open on this host" in error
+    if clause is None:
+        assert "idle" not in error
+    else:
+        assert clause in error
+    assert error.endswith(
+        "Wait a minute and send it again, or /cancel a run in the chat that started it."
+    )
+    assert "restart" not in error
+
+
+def test_1195_ram_block_with_no_runs_only_says_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners.codex import CodexRunner
+
+    _guard_settings(monkeypatch, tmp_path, prespawn_ram_block_mb=500)
+
+    result = CodexRunner(codex_cmd="codex", extra_args=[])._check_prespawn_ram_guard(
+        resume=None
+    )
+
+    assert result is not None
+    assert result.error == (
+        "🛑 Insufficient RAM to start engine (100 MB free, threshold 500 MB). "
+        "Wait a minute and send it again."
+    )

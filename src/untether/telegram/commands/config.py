@@ -714,6 +714,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
 
     current_engine, _ = await _resolve_effective_engine(ctx)
     if current_engine not in PERMISSION_MODE_SUPPORTED_ENGINES:
+        if action is not None:
+            _set_late_toast(ctx, _STALE_TOAST)
         await _respond(
             ctx,
             (
@@ -726,6 +728,14 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         return
 
     engine = current_engine
+    if action is not None and ctx.callback_query_id is not None:
+        # #1281: a tap from a page left open for another engine (the chat
+        # switched since) changes nothing; a typed `pm:clr` still clears.
+        if _pm_page_offers(engine, action):
+            _set_late_toast(ctx, _TOAST_LABELS["pm"][action])
+        else:
+            _set_late_toast(ctx, _STALE_TOAST)
+            action = None
 
     # --- Codex approval policy actions ---
     if engine == "codex" and action in _CODEX_PM_MODES:
@@ -1264,6 +1274,14 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     chat_id = ctx.message.channel_id
     # #1165: offer only engines that can run (the startup message's list).
     available = list(ctx.runtime.available_engine_ids())
+
+    if action is not None:
+        # #1281: an engine button for one that can't run here changes nothing.
+        _set_late_toast(
+            ctx,
+            _TOAST_LABELS["ag"].get(action)
+            or (f"Engine: {action}" if action in available else _STALE_TOAST),
+        )
 
     if action == "md_clr":
         # Clear model override (handled here for the merged page)
@@ -2686,6 +2704,20 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
 _TRIGGER_LIST_CAP = 10
 
 
+def _trigger_run_option_segs(trigger: Any) -> str:
+    """``model=`` / ``effort=`` / ``mode=`` segments for a cron or webhook row,
+    only for the options it sets (#743, #1122). Free-form, so escaped."""
+    segs = ""
+    if trigger.model:
+        model = html.escape(_truncate_field(redact_url_secrets(trigger.model)))
+        segs += f"model=<i>{model}</i> · "
+    if trigger.reasoning:
+        segs += f"effort=<i>{html.escape(trigger.reasoning)}</i> · "
+    if trigger.permission_mode:
+        segs += f"mode=<i>{html.escape(trigger.permission_mode)}</i> · "
+    return segs
+
+
 def _format_trigger_relative(ts: float | None) -> str:
     """Render a unix timestamp as a relative-time hint for the triggers page.
 
@@ -2746,7 +2778,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
     webhook_count = mgr.webhook_count
     has_any = cron_count > 0 or webhook_count > 0
 
+    changed = False
     if action == "pause" and has_any and mgr.pause():
+        changed = True
         logger.info(
             "config.triggers.paused",
             chat_id=chat_id_int,
@@ -2755,12 +2789,24 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             webhooks=webhook_count,
         )
     elif action == "resume" and mgr.resume():
+        changed = True
         logger.info(
             "config.triggers.resumed",
             chat_id=chat_id_int,
             sender_id=ctx.message.sender_id,
             crons=cron_count,
             webhooks=webhook_count,
+        )
+
+    if action in ("pause", "resume"):
+        # #1281: say what happened, not what the button asked for.
+        _set_late_toast(
+            ctx,
+            _TOAST_LABELS["tg"][action]
+            if changed
+            else "No crons or webhooks to pause"
+            if not has_any
+            else "Nothing changed",
         )
 
     is_paused = mgr.is_paused
@@ -2812,23 +2858,12 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     schedule_text = describe_cron(
                         cron.schedule, cron.timezone or default_tz
                     )
-                    last = _format_trigger_relative(get_last_fired(cron.id))
-                    # #743: free-form, so escaped (only shown when set).
-                    model_seg = (
-                        f"model=<i>{html.escape(_truncate_field(redact_url_secrets(cron.model)))}</i> · "
-                        if cron.model
-                        else ""
-                    )
-                    effort_seg = (
-                        f"effort=<i>{html.escape(cron.reasoning)}</i> · "
-                        if cron.reasoning
-                        else ""
-                    )
+                    last = _format_trigger_relative(get_last_fired("cron", cron.id))
                     lines.append(
                         f"<code>{cron.id}</code> · {schedule_text} · "
                         f"proj=<i>{_truncate_field(cron.project)}</i> · "
                         f"eng=<i>{_truncate_field(cron.engine)}</i> · "
-                        f"{model_seg}{effort_seg}"
+                        f"{_trigger_run_option_segs(cron)}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_crons) - _TRIGGER_LIST_CAP
@@ -2840,12 +2875,13 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             if chat_webhooks:
                 lines += ["", "<b>Webhooks</b>"]
                 for wh in chat_webhooks[:_TRIGGER_LIST_CAP]:
-                    last = _format_trigger_relative(get_last_fired(wh.id))
+                    last = _format_trigger_relative(get_last_fired("webhook", wh.id))
                     lines.append(
                         f"<code>{wh.id}</code> · <code>{wh.path}</code> · "
                         f"auth=<i>{wh.auth}</i> · "
                         f"proj=<i>{_truncate_field(wh.project)}</i> · "
                         f"eng=<i>{_truncate_field(wh.engine)}</i> · "
+                        f"{_trigger_run_option_segs(wh)}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_webhooks) - _TRIGGER_LIST_CAP
@@ -2977,6 +3013,120 @@ _OPEN_ACTIONS: dict[str, frozenset[str]] = {
 
 CONFIG_ADMIN_GATE = SETTINGS_ADMIN_GATE
 
+_TOAST_LABELS: dict[str, dict[str, str]] = {
+    "pm": {
+        "on": "Permission mode: on (plan)",
+        "off": "Permission mode: off (acceptEdits)",
+        "pa": "Permission mode: plan-auto",
+        "auto": "Permission mode: auto",
+        "clr": "Permission mode: cleared",
+        "fa": "Approval policy: full auto",
+        "ya": "Approval mode: full access",
+        "ae": "Approval mode: edit files",
+        "ro": "Approval mode: read-only",
+        "safe": "Approval policy: safe",
+        "cxc": "Approval policy: cleared",  # #1155
+        # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
+        # conversation keeps the agent it started with, so a switch
+        # across Workspace / Plan first ↔ Ask me / Full access
+        # needs /new.
+        "agw": agy_mode.WORKSPACE_TOAST,
+        "agf": agy_mode.FULL_ACCESS_TOAST,
+        "agc": agy_mode.CLEARED_TOAST,
+        "aga": agy_mode.ASK_TOAST,
+        "agp": agy_mode.PLAN_FIRST_TOAST,
+    },
+    "vb": {
+        "on": "Verbose: on",
+        "off": "Verbose: off",
+        "clr": "Verbose: cleared",
+    },
+    "ag": {"clr": "Engine: cleared", "md_clr": "Model: cleared"},
+    "tr": {
+        "all": "Listen: all",
+        "men": "Listen: mentions",
+        "clr": "Listen: cleared",
+    },
+    "fu": {
+        "q": "Follow-up: queue",
+        "s": "Follow-up: steer",
+        "clr": "Follow-up: cleared",
+    },
+    "tg": {
+        "pause": "⏸ Triggers paused",
+        "resume": "▶️ Triggers resumed",
+    },
+    "md": {"clr": "Model: cleared"},
+    "rs": {
+        "low": "Reasoning: low",
+        "med": "Reasoning: medium",
+        "hi": "Reasoning: high",
+        "xhi": "Reasoning: xhigh",
+        "max": "Reasoning: max",
+        "clr": "Reasoning: cleared",
+    },
+    "aq": {
+        "on": "Ask mode: on",
+        "off": "Ask mode: off",
+        "clr": "Ask mode: cleared",
+    },
+    "dp": {
+        "on": "Diff preview: on",
+        "off": "Diff preview: off",
+        "clr": "Diff preview: cleared",
+    },
+    "cu": {
+        "ac_on": "API cost: on",
+        "ac_off": "API cost: off",
+        "ac_clr": "API cost: cleared",
+        "su_on": "Sub usage: on",
+        "su_off": "Sub usage: off",
+        "su_clr": "Sub usage: cleared",
+        "bg_on": "Budget: on",
+        "bg_off": "Budget: off",
+        "bg_clr": "Budget: cleared",
+        "bc_on": f"{_STOP_AT_LIMIT}: on",
+        "bc_off": f"{_STOP_AT_LIMIT}: off",
+        "bc_clr": f"{_STOP_AT_LIMIT}: cleared",
+    },
+    "rl": {
+        "on": "Resume line: on",
+        "off": "Resume line: off",
+        "clr": "Resume line: cleared",
+    },
+    "loop": {
+        "on": "🔁 Loop mode: on",
+        "off": "🔁 Loop mode: off",
+        "clr": "🔁 Loop mode: cleared",
+    },
+}
+
+# #1281: pages whose change depends on live state (the chat's engine, which
+# engines can run, whether any triggers exist). A tap on them is answered
+# after the handler ran, with the toast for what it actually did, so a stale
+# button never announces a change it didn't make.
+_LATE_ANSWER_PAGES: frozenset[str] = frozenset({"pm", "ag", "tg"})
+_STALE_TOAST = "Out of date, nothing changed. Reopen /config."
+# callback query id -> toast; popped by the dispatch when it answers.
+_LATE_TOASTS: dict[str, str] = {}
+
+# #1281: the actions each engine's permission page offers as buttons.
+_PM_PAGE_ACTIONS: dict[str, frozenset[str]] = {
+    "claude": frozenset({*_PM_MODES, "clr"}),
+    "codex": frozenset({*_CODEX_PM_MODES, "cxc"}),
+    "antigravity": frozenset({*agy_mode.ANTIGRAVITY_PM_ACTIONS, "agc"}),
+    "gemini": frozenset({*_GEMINI_AM_MODES, "ro", "clr"}),
+}
+
+
+def _pm_page_offers(engine: str, action: str) -> bool:
+    return action in _PM_PAGE_ACTIONS.get(engine, frozenset())
+
+
+def _set_late_toast(ctx: CommandContext, text: str) -> None:
+    if ctx.callback_query_id is not None:
+        _LATE_TOASTS[ctx.callback_query_id] = text
+
 
 def parse_config_args(args_text: str) -> tuple[str | None, str | None]:
     """Split `/config` args (typed or callback data) into ``(page, action)``.
@@ -3011,6 +3161,19 @@ class ConfigCommand:
     answer_early = True
 
     @staticmethod
+    def defers_answer(args_text: str) -> bool:
+        """#1281: answer a change on a state-dependent page after ``handle``."""
+        page, _ = parse_config_args(args_text)
+        return (
+            page in _LATE_ANSWER_PAGES
+            and classify_config_action(args_text) == "mutating"
+        )
+
+    @staticmethod
+    def pop_late_toast(owner: str) -> str | None:
+        return _LATE_TOASTS.pop(owner, None)
+
+    @staticmethod
     def early_answer_toast(
         args_text: str, *, channel_id: int | None = None
     ) -> str | None:
@@ -3026,93 +3189,6 @@ class ConfigCommand:
         action = parts[1] if len(parts) > 1 else None
         if action is None:
             return None  # Sub-page navigation only
-        _TOAST_LABELS: dict[str, dict[str, str]] = {
-            "pm": {
-                "on": "Permission mode: on (plan)",
-                "off": "Permission mode: off (acceptEdits)",
-                "pa": "Permission mode: plan-auto",
-                "auto": "Permission mode: auto",
-                "clr": "Permission mode: cleared",
-                "fa": "Approval policy: full auto",
-                "ya": "Approval mode: full access",
-                "ae": "Approval mode: edit files",
-                "ro": "Approval mode: read-only",
-                "safe": "Approval policy: safe",
-                "cxc": "Approval policy: cleared",  # #1155
-                # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
-                # conversation keeps the agent it started with, so a switch
-                # across Workspace / Plan first ↔ Ask me / Full access
-                # needs /new.
-                "agw": agy_mode.WORKSPACE_TOAST,
-                "agf": agy_mode.FULL_ACCESS_TOAST,
-                "agc": agy_mode.CLEARED_TOAST,
-                "aga": agy_mode.ASK_TOAST,
-                "agp": agy_mode.PLAN_FIRST_TOAST,
-            },
-            "vb": {
-                "on": "Verbose: on",
-                "off": "Verbose: off",
-                "clr": "Verbose: cleared",
-            },
-            "ag": {"clr": "Engine: cleared", "md_clr": "Model: cleared"},
-            "tr": {
-                "all": "Listen: all",
-                "men": "Listen: mentions",
-                "clr": "Listen: cleared",
-            },
-            "fu": {
-                "q": "Follow-up: queue",
-                "s": "Follow-up: steer",
-                "clr": "Follow-up: cleared",
-            },
-            "tg": {
-                "pause": "⏸ Triggers paused",
-                "resume": "▶️ Triggers resumed",
-            },
-            "md": {"clr": "Model: cleared"},
-            "rs": {
-                "low": "Reasoning: low",
-                "med": "Reasoning: medium",
-                "hi": "Reasoning: high",
-                "xhi": "Reasoning: xhigh",
-                "max": "Reasoning: max",
-                "clr": "Reasoning: cleared",
-            },
-            "aq": {
-                "on": "Ask mode: on",
-                "off": "Ask mode: off",
-                "clr": "Ask mode: cleared",
-            },
-            "dp": {
-                "on": "Diff preview: on",
-                "off": "Diff preview: off",
-                "clr": "Diff preview: cleared",
-            },
-            "cu": {
-                "ac_on": "API cost: on",
-                "ac_off": "API cost: off",
-                "ac_clr": "API cost: cleared",
-                "su_on": "Sub usage: on",
-                "su_off": "Sub usage: off",
-                "su_clr": "Sub usage: cleared",
-                "bg_on": "Budget: on",
-                "bg_off": "Budget: off",
-                "bg_clr": "Budget: cleared",
-                "bc_on": f"{_STOP_AT_LIMIT}: on",
-                "bc_off": f"{_STOP_AT_LIMIT}: off",
-                "bc_clr": f"{_STOP_AT_LIMIT}: cleared",
-            },
-            "rl": {
-                "on": "Resume line: on",
-                "off": "Resume line: off",
-                "clr": "Resume line: cleared",
-            },
-            "loop": {
-                "on": "🔁 Loop mode: on",
-                "off": "🔁 Loop mode: off",
-                "clr": "🔁 Loop mode: cleared",
-            },
-        }
         page_labels = _TOAST_LABELS.get(page, {})
         if action in page_labels:
             return page_labels[action]

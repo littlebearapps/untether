@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,18 @@ class RunContext:
     # #743: per-cron model / reasoning overrides, applied the same way.
     model: str | None = None
     reasoning: str | None = None
+    # #1120: one id per trigger fire (uuid4), exported to the child as
+    # ``UNTETHER_RUN_ID`` and bound into the run's log context.
+    run_id: str | None = None
+    # #1118: a trigger's own Claude allowlist (``()`` = pre-approve nothing).
+    allowed_tools: tuple[str, ...] | None = None
+    # #1118: a webhook fired under ``[triggers] webhook_defaults = "strict"``;
+    # ``_apply_trigger_overrides`` applies the engine's safe defaults.
+    strict_webhook: bool = False
+    # #1121: a trigger's own env vars (added by ``apply_run_env``, never over
+    # an existing name) and its Claude ``--agent``.
+    env: tuple[tuple[str, str], ...] = ()
+    agent: str | None = None
 
 
 # #751 / #835: trigger sources with nobody present to answer a Telegram
@@ -58,11 +70,7 @@ def attended_context(context: RunContext | None) -> RunContext | None:
     """
     if context is None:
         return None
-    if (
-        context.trigger_source is None
-        and context.permission_mode is None
-        and context.model is None
-        and context.reasoning is None
-    ):
+    # #1120: generic, so a field added later can't leak into a human turn.
+    if replace(context, project=None, branch=None) == RunContext():
         return context
     return RunContext(project=context.project, branch=context.branch)

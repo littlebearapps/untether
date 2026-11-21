@@ -31,11 +31,14 @@ def _make_ctx(
     engine_ids: tuple[str, ...] = ("codex", "claude"),
     default_engine: str = "codex",
     missing: tuple[str, ...] = (),
+    callback_query_id: str | None = None,
 ) -> MagicMock:
     """Build a minimal CommandContext-like object for testing.
 
-    ``missing`` engines are known but not installed (#1165)."""
+    ``missing`` engines are known but not installed (#1165).
+    ``callback_query_id`` marks a button tap (#1281); ``None`` = typed."""
     ctx = MagicMock()
+    ctx.callback_query_id = callback_query_id
     ctx.args_text = args_text
     ctx.text = text
     ctx.message.channel_id = chat_id
@@ -5106,6 +5109,38 @@ class TestTriggersPagePerChat:
         assert "/webhooks/github" in text
         assert "auth=<i>hmac-sha256</i>" in text
         assert "untether" in text
+        assert "model=" not in text and "mode=" not in text
+
+    @pytest.mark.anyio
+    async def test_1122_webhook_row_shows_run_options(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "webhooks": [
+                    {
+                        "id": "qa",
+                        "path": "/hooks/qa",
+                        "auth": "none",
+                        "prompt_template": "x",
+                        "chat_id": 123,
+                        "engine": "claude",
+                        "permission_mode": "auto",
+                        "model": "sonnet",
+                        "reasoning": "low",
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        (row,) = [line for line in text.splitlines() if line.startswith("<code>qa")]
+        assert "model=<i>sonnet</i> · effort=<i>low</i> · mode=<i>auto</i>" in row
 
     @pytest.mark.anyio
     async def test_filters_to_current_chat(self, tmp_path):
@@ -5201,7 +5236,7 @@ class TestTriggersPagePerChat:
         from untether.triggers.settings import parse_trigger_config
 
         history.init_history(tmp_path / "untether.toml")
-        history.record_fired("morning")
+        history.record_fired("cron", "morning")
 
         cfg = parse_trigger_config(
             {
@@ -5356,3 +5391,105 @@ def test_903_no_field_by_field_override_rebuilds():
         and re.search(r"\bEngineOverrides\(\s*\n\s*\w+=", path.read_text())
     ]
     assert offenders == []
+
+
+class TestStaleButtons1281:
+    """#1281: stale /config buttons never change another engine's setting,
+    and the toast says what actually happened."""
+
+    @pytest.mark.anyio
+    async def test_stale_claude_clear_keeps_codex_safe(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.commands.config import _LATE_TOASTS, _STALE_TOAST
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(permission_mode="safe")
+        )
+        ctx = _make_ctx(
+            args_text="pm:clr",
+            text="config:pm:clr",
+            config_path=state_path,
+            default_engine="codex",
+            callback_query_id="cb-stale",
+        )
+        await ConfigCommand().handle(ctx)
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.permission_mode == "safe"
+        assert ConfigCommand.pop_late_toast("cb-stale") == _STALE_TOAST
+        assert "Approval policy" in _last_edit_msg(ctx).text
+        assert _LATE_TOASTS == {}
+
+    @pytest.mark.anyio
+    async def test_stale_codex_safe_on_claude_stores_nothing(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.commands.config import _STALE_TOAST
+
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="pm:safe",
+            text="config:pm:safe",
+            config_path=state_path,
+            default_engine="claude",
+            callback_query_id="cb-1",
+        )
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        assert await prefs.get_engine_override(123, "claude") is None
+        assert await prefs.get_engine_override(123, "codex") is None
+        assert ConfigCommand.pop_late_toast("cb-1") == _STALE_TOAST
+
+    @pytest.mark.anyio
+    async def test_valid_tap_toasts_the_change(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="pm:safe",
+            text="config:pm:safe",
+            config_path=state_path,
+            default_engine="codex",
+            callback_query_id="cb-2",
+        )
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.permission_mode == "safe"
+        assert ConfigCommand.pop_late_toast("cb-2") == "Approval policy: safe"
+
+    @pytest.mark.anyio
+    async def test_unavailable_engine_and_empty_triggers(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.commands.config import _STALE_TOAST
+
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="ag:pi",
+            text="config:ag:pi",
+            config_path=state_path,
+            callback_query_id="cb-3",
+        )
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        assert await prefs.get_default_engine(123) is None
+        assert ConfigCommand.pop_late_toast("cb-3") == _STALE_TOAST
+
+        ctx = _make_ctx(
+            args_text="tg:pause", text="config:tg:pause", callback_query_id="cb-4"
+        )
+        ctx.trigger_manager = MagicMock()
+        ctx.trigger_manager.cron_ids.return_value = []
+        ctx.trigger_manager.webhook_count = 0
+        ctx.trigger_manager.is_paused = False
+        await ConfigCommand().handle(ctx)
+        ctx.trigger_manager.pause.assert_not_called()
+        assert ConfigCommand.pop_late_toast("cb-4") == "No crons or webhooks to pause"
+
+    def test_only_state_dependent_changes_defer(self):
+        assert ConfigCommand.defers_answer("pm:safe")
+        assert ConfigCommand.defers_answer("ag:codex")
+        assert ConfigCommand.defers_answer("tg:pause")
+        assert not ConfigCommand.defers_answer("pm")
+        assert not ConfigCommand.defers_answer("vb:on")

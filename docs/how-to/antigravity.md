@@ -307,8 +307,9 @@ untether agy-gate uninstall
 Useful options: `install --dry-run` prints the files and where they would go without writing anything;
 `install --wait-s <seconds>` sets how long a question or approval waits for an answer (900 by default);
 `status --canary` also sends one trivial agy turn (about 13k tokens) to check the hooks really reach Untether;
-`--agy <path>` points any of them at a particular agy binary (otherwise `[antigravity] cmd`, then `agy` on
-`PATH`). `status` exits with status 1 when the plugin isn't ready.
+`--agy <path>` points any of them at a particular agy binary (otherwise the `cmd` under `[engines.antigravity]` or
+`[antigravity]` in the instance's config, then `agy` on `PATH`); `--config-path <file>` picks the config (default:
+`UNTETHER_CONFIG_PATH`, then `~/.untether/untether.toml`), so a second instance uses the agy it runs. `status` exits with status 1 when the plugin isn't ready.
 
 <!-- TODO: capture screenshot: antigravity-agy-gate-status — terminal output of `untether agy-gate status --project <folder>` with the plugin installed and loaded (crop out the home folder path) -->
 <!-- <img src="../assets/screenshots/antigravity-agy-gate-status.jpg" alt="Terminal output of untether agy-gate status --project showing the plugin installed and loaded for the project" width="360" loading="lazy" /> -->
@@ -400,7 +401,8 @@ Sample output: [Cost budgets → Antigravity](cost-budgets.md#antigravity).
 Cron and webhook runs work with Antigravity, with these rules that differ from chat:
 
 - **They never inherit Full access or Ask me.** A cron gets either only from its own `permission_mode` (`"full"` or
-  `"ask"`). A webhook run never gets either: webhooks have no `permission_mode` of their own. A chat's (or
+  `"ask"`), and a webhook the same way (from v0.36.2; `"full"` on a webhook also needs
+  `allow_unsafe_permission_mode = true`, see [Webhook run options](webhooks-and-cron.md#webhook-run-options)). A chat's (or
   `untether.toml`'s) Full access or Ask me runs a scheduled run as Workspace. A cron with `permission_mode = "ask"`
   has nobody to tap Approve: reads and in-project edits run, everything that would ask is denied at once, and the
   answer ends with a `🔒 unattended … nobody to approve` footer. A scheduled run in **Plan first** (the chat's mode or

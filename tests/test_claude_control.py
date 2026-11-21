@@ -69,6 +69,17 @@ def _make_state_with_session(
     return state, state.factory
 
 
+def _plan_approved_state(
+    session_id: str = "sess-1",
+) -> tuple[ClaudeStreamState, EventFactory]:
+    """#882: an attended plan chat after Approve Plan (the CLI is in
+    `default`): the autonomous state that approves a no-reason tool request."""
+    state, factory = _make_state_with_session(session_id)
+    state.requested_permission_mode = "plan"
+    state.effective_permission_mode = "default"
+    return state, factory
+
+
 # ---------------------------------------------------------------------------
 # Autouse fixture: clear global registries between tests
 # ---------------------------------------------------------------------------
@@ -219,8 +230,9 @@ def test_auto_approve_types_register_input(
     ],
 )
 def test_non_exit_plan_mode_tools_auto_approved(tool_name: str) -> None:
-    """CanUseTool requests for tools other than ExitPlanMode are auto-approved."""
-    state, factory = _make_state_with_session()
+    """CanUseTool requests for tools other than ExitPlanMode are auto-approved
+    (no ask reason, plan already approved; #882 gates the rest)."""
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -724,6 +736,33 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
 
     # Mapping cleaned up
     assert "toolu_lifecycle" not in state.control_action_for_tool
+
+
+@pytest.mark.parametrize(("turn_advanced", "emitted"), [(False, True), (True, False)])
+def test_942_reconcile_completes_only_in_the_registering_turn(
+    turn_advanced: bool, emitted: bool
+) -> None:
+    """#942: a request answered after a live session moved to a later turn is
+    retired silently — no stray "Permission resolved" row in that turn."""
+    from untether.runners.claude import _reconcile_handled_requests
+
+    state, factory = _make_state_with_session("sess-942")
+    state.prompting_mode = True
+    translate_claude_event(
+        _929_request("r-942", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert "r-942" in state.request_to_action
+    if turn_advanced:
+        state.turn += 1
+    _HANDLED_REQUESTS["r-942"] = None
+    events = _reconcile_handled_requests(state)
+    assert bool(events) is emitted
+    assert "r-942" not in state.request_to_action
+    assert "r-942" not in state.request_turn
+    assert "r-942" not in state.pending_control_requests
 
 
 # ===========================================================================
@@ -1237,13 +1276,9 @@ def test_exit_plan_mode_auto_mode_skips_outline_gate() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_expired_control_request_queues_auto_deny() -> None:
-    """Expired control requests should be auto-denied, not just cleaned up.
-
-    Without sending a deny response, the subprocess hangs indefinitely
-    waiting for a control_response that never comes.
-    See: https://github.com/banteg/takopi/issues/215
-    """
+def test_844_old_control_request_is_not_auto_denied() -> None:
+    """#844: the 5-min expiry sweep is retired — the CLI has no permission
+    deadline, so an old request stays answerable when another arrives."""
     import time as _time
 
     state, factory = _make_state_with_session("sess-timeout")
@@ -1265,11 +1300,11 @@ def test_expired_control_request_queues_auto_deny() -> None:
     # Verify it was registered as pending
     assert "req-old" in state.pending_control_requests
 
-    # Backdate the request to be older than the 5-minute timeout
+    # Older than the retired 5-minute timeout.
     evt_data, _ = state.pending_control_requests["req-old"]
     state.pending_control_requests["req-old"] = (evt_data, _time.time() - 301.0)
 
-    # Trigger a NEW control request — the cleanup runs when processing new requests
+    # A sibling request used to trigger the sweep.
     new_event = _decode_event(
         {
             "type": "control_request",
@@ -1283,17 +1318,11 @@ def test_expired_control_request_queues_auto_deny() -> None:
     )
     translate_claude_event(new_event, title="claude", state=state, factory=factory)
 
-    # The expired request should have been removed from pending
-    assert "req-old" not in state.pending_control_requests
-
-    # CRITICAL: It should have been queued for auto-deny (not just discarded)
-    deny_ids = [rid for rid, _ in state.auto_deny_queue]
-    assert "req-old" in deny_ids, (
-        "Expired request must be auto-denied to unblock subprocess"
-    )
-
-    # The new request should still be pending
+    assert "req-old" in state.pending_control_requests
     assert "req-new" in state.pending_control_requests
+    assert state.auto_deny_queue == []
+    assert _REQUEST_TO_SESSION["req-old"] == "sess-timeout"
+    assert "req-old" not in _HANDLED_REQUESTS
 
 
 def test_handled_request_not_auto_denied_on_expiry() -> None:
@@ -1301,8 +1330,8 @@ def test_handled_request_not_auto_denied_on_expiry() -> None:
 
     When send_claude_control_response() handles a request, it adds it to
     _HANDLED_REQUESTS but can't clean up state.pending_control_requests.
-    The reconciliation in translate() should catch this and prevent the
-    5-minute expiry from sending a duplicate deny.
+    The reconciliation in translate() should catch this (an old request is
+    never auto-denied either, #844).
     See: https://github.com/littlebearapps/untether/issues/229
     """
     import time as _time
@@ -1469,7 +1498,7 @@ def test_diff_preview_disabled_still_auto_approves(tool_name: str) -> None:
     """When diff_preview=False, Edit/Write/Bash are auto-approved as normal."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1493,7 +1522,7 @@ def test_diff_preview_disabled_still_auto_approves(tool_name: str) -> None:
 @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
 def test_diff_preview_default_auto_approves(tool_name: str) -> None:
     """When diff_preview=None (default), Edit/Write/Bash are auto-approved."""
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1519,7 +1548,7 @@ def test_diff_preview_enabled_non_previewable_still_auto_approved(
     """When diff_preview=True, non-previewable tools are still auto-approved."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     event = _decode_event(
         {
             "type": "control_request",
@@ -1545,7 +1574,7 @@ def test_diff_preview_bypassed_after_plan_exit_approved(tool_name: str) -> None:
     """After ExitPlanMode is approved, diff_preview tools auto-approve (#283)."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
 
-    state, factory = _make_state_with_session()
+    state, factory = _plan_approved_state()
     session_id = factory.resume.value
     # Simulate plan exit approval
     _PLAN_EXIT_APPROVED.add(session_id)
@@ -2290,11 +2319,9 @@ async def test_drain_hook_callbacks_writes_exact_control_response() -> None:
 # in plan mode — the fleet's primary mode.  See docs/plans/v0.35.5-rc9/
 # decisions.md D-1 and phase 02's risk section.
 #
-# KNOWN GAP (carry-forward, not fixed here): D-1's motivating case is an
-# explicit `ask` rule reaching stage 6 *even under bypassPermissions*.  With
-# the two-tool set retained AND phase 02 keeping `--allowedTools` for
-# autonomous modes, such a rule is still defeated at stage 5 by the
-# allowlist.  Closing that needs a stage-5 change, not a handler change.
+# #882 closed D-1's motivating case: an explicit `ask` rule is decided before
+# allow rules, reaches stage 6 even under bypassPermissions, and now gets a
+# card (see TestAttendedAskClass at the end of this file).
 # ===========================================================================
 
 
@@ -2386,11 +2413,14 @@ def test_749_accept_edits_mode_gates_out_of_scope_tool() -> None:
     assert "/etc/nope.conf" in events[0].action.title
 
 
-@pytest.mark.parametrize("tool_name", ["Bash", "Read", "Glob", "Task"])
+@pytest.mark.parametrize("tool_name", ["Read", "Glob", "Task"])
 def test_749_plan_mode_gate_unchanged_two_tools_only(tool_name: str) -> None:
-    """Plan mode keeps today's behaviour — no approval storm (D-3 H/I)."""
+    """Plan mode research keeps today's behaviour — no approval storm (D-3
+    H/I). Plan-mode writes get a card since #882 (TestAttendedAskClass)."""
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "plan"
+    state.effective_permission_mode = "plan"
 
     rid = f"req-749-plan-{tool_name}"
     events = translate_claude_event(
@@ -2405,13 +2435,15 @@ def test_749_plan_mode_gate_unchanged_two_tools_only(tool_name: str) -> None:
 
 
 def test_749_auto_mode_gate_unchanged() -> None:
-    """CLI `auto` is classifier-gated at stage 4; stage 6 stays cheap (D-1)."""
+    """CLI `auto` is classifier-gated at stage 4 and is not a prompting mode
+    (D-1); what still reaches stage 6 is ask-class and gets a card (#882)."""
     from untether.runners.run_options import is_claude_prompting_mode
 
     assert is_claude_prompting_mode("auto") is False
 
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "auto"
 
     rid = "req-749-auto-bash"
     events = translate_claude_event(
@@ -2421,16 +2453,15 @@ def test_749_auto_mode_gate_unchanged() -> None:
         factory=factory,
     )
 
-    assert events == []
-    assert rid in state.auto_approve_queue
+    _assert_routed_to_approval(events, state, rid)
 
 
 def test_749_bypass_mode_still_honours_stage6_request() -> None:
     """`bypassPermissions` must still *answer* a stage-6 request.
 
     The CLI blocks on stdin until the parent responds, so dropping the
-    request would hang the run.  Honouring it here means queueing a control
-    response — which under the retained two-tool set is an approval.
+    request would hang the run. Since #882 the answer comes from the user's
+    tap: the request is registered with a card, never silently dropped.
     """
     from untether.runners.run_options import is_claude_prompting_mode
 
@@ -2438,6 +2469,7 @@ def test_749_bypass_mode_still_honours_stage6_request() -> None:
 
     state, factory = _make_state_with_session()
     state.prompting_mode = False
+    state.requested_permission_mode = "bypassPermissions"
 
     rid = "req-749-bypass-bash"
     events = translate_claude_event(
@@ -2447,10 +2479,9 @@ def test_749_bypass_mode_still_honours_stage6_request() -> None:
         factory=factory,
     )
 
-    assert events == []
-    # The load-bearing assertion: a response is queued, the request is not
-    # silently dropped.
-    assert rid in state.auto_approve_queue
+    _assert_routed_to_approval(events, state, rid)
+    assert rid in state.pending_control_requests
+    assert _REQUEST_TO_SESSION.get(rid) == "sess-1"
 
 
 def test_749_exit_plan_mode_exception_survives_in_plan_auto() -> None:
@@ -2949,29 +2980,6 @@ async def test_685_send_wrapper_cancelled_returns_false() -> None:
     assert await send_claude_control_response("r-wd", True) is False
 
 
-def _drive_sweep(
-    state: ClaudeStreamState, factory: EventFactory, old_id: str, new_id: str
-) -> list[Any]:
-    import time as _time
-
-    evt_data, _ = state.pending_control_requests[old_id]
-    state.pending_control_requests[old_id] = (evt_data, _time.time() - 301.0)
-    new_event = _decode_event(
-        {
-            "type": "control_request",
-            "request_id": new_id,
-            "request": {
-                "subtype": "can_use_tool",
-                "tool_name": "ExitPlanMode",
-                "input": {},
-            },
-        }
-    )
-    return translate_claude_event(
-        new_event, title="claude", state=state, factory=factory
-    )
-
-
 def _raise_exit_plan(
     state: ClaudeStreamState, factory: EventFactory, request_id: str
 ) -> list[Any]:
@@ -2987,79 +2995,6 @@ def _raise_exit_plan(
         }
     )
     return translate_claude_event(event, title="claude", state=state, factory=factory)
-
-
-def test_685_swept_request_is_expired_not_pending() -> None:
-    from untether.runners.claude import (
-        ControlRequestStatus,
-        classify_control_request,
-        pending_control_requests_for_session,
-    )
-    from untether.telegram.commands.claude_control import ClaudeControlCommand
-
-    state, factory = _make_state_with_session("sess-sweep")
-    _raise_exit_plan(state, factory, "r-old")
-    assert _REQUEST_TO_SESSION["r-old"] == "sess-sweep"
-    _drive_sweep(state, factory, "r-old", "r-new")
-
-    assert "r-old" in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-old" not in _REQUEST_TO_SESSION
-    lookup = classify_control_request("r-old")
-    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
-    assert lookup.prior is not None and lookup.prior.outcome == "expired"
-    assert (
-        ClaudeControlCommand.early_answer_toast("approve:r-old")
-        == "This request has expired"
-    )
-    assert pending_control_requests_for_session("sess-sweep") == 1
-
-
-def test_685_sweep_strips_keyboard_and_records_channel() -> None:
-    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
-
-    state, factory = _make_state_with_session("sess-strip")
-    started = _raise_exit_plan(state, factory, "r-kb")
-    kb_action_id = next(e.action.id for e in started if isinstance(e, ActionEvent))
-    token = set_run_channel_id(4242)
-    try:
-        events = _drive_sweep(state, factory, "r-kb", "r-kb2")
-    finally:
-        reset_run_channel_id(token)
-    completed = [
-        e
-        for e in events
-        if isinstance(e, ActionEvent)
-        and e.phase == "completed"
-        and e.action.id == kb_action_id
-    ]
-    assert completed, "the swept request's keyboard must be stripped"
-    assert "Timed out" in completed[0].action.title
-    record = _HANDLED_REQUESTS["r-kb"]
-    assert record is not None and record.channel_id == 4242
-    assert record.action == "timeout"
-
-
-def test_685_tap_vs_sweep_inflight_wins() -> None:
-    from untether.runners.claude import claim_control_request, mark_request_handled
-
-    state, factory = _make_state_with_session("sess-tvs")
-    _raise_exit_plan(state, factory, "r-tvs")
-    # A tap holds the claim (its write is in flight).
-    claim_control_request("r-tvs", action="approve", owner="cb-tvs")
-    _drive_sweep(state, factory, "r-tvs", "r-tvs-2")
-    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-tvs" in state.pending_control_requests
-    # The write completes: the record is the user's answer.
-    _REQUEST_TO_SESSION.pop("r-tvs", None)
-    mark_request_handled("r-tvs", action="approve")
-    _INFLIGHT_CONTROL_RESPONSES.pop("r-tvs", None)
-    record = _HANDLED_REQUESTS["r-tvs"]
-    assert record is not None and record.outcome == "answered"
-    # A later sweep does nothing for it (reconciled, never auto-denied).
-    state.auto_deny_queue.clear()
-    _raise_exit_plan(state, factory, "r-tvs-3")
-    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
-    assert "r-tvs" not in state.pending_control_requests
 
 
 def test_685_cleanup_drops_claims_for_session() -> None:
@@ -3499,9 +3434,15 @@ async def test_684_inflight_cancel_tap_line_says_withdrawn() -> None:
 def test_684_cancel_after_timeout_keeps_expired() -> None:
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import mark_request_handled
+
     state, factory = _make_state_with_session("sess-to")
     _raise_exit_plan(state, factory, "r-to")
-    _drive_sweep(state, factory, "r-to", "r-to-2")
+    # An expired record (today only from a superseded ``da:`` request).
+    _REQUEST_TO_SESSION.pop("r-to", None)
+    state.pending_control_requests.pop("r-to", None)
+    state.request_to_action.pop("r-to", None)
+    mark_request_handled("r-to", action="superseded", outcome="expired")
     with capture_logs() as logs:
         assert _translate_cancel(state, factory, "r-to") == []
     record = _HANDLED_REQUESTS["r-to"]
@@ -4014,6 +3955,7 @@ def test_822_received_on_auto_approve_path() -> None:
     from structlog.testing import capture_logs
 
     state, factory = _make_state_with_session("sess-822a")
+    state.requested_permission_mode = "plan"
     state.effective_permission_mode = "plan"
     with capture_logs() as logs:
         events = translate_claude_event(
@@ -4293,6 +4235,36 @@ def test_929_detail_omits_absent_fields() -> None:
         assert key not in detail
 
 
+def test_939_in_turn_title_shows_escaped_reason() -> None:
+    """#939: the CLI's decision_reason appears in the in-turn approval title,
+    markdown-escaped, on its own line."""
+    state, factory = _make_state_with_session("sess-939a")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _929_request(
+            "r-939a", reason_type="rule", reason="ask rule `Bash(rm *)`", command="ls"
+        ),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    title = events[0].action.title
+    assert title.startswith("Permission Request [CanUseTool] - tool: Bash")
+    assert "\n🪝 ask rule \\`Bash\\(rm \\*\\)\\`\n" in title
+
+
+def test_939_in_turn_title_without_reason_unchanged() -> None:
+    state, factory = _make_state_with_session("sess-939b")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _929_request("r-939b", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    assert "🪝" not in events[0].action.title
+
+
 def test_929_received_log_names_agent_not_reason() -> None:
     from structlog.testing import capture_logs
 
@@ -4374,6 +4346,70 @@ def test_929_mapping_falls_back_for_unknown_native_id() -> None:
         factory=factory,
     )
     assert state.control_action_for_tool == {"toolu_last": _started_action_id(events)}
+
+
+def test_1251_snapshot_carries_agent_and_reason() -> None:
+    """#1251: a rescue with no tracked action reads who/why from the
+    snapshot; the entry goes once the request is no longer registered."""
+    state, factory = _make_state_with_session("sess-1251s")
+    state.prompting_mode = True
+    for request in (
+        _929_request(
+            "r-agent", "Write", agent_id="a1", reason="outside cwd", file_path="/x"
+        ),
+        _929_request("r-main", command="ls"),
+    ):
+        translate_claude_event(request, title="claude", state=state, factory=factory)
+    snaps = {s.request_id: s for s in state.control_request_snapshot()}
+    assert (snaps["r-agent"].agent_id, snaps["r-agent"].decision_reason) == (
+        "a1",
+        "outside cwd",
+    )
+    assert (snaps["r-main"].agent_id, snaps["r-main"].decision_reason) == (None, None)
+    _REQUEST_TO_SESSION.pop("r-agent")
+    state.control_request_snapshot()
+    assert "r-agent" not in state.request_origin
+
+
+def test_1251_agent_request_does_not_steal_tool_mapping() -> None:
+    """#1251: an agent's request with an unseen ``tool_use_id`` must not take
+    over the main thread's tool mapping, or that tool's result strips the
+    agent's still-pending approval."""
+    state, factory = _make_state_with_session("sess-1251m")
+    state.prompting_mode = True
+    _929_seen_tool(state, "toolu_main")
+    main_action = _started_action_id(
+        translate_claude_event(
+            _929_request("r-main", tool_use_id="toolu_main", command="ls"),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    )
+    agent_action = _started_action_id(
+        translate_claude_event(
+            _929_request(
+                "r-agent",
+                "Write",
+                tool_use_id="toolu_agent_unseen",
+                agent_id="ad1",
+                file_path="/x",
+            ),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    )
+    assert state.control_action_for_tool == {"toolu_main": main_action}
+    out = translate_claude_event(
+        _929_tool_result("toolu_main"), title="claude", state=state, factory=factory
+    )
+    done = [
+        e.action.id
+        for e in out
+        if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    assert main_action in done and agent_action not in done
 
 
 def test_929_live_idle_request_emits_action_without_turn() -> None:
@@ -4569,3 +4605,375 @@ async def test_771_unrelated_pending_approval_keeps_its_buttons() -> None:
         "claude_control:approve:r-bash",
         "claude_control:deny:r-bash",
     ]
+
+
+# ===========================================================================
+# #882: attended ask-class requests in autonomous modes get a card
+# ===========================================================================
+#
+# The CLI hands Untether only the calls it wants a person to decide (an ask
+# rule, a hook `ask`, a safety check, auto's classifier escalation, a
+# plan-mode edit). Autonomous modes used to approve all of them. The decision
+# table is fail-closed: unknown modes, reasons and malformed flags are asks.
+# Shapes from docs/findings/2026-11-18-claude-882-ask-class-matrix.md.
+
+_882_ABSENT: Any = object()
+_882_CLI_REASON_TYPES = (
+    "rule",
+    "mode",
+    "subcommandResults",
+    "permissionPromptTool",
+    "hook",
+    "asyncAgent",
+    "sandboxOverride",
+    "workingDir",
+    "safetyCheck",
+    "classifier",
+    "other",
+)
+
+
+def _882_request(rid: str, tool: str, **fields: Any) -> Any:
+    """A ``can_use_tool`` frame; absent flags are missing keys (as on 2.1.327)."""
+    request: dict[str, Any] = {
+        "subtype": "can_use_tool",
+        "tool_name": tool,
+        "input": {"command": "ls"},
+    }
+    request.update(fields)
+    return _decode_event(
+        {"type": "control_request", "request_id": rid, "request": request}
+    )
+
+
+def _882_state(
+    mode: str | None, *, effective: Any = _882_ABSENT, unattended: bool = False
+) -> ClaudeStreamState:
+    state, _ = _make_state_with_session("sess-882")
+    cli_mode = "plan" if mode == "plan-auto" else mode
+    state.requested_permission_mode = cli_mode
+    state.auto_approve_exit_plan_mode = mode == "plan-auto"
+    state.effective_permission_mode = (
+        cli_mode if effective is _882_ABSENT else effective
+    )
+    if unattended:
+        state.unattended_trigger = "cron:c882"
+        state.unattended_mode = mode
+    return state
+
+
+def _882_feed(state: ClaudeStreamState, event: Any) -> list[Any]:
+    return translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+
+def _882_outcome(state: ClaudeStreamState, rid: str, events: list[Any]) -> str:
+    if rid in state.auto_approve_queue:
+        return "approve"
+    if rid in [r for r, _ in state.auto_deny_queue]:
+        return "deny"
+    if any(
+        isinstance(e, ActionEvent) and e.action.detail.get("inline_keyboard")
+        for e in events
+    ):
+        return "card"
+    return "none"
+
+
+def _882_buttons(events: list[Any]) -> list[str]:
+    return [
+        b["text"]
+        for e in events
+        if isinstance(e, ActionEvent)
+        for row in (e.action.detail.get("inline_keyboard") or {}).get("buttons", [])
+        for b in row
+    ]
+
+
+_A = _882_ABSENT
+
+
+class TestAttendedAskClass:
+    @pytest.mark.parametrize(
+        ("mode", "tool", "fields", "effective", "expected"),
+        [
+            # bypassPermissions: only ask-class calls reach stage 6 (B4).
+            ("bypassPermissions", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            (
+                "bypassPermissions",
+                "Bash",
+                {"decision_reason_type": "safetyCheck", "classifier_approvable": False},
+                _A,
+                "card",
+            ),
+            (
+                "bypassPermissions",
+                "Write",
+                {"decision_reason_type": "hook"},
+                _A,
+                "card",
+            ),
+            ("bypassPermissions", "Bash", {}, _A, "card"),
+            # auto: classifier escalation, ask rule, outside read, no reason.
+            ("auto", "Bash", {"decision_reason_type": "classifier"}, _A, "card"),
+            ("auto", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            ("auto", "Read", {"decision_reason_type": "workingDir"}, _A, "card"),
+            ("auto", "Bash", {}, _A, "card"),
+            # dontAsk: the CLI denies ask-class itself; defensive.
+            ("dontAsk", "Bash", {}, _A, "card"),
+            # plan: edits arrive with `mode` (P1, P6, P7).
+            ("plan", "Write", {"decision_reason_type": "mode"}, _A, "card"),
+            ("plan", "mcp__p__write", {"decision_reason_type": "mode"}, _A, "card"),
+            (
+                "plan",
+                "Write",
+                {"decision_reason_type": "mode", "agent_id": "a1"},
+                "default",
+                "card",
+            ),
+            # plan: routine research with no reason is approved.
+            ("plan", "Glob", {}, _A, "approve"),
+            ("plan", "WebFetch", {}, _A, "approve"),
+            ("plan", "Task", {}, _A, "approve"),
+            # plan: no-reason writes are gated while the CLI is in plan
+            # (or before the first init), approved after Approve Plan.
+            ("plan", "Write", {}, "plan", "card"),
+            ("plan", "Write", {}, None, "card"),
+            ("plan", "Write", {}, "default", "approve"),
+            ("plan", "mcp__x__y", {}, "plan", "card"),
+            ("plan", "mcp__x__y", {}, "default", "approve"),
+            ("plan", "SomeFutureWriteTool", {}, "plan", "card"),
+            # plan-auto (D2-A): plan edits approved; explicit asks still card.
+            ("plan-auto", "Write", {"decision_reason_type": "mode"}, _A, "approve"),
+            ("plan-auto", "Bash", {"decision_reason_type": "mode"}, _A, "approve"),
+            ("plan-auto", "mcp__x__w", {"decision_reason_type": "mode"}, _A, "card"),
+            ("plan-auto", "Write", {}, "plan", "approve"),
+            ("plan-auto", "Bash", {"decision_reason_type": "rule"}, _A, "card"),
+            ("plan-auto", "Write", {"matched_ask_rule": {}}, _A, "card"),
+            # Unknown / missing mode: never "approve".
+            ("futureMode", "Bash", {}, _A, "card"),
+            (None, "Bash", {}, _A, "card"),
+            # Raw, malformed reasons and flags count as asks.
+            ("plan", "Glob", {"decision_reason_type": ""}, _A, "card"),
+            ("plan", "Glob", {"decision_reason_type": {}}, _A, "card"),
+            ("plan-auto", "Glob", {"decision_reason_type": "futureReason"}, _A, "card"),
+            ("plan", "Glob", {"classifier_approvable": "no"}, _A, "card"),
+            ("plan", "Glob", {"classifier_approvable": 1}, _A, "card"),
+            ("plan", "Glob", {"default_to_no": 1}, _A, "card"),
+            ("plan", "Glob", {"matched_ask_rule": {"source": "x"}}, _A, "card"),
+            # Explicitly benign flag values don't gate.
+            ("plan", "Glob", {"classifier_approvable": True}, _A, "approve"),
+            ("plan", "Glob", {"default_to_no": False}, _A, "approve"),
+            ("plan", "Glob", {"requires_user_interaction": False}, _A, "approve"),
+        ],
+    )
+    def test_decision_table(
+        self, mode: str | None, tool: str, fields: dict, effective: Any, expected: str
+    ) -> None:
+        state = _882_state(mode, effective=effective)
+        events = _882_feed(state, _882_request("r882", tool, **fields))
+        assert _882_outcome(state, "r882", events) == expected
+
+    @pytest.mark.parametrize("mode", ["plan", "plan-auto"])
+    @pytest.mark.parametrize("reason", _882_CLI_REASON_TYPES)
+    def test_every_cli_reason_type_cards_in_plan(self, mode: str, reason: str) -> None:
+        """No value of the CLI's enum is routine in plan (the set ships empty)."""
+        state = _882_state(mode)
+        events = _882_feed(
+            state, _882_request("r882", "Glob", decision_reason_type=reason)
+        )
+        assert _882_outcome(state, "r882", events) == "card"
+
+    def test_plan_routine_reasons_never_include_ask_reasons(self) -> None:
+        from untether.runners.claude import (
+            _NEVER_ROUTINE_REASONS,
+            _PLAN_ROUTINE_REASONS,
+        )
+
+        assert _PLAN_ROUTINE_REASONS.isdisjoint(_NEVER_ROUTINE_REASONS)
+        required = {
+            "rule",
+            "hook",
+            "safetyCheck",
+            "classifier",
+            "sandboxOverride",
+            "mode",
+            "workingDir",
+        }
+        assert required <= _NEVER_ROUTINE_REASONS
+        for routine in _PLAN_ROUTINE_REASONS:
+            state = _882_state("plan")
+            events = _882_feed(
+                state,
+                _882_request(
+                    "r882", "Glob", decision_reason_type=routine, matched_ask_rule={}
+                ),
+            )
+            assert _882_outcome(state, "r882", events) == "card"
+
+    def test_ask_class_prompt_logged_at_info(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("bypassPermissions")
+        with capture_logs() as logs:
+            _882_feed(
+                state,
+                _882_request(
+                    "r882",
+                    "Bash",
+                    decision_reason_type="rule",
+                    decision_reason="ask rule",
+                    input={"command": "secret-arg"},
+                ),
+            )
+        received = _events_named(logs, "control_request.received")
+        prompts = _events_named(logs, "control_request.ask_class_prompt")
+        assert [e["request_id"] for e in received] == ["r882"]
+        assert len(prompts) == 1
+        prompt = prompts[0]
+        assert prompt["log_level"] == "info"
+        assert prompt["request_id"] == "r882"
+        assert prompt["reason"] == "ask_class"
+        assert prompt["decision_reason_type"] == "rule"
+        assert prompt["permission_mode"] == "bypassPermissions"
+        assert "secret-arg" not in repr(prompt)
+
+    def test_plan_edit_prompt_reason_is_plan_mode(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("plan")
+        with capture_logs() as logs:
+            _882_feed(state, _882_request("r882", "Write", decision_reason_type="mode"))
+        (prompt,) = _events_named(logs, "control_request.ask_class_prompt")
+        assert prompt["reason"] == "plan_mode"
+
+    def test_routine_plan_research_logs_no_prompt(self) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state("plan")
+        with capture_logs() as logs:
+            _882_feed(state, _882_request("r882", "Glob"))
+        assert _events_named(logs, "control_request.ask_class_prompt") == []
+
+    # --- person-only (requires_user_interaction): never one-tap Approve ----
+
+    @pytest.mark.parametrize(
+        ("mode", "fields"),
+        [
+            ("bypassPermissions", {"requires_user_interaction": True}),
+            (
+                "auto",
+                {
+                    "decision_reason_type": "classifier",
+                    "requires_user_interaction": True,
+                },
+            ),
+            ("plan", {"requires_user_interaction": "yes"}),
+            ("plan-auto", {"requires_user_interaction": True}),
+            ("acceptEdits", {"requires_user_interaction": True}),
+        ],
+    )
+    def test_person_only_denied_with_terminal_note(
+        self, mode: str, fields: dict
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        state = _882_state(mode)
+        state.prompting_mode = mode == "acceptEdits"
+        # U1's exact shape: no reason type, suppress flag, mcp_server set.
+        with capture_logs() as logs:
+            events = _882_feed(
+                state,
+                _882_request(
+                    "r882",
+                    "mcp__probe__probe_consent",
+                    suppress_always_allow_rule=True,
+                    mcp_server={"name": "probe"},
+                    **fields,
+                ),
+            )
+        assert _882_outcome(state, "r882", events) == "deny"
+        assert "✅ Approve" not in _882_buttons(events)
+        message = dict(state.auto_deny_queue)["r882"]
+        assert "terminal" in message
+        assert "claude --resume sess-882" in message
+        notes = [e for e in events if isinstance(e, ActionEvent)]
+        assert notes and all(e.action.kind == "note" for e in notes)
+        assert any("claude --resume sess-882" in e.action.title for e in notes)
+        (logged,) = _events_named(logs, "control_request.person_only_denied")
+        assert logged["request_id"] == "r882"
+        assert logged["tool_name"] == "mcp__probe__probe_consent"
+
+    def test_exitplanmode_with_requires_user_interaction_keeps_plan_card(
+        self,
+    ) -> None:
+        """EP row: ExitPlanMode carries requires_user_interaction=true and no
+        reason. It is excluded before the flag is read."""
+        state = _882_state("plan")
+        events = _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "ExitPlanMode",
+                input={"plan": "do it"},
+                requires_user_interaction=True,
+            ),
+        )
+        assert _882_outcome(state, "r882", events) == "card"
+        assert state.auto_deny_queue == []
+        assert any("Approve" in t for t in _882_buttons(events))
+
+    def test_plan_auto_exitplanmode_with_flag_still_rubber_stamped(self) -> None:
+        state = _882_state("plan-auto")
+        _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "ExitPlanMode",
+                input={"plan": "do it"},
+                requires_user_interaction=True,
+            ),
+        )
+        assert "r882" in state.auto_approve_queue
+
+    def test_ask_user_question_with_flag_not_denied(self) -> None:
+        state = _882_state("bypassPermissions")
+        events = _882_feed(
+            state,
+            _882_request(
+                "r882",
+                "AskUserQuestion",
+                input={"questions": [{"question": "Which?", "options": []}]},
+                requires_user_interaction=True,
+            ),
+        )
+        assert state.auto_deny_queue == []
+        assert "r882" not in state.auto_approve_queue
+        assert _882_outcome(state, "r882", events) == "card"
+
+
+def test_882_schema_decodes_flags_in_odd_shapes() -> None:
+    request = _882_request(
+        "r882",
+        "Bash",
+        matched_ask_rule=["x"],
+        classifier_approvable="no",
+        requires_user_interaction={"a": 1},
+        default_to_no=[1],
+        decision_reason_rule_source="localSettings",
+        server_policy_ask_only=True,
+    ).request
+    assert isinstance(request, claude_schema.ControlCanUseToolRequest)
+    assert request.matched_ask_rule == ["x"]
+    assert request.classifier_approvable == "no"
+    assert request.requires_user_interaction == {"a": 1}
+    assert request.default_to_no == [1]
+
+
+def test_882_schema_absent_flags_are_none() -> None:
+    request = _882_request("r882", "Bash").request
+    assert request.matched_ask_rule is None
+    assert request.classifier_approvable is None
+    assert request.requires_user_interaction is None
+    assert request.default_to_no is None

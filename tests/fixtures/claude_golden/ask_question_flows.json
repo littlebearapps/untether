@@ -285,19 +285,19 @@
         "buttons": [
          [
           {
-           "callback_data": "aq:opt:0",
+           "callback_data": "aq:opt:0:req-ask-1",
            "text": "pytest"
           }
          ],
          [
           {
-           "callback_data": "aq:opt:1",
+           "callback_data": "aq:opt:1:req-ask-1",
            "text": "unittest"
           }
          ],
          [
           {
-           "callback_data": "aq:other",
+           "callback_data": "aq:other:req-ask-1",
            "text": "Other (type reply)"
           }
          ]
@@ -399,7 +399,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": true,
+        "decision_reason": null,
         "input_details": "",
         "kind": "ask",
         "request_id": "req-ask-1",
@@ -426,13 +428,13 @@
      "id": 1,
      "keyboard": [
       [
-       "pytest => aq:opt:0"
+       "pytest => aq:opt:0:req-ask-1"
       ],
       [
-       "unittest => aq:opt:1"
+       "unittest => aq:opt:1:req-ask-1"
       ],
       [
-       "Other (type reply) => aq:other"
+       "Other (type reply) => aq:other:req-ask-1"
       ],
       [
        "cancel => untether:cancel"
@@ -474,7 +476,7 @@
      }
     }
    },
-   "step": "do:tap data=aq:opt:1",
+   "step": "do:tap data=aq:opt:1:req-ask-1",
    "telegram": [
     {
      "extra": {
@@ -483,13 +485,13 @@
      "id": 1,
      "keyboard": [
       [
-       "3.12 => aq:opt:0"
+       "3.12 => aq:opt:0:req-ask-1"
       ],
       [
-       "3.14 => aq:opt:1"
+       "3.14 => aq:opt:1:req-ask-1"
       ],
       [
-       "Other (type reply) => aq:other"
+       "Other (type reply) => aq:other:req-ask-1"
       ]
      ],
      "op": "edit",
@@ -516,7 +518,7 @@
      }
     }
    },
-   "step": "do:tap data=aq:other",
+   "step": "do:tap data=aq:other:req-ask-1",
    "telegram": [
     {
      "chat": 123,
@@ -745,7 +747,7 @@
     "info callback.answered command=\"aq\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
     "info callback.dispatch command=\"aq\" +[chat_id,logger_name]"
    ],
-   "step": "do:tap data=aq:opt:0",
+   "step": "do:tap data=aq:opt:0:req-ask-1",
    "telegram": [
     {
      "chat": 123,
@@ -879,7 +881,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": true,
+        "decision_reason": null,
         "input_details": "",
         "kind": "ask",
         "request_id": "req-ask-2",

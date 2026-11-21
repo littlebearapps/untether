@@ -199,15 +199,15 @@ def test_1165_available_engines_text_notes_unavailable_engines() -> None:
             "opencode": "load_error",
         }
     )
-    # bad_config still runs (on defaults), so it's listed *and* noted.
-    assert runtime.available_engine_ids() == ("codex", "pi")
+    # #1283: bad_config fails closed, so it's only noted.
+    assert runtime.available_engine_ids() == ("codex",)
     assert runtime.engine_availability_notes() == (
         "not installed: amp, claude",
         "misconfigured: pi",
         "failed to load: opencode",
     )
     assert runtime.available_engines_text(code=True) == (
-        "`codex, pi` (not installed: amp, claude; misconfigured: pi;"
+        "`codex` (not installed: amp, claude; misconfigured: pi;"
         " failed to load: opencode)"
     )
 

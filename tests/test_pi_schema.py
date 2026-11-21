@@ -32,6 +32,8 @@ def _decode_fixture(name: str) -> list[str]:
         "pi_stream_success.jsonl",
         "pi_stream_error.jsonl",
         "pi_print_mode_events.jsonl",
+        # #1239: Pi >= 0.66.1 event names, shapes from Pi 1.5.2 docs/json.md
+        "pi_1_5_compaction_events.jsonl",
     ],
 )
 def test_pi_schema_parses_fixture(fixture: str) -> None:

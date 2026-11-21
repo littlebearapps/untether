@@ -538,6 +538,7 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_301: dict[str, str] = {
     "--include-partial-messages": "allowed",
     "--json-schema": "allowed",
     "--max-budget-usd": "allowed",
+    "--max-turns": "allowed",  # hidden from --help since 2.1.325 (#1124)
     "--mcp-config": "allowed",
     "--model": "allowed",
     "--name": "allowed",
@@ -582,6 +583,9 @@ CLAUDE_FLAGS_CLASSIFIED_2_1_301: dict[str, str] = {
 _209_HIDDEN = {
     "--permission-prompt-tool": "hidden since before 2.1.228 (#750)",
     "--client-data-url": "hidden since 2.1.301 (#1156)",
+    # Still parsed and honoured without -p (probe 8, CLI 2.1.328); #1125
+    # builds trigger turn caps on it, so its removal must fail loudly.
+    "--max-turns": "hidden since 2.1.325 (#1124 probe 8, gates #1125)",
 }
 
 _HELP_FLAG_RE = re.compile(
@@ -745,6 +749,27 @@ def test_209_hidden_flags_still_parsed(flag: str, tmp_path) -> None:
     pytest.skip(
         f"unexpected wording for {flag}: {blob.strip()[:200]!r} — re-derive the "
         f"probe (last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_1124_spawn_flags_listed_and_bare_not_print_default() -> None:
+    """#1124: Untether sends `--fallback-model` (config key) and documents
+    `--permission-prompts` as managed, so both must stay in `--help`. `--bare`
+    never reads OAuth/keychain: if the CLI ever makes it the `-p` default
+    (its help text says so, or a `--no-bare` opt-out appears), the legacy
+    `-p` path loses subscription auth — fail loudly instead of assuming."""
+    text = _claude_help().split("\nCommands:")[0]
+    for flag in ("--fallback-model", "--permission-prompts", "--bare"):
+        assert re.search(rf"^  {flag}\b", text, re.MULTILINE), (
+            f"{flag} is gone from `claude --help` — re-check #1124 (last green "
+            f"on CLI {PROBED_CLI_VERSION})"
+        )
+    bare = re.search(r"^  --bare\b.*?(?=^  -)", text, re.MULTILINE | re.DOTALL)
+    assert bare is not None
+    assert "--no-bare" not in text, "a --no-bare opt-out exists: --bare is a default"
+    assert not re.search(r"default|--print|\B-p\b", bare.group(0)), (
+        "the --bare help text now mentions a default / --print — check whether "
+        "the legacy `-p` path still reads OAuth (#1124, #1118)"
     )
 
 
@@ -1189,33 +1214,64 @@ def test_743_effort_choices_match_untether_levels() -> None:
 
 # --- #922 (rc20) ---------------------------------------------------------------
 # The #701 action-required cap latch reads the result's `api_error*` fields
-# first and the headless cap wording second. Re-derived against CLI 2.1.289.
+# first and the headless cap wording second. Re-derived against CLI 2.1.327
+# (#1238).
 
-# The headless builder's templates: `<cap sentence> Switch to another model${K}
-# to continue.` — the cap sentence is a literal or a `${g}` / `${h}` placeholder.
+# The credits builder's templates: `<cap sentence> Switch to another model${K}
+# to continue.` — the cap sentence is a literal or a placeholder.
 _922_HEADLESS_TEMPLATE_RE = re.compile(
     rb"`([^`]{0,90}?) Switch to another model\$\{[\w$]{1,4}\} to continue\.`"
 )
 _922_PLACEHOLDER_RE = re.compile(r"\$\{[\w$]{1,4}\}")
-# What the builder's `${g}` / `${h}` expand to (each literal is asserted present).
+# What the builder's placeholders expand to.
 _922_CAP_SENTENCES = (
-    "You've reached your Fable limit.",
+    "You've hit your team's pooled group budget.",
+    "You've hit your team's pooled group budget. It resets Dec 1, 9am (UTC).",
     "Opus 5.5 requires usage credits.",
     "You've hit your monthly spend limit.",
     "You've hit your channel's monthly spend limit.",
 )
+# #1238: the plan-limit path (every other 429) appends the remedy to the shared
+# rate-limit head `You've hit your <name> · resets <time>` through a nested
+# `${cond?…:""}` template the regex above can't see.
+_1238_PLAN_LIMIT_REMEDY = b"`. Switch to another model${"
+# Head name -> expected (model, kind); None = never this class.
+_1238_PLAN_LIMIT_HEADS = {
+    "Fable limit": ("Fable", "model"),
+    "team's pooled group budget": ("", "team_budget"),
+    "monthly spend limit": ("", "spend"),
+    "channel's monthly spend limit": ("", "spend"),
+    "individual spend limit": ("", "spend"),
+    "org's monthly spend limit": ("", "spend"),
+    "channel's monthly usage limit": ("", "usage_limit"),
+    "individual usage limit": ("", "usage_limit"),
+    "org's monthly usage limit": ("", "usage_limit"),
+    "5-hour limit": None,
+    "weekly limit": None,
+    "Opus limit": None,
+    "Sonnet limit": None,
+}
 _922_CAP_LITERALS = (
-    b"You've reached your Fable limit.",
+    b"team's pooled group budget",
     b" requires usage credits.",
     b"You've hit your monthly spend limit.",
     b"You've hit your channel's monthly spend limit.",
+    b'"Fable limit"',
+    b"individual spend limit",
+    b"org's monthly spend limit",
+    b"individual usage limit",
+    b"channel's monthly usage limit",
+    b"org's monthly usage limit",
+    # The CLI's model-family regex; _ACTION_CAP_RE names the same families.
+    b"(?:Fable|Haiku|Mythos|Opus|Sonnet)",
 )
 # `${K}`: empty when the account can't buy credits, else the personal or the
 # Team/Enterprise usage URL.
 _922_K_VARIANTS = (
     "",
-    ", or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message,",
-    ", or manage usage credits at claude.ai/admin-settings/usage,",
+    ", or manage usage credits at "
+    "https://claude.ai/settings/usage?from=cc_cli_limit_message,",
+    ", or manage usage credits at https://claude.ai/admin-settings/usage,",
 )
 
 
@@ -1235,7 +1291,10 @@ def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
     """Every headless cap message the CLI can emit must arm the latch. This
     probe FAILS (never skips) when the wording moves — that is the drift it
     exists to catch (#922 review amendment 1)."""
-    from untether.runners.claude import _parse_action_required_cap
+    from untether.runners.claude import (
+        _classify_action_required_cap,
+        _parse_action_required_cap,
+    )
 
     for literal in _922_CAP_LITERALS:
         assert cli_blob.find(literal) != -1, (
@@ -1258,6 +1317,22 @@ def test_922_headless_cap_wording_matches_parser(cli_blob: mmap.mmap) -> None:
         if _parse_action_required_cap(text) is None
     ]
     assert not unparsed, f"cap wording the latch no longer recognises: {unparsed}"
+
+    assert cli_blob.find(_1238_PLAN_LIMIT_REMEDY) != -1, (
+        "the plan-limit remedy `. Switch to another model${…}` moved — "
+        "re-derive _ACTION_REMEDY_RE (#1238)"
+    )
+    wrong = {}
+    for name, expected in _1238_PLAN_LIMIT_HEADS.items():
+        for k in _922_K_VARIANTS:
+            text = (
+                f"You've hit your {name} · resets Nov 25, 5pm "
+                f"(Australia/Melbourne). Switch to another model{k} to continue."
+            )
+            got = _classify_action_required_cap(text)
+            if got != (None if expected is None else (*expected, "result_text")):
+                wrong[text] = got
+    assert not wrong, f"plan-limit heads misclassified: {wrong}"
 
 
 def test_922_result_schema_carries_api_error_fields(cli_blob: mmap.mmap) -> None:
@@ -1465,4 +1540,40 @@ def test_926_recurring_max_age_default(cli_blob: mmap.mmap) -> None:
         cli_blob,
         (b"recurringMaxAgeMs:604800000",),
         "the CLI's session-cron max age moved — update CLI_CRON_MAX_AGE_S",
+    )
+
+
+def test_882_decision_reason_types_and_ask_flags_present(cli_blob: mmap.mmap) -> None:
+    """#882: the ``can_use_tool`` reason enum and the four ask flags
+    ``_autonomous_ask_reason`` reads (CLI 2.1.327). A new reason value is a
+    card in plan anyway (fail-closed); this makes the drift visible."""
+    from untether.runners.claude import _NEVER_ROUTINE_REASONS
+
+    m = re.search(rb'\[((?:"[A-Za-z]+",)*"safetyCheck"(?:,"[A-Za-z]+")*)\]', cli_blob)
+    if m is None:
+        pytest.fail("the CLI's decision_reason_type enum moved — re-run the #882 probe")
+    declared = {v.decode() for v in re.findall(rb'"([^"]+)"', m.group(1))}
+    assert declared == {
+        "rule",
+        "mode",
+        "subcommandResults",
+        "permissionPromptTool",
+        "hook",
+        "asyncAgent",
+        "sandboxOverride",
+        "workingDir",
+        "safetyCheck",
+        "classifier",
+        "other",
+    }
+    assert declared >= _NEVER_ROUTINE_REASONS
+    _require_bytes(
+        cli_blob,
+        (
+            b"classifier_approvable",
+            b"matched_ask_rule",
+            b"requires_user_interaction",
+            b"default_to_no",
+        ),
+        "a #882 ask flag left the can_use_tool schema — re-run the probe",
     )

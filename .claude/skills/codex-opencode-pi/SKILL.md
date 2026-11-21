@@ -29,7 +29,7 @@ A failed **resumed** run keeps the chat's saved session unless the error names t
 | **CLI** | `codex exec --json` | `opencode run --format json` | `pi --print --mode json` |
 | **Event model** | Turn-based (items in turns) | Step-based (tools in steps) | Agent-based (messages + tools) |
 | **Resume line** | `` `codex resume <thread_id>` `` | `` `opencode --session ses_XXX` `` | `` `pi --session <token>` `` |
-| **Resume token** | thread_id (UUID) | ses_XXXX (26+ chars) | UUID short (8 chars) or path |
+| **Resume token** | thread_id (UUID) | ses_XXXX (26+ chars) | full session UUID (#1264) or path |
 | **Final answer** | `agent_message` item | Accumulated `text` events | `message_end` assistant content |
 | **Error signal** | `turn.failed` | `error` event / missing `step_finish` | `stopReason` in `message_end` |
 
@@ -45,6 +45,8 @@ A failed **resumed** run keeps the chat's saved session unless the error names t
 | `src/untether/schemas/codex.py` | msgspec structs for Codex events |
 | `docs/reference/runners/codex/exec-json-cheatsheet.md` | JSONL event shapes |
 | `docs/reference/runners/codex/untether-events.md` | Event mapping spec |
+| `docs/reference/runners/codex/runner.md` | App-server drift probe + pre-spawn support gate (#961); transport/register arrive with #962 |
+| `src/untether/runners/codex_app_server.py`, `src/untether/schemas/codex_app_server.py` | App-server support gate and the protocol contract it checks |
 
 ### CLI invocation
 
@@ -57,7 +59,7 @@ codex [extra_args…] [--profile P] [--model MODEL] [-c model_reasoning_effort=L
 - Prompt on stdin (trailing `-` means read stdin)
 - Resume: `resume <thread_id> -` (`resume --last -` for `/continue`)
 - Safe mode is genuinely read-only: `--sandbox read-only` (exec-level, so it outranks a root-level sandbox flag), only in `safe` permission mode and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
-- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209)
+- `extra_args` sit at the root (before `exec`) and are checked by `runners/extra_args_guard.py`: bypass/sandbox-escape flags (`--yolo`, `--sandbox danger-full-access`, `-c …danger…`, `-C/--cd`, …) disable the engine at load (#209); `--trust` (0.169.0) is refused too, since it saves project trust for future chats (#1040)
 - `--skip-git-repo-check --color=never` for clean output
 
 ### JSONL events
@@ -190,7 +192,7 @@ pi --print --mode json [--session SESSION_PATH] \
 ```
 
 - Prompt as positional arg (prefixed with space if starts with `-`)
-- Resume: `--session <token>` (short ID or full path)
+- Resume: `--session <token>` (full session id, an older short prefix, or a session-file path)
 - Minimum version: 0.45.1
 - Environment: `NO_COLOR=1`, `CI=1` (set by runner)
 
@@ -209,9 +211,9 @@ pi --print --mode json [--session SESSION_PATH] \
 
 Pi has a unique resume mechanism:
 1. For new runs, Untether generates a session `.jsonl` file path
-2. If a `session` header arrives with a UUID, the resume token is promoted to the 8-char short ID
+2. If a `session` header arrives with a UUID, the resume token is promoted to the full session id (#1264: a UUIDv7's 8-hex prefix collides within ~65 s)
 3. `allow_id_promotion` flag ensures this only happens once
-4. This gives a user-friendly resume token instead of a long path
+4. This gives an id resume token instead of a long path
 
 Session path format: `~/.pi/agent/sessions/--<sanitized-cwd>--/<date>-<uuid>.jsonl`
 

@@ -166,7 +166,14 @@ class SessionStatsStore:
             self._data = {"version": 1, "engines": {}}
 
     def _save(self) -> None:
-        atomic_write_json(self.path, self._data)
+        # #1276: stats are accounting; a full or read-only disk must never
+        # break final delivery. The in-memory data stays current.
+        try:
+            atomic_write_json(self.path, self._data)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "session_stats.save_failed", path=str(self.path), exc_info=True
+            )
 
     def record_run(
         self,

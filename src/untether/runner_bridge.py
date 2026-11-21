@@ -32,6 +32,7 @@ from .background_status import (
 )
 from .context import RunContext
 from .error_hints import SESSION_NOT_LOADED_HINT as _SESSION_NOT_LOADED_HINT
+from .error_hints import codex_error_info_hint as _codex_error_info_hint
 from .error_hints import get_error_hint as _get_error_hint
 from .events import EventFactory
 from .interactive.buttons import CONTROL_CALLBACK_PREFIXES
@@ -49,7 +50,13 @@ from .model import (
 )
 from .orphan_approvals import OrphanApprovalSurface
 from .presenter import Presenter
-from .progress import ProgressState, ProgressTracker, keyboard_action, keyboard_actions
+from .progress import (
+    ProgressState,
+    ProgressTracker,
+    close_open_actions,
+    keyboard_action,
+    keyboard_actions,
+)
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
@@ -63,7 +70,7 @@ from .runner import (
     review_card,
     set_run_stream_handle,
 )
-from .session_costs import RUN_TOKENS_KEY, TokenScope, token_counts
+from .session_costs import RUN_TOKENS_KEY, token_counts, usage_scope
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -1326,11 +1333,13 @@ def _apply_cost_delta(
     """Return ``usage`` with ``total_cost_usd`` replaced by the spend since
     the previous result of the same session (#778).
 
-    Claude only: its ``total_cost_usd`` is session-cumulative (probe F12).
-    Other engines' values are per-run as far as we know and pass through.
-    The cumulative value is kept as ``session_total_cost_usd``.
+    Only for an engine whose runner declares ``cost="session_cumulative"``
+    (#850; Claude, probe F12). Other engines' values are per-run and pass
+    through. The cumulative value is kept as ``session_total_cost_usd``.
     """
-    if engine != "claude" or not usage or not session_id:
+    if not usage or not session_id:
+        return usage
+    if usage_scope(engine, usage).get("cost") != "session_cumulative":
         return usage
     raw = usage.get("total_cost_usd")
     if not isinstance(raw, (int, float)):
@@ -1379,18 +1388,6 @@ def _engine_note(stream: Any, name: str) -> str | None:
     return note if isinstance(note, str) and note else None
 
 
-# #419: engines whose CompletedEvent token usage needs the session ledger.
-# Codex's turn.completed.usage is the thread's running total (every earlier
-# ``exec resume`` run included), so runs report the delta.
-_TOKEN_LEDGER_SCOPES: dict[str, TokenScope] = {
-    "codex": "thread_cumulative",
-    # #558: agy's result.usage is cumulative across --conversation resumes.
-    "antigravity": "thread_cumulative",
-    # #417: OpenCode reports per run; the ledger keeps a session total.
-    "opencode": "per_run",
-}
-
-
 def _apply_token_delta(
     engine: str,
     session_id: str | None,
@@ -1400,10 +1397,12 @@ def _apply_token_delta(
 ) -> dict[str, Any] | None:
     """Return ``usage`` with its token fields rewritten to this run's share
     (#419). Passthrough (the same object, no ``token_delta_source``) when the
-    engine is not in ``_TOKEN_LEDGER_SCOPES``, there is no session id, or the
-    usage carries no token counts."""
-    scope = _TOKEN_LEDGER_SCOPES.get(engine)
-    if scope is None or not usage or not session_id:
+    runner declares no ``tokens`` usage scope (#850), there is no session id,
+    or the usage carries no token counts."""
+    if not usage or not session_id:
+        return usage
+    scope = usage_scope(engine, usage).get("tokens")
+    if scope is None:
         return usage
     counts = token_counts(usage)
     if counts is None:
@@ -2148,6 +2147,15 @@ def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+# #1240: Codex skipped an untrusted project's .codex/ folder. The progress row
+# isn't kept in the final, so the runner flags ``usage["project_config_untrusted"]``.
+_UNTRUSTED_PROJECT_FOOTER = (
+    "\n\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex skipped this project's"
+    " .codex/ settings (untrusted): https://littlebearapps.com/help/untether/"
+    "troubleshooting/#codex-ignores-my-projects-mcp-servers-or-codexconfigtoml"
+)
+
+
 # #835: unattended (cron / webhook) runs. The runner carries the turn's
 # denials on ``usage["unattended"]``; the final gets one footer line and, once
 # per trigger per process, what to change (bounded, oldest evicted first).
@@ -2357,6 +2365,8 @@ class RunningTask:
     # #1159: the run's engine, known before its session is — the drain-timeout
     # notice names it ("starting /codex"), never a hardcoded /claude.
     engine: str | None = None
+    # #1176: the run's final has been handed to the transport.
+    final_sent: bool = False
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -2670,6 +2680,9 @@ class ProgressEdits:
 
     async def run(self) -> None:
         if self.progress_ref is None:
+            # #1284: no card to repaint, but the run still needs its stall
+            # watchdog (notices and auto-cancel are separate messages).
+            await self._stall_monitor()
             return
         stall_scope = anyio.CancelScope()
 
@@ -5077,8 +5090,8 @@ class ProgressEdits:
                 and evt.action.detail.get("inline_keyboard")
             ):
                 orphans.offer(evt.action)
-        if self.progress_ref is None:
-            return
+        # #1284: stall bookkeeping runs without a progress message too, or
+        # the monitor would read a busy run as silent.
         now = self.clock()
         if self._stall_warned:
             elapsed_stall = now - self._last_event_at
@@ -5995,6 +6008,15 @@ def running_task_shows_progress(task: Any, ref: MessageRef) -> bool:
     return not shows_final
 
 
+def running_task_is_delivered_teardown(task: Any) -> bool:
+    """#1176: a run (not a live session) whose final is out while its process
+    is still being torn down — nothing the user can see is running."""
+    if not getattr(task, "final_sent", False):
+        return False
+    stream = getattr(getattr(task, "edits", None), "stream", None)
+    return not getattr(getattr(stream, "engine_state", None), "live_mode", False)
+
+
 def running_task_is_idle_after_result(task: Any) -> bool:
     """#895: a live session that has answered and has nothing left in flight
     — between turns, no background task holding it open (#801) and no queued
@@ -6254,7 +6276,10 @@ def _run_error_hint(
       user to send /new would throw away a resumable conversation."""
     if close_reason == "abs_cap":
         return _ABS_CAP_HINT
-    hint = _get_error_hint(raw_error)
+    # #962: Codex app-server's typed error outranks the text patterns.
+    hint = _codex_error_info_hint(
+        (usage or {}).get("codex_error_info")
+    ) or _get_error_hint(raw_error)
     if hint == _SESSION_NOT_LOADED_HINT:
         turns = (usage or {}).get("num_turns")
         if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
@@ -6268,6 +6293,12 @@ _CLOSING_NOTICE_FINAL_WAIT_S = 10.0
 _CLOSING_NOTICE_POLL_S = 0.05
 
 
+_CODEX_JOBS_CLOSED_LINE = (
+    "Codex plugin jobs stop when the session closes, and their results can't "
+    "be fetched afterwards."
+)
+
+
 def _live_closing_notice(
     reason: str,
     tasks: list[str],
@@ -6278,9 +6309,13 @@ def _live_closing_notice(
     rearm_on_progress: bool = True,
     mid_turn: bool = False,
     max_s: float | None = None,
+    codex_jobs: list[str] | None = None,
 ) -> str:
     """User-facing text for a live session closing over running background
     tasks (#776) or background hooks (#812, automatic closes only).
+
+    #1186 step 3: ``codex_jobs`` (Codex plugin jobs the close stops) are
+    named with the tasks, plus a line saying their results are gone.
 
     #829: it never promises "reply to continue" — whether the next message
     continues the same session is only known once the process has exited
@@ -6289,6 +6324,18 @@ def _live_closing_notice(
     #887: ``mid_turn`` — an ``abs_cap`` close cut a running turn short (it
     outlived the grace after ``max_s``, the session time limit). That is
     announced even with no task to name."""
+    if codex_jobs:
+        text = _live_closing_notice(
+            reason,
+            [*tasks, *codex_jobs],
+            hooks,
+            hook_count,
+            max_hold_s=max_hold_s,
+            rearm_on_progress=rearm_on_progress,
+            mid_turn=mid_turn,
+            max_s=max_s,
+        )
+        return f"{text}\n{_CODEX_JOBS_CLOSED_LINE}"
     if hooks:
         hook_text = _live_closing_hooks_notice(hooks, hook_count)
         if not tasks and not (reason == "abs_cap" and mid_turn):
@@ -7301,16 +7348,13 @@ async def handle_message(
         # fails.
         min_render_interval=progress_cfg.min_render_interval,
     )
-    if running_task is not None and running_tasks is not None:
-        # #1082: from the start-up key to the run's progress message.
-        if progress_ref is not None:
-            running_task.edits = edits
-            running_tasks[progress_ref] = running_task
-        elif not running_task.cancel_requested.is_set():
-            # No progress message: untracked, as before. A cancel asked for
-            # during start-up is still honoured (the runner never starts).
-            running_task.done.set()
-            running_task = None
+    # #1082: from the start-up key to the run's progress message. #1284:
+    # with no progress message the run stays under its start-up key, so
+    # /cancel and the stall watchdog still reach it.
+    task_ref = progress_ref or starting_ref
+    if running_task is not None and running_tasks is not None and task_ref:
+        running_task.edits = edits
+        running_tasks[task_ref] = running_task
 
     # Apply watchdog settings to runner and edits
     edits.run_level = True
@@ -7402,6 +7446,17 @@ async def handle_message(
     # when that early path did not run or failed — from the post-return
     # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
     final_delivery = {"sent": False}
+    # #1123: the run's triggers_runs.jsonl line is written once.
+    journal_state = {"written": False}
+
+    def _journal(outcome: str, *, ok: bool, **fields: Any) -> None:
+        if journal_state["written"] or not (context and context.trigger_source):
+            return
+        journal_state["written"] = True
+        from .triggers.journal import record_run
+
+        record_run(context, outcome=outcome, ok=ok, engine=runner.engine, **fields)
+
     # #596: set by _deliver_final when an empty-result no-op resume is detected
     # and eligible for a single automatic resend. Read by the post-return
     # auto-resend block below (independent of final_delivery["sent"], since the
@@ -7518,6 +7573,10 @@ async def handle_message(
         if (compaction := _compaction_usage(completed.usage)) is not None:
             usage_log["compactions"] = compaction.get("count")
             usage_log["compaction_trigger"] = compaction.get("trigger")
+        # #1123: this result's throttling (Claude reports a per-result delta).
+        throttle = (completed.usage or {}).get("throttle")
+        if isinstance(throttle, dict):
+            usage_log.update(throttle)
         logger.info(
             "runner.completed",
             ok=completed.ok,
@@ -7532,6 +7591,26 @@ async def handle_message(
             # previously logged with no record of which model produced it.
             **_model_log_fields(t_tracker.meta),
         )
+        if turn is None:
+            # #1123: the run's first result is its journal line; a live
+            # session's later turns are human follow-ups or wake turns.
+            from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+            aborted = (completed.usage or {}).get(
+                "terminal_reason"
+            ) in CLAUDE_ABORTED_TERMINAL_REASONS
+            _journal(
+                "cancelled" if aborted else ("ok" if completed.ok else "error"),
+                ok=bool(completed.ok),
+                error=completed.error,
+                session_id=resume_value,
+                model=_model_log_fields(t_tracker.meta).get("model"),
+                elapsed_s=elapsed_s,
+                usage={
+                    **(completed.usage or {}),
+                    "total_cost_usd": (cost_usage or {}).get("total_cost_usd"),
+                },
+            )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
 
@@ -7991,7 +8070,8 @@ async def handle_message(
             cost_line = _format_run_cost(
                 run_usage,
                 thread_cumulative=(
-                    _TOKEN_LEDGER_SCOPES.get(runner.engine) == "thread_cumulative"
+                    usage_scope(runner.engine, run_usage).get("tokens")
+                    == "thread_cumulative"
                 ),
             )
             if cost_line:
@@ -8042,6 +8122,11 @@ async def handle_message(
         if unattended is not None:
             final_rendered = _insert_footer_line(
                 final_rendered, _unattended_footer(unattended)
+            )
+
+        if (completed.usage or {}).get("project_config_untrusted") is True:
+            final_rendered = _insert_footer_line(
+                final_rendered, _UNTRUSTED_PROJECT_FOOTER
             )
 
         if plain_refusal:
@@ -8144,6 +8229,8 @@ async def handle_message(
         # multi-chunk final cut short part-way queues its remaining chunks
         # in the transport, so it is neither duplicated nor left partial.
         delivery["sent"] = True
+        if running_task is not None:
+            running_task.final_sent = True
         try:
             final_ref = await send_result_message(
                 cfg,
@@ -8370,6 +8457,7 @@ async def handle_message(
             return
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
         hooks = [h for h in payload.get("hooks", []) if isinstance(h, str)]
+        codex_jobs = [j for j in payload.get("codex_jobs", []) if isinstance(j, str)]
         raw_count = payload.get("hook_count")
         hook_count = (
             raw_count
@@ -8383,7 +8471,7 @@ async def handle_message(
         cap_mid_turn = (
             payload.get("reason") == "abs_cap" and payload.get("mid_turn") is True
         )
-        if not tasks and not hooks and not cap_mid_turn:
+        if not tasks and not hooks and not codex_jobs and not cap_mid_turn:
             if payload.get("reason") == "wake_cap":
                 # #925 §14.4: say why the self-paced loop stopped.
                 try:
@@ -8420,8 +8508,9 @@ async def handle_message(
                 if isinstance(raw_max, int | float) and not isinstance(raw_max, bool)
                 else None
             ),
+            codex_jobs=codex_jobs,
         )
-        if tasks or cap_mid_turn:
+        if tasks or codex_jobs or cap_mid_turn:
             closing_named_tasks["reason"] = str(payload.get("reason"))
         if payload.get("reason") == "abs_cap" and not cap_mid_turn:
             await _await_final_handed_off()
@@ -8654,10 +8743,12 @@ async def handle_message(
             return
         # #890: a cancelled turn ends a run of capped repeats too.
         capped_wake_error.clear()
-        state = ctx.tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
+        state = close_open_actions(
+            ctx.tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
+            )
         )
         rendered = effective_presenter.render_progress(
             state,
@@ -9012,8 +9103,7 @@ async def handle_message(
     error: Exception | None = None
 
     async with anyio.create_task_group() as tg:
-        if progress_ref is not None:
-            tg.start_soon(run_edits)
+        tg.start_soon(run_edits)
         tg.start_soon(_run_bg_status)
         turn_task_group["tg"] = tg
         turn_router.bind_task_group(tg)
@@ -9055,8 +9145,8 @@ async def handle_message(
             unregister_live_count_source(_bg_count_token)
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
-                if progress_ref is not None:
-                    running_tasks.pop(progress_ref, None)
+                if task_ref is not None and running_tasks.get(task_ref) is running_task:
+                    running_tasks.pop(task_ref, None)
             if not outcome.cancelled and error is None:
                 # Give pending progress edits a chance to flush if they're ready.
                 await anyio.lowlevel.checkpoint()
@@ -9091,6 +9181,13 @@ async def handle_message(
 
         if error is not None:
             release_reason = "error"
+            _journal(
+                "error",
+                ok=False,
+                error=f"{error.__class__.__name__}: {error}",
+                session_id=outcome.resume.value if outcome.resume else None,
+                elapsed_s=elapsed,
+            )
             sync_resume_token(progress_tracker, outcome.resume)
             raw_err = _format_error(error)
             hint = _get_error_hint(raw_err)
@@ -9169,10 +9266,18 @@ async def handle_message(
                 resume=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
-            state = progress_tracker.snapshot(
-                resume_formatter=runner.format_resume,
-                context_line=context_line,
-                meta_formatter=format_meta_line,
+            _journal(
+                "cancelled",
+                ok=False,
+                session_id=resume.value if resume else None,
+                elapsed_s=elapsed,
+            )
+            state = close_open_actions(
+                progress_tracker.snapshot(
+                    resume_formatter=runner.format_resume,
+                    context_line=context_line,
+                    meta_formatter=format_meta_line,
+                )
             )
             # #1061: an engine holding its answer for background work
             # (Antigravity) says where the answer went.

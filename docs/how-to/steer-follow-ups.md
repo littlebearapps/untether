@@ -70,7 +70,7 @@ The message is queued as normal and Untether tells you why:
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
 | `↪️ Earlier messages are still waiting to run — queued behind them.` | A message you sent earlier is still queued for this session, so this one waits its turn behind it instead of jumping ahead into the current run (`/steer <text>` still steers) ([#1164](https://github.com/littlebearapps/untether/issues/1164)). |
 
-In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)).
+In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)). Likewise a `/<engine>` message for a different engine from the busy run (say `/codex …` while Claude Code is working) starts on its own without a notice ([#1177](https://github.com/littlebearapps/untether/issues/1177)).
 
 With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` tells you too, with two exceptions: while Claude is waiting on a question (`AskUserQuestion`) the text is queued without a note, and if your model or mode changed since the session started, the queued run posts its own notice when it restarts the session with the new settings.
 

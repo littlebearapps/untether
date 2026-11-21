@@ -509,7 +509,7 @@ def test_denied_actions_nonempty_response_gets_notice_appended() -> None:
         ),
         (
             EngineRunOptions(unattended_trigger="webhook:y"),
-            "Webhook runs never get Full access",
+            "allow_unsafe_permission_mode = true` on this webhook",
             "/config",
         ),
         (

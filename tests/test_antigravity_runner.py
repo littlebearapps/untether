@@ -536,6 +536,10 @@ def test_tool_name_mapping() -> None:
         ("view_file", {"AbsolutePath": "/x/test.py"}, "tool", "test.py"),
         ("write_to_file", {"TargetFile": "/x/foo.py"}, "file_change", "foo.py"),
         ("replace_file_content", {"TargetFile": "/x/foo.py"}, "file_change", "foo.py"),
+        # #1272: agy 1.5.x names (live on 1.5.12), path in ``Path``.
+        ("read_file", {"Path": "/x/hello.py"}, "tool", "hello.py"),
+        ("write_file", {"Path": "/x/new.py"}, "file_change", "new.py"),
+        ("edit_file", {"Path": "/x/foo.py"}, "file_change", "foo.py"),
         ("run_command", {"CommandLine": "ls -la"}, "command", "ls -la"),
         ("grep_search", {"Query": "needle", "SearchPath": "/x"}, "tool", "needle"),
         ("find_by_name", {"Pattern": "*.py", "SearchDirectory": "/x"}, "tool", "*.py"),
@@ -660,6 +664,29 @@ def test_session_started_logs_agy_version(monkeypatch: pytest.MonkeyPatch) -> No
     assert started["agy_version"] == "1.3.2"
     assert started["resumed"] is False
     assert started["session_id"] == "90ca6744-e8d4-46d4-b5fc-64a30ae2fa6d"
+
+
+@pytest.mark.anyio
+async def test_agy_version_survives_a_self_update_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #1212: agy updated itself (new mtime) between the version check and
+    # the spawn; the run still records the version it was checked against.
+    script = tmp_path / "agy"
+    script.write_text("#!/bin/sh\necho 1.4.10\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(agy, "_VERSION_CACHE", {})
+    monkeypatch.setattr(agy, "_probe_agy_version", agy._run_agy_version)
+    runner = AntigravityRunner(antigravity_cmd=str(script))
+    assert await runner._unsupported_version_event(None) is None
+    os.utime(script, (1, 1))
+    assert agy.cached_agy_version(str(script)) is None
+    state = runner.new_state("hi", None)
+    runner.start_run("hi", None, state=state)
+    assert state.agy_version == "1.4.10"
+    # Consumed: a later run in the same context never reuses it.
+    runner.start_run("hi", None, state=state)
+    assert state.agy_version is None
 
 
 # ── env ─────────────────────────────────────────────────────────────────────
@@ -884,17 +911,17 @@ async def test_version_guard_fails_open_on_garbage(
 async def test_version_guard_quiet_on_probed_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091, #1156, #1160, #1209: the drift suite was re-run on agy 1.4.10, so
-    neither a 1.4.10 run nor an older one logs ``newer_than_probed`` on every
-    message."""
-    for version in ("1.3.5", "1.3.6", "1.4.0", "1.4.10"):
+    """#1091, #1156, #1160, #1209, #1254, #1272: the drift suite was re-run
+    on agy 1.5.12, so neither a 1.5.12 run nor an older one logs
+    ``newer_than_probed`` on every message."""
+    for version in ("1.3.5", "1.3.6", "1.4.0", "1.4.10", "1.5.10", "1.5.12"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None
         assert not any(
             e["event"] == "antigravity.version.newer_than_probed" for e in logs
         ), version
-    for version in ("1.4.11", "1.5.0"):
+    for version in ("1.5.13", "1.6.0"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None

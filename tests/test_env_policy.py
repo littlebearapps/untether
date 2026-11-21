@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from untether.context import RunContext
 from untether.utils.env_policy import (
     _is_allowed,
     _reset_log_latch_for_tests,
+    apply_run_env,
     filtered_env,
     is_allowed,
     is_allowed_with_extras,
@@ -260,3 +262,129 @@ class TestUserExtensionLogging:
 
         ext_events = [r for r in logs if r.get("event") == "env_policy.user_extension"]
         assert ext_events == []
+
+
+def test_network_env_names_cover_codex_ca_and_proxy():
+    """#1241: Codex 0.170.0's ``CUSTOM_CA_ENV_KEYS`` and proxy keys, and none
+    of them is in the global allowlist (D3: per-engine only)."""
+    from untether.utils.env_policy import NETWORK_ENV_NAMES
+
+    expected = {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "CARGO_HTTP_CAINFO",
+        "BUNDLE_SSL_CA_CERT",
+        "npm_config_cafile",
+    }
+    assert expected <= set(NETWORK_ENV_NAMES)
+    assert not any(is_allowed(name) for name in NETWORK_ENV_NAMES)
+
+
+class TestLogDroppedOnce:
+    """#1241: ``env_policy.dropped`` names what an engine lost, once per engine."""
+
+    def setup_method(self):
+        _reset_log_latch_for_tests()
+
+    def teardown_method(self):
+        _reset_log_latch_for_tests()
+
+    def test_log_dropped_once_names_only(self):
+        from structlog.testing import capture_logs
+
+        from untether.utils.env_policy import log_dropped_once
+
+        source = {"PATH": "/bin", "ZZ_SECRET": "s3cret", "AWS_KEY": "k"}
+        with capture_logs() as logs:
+            log_dropped_once("codex", source, {"PATH": "/bin"})
+            log_dropped_once("codex", source, {"PATH": "/bin"})
+            log_dropped_once("opencode", source, {"PATH": "/bin"})
+        dropped = [r for r in logs if r.get("event") == "env_policy.dropped"]
+        assert [(r["engine"], r["names"]) for r in dropped] == [
+            ("codex", ["AWS_KEY", "ZZ_SECRET"]),
+            ("opencode", ["AWS_KEY", "ZZ_SECRET"]),
+        ]
+        assert "s3cret" not in repr(dropped)
+
+    def test_nothing_dropped_logs_nothing(self):
+        from structlog.testing import capture_logs
+
+        from untether.utils.env_policy import log_dropped_once
+
+        with capture_logs() as logs:
+            log_dropped_once("codex", {"PATH": "/bin"}, {"PATH": "/bin"})
+        assert not [r for r in logs if r.get("event") == "env_policy.dropped"]
+
+
+class TestApplyRunEnv:
+    """#1120: run identity in the child env."""
+
+    def test_trigger_run_gets_both_vars(self):
+        ctx = RunContext(trigger_source="cron:daily", run_id="rid-1")
+        assert apply_run_env({"PATH": "/bin"}, ctx) == {
+            "PATH": "/bin",
+            "UNTETHER_TRIGGER": "cron:daily",
+            "UNTETHER_RUN_ID": "rid-1",
+        }
+
+    def test_inherited_values_are_replaced_not_kept(self):
+        ctx = RunContext(trigger_source="webhook:gh", run_id="new")
+        env = apply_run_env(
+            {"UNTETHER_RUN_ID": "old", "UNTETHER_TRIGGER": "cron:old"}, ctx
+        )
+        assert env == {"UNTETHER_RUN_ID": "new", "UNTETHER_TRIGGER": "webhook:gh"}
+
+    def test_attended_run_has_neither(self):
+        inherited = {"PATH": "/bin", "UNTETHER_RUN_ID": "x", "UNTETHER_TRIGGER": "y"}
+        for ctx in (None, RunContext(project="p"), RunContext(trigger_source="at:1")):
+            assert apply_run_env(inherited, ctx) == {"PATH": "/bin"}
+
+    def test_none_env_stays_none_when_nothing_to_change(self, monkeypatch):
+        monkeypatch.delenv("UNTETHER_RUN_ID", raising=False)
+        monkeypatch.delenv("UNTETHER_TRIGGER", raising=False)
+        assert apply_run_env(None, None) is None
+
+    def test_none_env_merges_service_env_for_trigger_run(self, monkeypatch):
+        monkeypatch.setenv("SERVICE_ONLY", "1")
+        monkeypatch.setenv("UNTETHER_RUN_ID", "stale")
+        env = apply_run_env(None, RunContext(trigger_source="cron:c"))
+        assert env is not None
+        assert env["SERVICE_ONLY"] == "1"
+        assert env["UNTETHER_TRIGGER"] == "cron:c"
+        assert "UNTETHER_RUN_ID" not in env  # no run id on this context
+
+    def test_none_env_drops_stale_vars_for_attended_run(self, monkeypatch):
+        monkeypatch.setenv("UNTETHER_TRIGGER", "cron:stale")
+        env = apply_run_env(None, None)
+        assert env is not None and "UNTETHER_TRIGGER" not in env
+
+
+class TestConfigOverridesNeverReachEngines:
+    """#1219: ``UNTETHER__*`` overrides (the bot token among them) are dropped
+    for every engine, attended or not, inherited env or filtered."""
+
+    def test_filtered_env_drops_overrides(self):
+        env = {"PATH": "/bin", "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN": "t"}
+        assert apply_run_env(env, None) == {"PATH": "/bin"}
+
+    def test_inherited_env_drops_overrides(self, monkeypatch):
+        monkeypatch.setenv("UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN", "t")
+        monkeypatch.setenv("UNTETHER_SESSION", "1")
+        env = apply_run_env(None, RunContext(trigger_source="cron:c"))
+        assert env is not None
+        assert "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN" not in env
+        assert env["UNTETHER_SESSION"] == "1"  # single underscore stays
+        attended = apply_run_env(None, None)
+        assert attended is not None
+        assert "UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN" not in attended

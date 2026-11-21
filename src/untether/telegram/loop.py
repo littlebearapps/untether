@@ -14,7 +14,12 @@ from ..commands import list_command_ids
 from ..config import ConfigError
 from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
-from ..context import RunContext, attended_context, unattended_trigger
+from ..context import (
+    WEBHOOK_TRIGGER_PREFIX,
+    RunContext,
+    attended_context,
+    unattended_trigger,
+)
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..live_sessions import live_backend
@@ -26,7 +31,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
-from . import arrival_order, first_start
+from . import arrival_order, first_start, settings_barrier
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
@@ -65,6 +70,7 @@ from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import drop_unsupported_reasoning, merge_overrides
 from .first_start import dropped_notice
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .pending_finals import PendingFinals, resolve_pending_finals_path
 from .reply_context import append_reply_context, strip_reply_routing_lines
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
@@ -219,7 +225,24 @@ async def _resolve_engine_run_options(
 
 # Trigger-level fields that win over the resolved chat/topic options for a
 # trigger's own run (#330 permission_mode). Each is copied from RunContext.
-_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode", "model", "reasoning")
+_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "permission_mode",
+    "model",
+    "reasoning",
+    "allowed_tools",  # #1118
+    "agent",  # #1121
+)
+
+# #1118: the mode a webhook with no own `permission_mode` runs in under
+# `[triggers] webhook_defaults = "strict"`, instead of the chat's /planmode or
+# engine config. Engines not listed are left alone.
+# shortcut: Codex `safe` is the exec runner's name; add the app-server mode
+# name here when #962/#963 change it.
+STRICT_WEBHOOK_DEFAULT_MODES: dict[str, str] = {
+    "claude": "default",
+    "codex": "safe",
+    "antigravity": "workspace",
+}
 
 
 def _apply_trigger_overrides(
@@ -248,6 +271,15 @@ def _apply_trigger_overrides(
         for name in _TRIGGER_OVERRIDE_FIELDS
         if (value := getattr(context, name, None)) is not None
     }
+    if context.strict_webhook and engine is not None:
+        # #1118 strict: a webhook never runs mode-less (Claude's legacy `-p`
+        # path) or in the chat's mode, and Claude pre-approves nothing
+        # unless the webhook lists its own tools.
+        strict_mode = STRICT_WEBHOOK_DEFAULT_MODES.get(engine)
+        if strict_mode is not None:
+            fields.setdefault("permission_mode", strict_mode)
+        if engine == "claude":
+            fields.setdefault("allowed_tools", ())
     # #835: derived, not configured — the shared predicate marks cron and
     # webhook runs so the runner denies anything that would wait for a tap.
     # Never logged as an "override".
@@ -277,7 +309,13 @@ def _apply_trigger_overrides(
     if log:
         # A run Untether starts itself with a fixed mode (an approved
         # Antigravity plan, #981) carries no trigger; don't log it as a cron.
-        prefix = "trigger.cron" if context.trigger_source is not None else "run"
+        source = context.trigger_source
+        if source is None:
+            prefix = "run"
+        elif source.startswith(WEBHOOK_TRIGGER_PREFIX):
+            prefix = "trigger.webhook"  # #1122; crons keep their names
+        else:
+            prefix = "trigger.cron"
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None
             if previous != value:
@@ -486,11 +524,11 @@ async def _notify_reload_applied(
 async def _notify_trigger_config_problem(
     cfg: TelegramBridgeConfig,
     text: str,
-    *,
-    running_tasks: Mapping[MessageRef, object] | None = None,
 ) -> None:
     """#1117: post a trigger config problem (skipped entries, or a whole
-    ``[triggers]`` block that failed) to the reload-notice audience.
+    ``[triggers]`` block that failed) to the admin DMs (#1248): the
+    ``allowed_user_ids`` chats, or ``cfg.chat_id`` when there are none.
+    Busy project chats are left out; only the hot-reload cue goes there.
 
     Rendered from markdown into entities (no parse mode), so validation text
     full of ``_`` can't make the send fail; the formatters escape user text
@@ -501,7 +539,7 @@ async def _notify_trigger_config_problem(
 
     try:
         rendered, entities = prepare_telegram(MarkdownParts(header=text))
-        targets = _reload_notice_targets(cfg, running_tasks, restart_pending=False)
+        targets = _reload_notice_targets(cfg, None, restart_pending=False)
     except Exception:  # noqa: BLE001 — a notice must never break startup/reload
         logger.warning("triggers.config_notice.crashed", exc_info=True)
         return
@@ -561,8 +599,61 @@ async def _notify_new_invalid_triggers(
                 running=trigger_manager is not None,
                 webhook_server_running=not state.webhook_server_refused,
             ),
-            running_tasks=state.running_tasks,
         )
+
+
+async def _warn_config_permissions(
+    cfg: TelegramBridgeConfig,
+    state: TelegramLoopState,
+    config_path: Path | None,
+) -> None:
+    """#1219: warn (log + one Telegram notice) when the config holds an
+    inline secret and other local users can read it or its directory, or a
+    backup is readable. Only when a finding is new. Never raises."""
+    if config_path is None:
+        return
+    from ..config import config_permission_fixes, read_config
+
+    try:
+        fixes = config_permission_fixes(
+            config_path, read_config(config_path, log_toml_errors=False)
+        )
+    except Exception:  # noqa: BLE001 — a permission check must never break a load
+        logger.debug("config.file_permissions.check_failed", exc_info=True)
+        return
+    previous = state.config_permission_fixes
+    state.config_permission_fixes = fixes
+    # Only a new finding warns; a partial fix just updates the state.
+    if not set(fixes) - set(previous):
+        return
+    logger.warning(
+        "config.file_permissions",
+        path=str(config_path),
+        fixes=list(fixes),
+        hint=(
+            "The config holds a secret (bot token or webhook secret) other "
+            "local users can read; run the chmod commands, or move the secret "
+            "to the environment (see docs/reference/env-vars.md)."
+        ),
+    )
+    from ..config_reload_notification import format_config_permissions_notice
+
+    await _notify_trigger_config_problem(cfg, format_config_permissions_notice(fixes))
+
+
+async def _notify_strict_webhook_changes(
+    cfg: TelegramBridgeConfig,
+    changes: Sequence[StrictWebhookChange],
+) -> None:
+    """#1118: one notice listing the newly found compat-mode webhooks that
+    ``webhook_defaults = "strict"`` would change. Nothing when none are new."""
+    if not changes:
+        return
+    from ..config_reload_notification import format_strict_webhook_changes_notice
+
+    await _notify_trigger_config_problem(
+        cfg, format_strict_webhook_changes_notice(changes)
+    )
 
 
 def _allowed_tools_tuple(value: object) -> tuple[str, ...]:
@@ -687,7 +778,6 @@ async def _notify_trigger_block_failure_on_reload(
             active_secret_webhook_ids=active,
             webhook_server_running=not state.webhook_server_refused,
         ),
-        running_tasks=state.running_tasks,
     )
 
 
@@ -706,6 +796,9 @@ def _dispatch_builtin_command(
     scope_chat_ids = ctx.scope_chat_ids
     reply = ctx.reply
     task_group = ctx.task_group
+    if command_id in settings_barrier.SETTINGS_COMMANDS:
+        # #1265: later prompts in this chat wait for the change to land.
+        task_group = settings_barrier.Guarded(task_group, msg.chat_id, msg.message_id)
     if command_id == "file":
         if not cfg.files.enabled:
             handler = partial(
@@ -1059,6 +1152,11 @@ def _init_quarantine_store(config_path: Path) -> None:
         logger.warning("quarantine.startup_init_failed", exc_info=True)
 
 
+def _pending_finals_kick(cfg: TelegramBridgeConfig) -> Callable[[], None] | None:
+    pending = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+    return pending.kick if isinstance(pending, PendingFinals) else None
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -1110,6 +1208,7 @@ async def poll_updates(
             on_offset_advanced=(
                 offset_writer.note if offset_writer is not None else None
             ),
+            on_poll_ok=_pending_finals_kick(cfg),
         ):
             yield msg
     finally:
@@ -1238,6 +1337,11 @@ class TelegramLoopState:
     # #1142: ``trigger.cron.inherits_bypass`` / ``trigger.webhook.*`` audit
     # findings already logged, so reloads don't repeat them.
     trigger_permission_risks_warned: set[TriggerRisk] = field(default_factory=set)
+    # #1118: compat-mode webhooks already warned about (log + one notice).
+    trigger_strict_changes_warned: set[StrictWebhookChange] = field(default_factory=set)
+    # #1219: the chmod fixes last warned about, so an unchanged reload
+    # doesn't repeat the warning or the notice.
+    config_permission_fixes: tuple[str, ...] = ()
     # #1117: invalid trigger entries / the block-level error already announced
     # in Telegram, so a reload of unrelated keys doesn't repeat the notice.
     trigger_invalid_notified: set[InvalidTrigger] = field(default_factory=set)
@@ -1278,6 +1382,7 @@ if TYPE_CHECKING:
     from ..triggers.manager import TriggerManager
     from ..triggers.settings import (
         InvalidTrigger,
+        StrictWebhookChange,
         TriggerChatFallback,
         TriggersSettings,
     )
@@ -2253,6 +2358,10 @@ async def run_main_loop(
             from .progress_persistence import resolve_progress_path
 
             set_progress_persistence_path(resolve_progress_path(config_path))
+            # #1207: finals a previous run couldn't send go out once polling works.
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                pending_finals.attach(resolve_pending_finals_path(config_path))
 
             state.chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
             logger.info(
@@ -2262,9 +2371,11 @@ async def run_main_loop(
             from ..cost_tracker import init_daily_cost
             from ..session_stats import init_stats
             from ..triggers.history import init_history
+            from ..triggers.journal import init_journal
 
             init_stats(config_path)
             init_history(config_path)
+            init_journal(config_path)  # #1123
             init_daily_cost(config_path)  # #898
         if cfg.session_mode == "chat":
             if config_path is None:
@@ -2494,6 +2605,8 @@ async def run_main_loop(
                             "config.reload.applied_notify.crashed", exc_info=True
                         )
 
+                await _warn_config_permissions(cfg, state, reload.config_path)
+
                 # --- Hot-reload trigger configuration ---
                 from ..triggers.settings import format_trigger_error
 
@@ -2509,11 +2622,12 @@ async def run_main_loop(
                         )
                 elif trigger_manager is not None or triggers_enabled_now:
                     try:
+                        from ..triggers.history import prune_history
                         from ..triggers.settings import (
-                            TriggersSettings,
                             log_invalid_triggers,
                             parse_trigger_config_isolated,
                             warn_short_webhook_secrets,
+                            warn_strict_webhook_changes,
                             warn_trigger_chat_fallbacks,
                         )
 
@@ -2524,7 +2638,14 @@ async def run_main_loop(
                             )
                             new_settings = parsed_triggers.settings
                             if trigger_manager is not None:
-                                trigger_manager.update(new_settings)
+                                trigger_manager.update(
+                                    new_settings,
+                                    keep_fired=parsed_triggers.cron_ids,
+                                )
+                            prune_history(
+                                parsed_triggers.cron_ids,
+                                [wh.id for wh in new_settings.webhooks],
+                            )
                             state.trigger_block_error_notified = None
                             log_invalid_triggers(
                                 parsed_triggers.invalid, phase="reload"
@@ -2537,6 +2658,13 @@ async def run_main_loop(
                                 exposed=new_settings.server.exposed,
                             )
                             warn_short_webhook_secrets(new_settings)
+                            await _notify_strict_webhook_changes(
+                                cfg,
+                                warn_strict_webhook_changes(
+                                    new_settings,
+                                    warned=state.trigger_strict_changes_warned,
+                                ),
+                            )
                             # #894: warn (once) about project-only triggers
                             # that will post to the default chat.
                             warn_trigger_chat_fallbacks(
@@ -2551,7 +2679,7 @@ async def run_main_loop(
                             )
                         elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
-                            trigger_manager.update(TriggersSettings())
+                            trigger_manager.disable()
                             state.trigger_invalid_notified = set()
                             state.trigger_refused_notified = set()
                             state.trigger_block_error_notified = None
@@ -2594,6 +2722,10 @@ async def run_main_loop(
                         phase="startup",
                     )
                 )
+
+            pending_finals = getattr(cfg.exec_cfg.transport, "pending_finals", None)
+            if isinstance(pending_finals, PendingFinals):
+                tg.start_soon(pending_finals.run, cfg.bot)
 
             # Graceful drain-then-exit task
             async def _drain_and_exit() -> None:
@@ -3029,6 +3161,11 @@ async def run_main_loop(
                 is_chat_busy=_is_chat_busy,
             )
 
+            # #1219: a readable config holding a secret, or a readable backup.
+            tg.start_soon(
+                partial(_warn_config_permissions, cfg, state, cfg.runtime.config_path)
+            )
+
             # --- Trigger system (webhooks + cron) ---
             trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
@@ -3046,6 +3183,7 @@ async def run_main_loop(
                     log_invalid_triggers,
                     parse_trigger_config_isolated,
                     warn_short_webhook_secrets,
+                    warn_strict_webhook_changes,
                     warn_trigger_chat_fallbacks,
                 )
 
@@ -3056,6 +3194,17 @@ async def run_main_loop(
                     log_invalid_triggers(parsed_triggers.invalid, phase="startup")
                     state.trigger_invalid_notified = set(parsed_triggers.invalid)
                     warn_short_webhook_secrets(trigger_settings)
+                    # #1118: compat webhooks that strict defaults would change.
+                    tg.start_soon(
+                        partial(
+                            _notify_strict_webhook_changes,
+                            cfg,
+                            warn_strict_webhook_changes(
+                                trigger_settings,
+                                warned=state.trigger_strict_changes_warned,
+                            ),
+                        )
+                    )
                     # #894: a project-only trigger posts to the default chat,
                     # not the project's — warn once so it isn't a surprise.
                     warn_trigger_chat_fallbacks(
@@ -3082,6 +3231,14 @@ async def run_main_loop(
                     trigger_manager = TriggerManager(
                         trigger_settings,
                         config_path=cfg.runtime.config_path,
+                        keep_fired=parsed_triggers.cron_ids,
+                    )
+                    # #1123: forget last-fired entries of removed triggers.
+                    from ..triggers.history import prune_history
+
+                    prune_history(
+                        parsed_triggers.cron_ids,
+                        [wh.id for wh in trigger_settings.webhooks],
                     )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
@@ -3314,6 +3471,21 @@ async def run_main_loop(
                 dropped_in_line = await arrival_order.wait_turn(ticket)
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
+                if ticket is not None:
+                    # #1265: a settings command sent just before this prompt
+                    # (e.g. /planmode) lands first. Not for /continue (no
+                    # ticket), which runs inline in the update loop.
+                    await settings_barrier.wait_before(chat_id, user_msg_id)
+                if resolved.leaves_chat_context and chat_session_key is not None:
+                    # #1269: `/<other-project> …` in chat session mode runs
+                    # fresh and leaves the chat's own session alone; a reply
+                    # to its final (resume line) carries on there.
+                    logger.info(
+                        "session.chat_context_left",
+                        chat_id=chat_id,
+                        project=resolved.context.project if resolved.context else None,
+                    )
+                    chat_session_key = None
                 if dropped_in_line is not None:
                     # /cancel or /new while it waited behind an earlier
                     # prompt: no queued card or first-start wait had it yet.
@@ -4044,7 +4216,12 @@ async def run_main_loop(
                             chat_prefs=state.chat_prefs,
                             topic_store=state.topic_store,
                         )
-                        tg.start_soon(
+                        # #1265: settings commands hold the prompts after them.
+                        (
+                            settings_barrier.Guarded(tg, msg.chat_id, msg.message_id)
+                            if command_id in settings_barrier.SETTINGS_COMMANDS
+                            else tg
+                        ).start_soon(
                             # #950: /at freezes the engine + context a plain
                             # prompt here would use (topic/chat defaults).
                             partial(dispatch_command, ambient_context=ambient_context),
@@ -4101,8 +4278,12 @@ async def run_main_loop(
                         await reply(text=NOT_ORIGINATOR_TEXT)
                         return True
 
+                    # #1274: only a question raised in this message's topic.
+                    ask_thread_filter = thread_filter_for(msg)
                     # Check for active option flow in "Other" text mode first
-                    flow = get_ask_question_flow(channel_id=msg.chat_id)
+                    flow = get_ask_question_flow(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if flow is not None and flow.awaiting_text:
                         if await _ask_answer_refused(flow.request_id):
                             return
@@ -4136,7 +4317,9 @@ async def run_main_loop(
                                 await reply(text=_format_answered_echo(text))
                             return
 
-                    pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
+                    pending_ask = get_pending_ask_request(
+                        channel_id=msg.chat_id, thread_filter=ask_thread_filter
+                    )
                     if pending_ask is not None:
                         ask_req_id, _ask_question = pending_ask
                         if await _ask_answer_refused(ask_req_id):
@@ -4236,6 +4419,29 @@ async def run_main_loop(
                         callback_query_id=query_id,
                     )
 
+            # #1285: a voice note is transcribed (up to ~10 min) off the
+            # update loop. Later messages in the same chat/topic queue behind
+            # it so they keep their order; other chats and button taps don't.
+            voice_tails: dict[tuple[int, int | None], anyio.Event] = {}
+
+            def route_in_line(msg: TelegramIncomingMessage) -> None:
+                scope = (msg.chat_id, msg.thread_id)
+                prev = voice_tails.get(scope)
+                done = anyio.Event()
+                voice_tails[scope] = done
+
+                async def run() -> None:
+                    try:
+                        if prev is not None:
+                            await prev.wait()
+                        await route_message(msg)
+                    finally:
+                        done.set()
+                        if voice_tails.get(scope) is done:
+                            del voice_tails[scope]
+
+                tg.start_soon(run)
+
             async def route_update(update: TelegramIncomingUpdate) -> None:
                 current_allowed = frozenset(cfg.allowed_user_ids)
                 if current_allowed:
@@ -4320,7 +4526,15 @@ async def run_main_loop(
                                 else None
                             )
                             cb_stateful_mode = cb_topic_key is not None
-                            tg.start_soon(
+                            # #1265: a settings tap (/config pages) holds the
+                            # prompts sent after its menu until it lands.
+                            (
+                                settings_barrier.Guarded(
+                                    tg, update.chat_id, update.message_id
+                                )
+                                if cb_command_id in settings_barrier.SETTINGS_COMMANDS
+                                else tg
+                            ).start_soon(
                                 # #997: a tap sees the context the command
                                 # that drew the button saw (/browse root).
                                 partial(
@@ -4357,6 +4571,12 @@ async def run_main_loop(
                             update.callback_query_id,
                         )
                     return
+                if (
+                    update.voice is not None
+                    or (update.chat_id, update.thread_id) in voice_tails
+                ):
+                    route_in_line(update)
+                    return
                 await route_message(update)
 
             async for update in poller_fn(cfg):
@@ -4369,6 +4589,8 @@ async def run_main_loop(
             # triggering shutdown so _drain_and_exit() can exit.
             # #775: 50, not 10 — the dispatch chain now also resolves the
             # follow-up mode (chat/topic prefs reads) before queueing.
+            while voice_tails:  # #1285: voice notes still transcribing
+                await next(iter(voice_tails.values())).wait()
             for _ in range(50):
                 await anyio.lowlevel.checkpoint()
             while state.running_tasks:

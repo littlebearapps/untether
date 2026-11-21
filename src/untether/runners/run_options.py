@@ -38,6 +38,13 @@ class EngineRunOptions:
     # inherited from the chat or TOML look identical; only the agy runner
     # reads this, so unattended runs never inherit Full access.
     trigger_permission_mode: str | None = None
+    # #1118: a trigger's own Claude allowlist; replaces the engine-wide
+    # `allowed_tools` for that run (``()`` = send no ``--allowedTools``).
+    # ``None`` keeps the engine config. Only ClaudeRunner reads it.
+    allowed_tools: tuple[str, ...] | None = None
+    # #1121: a trigger's own Claude Code agent (``--agent=<name>``) for that
+    # run only. Only ClaudeRunner reads it.
+    agent: str | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.
@@ -176,9 +183,10 @@ def is_claude_prompting_mode(mode: str | None) -> bool:
     mode.  See docs/findings/2026-08-13-claude-permission-modes.md.
     **Probe G no longer holds on CLI 2.1.285**: plan mode raises a
     ``can_use_tool`` (``decision_reason_type: "mode"``) for a non-plan-file
-    ``Write`` instead of blocking it, and this classification lets stage 6
-    approve it — see the 2026-09-30 findings addenda (#383, §Q3a). Open
-    issue; not changed by #751.
+    ``Write`` instead of blocking it (2026-09-30 findings, #383, §Q3a). Plan
+    stays non-prompting here; since #882 stage 6 routes ``mode`` requests and
+    no-reason non-research tools in plan to buttons
+    (``runners/claude.py`` ``_autonomous_ask_reason``).
 
     ``auto``, ``dontAsk`` and ``bypassPermissions`` are False because each
     resolves permissions elsewhere: ``auto`` at the stage-4 classifier,

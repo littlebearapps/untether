@@ -38,7 +38,9 @@ Untether appends a **single backticked** resume line at the end of the message, 
 Notes:
 
 * `pi --resume/-r` opens an interactive session picker, so Untether uses `--session <token>` instead.
-* The resume token is the **session id** (short prefix), derived from the session
+* The resume token is the **full session id** ([#1264](https://github.com/littlebearapps/untether/issues/1264): Pi's ids are UUIDv7, so the 8-hex prefix older Untether
+  versions saved was shared by every session started within about 65 s; those short tokens still resume, through
+  Pi's own prefix lookup), derived from the session
   header line (`{"type":"session", ...}`) emitted to stdout in `--mode json`.
   This requires **pi-coding-agent >= 0.45.1**.
 * If the path contains spaces, the runner will quote it.
@@ -125,12 +127,15 @@ The runner should translate:
 
 * `tool_execution_start` -> `action` (phase: started)
 * `tool_execution_end` -> `action` (phase: completed)
-* `agent_end` -> `completed`
+* `agent_settled` (Pi ≥ 0.80.5) or process exit (older Pi) -> `completed`,
+  using the last `agent_end`'s outcome; `agent_end` alone doesn't end the run,
+  because Pi may still retry or compact (#1255)
 
 For the final answer, use the most recent assistant message text (from
 `message_end` events). For errors, if the assistant stopReason is `error` or
-`aborted`, emit `completed(ok=false, error=...)`. `auto_compaction_*` and
-`auto_retry_*` become note actions; see [Untether events](untether-events.md)
+`aborted`, emit `completed(ok=false, error=...)`. `compaction_*` (Pi ≥ 0.66.1;
+the older `auto_compaction_*` names still decode, #1239) and `auto_retry_*`
+become note actions; see [Untether events](untether-events.md)
 for the full mapping.
 
 **Footer model display.** When no model override is set for the chat, Pi extracts the model name from the `message_end` JSONL event and emits a supplementary `StartedEvent` with populated `meta`. The base runner's `handle_started_event` passes this duplicate through whenever `event.meta` is truthy, and `ProgressTracker.note_event` merges meta idempotently, so the completion footer shows the actual default model instead of a blank. ([#225](https://github.com/littlebearapps/untether/issues/225))

@@ -313,7 +313,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "",
         "kind": "tool",
         "request_id": "req-agent-1",
@@ -680,15 +682,14 @@
     "states": {
      "golden-session-1": {
       "awaiting_user_approval": true,
-      "control_action_for_tool": {
-       "toolu_agent_1": "claude.control.2"
-      },
       "control_registered": [
        "req-agent-bash-1"
       ],
       "control_request_snapshot": [
        {
+        "agent_id": "a1",
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "(command=`pytest -q`)",
         "kind": "tool",
         "request_id": "req-agent-bash-1",

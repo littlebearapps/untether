@@ -23,29 +23,40 @@ agy_gate_app = typer.Typer(
 )
 
 
-def _agy_cmd(agy: str | None) -> str:
-    """``--agy``, else ``[antigravity] cmd`` from untether.toml, else agy on
-    PATH (the runner's own order)."""
+def _agy_cmd(agy: str | None, config_path: Path | None = None) -> str:
+    """``--agy``, else the runner's ``cmd`` (``[engines.antigravity]`` over
+    ``[antigravity]``) from ``--config-path`` / ``UNTETHER_CONFIG_PATH`` /
+    untether.toml, else agy on PATH: the agy this instance runs (#1180)."""
     if agy:
         return agy
-    import tomllib
-
     from .. import config as untether_config
+    from ..runners.antigravity import resolve_antigravity_cmd
 
     try:
-        data = tomllib.loads(untether_config.HOME_CONFIG_PATH.read_text())
-    except (OSError, ValueError):
+        data, _ = untether_config.load_or_init_config(config_path)
+    except untether_config.ConfigError as exc:
+        # Never block on an unrelated config error; say which agy is used.
+        typer.echo(f"{exc} Using agy on PATH.", err=True)
         data = {}
-    section = data.get("antigravity") if isinstance(data, dict) else None
-    cmd = section.get("cmd") if isinstance(section, dict) else None
-    if isinstance(cmd, str) and cmd.strip():
-        return str(Path(cmd).expanduser())
-    from ..runners.antigravity import default_antigravity_cmd
+    # Same table precedence as ``UntetherSettings.engine_config``.
+    engines = data.get("engines")
+    if isinstance(engines, dict) and "antigravity" in engines:
+        section = engines["antigravity"]
+    else:
+        section = data.get("antigravity")
+    return resolve_antigravity_cmd(section if isinstance(section, dict) else {})
 
-    return default_antigravity_cmd()
 
-
-_AGY_OPTION = typer.Option(None, "--agy", help="Path to agy (default: agy on PATH).")
+_AGY_OPTION = typer.Option(
+    None,
+    "--agy",
+    help="Path to agy (default: the config's antigravity cmd, else agy on PATH).",
+)
+_CONFIG_PATH_OPTION = typer.Option(
+    None,
+    "--config-path",
+    help="untether.toml to read the agy cmd from (default: UNTETHER_CONFIG_PATH, else ~/.untether/untether.toml).",
+)
 _PROJECT_OPTION = typer.Option(
     None,
     "--project",
@@ -72,6 +83,7 @@ def install_cmd(
         False, "--dry-run", help="Print the files and the target; write nothing."
     ),
     agy: str | None = _AGY_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Install the plugin with `agy plugin install` (host-wide: every agy on this HOME)."""
     try:
@@ -88,7 +100,10 @@ def install_cmd(
         return
     try:
         state = gate_plugin.install(
-            agy_cmd=_agy_cmd(agy), wait_s=wait_s, force=force, echo=typer.echo
+            agy_cmd=_agy_cmd(agy, config_path),
+            wait_s=wait_s,
+            force=force,
+            echo=typer.echo,
         )
     except gate_plugin.GateInstallError as exc:
         typer.echo(str(exc), err=True)
@@ -108,10 +123,11 @@ def uninstall_cmd(
         help="Remove it even if Untether didn't install it or it was edited.",
     ),
     agy: str | None = _AGY_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Remove the plugin with `agy plugin uninstall untether-gate`."""
     try:
-        removed = gate_plugin.uninstall(agy_cmd=_agy_cmd(agy), force=force)
+        removed = gate_plugin.uninstall(agy_cmd=_agy_cmd(agy, config_path), force=force)
     except gate_plugin.GateInstallError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from None
@@ -127,6 +143,7 @@ def status_cmd(
         help="Also send one trivial agy turn (≈13k tokens) and check its hooks reach Untether.",
     ),
     agy: str | None = _AGY_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """What is installed, and optionally whether agy loads and runs it."""
     state = gate_plugin.inspect_install()
@@ -139,10 +156,13 @@ def status_cmd(
         for name, status in sorted(state.files.items()):
             typer.echo(f"  {name}: {status}")
     ok = state.ready
+    if project is not None or canary:
+        agy_cmd = _agy_cmd(agy, config_path)
+        typer.echo(f"agy: {agy_cmd}")
     if project is not None:
-        ok = anyio.run(_project_check, _agy_cmd(agy), project.resolve()) and ok
+        ok = anyio.run(_project_check, agy_cmd, project.resolve()) and ok
     if canary:
-        ok = anyio.run(_canary, _agy_cmd(agy)) and ok
+        ok = anyio.run(_canary, agy_cmd) and ok
     if not ok:
         raise typer.Exit(code=1)
 

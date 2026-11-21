@@ -80,7 +80,7 @@ from ..runner import (
 from ..schemas import antigravity as agy_schema
 from ..session_costs import RUN_TOKENS_KEY
 from ..utils import antigravity_context, antigravity_quota, antigravity_scan
-from ..utils.antigravity_argv import native_compact_prompt
+from ..utils.antigravity_argv import MODEL_ID_PUNCTUATION_TEXT, native_compact_prompt
 from ..utils.antigravity_redact import redact_agy_text
 from ..utils.antigravity_state import (
     NOTICES_FILENAME,
@@ -206,7 +206,8 @@ INVALID_ARGUMENT_BLOCK = "invalid_argument"
 # (``utils/antigravity_argv.py``): refused before anything spawns.
 INVALID_MODEL_TEXT = (
     "🛑 That model id isn't valid for Antigravity, so nothing was started. "
-    "A model id uses letters, digits and . _ - : / only, with no spaces and "
+    "A model id uses letters, digits and "
+    f"{MODEL_ID_PUNCTUATION_TEXT} only, with no spaces and "
     "no leading dash (for example gemini-3.8-flash). Set one with /model set, "
     "or go back to the default with /model clear."
 )
@@ -227,6 +228,10 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "replace_file_content": "edit",
     "multi_replace_file_content": "edit",
     "sed_file": "edit",
+    # agy 1.5.x (#1272); path in ``Path``.
+    "read_file": "read",
+    "write_file": "write",
+    "edit_file": "edit",
     "list_dir": "ls",
     "find_by_name": "glob",
     "grep_search": "grep",
@@ -242,6 +247,7 @@ _PATH_KEYS = (
     "DirectoryPath",
     "SearchPath",
     "SearchDirectory",
+    "Path",
     "file_path",
     "path",
     "filePath",
@@ -250,22 +256,6 @@ _PATH_KEYS = (
 # 1.3.1 drift 1: a soft-denied step is ``DONE`` with no output and no error;
 # only ``result.denied_actions`` says it was denied. A DONE step of these
 # families with empty output is parked until a later step or the result.
-_DENIABLE_TOOLS = frozenset(
-    {
-        "run_command",
-        "read_url_content",
-        "search_web",
-        "call_mcp_tool",
-        "view_file",
-        "write_to_file",
-        "replace_file_content",
-        "multi_replace_file_content",
-        "sed_file",
-        "list_dir",
-        "find_by_name",
-        "grep_search",
-    }
-)
 _FILE_TOOLS = frozenset(
     {
         "view_file",
@@ -276,8 +266,18 @@ _FILE_TOOLS = frozenset(
         "list_dir",
         "find_by_name",
         "grep_search",
+        # agy 1.5.x names (#1272).
+        "read_file",
+        "write_file",
+        "edit_file",
     }
 )
+_DENIABLE_TOOLS = _FILE_TOOLS | {
+    "run_command",
+    "read_url_content",
+    "search_web",
+    "call_mcp_tool",
+}
 # ``result.denied_actions[].action`` → the tool names it covers (a trailing
 # ``*`` is a prefix) and how Telegram names it.
 _DENIED_FAMILY: dict[str, frozenset[str]] = {
@@ -495,8 +495,8 @@ _AGY_ENV_EXTRAS: tuple[str, ...] = (
 
 _MIN_AGY_VERSION: tuple[int, ...] = (1, 3, 1)
 # The newest agy the fixtures and drift notes were checked against (#1091,
-# #1156, #1160, #1209).
-PROBED_CLI_VERSION = "1.4.10"
+# #1156, #1160, #1209, #1272).
+PROBED_CLI_VERSION = "1.5.12"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -936,12 +936,12 @@ def denial_paragraph(
         else ""
     )
     if trigger is not None and trigger.startswith("webhook:"):
-        tail = (
-            f"{rule.removeprefix(', or ')}, or run it from the chat"
-            if rule
-            else "run it from the chat"
+        # #1118: a webhook keeps Full access only when it sets it itself.
+        return (
+            f'{head} To allow it, set `permission_mode = "full"` and'
+            f" `allow_unsafe_permission_mode = true` on this webhook{rule},"
+            " or run it from the chat."
         )
-        return f"{head} Webhook runs never get Full access; {tail}."
     if trigger is not None:
         return f'{head} To allow it, set `permission_mode = "full"` on this cron{rule}.'
     if kept_shell:
@@ -1138,6 +1138,10 @@ _FROM_CONTINUE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # goes into agy's env).
 _GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "untether_agy_gate", default=None
+)
+# #1212: the version this run's pre-spawn check probed, read by ``start_run``.
+_PROBED_VERSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "untether_agy_probed_version", default=None
 )
 # #980 phase 14: same hand-off — how the run starts (``build_args``).
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
@@ -2273,6 +2277,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         self, resume: ResumeToken | None
     ) -> UntetherEvent | None:
         version = await anyio.to_thread.run_sync(agy_cli_version, self.antigravity_cmd)
+        _PROBED_VERSION.set(version)
         parsed = parse_agy_version(version) if version else None
         if parsed is None:
             # Fail open: a slow or odd ``--version`` must never block a run;
@@ -2646,7 +2651,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AntigravityStreamState,
     ) -> None:
         state.t_spawn = time.monotonic()
-        state.agy_version = cached_agy_version(self.antigravity_cmd)
+        probed = _PROBED_VERSION.get()
+        _PROBED_VERSION.set(None)
+        # #1212: an agy self-update since the check above changes the mtime,
+        # so the cache misses; log the version the run was checked against
+        # (the pre-update one if the update landed in between).
+        state.agy_version = cached_agy_version(self.antigravity_cmd) or probed
 
     def on_spawned(self, *, state: Any, pid: int) -> None:
         if isinstance(state, AntigravityStreamState):
@@ -4662,7 +4672,8 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             )
             raise ConfigError(
                 f"Invalid `antigravity.model` in {config_path}; expected a model "
-                "id made of letters, digits and . _ - : / with no spaces and no "
+                "id made of letters, digits and "
+                f"{MODEL_ID_PUNCTUATION_TEXT} with no spaces and no "
                 "leading dash (for example gemini-3.8-flash)."
             ) from None
     raw_cmd = config.get("cmd")
@@ -4725,4 +4736,6 @@ BACKEND = EngineBackend(
     cli_cmd="agy",
     install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
     resolve_cli_cmd=resolve_antigravity_cmd,
+    # #558: result.usage is cumulative across --conversation resumes.
+    usage_scope={"tokens": "thread_cumulative"},
 )

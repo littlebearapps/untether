@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -613,3 +614,244 @@ def test_turn_completed_usage_carries_five_fields() -> None:
     assert completed.usage is not None
     assert completed.usage["reasoning_output_tokens"] == 7
     assert completed.usage["cache_write_input_tokens"] == 5
+
+
+# --- #1240: untrusted project-local config (stderr-only warning) -----------
+
+_UNTRUSTED_STDERR_1240 = (
+    "warning: Untrusted project-local configuration is disabled. Run `codex exec"
+    " --trust` to allow project configuration and MCP servers for this and"
+    " future chats.\n"
+)
+
+_STREAM_1240: list[dict] = [
+    {"type": "thread.started", "thread_id": "t-1240"},
+    {"type": "turn.started"},
+    {
+        "type": "item.completed",
+        "item": {"id": "item_0", "type": "agent_message", "text": "OK"},
+    },
+    {
+        "type": "turn.completed",
+        "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+    },
+]
+
+
+def _run_lines_1240(runner: CodexRunner, state, lines: list[dict]) -> list:
+    import json
+
+    events: list = []
+    for line in lines:
+        data = codex_schema.decode_event(json.dumps(line))
+        events.extend(
+            runner.translate(data, state=state, resume=None, found_session=None)
+        )
+    return events
+
+
+def _untrusted_rows(events: list) -> list[ActionEvent]:
+    return [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.id == "codex.untrusted_project"
+    ]
+
+
+def test_1240_untrusted_stderr_sets_flag_and_logs_once() -> None:
+    from structlog.testing import capture_logs
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    with capture_logs() as logs:
+        runner.on_stderr_line("some other stderr line\n", state=state, proc=None)
+        assert state.untrusted_project_config is False
+        runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+        runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    assert state.untrusted_project_config is True
+    assert [e["event"] for e in logs].count("codex.project_config_untrusted") == 1
+
+
+def test_1240_flag_before_thread_started_row_follows_started() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    events = _run_lines_1240(runner, state, _STREAM_1240)
+
+    assert isinstance(events[0], StartedEvent)
+    assert isinstance(events[-1], CompletedEvent)
+    rows = _untrusted_rows(events)
+    assert len(rows) == 1
+    assert events[1] is rows[0]
+    row = rows[0]
+    assert row.ok is True
+    assert row.level == "warning"
+    assert row.action.kind == "warning"
+    assert row.action.title.startswith("⚠️")
+    assert "trust_level" in row.action.title
+    assert "--trust" not in row.action.title
+
+
+def test_1240_flag_after_thread_started_row_before_completed() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    events = _run_lines_1240(runner, state, _STREAM_1240[:3])
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    events += _run_lines_1240(runner, state, _STREAM_1240[3:])
+
+    assert isinstance(events[0], StartedEvent)
+    assert isinstance(events[-1], CompletedEvent)
+    rows = _untrusted_rows(events)
+    assert len(rows) == 1
+    assert events[-2] is rows[0]
+
+
+def test_1240_flag_after_thread_started_row_before_turn_failed() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    events = _run_lines_1240(runner, state, _STREAM_1240[:2])
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    events += _run_lines_1240(
+        runner, state, [{"type": "turn.failed", "error": {"message": "boom"}}]
+    )
+
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].ok is False
+    rows = _untrusted_rows(events)
+    assert len(rows) == 1
+    assert events[-2] is rows[0]
+
+
+def test_1240_no_row_without_flag() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    events = _run_lines_1240(runner, state, _STREAM_1240)
+    assert _untrusted_rows(events) == []
+    assert not any(
+        isinstance(e, ActionEvent) and e.action.kind == "warning" for e in events
+    )
+
+
+# ── #1241: Codex exec gets a filtered environment ──────────────────────────
+
+
+def _codex_env() -> dict[str, str]:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    env = runner.env(state=runner.new_state("hi", None))
+    assert env is not None
+    return env
+
+
+def test_codex_env_drops_canary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZZ_CANARY_SECRET", "leak")
+    monkeypatch.setenv("STRIPE_API_KEY", "leak")
+    monkeypatch.setenv("MY_WEBHOOK_SECRET", "leak")  # a user-named secret_env
+    env = _codex_env()
+    for name in ("ZZ_CANARY_SECRET", "STRIPE_API_KEY", "MY_WEBHOOK_SECRET"):
+        assert name not in env
+    assert env["PATH"] == os.environ["PATH"]
+
+
+def test_codex_env_keeps_codex_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    kept = {
+        "HOME": "/home/u",  # the ChatGPT login lives in ~/.codex
+        "CODEX_HOME": "/srv/codex",
+        "CODEX_API_KEY": "k",
+        "CODEX_CA_CERTIFICATE": "/ca.pem",
+        "OPENAI_API_KEY": "k",
+        "OPENAI_IDENTITY_TOKEN_FILE": "/tok",
+        "HTTPS_PROXY": "http://p:3128",
+        "no_proxy": "localhost",
+        "SSL_CERT_FILE": "/ca.pem",
+        "SSL_CERT_DIR": "/certs",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus",
+        "RUST_LOG": "info",
+    }
+    for name, value in kept.items():
+        monkeypatch.setenv(name, value)
+    env = _codex_env()
+    assert {k: env.get(k) for k in kept} == kept
+
+
+def test_codex_env_honours_user_extras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "untether.toml"
+    config.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n\n[security]\n"
+        'env_extra_allow = ["MY_PROVIDER_KEY"]\n'
+        'env_extra_prefix_allow = ["VAULT_"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(config))
+    monkeypatch.setenv("MY_PROVIDER_KEY", "k")
+    monkeypatch.setenv("VAULT_TOKEN", "v")
+    env = _codex_env()
+    assert env["MY_PROVIDER_KEY"] == "k"
+    assert env["VAULT_TOKEN"] == "v"
+
+
+def test_codex_env_then_apply_run_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from untether.context import RunContext
+    from untether.utils.env_policy import apply_run_env
+
+    monkeypatch.setenv("UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN", "t")
+    monkeypatch.setenv("UNTETHER_RUN_ID", "stale")
+    ctx = RunContext(trigger_source="cron:c", run_id="r")
+    env = apply_run_env(_codex_env(), ctx)
+    assert env is not None
+    assert env["UNTETHER_TRIGGER"] == "cron:c"
+    assert env["UNTETHER_RUN_ID"] == "r"
+    assert not any(k.startswith("UNTETHER__") for k in env)
+
+
+def test_codex_env_logs_dropped_names_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils.env_policy import _reset_log_latch_for_tests
+
+    _reset_log_latch_for_tests()
+    monkeypatch.setenv("ZZ_CANARY_SECRET", "leak-value")
+    try:
+        with capture_logs() as logs:
+            _codex_env()
+            _codex_env()
+    finally:
+        _reset_log_latch_for_tests()
+    dropped = [r for r in logs if r.get("event") == "env_policy.dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["engine"] == "codex"
+    assert "ZZ_CANARY_SECRET" in dropped[0]["names"]
+    assert "leak-value" not in repr(dropped[0])
+
+
+def test_1240_completed_usage_carries_the_footer_flag() -> None:
+    """The ⚠️ row isn't kept in the final, so the flag rides on usage."""
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    ok = _run_lines_1240(runner, state, _STREAM_1240)[-1]
+    assert ok.usage["project_config_untrusted"] is True
+    assert ok.usage["input_tokens"] == 1
+
+    state = runner.new_state("hi", None)
+    runner.on_stderr_line(_UNTRUSTED_STDERR_1240, state=state, proc=None)
+    failed = _run_lines_1240(
+        runner,
+        state,
+        [*_STREAM_1240[:2], {"type": "turn.failed", "error": {"message": "boom"}}],
+    )[-1]
+    assert failed.usage == {"project_config_untrusted": True}
+
+
+def test_1240_no_footer_flag_without_warning() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    ok = _run_lines_1240(runner, state, _STREAM_1240)[-1]
+    assert "project_config_untrusted" not in (ok.usage or {})
+    state = runner.new_state("hi", None)
+    failed = _run_lines_1240(
+        runner, state, [{"type": "turn.failed", "error": {"message": "boom"}}]
+    )[-1]
+    assert not failed.usage

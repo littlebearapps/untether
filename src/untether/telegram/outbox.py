@@ -54,6 +54,11 @@ class OutboxOp:
     #: ``None``; edit ops set it to ``SUPERSEDED`` so a coalesced edit is not
     #: misread as a transport failure (#598).
     superseded_result: Any = None
+    #: #1286: called when the outbox fails this op without it ever reaching
+    #: Telegram (closed, flush timeout, fatal worker error, or a 429 requeue
+    #: at close), so a final can still be kept for redelivery. Never called
+    #: for a superseded op: a newer op took its place.
+    on_dropped: Callable[[], None] | None = None
     done: anyio.Event = field(default_factory=anyio.Event)
     result: Any = None
 
@@ -62,6 +67,19 @@ class OutboxOp:
             return
         self.result = result
         self.done.set()
+
+    def drop(self) -> None:
+        """Fail an op that never reached Telegram (#1286)."""
+        if self.done.is_set():
+            return
+        if self.on_dropped is not None:
+            try:
+                self.on_dropped()
+            except Exception:  # noqa: BLE001 — shutdown must carry on
+                logger.warning(
+                    "outbox.on_dropped.failed", label=self.label, exc_info=True
+                )
+        self.set_result(None)
 
 
 class TelegramOutbox:
@@ -101,7 +119,7 @@ class TelegramOutbox:
                 logger.warning(
                     "outbox.enqueue.closed", label=op.label, chat_id=op.chat_id
                 )
-                op.set_result(None)
+                op.drop()
                 return op.result
             previous = self._pending.get(key)
             if previous is not None:
@@ -177,7 +195,7 @@ class TelegramOutbox:
         if count > 0:
             logger.warning("outbox.fail_pending", count=count)
         for pending in list(self._pending.values()):
-            pending.set_result(None)
+            pending.drop()
         self._pending.clear()
 
     def _pick_ready(self, now: float) -> tuple[Hashable, OutboxOp] | None:
@@ -270,7 +288,7 @@ class TelegramOutbox:
                                 label=op.label,
                                 chat_id=op.chat_id,
                             )
-                            op.set_result(None)
+                            op.drop()
                         elif key not in self._pending:
                             self._pending[key] = op
                             self._cond.notify()

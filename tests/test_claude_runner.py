@@ -277,7 +277,7 @@ async def test_838_concurrency_blocked_for_claude(
 
     assert len(events) == 1
     assert isinstance(events[0], CompletedEvent)
-    assert "Too many engine runs in flight (1/1)" in (events[0].error or "")
+    assert "Too many engine runs open on this host (1/1)" in (events[0].error or "")
     assert events[0].usage == {"prespawn_blocked": "concurrency"}
     blocked = [
         r for r in logs if r["event"] == "subprocess.prespawn.concurrency_blocked"
@@ -432,11 +432,11 @@ def _838_idle_claude_session(monkeypatch: pytest.MonkeyPatch, sid: str) -> None:
     monkeypatch.setitem(claude_runner._LIVE_SESSIONS, sid, session)
 
 
-def test_prespawn_message_claude_text_unchanged(
+def test_prespawn_message_claude_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """#977: the idle count comes through the live-session seam; the whole
-    message and the log line stay exactly as #838 shipped them."""
+    """#977: the idle count comes through the live-session seam; the log line
+    stays exactly as #838 shipped it (#1195: host-wide wording and advice)."""
     _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=2)
     _838_idle_claude_session(monkeypatch, "idle-977-a")
     _838_idle_claude_session(monkeypatch, "idle-977-b")
@@ -445,9 +445,10 @@ def test_prespawn_message_claude_text_unchanged(
 
     assert result is not None
     assert result.error == (
-        "🛑 Too many engine runs in flight (2/2) (including 2 idle Claude "
-        "session(s) kept open for background work — they close on their own). "
-        "Wait for one to finish, or /cancel an active run."
+        "🛑 Too many engine runs open on this host (2/2, including 2 idle "
+        "Claude session(s) kept open for background work — they close on "
+        "their own). Wait a minute and send it again, or /cancel a run in the "
+        "chat that started it."
     )
     assert result.usage == {"prespawn_blocked": "concurrency"}
     assert len(blocked) == 1
@@ -462,7 +463,7 @@ def test_prespawn_message_claude_text_unchanged(
     }
 
 
-def test_prespawn_message_without_idle_sessions_unchanged(
+def test_prespawn_message_without_idle_sessions(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=1)
@@ -471,8 +472,8 @@ def test_prespawn_message_without_idle_sessions_unchanged(
 
     assert result is not None
     assert result.error == (
-        "🛑 Too many engine runs in flight (1/1). Wait for one to finish, or "
-        "/cancel an active run."
+        "🛑 Too many engine runs open on this host (1/1). Wait a minute and "
+        "send it again, or /cancel a run in the chat that started it."
     )
     assert "idle_live_sessions" not in blocked[0]
 
@@ -497,7 +498,7 @@ def test_prespawn_message_mixed_engines_generic(
     result, blocked = _838_blocked_codex_spawn(3)
 
     assert result is not None
-    assert "(including 3 idle live session(s) kept open" in (result.error or "")
+    assert ", including 3 idle live session(s) kept open" in (result.error or "")
     assert "Claude" not in (result.error or "")
     assert blocked[0]["idle_live_sessions"] == 3
 
@@ -3133,6 +3134,49 @@ async def test_run_strips_anthropic_api_key_by_default(tmp_path, monkeypatch) ->
         if isinstance(event, CompletedEvent):
             answer = event.answer
     assert answer == "api=set"
+
+
+def test_env_drops_inherited_child_session_and_entrypoint(monkeypatch) -> None:
+    """#1124: started from a Claude Code shell, Untether must not hand the
+    parent's CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_ENTRYPOINT to its own
+    spawn (both pass the `CLAUDE_CODE_` prefix allowlist)."""
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    for runner in (
+        ClaudeRunner(claude_cmd="claude"),
+        ClaudeRunner(claude_cmd="claude", use_api_billing=True),
+    ):
+        env = runner.env(state=None)
+        assert env is not None
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env
+        assert "CLAUDE_CODE_ENTRYPOINT" not in env
+        # The prefix allowlist itself still works.
+        assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+def test_build_runner_fallback_model(monkeypatch) -> None:
+    """#1124: `[claude] fallback_model` is read, validated like `model`, and
+    makes a `--fallback-model` in extra_args a conflict."""
+    from untether.config import ConfigError
+
+    monkeypatch.setattr(claude_runner.shutil, "which", lambda _n: "claude")
+    path = Path("untether.toml")
+
+    def build(cfg: dict) -> ClaudeRunner:
+        return cast(ClaudeRunner, claude_runner.build_runner(cfg, path))
+
+    assert build({}).fallback_model is None
+    assert build({"fallback_model": ""}).fallback_model is None
+    assert build({"fallback_model": "sonnet,opus"}).fallback_model == "sonnet,opus"
+    for bad in ("--version", "son net", ["sonnet"], 3):
+        with pytest.raises(ConfigError, match=r"claude\.fallback_model"):
+            build({"fallback_model": bad})
+    # Without the key, extra_args may still pass it (existing configs).
+    assert build({"extra_args": ["--fallback-model", "sonnet"]}).extra_args
+    for spelling in (["--fallback-model", "opus"], ["--fallback-model=opus"]):
+        with pytest.raises(ConfigError, match="--fallback-model"):
+            build({"fallback_model": "sonnet", "extra_args": spelling})
 
 
 def test_env_sets_untether_session() -> None:
@@ -7990,6 +8034,55 @@ _922_HEADLESS_CAPS = (
         "team_budget",
         "⛔ Team budget reached",
     ),
+    # #1238: CLI 2.1.326 renamed the team budget and added its reset.
+    (
+        "You've hit your team's pooled group budget.",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+    (
+        "You've hit your team's pooled group budget. It resets Dec 1, 9am (UTC).",
+        "",
+        "team_budget",
+        "⛔ Team budget reached",
+    ),
+    (
+        "You've hit your individual spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your org's monthly spend limit.",
+        "",
+        "spend",
+        "⛔ Monthly spend limit reached",
+    ),
+    (
+        "You've hit your individual usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "You've hit your org's monthly usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "You've hit your channel's monthly usage limit.",
+        "",
+        "usage_limit",
+        "⛔ Usage limit reached",
+    ),
+    (
+        "Your org is out of usage · add funds to continue.",
+        "",
+        "credits",
+        "⛔ Usage credits used up",
+    ),
 )
 
 
@@ -8100,6 +8193,15 @@ def test_922_interactive_wording_still_latches(
         "Switch to another model to continue.",
         "",
         None,
+        # #1238: time-based heads without the remedy stay #692's.
+        "You've hit your weekly limit · resets Nov 25, 5pm (Australia/Melbourne)",
+        "You've hit your Fable limit · resets Nov 25, 5pm (Australia/Melbourne)",
+        # Admin configuration, not a cap the user can act on.
+        "Your seat type doesn't include Opus 5.5. Switch to another model to continue.",
+        "This service is disabled for your org. Switch to another model to continue.",
+        "Your usage allocation has been disabled by your admin. Switch to another "
+        "model to continue.",
+        "Your group's usage limit is set to $0. Switch to another model to continue.",
     ],
 )
 def test_922_fail_closed(text: str | None) -> None:
@@ -8110,6 +8212,69 @@ def test_922_fail_closed(text: str | None) -> None:
 
     assert _parse_action_required_cap(text) is None
     assert _classify_action_required_cap(text) is None
+
+
+_1238_RESETS = " · resets Nov 25, 5pm (Australia/Melbourne)"
+
+
+@pytest.mark.parametrize("k_suffix", _922_K_VARIANTS)
+def test_1238_fable_plan_limit_wording_latches(
+    k_suffix: str, clean_action_latch, clean_reset_latch
+) -> None:
+    """CLI 2.1.323+ headless Fable cap: the shared rate-limit head plus the
+    plan-limit remedy."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _classify_action_required_cap
+
+    text = (
+        f"You've hit your Fable limit{_1238_RESETS}. "
+        f"Switch to another model{k_suffix} to continue."
+    )
+    assert _classify_action_required_cap(text) == ("Fable", "model", "result_text")
+    with capture_logs() as logs:
+        _922_feed(ClaudeStreamState(), _922_result(text))
+    (rec,) = _922_latched_logs(logs)
+    assert (rec["source"], rec["kind"], rec["model"]) == (
+        "result_text",
+        "model",
+        "Fable",
+    )
+
+
+# Every head the CLI 2.1.327 plan-limit builder can put the remedy on.
+_1238_PLAN_LIMIT_HEADS = (
+    ("Fable limit", ("Fable", "model")),
+    ("team's pooled group budget", ("", "team_budget")),
+    ("monthly spend limit", ("", "spend")),
+    ("channel's monthly spend limit", ("", "spend")),
+    ("individual spend limit", ("", "spend")),
+    ("org's monthly spend limit", ("", "spend")),
+    ("channel's monthly usage limit", ("", "usage_limit")),
+    ("individual usage limit", ("", "usage_limit")),
+    ("org's monthly usage limit", ("", "usage_limit")),
+    # Time-based windows and generic limits: never this class.
+    ("usage limit", None),
+    ("limit", None),
+    ("5-hour limit", None),
+    ("weekly limit", None),
+    ("Opus limit", None),
+    ("Sonnet limit", None),
+)
+
+
+@pytest.mark.parametrize(("name", "expected"), _1238_PLAN_LIMIT_HEADS)
+def test_1238_no_limit_name_is_a_model(
+    name: str, expected: tuple[str, str] | None
+) -> None:
+    from untether.runners.claude import _classify_action_required_cap
+
+    text = (
+        f"You've hit your {name}{_1238_RESETS}. Switch to another model, or manage "
+        "usage credits at https://claude.ai/settings/usage, to continue."
+    )
+    got = _classify_action_required_cap(text)
+    assert got == (None if expected is None else (*expected, "result_text"))
 
 
 def test_922_structured_api_error_latches_without_text(
@@ -9839,3 +10004,82 @@ class TestCronSuppressedSpawn:
             isinstance(e, ActionEvent) and "scheduling is off" in e.action.title
             for e in events
         )
+
+
+@pytest.mark.anyio
+async def test_1120_claude_trigger_run_env_has_run_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1120: the `env -i` wrap carries UNTETHER_TRIGGER / UNTETHER_RUN_ID for
+    a trigger run and neither for an attended one."""
+    from untether.context import RunContext
+    from untether.utils.paths import reset_run_context, set_run_context
+
+    seen: list[list[str]] = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_manage_subprocess(cmd: list[str], *args: object, **kwargs: object):
+        seen.append(list(cmd))
+        raise _Stop
+
+    monkeypatch.setattr(claude_runner, "manage_subprocess", fake_manage_subprocess)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+
+    for ctx in (RunContext(trigger_source="cron:daily", run_id="rid-1"), None):
+        token = set_run_context(ctx)
+        try:
+            with contextlib.suppress(_Stop):
+                async for _evt in runner.run_impl("hi", None):
+                    pass
+        finally:
+            reset_run_context(token)
+
+    trigger_cmd, attended_cmd = seen
+    assert "UNTETHER_TRIGGER=cron:daily" in trigger_cmd
+    assert "UNTETHER_RUN_ID=rid-1" in trigger_cmd
+    assert not any(a.startswith("UNTETHER_RUN_ID=") for a in attended_cmd)
+    assert not any(a.startswith("UNTETHER_TRIGGER=") for a in attended_cmd)
+
+
+# ---------------------------------------------------------------------------
+# #1123: per-result throttle deltas on usage["throttle"]
+# ---------------------------------------------------------------------------
+
+
+def _ok_result(session_id: str = "s1123") -> dict:
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 1,
+        "duration_ms": 10,
+        "duration_api_ms": 5,
+        "session_id": session_id,
+        "result": "done",
+    }
+
+
+def _result_usage(events: list) -> dict:
+    (completed,) = [e for e in events if isinstance(e, CompletedEvent)]
+    return completed.usage or {}
+
+
+def test_1123_rejected_rate_limit_rides_on_ok_result(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    usage = _result_usage(_translate(state, _ok_result()))
+    throttle = usage["throttle"]
+    assert throttle["rate_limit_count"] >= 1
+    assert throttle["rejected"] is True
+    assert throttle["rate_limit_total_s"] > 0
+
+
+def test_1123_throttle_reports_only_this_results_delta(clean_reset_latch) -> None:
+    state = ClaudeStreamState()
+    _translate(state, _REJECTED_NO_RESET)
+    first = _result_usage(_translate(state, _ok_result()))
+    assert first["throttle"]["rate_limit_count"] == 1
+    # A clean second result in the same process reports nothing.
+    assert "throttle" not in _result_usage(_translate(state, _ok_result()))

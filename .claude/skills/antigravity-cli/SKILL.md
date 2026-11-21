@@ -91,6 +91,8 @@ Opt-in agy plugin (`untether agy-gate install`, via `agy plugin validate` + `agy
 (steer via `injectSteps`, liveness), `Stop` (`fullyIdle: false` → background-hold note) — run
 `python -I -m untether.antigravity.gate_hook <Event>` only when `UNTETHER_AGY_GATE` is set, so the user's own agy
 sessions never start Python.
+`untether agy-gate` drives the same agy as the runner (#1180): `--agy`, else the `cmd` from `[engines.antigravity]` /
+`[antigravity]` in `--config-path` → `UNTETHER_CONFIG_PATH` → `~/.untether/untether.toml`, else `agy` on PATH.
 
 - Per run: precheck (plugin bytes match this version's templates, not disabled, `agy -p /hooks` lists it; cached 1 h),
   then a 0600 Unix socket under `$XDG_RUNTIME_DIR/untether/<inst8>/`, a 32-byte token, and peer checks

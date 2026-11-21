@@ -47,8 +47,6 @@ ENGINE: EngineId = "pi"
 
 _RESUME_RE = re.compile(r"(?im)^\s*`?pi\s+--session\s+(?P<token>.+?)`?\s*$")
 
-_SESSION_ID_PREFIX_LEN = 8
-
 # #1064: Pi's own session-id grammar (``assertValidSessionId`` in
 # ``core/session-manager.js``, pi 0.78.0). ``--session <id>`` only looks the
 # id (or a prefix of one) up among existing sessions and never writes a file.
@@ -93,6 +91,8 @@ class PiStreamState:
     # progress UI updates the same action rather than stacking a new one.
     retry_seq: int = 0
     retry_action_id: str | None = None
+    # #1255: an agent_end was seen; the run completes on agent_settled or exit.
+    agent_ended: bool = False
     # #225: latch once the runner has emitted the JSONL-derived model into
     # meta. Prevents us from re-emitting supplementary StartedEvents on every
     # subsequent message_end when the default-config model path is in use.
@@ -162,16 +162,6 @@ def check_pi_resume(value: Any) -> str:
     raise engine_argv.EngineArgvError("resume", "not_a_session")
 
 
-def _short_session_id(session_id: str) -> str:
-    if not session_id:
-        return session_id
-    if "-" in session_id:
-        return session_id.split("-", 1)[0]
-    if len(session_id) > _SESSION_ID_PREFIX_LEN:
-        return session_id[:_SESSION_ID_PREFIX_LEN]
-    return session_id
-
-
 def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> None:
     if not session_id:
         return
@@ -184,7 +174,11 @@ def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> N
     if state.resume.value and not _looks_like_session_path(state.resume.value):
         return
     old_value = state.resume.value
-    state.resume = ResumeToken(engine=ENGINE, value=_short_session_id(session_id))
+    # #1264: the full id. Pi's ids are UUIDv7, so the old 8-hex prefix was
+    # a timestamp shared by every session started within ~65 s, and
+    # ``--session`` resolves a prefix to the newest match (any project).
+    # Short tokens saved before this still resume through that same lookup.
+    state.resume = ResumeToken(engine=ENGINE, value=session_id)
     state.allow_id_promotion = False
     logger.info("pi.session.promoted", old=old_value, new=state.resume.value)
 
@@ -256,6 +250,27 @@ def _last_assistant_message(messages: Any) -> dict[str, Any] | None:
         if isinstance(item, dict) and item.get("role") == "assistant":
             return item
     return None
+
+
+def _completed_event(state: PiStreamState, *, source: str) -> CompletedEvent:
+    ok = state.last_assistant_error is None
+    answer = state.last_assistant_text or ""
+    logger.info(
+        "pi.completed",
+        ok=ok,
+        error=state.last_assistant_error,
+        resume=state.resume.value,
+        answer_len=len(answer),
+        source=source,
+    )
+    return CompletedEvent(
+        engine=ENGINE,
+        ok=ok,
+        answer=answer,
+        resume=state.resume,
+        error=state.last_assistant_error,
+        usage=state.last_usage,
+    )
 
 
 def translate_pi_event(
@@ -349,9 +364,9 @@ def translate_pi_event(
                 usage = message.get("usage")
                 if isinstance(usage, dict):
                     state.last_usage = usage
-                error = _assistant_error(message)
-                if error:
-                    state.last_assistant_error = error
+                # #1255: the latest assistant message decides, so a retry's
+                # answer clears the failed attempt's error.
+                state.last_assistant_error = _assistant_error(message)
                 # #225: when the user relies on Pi's default config model (no
                 # /model override and no pi.model in untether.toml), SessionHeader
                 # was emitted without a model in meta. Pi's message_end carries
@@ -379,6 +394,9 @@ def translate_pi_event(
             return out
 
         case pi_schema.AgentEnd(messages=messages):
+            # #1255: agent_end closes one low-level run; Pi may still retry,
+            # compact-and-retry or run queued messages. Record the outcome and
+            # complete on agent_settled, or at process exit for Pi < 0.80.5.
             assistant = _last_assistant_message(messages)
             if assistant:
                 text = _extract_text_blocks(assistant.get("content"))
@@ -387,34 +405,18 @@ def translate_pi_event(
                 usage = assistant.get("usage")
                 if isinstance(usage, dict):
                     state.last_usage = usage
-                error = _assistant_error(assistant)
-                if error:
-                    state.last_assistant_error = error
-
-            ok = state.last_assistant_error is None
-            error = state.last_assistant_error
-            answer = state.last_assistant_text or ""
-
-            logger.info(
-                "pi.completed",
-                ok=ok,
-                error=error,
-                resume=state.resume.value,
-                answer_len=len(answer),
-            )
-            out.append(
-                CompletedEvent(
-                    engine=ENGINE,
-                    ok=ok,
-                    answer=answer,
-                    resume=state.resume,
-                    error=error,
-                    usage=state.last_usage,
-                )
-            )
+                state.last_assistant_error = _assistant_error(assistant)
+            state.agent_ended = True
             return out
 
-        case pi_schema.AutoCompactionStart(reason=reason):
+        case pi_schema.AgentSettled():
+            # Settled without any agent_end (the run failed to start): leave
+            # it to the stream-end path, which reports the missing agent_end.
+            if state.agent_ended:
+                out.append(_completed_event(state, source="agent_settled"))
+            return out
+
+        case pi_schema.CompactionStart(reason=reason):
             state.compaction_seq += 1
             action_id = f"compaction_{state.compaction_seq}"
             state.compaction_action_id = action_id
@@ -432,7 +434,9 @@ def translate_pi_event(
             )
             return out
 
-        case pi_schema.AutoCompactionEnd(result=result, aborted=aborted):
+        case pi_schema.CompactionEnd(
+            result=result, aborted=aborted, errorMessage=compaction_error
+        ):
             action_id = (
                 state.compaction_action_id or f"compaction_{state.compaction_seq}"
             )
@@ -440,8 +444,11 @@ def translate_pi_event(
             tokens_before = None
             if isinstance(result, dict):
                 tokens_before = result.get("tokensBefore")
+            failed = bool(aborted or compaction_error)
             if aborted:
                 title = "context compaction aborted"
+            elif compaction_error:
+                title = "context compaction failed"
             elif tokens_before:
                 title = f"context compacted ({tokens_before:,} tokens)"
             else:
@@ -455,7 +462,7 @@ def translate_pi_event(
                         title=title,
                         detail={"result": result} if result else {},
                     ),
-                    ok=not aborted,
+                    ok=not failed,
                 )
             )
             return out
@@ -703,6 +710,10 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: PiStreamState,
         stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
+        # #1255: Pi already ended a run; report it as Untether did before it
+        # waited for agent_settled.
+        if state.agent_ended:
+            return [_completed_event(state, source=f"exit_rc_{rc}")]
         parts = [f"pi failed ({_rc_label(rc)})."]
         session = _session_label(found_session, resume)
         if session:
@@ -733,6 +744,9 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: PiStreamState,
         stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
+        # #1255: Pi < 0.80.5 has no agent_settled, so exit is its settle point.
+        if state.agent_ended:
+            return [_completed_event(state, source="exit")]
         resume_for_completed = found_session or resume or state.resume
         resumed = resume is not None
         # #565: Untether was blind to *why* Pi exited on this path — the old

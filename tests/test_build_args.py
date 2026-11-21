@@ -73,6 +73,32 @@ class TestClaudeBuildArgs:
         assert "--model=opus-4" in args
         assert "--model" not in args
 
+    @pytest.mark.parametrize("mode", [None, "plan"])
+    def test_fallback_model_both_paths(self, mode: str | None) -> None:
+        """#1124: `fallback_model` reaches argv (joined) on the legacy `-p`
+        path and the control channel; unset → no flag."""
+        from untether.runners.claude import ClaudeStreamState
+
+        opts = RunOptions(permission_mode=mode) if mode else None
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            args = self._runner(fallback_model="sonnet,opus").build_args(
+                "hello", None, state=ClaudeStreamState()
+            )
+            plain = self._runner().build_args("hello", None, state=ClaudeStreamState())
+        assert "--fallback-model=sonnet,opus" in args
+        assert ("-p" in args) is (mode is None)
+        if mode is None:  # never displaces the prompt after `--`
+            assert args.index("--fallback-model=sonnet,opus") < args.index("--")
+        assert not any(a.startswith("--fallback-model") for a in plain)
+
+    def test_legacy_print_path_never_sends_bare(self) -> None:
+        """#1124: `--bare` never reads OAuth/keychain, so the `-p` path must
+        not send it (subscription auth would break)."""
+        from untether.runners.claude import ClaudeStreamState
+
+        args = self._runner().build_args("hello", None, state=ClaudeStreamState())
+        assert "-p" in args and "--bare" not in args
+
     def test_permission_mode(self) -> None:
         runner = self._runner()
         from untether.runners.claude import ClaudeStreamState
@@ -554,6 +580,10 @@ class TestCodexBuildRunnerDenylist:
     )
     def test_209_codex_workspace_flags_rejected(self, extra: list[str]) -> None:
         self._rejected(extra, match="working directory")
+
+    @pytest.mark.parametrize("extra", [["--trust"], ["--trust=true"]])
+    def test_1040_codex_trust_rejected(self, extra: list[str]) -> None:
+        self._rejected(extra, match="trust_level")
 
     @pytest.mark.parametrize(
         "extra",

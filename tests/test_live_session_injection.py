@@ -190,6 +190,153 @@ def test_drain_followup_anchors_returns_leftovers_for_session() -> None:
     rb._FOLLOWUP_ANCHORS.clear()
 
 
+# ── #1173: several injected lines folded into one turn ─────────────────────
+
+
+def _fold_state(*uuids: str, turn_open: bool = False):
+    from untether.events import EventFactory
+
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open = turn_open
+    factory = EventFactory(engine="claude")
+    factory.started(ResumeToken(engine="claude", value="sid-fold"), title="claude")
+    for n, uuid in enumerate(uuids):
+        state.injected_commands[uuid] = time.monotonic() + n
+        state.awaiting_injected[uuid] = time.monotonic() + n
+    return state, factory
+
+
+def _lifecycle(uuid: str, cmd_state: str):
+    import msgspec
+
+    from untether.schemas import claude as claude_schema
+
+    line = {"type": "command_lifecycle", "command_uuid": uuid, "state": cmd_state}
+    return msgspec.json.decode(
+        msgspec.json.encode(line), type=claude_schema.StreamJsonMessage
+    )
+
+
+def _absorbed_ids(events: list[Any]) -> list[str]:
+    return [
+        e.action.detail["absorbed_command_uuid"]
+        for e in events
+        if getattr(e, "phase", None) == "completed"
+        and "absorbed_command_uuid" in (e.action.detail or {})
+    ]
+
+
+def _translate(state, factory, event) -> list[Any]:
+    return claude_mod.translate_claude_event(
+        event, title="claude", state=state, factory=factory
+    )
+
+
+def test_1252_line_without_own_frame_is_not_guessed(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2")
+    assert _translate(state, factory, _lifecycle("u2", "started")) == []
+    events = claude_mod._open_turn_events(state, factory)
+    assert state.turn_command_uuid == "u2"
+    # No FIFO inference: u1 had no frame of its own yet, so it still waits.
+    assert _absorbed_ids(events) == []
+    assert list(state.awaiting_injected) == ["u1"]
+    # Its own completed frame absorbs it.
+    events = _translate(state, factory, _lifecycle("u1", "completed"))
+    assert _absorbed_ids(events) == ["u1"]
+    assert claude_mod._awaiting_injected(state) is False
+    # The bridge drops u1's anchor, so it is never reported as not run.
+    ref = MessageRef(channel_id=1, message_id=5)
+    rb.register_followup_anchor(
+        "u1", session_id="sid-fold", reply_to=ref, placeholder=None
+    )
+    for evt in events:
+        rb._consume_absorbed_anchor(evt)
+    assert rb.drain_followup_anchors("sid-fold") == []
+
+
+def test_1173_two_started_frames_before_the_turn_opens(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2")
+    _translate(state, factory, _lifecycle("u1", "started"))
+    _translate(state, factory, _lifecycle("u2", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert state.turn_command_uuid == "u2"
+    assert _absorbed_ids(events) == ["u1"]
+    assert state.awaiting_injected == {}
+    assert state.superseded_started == []
+
+
+def test_1252_mid_turn_absorbs_each_line_on_its_own_started(cleanup) -> None:
+    state, factory = _fold_state("u1", "u2", "u3", turn_open=True)
+    events = _translate(state, factory, _lifecycle("u2", "started"))
+    assert _absorbed_ids(events) == ["u2"]
+    events = _translate(state, factory, _lifecycle("u1", "started"))
+    assert _absorbed_ids(events) == ["u1"]
+    assert list(state.awaiting_injected) == ["u3"]
+
+
+def test_1252_capture_sequence_from_issue(cleanup) -> None:
+    """#1252 capture (CLI 2.1.327): A running; B, C, D each get queued,
+    started and completed before A's completed."""
+    state, factory = _fold_state("B", "C", "D", turn_open=True)
+    absorbed: list[str] = []
+    for uuid in ("B", "C", "D"):
+        assert _translate(state, factory, _lifecycle(uuid, "queued")) == []
+        absorbed += _absorbed_ids(
+            _translate(state, factory, _lifecycle(uuid, "started"))
+        )
+        assert _translate(state, factory, _lifecycle(uuid, "completed")) == []
+    assert _translate(state, factory, _lifecycle("A", "completed")) == []
+    assert absorbed == ["B", "C", "D"]
+    assert state.awaiting_injected == {}
+
+
+def test_1252_wakeup_started_is_not_superseded(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    _translate(state, factory, _lifecycle("wake", "started"))
+    _translate(state, factory, _lifecycle("u1", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert _absorbed_ids(events) == []
+    assert state.superseded_started == []
+    assert state.turn_reason == "followup"
+    assert state.turn_command_uuid == "u1"
+
+
+def test_1173_completed_without_start_is_absorbed(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    events = _translate(state, factory, _lifecycle("u1", "completed"))
+    assert _absorbed_ids(events) == ["u1"]
+    assert state.awaiting_injected == {}
+
+
+@pytest.mark.parametrize("cmd_state", ["cancelled", "discarded", "refused"])
+def test_1173_line_that_never_ran_releases_the_hold_keeps_anchor(
+    cleanup, cmd_state: str
+) -> None:
+    state, factory = _fold_state("u1")
+    with capture_logs() as logs:
+        events = _translate(state, factory, _lifecycle("u1", cmd_state))
+    assert events == []
+    assert state.awaiting_injected == {}
+    assert "u1" not in state.absorbed_commands
+    assert any(
+        e["event"] == "claude.live_session.injected_not_run"
+        and e["lifecycle_state"] == cmd_state
+        for e in logs
+    )
+
+
+def test_1173_single_line_turn_unchanged(cleanup) -> None:
+    state, factory = _fold_state("u1")
+    _translate(state, factory, _lifecycle("u1", "started"))
+    events = claude_mod._open_turn_events(state, factory)
+    assert _absorbed_ids(events) == []
+    assert state.turn_command_uuid == "u1"
+    # Its own completed frame after the turn opened changes nothing.
+    assert _translate(state, factory, _lifecycle("u1", "completed")) == []
+
+
 # ── end to end ──────────────────────────────────────────────────────────────
 
 
@@ -1383,3 +1530,56 @@ async def test_inject_live_followup_logs_use_engine_namespace(
     assert [(sid, text) for sid, text, _ in injected] == [("sid-inj", "again")] * 2
     assert injected[-1][2] == {"command_uuid": command_uuid}
     assert closes == []
+
+
+# ── #1275: a queued /continue doesn't wait for the idle timer ───────────────
+
+
+async def test_1275_queued_continue_closes_the_idle_live_session_at_once(
+    cleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live QA: a /continue sent during a live /continue run's turn queues
+    behind it (every /continue shares one scheduler key). Once that turn
+    ends, the queued /continue closes the clean-idle session (``continue``)
+    instead of waiting ~60 s for its idle close, then runs."""
+    continue_token = ResumeToken(engine="claude", value="", is_continue=True)
+    live, _pipe = _install("sid-inj", idle=False)  # A: a turn in progress
+    session_closed = anyio.Event()
+    closes: list[tuple[str, str]] = []
+
+    async def close(sid: str, reason: str, **_: Any) -> bool:
+        closes.append((sid, reason))
+        claude_mod._LIVE_SESSIONS.pop(sid, None)  # A's process exits
+        session_closed.set()
+        return True
+
+    monkeypatch.setattr(claude_mod, "close_live_session", close)
+    ran: list[str] = []
+
+    async def run_job(job: ThreadJob) -> None:
+        ran.append(job.text)
+        if job.text == "first":
+            await session_closed.wait()  # A's live run lasts until it closes
+
+    def job(text: str, msg_id: int) -> ThreadJob:
+        return ThreadJob(
+            chat_id=123, user_msg_id=msg_id, text=text, resume_token=continue_token
+        )
+
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(
+            task_group=tg,
+            run_job=run_job,
+            inject_job=functools.partial(inject_live_followup, cwd_for=_cwd(None)),
+        )
+        sched._live_pump_interval_s = 0.01
+        await sched.enqueue(job("first", 10))
+        await anyio.sleep(0.05)
+        await sched.enqueue(job("hi", 11))
+        await anyio.sleep(0.1)
+        assert ran == ["first"] and closes == []  # busy: queued, not closed
+        live.state.turn_open = False  # the turn ends: clean idle
+        with anyio.fail_after(2):
+            while ran != ["first", "hi"]:
+                await anyio.sleep(0.01)
+    assert closes == [("sid-inj", "continue")]

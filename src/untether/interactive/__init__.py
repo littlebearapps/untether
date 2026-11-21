@@ -29,7 +29,6 @@ from .questions import (
     recently_resolved_ask_flow,
 )
 from .registry import (
-    CONTROL_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_CALLBACK_PREFIX,
     ControlLookup,
     ControlRequestSnapshot,
@@ -65,7 +64,6 @@ from .unattended import unattended_deny_message
 __all__ = [
     "APPROVAL_COMMAND_IDS",
     "CONTROL_CALLBACK_PREFIXES",
-    "CONTROL_REQUEST_TIMEOUT_SECONDS",
     "DEFAULT_CALLBACK_PREFIX",
     "AskQuestionState",
     "ControlLookup",

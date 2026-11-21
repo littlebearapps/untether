@@ -52,6 +52,13 @@ from ..runner import (
 )
 from ..schemas import opencode as opencode_schema
 from ..utils import engine_argv
+from ..utils.env_policy import (
+    NETWORK_ENV_NAMES,
+    filtered_env,
+    load_env_extras,
+    log_dropped_once,
+    log_user_extensions_once,
+)
 from ..utils.paths import relativize_path
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
@@ -59,6 +66,63 @@ from .tool_actions import tool_input_path, tool_kind_and_title
 logger = get_logger(__name__)
 
 ENGINE: EngineId = "opencode"
+
+# #1241 (D1): provider credential names that don't end in ``_API_KEY``
+# (those pass by suffix in ``OpenCodeRunner.env``). Snapshot taken
+# 2026-11-18 from opencode-ai 1.19.6: the 34 non-suffix ``env`` names in
+# its bundled models.dev provider catalogue, plus the names its Bedrock /
+# Vertex / SAP AI Core loaders read directly (AWS_PROFILE ... AICORE_*).
+# Refresh with each OpenCode drift check; anything missing goes in
+# ``[security] env_extra_allow``.
+_OPENCODE_PROVIDER_ENV: tuple[str, ...] = (
+    "ABLIT_KEY",
+    "AICORE_SERVICE_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_REGION",
+    "AWS_SECRET_ACCESS_KEY",
+    "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME",
+    "AZURE_RESOURCE_NAME",
+    "BAILING_API_TOKEN",
+    "CLARIFAI_PAT",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_GATEWAY_ID",
+    "DATABRICKS_HOST",
+    "DATABRICKS_TOKEN",
+    "DIGITALOCEAN_ACCESS_TOKEN",
+    "FRIENDLI_TOKEN",
+    "GITHUB_TOKEN",
+    "GITLAB_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_VERTEX_LOCATION",
+    "GOOGLE_VERTEX_PROJECT",
+    "HF_TOKEN",
+    "INFOMANIAK_PRODUCT_ID",
+    "MODAL_PROXY_TOKEN",
+    "NEON_AI_GATEWAY_BASE_URL",
+    "NEON_AI_GATEWAY_TOKEN",
+    "RUNINFRA_GATEWAY_KEY",
+    "SNOWFLAKE_ACCOUNT",
+    "SNOWFLAKE_CORTEX_PAT",
+    "SUBMODEL_INSTAGEN_ACCESS_KEY",
+    "WATSONX_AI_APIKEY",
+    "WATSONX_AI_PROJECT_ID",
+    "ZENIFRA_AI_KEY",
+    # read by the provider loaders, not listed in the catalogue
+    "AWS_PROFILE",
+    "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_REGION",
+    "GCP_PROJECT",
+    "GCLOUD_PROJECT",
+    "VERTEX_LOCATION",
+    "AICORE_RESOURCE_GROUP",
+    "AICORE_DEPLOYMENT_ID",
+)
+# #1241 (D3): proxies/CA (OpenCode 1.x honours HTTP(S)_PROXY, NO_PROXY and
+# NODE_EXTRA_CA_CERTS; the last already passes by the NODE_ prefix).
+_OPENCODE_ENV_EXTRAS: tuple[str, ...] = (*_OPENCODE_PROVIDER_ENV, *NETWORK_ENV_NAMES)
+_OPENCODE_ENV_PREFIXES: tuple[str, ...] = ("OPENCODE_",)
 
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?opencode(?:\s+run)?\s+(?:--session|-s)\s+(?P<token>ses_[A-Za-z0-9]+)`?\s*$"
@@ -609,6 +673,20 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> OpenCodeStreamState:
         return OpenCodeStreamState()
 
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        """#1241: the allowlisted env, not Untether's whole service env.
+        OpenCode 1.x has no native env filter for its shell tool or MCP
+        servers. Its login (auth.json) is found via HOME / XDG_DATA_HOME."""
+        user_exact, user_prefix = load_env_extras()
+        log_user_extensions_once(user_exact, user_prefix)
+        api_keys = [k for k in os.environ if k.endswith("_API_KEY")]  # D1 suffix rule
+        env = filtered_env(
+            extra_allow=(*user_exact, *_OPENCODE_ENV_EXTRAS, *api_keys),
+            extra_prefix=(*user_prefix, *_OPENCODE_ENV_PREFIXES),
+        )
+        log_dropped_once(ENGINE, os.environ, env)
+        return env
+
     def start_run(
         self,
         prompt: str,
@@ -842,4 +920,6 @@ BACKEND = EngineBackend(
     id="opencode",
     build_runner=build_runner,
     install_cmd="npm install -g opencode-ai@1",
+    # #417: tokens are per run; the ledger keeps the session total.
+    usage_scope={"tokens": "per_run"},
 )

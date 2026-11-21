@@ -261,7 +261,7 @@ async def test_dispatch_errors_dont_fail_http_response(caplog):
     settings = _make_settings()
 
     class ExplodingDispatcher:
-        async def dispatch_webhook(self, wh, prompt):
+        async def dispatch_webhook(self, wh, prompt, **kw):
             raise RuntimeError("boom")
 
     app = build_webhook_app(settings, ExplodingDispatcher())  # type: ignore[arg-type]
@@ -564,7 +564,7 @@ async def test_webhook_returns_202_before_dispatch_completes():
     dispatch_release = asyncio.Event()
 
     class SlowDispatcher:
-        async def dispatch_webhook(self, wh, prompt):
+        async def dispatch_webhook(self, wh, prompt, **kw):
             dispatch_started.set()
             # Block until the test releases us.
             await dispatch_release.wait()

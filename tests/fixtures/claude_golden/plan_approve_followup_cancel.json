@@ -321,7 +321,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "",
         "kind": "tool",
         "request_id": "req-epm-1",

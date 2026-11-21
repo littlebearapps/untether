@@ -1061,3 +1061,103 @@ def test_opencode_version_probe_failure_not_cached(
     )
     assert opencode_mod.opencode_cli_version(str(script)) is None
     assert opencode_mod.opencode_cli_version(str(script)) == "2.0.23"
+
+
+# ── #1241: OpenCode gets a filtered environment ────────────────────────────
+
+
+def _opencode_env() -> dict[str, str]:
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    env = runner.env(state=runner.new_state("hi", None))
+    assert env is not None
+    return env
+
+
+def test_opencode_env_drops_canary(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    leaks = ("ZZ_CANARY_SECRET", "MY_WEBHOOK_SECRET", "DATABASE_URL", "X_TOKEN")
+    for name in leaks:
+        monkeypatch.setenv(name, "leak")
+    env = _opencode_env()
+    for name in leaks:
+        assert name not in env
+    assert env["PATH"] == os.environ["PATH"]
+
+
+def test_opencode_env_keeps_opencode_and_provider_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = {
+        "HOME": "/home/u",  # auth.json lives in ~/.local/share/opencode
+        "XDG_DATA_HOME": "/home/u/.local/share",
+        "OPENCODE_CONFIG": "/c.json",
+        "OPENCODE_PERMISSION": "{}",
+        "OPENROUTER_API_KEY": "k",  # D1: the *_API_KEY suffix rule
+        "AWS_ACCESS_KEY_ID": "k",  # D1: the 1.19.6 provider snapshot
+        "AWS_PROFILE": "dev",
+        "GOOGLE_VERTEX_PROJECT": "p",
+        "HF_TOKEN": "k",
+        "HTTPS_PROXY": "http://p:3128",
+        "NO_PROXY": "localhost",
+        "NODE_EXTRA_CA_CERTS": "/ca.pem",
+    }
+    for name, value in kept.items():
+        monkeypatch.setenv(name, value)
+    env = _opencode_env()
+    assert {k: env.get(k) for k in kept} == kept
+
+
+def test_opencode_env_honours_user_extras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "untether.toml"
+    config.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n\n[security]\n"
+        'env_extra_allow = ["MY_PROVIDER_SECRET"]\n'
+        'env_extra_prefix_allow = ["VAULT_"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(config))
+    monkeypatch.setenv("MY_PROVIDER_SECRET", "k")
+    monkeypatch.setenv("VAULT_TOKEN", "v")
+    env = _opencode_env()
+    assert env["MY_PROVIDER_SECRET"] == "k"
+    assert env["VAULT_TOKEN"] == "v"
+
+
+def test_opencode_env_then_apply_run_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from untether.context import RunContext
+    from untether.utils.env_policy import apply_run_env
+
+    monkeypatch.setenv("UNTETHER__TRANSPORTS__TELEGRAM__BOT_TOKEN", "t")
+    monkeypatch.setenv("UNTETHER_RUN_ID", "stale")
+    ctx = RunContext(trigger_source="cron:c", run_id="r")
+    env = apply_run_env(_opencode_env(), ctx)
+    assert env is not None
+    assert env["UNTETHER_TRIGGER"] == "cron:c"
+    assert env["UNTETHER_RUN_ID"] == "r"
+    assert not any(k.startswith("UNTETHER__") for k in env)
+
+
+def test_opencode_env_logs_dropped_names_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils.env_policy import _reset_log_latch_for_tests
+
+    _reset_log_latch_for_tests()
+    monkeypatch.setenv("ZZ_CANARY_SECRET", "leak-value")
+    try:
+        with capture_logs() as logs:
+            _opencode_env()
+            _opencode_env()
+    finally:
+        _reset_log_latch_for_tests()
+    dropped = [r for r in logs if r.get("event") == "env_policy.dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["engine"] == "opencode"
+    assert "ZZ_CANARY_SECRET" in dropped[0]["names"]
+    assert "leak-value" not in repr(dropped[0])

@@ -84,10 +84,10 @@ Untether’s CLI is an auto-router by default; engine subcommands override the d
 |---------|-------------|
 | `untether` | Start Untether (runs onboarding if setup/config is missing and you’re in a TTY). |
 | `untether <engine>` | Run with a specific engine (e.g. `untether codex`). |
-| `untether config path` | Print the resolved config file path. |
-| `untether config list` | List config keys as flattened dot-paths. |
-| `untether config get <key>` | Fetch a single config key (dot-path). |
-| `untether config set <key> <value>` | Set a config value (value is auto-parsed). |
+| `untether config path` | Print the resolved config file path: `--config-path`, then `UNTETHER_CONFIG_PATH`, then `~/.untether/untether.toml` (all `config` subcommands use this order; [#1268](https://github.com/littlebearapps/untether/issues/1268)). |
+| `untether config list` | List config keys as flattened dot-paths; arrays of tables show as `triggers.crons[0].id`. Secrets (`bot_token`, API keys, webhook `secret`, any key named like a token, secret, password or credential) print as `"***"` with their length; `--show-secrets` prints them ([#1268](https://github.com/littlebearapps/untether/issues/1268)). |
+| `untether config get <key>` | Fetch a single config key (dot-path); secrets masked unless `--show-secrets`. |
+| `untether config set <key> <value>` | Set a config value (value is auto-parsed); a secret is masked in the confirmation. |
 | `untether config unset <key>` | Remove a config key. |
 | `untether init <alias>` | Register the current repo as a project (`--default` also sets it as `default_project`). |
 | `untether chat-id` | Capture the current chat id. |
@@ -96,9 +96,9 @@ Untether’s CLI is an auto-router by default; engine subcommands override the d
 | `untether onboarding-paths` | Print all possible onboarding paths. |
 | `untether plugins` | List discovered plugins without loading them. |
 | `untether plugins --load` | Load each plugin to validate types and surface import errors. |
-| `untether agy-gate install` | Install Untether's agy plugin on this host through `agy plugin install` (approval buttons in Ask me, question buttons and steer for Antigravity). `--wait-s <s>` sets how long a question or approval waits (default 900), `--force` replaces a plugin folder Untether didn't install or that was edited, `--dry-run` prints the files without writing, `--agy <path>` names the agy binary (default: `[antigravity] cmd`, then agy on `PATH`, then `~/.local/bin/agy`) ([#980](https://github.com/littlebearapps/untether/issues/980)). |
-| `untether agy-gate status` | Show whether the plugin is installed and current. `--project <dir>` also runs agy's own `-p /hooks` check there (no model turn); `--canary` sends one trivial agy turn to check the hooks reach Untether. `--agy <path>` as for install. Exits 1 when not ready. |
-| `untether agy-gate uninstall` | Remove the plugin with `agy plugin uninstall` (`--force` even if Untether didn't install it; `--agy <path>` as for install). |
+| `untether agy-gate install` | Install Untether's agy plugin on this host through `agy plugin install` (approval buttons in Ask me, question buttons and steer for Antigravity). `--wait-s <s>` sets how long a question or approval waits (default 900), `--force` replaces a plugin folder Untether didn't install or that was edited, `--dry-run` prints the files without writing, `--agy <path>` names the agy binary (default: `cmd` under `[engines.antigravity]` or `[antigravity]`, then agy on `PATH`, then `~/.local/bin/agy`), `--config-path <file>` picks the config that `cmd` comes from (default: `UNTETHER_CONFIG_PATH`, then `~/.untether/untether.toml`; [#1180](https://github.com/littlebearapps/untether/issues/1180)) ([#980](https://github.com/littlebearapps/untether/issues/980)). |
+| `untether agy-gate status` | Show whether the plugin is installed and current. `--project <dir>` also runs agy's own `-p /hooks` check there (no model turn); `--canary` sends one trivial agy turn to check the hooks reach Untether. `--agy <path>` and `--config-path <file>` as for install; with `--project` or `--canary` it prints the agy it used. Exits 1 when not ready. |
+| `untether agy-gate uninstall` | Remove the plugin with `agy plugin uninstall` (`--force` even if Untether didn't install it; `--agy <path>` and `--config-path <file>` as for install). |
 
 ### Common flags
 

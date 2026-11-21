@@ -11,7 +11,7 @@ import httpx
 from ..logging import get_logger
 from ..transport import current_message_kind
 from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
-from .client_api import BotClient, HttpBotClient, TelegramRetryAfter
+from .client_api import BotClient, HttpBotClient, SendOutcome, TelegramRetryAfter
 from .outbox import (
     DELETE_PRIORITY,
     EDIT_PRIORITY,
@@ -117,6 +117,7 @@ class TelegramClient:
         chat_id: int | None,
         wait: bool = True,
         superseded_result: Any = None,
+        on_dropped: Callable[[], None] | None = None,
     ) -> Any:
         request = OutboxOp(
             execute=execute,
@@ -126,6 +127,7 @@ class TelegramClient:
             label=label,
             kind=current_message_kind(),
             superseded_result=superseded_result,
+            on_dropped=on_dropped,
         )
         return await self._outbox.enqueue(key=key, op=request, wait=wait)
 
@@ -187,8 +189,11 @@ class TelegramClient:
         *,
         replace_message_id: int | None = None,
         wait: bool = True,
+        on_failure: Callable[[SendOutcome], None] | None = None,
     ) -> Message | None:
-        """``wait=False`` queues the send and returns None at once (#928)."""
+        """``wait=False`` queues the send and returns None at once (#928).
+        ``on_failure`` (#1207) runs when the queued send itself fails, even
+        after its waiter has gone."""
 
         async def execute() -> Message | None:
             return await self._client.send_message(
@@ -201,6 +206,7 @@ class TelegramClient:
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
                 replace_message_id=replace_message_id,
+                **({"on_failure": on_failure} if on_failure is not None else {}),
             )
 
         if replace_message_id is not None:
@@ -216,6 +222,10 @@ class TelegramClient:
             priority=SEND_PRIORITY,
             chat_id=chat_id,
             wait=wait,
+            # #1286: a send the outbox drops before dispatch was never sent.
+            on_dropped=(
+                (lambda: on_failure("resendable")) if on_failure is not None else None
+            ),
         )
         if replace_message_id is not None and result is not None:
             # #928: queue the replaced message's delete without awaiting it —

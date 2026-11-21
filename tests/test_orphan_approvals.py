@@ -196,6 +196,18 @@ def test_render_escapes_reason_markdown() -> None:
     assert "a\\_b\\*c" in md
 
 
+def test_939_render_skips_reason_already_in_title() -> None:
+    """#939: the in-turn title carries the reason line; the surface must not
+    repeat it."""
+    md = render_surface_markdown(
+        "Permission Request [CanUseTool] - tool: Bash\n🪝 confirm \\*this\\*",
+        label=None,
+        reason="confirm *this*",
+        agent=True,
+    )
+    assert md.count("🪝") == 1
+
+
 def test_synth_keyboard_approve_deny() -> None:
     rows = synth_keyboard("r-5")
     data = [b["callback_data"] for row in rows for b in row]
@@ -451,6 +463,34 @@ async def test_rescue_prefers_tracked_keyboard() -> None:
     await surface.flush()
     rows = transport.send_calls[0]["message"].extra["reply_markup"]["inline_keyboard"]
     assert rows == [[{"text": "Option A", "callback_data": "aq:r-9:0"}]]
+
+
+async def test_rescue_without_action_uses_snapshot_agent_and_reason() -> None:
+    """#1251: a follow-up turn's request has no run-level action, so the
+    rescue reads who/why from the snapshot; the reason is never logged."""
+    surface, transport, _ = _surface()
+    snap = ControlRequestSnapshot(
+        request_id="r-9",
+        session_id="sess-1251",
+        age_s=40.0,
+        tool_name="Write",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=True,
+        agent_id="a1",
+        decision_reason="R1251-outside cwd",
+    )
+    assert surface.rescue(snap) is True
+    with structlog.testing.capture_logs() as logs:
+        await surface.flush()
+    (call,) = transport.send_calls
+    text = call["message"].text
+    assert "A background agent needs your approval" in text
+    assert "🤖 Plan the" in text
+    assert "🪝 R1251" in text and "outside cwd" in text
+    (sent,) = _events(logs, "approval_surface.sent")
+    assert sent["agent_id"] == "a1" and sent["source"] == "rescue"
+    assert "R1251" not in repr(logs)
 
 
 async def test_rescue_does_not_duplicate_offer() -> None:

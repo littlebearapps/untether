@@ -25,7 +25,14 @@ from ..runner import (
 )
 from ..schemas import codex as codex_schema
 from ..utils import engine_argv
-from ..utils.paths import relativize_command, relativize_path
+from ..utils.env_policy import (
+    NETWORK_ENV_NAMES,
+    filtered_env,
+    load_env_extras,
+    log_dropped_once,
+    log_user_extensions_once,
+)
+from ..utils.paths import get_run_base_dir, relativize_command, relativize_path
 from .extra_args_guard import (
     SECURITY_DOC_REF,
     BlockedArg,
@@ -42,6 +49,21 @@ from .run_options import EngineRunOptions, get_run_options
 logger = get_logger(__name__)
 
 ENGINE: EngineId = "codex"
+
+# #1241: Codex-only env names on top of the global allowlist (codex-cli
+# 0.170.0). ``CODEX_*`` covers CODEX_HOME, CODEX_SQLITE_HOME, CODEX_API_KEY,
+# CODEX_ACCESS_TOKEN and CODEX_CA_CERTIFICATE; the ChatGPT login is found via
+# HOME (~/.codex), and the keyring credential store needs D-Bus. The #962
+# app-server child reuses these two tuples.
+_CODEX_ENV_EXTRAS: tuple[str, ...] = (
+    "RUST_LOG",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "OPENAI_FEDERATION_RULE_ID",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    *NETWORK_ENV_NAMES,
+)
+_CODEX_ENV_PREFIXES: tuple[str, ...] = ("CODEX_",)
 
 __all__ = [
     "CODEX_SAFE_PERMISSION_MODE",
@@ -232,6 +254,13 @@ _CODEX_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
     # workspace
     "--cd": ("workspace", _CODEX_WORKSPACE_HINT),
     "--worktree": ("workspace", _CODEX_WORKSPACE_HINT),
+    # 0.169.0, exec-only: persists project trust for future chats (#1040)
+    "--trust": (
+        "workspace",
+        "saves project trust for this and future Codex chats and is not accepted"
+        ' in `extra_args`; set `[projects."<path>"] trust_level` in'
+        " `~/.codex/config.toml` yourself",
+    ),
     "--": (
         "separator",
         "is not accepted: a bare `--` would turn `exec …` into prompt text",
@@ -313,6 +342,33 @@ def find_blocked_codex_args(extra_args: list[str]) -> list[BlockedArg]:
                     )
                 )
     return dedupe_hits(hits)
+
+
+# #962: `codex app-server --help` (0.170.0) options a user may set; the rest
+# are transport/auth plumbing Untether owns, or exec-only.
+_APP_SERVER_ALLOWED_FLAGS = frozenset(
+    {"--config", "--enable", "--disable", "--strict-config"}
+)
+
+
+def find_non_app_server_args(extra_args: list[str]) -> list[BlockedArg]:
+    """Flags `transport = "app-server"` refuses: everything but the allow-list."""
+    return dedupe_hits(
+        [
+            BlockedArg(
+                flag=tok.flag,
+                category="managed",
+                hint='is not accepted with `transport = "app-server"`; only'
+                " `-c`, `--enable`, `--disable` and `--strict-config` are",
+            )
+            for tok in iter_option_tokens(
+                extra_args,
+                short_aliases=_CODEX_SHORT_ALIASES,
+                short_value_flags=_CODEX_SHORT_VALUE_FLAGS,
+            )
+            if tok.flag not in _APP_SERVER_ALLOWED_FLAGS
+        ]
+    )
 
 
 def _parse_reconnect_message(message: str) -> tuple[int, int] | None:
@@ -766,6 +822,19 @@ def _warning_display_text(message: str) -> str:
     return _WARNING_PATH_RE.sub(_replace, text)
 
 
+# #1240: codex-cli >= 0.169.0 prints this on stderr only, before the JSON
+# stream, when an untrusted project has a .codex/ folder. Match the stable
+# prefix; the rest of the sentence changes between versions.
+_UNTRUSTED_PROJECT_PREFIX = "warning: Untrusted project-local configuration is disabled"
+_UNTRUSTED_PROJECT_NOTE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex skipped this project's"
+    " `.codex/` settings (MCP servers, hooks, rules) because the project isn't"
+    " trusted. Untether doesn't trust projects for you: add"
+    ' `[projects."<repo root>"] trust_level = "trusted"` to'
+    " `~/.codex/config.toml`."
+)
+
+
 def translate_codex_event(
     event: codex_schema.ThreadEvent,
     *,
@@ -804,6 +873,9 @@ class CodexRunState:
     # The argv build_args produced for this run (the prompt goes via stdin),
     # kept for the #830 `codex.argv.rejected` diagnostic.
     argv: list[str] | None = None
+    # #1240: Codex said on stderr that it disabled the project's .codex/ layer.
+    untrusted_project_config: bool = False
+    untrusted_note_sent: bool = False
 
 
 class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
@@ -811,6 +883,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     resume_re = _RESUME_RE
     model: str | None = None
     logger = logger
+    # How failures name the process ("codex app-server" on #962's transport).
+    process_label = "codex exec"
 
     def __init__(
         self,
@@ -903,6 +977,52 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
 
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        # #1240: Untether never grants trust (no `--trust`); it only reports it.
+        if state.untrusted_project_config or not line.startswith(
+            _UNTRUSTED_PROJECT_PREFIX
+        ):
+            return
+        state.untrusted_project_config = True
+        logger.info("codex.project_config_untrusted", cwd=str(get_run_base_dir()))
+
+    def _untrusted_note(self, state: CodexRunState) -> list[UntetherEvent]:
+        """The #1240 ⚠️ row, at most once per run."""
+        if not state.untrusted_project_config or state.untrusted_note_sent:
+            return []
+        state.untrusted_note_sent = True
+        return [
+            state.factory.action_completed(
+                action_id="codex.untrusted_project",
+                kind="warning",
+                title=_UNTRUSTED_PROJECT_NOTE,
+                ok=True,
+                level="warning",
+            )
+        ]
+
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        """#1241: the allowlisted env, not Untether's whole service env.
+        Codex's own ``shell_environment_policy`` stays the user's second layer."""
+        user_exact, user_prefix = load_env_extras()
+        log_user_extensions_once(user_exact, user_prefix)
+        env = filtered_env(
+            extra_allow=(*user_exact, *_CODEX_ENV_EXTRAS),
+            extra_prefix=(*user_prefix, *_CODEX_ENV_PREFIXES),
+        )
+        log_dropped_once(ENGINE, os.environ, env)
+        return env
+
+    @staticmethod
+    def _untrusted_usage(
+        state: CodexRunState, usage: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """#1240: rows aren't kept in the final, so the bridge's footer line
+        reads this flag from ``usage["project_config_untrusted"]``."""
+        if not state.untrusted_project_config:
+            return usage
+        return {**(usage or {}), "project_config_untrusted": True}
+
     def start_run(
         self,
         prompt: str,
@@ -939,7 +1059,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
 
     def pipes_error_message(self) -> str:
-        return "codex exec failed to open subprocess pipes"
+        return f"{self.process_label} failed to open subprocess pipes"
 
     def translate(
         self,
@@ -970,11 +1090,13 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case codex_schema.TurnFailed(error=error):
                 resume_for_completed = found_session or resume
                 return [
+                    *self._untrusted_note(state),
                     factory.completed_error(
                         error=error.message,
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
-                    )
+                        usage=self._untrusted_usage(state, None),
+                    ),
                 ]
             case codex_schema.TurnStarted():
                 action_id = f"turn_{state.turn_index}"
@@ -991,11 +1113,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case codex_schema.TurnCompleted(usage=usage):
                 resume_for_completed = found_session or resume
                 return [
+                    *self._untrusted_note(state),
                     factory.completed_ok(
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
-                        usage=msgspec.to_builtins(usage),
-                    )
+                        usage=self._untrusted_usage(state, msgspec.to_builtins(usage)),
+                    ),
                 ]
             case codex_schema.ItemCompleted(
                 item=codex_schema.AgentMessageItem(text=text, phase=message_phase)
@@ -1036,12 +1159,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 meta = {}
             meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
 
-        return translate_codex_event(
+        events = translate_codex_event(
             data,
             title=self.session_title,
             factory=factory,
             meta=meta,
         )
+        if isinstance(data, codex_schema.ThreadStarted):
+            # #1240: the row goes right after StartedEvent (3-event contract).
+            events.extend(self._untrusted_note(state))
+        return events
 
     def process_error_events(
         self,
@@ -1052,7 +1179,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: CodexRunState,
         stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        parts = [f"codex exec failed ({_rc_label(rc)})."]
+        parts = [f"{self.process_label} failed ({_rc_label(rc)})."]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
@@ -1139,7 +1266,23 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `codex.extra_args` in {config_path}; expected a list of strings."
         )
 
+    # #962: install-wide transport; exec stays the default (DEC-2).
+    transport = config.get("transport", "exec")
+    if transport not in ("exec", "app-server"):
+        logger.warning(
+            "codex.config.invalid",
+            error="transport must be exec or app-server",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f'Invalid `codex.transport` in {config_path}; expected "exec" or'
+            ' "app-server".'
+        )
+    app_server = transport == "app-server"
+
     blocked = find_blocked_codex_args(extra_args)
+    if app_server:
+        blocked = dedupe_hits([*blocked, *find_non_app_server_args(extra_args)])
     if blocked:
         # Flag names only — never the values (a `-c` value can hold a secret).
         logger.warning(
@@ -1153,6 +1296,17 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     title = "Codex"
     profile_value = config.get("profile")
+    if profile_value and app_server:
+        # DEC-19: `codex app-server` has no --profile; don't guess a mapping.
+        logger.warning(
+            "codex.config.invalid",
+            error="profile is not supported on the app-server transport",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `codex.profile` in {config_path}: `codex app-server` has no"
+            ' `--profile`. Remove it, or use `transport = "exec"`.'
+        )
     if profile_value:
         if not isinstance(profile_value, str):
             logger.warning(
@@ -1166,6 +1320,10 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         extra_args.extend(["--profile", profile_value])
         title = profile_value
 
+    if app_server:
+        from .codex_app_server import CodexAppServerRunner  # imports this module
+
+        return CodexAppServerRunner(codex_cmd=codex_cmd, extra_args=extra_args)
     return CodexRunner(codex_cmd=codex_cmd, extra_args=extra_args, title=title)
 
 
@@ -1173,4 +1331,6 @@ BACKEND = EngineBackend(
     id="codex",
     build_runner=build_runner,
     install_cmd="npm install -g @openai/codex",
+    # #419: turn.completed.usage is the thread's total, across exec resume.
+    usage_scope={"tokens": "thread_cumulative"},
 )

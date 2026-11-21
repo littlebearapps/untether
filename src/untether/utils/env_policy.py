@@ -20,11 +20,10 @@ dropped.
 Scope of this change
 --------------------
 
-Only the Claude and Pi runners opt in via :func:`filtered_env` in
-v0.35.2. Other engines (Codex, OpenCode, Gemini, AMP) continue to
-return ``None`` from their ``env()`` hook and inherit the parent
-environment unchanged. Extending to those engines needs per-engine
-integration validation — see #332 for the follow-up milestone.
+Claude and Pi opted in via :func:`filtered_env` in v0.35.2, Antigravity
+with #558, and Codex and OpenCode with #1241. The deprecated Gemini and
+AMP runners still return ``None`` from their ``env()`` hook and inherit the parent
+environment (minus :func:`apply_run_env`'s drops).
 
 Extending the allowlist
 -----------------------
@@ -53,8 +52,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 from ..logging import get_logger
+
+if TYPE_CHECKING:
+    from ..context import RunContext
 
 logger = get_logger(__name__)
 
@@ -163,6 +166,31 @@ _PREFIX_ALLOW: tuple[str, ...] = (
     "NODE_",  # NODE_TLS_REJECT_UNAUTHORIZED (for corp CAs), etc.
     "PIP_",  # PIP_INDEX_URL, PIP_EXTRA_INDEX_URL for private PyPI
     "UNTETHER_",  # Untether's own env markers (forward-compat)
+)
+
+
+#: #1241 (D3): proxy and custom-CA names, passed as per-engine extras by
+#: Codex (and OpenCode) only, so Claude/Pi/agy envs are unchanged. Codex
+#: 0.170.0 ``PROXY_ENV_KEYS`` / ``NO_PROXY_ENV_KEYS`` / ``CUSTOM_CA_ENV_KEYS``
+#: plus ``SSL_CERT_DIR`` (in its binary); ``NODE_EXTRA_CA_CERTS``,
+#: ``PIP_CERT`` and ``NPM_CONFIG_CAFILE`` already pass by prefix.
+NETWORK_ENV_NAMES: tuple[str, ...] = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "CARGO_HTTP_CAINFO",
+    "BUNDLE_SSL_CA_CERT",
+    "npm_config_cafile",
 )
 
 
@@ -301,16 +329,95 @@ def log_user_extensions_once(
     _extension_logged = True
 
 
+_dropped_logged: set[str] = set()
+
+
+def log_dropped_once(
+    engine: str, source: Mapping[str, str], kept: Mapping[str, str]
+) -> None:
+    """INFO-log the names (never values) the filter removed, once per engine
+    per process (#1241), so a user can see what to add to ``env_extra_allow``."""
+    if engine in _dropped_logged:
+        return
+    names = sorted(set(source) - set(kept))
+    if not names:
+        return
+    _dropped_logged.add(engine)
+    logger.info(
+        "env_policy.dropped",
+        engine=engine,
+        names=names,
+        hint="add a name to [security] env_extra_allow to pass it through",
+    )
+
+
 def _reset_log_latch_for_tests() -> None:
-    """Clear the once-per-process log latch. Tests only."""
+    """Clear the once-per-process log latches. Tests only."""
     global _extension_logged
     _extension_logged = False
+    _dropped_logged.clear()
+
+
+#: #1120: run identity exported to an unattended trigger run's child.
+RUN_ID_ENV = "UNTETHER_RUN_ID"
+TRIGGER_ENV = "UNTETHER_TRIGGER"
+_RUN_ENV_NAMES = (RUN_ID_ENV, TRIGGER_ENV)
+#: #1219: Untether's own config overrides (``UNTETHER__TRANSPORTS__TELEGRAM__
+#: BOT_TOKEN`` and the like) are for Untether only; no engine gets them.
+CONFIG_OVERRIDE_PREFIX = "UNTETHER__"
+
+
+def _dropped(name: str) -> bool:
+    return name in _RUN_ENV_NAMES or name.startswith(CONFIG_OVERRIDE_PREFIX)
+
+
+def apply_run_env(
+    env: Mapping[str, str] | None, context: RunContext | None
+) -> dict[str, str] | None:
+    """*env* with this run's identity vars (#1120), minus Untether's config
+    overrides (#1219).
+
+    ``env`` is a runner's ``env()`` result; ``None`` means "inherit the
+    service env" (Gemini, AMP). Inherited ``UNTETHER_RUN_ID`` /
+    ``UNTETHER_TRIGGER`` are always dropped (``UNTETHER_*`` passes the
+    filter), then assigned only for an unattended cron/webhook run, so a
+    human turn or ``/at`` fire never carries a stale or borrowed identity.
+    ``UNTETHER__*`` overrides (which can hold the bot token) are always
+    dropped too.
+    """
+    from ..context import unattended_trigger
+
+    source = unattended_trigger(context)
+    current = os.environ if env is None else env
+    if source is None and not any(_dropped(name) for name in current):
+        return None if env is None else dict(env)
+    out = {k: v for k, v in current.items() if not _dropped(k)}
+    if source is not None:
+        if context is not None and context.env:
+            # #1121: a trigger's env adds names, never replaces one the
+            # service passed (validation already refuses managed names).
+            kept = [name for name, _ in context.env if name in out]
+            for name, value in context.env:
+                out.setdefault(name, value)
+            logger.debug(
+                "trigger.env_applied",
+                trigger=source,
+                names=[name for name, _ in context.env if name not in kept],
+                not_overridden=kept or None,
+            )
+        out[TRIGGER_ENV] = source
+        if context is not None and context.run_id:
+            out[RUN_ID_ENV] = context.run_id
+    return out
 
 
 __all__ = [
+    "NETWORK_ENV_NAMES",
+    "apply_run_env",
     "filtered_env",
     "is_allowed",
     "is_allowed_with_extras",
     "load_env_extras",
+    "log_dropped_once",
     "log_user_extensions_once",
 ]

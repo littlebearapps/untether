@@ -837,9 +837,12 @@ async def _fire(token: str) -> None:
     Sequence:
     1. Validate entry still pending (not cancelled, not over caps).
     2. Honour the per-loop do-not-resume sentinel (#926).
-    3. Drop-on-busy: if another run is in flight for our chat (a run that
-       is not a live-idle session), log and skip.  Mirrors upstream's "no
-       catch-up" semantic.
+    3. One-shots (wake-ups, ``recurring=False`` crons) go straight to the
+       retry loop (:func:`_fire_past_live_session`): a busy chat, a failed
+       notice or a raised run is retried, never expired unrun (#1287).
+       Recurring: drop-on-busy, if another run is in flight for our chat (a
+       run that is not a live-idle session), log and skip.  Mirrors
+       upstream's "no catch-up" semantic.
     4. A process still owns the session (#925 D-D,
        :func:`_fire_past_live_session`): a clean-idle live session is
        closed so the iteration can resume it; a wake-up a live session
@@ -855,6 +858,11 @@ async def _fire(token: str) -> None:
         return
     if _blocked_by_cancel(entry):
         _expire(entry, reason="do_not_resume")
+        return
+    if not entry.recurring:
+        # #1287: a one-shot only completes once its run was dispatched; a
+        # busy chat, a failed notice or a raised run_job retries instead.
+        await _fire_past_live_session(entry)
         return
     if _IS_CHAT_BUSY is not None and _IS_CHAT_BUSY(entry.chat_id):
         logger.warning(
@@ -933,8 +941,9 @@ async def _fire_past_live_session(entry: _LoopEntry) -> None:
             return
         chat_busy = _IS_CHAT_BUSY is not None and _IS_CHAT_BUSY(entry.chat_id)
         if not _is_session_alive_safe(session_id):
-            if not chat_busy:
-                await _spawn_loop_iteration(entry)
+            if not chat_busy and (
+                await _spawn_loop_iteration(entry) or entry.recurring
+            ):
                 _rearm_or_expire(entry)
                 return
         elif entry.kind == "wakeup":
@@ -952,9 +961,9 @@ async def _fire_past_live_session(entry: _LoopEntry) -> None:
                 session=session_id,
                 iteration=entry.iteration_count + 1,
             )
-            await _spawn_loop_iteration(entry)
-            _rearm_or_expire(entry)
-            return
+            if await _spawn_loop_iteration(entry) or entry.recurring:
+                _rearm_or_expire(entry)
+                return
         if deadline is not None and time.monotonic() + interval >= deadline:
             logger.info(
                 "loop.iteration_skipped_session_busy",
@@ -979,10 +988,14 @@ async def _fire_past_live_session(entry: _LoopEntry) -> None:
         await anyio.lowlevel.checkpoint()
 
 
-async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
-    """Send the notification and dispatch the run via ``_RUN_JOB``."""
+async def _spawn_loop_iteration(entry: _LoopEntry) -> bool:
+    """Send the notification and dispatch the run via ``_RUN_JOB``.
+
+    True once ``_RUN_JOB`` returned; False when cancelled, the notice
+    failed or the run raised (#1287: a one-shot then retries).
+    """
     if entry.cancelled:
-        return
+        return False
     assert _RUN_JOB is not None and _TRANSPORT is not None
     iteration = entry.iteration_count + 1
     label = f"\N{ALARM CLOCK} /loop · iter {iteration}/{entry.max_iterations}"
@@ -1002,10 +1015,10 @@ async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
             error=str(exc),
             error_type=exc.__class__.__name__,
         )
-        return
+        return False
     if notify_ref is None:
         logger.error("loop.notify_failed", token=entry.token, chat_id=entry.chat_id)
-        return
+        return False
     fire_prompt = entry.prompt
     if fire_prompt == "<<autonomous-loop-dynamic>>":
         fire_prompt = entry.fallback_first_user_message or fire_prompt
@@ -1042,7 +1055,7 @@ async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
             error=str(exc),
             error_type=exc.__class__.__name__,
         )
-        return
+        return False
     entry.iteration_count = iteration
     logger.info(
         "loop.fired_ok",
@@ -1050,6 +1063,7 @@ async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
         iteration=iteration,
         session=entry.resume_token,
     )
+    return True
 
 
 def _rearm_or_expire(entry: _LoopEntry) -> None:

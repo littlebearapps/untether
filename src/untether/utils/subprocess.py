@@ -369,11 +369,24 @@ async def manage_subprocess(
         kwargs.setdefault("start_new_session", True)
     proc = await anyio.open_process(cmd, **kwargs)
     _incr_live_engine_subprocesses(1)
+    cancelled = False
     try:
         yield proc
+    except anyio.get_cancelled_exc_class():
+        cancelled = True
+        raise
     finally:
         _incr_live_engine_subprocesses(-1)
-        if proc.returncode is None:
+        if proc.returncode is not None and cancelled and log_teardown_exit:
+            # A cancel after the process exited skips the caller's exit line too.
+            logger.info(
+                "subprocess.exit",
+                pid=proc.pid,
+                rc=proc.returncode,
+                reason="teardown",
+                killed=False,
+            )
+        elif proc.returncode is None:
             with anyio.CancelScope(shield=True):
                 terminate_process(proc)
                 timed_out = await wait_for_process(proc, timeout=10.0)

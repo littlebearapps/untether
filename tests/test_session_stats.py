@@ -479,7 +479,8 @@ def test_897_init_survives_save_oserror(tmp_path, monkeypatch) -> None:
     with capture_logs() as logs:
         store = SessionStatsStore(path)
 
-    failed = [e for e in logs if e.get("event") == "session_stats.roll_up_failed"]
+    # #1276: the save itself now logs and swallows the write error.
+    failed = [e for e in logs if e.get("event") == "session_stats.save_failed"]
     assert len(failed) == 1 and failed[0]["log_level"] == "warning"
     assert _totals(store.aggregate(period="all"))["claude"][0] == 63
     assert _totals(store.aggregate(period="today")) == {
@@ -530,3 +531,28 @@ def test_897_roll_up_skips_non_dict_bucket_injected_after_load(tmp_path) -> None
     }
     assert store.roll_up() == 1
     assert store._data["engines"]["claude"]["2020-01-01"] is None
+
+
+# ── #1276: an unwritable stats.json must never break final delivery ─────────
+
+
+def test_1276_record_run_survives_save_oserror(tmp_path, monkeypatch) -> None:
+    """A full or read-only disk while recording a run logs a warning and
+    keeps the in-memory count (once) instead of raising into the final send."""
+    from structlog.testing import capture_logs
+
+    import untether.session_stats as session_stats
+
+    store = SessionStatsStore(tmp_path / "stats.json")
+
+    def _boom(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(session_stats, "atomic_write_json", _boom)
+    with capture_logs() as logs:
+        store.record_run("claude", actions=2, duration_ms=100)
+
+    failed = [e for e in logs if e.get("event") == "session_stats.save_failed"]
+    assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+    stats = store.aggregate(period="today")
+    assert len(stats) == 1 and stats[0].run_count == 1

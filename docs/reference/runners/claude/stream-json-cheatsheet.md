@@ -101,7 +101,14 @@ Fields (error path):
   `result` text: "… Switch to another model[, or manage usage credits at <url>,] to
   continue." in headless mode, or the older "Run /usage-credits …" wording
   ([#922](https://github.com/littlebearapps/untether/issues/922)). The long-context kind never
-  latches: its remedy is different.
+  latches: its remedy is different. CLI 2.1.323+ words the Fable cap through the shared
+  rate-limit head ("You've hit your Fable limit · resets <time>. Switch to another model…"),
+  and 2.1.326+ calls the team budget "team's pooled group budget"; the same head can name a
+  spend or usage limit, so the model clause only matches a model family and spend, usage,
+  credits and budget clauses are checked first
+  ([#1238](https://github.com/littlebearapps/untether/issues/1238)). `api_error` on that path
+  is the generic `usage_limit_reached`, which can't tell the Fable cap from a time-based one,
+  so the text stays the source of the model and kind.
 
 Example (error):
 ```json
@@ -176,7 +183,7 @@ emitter still gets a precise countdown ([#518](https://github.com/littlebearapps
 | `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. (Every status stashes the snapshot; the final's ≥70 % 5h warning reads it when the usage footer is off — [#1150](https://github.com/littlebearapps/untether/issues/1150).) |
 | `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
 | `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
-| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage / `seven_day_overage_included` → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title naming the cap kind (`⛔ Fable limit reached — …`, `⛔ Usage credits used up — …`, `⛔ Monthly spend limit reached — …`, `⛔ Team budget reached — …`; [#922](https://github.com/littlebearapps/untether/issues/922)) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
+| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage / `seven_day_overage_included` → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title naming the cap kind (`⛔ Fable limit reached — …`, `⛔ Usage credits used up — …`, `⛔ Monthly spend limit reached — …`, `⛔ Usage limit reached — …`, `⛔ Team budget reached — …`; [#922](https://github.com/littlebearapps/untether/issues/922)) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
 | `rejected` with `isUsingOverage`, or `resetsAt` already past | Not a throttle (INFO log `retry_after_source=covered_by_overage` / `stale`). |
 | unknown `status` | WARN `claude.rate_limit_event.unknown_status` once per value; no latch. |
 | no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |
@@ -280,7 +287,7 @@ One line per input command (user line or scheduled wake-up):
 {"type":"command_lifecycle","command_uuid":"<uuid>","state":"completed"}
 ```
 
-`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued).
+`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued). The CLI 2.1.325 schema lists six states: `queued | started | completed | cancelled | discarded | refused`. When several queued lines are folded into one turn the turn is attributed to one uuid; each folded line still gets its own `started` and `completed` (CLI 2.1.327, [#1252](https://github.com/littlebearapps/untether/issues/1252)), so Untether absorbs a line on its own `started` (mid-turn, or superseded before the turn opens) or a still-waiting line on its `completed`, and `cancelled` / `discarded` / `refused` as not run ([#1173](https://github.com/littlebearapps/untether/issues/1173)).
 
 ### Multi-result streams (#776)
 

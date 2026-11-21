@@ -313,7 +313,9 @@
       ],
       "control_request_snapshot": [
        {
+        "agent_id": null,
         "answerable_by_text": false,
+        "decision_reason": null,
         "input_details": "(command=`touch notes.txt`)",
         "kind": "tool",
         "request_id": "req-bash-1",
@@ -373,7 +375,8 @@
     "info claude.post_result_idle.task_exited reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
     "info claude_runner.session_cleanup cleaned=[\"active_runners\", \"session_stdin\", \"session_bg_state\", \"live_session\", \"requests(1)\"] session_id=\"golden-session-1\" +[logger_name]",
     "info handle.cancelled +[elapsed_s,logger_name,resume]",
-    "info session.summary cancelled=true engine=\"claude\" ok=null session_id=\"golden-session-1\" +[approval_surfaces,duration_seconds,event_count,followup_turns,hooks_started,last_event_type,liveness_stalls,logger_name,model,model_display,no_query_results,peak_idle_seconds,peak_live_idle_seconds,saw_result,stall_suppressions,stall_warnings,unanswerable_control_requests]"
+    "info session.summary cancelled=true engine=\"claude\" ok=null session_id=\"golden-session-1\" +[approval_surfaces,duration_seconds,event_count,followup_turns,hooks_started,last_event_type,liveness_stalls,logger_name,model,model_display,no_query_results,peak_idle_seconds,peak_live_idle_seconds,saw_result,stall_suppressions,stall_warnings,unanswerable_control_requests]",
+    "info subprocess.exit rc=-15 reason=\"teardown\" +[killed,logger_name,pid]"
    ],
    "registry": {
     "active_runners": [],
@@ -408,7 +411,7 @@
      "id": 1,
      "keyboard": [],
      "op": "edit",
-     "text": "cancelled · claude · <t> · step 2\n\n▸ touch notes.txt\n▸ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
+     "text": "cancelled · claude · <t> · step 2\n\n✗ touch notes.txt\n✗ Permission Request [CanUseTool] - tool: Bash (command=touch notes.txt) $ touch notes.txt\n\n🏷 claude-golden-1 · default\n\n↩️ claude --resume golden-session-1"
     },
     {
      "id": 2,

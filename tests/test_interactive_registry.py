@@ -81,7 +81,6 @@ class FakeResponder:
 
 
 REGISTRY_NAMES = (
-    "CONTROL_REQUEST_TIMEOUT_SECONDS",
     "ControlLookup",
     "ControlRequestSnapshot",
     "ControlRequestStatus",
@@ -159,9 +158,9 @@ def test_option_buttons_identical_for_dict_and_str_options() -> None:
     strings = questions.get_question_option_buttons(flow(["Red", "Green"]))
     assert dicts == strings
     assert dicts == [
-        [{"text": "Red", "callback_data": "aq:opt:0"}],
-        [{"text": "Green", "callback_data": "aq:opt:1"}],
-        [{"text": "Other (type reply)", "callback_data": "aq:other"}],
+        [{"text": "Red", "callback_data": "aq:opt:0:r"}],
+        [{"text": "Green", "callback_data": "aq:opt:1:r"}],
+        [{"text": "Other (type reply)", "callback_data": "aq:other:r"}],
     ]
 
 

@@ -24,6 +24,18 @@ required `type` field. These are `AgentSessionEvent` objects from
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop","timestamp":123}]} 
 ```
 
+Pi ≥ 0.75.4 adds `"willRetry":true|false`. `agent_end` closes one low-level
+run; Pi may still retry, compact or run queued messages after it.
+
+### `agent_settled`
+
+```json
+{"type":"agent_settled","aborted":false}
+```
+
+Pi ≥ 0.80.5: no automatic work is left. Untether completes the run here, or at
+process exit on older Pi (#1255).
+
 ### `turn_start` / `turn_end`
 
 ```json
@@ -66,17 +78,23 @@ required `type` field. These are `AgentSessionEvent` objects from
 {"type":"tool_execution_end","toolCallId":"tool_1","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}],"details":{}},"isError":false}
 ```
 
-### `auto_compaction_start`
+### `compaction_start`
 
 ```json
-{"type":"auto_compaction_start","reason":"context_limit"}
+{"type":"compaction_start","reason":"threshold"}
 ```
 
-### `auto_compaction_end`
+`reason` is `manual`, `threshold` or `overflow`. Pi < 0.66.1 named this event
+`auto_compaction_start`; Untether still reads the old name (#1239).
+
+### `compaction_end`
 
 ```json
-{"type":"auto_compaction_end","result":{"tokensBefore":42000},"aborted":false}
+{"type":"compaction_end","reason":"threshold","result":{"summary":"...","firstKeptEntryId":"abc123","tokensBefore":150000,"estimatedTokensAfter":32000},"aborted":false,"willRetry":false}
 ```
+
+A failed compaction has no `result`, `aborted:false` and an `errorMessage`.
+Pi < 0.66.1 named this event `auto_compaction_end`.
 
 ### `auto_retry_start` / `auto_retry_end`
 

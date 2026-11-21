@@ -18,12 +18,13 @@ so a restart doesn't turn the next resume into a raw-total recording.
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from .logging import get_logger
 from .utils.json_state import atomic_write_json
@@ -41,6 +42,48 @@ def _key(engine: str, session_id: str) -> str:
 # How an engine reports token usage on its CompletedEvent: a running total
 # for the whole thread (Codex) or this run only (OpenCode).
 type TokenScope = Literal["thread_cumulative", "per_run"]
+
+
+class UsageScope(TypedDict, total=False):
+    """#850: what an engine's completion usage figures cover, declared by the
+    runner (``EngineBackend.usage_scope``) instead of a bridge engine table.
+    ``cost="session_cumulative"``: ``total_cost_usd`` is the session's running
+    total (Claude, #778). ``tokens``: see ``TokenScope`` (#419/#417). A missing
+    key means the figure passes through as this run's."""
+
+    cost: Literal["session_cumulative"]
+    tokens: TokenScope
+
+
+# #850: a CompletedEvent/TurnEvent ``usage`` key that overrides the backend's
+# declaration for that one result (e.g. a transport that reports differently).
+USAGE_SCOPE_KEY = "usage_scope"
+
+
+def usage_scope(engine: str, usage: Mapping[str, Any] | None = None) -> UsageScope:
+    """The scope of ``engine``'s usage: ``usage[USAGE_SCOPE_KEY]`` when the
+    result declares one, else the engine backend's ``usage_scope``; ``{}``
+    (passthrough) for an engine that declares none or isn't installed."""
+    declared = usage.get(USAGE_SCOPE_KEY) if isinstance(usage, Mapping) else None
+    if isinstance(declared, Mapping):
+        return declared  # type: ignore[return-value]
+    return _backend_usage_scope(engine)
+
+
+@functools.cache
+def _backend_usage_scope(engine: str) -> UsageScope:
+    # Cached: an entry-point scan costs ~14 ms, and backends don't change at runtime.
+    from .config import ConfigError
+    from .plugins import ENGINE_GROUP, load_plugin_backend
+
+    try:
+        backend = load_plugin_backend(
+            ENGINE_GROUP, engine, kind_label="engine", required=False
+        )
+    except ConfigError:  # a broken plugin: no declaration, like an unknown engine
+        return {}
+    return getattr(backend, "usage_scope", None) or {}
+
 
 # #1062: ``CompletedEvent.usage`` key under which a thread-cumulative engine
 # that can also tell its own run's use (Antigravity: the sum of the run's

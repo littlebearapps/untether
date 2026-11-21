@@ -61,6 +61,7 @@ class _Bot(BotClient):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
+        on_failure: object = None,
     ) -> Message | None:
         _ = (
             chat_id,

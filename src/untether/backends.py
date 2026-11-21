@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .runner import Runner
+    from .session_costs import UsageScope
 
 EngineConfig = dict[str, Any]
 
@@ -26,6 +27,9 @@ class EngineBackend:
     # #1089: for an engine whose binary can be configured or found off PATH,
     # returns the command ``build_runner`` spawns for this engine config.
     resolve_cli_cmd: Callable[[EngineConfig], str] | None = None
+    # #850: what the runner's completion usage figures cover (cumulative or
+    # per run), read via ``session_costs.usage_scope``. None = all per run.
+    usage_scope: UsageScope | None = None
 
     def cli_command(self, config: EngineConfig | None = None) -> str:
         """The command the runner spawns for ``config`` — what availability

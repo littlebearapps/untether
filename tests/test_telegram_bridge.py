@@ -114,6 +114,23 @@ def test_parse_directives_bot_suffix() -> None:
     assert directives.prompt == "hi"
 
 
+@pytest.mark.parametrize(
+    ("text", "branch", "prompt"),
+    [
+        ("@untether_dev_bot fix the failing tests", None, "fix the failing tests"),
+        ("@TetrisBot @feat/api go", "feat/api", "go"),
+        ("@feat/robot go", "feat/robot", "go"),
+        ("@develop go", "develop", "go"),
+    ],
+)
+def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
+    directives = parse_directives(
+        text, engine_ids=("claude",), projects=_empty_projects()
+    )
+    assert directives.branch == branch
+    assert directives.prompt == prompt
+
+
 def test_parse_directives_only_first_non_empty_line() -> None:
     directives = parse_directives(
         "hello\n/claude hi",
@@ -566,6 +583,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             reply_markup: dict | None = None,
             *,
             replace_message_id: int | None = None,
+            on_failure: Any = None,
         ) -> Message | None:
             _ = reply_markup
             return None
@@ -3738,6 +3756,76 @@ async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("text", "leaves"), [("/other list the files", True), ("/proj hi", False)]
+)
+async def test_1269_project_directive_never_resumes_the_chats_session(
+    tmp_path: Path, text: str, leaves: bool
+) -> None:
+    """#1269: in chat session mode, `/<other-project> …` starts fresh in that
+    project and leaves the chat's own stored session as it was."""
+    state_path = tmp_path / "untether.toml"
+    store = ChatSessionStore(resolve_sessions_path(state_path))
+    saved = ResumeToken(engine=CODEX_ENGINE, value="proj-session")
+    await store.set_session_resume(123, None, saved)
+
+    runner = ScriptRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="new-session"
+    )
+    projects = ProjectsConfig(
+        projects={
+            alias: ProjectConfig(
+                alias=alias, path=tmp_path / alias, worktrees_dir=Path(".worktrees")
+            )
+            for alias in ("proj", "other")
+        },
+        default_project="proj",
+    )
+    for alias in ("proj", "other"):
+        (tmp_path / alias).mkdir()
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=TransportRuntime(
+            router=_make_router(runner), projects=projects, config_path=state_path
+        ),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        session_mode="chat",
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text=text,
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+
+    await run_main_loop(cfg, poller)
+
+    _prompt, resume = runner.calls[0]
+    stored = await ChatSessionStore(
+        resolve_sessions_path(state_path)
+    ).get_session_resume(123, None, CODEX_ENGINE)
+    if leaves:
+        assert resume is None
+        assert stored == saved
+    else:
+        assert resume == saved
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("already_saved", [False, True])
 async def test_run_main_loop_prompt_upload_uses_caption_directives(
     tmp_path: Path,
@@ -4063,6 +4151,81 @@ async def test_run_main_loop_voice_hides_transcription_when_disabled(
     # No transcription echo — only progress/final messages
     echo_texts = [c["message"].text for c in transport.send_calls]
     assert not any("hello world" in t for t in echo_texts)
+
+
+@pytest.mark.anyio
+async def test_1285_slow_voice_note_does_not_block_other_chats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1285: a transcription still running in chat A no longer holds the
+    update loop: chat B's prompt runs meanwhile, and A's later text still
+    reaches the engine after the voice note."""
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=runner.engine, runner=runner)],
+        default_engine=runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=_empty_projects())
+    exec_cfg = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=True
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=exec_cfg,
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        voice_transcription=True,
+        voice_show_transcription=False,
+    )
+    release = anyio.Event()
+
+    async def _slow_transcribe(**_kwargs: Any) -> str:
+        await release.wait()
+        return "spoken words"
+
+    monkeypatch.setattr(telegram_loop, "transcribe_voice", _slow_transcribe)
+    monkeypatch.setattr(telegram_loop, "list_command_ids", lambda **_: [])
+
+    def _text(chat_id: int, message_id: int, text: str) -> TelegramIncomingMessage:
+        return TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+        )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield replace(
+            _text(123, 1, ""),
+            voice=TelegramVoice(
+                file_id="voice-1",
+                mime_type=None,
+                file_size=None,
+                duration=None,
+                raw={"file_id": "voice-1"},
+            ),
+        )
+        yield _text(456, 2, "other chat")
+        yield _text(123, 3, "typed after")
+        # Only reached when the loop isn't stuck on chat A's transcription.
+        with anyio.fail_after(5):
+            while not any("other chat" in p for p, _ in runner.calls):
+                await anyio.sleep(0.01)
+        release.set()
+
+    with anyio.fail_after(10):
+        await run_main_loop(cfg, poller)
+
+    prompts = [p for p, _ in runner.calls]
+    assert "other chat" in prompts[0]
+    joined = "\n".join(prompts[1:])
+    assert joined.index("spoken words") < joined.index("typed after")
 
 
 def _679_voice_cfg(
@@ -7206,3 +7369,71 @@ async def test_1142_startup_audit_flags_bypass_cron_and_bare_webhook(
     assert manager is not None
     assert manager.webhook_for_path("/hooks/bare") is not None  # still starts
     assert not [e for e in logs if e["event"] == "trigger.permission_audit.failed"]
+
+
+# --- #1176: /cancel while a delivered non-live run is torn down -------------
+
+
+@pytest.mark.anyio
+async def test_1176_cancel_after_final_drops_pending_at_and_replies() -> None:
+    """The rc10 Pi repro: final out, process still tearing down, a pending
+    /at — /cancel finishes the teardown, drops the /at and replies."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = RunningTask(final_sent=True, engine="pi")
+    running = {MessageRef(channel_id=123, message_id=42): task}
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(123, None, 300, "later")
+        await handle_cancel(cfg, _plain_cancel_msg(), running)
+        assert at_scheduler.pending_for_chat(123) == []
+
+    await _with_at_scheduler(transport, body)
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "\N{CROSS MARK} cancelled 1 pending /at run."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1176_cancel_after_final_alone_says_nothing_running() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = RunningTask(final_sent=True)
+
+    await handle_cancel(
+        cfg, _plain_cancel_msg(), {MessageRef(channel_id=123, message_id=42): task}
+    )
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "nothing running in this chat."
+    ]
+
+
+@pytest.mark.anyio
+async def test_1176_delivered_run_beside_a_real_run_cancels_the_real_one() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    delivered = RunningTask(final_sent=True)
+    busy = RunningTask()
+    running = {
+        MessageRef(channel_id=123, message_id=1): delivered,
+        MessageRef(channel_id=123, message_id=2): busy,
+    }
+
+    await handle_cancel(cfg, _plain_cancel_msg(), running)
+
+    assert busy.cancel_requested.is_set()
+    assert transport.send_calls == []  # not "multiple runs active"
+
+
+def test_1176_a_live_session_is_never_a_delivered_teardown() -> None:
+    from untether.runner_bridge import running_task_is_delivered_teardown
+
+    task = _idle_live_task(idle=False)
+    task.final_sent = True
+    assert running_task_is_delivered_teardown(task) is False
+    assert running_task_is_delivered_teardown(RunningTask(final_sent=True)) is True
+    assert running_task_is_delivered_teardown(RunningTask()) is False

@@ -38,6 +38,11 @@ Read those before changing any of these areas.
 - `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` — **`ExitPlanMode` is never auto-approved**.
 - Prompting modes (`default`/`manual`/`acceptEdits`) route every tool to Telegram (#749); `is_claude_prompting_mode()`
   in `runners/run_options.py` is the single classification point.
+- Autonomous modes approve at stage 6 **only** what `_autonomous_ask_reason` clears (#882). It reads the raw request
+  fields and fails closed: never add a "default approve" branch, and any new stage-6 branch must call it.
+  `_PLAN_ROUTINE_REASONS` ships empty and never overlaps `_NEVER_ROUTINE_REASONS` (test-enforced).
+- `requires_user_interaction` requests are never answered by a one-tap Approve, in any mode: deny with the terminal
+  note (#882). Exclude `ExitPlanMode` / `AskUserQuestion` before reading the flag (both carry it).
 
 ## Permission modes (#741)
 - Only `plan-auto` is translated (→ CLI `plan` + ExitPlanMode rubber stamp). Every genuine CLI mode passes through verbatim.
@@ -57,12 +62,15 @@ Read those before changing any of these areas.
 - `_SESSION_STDIN` means "a process owns this session"; ask `is_session_accepting()` before writing a follow-up.
 - Async hooks (#812): `has_pending_async_hooks()` is a sibling predicate — never part of `has_live_background_work()`.
   Hook release is all-or-nothing; **never bind a process to a hook**; never rely on `sh -c` to identify hook processes.
+- The idle close is held while a Codex plugin `--background` job owned by the session runs (#1186): the plugin's
+  `SessionEnd` hook kills them on any exit. `utils/codex_plugin_jobs.py` reads the plugin's private state **read-only**
+  and fails open (a recorded `shortcut:`, plan D12); never write or delete it. Remove when codex-plugin-cc#822 ships.
 - Timing knobs are slots-dataclass fields: set them on the instance in tests.
 
 ## Outline gate / post-outline approval
 - After "Pause & Outline", the gate is text-based (`_OUTLINE_MIN_CHARS`): short → auto-deny, written → hold open with buttons.
 - Synthetic buttons use the `da:` callback prefix (64-byte limit), handled in `claude_control.py` before approve/deny.
-- "Let's discuss" holds the request open; the 5-min sweep is event-driven, not a timer.
+- "Let's discuss" holds the request open; nothing expires it (the 5-min sweep was retired, #844) — only the user, a CLI cancel or the 4 h cap.
 
 ## Scheduling hooks (#925)
 - Every control-channel spawn registers `PreToolUse` hook callbacks `ut_loop_cron_create` / `ut_loop_cron_delete` in

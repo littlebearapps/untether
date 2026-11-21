@@ -471,7 +471,7 @@ async def test_cron_firing_records_last_fired(monkeypatch, tmp_path):
         tg.cancel_scope.cancel()
 
     assert "daily-job" in dispatcher.fired
-    assert history.get_last_fired("daily-job") is not None
+    assert history.get_last_fired("cron", "daily-job") is not None
     history.reset_history()
 
 
@@ -484,7 +484,7 @@ async def test_cron_history_failure_does_not_break_scheduler(monkeypatch, tmp_pa
     history.init_history(tmp_path / "untether.toml")
 
     # Make the underlying store raise on every record_fired.
-    def boom(self, trigger_id: str) -> None:
+    def boom(self, kind: str, trigger_id: str) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(
@@ -709,7 +709,7 @@ async def test_893_failed_send_does_not_record_last_fired(monkeypatch, tmp_path)
         manager = TriggerManager(_one_shot_settings())
         dispatcher = ScriptedDispatcher(results=[False])
         await _drive_scheduler(monkeypatch, manager, dispatcher, _minutes(0))
-        assert history.get_last_fired("once") is None
+        assert history.get_last_fired("cron", "once") is None
     finally:
         history.reset_history()
 
@@ -945,7 +945,7 @@ async def test_896_refused_run_once_stays_scheduled(monkeypatch, tmp_path):
     assert manager.cron_ids() == ["once"]
     assert manager.fired_run_once_ids() == []
     assert manager.run_once_pending_since("once") is None
-    assert history.get_last_fired("once") is None
+    assert history.get_last_fired("cron", "once") is None
     events = [e["event"] for e in logs]
     assert "triggers.cron.run_once_refused" in events
     assert "triggers.cron.run_once_completed" not in events

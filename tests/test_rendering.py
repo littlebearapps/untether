@@ -239,6 +239,61 @@ def test_render_markdown_keeps_valid_link() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #1250 — `[label](file:///…)` links (Antigravity answers) show their label
+# ---------------------------------------------------------------------------
+
+
+def test_1250_file_link_renders_label_as_code() -> None:
+    text, entities = render_markdown("Created [hello.txt](file:///h/x/hello.txt) ok")
+
+    assert text == "Created hello.txt ok"
+    assert entities == [{"type": "code", "offset": 8, "length": 9}]
+
+
+def test_1250_file_link_with_fragment_and_emphasis() -> None:
+    text, entities = render_markdown("**[a b](file:///x/a%20b.py#L3)**")
+
+    assert text == "a b"
+    types = sorted(e["type"] for e in entities)
+    assert types == ["bold", "code"]
+    assert all((e["offset"], e["length"]) == (0, 3) for e in entities)
+
+
+def test_1250_other_unsafe_schemes_still_unparsed() -> None:
+    md = "[x](javascript:alert(1)) [d](data:text/plain,hi) [y](https://e.com/z)"
+    text, entities = render_markdown(md)
+
+    assert text.startswith("[x](javascript:alert(1)) [d](data:text/plain,hi) y")
+    links = [e for e in entities if e.get("type") == "text_link"]
+    assert [e["url"] for e in links] == ["https://e.com/z"]
+
+
+def test_1250_file_link_in_code_and_bare_untouched() -> None:
+    text, _ = render_markdown("`[k](file:///x)` and bare file:///home/x/a.py here")
+
+    assert text == "[k](file:///x) and bare file:///home/x/a.py here"
+
+
+def test_1250_agy_fixture_answer_has_no_file_scheme() -> None:
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures/antigravity/subagent.jsonl"
+    line = fixture.read_text(encoding="utf-8").splitlines()[12]
+    response = json.loads(line)["result"]["response"]
+    assert "](file://" in response  # the fixture still carries agy's link
+
+    text, entities = render_markdown(response)
+
+    assert "file://" not in text
+    assert "spawned the subagent to read notes.txt." in text
+    assert not any(
+        e.get("type") == "text_link" and e.get("url", "").startswith("file:")
+        for e in entities
+    )
+
+
+# ---------------------------------------------------------------------------
 # #786 — model-emitted <br> renders as a line break, not literally
 # ---------------------------------------------------------------------------
 
@@ -1164,3 +1219,155 @@ def test_markdown_to_plain(md: str, expected: str) -> None:
     from untether.telegram.render import markdown_to_plain
 
     assert markdown_to_plain(md) == expected
+
+
+# ── #1249: an open fence must not swallow the footer ───────────────────────
+
+_FENCE_FOOTER = "\N{LABEL} dir: x | workspace  \n  \n↩️ `agy --conversation abc`"
+
+# Verbatim fence-bearing segment of dev msg 165337 (agy quoting a README in a
+# same-length ```markdown fence; the README's own closer ends the outer fence).
+_AGY_README_ANSWER = (
+    "### Contents of [README.md](file:///tmp/README.md#L1-L9)\n\n"
+    "```markdown\n# Hello\n\nA tiny Python project used to try out Antigravity "
+    "from Telegram.\n\nRun it with:\n\n```sh\npython hello.py\n```\n```\n\n"
+    "## Summary\n### Completed\n- Listed the files.\n\n### Next Steps\n- None."
+)
+
+
+def _footer_ok(text: str, entities: list[dict]) -> bool:
+    raw = text.encode("utf-16-le")
+    end = len(raw) // 2
+    pre_to_end = any(
+        e["type"] == "pre" and e["offset"] + e["length"] >= end for e in entities
+    )
+    codes = [
+        raw[2 * e["offset"] : 2 * (e["offset"] + e["length"])].decode("utf-16-le")
+        for e in entities
+        if e["type"] == "code"
+    ]
+    return not pre_to_end and "agy --conversation abc" in codes
+
+
+def _parts(body: str):
+    from untether.telegram.render import MarkdownParts
+
+    return MarkdownParts(header="done", body=body, footer=_FENCE_FOOTER)
+
+
+def _unpatched(body: str):
+    """What the renderer produced before #1249 for a body it leaves alone."""
+    from untether.markdown import assemble_markdown_parts
+
+    return render_markdown(assemble_markdown_parts(_parts(body)))
+
+
+def test_1249_agy_readme_quote_closes_before_footer() -> None:
+    from untether.telegram.render import prepare_telegram, prepare_telegram_multi
+
+    assert not _footer_ok(*_unpatched(_AGY_README_ANSWER))  # the bug
+    assert _footer_ok(*prepare_telegram(_parts(_AGY_README_ANSWER)))
+    assert _footer_ok(*prepare_telegram_multi(_parts(_AGY_README_ANSWER))[-1])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```\ncode\n```sh\nmore\n```",  # (a) an info-string line is not a closer
+        "```markdown\n# Hi\n```sh\nx\n```",  # (b) inner ```sh, then the closer
+        "text\n\n    ```\n    not a fence",  # (c) 4-space indent is indented code
+        "ok\n\n```\na\n```\n",  # already closed
+        "- item\n\n  ```py\n  x = 1\n  ```",  # list item, closed
+        "> ```sh\n> echo",  # blockquote, unclosed (the quote ends the fence)
+        "1. a\n\n    ```bash\n    echo\n    ```",  # 4-space fence in a list item
+    ],
+)
+def test_1249_balanced_fences_render_unchanged(body: str) -> None:
+    from untether.telegram.render import prepare_telegram, prepare_telegram_multi
+
+    before = _unpatched(body)
+    assert _footer_ok(*before)
+    assert prepare_telegram(_parts(body)) == before
+    assert prepare_telegram_multi(_parts(body)) == [before]
+
+
+def test_1249_unclosed_list_item_fence_keeps_footer() -> None:
+    from untether.telegram.render import prepare_telegram
+
+    # Not modelled (containers are a follow-up); the item's end closes it today.
+    assert _footer_ok(*prepare_telegram(_parts("- item\n\n  ```py\n  x = 1")))
+
+
+def test_1249_plain_open_fence_closed_split_and_trim() -> None:
+    from untether.telegram.render import (
+        MAX_BODY_CHARS,
+        prepare_telegram,
+        prepare_telegram_multi,
+    )
+
+    body = "intro\n\n" + "para " * 60 + "\n\n```sh\n" + "npm i pkg\n" * 40
+    payloads = prepare_telegram_multi(_parts(body), max_body_chars=150)
+    assert len(payloads) >= 3
+    assert _footer_ok(*payloads[-1])
+
+    # trim mode: the cut lands inside the fence
+    long_body = "```py\n" + "x = 1\n" * (MAX_BODY_CHARS // 4) + "```\n"
+    assert _footer_ok(*prepare_telegram(_parts(long_body)))
+    assert _footer_ok(*prepare_telegram(_parts("x\n\n```sh\nnpm i")))
+
+
+def test_1249_tilde_fence_closed_with_tildes() -> None:
+    from untether.telegram.render import _close_open_fence, prepare_telegram
+
+    assert _close_open_fence("~~~~\na\n```\nb") == "~~~~\na\n```\nb\n~~~~\n"
+    assert _footer_ok(*prepare_telegram(_parts("~~~~\na\n```\nb")))
+
+
+def _mdit_fence_open(body: str) -> bool:
+    from untether.telegram.render import _MD_RENDERER
+
+    tokens = _MD_RENDERER.parse(body + "\n\nZQX")
+    return any(t.type == "fence" and "ZQX" in t.content for t in tokens)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```\na",
+        "```\na\n```",
+        "```sh\na\n```sh",
+        "````\na\n```",
+        "````\na\n`````",
+        "```\na\n````",
+        "~~~\na\n```",
+        "~~~\na\n~~~",
+        "~~~~ x`y\na",
+        "```foo`bar\na",
+        "   ```\na\n   ```",
+        "    ```\na",
+        "```\na\n    ```",
+        "\t```\na",
+        "```\na\n``` ",
+        "```\na\n```\t",
+        "```\na\n``` x",
+        "  ~~~\na\n ~~~~",
+        "```markdown\n# Hi\n```sh\nx\n```\n```",
+        "```\n```\n```",
+        "``\na",
+    ],
+)
+def test_1249_fence_scanner_matches_markdown_it(body: str) -> None:
+    from untether.telegram.render import _scan_fence_state
+
+    assert (_scan_fence_state(body, None) is not None) == _mdit_fence_open(body)
+
+
+def test_1249_split_list_item_four_space_fence_not_reopened() -> None:
+    body = (
+        "1. Install:\n\n    ```bash\n" + "    echo line\n" * 300 + "    ```\n\n2. Done."
+    )
+
+    chunks = split_markdown_body(body, 1000)
+
+    assert len(chunks) > 1
+    assert sum(c.count("```bash") for c in chunks) == 1

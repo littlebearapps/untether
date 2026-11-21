@@ -492,6 +492,56 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
     assert session_id in last_edit
 
 
+@pytest.mark.anyio
+async def test_962_cancelled_card_closes_rows_left_running() -> None:
+    """#962 (CX-6): a row the cancel stopped is ✗ on the cancelled card,
+    not ▸; finished rows keep their own status."""
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner(
+        [
+            Emit(action_started("c0", "command", "echo ok")),
+            Emit(action_completed("c0", "command", "echo ok", ok=True)),
+            Emit(action_started("c1", "command", "sleep 60")),
+            Wait(hold),
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="019b66fc-64c2-7a71-81cd-081c504cfeb3",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+
+    async def run_handle_message() -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_handle_message)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        running_task = running_tasks[next(iter(running_tasks))]
+        with anyio.fail_after(1):
+            await running_task.resume_ready.wait()
+        for _ in range(50):
+            await anyio.lowlevel.checkpoint()
+        running_task.cancel_requested.set()
+
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "cancelled" in last_edit.lower()
+    assert "✗ `sleep 60`" in last_edit
+    assert "✓ `echo ok`" in last_edit
+    assert "▸" not in last_edit
+
+
 @contextlib.contextmanager
 def _run_model(model: str | None):
     from untether.runners.run_options import (
@@ -1842,7 +1892,7 @@ async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
     runner = ScriptRunner(
         [
             ErrorReturn(
-                error="🛑 Too many engine runs in flight (1/1).",
+                error="🛑 Too many engine runs open on this host (1/1).",
                 usage={"prespawn_blocked": "concurrency"},
             )
         ],
@@ -13080,6 +13130,46 @@ async def test_835_footer_hint_once_per_trigger(monkeypatch) -> None:
     assert "\N{ELECTRIC LIGHT BULB}" not in second
 
 
+# #1240: Codex's untrusted-project hint kept in the final footer
+async def _run_codex_final(usage: dict) -> str:
+    runner = ScriptRunner(
+        [Return(answer="Done.", usage=usage)],
+        engine="codex",
+        resume_value=f"t-1240-{uuid.uuid4().hex[:6]}",
+    )
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+    return transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_1240_final_footer_has_untrusted_project_line() -> None:
+    import untether.runner_bridge as rb
+    from tests.test_config_help_links import _resolve
+
+    text = await _run_codex_final({"project_config_untrusted": True})
+    line = rb._UNTRUSTED_PROJECT_FOOTER.strip()
+    assert line in text
+    assert line.startswith("\N{WARNING SIGN}")
+    assert "--trust" not in line
+    url = line.rsplit(" ", 1)[-1]
+    assert _resolve(url) is not None, url
+
+
+@pytest.mark.anyio
+async def test_1240_no_untrusted_line_without_flag() -> None:
+    text = await _run_codex_final({"input_tokens": 1})
+    assert "untrusted" not in text
+
+
 def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
     import untether.runner_bridge as rb
 
@@ -14495,6 +14585,45 @@ async def test_929_rescue_uses_tracked_action() -> None:
     assert "A background agent needs your approval" in sent["message"].text
 
 
+@pytest.mark.anyio
+async def test_1251_rescue_of_followup_turn_request_keeps_agent_and_reason() -> None:
+    """#1251: a follow-up turn's action lives in that turn's tracker, so the
+    run-level tracker is empty at rescue; the card still names the agent
+    and shows why it asks, from the snapshot."""
+    from untether.orphan_approvals import OrphanApprovalSurface
+    from untether.runners.claude import ControlRequestSnapshot
+
+    snap = ControlRequestSnapshot(
+        request_id="r-1251",
+        session_id="sess-919",
+        age_s=31.0,
+        tool_name="Write",
+        kind="tool",
+        answerable_by_text=False,
+        writer_ok=True,
+        agent_id="a1",
+        decision_reason="outside cwd",
+    )
+    transport = FakeTransport()
+    surface = OrphanApprovalSurface(
+        transport=transport,
+        channel_id=123,
+        thread_id=None,
+        clock=_FakeClock(start=100.0),
+        label_for=lambda agent_id: "Probe agent" if agent_id == "a1" else None,
+        anchor_for=lambda agent_id: None,
+    )
+    edits, _, _, _ = _edits_929(snaps=[snap], surface=surface)
+    edits.control_surface_probe = lambda: frozenset()
+    edits._check_unanswerable_control_requests()
+    await edits._sync_orphan_approvals()
+    (sent,) = _surface_sends_929(transport)
+    text = sent["message"].text
+    assert "A background agent needs your approval" in text
+    assert "🤖 Probe agent" in text
+    assert "🪝 outside cwd" in text
+
+
 def test_929_rescue_not_before_grace() -> None:
     edits, _ = _rescue_edits_929(_snap_919("r-9", age_s=10.0))
     edits._check_unanswerable_control_requests()
@@ -15198,3 +15327,29 @@ def test_is_background_waiting_real_states() -> None:
     assert edits._is_background_waiting() is False
     state.bg_steps[2] = time.monotonic()
     assert edits._is_background_waiting() is True
+
+
+@pytest.mark.anyio
+async def test_1176_final_sent_is_marked_on_the_running_task() -> None:
+    """#1176: /cancel tells a delivered run in teardown from a real one."""
+    from untether.runner_bridge import RunningTask
+
+    seen: list[RunningTask] = []
+
+    class _Recording(dict):
+        def __setitem__(self, key, value) -> None:
+            seen.append(value)
+            super().__setitem__(key, value)
+
+    cfg = ExecBridgeConfig(
+        transport=FakeTransport(), presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=ScriptRunner([Return(answer="done")], engine=CODEX_ENGINE),
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+        running_tasks=_Recording(),
+    )
+    assert seen
+    assert all(task.final_sent for task in seen)

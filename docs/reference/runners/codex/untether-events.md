@@ -1,6 +1,6 @@
 # Codex -> Untether event mapping
 
-This document describes how Codex exec --json events are translated to Untether's normalised event model.
+This document describes how Codex exec --json events are translated to Untether's normalised event model. The opt-in app-server transport (#962) is mapped in [its own section](#app-server-transport-962) at the end.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/codex.py` and the translation logic is in `src/untether/runners/codex.py`. When in doubt, refer to the code.
 
@@ -14,7 +14,7 @@ codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<lev
   [resume <thread_id> | resume --last] -
 ```
 
-* **`extra_args`** default to `["-c", "notify=[]"]` and sit at the root, before `exec`. A deny-list rejects managed flags (`--json`, `--skip-git-repo-check`, `--color`, `--output-schema`, `--output-last-message`, `--ask-for-approval`/`-a`, exec-only `--ignore-rules`/`--ignore-user-config`), bypass flags (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, `-c` values mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), workspace flags (`--cd`/`-C`, `--worktree`) and a bare `--`, in every spelling. A blocked flag stops the Codex engine loading, and the error names the flag ([#209](https://github.com/littlebearapps/untether/issues/209), see [Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). Root `--sandbox read-only|workspace-write` stays allowed.
+* **`extra_args`** default to `["-c", "notify=[]"]` and sit at the root, before `exec`. A deny-list rejects managed flags (`--json`, `--skip-git-repo-check`, `--color`, `--output-schema`, `--output-last-message`, `--ask-for-approval`/`-a`, exec-only `--ignore-rules`/`--ignore-user-config`), bypass flags (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--not-so-yolo`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, `-c` values mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`), workspace flags (`--cd`/`-C`, `--worktree`, and exec-level `--trust` from codex-cli 0.169.0, which would save project trust for future chats, [#1040](https://github.com/littlebearapps/untether/issues/1040)) and a bare `--`, in every spelling. A blocked flag stops the Codex engine loading, and the error names the flag ([#209](https://github.com/littlebearapps/untether/issues/209), see [Engine CLI flags](../../../how-to/security.md#engine-cli-flags-extra_args)). Root `--sandbox read-only|workspace-write` stays allowed.
 * **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto, except on a webhook run, which runs safe instead and logs `codex.webhook_unknown_mode_safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)).
 * **Model and resume id** are validated before spawn (no leading dash, no control characters; `runner.argv.invalid_value`). The model is joined to its flag; the thread id is positional in `exec resume`, where clap (0.160.1) reads a dash-leading token as an option, so validation is the whole defence there ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 * **Resume value = thread UUID only** ([#1065](https://github.com/littlebearapps/untether/issues/1065), checked on codex-cli 0.162.1, 2026-10-13). `codex exec resume [SESSION_ID]` natively takes a thread id **or a thread name**, but an unknown name (or any other non-UUID value, such as a URL) silently starts a **new** thread instead of failing, while an unknown UUID fails cleanly (`no rollout found for thread id …`). Untether keys sessions on the `thread.started` UUID, so a name never resumed under Untether anyway (the run failed the "emitted session id … but expected …" check after the new thread was created). `CodexRunner.check_resume_value` therefore refuses anything but a UUID before spawning. Native gap recorded here: thread names are not available on Untether's surface; revisit if Codex adds a strict lookup (fail when the name is unknown) or reports the name with the thread id.
@@ -461,3 +461,36 @@ Even though you *learn* the final answer at `agent_message`, you generally want 
 * you still use `agent_message` as the authoritative answer payload.
 
 That still matches your intent (“completed is when we get final answer”) because the answer comes from `agent_message`; you just *publish* it at the terminal boundary.
+
+---
+
+## App-server transport ([#962](https://github.com/littlebearapps/untether/issues/962))
+
+With `transport = "app-server"` under `[codex]`, the same engine id runs `codex app-server --listen stdio://` and
+reads JSON-RPC notifications instead of `exec --json` lines (checked on codex-cli 0.170.0). Every item is mapped to
+the exec item it corresponds to and rendered by the exec translation, so the rows, titles and `ok` values are the
+same on both transports. Transport choice, permissions and the native-vs-custom register: [runner.md](runner.md).
+
+Handshake: `initialize` (`experimentalApi: false`, deltas opted out) → `config/read` (Full auto only, for the trust
+check) → `thread/start`, `thread/resume` or `thread/list` (`/continue`) → `turn/start {threadId, input, effort?,
+turnTrigger: "untether"}`. Stdin closes after `turn/completed` and Codex exits by itself.
+
+| App-server message | Untether |
+|---|---|
+| `thread/start` / `thread/resume` result | `started`; `meta.model` is the result's `model` (the real model in the footer) |
+| `item/started`, `item/completed` | `action` started/completed, via exec's item translation: `commandExecution` (`inProgress` → `in_progress`), `fileChange` (`kind {type}` → `kind`; completed only, like exec), `mcpToolCall` (`structuredContent`), `webSearch` (`openPage`/`findInPage` → exec's names), `reasoning` (summary text; completed only), `agentMessage` with `phase: "commentary"` (note row) |
+| `collabAgentToolCall`, `imageView` | a `subagent` / `tool` row (exec has no such items) |
+| any other item type | a generic `tool` row titled with the type; `codex.app_server.unknown_item` logged once per type. `userMessage`, `hookPrompt` and `plan` get no row |
+| `contextCompaction` | a `note` row: `🗜️ Compacting context…` on `item/started`, `🗜️ Context compacted` on `item/completed` (Claude's wording); `usage.compaction = {count, trigger: "auto"}` → `runner.completed compactions=N` (#832) |
+| `thread/tokenUsage/updated` | a `telemetry` action (`context_pct`, `context_used`, `context_window`, `model`) from `last.totalTokens / modelContextWindow`, only when (pct, window) changes and never without a window; the header's `N% ctx`. `total` is kept for the final's usage |
+| `agentMessage` | the answer: the last `phase: "final_answer"`, else the last unnamed message, else the last message. `moderation.moderated` logs `codex.app_server.moderated mode=…` once per run; the text is shown as sent |
+| `turn/completed` `completed` | `completed` ok; `usage` carries exec's five token keys from the last update's `total` (thread-cumulative, as exec's `turn.completed.usage`), `context {pct, used, window, model}` and `compaction` when there was one |
+| `turn/completed` `failed` / `interrupted` | every row still open is closed (`ok: false`, `detail.status` `failed` / `cancelled`; Codex never completes them, Δ D19), then `completed` error with the turn's message and any answer so far. `usage.codex_error_info` carries `TurnError.codexErrorInfo` (an object variant by its key), which picks the hint (`error_hints.CODEX_ERROR_INFO_HINTS`) |
+| `error` `willRetry: true` | exec's reconnect row (`codex.reconnect`, started then updated) |
+| `error` `willRetry: false` | a failed note, as exec shows its `error` line |
+| `warning`, `configWarning`, `deprecationNotice` | one ⚠️ row per message per run (#987), paths and URLs masked (#1066, #1151); `deprecationNotice` also logs `codex.app_server.deprecation`. The untrusted-project `configWarning` gives exec's #1240 row and footer instead |
+| server request (approval, user input, …) | declined by the peer (approvals are #963), plus one ⚠️ row per request |
+
+Rows raised before the thread exists (a `configWarning` right after `initialize`) wait until `started` has gone out.
+Items, errors, usage updates and turns of another thread (a sub-agent's) are ignored. A notification Untether
+doesn't read is logged once per method at debug (`codex.app_server.notification_ignored`).

@@ -8,6 +8,7 @@ so that subsequent ticks/requests see the new configuration immediately.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Collection
 from pathlib import Path
 
 from ..logging import get_logger
@@ -47,6 +48,7 @@ class TriggerManager:
         "_run_once_pending_path",
         "_run_once_state_path",
         "_trusted_proxy_header",
+        "_webhook_defaults",
         "_webhooks_by_path",
     )
 
@@ -55,6 +57,7 @@ class TriggerManager:
         settings: TriggersSettings | None = None,
         *,
         config_path: Path | None = None,
+        keep_fired: Collection[str] = (),
     ) -> None:
         self._crons: list[CronConfig] = []
         self._webhooks_by_path: dict[str, WebhookConfig] = {}
@@ -62,6 +65,8 @@ class TriggerManager:
         # can announce them in Telegram (not just the log).
         self._refused_webhook_ids: tuple[str, ...] = ()
         self._default_timezone: str | None = None
+        # #1118: `[triggers] webhook_defaults`, read by the server per request.
+        self._webhook_defaults: str = "compat"
         # #1119: the proxy header the webhook server trusts (exposed only).
         self._trusted_proxy_header: str | None = None
         # #294: master pause flag — in-memory only (no persistence). Triggers
@@ -93,13 +98,19 @@ class TriggerManager:
             else {}
         )
         if settings is not None:
-            self.update(settings)
+            self.update(settings, keep_fired=keep_fired)
 
-    def update(self, settings: TriggersSettings) -> None:
+    def update(
+        self, settings: TriggersSettings, *, keep_fired: Collection[str] = ()
+    ) -> None:
         """Replace cron and webhook configuration.
 
         Creates new container objects so that in-flight iterations over
         the previous ``crons`` list are unaffected.
+
+        ``keep_fired`` (#1279): cron ids still written in the TOML but not in
+        ``settings.crons`` (a skipped entry, or the whole block disabled);
+        their run_once fired state survives instead of being pruned.
         """
         old_cron_ids = {c.id for c in self._crons}
         old_webhook_ids = {wh.id for wh in self._webhooks_by_path.values()}
@@ -111,7 +122,7 @@ class TriggerManager:
         # Clean fired-state entries for crons that are no longer in the
         # TOML at all — lets the user re-add the same id later under a
         # fresh schedule.
-        stale_fired = set(self._fired_run_once) - incoming_cron_ids
+        stale_fired = set(self._fired_run_once) - incoming_cron_ids - set(keep_fired)
         if stale_fired:
             for cron_id in stale_fired:
                 self._fired_run_once.pop(cron_id, None)
@@ -149,6 +160,7 @@ class TriggerManager:
             wh.path: wh for wh in settings.webhooks if wh.id not in refused_unauth
         }
         self._default_timezone = settings.default_timezone
+        self._webhook_defaults = settings.webhook_defaults
 
         new_cron_ids = {c.id for c in self._crons}
         new_webhook_ids = {wh.id for wh in self._webhooks_by_path.values()}
@@ -206,6 +218,12 @@ class TriggerManager:
                     path=wh.path,
                 )
 
+    def disable(self) -> None:
+        """Drop every cron and webhook (``[triggers]`` turned off or removed),
+        keeping run_once fired state so turning triggers back on can't re-arm
+        a completed one-shot (#1279)."""
+        self.update(TriggersSettings(), keep_fired=self._fired_run_once)
+
     @property
     def crons(self) -> list[CronConfig]:
         """Current cron list — the scheduler iterates this each tick."""
@@ -214,6 +232,11 @@ class TriggerManager:
     @property
     def default_timezone(self) -> str | None:
         return self._default_timezone
+
+    @property
+    def strict_webhooks(self) -> bool:
+        """#1118: ``[triggers] webhook_defaults = "strict"`` is in effect."""
+        return self._webhook_defaults == "strict"
 
     def webhook_for_path(self, path: str) -> WebhookConfig | None:
         """Look up a webhook by its HTTP path."""

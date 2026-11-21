@@ -144,6 +144,54 @@ class ProjectsConfig:
         return tuple(self.chat_map.keys())
 
 
+#: #1219: group/other permission bits.
+_GROUP_OTHER_BITS = 0o077
+
+
+def _has_inline_secret(raw: dict[str, Any]) -> bool:
+    """The TOML holds the bot token or a webhook ``secret`` itself."""
+    telegram = (raw.get("transports") or {}).get("telegram") or {}
+    if raw.get("bot_token") or (
+        isinstance(telegram, dict) and telegram.get("bot_token")
+    ):
+        return True
+    triggers = raw.get("triggers") or {}
+    webhooks = triggers.get("webhooks") if isinstance(triggers, dict) else None
+    return isinstance(webhooks, list) and any(
+        isinstance(hook, dict) and hook.get("secret") for hook in webhooks
+    )
+
+
+def _readable_by_others(path: Path) -> bool:
+    try:
+        return bool(stat.S_IMODE(path.stat().st_mode) & _GROUP_OTHER_BITS)
+    except OSError:
+        return False
+
+
+def config_permission_fixes(path: Path, raw: dict[str, Any]) -> tuple[str, ...]:
+    """#1219: ``chmod`` commands that make the config, its directory and its
+    backups private, or ``()`` when nothing needs fixing.
+
+    The file and directory count only when the TOML holds an inline secret;
+    a ``<name>.bak*`` backup always counts (it may hold an older token).
+    Never reads or returns a secret value.
+    """
+    fixes: list[str] = []
+    if _has_inline_secret(raw):
+        if _readable_by_others(path):
+            fixes.append(f"chmod 600 {path}")
+        if _readable_by_others(path.parent):
+            fixes.append(f"chmod 700 {path.parent}")
+    try:
+        backups = sorted(path.parent.glob(f"{path.name}.bak*"))
+    except OSError:
+        backups = []
+    if any(_readable_by_others(backup) for backup in backups):
+        fixes.append(f"chmod 600 {path.parent / path.name}.bak*")
+    return tuple(fixes)
+
+
 def dump_toml(config: dict[str, Any]) -> str:
     try:
         dumped = tomli_w.dumps(config)
@@ -154,15 +202,24 @@ def dump_toml(config: dict[str, Any]) -> str:
 
 def write_config(config: dict[str, Any], path: Path) -> None:
     """Write ``config`` atomically: temp file in the same directory, fsync,
-    ``os.replace``. A reader never sees a half-written file (#1049). An
-    existing file keeps its permission bits; a new one is owner-only (0600,
-    it holds the bot token)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ``os.replace``. A reader never sees a half-written file (#1049). The file
+    is owner-only: a new one is 0600 (it holds the bot token), an existing
+    one keeps its owner bits and loses any group/other bits (#1219), and a
+    new directory is 0700."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = dump_toml(config)
     try:
-        mode: int | None = stat.S_IMODE(path.stat().st_mode)
+        old_mode: int | None = stat.S_IMODE(path.stat().st_mode)
     except OSError:
-        mode = None
+        old_mode = None
+    mode = old_mode & 0o600 if old_mode is not None else None
+    if old_mode is not None and mode != old_mode:
+        logger.info(
+            "config.file_mode_tightened",
+            path=str(path),
+            old_mode=oct(old_mode),
+            new_mode=oct(mode or 0),
+        )
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

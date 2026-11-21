@@ -6,11 +6,13 @@ When Claude Code runs in permission mode, Untether shows inline buttons in Teleg
 
 What raises a button depends on the permission mode:
 
-- **Plan mode** (`plan`) — when Claude Code wants to **exit plan mode** (ExitPlanMode) or **ask you a question** (AskUserQuestion). Every other tool request that reaches Untether is auto-approved by Untether.
-- **`plan-auto`** — only questions. Untether approves the plan itself.
-- **`auto`, `bypassPermissions`** — only questions; there is no plan step.
+- **Plan mode** (`plan`) — when Claude Code wants to **exit plan mode** (ExitPlanMode), **ask you a question** (AskUserQuestion), or tries an edit before you approve the plan.
+- **`plan-auto`** — questions, plus anything Claude Code itself asks about (see below). Untether approves the plan itself, and the edits that carry it out.
+- **`auto`, `bypassPermissions`** — questions, plus anything Claude Code itself asks about; there is no plan step.
 - **`dontAsk`** — nothing: only pre-approved tools run, and anything that would ask (questions included) is denied.
 - **Accept edits** (`/planmode off`) and `default` / `manual` — any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
+
+In the autonomous modes (`plan`, `plan-auto`, `auto`, `bypassPermissions`), Claude Code still hands some requests back to the host on purpose: one of your `permissions.ask` rules, a hook that answers `ask`, a risky `rm` its safety check can't rule out, or, in `auto`, an action its classifier blocked several times in a row. Untether shows Approve / Deny for these instead of approving them for you ([#882](https://github.com/littlebearapps/untether/issues/882)); routine work doesn't reach Untether in those modes, so no extra buttons appear for it. A few requests are marked by Claude Code as needing you at the session itself (for example an MCP tool flagged `requiresUserInteraction`). Untether denies those in every mode and shows the `claude --resume` line so you can finish them in a terminal. Cron and webhook runs deny all of these.
 
 With **Diff preview** turned on in `/config`, an Edit, Write or Bash request that reaches Untether in one of these autonomous modes waits for a tap, with the diff, instead of being approved for you. Which requests reach Untether is up to Claude Code and the mode ([#1147](https://github.com/littlebearapps/untether/issues/1147)):
 
@@ -25,7 +27,7 @@ A **background agent** can ask for approval after Claude has already replied —
 
 ## The approval buttons
 
-When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons:
+When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons. When Claude Code says why it's asking (a hook, a permission rule or the auto-mode classifier), that reason follows on a `🪝` line ([#939](https://github.com/littlebearapps/untether/issues/939)):
 
 | Button | What it does |
 |--------|-------------|
@@ -125,11 +127,11 @@ Each request can be answered once. A second tap (yours or someone else's in a gr
 
 - **Already answered** — plus a silent `ℹ️ Already answered — approved` (or `denied`, …) line saying what the first tap did
 - **No longer needed** — Claude Code withdrew the request, for example because the turn ended; its buttons are removed
-- **This request has expired** — the request timed out, or Untether no longer knows about it (for example after a restart)
+- **This request has expired** — a newer request replaced it, or Untether no longer knows about it (for example after a restart)
 
 Buttons only work in the chat they were posted in: a forged approval sent from another chat reads as expired and changes nothing ([#388](https://github.com/littlebearapps/untether/issues/388)).
 
-An unanswered request is denied automatically after 5 minutes (`⏱️ Timed out: auto-denied after 5 min`). Untether checks for this when another approval request arrives, so a single request on its own waits for you.
+An unanswered request waits for you: Claude Code has no deadline on it, and Untether no longer denies it after 5 minutes ([#844](https://github.com/littlebearapps/untether/issues/844)). You get reminders while it waits, and the session closes at its 4-hour cap.
 
 ## Who can answer in a group
 
@@ -283,7 +285,7 @@ A blocked shell command (a row such as `⚠️ Blocked: shell command (RunComman
 
 **Allow rules.** Exact rules in `permissions.allow` in agy's own settings file (`~/.gemini/antigravity-cli/settings.json`), for example `command(git status)`, only matter where agy has a shell tool to block, which is the cases in the paragraph above. A Workspace conversation on the no-shell agent has no shell tool, so an allow rule doesn't give it one; use Full access. Exact commands are the reliable form; prefix patterns don't match consistently in headless runs. When agy's settings carry allow rules, or let it reach files outside the project, Untether shows a ⚠️ row saying so.
 
-**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`, `"ask"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access or Ask me from the chat or `untether.toml`: a cron gets either only from its own `permission_mode`, and webhook runs never get Full access.
+**Defaults and scheduled runs.** Set a default with `permission_mode = "full"` (or `"workspace"`, `"ask"` or `"plan"`) under `[antigravity]` in `untether.toml`. Unknown values are rejected at startup, and an unknown stored value runs as Workspace. Cron and webhook runs never inherit Full access or Ask me from the chat or `untether.toml`: a cron gets either only from its own `permission_mode`, and a webhook gets Full access only from its own `permission_mode = "full"` with `allow_unsafe_permission_mode = true` (v0.36.2).
 
 **agy's own settings can override the mode.** If agy's settings file sets `toolPermission` to anything other than `request-review` or `strict` (for example `always-proceed`), agy would approve tools by itself, so Untether refuses to run Workspace and tells you to set it back or pick Full access.
 

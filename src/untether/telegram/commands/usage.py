@@ -349,8 +349,7 @@ def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
     """The #417 block for the chat's last session of ``engine`` (header line
     first), or ``None`` when this chat has no completed run of it. Shared by
     the token-only reply and Antigravity's quota reply (#558)."""
-    from ...runner_bridge import _TOKEN_LEDGER_SCOPES
-    from ...session_costs import get_session_cost_ledger, token_counts
+    from ...session_costs import get_session_cost_ledger, token_counts, usage_scope
     from .export import latest_session_for_chat
 
     esc_engine = html.escape(engine)
@@ -383,7 +382,7 @@ def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
         if counts is not None:
             label = (
                 "Session total"
-                if _TOKEN_LEDGER_SCOPES.get(engine) == "thread_cumulative"
+                if usage_scope(engine, sess.usage).get("tokens") == "thread_cumulative"
                 else "Last run"
             )
             lines.append(
@@ -450,6 +449,17 @@ async def _antigravity_debug_lines(cmd: str) -> list[str]:
     return lines
 
 
+def _slash_error_reason(kind: str) -> str:
+    """#1195: a readable reason for a failed agy slash probe, never the
+    internal ``prespawn_blocked`` kind."""
+    if kind == "prespawn_blocked":
+        return (
+            "the host is short of memory or at its run limit right now;"
+            " try /usage again in a minute"
+        )
+    return html.escape(kind[:40])
+
+
 async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
     """``AI credits: N remaining`` from the zero-token ``agy -p /credits``
     (#979; cached 300 s). Asked only once the quota itself was read. A
@@ -463,7 +473,7 @@ async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
     except agy_quota.AntigravityNotSignedIn:
         return None
     except agy_quota.AgySlashError as exc:
-        return f"AI credits: couldn't read ({html.escape(exc.kind[:40])})."
+        return f"AI credits: couldn't read ({_slash_error_reason(exc.kind)})."
     except Exception as exc:  # noqa: BLE001 — logged by the cache
         return f"AI credits: couldn't read ({html.escape(type(exc).__name__)})."
     return agy_quota.format_credits_html(credits)
@@ -509,7 +519,7 @@ async def _antigravity_usage_reply(
                 )
             else:
                 lines.append(
-                    f"Couldn't read agy's quota ({html.escape(exc.kind[:40])})."
+                    f"Couldn't read agy's quota ({_slash_error_reason(exc.kind)})."
                 )
         except Exception as exc:  # noqa: BLE001 — logged by the cache
             lines.append(

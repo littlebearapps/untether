@@ -52,7 +52,8 @@ def test_pi_resume_format_and_extract(tmp_path: Path) -> None:
 def test_translate_success_fixture() -> None:
     state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
     events: list = []
-    for event in _load_fixture("pi_stream_success.jsonl"):
+    # #1255: the run completes on agent_settled, which follows agent_end.
+    for event in [*_load_fixture("pi_stream_success.jsonl"), pi_schema.AgentSettled()]:
         events.extend(translate_pi_event(event, title="pi", meta=None, state=state))
 
     assert isinstance(events[0], StartedEvent)
@@ -136,7 +137,7 @@ def test_started_event_skips_jsonl_model_when_config_model_present() -> None:
 def test_translate_error_fixture() -> None:
     state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
     events: list = []
-    for event in _load_fixture("pi_stream_error.jsonl"):
+    for event in [*_load_fixture("pi_stream_error.jsonl"), pi_schema.AgentSettled()]:
         events.extend(translate_pi_event(event, title="pi", meta=None, state=state))
 
     completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
@@ -162,7 +163,30 @@ def test_session_id_promotion_from_stdout() -> None:
         state=state,
     )
     started = next(evt for evt in events if isinstance(evt, StartedEvent))
-    assert started.resume.value == "ccd569e0"
+    assert started.resume.value == "ccd569e0-4e1b-4c7d-a981-637ed4107310"
+
+
+def test_1264_sessions_started_together_get_different_tokens() -> None:
+    """Pi ids are UUIDv7: two sessions 12 s apart share the first 8 hex
+    (live, Pi 1.5.2), so the token must be the whole id."""
+    tokens = []
+    for sid in (
+        "01a1f172-6e3b-77c3-8f00-000000000001",
+        "01a1f172-9e4b-72cc-8f00-000000000002",
+    ):
+        state = PiStreamState(
+            resume=ResumeToken(engine=ENGINE, value="/s/new.jsonl"),
+            allow_id_promotion=True,
+        )
+        translate_pi_event(
+            pi_schema.SessionHeader(id=sid, version=3, timestamp="t", cwd="/tmp"),
+            title="pi",
+            meta=None,
+            state=state,
+        )
+        tokens.append(state.resume.value)
+    assert tokens[0] != tokens[1]
+    assert tokens[0] == "01a1f172-6e3b-77c3-8f00-000000000001"
 
 
 def test_extract_resume_keeps_session_path(tmp_path: Path) -> None:
@@ -338,7 +362,7 @@ def test_continue_session_id_promoted_from_header() -> None:
         state=state,
     )
     started = next(e for e in events if isinstance(e, StartedEvent))
-    assert started.resume.value == "ccd569e0"
+    assert started.resume.value == "ccd569e0-4e1b-4c7d-a981-637ed4107310"
     assert started.resume.value != ""
 
 
@@ -512,3 +536,131 @@ def test_multiple_retries_have_stable_distinct_ids() -> None:
     assert e1[0].action.id == "retry_1"
     assert s2[0].action.id == "retry_2"
     assert e2[0].action.id == "retry_2"
+
+
+# ---------------------------------------------------------------------------
+# #1255 — Pi's run ends at agent_settled, not the first agent_end
+# ---------------------------------------------------------------------------
+
+_ERR_ASSISTANT = (
+    '{"role":"assistant","content":[],"stopReason":"error",'
+    '"errorMessage":"503 overloaded"}'
+)
+_OK_ASSISTANT = (
+    '{"role":"assistant","content":[{"type":"text","text":"Retried answer"}],'
+    '"stopReason":"stop"}'
+)
+_PAD = "__PAD__"
+
+
+def _retry_stream(*, will_retry: bool, settled: bool) -> list[str]:
+    """A provider error, Pi's auto-retry, then the good answer (json.md shapes)."""
+    retry = ',"willRetry":true' if will_retry else ""
+    done = ',"willRetry":false' if will_retry else ""
+    lines = [
+        '{"type":"session","version":3,"id":"s1","cwd":"/tmp"}',
+        '{"type":"agent_start"}',
+        f'{{"type":"message_end","message":{_ERR_ASSISTANT}}}',
+        f'{{"type":"agent_end","messages":[{_ERR_ASSISTANT}]{retry}}}',
+        '{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":10}',
+        '{"type":"agent_start"}',
+        _PAD,
+        f'{{"type":"message_end","message":{_OK_ASSISTANT}}}',
+        '{"type":"auto_retry_end","success":true,"attempt":1}',
+        f'{{"type":"agent_end","messages":[{_OK_ASSISTANT}]{done}}}',
+    ]
+    if settled:
+        lines.append('{"type":"agent_settled","aborted":false}')
+    return lines
+
+
+def _fake_pi(tmp_path: Path, lines: list[str], *, pad_lines: int = 0) -> Path:
+    import sys
+
+    script = tmp_path / "fake_pi"
+    delta = '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"x"}}'
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"for line in {lines!r}:\n"
+        f"    if line == {_PAD!r}:\n"
+        f"        for _ in range({pad_lines}):\n"
+        f"            sys.stdout.write({delta!r} + '\\n')\n"
+        "        continue\n"
+        "    sys.stdout.write(line + '\\n')\n"
+        "    sys.stdout.flush()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+async def _run_fake_pi(tmp_path: Path, script: Path) -> list:
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    runner.command = lambda: str(script)  # type: ignore[method-assign]
+    resume = ResumeToken(engine=ENGINE, value="s1")
+    with anyio.fail_after(10):
+        return [evt async for evt in runner.run("hi", resume)]
+
+
+@pytest.mark.anyio
+async def test_run_completes_on_agent_settled_after_retry(tmp_path: Path) -> None:
+    """Pi >= 0.80.5: agent_end{willRetry:true} must not end the run."""
+    script = _fake_pi(tmp_path, _retry_stream(will_retry=True, settled=True))
+    events = await _run_fake_pi(tmp_path, script)
+
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert events[-1] is completed[0]
+    assert completed[0].ok is True
+    assert completed[0].answer == "Retried answer"
+    assert completed[0].error is None
+    titles = [e.action.title for e in events if isinstance(e, ActionEvent)]
+    assert "retry succeeded" in titles
+
+
+@pytest.mark.anyio
+async def test_run_legacy_pi_without_agent_settled_completes_at_exit(
+    tmp_path: Path,
+) -> None:
+    """Pi < 0.80.5 never sends agent_settled: the last agent_end wins at exit."""
+    script = _fake_pi(tmp_path, _retry_stream(will_retry=True, settled=False))
+    events = await _run_fake_pi(tmp_path, script)
+
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert completed[0].ok is True
+    assert completed[0].answer == "Retried answer"
+
+
+@pytest.mark.anyio
+async def test_run_keeps_reading_past_first_agent_end(tmp_path: Path) -> None:
+    """More than a pipe buffer of output after the first agent_end must not
+    stall Pi (it blocks on a full stdout pipe if Untether stops reading)."""
+    script = _fake_pi(
+        tmp_path, _retry_stream(will_retry=True, settled=True), pad_lines=5000
+    )
+    events = await _run_fake_pi(tmp_path, script)
+
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert completed[0].answer == "Retried answer"
+
+
+@pytest.mark.anyio
+async def test_run_exhausted_retry_still_reports_error(tmp_path: Path) -> None:
+    script = _fake_pi(
+        tmp_path,
+        [
+            '{"type":"session","version":3,"id":"s1","cwd":"/tmp"}',
+            '{"type":"agent_start"}',
+            f'{{"type":"message_end","message":{_ERR_ASSISTANT}}}',
+            f'{{"type":"agent_end","messages":[{_ERR_ASSISTANT}],"willRetry":false}}',
+            '{"type":"agent_settled","aborted":false}',
+        ],
+    )
+    events = await _run_fake_pi(tmp_path, script)
+
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert completed[0].ok is False
+    assert completed[0].error == "503 overloaded"
