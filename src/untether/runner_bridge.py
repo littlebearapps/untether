@@ -776,9 +776,12 @@ def _claude_per_run_cost_usage(
     engine: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """#1322: return a shallow copy of ``usage`` with Claude's cumulative
-    ``total_cost_usd`` replaced by the read-only per-run delta."""
-    if engine != "claude" or usage is None:
+    """#1322: return a shallow copy of ``usage`` with a session-cumulative
+    ``total_cost_usd`` (Claude's) replaced by the read-only per-run delta.
+    Read-only because the guard runs before ``_apply_cost_delta`` records."""
+    if not engine or usage is None:
+        return usage
+    if usage_scope(engine, usage).get("cost") != "session_cumulative":
         return usage
     raw_cost = usage.get("total_cost_usd")
     if not isinstance(raw_cost, (int, float)) or isinstance(raw_cost, bool):

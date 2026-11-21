@@ -24,6 +24,7 @@
 
 ### fixes
 
+- **fix(watchdog):** the stream-idle auto-retry's budget check compares Claude's cost for the failed run, not the session's running total, with `max_cost_per_run`, so a long resumed session no longer blocks every retry [#1322](https://github.com/littlebearapps/untether/issues/1322)
 - **fix:** a cancelled run's progress card shows the step it stopped as ✗ instead of still running, on every engine [#962](https://github.com/littlebearapps/untether/issues/962)
 - **security(config):** an engine with an invalid config section is now disabled ("misconfigured") instead of running on its defaults, which dropped restrictive settings such as `extra_args = ["-s", "read-only"]` [#1283](https://github.com/littlebearapps/untether/issues/1283)
 - **fix(antigravity):** support agy 1.5.x's renamed file tools (`read_file` / `write_file` / `edit_file`), so Plan first shows its Approve card again and Ask me reads and edits project files without asking [#1272](https://github.com/littlebearapps/untether/issues/1272)
