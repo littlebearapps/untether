@@ -33,6 +33,7 @@ VERSION_HEADING = re.compile(r"^## v(\S+) \((\d{4}-\d{2}-\d{2})\)")
 SUBSECTION_HEADING = re.compile(r"^### (\w+)")
 TOP_LEVEL_ENTRY = re.compile(r"^- .+")
 ISSUE_LINK = re.compile(r"\[#\d+\]")
+CITATION_VERSION = re.compile(r"^version:\s*(\S+)", re.MULTILINE)
 
 
 def load_version() -> str:
@@ -107,6 +108,19 @@ def validate_section(lines: list[str], start: int) -> tuple[list[str], list[str]
     return warnings, errors
 
 
+def check_citation_version(version: str) -> str | None:
+    """Return an error message if CITATION.cff version != pyproject version."""
+    path = Path("CITATION.cff")
+    if not path.exists():
+        return "CITATION.cff not found"
+    m = CITATION_VERSION.search(path.read_text(encoding="utf-8"))
+    if not m:
+        return "no 'version:' field found in CITATION.cff"
+    if m.group(1) != version:
+        return f"CITATION.cff version {m.group(1)} != pyproject.toml version {version}"
+    return None
+
+
 def main() -> int:
     passed = 0
     failed = 0
@@ -152,7 +166,16 @@ def main() -> int:
             print("OK: all changelog entries have issue links and valid subsections")
             passed += 1
 
-    # 5. User-facing GitHub Discussions announcement (#1008)
+    # 5. CITATION.cff version matches pyproject.toml (coderabbit nitpick on #1379)
+    cit_err = check_citation_version(version)
+    if cit_err:
+        print(f"FAIL: {cit_err}")
+        failed += 1
+    else:
+        print("OK: CITATION.cff version matches pyproject.toml")
+        passed += 1
+
+    # 6. User-facing GitHub Discussions announcement (#1008)
     problems = check_announcement(version)
     if problems:
         print(f"FAIL: release announcement for v{version}:")
