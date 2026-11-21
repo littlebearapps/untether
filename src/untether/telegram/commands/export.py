@@ -142,10 +142,15 @@ def _format_export_markdown(
         counts = token_counts(usage) or {}
         input_tokens = counts.get("input_tokens")
         output_tokens = counts.get("output_tokens")
-        # The transcript spans every run of the session, but cost, turns and
-        # duration are the latest run's (rc15 integration finding).
+        from ...session_costs import usage_scope
+
+        engine = _session_engine(events)
+        scope = usage_scope(engine or "", usage)
+        # #1266: Claude's total_cost_usd is the session's running total, while
+        # turns and duration are the latest run's (rc15 integration finding).
+        session_cost = cost is not None and scope.get("cost") == "session_cumulative"
         run_parts: list[str] = []
-        if cost is not None:
+        if cost is not None and not session_cost:
             run_parts.append(f"${cost:.4f}")
         if turns:
             run_parts.append(f"{turns} turns")
@@ -160,14 +165,18 @@ def _format_export_markdown(
             token_part = " / ".join(token_parts) + " tokens"
         # Tokens are the latest run's too, except for engines that report a
         # running thread total (Codex, Antigravity).
-        from ...session_costs import usage_scope
-
-        engine = _session_engine(events)
         thread_total = token_part is not None and (
-            usage_scope(engine or "", usage).get("tokens") == "thread_cumulative"
+            scope.get("tokens") == "thread_cumulative"
         )
         header = ""
-        if thread_total and run_parts:
+        if session_cost:
+            cost_part = f"${cost:.4f}"
+            header = (
+                f"{cost_part} (session total) · {' · '.join(run_parts)} (last run)"
+                if run_parts
+                else f"{cost_part} · session total"
+            )
+        elif thread_total and run_parts:
             # #1158: agy's last-run duration sits beside thread-total
             # tokens, so each figure names its own scope.
             header = f"{' · '.join(run_parts)} (last run) · {token_part} (thread total)"

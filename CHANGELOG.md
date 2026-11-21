@@ -24,6 +24,7 @@
 
 ### fixes
 
+- **fix(export):** `/export` labels Claude's cost as the session total instead of the last run, because Claude reports a running total across resumed turns; turns and duration stay labelled as the last run [#1266](https://github.com/littlebearapps/untether/issues/1266)
 - **security(gemini, amp):** the deprecated Gemini CLI and AMP engines no longer inherit Untether's whole environment; like Codex and OpenCode they now get the env allowlist plus your `[security]` extras and the few names each CLI documents (`GEMINI_*` and Gemini's base-URL/project names; `AMP_*` and `NODE_EXTRA_CA_CERTS`), so unrelated tokens in the service environment no longer reach them or their tool calls [#1354](https://github.com/littlebearapps/untether/issues/1354)
 - **fix:** a cancelled run's progress card shows the step it stopped as ✗ instead of still running, on every engine [#962](https://github.com/littlebearapps/untether/issues/962)
 - **security(config):** an engine with an invalid config section is now disabled ("misconfigured") instead of running on its defaults, which dropped restrictive settings such as `extra_args = ["-s", "read-only"]` [#1283](https://github.com/littlebearapps/untether/issues/1283)
