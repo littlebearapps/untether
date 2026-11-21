@@ -24,6 +24,7 @@
 
 ### fixes
 
+- **fix(watchdog):** the stream-idle auto-retry's budget check compares Claude's cost for the failed run, not the session's running total, with `max_cost_per_run`, so a long resumed session no longer blocks every retry [#1322](https://github.com/littlebearapps/untether/issues/1322)
 - **fix(export):** `/export` labels Claude's cost as the session total instead of the last run, because Claude reports a running total across resumed turns; turns and duration stay labelled as the last run [#1266](https://github.com/littlebearapps/untether/issues/1266)
 - **security(gemini, amp):** the deprecated Gemini CLI and AMP engines no longer inherit Untether's whole environment; like Codex and OpenCode they now get the env allowlist plus your `[security]` extras and the few names each CLI documents (`GEMINI_*` and Gemini's base-URL/project names; `AMP_*` and `NODE_EXTRA_CA_CERTS`), so unrelated tokens in the service environment no longer reach them or their tool calls [#1354](https://github.com/littlebearapps/untether/issues/1354)
 - **fix:** a cancelled run's progress card shows the step it stopped as ✗ instead of still running, on every engine [#962](https://github.com/littlebearapps/untether/issues/962)
