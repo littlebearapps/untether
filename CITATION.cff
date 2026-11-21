@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Untether"
+abstract: >-
+  Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode,
+  Pi and Antigravity CLI to Telegram with interactive permissions, voice input,
+  cost tracking, and live progress.
+authors:
+  - name: "Little Bear Apps"
+    email: "hello@littlebearapps.com"
+type: software
+version: 0.36.1
+license: MIT
+repository-code: "https://github.com/littlebearapps/untether"
+url: "https://untether.cc"
+keywords:
+  - telegram
+  - coding-assistant
+  - ai-agents
+  - remote-control
