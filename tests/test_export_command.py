@@ -445,6 +445,21 @@ def test_export_usage_header_labels_mixed_scopes() -> None:
     assert "**Usage:** 1.5s · 9 in / 2 out tokens · last run" in md
 
 
+def test_export_usage_header_claude_session_total_cost() -> None:
+    """#1266: Claude's total_cost_usd is session-cumulative, whereas num_turns
+    and duration_ms are per-run; /export must not label the running cost total
+    as 'last run'."""
+    claude = [{"type": "started", "engine": "claude", "title": "t"}]
+    usage = {"total_cost_usd": 2.5995, "num_turns": 2, "duration_ms": 5600}
+    md = _format_export_markdown("s", claude, usage)
+    assert "· last run\n" not in md
+    assert "$2.5995 (session total)" in md
+    assert "2 turns · 5.6s (last run)" in md
+    # Cost alone on Claude should still be labelled session total, not last run.
+    md_cost_only = _format_export_markdown("s", claude, {"total_cost_usd": 2.5995})
+    assert "**Usage:** $2.5995 · session total" in md_cost_only
+
+
 # --- #418: /export attaches the full transcript as a document ---------------
 
 

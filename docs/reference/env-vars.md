@@ -143,7 +143,7 @@ If you'd rather the new variable ship as a default for every Untether user, open
 
 <!-- verified codex 0.170.0 / opencode 1.19.6, 2026-11-18 (#1241); recheck on either CLI bump -->
 
-Since v0.36.2, Untether spawns Codex and OpenCode with the [env allowlist](#env-allowlist-claudepi) plus their own extras, not its full process environment ([#1241](https://github.com/littlebearapps/untether/issues/1241)); only the deprecated, unsupported Gemini CLI and AMP engines still get the full environment. A variable either engine reads under a name you chose (a Codex `model_providers.<id>.env_key`, an MCP server's `env_vars`, `bearer_token_env_var` or `env_http_headers`, an `opencode.json` `{env:NAME}`) needs `[security] env_extra_allow`.
+Since v0.36.2, Untether spawns Codex and OpenCode with the [env allowlist](#env-allowlist-claudepi) plus their own extras, not its full process environment ([#1241](https://github.com/littlebearapps/untether/issues/1241)). The deprecated, unsupported Gemini CLI and AMP engines get the same treatment ([#1354](https://github.com/littlebearapps/untether/issues/1354)), so no engine inherits Untether's full environment. A variable either engine reads under a name you chose (a Codex `model_providers.<id>.env_key`, an MCP server's `env_vars`, `bearer_token_env_var` or `env_http_headers`, an `opencode.json` `{env:NAME}`) needs `[security] env_extra_allow`.
 
 What an **MCP server** sees is decided by the engine, not by Untether, and the two engines differ:
 
