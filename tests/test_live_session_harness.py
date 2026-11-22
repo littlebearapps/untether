@@ -862,7 +862,8 @@ async def test_845_cancel_with_pending_approval_sends_native_interrupt(
     events = [e.get("event") for e in logs]
     (sent,) = [e for e in logs if e.get("event") == "claude.interrupt.sent"]
     assert sent["request_id"] == "ut_interrupt_fake-live-session_1"
-    assert "claude.interrupt.result" in events
+    tail = events[events.index("claude.interrupt.sent") :]
+    assert "claude.interrupt.result" in events, tail
     assert "claude.interrupt.no_result" not in events
     assert "control_request.cancelled_by_cli" in events
     # An errored first result never stays live (#776 review): stdin closes.
