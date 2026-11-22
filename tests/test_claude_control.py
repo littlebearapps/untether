@@ -5008,3 +5008,100 @@ async def test_845_interrupt_only_with_a_pending_request_and_open_turn() -> None
         _SESSION_STDIN.pop(sid, None)
         _ACTIVE_RUNNERS.pop(sid, None)
         _REQUEST_TO_SESSION.pop("r-845", None)
+
+
+# #837 — cross-check a flagged request against the CLI's pending list
+
+
+async def _probe_with_reply(
+    state: ClaudeStreamState, ids: list[str], reply: dict[str, Any] | None
+) -> dict[str, bool | None]:
+    """Run ``cli_pending_check``; answer its write with ``reply`` (the
+    success envelope's extra keys) through ``translate_claude_event``."""
+    result: dict[str, bool | None] = {}
+
+    async def probe() -> None:
+        result.update(await state.cli_pending_check(ids, timeout_s=0.5))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(probe)
+        with anyio.fail_after(2):
+            while not state.cli_probe_waiters:
+                await anyio.sleep(0.01)
+        if reply is not None:
+            (rid,) = state.cli_probe_waiters
+            event = _decode_event(
+                {
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": rid, **reply},
+                }
+            )
+            assert (
+                translate_claude_event(
+                    event, title="claude", state=state, factory=state.factory
+                )
+                == []
+            )
+    return result
+
+
+@pytest.mark.anyio
+async def test_837_cli_pending_check_reads_pending_permission_requests() -> None:
+    sid = "sess-837"
+    state, _factory = _make_state_with_session(sid)
+    fake_stdin = _register_live_request("r-gone", sid)
+    _register_live_request("r-held", sid)
+    try:
+        verdicts = await _probe_with_reply(
+            state,
+            ["r-gone", "r-held", "da:sess-837"],
+            {
+                "response": {"session_state": "requires_action"},
+                "pending_permission_requests": [
+                    {
+                        "type": "control_request",
+                        "request_id": "r-held",
+                        "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+                    }
+                ],
+            },
+        )
+        assert verdicts == {"r-gone": False, "r-held": True, "da:sess-837": None}
+        (call,) = fake_stdin.send.await_args_list
+        assert json.loads(call.args[0]) == {
+            "type": "control_request",
+            "request_id": f"ut_pending_probe_{sid}_1",
+            "request": {"subtype": "initialize", "hooks": None},
+        }
+        # Rate-limited: a second flag within 30 min writes nothing.
+        again = await state.cli_pending_check(["r-gone"], timeout_s=0.1)
+        assert again == {"r-gone": None}
+        assert fake_stdin.send.await_count == 1
+    finally:
+        for rid in ("r-gone", "r-held"):
+            _REQUEST_TO_SESSION.pop(rid, None)
+        _SESSION_STDIN.pop(sid, None)
+        _ACTIVE_RUNNERS.pop(sid, None)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(None, id="timeout"),
+        pytest.param({"response": {}}, id="field-absent"),
+    ],
+)
+async def test_837_cli_pending_check_unknown(reply: dict[str, Any] | None) -> None:
+    """No reply or an older CLI without the field: unknown, never "not
+    pending"."""
+    sid = "sess-837u"
+    state, _factory = _make_state_with_session(sid)
+    _register_live_request("r-u", sid)
+    try:
+        assert await _probe_with_reply(state, ["r-u"], reply) == {"r-u": None}
+        assert state.cli_probe_waiters == {} and state.cli_probe_replies == {}
+    finally:
+        _REQUEST_TO_SESSION.pop("r-u", None)
+        _SESSION_STDIN.pop(sid, None)
+        _ACTIVE_RUNNERS.pop(sid, None)

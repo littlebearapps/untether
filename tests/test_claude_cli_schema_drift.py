@@ -1029,6 +1029,18 @@ def test_compact_heartbeat_interval_present(cli_blob: mmap.mmap) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_837_initialize_reply_lists_pending_requests(cli_blob: mmap.mmap) -> None:
+    """#837's probe reads ``pending_permission_requests`` off an
+    ``initialize`` reply (zero-token probe on CLI 2.1.330). A CLI without it
+    only makes the probe answer ``unknown``, but the probe is then useless."""
+    if cli_blob.find(b"pending_permission_requests") == -1:
+        pytest.fail(
+            "pending_permission_requests is gone from the installed CLI — "
+            "re-check the initialize reply before trusting #837's probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
 def test_684_control_cancel_request_frame_present(cli_blob: mmap.mmap) -> None:
     """#684 retires a request on the CLI's ``control_cancel_request`` frame
     (findings 2026-09-30 Q1 §3, probe Z4). If the frame is gone, withdrawn

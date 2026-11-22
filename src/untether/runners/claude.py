@@ -1570,6 +1570,11 @@ def session_turn_pending(session_id: str) -> bool:
     return not live.idle or bool(live.state.awaiting_injected)
 
 
+# #837: the pending-requests probe (a second ``initialize``).
+_CLI_PROBE_ID_PREFIX = "ut_pending_probe_"
+CLI_PROBE_TIMEOUT_S: float = 5.0
+CLI_PROBE_MIN_INTERVAL_S: float = 1800.0
+
 # #845: how long a /cancel waits for the interrupted turn's ``result`` before
 # falling back to stdin close / signals. CLI 2.1.330 answers in ~40 ms.
 INTERRUPT_RESULT_GRACE_S: float = 5.0
@@ -2380,6 +2385,13 @@ class ClaudeStreamState:
     catalog_refresh_seq: int = 0
     # #845: ``ut_interrupt_<session_id>_<seq>`` (parent-initiated interrupt).
     interrupt_seq: int = 0
+    # #837: ``ut_pending_probe_<session_id>_<seq>`` (a second ``initialize``
+    # asking the CLI which requests it still waits on). Replies by id: the
+    # ``pending_permission_requests`` list, or None when the field is absent.
+    cli_probe_seq: int = 0
+    cli_probe_last_at: float | None = None
+    cli_probe_waiters: dict[str, anyio.Event] = field(default_factory=dict)
+    cli_probe_replies: dict[str, list[Any] | None] = field(default_factory=dict)
     # #590: descendant PIDs captured while the subprocess was alive (at the
     # result event, at reader-done, and at limbo detection — see
     # _capture_orphan_descendants). Read by manage_subprocess's post-exit
@@ -2648,6 +2660,73 @@ class ClaudeStreamState:
                 )
             )
         return snaps
+
+    async def cli_pending_check(
+        self, request_ids: Iterable[str], *, timeout_s: float = CLI_PROBE_TIMEOUT_S
+    ) -> dict[str, bool | None]:
+        """#837: ask the CLI whether it still waits on ``request_ids``.
+
+        Writes a second ``initialize`` (``hooks: None``, like the spawn's)
+        and reads ``pending_permission_requests`` off the success envelope.
+        Probe on CLI 2.1.330 (2026-11-22): no ``system/init`` again, no hook
+        re-run, the request stays answerable; the only extra frame is a
+        ``background_tasks_changed`` snapshot of the current list. Per id:
+        True = listed, False = not listed, None = unknown (no reply in
+        ``timeout_s``, no field, a synthetic ``da:`` button, or the id was
+        registered after the write, answered meanwhile or in flight). At most
+        one write per ``CLI_PROBE_MIN_INTERVAL_S`` per session, so the reply
+        resets the watchdog's idle clock at most that often.
+        """
+        ids = list(request_ids)
+        unknown: dict[str, bool | None] = dict.fromkeys(ids)
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        stdin = _SESSION_STDIN.get(sid) if sid else None
+        now = time.monotonic()
+        if sid is None or stdin is None:
+            return unknown
+        if (
+            self.cli_probe_last_at is not None
+            and now - self.cli_probe_last_at < CLI_PROBE_MIN_INTERVAL_S
+        ):
+            logger.debug("control_request.cli_probe_rate_limited", session_id=sid)
+            return unknown
+        self.cli_probe_last_at = now
+        self.cli_probe_seq += 1
+        request_id = f"{_CLI_PROBE_ID_PREFIX}{sid}_{self.cli_probe_seq}"
+        before = {rid for rid, owner in _REQUEST_TO_SESSION.items() if owner == sid}
+        waiter = self.cli_probe_waiters[request_id] = anyio.Event()
+        payload = {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "initialize", "hooks": None},
+        }
+        try:
+            await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+            with anyio.move_on_after(timeout_s):
+                await waiter.wait()
+        except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            self.cli_probe_waiters.pop(request_id, None)
+        if request_id not in self.cli_probe_replies:
+            return unknown
+        listed = self.cli_probe_replies.pop(request_id)
+        if listed is None:
+            return unknown
+        pending = {
+            entry.get("request_id") for entry in listed if isinstance(entry, dict)
+        }
+        return {
+            rid: (
+                None
+                if rid.startswith("da:")
+                or rid not in before
+                or _REQUEST_TO_SESSION.get(rid) != sid
+                or rid in _INFLIGHT_CONTROL_RESPONSES
+                else rid in pending
+            )
+            for rid in ids
+        }
 
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
@@ -10113,6 +10192,19 @@ def _translate_claude_event_base(
                 resp,
                 session_id=factory.resume.value if factory.resume else None,
             )
+            return []
+        case claude_schema.StreamControlResponse(response=resp) if (
+            resp.request_id.startswith(_CLI_PROBE_ID_PREFIX)
+        ):
+            # #837: the reply to our pending-requests probe.
+            waiter = state.cli_probe_waiters.get(resp.request_id)
+            if waiter is not None:
+                state.cli_probe_replies[resp.request_id] = (
+                    resp.pending_permission_requests
+                    if isinstance(resp, claude_schema.ControlSuccessResponse)
+                    else None
+                )
+                waiter.set()
             return []
         case claude_schema.StreamControlCancelRequest(request_id=cancel_rid):
             # #684: the CLI withdrew a request it no longer needs.

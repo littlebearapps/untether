@@ -371,6 +371,7 @@ Budget alerts always appear regardless of `[footer]` settings.
     mcp_tool_timeout = 900.0
     subagent_timeout = 900.0
     detect_unanswerable_control_requests = true
+    control_request_cli_probe = false
     detect_stuck_after_tool_result = false
     stuck_after_tool_result_timeout = 300.0
     stuck_after_tool_result_recovery_enabled = true
@@ -407,6 +408,7 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `stall_repeat_seconds` | float | `180.0` | Interval between repeat stall warnings in Telegram (30–600). |
 | `reap_orphans` | bool | `true` | ([#590](https://github.com/littlebearapps/untether/issues/590)) After an engine subprocess exits (including a clean `rc=0`), kill the process-group members and descendants it left behind — chiefly leaked MCP server children. This also ends Bash tasks the agent backgrounded and that outlived the run. Set `false` to keep survivors. Applies from the next run. |
 | `tool_timeout` | float | `600.0` | Stall threshold (seconds) for running local tool calls like Bash, Read, Write (60–7200). Increase for long builds or benchmarks. |
+| `control_request_cli_probe` | bool | `false` | When `detect_unanswerable_control_requests` flags a Claude request, ask Claude Code (a second `initialize`) whether it still waits on it: logs `control_request.cli_pending_check pending=true/false/unknown` and the WARN adds `cli_not_pending` when it doesn't. Detect-only (nothing is pruned or answered); at most one probe per session per 30 min ([#837](https://github.com/littlebearapps/untether/issues/837)). |
 | `detect_unanswerable_control_requests` | bool | `true` | Log `control_request.unanswerable` (WARN, once per request) when a Claude approval or question has waited past `tool_timeout` with nothing on screen that can answer it — no approval/option button and no text-reply route — or no process to answer it ([#684](https://github.com/littlebearapps/untether/issues/684)). Detect-only: it never denies the request or closes the session. Applies to new runs. |
 | `mcp_tool_timeout` | float | `900.0` | Stall threshold (seconds) for running MCP tool calls (60–7200). MCP tools are network-bound and may legitimately run for 10–20+ minutes. |
 | `subagent_timeout` | float | `900.0` | Stall threshold (seconds) while the engine has active child processes, e.g. subagents (60–7200). Outside Claude Code, children count only while the process tree is using CPU ([#953](https://github.com/littlebearapps/untether/issues/953)). |

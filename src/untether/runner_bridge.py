@@ -2699,6 +2699,9 @@ class ProgressEdits:
         self.control_surface_probe: Callable[[], frozenset[str]] | None = None
         self._detect_unanswerable: bool = True
         self._unanswerable_warned: set[str] = set()
+        # #837: flagged requests whose WARN waits for the CLI probe.
+        self._cli_probe: bool = False
+        self._cli_probe_due: list[tuple[Any, list[str], dict[str, Any]]] = []
         # #929: standalone pushed approval messages for requests with no
         # visible keyboard (a background agent asking while live-idle). Owned
         # by the run-level edits; follow-up turn edits get a read-only
@@ -3002,6 +3005,7 @@ class ProgressEdits:
             # #684: before the live-idle ``continue`` below, so it also covers
             # a live session held open by a request nobody can answer.
             self._check_unanswerable_control_requests()
+            await self._finish_cli_pending_checks()
             elapsed = self.clock() - self._last_event_at
             # #787: a live session between turns is silent by design (its
             # runner lifecycle owns teardown). Its hold must not read as a
@@ -4184,24 +4188,69 @@ class ProgressEdits:
                 if not reasons:
                     continue
                 self._unanswerable_warned.add(snap.request_id)
-                logger.warning(
-                    "control_request.unanswerable",
-                    request_id=snap.request_id,
-                    session_id=snap.session_id,
-                    channel_id=self.channel_id,
-                    tool_name=snap.tool_name,
-                    kind=snap.kind,
-                    age_s=round(snap.age_s, 1),
-                    reasons=reasons,
-                    live_idle=live_idle,
-                    holds_live_session=live_idle,
-                    visible_buttons=len(visible or ()),
+                fields = {
+                    "live_idle": live_idle,
+                    "holds_live_session": live_idle,
+                    "visible_buttons": len(visible or ()),
                     # #929: queued / shown on a standalone approval message.
-                    rescued=snap.request_id in rescued,
-                    pid=self.pid,
-                )
+                    "rescued": snap.request_id in rescued,
+                }
+                if (
+                    self._cli_probe
+                    and snap.kind != "synthetic"
+                    and callable(getattr(es, "cli_pending_check", None))
+                ):
+                    # #837: WARN once the CLI has said whether it still waits.
+                    self._cli_probe_due.append((snap, reasons, fields))
+                    continue
+                self._warn_unanswerable(snap, reasons, fields)
         except Exception as exc:  # noqa: BLE001 - monitor loop must not die
             logger.debug("progress_edits.unanswerable_probe_failed", error=str(exc))
+
+    def _warn_unanswerable(
+        self, snap: Any, reasons: list[str], fields: dict[str, Any]
+    ) -> None:
+        logger.warning(
+            "control_request.unanswerable",
+            request_id=snap.request_id,
+            session_id=snap.session_id,
+            channel_id=self.channel_id,
+            tool_name=snap.tool_name,
+            kind=snap.kind,
+            age_s=round(snap.age_s, 1),
+            reasons=reasons,
+            pid=self.pid,
+            **fields,
+        )
+
+    async def _finish_cli_pending_checks(self) -> None:
+        """#837: one CLI probe for the requests the detector just flagged,
+        then their WARNs (``cli_not_pending`` added when the CLI no longer
+        lists one). Detect-only: nothing is pruned or answered."""
+        due, self._cli_probe_due = self._cli_probe_due, []
+        if not due:
+            return
+        verdicts: dict[str, bool | None] = {}
+        try:
+            es = getattr(self.stream, "engine_state", None) if self.stream else None
+            verdicts = await es.cli_pending_check([s.request_id for s, _r, _f in due])
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("control_request.cli_probe_failed", error=str(exc))
+        for snap, reasons, fields in due:
+            pending = verdicts.get(snap.request_id)
+            logger.info(
+                "control_request.cli_pending_check",
+                request_id=snap.request_id,
+                session_id=snap.session_id,
+                pending="unknown" if pending is None else pending,
+            )
+            if pending is False:
+                reasons = [*reasons, "cli_not_pending"]
+            self._warn_unanswerable(
+                snap,
+                reasons,
+                {**fields, "cli_pending": "unknown" if pending is None else pending},
+            )
 
     def _has_pending_approval(self) -> bool:
         """True while the run is blocked on a user approval.
@@ -7450,6 +7499,7 @@ async def handle_message(
         )
         target._bash_grace_seconds = watchdog.bash_grace_seconds
         target._detect_unanswerable = watchdog.detect_unanswerable_control_requests
+        target._cli_probe = watchdog.control_request_cli_probe
 
     if watchdog is not None:
         edits._stall_repeat_seconds = watchdog.stall_repeat_seconds
@@ -7471,6 +7521,7 @@ async def handle_message(
         edits._bash_grace_seconds = watchdog.bash_grace_seconds
         # #684: kill switch for the detect-only unanswerable canary.
         edits._detect_unanswerable = watchdog.detect_unanswerable_control_requests
+        edits._cli_probe = watchdog.control_request_cli_probe  # #837
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):

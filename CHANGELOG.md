@@ -21,6 +21,7 @@
 - **feat(codex):** groundwork for the Codex app-server transport: a zero-token schema drift probe and a pre-spawn support check that refuses a Codex CLI missing the protocol Untether needs, tested from codex-cli 0.169.0. The transport can't be selected yet; every Codex run still uses `codex exec` [#961](https://github.com/littlebearapps/untether/issues/961)
 - **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
+- **feat(claude):** `[watchdog] control_request_cli_probe` (default off): when an approval looks unanswerable, Untether asks Claude Code whether it is still waiting on it, and the `control_request.unanswerable` warning says `cli_not_pending` when it isn't; detect-only [#837](https://github.com/littlebearapps/untether/issues/837)
 
 ### fixes
 
