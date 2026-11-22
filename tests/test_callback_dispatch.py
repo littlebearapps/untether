@@ -1091,11 +1091,9 @@ async def test_685_claude_control_early_toast_uses_registry(
 
     await _dispatch_control(cfg, "claude_control:approve:req-done", "cb-late")
 
-    assert [c["text"] for c in bot.callback_calls] == ["Already answered"]
-    assert len(transport.send_calls) == 1
-    sent = transport.send_calls[0]
-    assert sent["message"].text == "ℹ️ Already answered — approved"
-    assert sent["options"].notify is False
+    # #945: toast-only — no chat line queued ahead of the keyboard swap.
+    assert [c["text"] for c in bot.callback_calls] == ["Already answered — approved"]
+    assert transport.send_calls == []
 
 
 @pytest.mark.anyio
@@ -1134,7 +1132,7 @@ async def test_685_dispatch_reserves_claim_before_early_answer(
                 break
         gate.set()
 
-    assert toasts == {"cb-1": "Approved", "cb-2": "Already answered"}
+    assert toasts == {"cb-1": "Approved", "cb-2": "Already answered — approved"}
     assert stdin.send.await_count == 1
     assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
 

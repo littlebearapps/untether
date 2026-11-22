@@ -797,18 +797,10 @@
    "step": "do:tap data=claude_control:deny:req-epm-2",
    "telegram": [
     {
-     "chat": 123,
-     "id": 5,
-     "notify": false,
-     "op": "send",
-     "reply_to": 1,
-     "text": "ℹ️ Already answered — discussion requested"
-    },
-    {
      "callback_query_id": "cb-3",
      "op": "answer_callback",
      "show_alert": null,
-     "text": "Already answered"
+     "text": "Already answered — discussion requested"
     }
    ]
   },
@@ -952,7 +944,7 @@
      "entities": [
       "code@140+32"
      ],
-     "id": 6,
+     "id": 5,
      "keyboard": [],
      "notify": true,
      "op": "send",
@@ -1013,10 +1005,6 @@
    "telegram": [
     {
      "id": 3,
-     "op": "delete"
-    },
-    {
-     "id": 5,
      "op": "delete"
     }
    ]

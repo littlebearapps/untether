@@ -887,18 +887,10 @@
    "step": "do:tap data=claude_control:approve:req-bash-1",
    "telegram": [
     {
-     "chat": 123,
-     "id": 7,
-     "notify": false,
-     "op": "send",
-     "reply_to": 1,
-     "text": "ℹ️ Already answered — approved"
-    },
-    {
      "callback_query_id": "cb-4",
      "op": "answer_callback",
      "show_alert": null,
-     "text": "Already answered"
+     "text": "Already answered — approved"
     }
    ]
   },
@@ -914,7 +906,7 @@
    "telegram": [
     {
      "chat": 123,
-     "id": 8,
+     "id": 7,
      "notify": true,
      "op": "send",
      "reply_to": 1,
@@ -999,7 +991,7 @@
      "entities": [
       "code@153+32"
      ],
-     "id": 9,
+     "id": 8,
      "keyboard": [],
      "notify": true,
      "op": "send",
@@ -1072,10 +1064,6 @@
     },
     {
      "id": 7,
-     "op": "delete"
-    },
-    {
-     "id": 8,
      "op": "delete"
     }
    ]

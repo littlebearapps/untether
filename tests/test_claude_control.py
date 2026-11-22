@@ -833,7 +833,7 @@ def test_early_answer_toast_values() -> None:
     assert cmd.early_answer_toast("approve:req-gone") == "This request has expired"
     # Handled → already answered.
     mark_request_handled("req-done", action="approve")
-    assert cmd.early_answer_toast("approve:req-done") == "Already answered"
+    assert cmd.early_answer_toast("approve:req-done") == "Already answered — approved"
     # Withdrawn by the CLI (#684) → no longer needed.
     mark_request_handled("req-cxl", action="cancelled", outcome="cancelled")
     assert cmd.early_answer_toast("deny:req-cxl") == "No longer needed"
@@ -3038,7 +3038,7 @@ def test_685_early_toast_channel_scoped() -> None:
     mark_request_handled("r-ch", action="approve", channel_id=100)
     toast = ClaudeControlCommand.early_answer_toast
     assert toast("approve:r-ch", channel_id=200) == "This request has expired"
-    assert toast("approve:r-ch", channel_id=100) == "Already answered"
+    assert toast("approve:r-ch", channel_id=100) == "Already answered — approved"
 
 
 @pytest.mark.anyio
@@ -3056,9 +3056,7 @@ async def test_685_second_approve_after_approve_is_silent_and_truthful() -> None
         second = await cmd.handle(_ctl_ctx("approve", "r-twice"))
 
     assert first is not None and first.text == "✅ Approved permission request"
-    assert second is not None
-    assert second.text.startswith("ℹ️ Already answered — approved")
-    assert second.notify is False
+    assert second is None  # #945: toast-only (the early toast says it)
     sent = _events_named(logs, "claude_control.sent")
     assert len(sent) == 1 and sent[0]["approved"] is True
     handled = _events_named(logs, "claude_control.already_handled")
@@ -3081,8 +3079,7 @@ async def test_685_approve_after_discuss_reports_outline_requested() -> None:
         await cmd.handle(_ctl_ctx("discuss", "r-epm"))
         second = await cmd.handle(_ctl_ctx("approve", "r-epm"))
 
-    assert second is not None
-    assert second.text == "ℹ️ Already answered — outline requested"
+    assert second is None  # #945: toast-only
     assert "sess-epm" not in _PLAN_EXIT_APPROVED
     assert fake_stdin.send.await_count == 1
     assert not [
@@ -3101,8 +3098,7 @@ async def test_685_chat_hold_open_double_tap(monkeypatch) -> None:
     await cmd.handle(_ctl_ctx("chat", "r-chat"))
     mark_outline_pending("sess-chat")
     second = await cmd.handle(_ctl_ctx("chat", "r-chat"))
-    assert second is not None
-    assert second.text == "ℹ️ Already answered — discussion requested"
+    assert second is None  # #945: toast-only
     assert deleted.await_count == 1
     # The second tap didn't re-run the outline side effects.
     assert "sess-chat" in _OUTLINE_PENDING
@@ -3158,12 +3154,11 @@ async def test_685_handle_uses_the_early_toast_claim() -> None:
     assert cmd.early_answer_toast("approve:r-own", claim_owner="cb-1") == "Approved"
     assert (
         cmd.early_answer_toast("approve:r-own", claim_owner="cb-2")
-        == "Already answered"
+        == "Already answered — approved"
     )
     assert classify_control_request("r-own").status is ControlRequestStatus.IN_FLIGHT
     second = await cmd.handle(_ctl_ctx("approve", "r-own", callback_query_id="cb-2"))
-    assert second is not None
-    assert second.text == "ℹ️ Already answered — approved"
+    assert second is None  # #945: toast-only
     assert fake_stdin.send.await_count == 0
     first = await cmd.handle(_ctl_ctx("approve", "r-own", callback_query_id="cb-1"))
     assert first is not None and first.text == "✅ Approved permission request"
