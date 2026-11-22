@@ -862,7 +862,11 @@ async def test_845_cancel_with_pending_approval_sends_native_interrupt(
     events = [e.get("event") for e in logs]
     (sent,) = [e for e in logs if e.get("event") == "claude.interrupt.sent"]
     assert sent["request_id"] == "ut_interrupt_fake-live-session_1"
-    tail = events[events.index("claude.interrupt.sent") :]
+    tail = " ".join(
+        e
+        for e in events[events.index("claude.interrupt.sent") :]
+        if e not in ("runner.event.cli", "action.recorded")
+    )
     assert "claude.interrupt.result" in events, tail
     assert "claude.interrupt.no_result" not in events
     assert "control_request.cancelled_by_cli" in events
