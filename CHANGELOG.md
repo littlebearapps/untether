@@ -72,6 +72,7 @@
 - **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
 - **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
+- **fix(antigravity):** Workspace's agent now names agy 1.5's file tools (`read_file`, `write_file`, `edit_file`) and, since agy 1.5 has no tool to list or search a project, says so plainly and points to the route for running a command instead of claiming tools it doesn't have [#1368](https://github.com/littlebearapps/untether/issues/1368)
 
 ### docs
 
