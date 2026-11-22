@@ -22,7 +22,7 @@
 - **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
 - **feat(claude):** `[watchdog] control_request_cli_probe` (default off): when an approval looks unanswerable, Untether asks Claude Code whether it is still waiting on it, and the `control_request.unanswerable` warning says `cli_not_pending` when it isn't; detect-only [#837](https://github.com/littlebearapps/untether/issues/837)
-- **chore(guard):** the release guard now also covers the sibling paths to a `master` merge: it denies `gh alias set`/`import` and risky existing aliases, retargeting a PR to `master` (`gh pr edit --base`, `gh api …/pulls/<n>` with `base=`, the GraphQL equivalent) and curl/wget writes to the GitHub API, and asks before `gh repo set-default`, `gh auth token` or `gh auth status --show-token`; 182 hook checks [#1242](https://github.com/littlebearapps/untether/issues/1242)
+- **chore(guard):** the release guard now also covers the sibling paths to a `master` merge: it denies `gh alias set`/`import` and risky existing aliases, retargeting a PR to `master` (`gh pr edit --base`, `gh api …/pulls/<n>` with `base=`, the GraphQL equivalent) and curl/wget writes to the GitHub API, and asks before `gh repo set-default`, `gh auth token` or `gh auth status --show-token`; 187 hook checks [#1242](https://github.com/littlebearapps/untether/issues/1242)
 
 ### fixes
 

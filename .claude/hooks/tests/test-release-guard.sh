@@ -109,6 +109,12 @@ bash_check "git push origin @"                            deny
 bash_check "git push origin \"HEAD\""                     deny
 bash_check "git push -u origin feature/x"                 allow
 cd "$TMP/repo" || exit 2
+# After cd / git -C the hook can't see the branch: a push needs a target
+bash_check "cd ../onmaster && git push"                   deny
+bash_check "git -C ../onmaster push"                      deny
+bash_check "cd ../onmaster && git push origin HEAD"       deny
+bash_check "cd ../repo && git push -u origin feature/x"   allow
+bash_check "git push"                                     allow
 bash_check "git tag v0.36.0"                              deny
 bash_check "git tag -l"                                   allow
 bash_check "gh release create v0.36.0"                    deny

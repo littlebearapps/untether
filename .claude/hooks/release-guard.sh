@@ -82,6 +82,11 @@ if echo "$COMMAND" | grep -qPi '\bgit\b.*\bpush\b' && \
     # Every push in the command is checked, not only the first; no match
     # leaves one empty line, which fails closed on master/main.
     CURRENT=$(git branch --show-current 2>/dev/null || echo "")
+    # The hook's cwd says nothing about a push after cd/pushd or git -C /
+    # --git-dir / --work-tree: treat the branch as master so it needs a target.
+    if echo "$COMMAND" | grep -qP '(^|[;&|({`]\s*)(cd|pushd)\b|\bgit\b[^;&|]*?\s(-C|--git-dir|--work-tree)\b'; then
+      CURRENT=master
+    fi
     if [ "$CURRENT" = "master" ] || [ "$CURRENT" = "main" ]; then
       while IFS= read -r PUSH_ARGS; do
         PUSH_NOFLAG=$(echo "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_-]*//g' | tr -d "'\"")
