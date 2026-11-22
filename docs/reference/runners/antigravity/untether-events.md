@@ -96,7 +96,9 @@ own: the block is re-read whenever the progress message is drawn. Each entry is 
 
 The state also offers two lines the bridge duck-types ([#1061](https://github.com/littlebearapps/untether/issues/1061)): `background_hold_note()`, the last line
 of the `⏳ background` block, and `cancelled_hold_note()`, added to the cancelled progress message when a listed
-task was still running at `/cancel` (agy drops an answer it is holding when it is stopped).
+task was still running at `/cancel` (agy drops an answer it is holding when it is stopped). It says agy was holding
+its answer only when the gate's `Stop` hook reported `fullyIdle: false`; otherwise it says background work was still
+running and the answer, if agy had written one, is in the conversation ([#1372](https://github.com/littlebearapps/untether/issues/1372)).
 
 Only `run_command`, `schedule` and `manage_task` steps count for the background wait (`awaiting_background`); a
 subagent row never does.

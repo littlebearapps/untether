@@ -20,6 +20,7 @@ from untether.background_status import live_shown, render_background_block
 from untether.background_tasks import EngineBackgroundTask
 from untether.markdown import HARD_BREAK, STOPPED_STATUS, format_action_line
 from untether.model import ActionEvent, CompletedEvent
+from untether.runners import antigravity as agy
 from untether.runners.antigravity import AntigravityRunner, AntigravityStreamState
 from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.schemas import antigravity as schema
@@ -810,15 +811,32 @@ def test_hold_notes_follow_the_listed_tasks() -> None:
     assert block.split(HARD_BREAK)[-1] == (
         "agy sends its answer when this work finishes \\(up to 30 min\\)"
     )
+    # #1372: without the gate's Stop signal nothing says an answer existed.
     assert state.cancelled_hold_note() == (
-        "⏳ Cancelled while agy was holding its answer for background work, so"
-        " it wasn't shown. The conversation kept it: send a message such as"
-        ' "repeat your last answer" to see it.'
+        "⏳ Cancelled while background work was still running. If agy had"
+        " already written an answer, the conversation kept it: send a message"
+        ' such as "repeat your last answer" to see it.'
     )
     # A command still inside its foreground window isn't listed: no note.
     _feed(runner, state, [_tool(2, "schedule", "DONE", {}, output="ok")])
     _feed(runner, state, [_tool(3, "run_command", "ACTIVE", {"CommandLine": "x"})])
     assert state.cancelled_hold_note() is None
+
+
+def test_1372_cancel_note_says_answer_held_only_after_gate_stop() -> None:
+    """#1372 (rc2, Full access U6): the loop was only backgrounded after
+    5 s and no answer existed, yet the note said agy was holding one. The
+    gate's ``Stop`` hook (``fullyIdle: false``) is the only sign the model
+    had finished its turn."""
+    runner, state = _gated(required=False)
+    _feed(runner, state, [_tool(2, "schedule", "ACTIVE", {"DurationSeconds": 60})])
+    assert state.cancelled_hold_note() == agy.CANCELLED_BACKGROUND_NOTE
+    state.gate.stop_not_idle = True
+    assert state.cancelled_hold_note() == (
+        "⏳ Cancelled while agy was holding its answer for background work, so"
+        " it wasn't shown. The conversation kept it: send a message such as"
+        ' "repeat your last answer" to see it.'
+    )
 
 
 def test_background_block_without_a_note_is_unchanged() -> None:
