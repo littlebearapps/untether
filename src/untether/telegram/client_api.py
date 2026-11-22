@@ -3,9 +3,10 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol, TypeVar
 
+import anyio
 import httpx
 import msgspec
 
@@ -145,6 +146,16 @@ class RetryAfter(Exception):
 
 class TelegramRetryAfter(RetryAfter):
     pass
+
+
+# #1365: getFile and file downloads are reads, so a transient failure (a
+# network error or an HTTP 5xx) is tried again: three tries, 1 s then 3 s
+# apart. A 429 is waited out by TelegramClient as before.
+_READ_RETRY_DELAYS_S = (1.0, 3.0)
+
+
+class _TransientRead(Exception):
+    """A read that failed in a way worth repeating; never leaves the client."""
 
 
 def retry_after_from_payload(payload: dict[str, Any]) -> float | None:
@@ -501,6 +512,7 @@ class HttpBotClient:
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         request_timeout: float | None = None,
+        raise_transient: bool = False,
     ) -> Any | None:
         request_payload = json if json is not None else data
         logger.debug("telegram.request", method=method, payload=request_payload)
@@ -532,6 +544,8 @@ class HttpBotClient:
                     method, json=json, data=data, files=files, **timeout_kwargs
                 )
         except httpx.HTTPError as exc:
+            if raise_transient:
+                raise _TransientRead(exc.__class__.__name__) from exc
             exc_url = getattr(exc.request, "url", None)
             chat_id, message_id = _payload_target(request_payload)
             # #1029: the request may have reached Telegram, and a send can't
@@ -593,6 +607,8 @@ class HttpBotClient:
                     retry_after=retry_after,
                 )
                 raise TelegramRetryAfter(retry_after) from exc
+            if raise_transient and resp.status_code >= 500:
+                raise _TransientRead(f"http {resp.status_code}") from exc
             body = resp.text
             chat_id, message_id = _payload_target(request_payload)
             description = _error_description(resp)
@@ -735,8 +751,27 @@ class HttpBotClient:
             )
             return None
 
+    async def _read_with_retries(
+        self, method: str, call: Callable[[bool], Awaitable[T | None]]
+    ) -> T | None:
+        """``call(raise_transient)``: the last try fails and logs as before."""
+        for delay in _READ_RETRY_DELAYS_S:
+            try:
+                return await call(True)
+            except _TransientRead as exc:
+                logger.warning(
+                    "telegram.read_retry", method=method, error=str(exc), delay_s=delay
+                )
+                await anyio.sleep(delay)
+        return await call(False)
+
     async def get_file(self, file_id: str) -> File | None:
-        result = await self._post("getFile", {"file_id": file_id})
+        result = await self._read_with_retries(
+            "getFile",
+            lambda raise_transient: self._request(
+                "getFile", json={"file_id": file_id}, raise_transient=raise_transient
+            ),
+        )
         return self._decode_result(method="getFile", payload=result, model=File)
 
     async def download_file(self, file_path: str) -> bytes | None:
@@ -753,9 +788,17 @@ class HttpBotClient:
             )
             return None
         url = f"{self._file_base}/{file_path}"
+        return await self._read_with_retries(
+            "download_file",
+            lambda raise_transient: self._download_once(url, raise_transient),
+        )
+
+    async def _download_once(self, url: str, raise_transient: bool) -> bytes | None:
         try:
             resp = await self._http_client.get(url, timeout=self._bulk_timeout_s)
         except httpx.HTTPError as exc:
+            if raise_transient:
+                raise _TransientRead(exc.__class__.__name__) from exc
             request_url = getattr(exc.request, "url", None)
             logger.error(
                 "telegram.file_network_error",
@@ -789,7 +832,8 @@ class HttpBotClient:
                     retry_after=retry_after,
                 )
                 raise TelegramRetryAfter(retry_after) from exc
-
+            if raise_transient and resp.status_code >= 500:
+                raise _TransientRead(f"http {resp.status_code}") from exc
             logger.error(
                 "telegram.file_http_error",
                 status=resp.status_code,

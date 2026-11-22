@@ -4924,6 +4924,70 @@ async def test_run_main_loop_forwarded_document_still_uploads(
 
 
 @pytest.mark.anyio
+async def test_1365_failed_upload_says_its_caption_was_not_sent(
+    tmp_path: Path,
+) -> None:
+    """getFile failed on every try (the client retried): the user is told
+    both the file and the caption prompt weren't sent; nothing runs."""
+    from untether.telegram.commands.file_transfer import PROMPT_NOT_SENT
+
+    class _NoFileBot(FakeBot):
+        async def get_file(self, file_id: str) -> File | None:
+            return None
+
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    projects = ProjectsConfig(
+        projects={
+            "proj": ProjectConfig(
+                alias="proj", path=tmp_path, worktrees_dir=Path(".worktrees")
+            )
+        },
+        default_project="proj",
+    )
+    transport = FakeTransport()
+    cfg = TelegramBridgeConfig(
+        bot=_NoFileBot(),
+        runtime=TransportRuntime(router=_make_router(runner), projects=projects),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        files=TelegramFilesSettings(
+            enabled=True, auto_put=True, auto_put_mode="prompt"
+        ),
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="summarise this",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+            document=TelegramDocument(
+                file_id="doc-1",
+                file_name="notes.md",
+                mime_type="text/markdown",
+                file_size=19_000,
+                raw={"file_id": "doc-1"},
+            ),
+        )
+
+    await run_main_loop(cfg, poller)
+
+    assert runner.calls == []
+    texts = [call["message"].text for call in transport.send_calls]
+    assert "couldn't get the file from Telegram, so it wasn't saved." in texts
+    assert texts[-1] == PROMPT_NOT_SENT
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_prompt_upload_auto_resumes_chat_sessions(
     tmp_path: Path,
 ) -> None:

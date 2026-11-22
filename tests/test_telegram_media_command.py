@@ -253,3 +253,5 @@ async def test_media_group_auto_put_prompt_saved_failure(monkeypatch) -> None:
     assert "failed to upload files" in text
     assert "failed:" in text
     assert "boom" in text
+    # #1365: the caption prompt isn't dropped silently.
+    assert text.endswith(media_commands.PROMPT_NOT_SENT)

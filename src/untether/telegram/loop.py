@@ -39,7 +39,7 @@ from .chat_prefs import ChatPrefsStore, resolve_prefs_path, shared_prefs_store
 from .chat_sessions import ChatSessionStore, resolve_sessions_path
 from .client import poll_incoming
 from .commands.cancel import handle_callback_cancel, handle_cancel
-from .commands.file_transfer import FILE_PUT_USAGE
+from .commands.file_transfer import FILE_PUT_USAGE, PROMPT_NOT_SENT
 from .commands.handlers import (
     dispatch_callback,
     dispatch_command,
@@ -3891,6 +3891,9 @@ async def run_main_loop(
                     topic_store,
                 )
                 if saved is None:
+                    # #1365: the error is out; never drop the caption silently.
+                    if resolved.prompt.strip():
+                        await make_reply(cfg, msg)(text=PROMPT_NOT_SENT)
                     return
                 annotation = f"[uploaded file: {saved.rel_path.as_posix()}]"
                 prompt = _build_upload_prompt(resolved.prompt, annotation)

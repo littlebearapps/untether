@@ -77,6 +77,7 @@
 - **fix(export):** `/export` shows a command that `/cancel` stopped as ✗, the same as the progress card, instead of still running (▸) [#1371](https://github.com/littlebearapps/untether/issues/1371)
 - **fix:** `/new` sent just after an answer arrives, while the engine is still exiting, no longer says it cancelled the run [#1372](https://github.com/littlebearapps/untether/issues/1372)
 - **fix:** while the chat settings file can't be read, `/planmode`, `/config` and the other settings commands show the settings runs actually use instead of the defaults, and a change made then says it couldn't be saved instead of being dropped silently [#1373](https://github.com/littlebearapps/untether/issues/1373)
+- **fix:** a file sent with a caption survives a brief Telegram network error: fetching and downloading the file is tried up to three times, and if it still fails the reply says the file wasn't saved and your message wasn't sent, instead of dropping the caption silently [#1365](https://github.com/littlebearapps/untether/issues/1365)
 
 ### docs
 
