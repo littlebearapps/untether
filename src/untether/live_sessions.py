@@ -80,6 +80,16 @@ class LiveSessionBackend(Protocol):
         """Live background handles held by the owning process (#647)."""
         ...
 
+    async def interrupt_pending_turn(self, session_id: str) -> bool:
+        """End a turn waiting on an approval with the engine's native interrupt
+        (#845); True once the turn ended, else the caller's stop path runs."""
+        ...
+
+    def holds_background_jobs(self, session_id: str) -> bool:
+        """Work outside the engine's own task map holds the session open
+        (Claude: a Codex plugin job, #1186) — closing it stops that work (#1267)."""
+        ...
+
     def spawn_options(self, session_id: str) -> Any:
         """The run options the live process was spawned with (None: no session)."""
         ...
@@ -98,8 +108,10 @@ class LiveSessionBackend(Protocol):
         ...
 
     async def inject_when_idle(
-        self, session_id: str, text: str, *, command_uuid: str
-    ) -> bool: ...
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
+    ) -> bool:
+        """``cancel=`` (optional): the scheduler's #935 token."""
+        ...
 
     async def close(
         self,
@@ -162,6 +174,12 @@ class _ClaudeLive:
     def live_bg_count(self, session_id: str) -> int:
         return self._claude().session_live_bg_count(session_id)
 
+    async def interrupt_pending_turn(self, session_id: str) -> bool:
+        return await self._claude().interrupt_pending_turn(session_id)
+
+    def holds_background_jobs(self, session_id: str) -> bool:
+        return self._claude().session_holds_plugin_jobs(session_id)
+
     def spawn_options(self, session_id: str) -> Any:
         live = self.get(session_id)
         return None if live is None else live.state.spawn_run_options
@@ -181,10 +199,10 @@ class _ClaudeLive:
         return await self._claude().close_idle_live_sessions_for_continue(cwd)
 
     async def inject_when_idle(
-        self, session_id: str, text: str, *, command_uuid: str
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
     ) -> bool:
         return await self._claude().inject_when_idle(
-            session_id, text, command_uuid=command_uuid
+            session_id, text, command_uuid=command_uuid, **kwargs
         )
 
     async def close(self, session_id: str, reason: str, **kwargs: Any) -> bool:

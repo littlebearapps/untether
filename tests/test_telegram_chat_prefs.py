@@ -85,7 +85,12 @@ async def test_1277_failed_read_keeps_state_and_refuses_saves(
     st = path.stat()  # a new mtime forces a reload, which now fails
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     assert await store.get_default_engine(123) == "codex"
-    await store.set_default_engine(789, "pi")
+    # #1373: the change is refused (and says so), not silently dropped.
+    from untether.telegram.chat_prefs import ChatPrefsNotSaved
+
+    with pytest.raises(ChatPrefsNotSaved):
+        await store.set_default_engine(789, "pi")
+    assert await store.get_default_engine(789) is None  # memory untouched
     assert real_read(path) == good
     assert not list(tmp_path.glob("*.corrupt-*"))
 

@@ -552,8 +552,11 @@ async def test_ia_always_button_answers_and_toasts(harness: Harness) -> None:
     assert gate_policy.granted(CHAT, CID, SHELL)
     # A second tap on the spent button reads "already answered".
     ctx.args_text = f"always:{rid}"
-    again = await IA_BACKEND.handle(ctx)
-    assert again is not None and "approved (always" in again.text
+    # #945: toast-only — the early toast says what the first tap did.
+    assert IA_BACKEND.early_answer_toast(f"always:{rid}") == (
+        "Already answered — approved (always for this command)"
+    )
+    assert await IA_BACKEND.handle(ctx) is None
 
 
 def test_gate_block_text_rows() -> None:

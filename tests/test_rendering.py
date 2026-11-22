@@ -1294,8 +1294,43 @@ def test_1249_balanced_fences_render_unchanged(body: str) -> None:
 def test_1249_unclosed_list_item_fence_keeps_footer() -> None:
     from untether.telegram.render import prepare_telegram
 
-    # Not modelled (containers are a follow-up); the item's end closes it today.
+    # The item's end closes it (#1271).
     assert _footer_ok(*prepare_telegram(_parts("- item\n\n  ```py\n  x = 1")))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "1. Run this:\n   ```sh\n   make test",  # the issue's example
+        "1. Run this:\n   ```sh\n   make test\nDone.",  # the item ends first
+        "- a\n  ```\n  x\nok",
+        "> Run this:\n> ```sh\n> make test",
+        "> 1. x\n>    ```sh\n>    make",
+        "1. a\n   - b\n     ~~~\n     make",
+        "1. a\n   ```sh\n   make\n   ```",  # closed nested fence
+        "> ```sh\n> make\n> ```\n\nDone.",  # closed in a blockquote
+    ],
+)
+def test_1271_fence_in_a_container_is_left_alone(body: str) -> None:
+    from untether.telegram.render import (
+        _close_open_fence,
+        prepare_telegram,
+        prepare_telegram_multi,
+    )
+
+    # The container's end closes the fence; a closer added after it would
+    # open a new top-level fence and take the footer in.
+    assert _close_open_fence(body) == body
+    assert _footer_ok(*prepare_telegram(_parts(body)))
+    assert _footer_ok(*prepare_telegram_multi(_parts(body))[-1])
+
+
+def test_1271_top_level_fence_after_a_container_is_closed() -> None:
+    from untether.telegram.render import _close_open_fence, prepare_telegram
+
+    body = "> ```\n> x\n```\nDone"  # the quote ends; ``` opens at top level
+    assert _close_open_fence(body) == body + "\n```\n"
+    assert _footer_ok(*prepare_telegram(_parts(body)))
 
 
 def test_1249_plain_open_fence_closed_split_and_trim() -> None:

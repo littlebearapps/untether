@@ -220,7 +220,7 @@ async def test_save_document_payload_missing_metadata(tmp_path: Path) -> None:
         force=False,
     )
 
-    assert result.error == "failed to fetch file metadata."
+    assert result.error == "couldn't get the file from Telegram, so it wasn't saved."
 
 
 @pytest.mark.anyio
@@ -241,7 +241,9 @@ async def test_save_document_payload_download_failed(tmp_path: Path) -> None:
         force=False,
     )
 
-    assert result.error == "failed to download file."
+    assert (
+        result.error == "couldn't download the file from Telegram, so it wasn't saved."
+    )
 
 
 @pytest.mark.anyio
@@ -1038,7 +1040,10 @@ async def test_save_file_put_reports_document_error(tmp_path: Path) -> None:
 
     assert result is None
     assert transport.send_calls
-    assert "failed to fetch file metadata" in transport.send_calls[-1]["message"].text
+    assert (
+        "couldn't get the file from Telegram"
+        in transport.send_calls[-1]["message"].text
+    )
 
 
 @pytest.mark.anyio

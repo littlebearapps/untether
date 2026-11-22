@@ -867,7 +867,8 @@ class GateRun:
             fully_idle = payload.get("fullyIdle")
             if isinstance(fully_idle, bool):
                 self.stop_not_idle = not fully_idle
-            logger.debug(
+            # info: the cancel note (#1372) depends on it, once per turn
+            logger.info(
                 "antigravity.gate.stop",
                 run=self.key,
                 fully_idle=fully_idle,

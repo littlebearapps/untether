@@ -1024,6 +1024,62 @@ async def test_planmode_antigravity_on_off_show_clear(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_1373_settings_commands_read_the_shared_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """While the prefs file can't be read, /planmode shows the last good
+    state (what runs use) and a change says it wasn't saved."""
+    import os
+
+    from untether.telegram.chat_prefs import (
+        ChatPrefsNotSaved,
+        resolve_prefs_path,
+        shared_prefs_store,
+    )
+
+    await _planmode(tmp_path, "on")
+    path = resolve_prefs_path(tmp_path / "untether.toml")
+    good = path.read_bytes()
+    runs = shared_prefs_store(tmp_path / "untether.toml")  # the loop's store
+    assert (
+        await runs.get_engine_override(100, "antigravity")
+    ).permission_mode == "plan"
+
+    real_read = Path.read_bytes
+
+    def failing_read(self):
+        if self == path:
+            raise PermissionError(13, "Permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    from tests.test_command_engine_gates import FakeCommandContext, FakeTransportRuntime
+    from untether.telegram.commands.planmode import PlanModeCommand
+
+    def ctx(args: str):
+        return FakeCommandContext(
+            args_text=args,
+            config_path=tmp_path / "untether.toml",
+            runtime=FakeTransportRuntime(
+                default_engine="antigravity",
+                runner=SimpleNamespace(default_permission_mode=None),
+            ),
+        )
+
+    result = await PlanModeCommand().handle(ctx("show"))  # type: ignore[arg-type]
+    assert result is not None and "<b>plan first</b>" in result.text
+    with pytest.raises(ChatPrefsNotSaved, match="couldn't save this setting"):
+        await PlanModeCommand().handle(ctx("off"))  # type: ignore[arg-type]
+    assert (
+        await runs.get_engine_override(100, "antigravity")
+    ).permission_mode == "plan"
+    assert real_read(path) == good
+
+
+@pytest.mark.anyio
 async def test_planmode_antigravity_off_beats_a_toml_plan_default(
     tmp_path: Path,
 ) -> None:

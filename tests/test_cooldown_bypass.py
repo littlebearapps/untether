@@ -882,9 +882,7 @@ async def test_685_da_deny_then_approve_does_not_flip(monkeypatch):
 
     assert first is not None and "denied" in first.text.lower()
     assert session_id not in _DISCUSS_APPROVED
-    assert second is not None
-    assert second.text == "ℹ️ Already answered — denied"
-    assert second.notify is False
+    assert second is None  # #945: the early toast is the answer
     assert deleted.await_count == 1
     handled = [e for e in logs if e["event"] == "claude_control.already_handled"]
     assert len(handled) == 1 and handled[0]["first_action"] == "deny"
@@ -907,8 +905,7 @@ async def test_685_da_chat_double_tap(monkeypatch):
         await cmd.handle(_da_ctx("chat", session_id))
         second = await cmd.handle(_da_ctx("chat", session_id))
 
-    assert second is not None
-    assert second.text == "ℹ️ Already answered — discussion requested"
+    assert second is None  # #945: the early toast is the answer
     chats = [e for e in logs if e["event"] == "claude_control.discuss_plan_chat"]
     assert len(chats) == 1
     # The chat tap marks the button handled, so the reconcile loop can retire it.

@@ -541,6 +541,17 @@ async def test_962_cancelled_card_closes_rows_left_running() -> None:
     assert "✓ `echo ok`" in last_edit
     assert "▸" not in last_edit
 
+    # #1371: /export closes the stopped command the same way.
+    from untether.telegram.commands.export import (
+        _format_export_markdown,
+        latest_session_for_chat,
+    )
+
+    session = latest_session_for_chat(123)
+    assert session is not None
+    export = _format_export_markdown(session.session_id, session.events, None)
+    assert export.rstrip().endswith("- ✗ `sleep 60`")
+
 
 @contextlib.contextmanager
 def _run_model(model: str | None):
@@ -12459,6 +12470,52 @@ def test_684_no_warn_when_newer_request_shows_buttons() -> None:
     assert _unanswerable(logs) == []
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("verdict", "reasons", "pending"),
+    [
+        pytest.param(False, ["no_keyboard", "cli_not_pending"], False, id="gone"),
+        pytest.param(True, ["no_keyboard"], True, id="still-pending"),
+        pytest.param(None, ["no_keyboard"], "unknown", id="unknown"),
+    ],
+)
+async def test_837_cli_probe_decides_the_warn(verdict, reasons, pending) -> None:
+    """#837: with ``control_request_cli_probe`` on, a flagged request's WARN
+    waits for one CLI probe and carries ``cli_not_pending`` when the CLI no
+    longer lists it; later ticks don't probe again."""
+    edits, _ = _edits_684([_snap_684()])
+    edits._cli_probe = True
+    probes: list[list[str]] = []
+
+    async def _check(ids):
+        probes.append(list(ids))
+        return dict.fromkeys(ids, verdict)
+
+    edits.stream.engine_state.cli_pending_check = _check
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+        assert _unanswerable(logs) == []  # held for the probe
+        await edits._finish_cli_pending_checks()
+        edits._check_unanswerable_control_requests()
+        await edits._finish_cli_pending_checks()
+    assert probes == [["r-1"]]
+    (hit,) = _unanswerable(logs)
+    assert hit["reasons"] == reasons and hit["cli_pending"] == pending
+    (check,) = [
+        e for e in logs if e.get("event") == "control_request.cli_pending_check"
+    ]
+    assert check["pending"] == pending
+
+
+def test_837_cli_probe_off_by_default_warns_at_once() -> None:
+    edits, _ = _edits_684([_snap_684()])
+    assert edits._cli_probe is False
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    (hit,) = _unanswerable(logs)
+    assert "cli_pending" not in hit
+
+
 def test_684_no_warn_below_threshold() -> None:
     edits, _ = _edits_684([_snap_684(age_s=599.0)])
     with structlog.testing.capture_logs() as logs:
@@ -15402,3 +15459,34 @@ async def test_1176_final_sent_is_marked_on_the_running_task() -> None:
     )
     assert seen
     assert all(task.final_sent for task in seen)
+
+
+# ── #1370: a session Untether started is noted before any usage arrives ─────
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_1370_fresh_run_notes_its_session_for_the_token_ledger(
+    resumed: bool,
+) -> None:
+    """A first run cancelled before reporting usage left no ledger entry,
+    so the next resumed run read as "outside Untether"."""
+    from untether.runner_bridge import run_runner_with_cancel
+    from untether.session_costs import get_session_cost_ledger
+
+    runner = ScriptRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="s-1370"
+    )
+    await run_runner_with_cancel(
+        runner,
+        prompt="p",
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="s-1370")
+        if resumed
+        else None,
+        edits=_make_edits(FakeTransport(), _KeyboardPresenter()),
+        running_task=None,
+        on_thread_known=None,
+        channel_id=123,
+    )
+    entry = get_session_cost_ledger()._entries.get(f"{CODEX_ENGINE}:s-1370", {})
+    assert bool(entry.get("started_here")) is not resumed

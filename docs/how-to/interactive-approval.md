@@ -125,7 +125,7 @@ Toggle ask mode on or off via `/config` → Ask mode. When off, questions are au
 
 Each request can be answered once. A second tap (yours or someone else's in a group) doesn't send anything to Claude Code; you get a popup instead ([#685](https://github.com/littlebearapps/untether/issues/685), [#684](https://github.com/littlebearapps/untether/issues/684)):
 
-- **Already answered** — plus a silent `ℹ️ Already answered — approved` (or `denied`, …) line saying what the first tap did
+- **Already answered — approved** (or `denied`, …) — the toast says what the first tap did; nothing is posted in the chat ([#945](https://github.com/littlebearapps/untether/issues/945))
 - **No longer needed** — Claude Code withdrew the request, for example because the turn ended; its buttons are removed
 - **This request has expired** — a newer request replaced it, or Untether no longer knows about it (for example after a restart)
 

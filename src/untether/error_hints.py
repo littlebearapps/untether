@@ -515,7 +515,8 @@ CODEX_ERROR_INFO_HINTS: dict[str, str] = {
     "contextWindowExceeded": "Session context is too long. Start a fresh"
     " session with /new.",
     "modelNotFound": "Codex doesn't recognise that model. Check the name with"
-    " /model, or `/model clear` to use Codex's default.",
+    " /model, or `/model clear` to use Codex's default (then `/new` if this"
+    " session stays on the old model).",
     "unauthorized": "Run `codex login` to re-authenticate.",
     "cyberPolicy": "Codex declined this request under OpenAI's cybersecurity"
     " policy. Try rephrasing it.",

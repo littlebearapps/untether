@@ -115,7 +115,7 @@ async def test_split_final_puts_cost_outlier_and_usage_on_last_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (None, None))
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: OUTLIER)
 
     chunks = _chunks(await _run(LONG_ANSWER))
@@ -138,7 +138,7 @@ async def test_split_final_puts_standalone_budget_alert_on_last_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _footer(monkeypatch, show_api_cost=False, show_subscription_usage=False)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (BUDGET, object()))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (BUDGET, object()))
     # Suppressed by the budget alert (#702), even though it would fire.
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: OUTLIER)
 
@@ -157,7 +157,7 @@ async def test_single_chunk_final_keeps_footer_before_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (None, None))
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: None)
 
     final = await _run("All done!")
@@ -174,7 +174,7 @@ async def test_trim_mode_final_keeps_footer_on_the_single_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (None, None))
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: OUTLIER)
 
     final = await _run(
@@ -195,7 +195,7 @@ async def test_near_limit_last_chunk_stays_under_telegram_limit(
     """A last chunk carrying a full ~3500-char body still has room for every
     footer line: MAX_BODY_CHARS leaves ~600 chars of headroom."""
     _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (None, None))
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: OUTLIER)
     answer = ("x" * 3400 + "\n\n") * 2 + "y" * 3499
 
@@ -219,7 +219,7 @@ async def test_1249_cost_line_before_resume_after_open_fence(
     """An answer ending inside a fence must not drag the footer into code, or
     the 🔢/💰 lines can't find the resume marker and land after it."""
     _footer(monkeypatch, show_api_cost=True, show_subscription_usage=True)
-    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage: (None, None))
+    monkeypatch.setattr(rb, "_check_cost_budget", lambda usage, **_: (None, None))
     monkeypatch.setattr(rb, "_check_run_cost_outlier", lambda usage: None)
 
     final = await _run("Run it with:\n\n```sh\npython hello.py")

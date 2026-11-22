@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import anyio.lowlevel
 
 from ..logging import get_logger
 from ..transport import RenderedMessage, message_kind
@@ -33,6 +34,9 @@ MAX_ATTEMPTS = 5
 MAX_AGE_S = 24 * 3600.0
 # Least time between two redelivery passes (each failed pass is an attempt).
 RETRY_SPACING_S = 30.0
+# #1270: how long shutdown waits for a redelivery send already under way, so
+# the chunk Telegram took is removed from the store before the task stops.
+SEND_SHIELD_S = 10.0
 
 
 def resolve_pending_finals_path(config_path: Path) -> Path:
@@ -144,26 +148,41 @@ class PendingFinals:
             return
         chunks: list[dict[str, Any]] = entry["chunks"]
         while chunks:
+            # A cancel lands here, between chunks, never mid-send (#1270).
+            await anyio.lowlevel.checkpoint()
             chunk = chunks[0]
             # Reported by the request itself, so no other send to the chat
             # can blur it (#1207).
             outcomes: list[str] = []
-            with message_kind("final"):
-                sent = await bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk["text"],
-                    entities=chunk.get("entities"),
-                    parse_mode=chunk.get("parse_mode"),
-                    reply_to_message_id=entry.get("reply_to_message_id"),
-                    message_thread_id=entry.get("thread_id"),
-                    replace_message_id=entry.get("replace_message_id"),
-                    disable_notification=not entry.get("notify", True),
-                    on_failure=outcomes.append,
-                )
+            sent = None
+            # #1270: the send and its removal from the store are one step, so
+            # a shutdown can't cancel between Telegram taking the chunk and
+            # the store forgetting it (the restart would post it again).
+            # shortcut: a send still running after SEND_SHIELD_S is cancelled
+            # and stays stored (a possible duplicate, never a loss, as before).
+            with anyio.CancelScope(shield=True) as shield:
+                shield.deadline = anyio.current_time() + SEND_SHIELD_S
+                with message_kind("final"):
+                    sent = await bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk["text"],
+                        entities=chunk.get("entities"),
+                        parse_mode=chunk.get("parse_mode"),
+                        reply_to_message_id=entry.get("reply_to_message_id"),
+                        message_thread_id=entry.get("thread_id"),
+                        replace_message_id=entry.get("replace_message_id"),
+                        disable_notification=not entry.get("notify", True),
+                        on_failure=outcomes.append,
+                    )
+                if sent is not None:
+                    chunks.pop(0)
+                    entry["replace_message_id"] = None  # the card went with chunk 1
+                    if not chunks:
+                        del self._entries[key]
+                    self._save()
+            if shield.cancelled_caught:
+                return
             if sent is not None:
-                chunks.pop(0)
-                entry["replace_message_id"] = None  # the card went with chunk 1
-                self._save()
                 continue
             if not outcomes:
                 # Superseded before it ran: try again later. A send the
@@ -193,8 +212,6 @@ class PendingFinals:
                 unknown=outcomes[0] == "unknown",
             )
             return
-        del self._entries[key]
-        self._save()
         logger.info(
             "final.redelivered",
             chat_id=chat_id,

@@ -660,6 +660,19 @@ def get_live_session(session_id: str) -> LiveSession | None:
     return _LIVE_SESSIONS.get(session_id)
 
 
+def session_holds_plugin_jobs(session_id: str) -> bool:
+    """#1267: a Codex plugin job owned by this live session is queued or
+    running (the #1186 hold), so closing it stops work. Sync file reads: only
+    ``/cancel`` and ``/new`` ask. Fails open (False: today's idle wording)."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None or live.closing:
+        return False
+    try:
+        return bool(session_plugin_jobs(session_id, live.codex_plugin_roots))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_session_accepting(session_id: str) -> bool:
     """True when ``session_id`` has a live Claude process whose stdin is open
     and not closing — i.e. a follow-up can be written into it (#776)."""
@@ -1301,6 +1314,7 @@ async def inject_when_idle(
     *,
     command_uuid: str,
     poll_s: float = 0.2,
+    cancel: Any = None,
 ) -> bool:
     """Queue-semantics follow-up (#776 phase 06): wait until the live session
     is idle — its turn ended and no earlier injected line is still waiting to
@@ -1309,9 +1323,15 @@ async def inject_when_idle(
 
     Writing mid-turn would fold the message into the running turn (probe F5
     — that is #775's *steer*), which is why this waits.
+
+    ``cancel`` (#935, the scheduler's ``InjectCancel``): /cancel from the
+    queued card stops the wait (False; the scheduler drops the job), and
+    ``cancel.claim()`` under ``live.lock`` decides the race with the write.
     """
     unaccounted_since: float | None = None
     while True:
+        if cancel is not None and cancel.cancelled:
+            return False
         live = _LIVE_SESSIONS.get(session_id)
         if live is None or not live.accepting_input:
             return False
@@ -1341,6 +1361,8 @@ async def inject_when_idle(
                         # #383: the CLI refused the plan re-arm — resume a
                         # fresh plan-mode process instead.
                         return False
+                    if cancel is not None and not cancel.claim():
+                        return False  # #935: cancelled from its queued card
                     await _write_plan_rearm_if_needed(
                         live, reason="followup", command_uuid=command_uuid
                     )
@@ -1546,6 +1568,101 @@ def session_turn_pending(session_id: str) -> bool:
     if live is None:
         return False
     return not live.idle or bool(live.state.awaiting_injected)
+
+
+# #837: the pending-requests probe (a second ``initialize``).
+_CLI_PROBE_ID_PREFIX = "ut_pending_probe_"
+CLI_PROBE_TIMEOUT_S: float = 5.0
+CLI_PROBE_MIN_INTERVAL_S: float = 1800.0
+
+# #845: how long a /cancel waits for the interrupted turn's ``result`` before
+# falling back to stdin close / signals. CLI 2.1.330 answers in ~40 ms.
+INTERRUPT_RESULT_GRACE_S: float = 5.0
+
+
+async def interrupt_pending_turn(
+    session_id: str, *, grace_s: float | None = None, poll_s: float = 0.02
+) -> bool:
+    """#845: end a turn that is waiting on an approval with the CLI's native
+    ``interrupt`` request instead of closing stdin or signalling.
+
+    Only while the turn's ``result`` is outstanding and a control request
+    (approval or question) is pending for the session. The CLI withdraws the
+    request (``control_cancel_request`` -> :func:`_handle_control_cancel`
+    strips the keyboard), writes a synthetic tool_result and a ``result``
+    with ``terminal_reason: "aborted_tools"`` and no further model call
+    (probe on CLI 2.1.330); closing stdin instead costs one more model call.
+    Returns True once that ``result`` arrived within ``grace_s``; False means
+    the caller keeps its usual stop path.
+    """
+    state = _SESSION_BG_STATE.get(session_id)
+    stdin = _SESSION_STDIN.get(session_id)
+    if (
+        state is None
+        or stdin is None
+        or state.result_received_at is not None
+        or pending_control_requests_for_session(session_id) == 0
+    ):
+        return False
+    state.interrupt_seq += 1
+    request_id = f"ut_interrupt_{session_id}_{state.interrupt_seq}"
+    payload = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "interrupt"},
+    }
+    try:
+        await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+    except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+        logger.warning(
+            "claude.interrupt.write_failed",
+            session_id=session_id,
+            request_id=request_id,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+    started = time.monotonic()
+    logger.info("claude.interrupt.sent", session_id=session_id, request_id=request_id)
+    grace = INTERRUPT_RESULT_GRACE_S if grace_s is None else grace_s
+
+    def _log_result() -> None:
+        logger.info(
+            "claude.interrupt.result",
+            session_id=session_id,
+            request_id=request_id,
+            waited_s=round(time.monotonic() - started, 2),
+        )
+
+    with anyio.move_on_after(grace):
+        # The reader sets ``result_received_at`` in translate (no event to await).
+        try:
+            while True:
+                if state.result_received_at is not None:
+                    break
+                if _SESSION_STDIN.get(session_id) is not stdin:
+                    logger.info(
+                        "claude.interrupt.process_gone",
+                        session_id=session_id,
+                        request_id=request_id,
+                    )
+                    return False
+                await anyio.sleep(poll_s)
+        except anyio.get_cancelled_exc_class():
+            # The run can end (and cancel its caller) inside one poll tick.
+            if state.result_received_at is not None:
+                _log_result()
+            raise
+        _log_result()
+        return True
+    if state.result_received_at is not None:
+        return True  # landed as the grace expired; logged in the except
+    logger.warning(
+        "claude.interrupt.no_result",
+        session_id=session_id,
+        request_id=request_id,
+        grace_s=grace,
+    )
+    return False
 
 
 SESSION_HANDOFF_POLL_S: float = 0.25
@@ -1849,6 +1966,12 @@ class ClaudeStreamState:
     factory: EventFactory = field(default_factory=lambda: EventFactory(ENGINE))
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_assistant_text: str | None = None
+    # #1375: main-thread text since its last tool_use (subagent text never
+    # lands here), its snapshot at the turn's first Stop hook, and whether
+    # main-thread text followed that hook (the hook continued the turn).
+    main_text: str | None = None
+    pre_stop_text: str | None = None
+    stop_continued: bool = False
     note_seq: int = 0
     # Phase 2: Control request tracking
     pending_control_requests: dict[
@@ -1875,6 +1998,9 @@ class ClaudeStreamState:
     last_tool_use_id: str | None = None
     # Map tool_use_id -> control action_id for completing control actions on tool result
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
+    # #1372: AskUserQuestion tool calls answered by a typed reply — a deny
+    # that carries the answer, so its error ``tool_result`` reads as ✓.
+    answered_ask_tools: set[str] = field(default_factory=set)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
     # #942: request_id -> ``turn`` its keyboard action was emitted in. A live
@@ -2278,6 +2404,15 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #845: ``ut_interrupt_<session_id>_<seq>`` (parent-initiated interrupt).
+    interrupt_seq: int = 0
+    # #837: ``ut_pending_probe_<session_id>_<seq>`` (a second ``initialize``
+    # asking the CLI which requests it still waits on). Replies by id: the
+    # ``pending_permission_requests`` list, or None when the field is absent.
+    cli_probe_seq: int = 0
+    cli_probe_last_at: float | None = None
+    cli_probe_waiters: dict[str, anyio.Event] = field(default_factory=dict)
+    cli_probe_replies: dict[str, list[Any] | None] = field(default_factory=dict)
     # #590: descendant PIDs captured while the subprocess was alive (at the
     # result event, at reader-done, and at limbo detection — see
     # _capture_orphan_descendants). Read by manage_subprocess's post-exit
@@ -2546,6 +2681,73 @@ class ClaudeStreamState:
                 )
             )
         return snaps
+
+    async def cli_pending_check(
+        self, request_ids: Iterable[str], *, timeout_s: float = CLI_PROBE_TIMEOUT_S
+    ) -> dict[str, bool | None]:
+        """#837: ask the CLI whether it still waits on ``request_ids``.
+
+        Writes a second ``initialize`` (``hooks: None``, like the spawn's)
+        and reads ``pending_permission_requests`` off the success envelope.
+        Probe on CLI 2.1.330 (2026-11-22): no ``system/init`` again, no hook
+        re-run, the request stays answerable; the only extra frame is a
+        ``background_tasks_changed`` snapshot of the current list. Per id:
+        True = listed, False = not listed, None = unknown (no reply in
+        ``timeout_s``, no field, a synthetic ``da:`` button, or the id was
+        registered after the write, answered meanwhile or in flight). At most
+        one write per ``CLI_PROBE_MIN_INTERVAL_S`` per session, so the reply
+        resets the watchdog's idle clock at most that often.
+        """
+        ids = list(request_ids)
+        unknown: dict[str, bool | None] = dict.fromkeys(ids)
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        stdin = _SESSION_STDIN.get(sid) if sid else None
+        now = time.monotonic()
+        if sid is None or stdin is None:
+            return unknown
+        if (
+            self.cli_probe_last_at is not None
+            and now - self.cli_probe_last_at < CLI_PROBE_MIN_INTERVAL_S
+        ):
+            logger.debug("control_request.cli_probe_rate_limited", session_id=sid)
+            return unknown
+        self.cli_probe_last_at = now
+        self.cli_probe_seq += 1
+        request_id = f"{_CLI_PROBE_ID_PREFIX}{sid}_{self.cli_probe_seq}"
+        before = {rid for rid, owner in _REQUEST_TO_SESSION.items() if owner == sid}
+        waiter = self.cli_probe_waiters[request_id] = anyio.Event()
+        payload = {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "initialize", "hooks": None},
+        }
+        try:
+            await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+            with anyio.move_on_after(timeout_s):
+                await waiter.wait()
+        except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            self.cli_probe_waiters.pop(request_id, None)
+        if request_id not in self.cli_probe_replies:
+            return unknown
+        listed = self.cli_probe_replies.pop(request_id)
+        if listed is None:
+            return unknown
+        pending = {
+            entry.get("request_id") for entry in listed if isinstance(entry, dict)
+        }
+        return {
+            rid: (
+                None
+                if rid.startswith("da:")
+                or rid not in before
+                or _REQUEST_TO_SESSION.get(rid) != sid
+                or rid in _INFLIGHT_CONTROL_RESPONSES
+                else rid in pending
+            )
+            for rid in ids
+        }
 
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
@@ -4217,6 +4419,8 @@ def _apply_hook_event(
     session_id = event.session_id
     if subtype == "hook_started":
         state.hooks_started += 1
+        if hook_event == "Stop" and state.turn_open and state.pre_stop_text is None:
+            state.pre_stop_text = state.main_text  # #1375
         if hook_id is None or _hook_never_holds(hook_event):
             return
         if hook_id not in state.pending_hooks and (
@@ -7116,6 +7320,7 @@ def _tool_result_event(
     *,
     action: Action,
     factory: EventFactory,
+    answered: bool = False,
 ) -> UntetherEvent:
     is_error = content.is_error is True
     raw_result = content.content
@@ -7132,7 +7337,7 @@ def _tool_result_event(
         action_id=action.id,
         kind=action.kind,
         title=action.title,
-        ok=not is_error,
+        ok=answered or not is_error,
         detail=detail,
     )
 
@@ -7544,6 +7749,12 @@ def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]
     ]
     for rid in handled:
         state.pending_control_requests.pop(rid, None)
+        record = _HANDLED_REQUESTS.get(rid)
+        if record is not None and record.action == "answer":
+            action_id = state.request_to_action.get(rid)
+            state.answered_ask_tools.update(
+                k for k, v in state.control_action_for_tool.items() if v == action_id
+            )
         # #942: an action from an earlier turn isn't in this turn's tracker —
         # retire the mapping silently instead of adding a fresh row here.
         same_turn = state.request_turn.get(rid, state.turn) == state.turn
@@ -8119,7 +8330,7 @@ def _note_wake_turn(
     tool_use can only be a CLI cron job firing (a legacy Loop-off job the
     CLI resurrected — the hook can't stop those). It is tagged
     ``source=cron`` and, with ``own_schedule`` on, the session is marked
-    cron-suppressed for the CLI's 7-day window and closed once idle, so
+    cron-suppressed for the CLI's resurrect window and closed once idle, so
     later spawns run with CLAUDE_CODE_DISABLE_CRON=1. It misses the first
     resurrected fire (the run's own first turn, F4): up to two stray fires
     per legacy session. Other wake turns count toward the wake cap; a user
@@ -8308,6 +8519,9 @@ def _open_followup_turn(
     state.safeguard = SafeguardTurn()
     state.unattended_denials = []  # #835
     state.last_assistant_text = None
+    state.main_text = None
+    state.pre_stop_text = None
+    state.stop_continued = False
     state.last_exitplanmode_plan = None
     state.last_schedule_wakeup_arm_delay = None
     state.last_bg_bash_launched_at = None
@@ -8950,6 +9164,8 @@ def _translate_claude_event_base(
                             state.tool_parents[content.id] = parent_tool_use_id
                         state.pending_actions[action.id] = action
                         state.last_tool_use_id = content.id
+                        if parent_tool_use_id is None:
+                            state.main_text = None  # #1375: a preamble
                         # #347 track long-running primitives that outlive
                         # this tool_use → tool_result cycle
                         _register_background_handle(state, content)
@@ -8999,6 +9215,11 @@ def _translate_claude_event_base(
                     case claude_schema.StreamTextBlock(text=text):
                         if text:
                             state.last_assistant_text = text
+                            if parent_tool_use_id is None:
+                                # #1375: text after the Stop hook's snapshot.
+                                if state.pre_stop_text is not None:
+                                    state.stop_continued = True
+                                state.main_text = text
                             if len(text) > state.max_text_len_since_cooldown:
                                 state.max_text_len_since_cooldown = len(text)
                             # When outline is pending (user clicked "Pause & Outline Plan"),
@@ -9079,11 +9300,11 @@ def _translate_claude_event_base(
                         title="tool result",
                         detail={},
                     )
+                answered = tool_use_id in state.answered_ask_tools
+                state.answered_ask_tools.discard(tool_use_id)
                 out.append(
                     _tool_result_event(
-                        content,
-                        action=action,
-                        factory=factory,
+                        content, action=action, factory=factory, answered=answered
                     )
                 )
                 # Complete any associated control action (e.g. permission approval)
@@ -9138,6 +9359,17 @@ def _translate_claude_event_base(
             result_text = event.result or ""
             if ok and not result_text and state.last_assistant_text:
                 result_text = state.last_assistant_text
+            # #1375: a Stop hook continued the turn, so ``result`` holds only
+            # the follow-up — keep the answer written before the hook.
+            pre_stop = state.pre_stop_text
+            if ok and state.stop_continued and pre_stop and pre_stop not in result_text:
+                logger.info(
+                    "claude.stop_hook.answer_kept",
+                    session_id=event.session_id,
+                    answer_chars=len(pre_stop),
+                    followup_chars=len(result_text),
+                )
+                result_text = f"{pre_stop}\n\n{result_text}".rstrip()
 
             # #510 / #508: re-emit the ExitPlanMode plan body when the
             # post-approval final answer is brief/empty. Done HERE on the
@@ -10011,6 +10243,19 @@ def _translate_claude_event_base(
                 resp,
                 session_id=factory.resume.value if factory.resume else None,
             )
+            return []
+        case claude_schema.StreamControlResponse(response=resp) if (
+            resp.request_id.startswith(_CLI_PROBE_ID_PREFIX)
+        ):
+            # #837: the reply to our pending-requests probe.
+            waiter = state.cli_probe_waiters.get(resp.request_id)
+            if waiter is not None:
+                state.cli_probe_replies[resp.request_id] = (
+                    resp.pending_permission_requests
+                    if isinstance(resp, claude_schema.ControlSuccessResponse)
+                    else None
+                )
+                waiter.set()
             return []
         case claude_schema.StreamControlCancelRequest(request_id=cancel_rid):
             # #684: the CLI withdrew a request it no longer needs.

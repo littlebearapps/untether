@@ -1029,6 +1029,18 @@ def test_compact_heartbeat_interval_present(cli_blob: mmap.mmap) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_837_initialize_reply_lists_pending_requests(cli_blob: mmap.mmap) -> None:
+    """#837's probe reads ``pending_permission_requests`` off an
+    ``initialize`` reply (zero-token probe on CLI 2.1.330). A CLI without it
+    only makes the probe answer ``unknown``, but the probe is then useless."""
+    if cli_blob.find(b"pending_permission_requests") == -1:
+        pytest.fail(
+            "pending_permission_requests is gone from the installed CLI — "
+            "re-check the initialize reply before trusting #837's probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
 def test_684_control_cancel_request_frame_present(cli_blob: mmap.mmap) -> None:
     """#684 retires a request on the CLI's ``control_cancel_request`` frame
     (findings 2026-09-30 Q1 §3, probe Z4). If the frame is gone, withdrawn
@@ -1472,12 +1484,14 @@ def test_928_no_query_dispatch_paths_present(cli_blob: mmap.mmap) -> None:
 # F3/F8; live probe G1 on CLI 2.1.289). Zero-token string probes.
 
 
-def _require_bytes(blob: mmap.mmap, needles: tuple[bytes, ...], why: str) -> None:
+def _require_bytes(
+    blob: mmap.mmap, needles: tuple[bytes, ...], why: str, last_green: str = "2.1.289"
+) -> None:
     missing = [n.decode() for n in needles if blob.find(n) == -1]
     if missing:
         pytest.fail(
             f"installed CLI lost {missing} — {why} "
-            "(last green on CLI 2.1.289; see the 2026-10-04 cron findings note)"
+            f"(last green on CLI {last_green}; see the 2026-10-04 cron findings note)"
         )
 
 
@@ -1531,15 +1545,17 @@ def test_926_disable_cron_env_present(cli_blob: mmap.mmap) -> None:
 
 
 def test_926_recurring_max_age_default(cli_blob: mmap.mmap) -> None:
-    """The 7-day resurrect window ``loop_scheduler.CLI_CRON_MAX_AGE_S``
-    mirrors (CLI 2.1.289). Fails loudly if the default moves."""
+    """The 30-day resurrect window ``loop_scheduler.CLI_CRON_MAX_AGE_S``
+    mirrors (#1376: CLI 2.1.330; 2.1.328 and earlier used 7 days, which 30
+    covers). Fails loudly if the default moves."""
     from untether.loop_scheduler import CLI_CRON_MAX_AGE_S
 
-    assert CLI_CRON_MAX_AGE_S * 1000 == 604800000
+    assert CLI_CRON_MAX_AGE_S * 1000 == 2592000000
     _require_bytes(
         cli_blob,
-        (b"recurringMaxAgeMs:604800000",),
+        (b"recurringMaxAgeMs:2592000000",),
         "the CLI's session-cron max age moved — update CLI_CRON_MAX_AGE_S",
+        last_green="2.1.330",
     )
 
 

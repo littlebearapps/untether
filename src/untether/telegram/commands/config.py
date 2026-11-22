@@ -134,14 +134,14 @@ async def _resolve_effective_engine(
     Returns ``(engine_id, label)`` where *label* is e.g. ``"codex"`` or
     ``"claude (default)"`` (annotated when effective == global default).
     """
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
 
     chat_id = ctx.message.channel_id
     global_default = ctx.runtime.default_engine
 
     chat_override = None
     if ctx.config_path is not None:
-        prefs = ChatPrefsStore(resolve_prefs_path(ctx.config_path))
+        prefs = shared_prefs_store(ctx.config_path)
         chat_override = await prefs.get_default_engine(chat_id)
 
     if chat_override is not None:
@@ -257,7 +257,7 @@ def _home_hint(setting: str, value: str) -> str:
 
 
 async def _page_home(ctx: CommandContext) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
@@ -292,7 +292,7 @@ async def _page_home(ctx: CommandContext) -> None:
     pm_source = ""
 
     if config_path is not None:
-        prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+        prefs = shared_prefs_store(config_path)
         engine_override = await prefs.get_engine_override(chat_id, current_engine)
         pm = engine_override.permission_mode if engine_override else None
         if current_engine == "claude":
@@ -694,7 +694,7 @@ _GEMINI_AM_MODES: dict[str, str] = {"ya": "yolo", "ae": "auto_edit"}
 
 
 async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
         PERMISSION_MODE_SUPPORTED_ENGINES,
         with_override,
@@ -709,7 +709,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     current_engine, _ = await _resolve_effective_engine(ctx)
@@ -1067,7 +1067,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
     cost/quota warning before enabling, deeplink to ``/config:cu`` for
     setting a budget cap.
     """
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import LOOP_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
@@ -1079,7 +1079,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     current_engine, _ = await _resolve_effective_engine(ctx)
@@ -1258,7 +1258,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
 
 async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import with_override
 
     config_path = ctx.config_path
@@ -1270,7 +1270,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
     # #1165: offer only engines that can run (the startup message's list).
     available = list(ctx.runtime.available_engine_ids())
@@ -1390,7 +1390,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
 
 async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1401,7 +1401,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     if action == "all":
@@ -1487,7 +1487,7 @@ def _followup_default() -> str:
 
 
 async def _page_followup(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1498,7 +1498,7 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     if action in {"q", "s"}:
@@ -1600,13 +1600,13 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
     Kept for backwards compatibility (deep links to ``config:md``).
     The ``clr`` action is still handled here, then redirects to engine page.
     """
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import with_override
 
     if action == "clr":
         config_path = ctx.config_path
         if config_path is not None:
-            prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+            prefs = shared_prefs_store(config_path)
             chat_id = ctx.message.channel_id
             current_engine, _ = await _resolve_effective_engine(ctx)
             current = await prefs.get_engine_override(chat_id, current_engine)
@@ -1691,7 +1691,7 @@ def _effective_reasoning(
 
 
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
         allowed_reasoning_levels,
         get_reasoning_label,
@@ -1708,7 +1708,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     # Reasoning is engine-specific — guard against unsupported engines
@@ -1878,7 +1878,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 
 async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import ask_questions_supported, with_override
 
     config_path = ctx.config_path
@@ -1890,7 +1890,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     # Claude Code, or Antigravity with Untether's agy plugin (#980)
@@ -2220,7 +2220,7 @@ def _claude_dp_on_note(mode: str | None) -> str | None:
 
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import diff_preview_supported, with_override
 
     config_path = ctx.config_path
@@ -2232,7 +2232,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     # Claude Code, or Antigravity with Untether's agy plugin (#1090)
@@ -2351,7 +2351,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
 
 async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
@@ -2367,7 +2367,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
     current_engine, _ = await _resolve_effective_engine(ctx)
@@ -2587,7 +2587,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
 
 async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> None:
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import with_override
 
     config_path = ctx.config_path
@@ -2599,7 +2599,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         )
         return
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
     current_engine, _ = await _resolve_effective_engine(ctx)
 

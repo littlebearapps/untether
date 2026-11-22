@@ -231,7 +231,8 @@ async def test_cancel_during_the_hold_says_where_the_answer_went(
     assert "agy sends its answer when this work finishes \\(up to 30 min\\)" in held[-1]
     last = transport.edit_calls[-1]["message"].text
     assert "cancelled" in last
-    assert "Cancelled while agy was holding its answer for background work" in last
+    # #1372: no gate here, so nothing says the model had answered yet.
+    assert "Cancelled while background work was still running" in last
     assert "repeat your last answer" in last
     assert any(e["event"] == "handle.cancelled_during_hold" for e in logs)
     exits = [e for e in logs if e["event"] == "subprocess.exit"]

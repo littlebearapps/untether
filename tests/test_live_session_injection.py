@@ -48,7 +48,7 @@ async def test_scheduler_skips_resume_when_injected() -> None:
     async def run_job(job: ThreadJob) -> None:
         ran.append(job)
 
-    async def inject(job: ThreadJob) -> bool:
+    async def inject(job: ThreadJob, **_: Any) -> bool:
         return True
 
     async with anyio.create_task_group() as tg:
@@ -68,7 +68,7 @@ async def test_scheduler_falls_back_to_resume(outcome: str) -> None:
     async def run_job(job: ThreadJob) -> None:
         ran.append(job)
 
-    async def inject(job: ThreadJob) -> bool:
+    async def inject(job: ThreadJob, **_: Any) -> bool:
         if outcome == "raises":
             raise RuntimeError("boom")
         return False
@@ -153,6 +153,71 @@ async def test_second_followup_waits_for_first_turn_to_start(cleanup) -> None:
         assert len(pipe.sent) == 1  # FIFO: one per turn
         live.state.awaiting_injected.pop("u1")  # u1's turn started and ended
     assert done.is_set() and len(pipe.sent) == 2
+
+
+async def _held_by_inject_when_idle(sched: ThreadScheduler) -> None:
+    """Wait until the scheduler has handed the job to the injector."""
+    with anyio.fail_after(2):
+        while not sched._injecting:
+            await anyio.sleep(0.01)
+
+
+async def test_935_cancel_from_card_while_inject_when_idle_holds_it(
+    cleanup,
+) -> None:
+    """#935: a follow-up waiting in ``inject_when_idle`` for the turn to end
+    is still listed for /cancel; cancelling it from its queued card drops it
+    — nothing is written into the session and it never resumes either."""
+    live, pipe = _install("sid-inj", idle=False)  # a turn is running
+    ran: list[ThreadJob] = []
+
+    async def run_job(job: ThreadJob) -> None:
+        ran.append(job)
+
+    async def inject(job: ThreadJob, **kwargs: Any) -> bool:
+        return await inject_live_followup(job, **kwargs)
+
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(task_group=tg, run_job=run_job, inject_job=inject)
+        await sched.enqueue(_job("sid-inj"))
+        await _held_by_inject_when_idle(sched)
+        assert [j.progress_ref for j in sched.queued_for_chat(123)] == [
+            MessageRef(channel_id=123, message_id=99)
+        ]
+        with capture_logs() as logs:
+            job = await sched.cancel_queued(123, 99)
+            assert job is not None
+            with anyio.fail_after(2):
+                while sched._injecting:
+                    await anyio.sleep(0.01)
+            live.state.turn_open = False  # the turn ends: nothing to write
+            await anyio.sleep(0.3)
+        tg.cancel_scope.cancel()
+    assert pipe.sent == []
+    assert ran == []
+    assert sched.queued_for_chat(123) == []
+    assert [e for e in logs if e.get("event") == "scheduler.injecting_job_dropped"]
+
+
+async def test_935_cancel_loses_to_a_claimed_write(cleanup) -> None:
+    """#935: once the injector has claimed the job for its write, /cancel
+    leaves it alone (it is now the session's next turn)."""
+    from untether.scheduler import InjectCancel
+
+    sched = ThreadScheduler(
+        task_group=None,  # type: ignore[arg-type]
+        run_job=None,  # type: ignore[arg-type]
+    )
+    job = _job()
+    token = sched._take_for_inject(job)
+    sched._queued_by_progress[(123, 99)] = job
+    assert isinstance(token, InjectCancel) and token.claim()
+    assert await sched.cancel_queued(123, 99) is None
+    assert not token.cancelled
+    # And the other order: a cancelled token can't be claimed.
+    other = InjectCancel()
+    other.cancelled = True
+    assert other.claim() is False
 
 
 async def test_injection_after_closing_falls_back(cleanup) -> None:
@@ -450,7 +515,7 @@ async def test_scheduler_offers_next_job_while_a_live_run_is_in_flight() -> None
         if job.text == "first":
             await release.wait()  # a live run: lasts until its session closes
 
-    async def inject(job: ThreadJob) -> bool:
+    async def inject(job: ThreadJob, **_: Any) -> bool:
         if job.text == "first":
             return False
         injected.append(job.text)
@@ -480,7 +545,7 @@ async def test_scheduler_pump_keeps_job_queued_when_not_injectable() -> None:
         if job.text == "first":
             await release.wait()
 
-    async def inject(job: ThreadJob) -> bool:
+    async def inject(job: ThreadJob, **_: Any) -> bool:
         nonlocal attempts
         if job.text == "second":
             attempts += 1

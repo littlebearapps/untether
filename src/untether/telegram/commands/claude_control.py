@@ -150,7 +150,8 @@ def _toast_for(
         case _:  # IN_FLIGHT / ALREADY_HANDLED
             if _is_expired(lookup.prior):
                 return _EXPIRED_TOAST
-            return _ALREADY_ANSWERED_TOAST
+            # #945: the toast is the whole answer (no chat line follows).
+            return f"{_ALREADY_ANSWERED_TOAST} — {_prior_label(lookup.prior)}"
 
 
 def _already_handled_result(
@@ -158,12 +159,17 @@ def _already_handled_result(
     prior: HandledControl | None,
     request_id: str,
     action: str,
-) -> CommandResult:
-    """The silent line for a tap on a request that was already resolved (#685).
+) -> CommandResult | None:
+    """The answer to a tap on a request that was already resolved (#685).
 
     An expected user race (double tap, a tap that lost to the keyboard strip),
-    so INFO and ``notify=False`` — mirrors #698's ask-flow late tap. It never
-    logs ``claude_control.sent``: that line means a response was written.
+    so INFO — mirrors #698's ask-flow late tap. It never logs
+    ``claude_control.sent``: that line means a response was written.
+
+    #945: an already-answered tap gets no chat line — its early toast already
+    says ``Already answered — <what>``. In a group chat each such line was a
+    paced send queued ahead of the keyboard-swap edit, so stale taps on the
+    answered request's buttons kept those buttons on screen for 10-17 s.
     """
     logger.info(
         "claude_control.already_handled",
@@ -178,7 +184,7 @@ def _already_handled_result(
     elif _is_expired(prior):
         text = f"ℹ️ {_EXPIRED_TOAST} — {_prior_label(prior)}"
     else:
-        text = f"ℹ️ {_ALREADY_ANSWERED_TOAST} — {_prior_label(prior)}"
+        return None
     return CommandResult(text=text, notify=False)
 
 
@@ -211,7 +217,7 @@ def _unsent_result(
     action: str,
     *,
     channel_id: int | None = None,
-) -> CommandResult:
+) -> CommandResult | None:
     """Result for a tap whose response was not written (#685) — or was
     written after the CLI withdrew the request, so it was ignored (#684)."""
     if result.status is ControlRequestStatus.NOT_FOUND:
@@ -259,7 +265,7 @@ def _early_toast(
 
 def _claim_synthetic(
     ctx: CommandContext, request_id: str, action: str
-) -> CommandResult | None:
+) -> tuple[bool, CommandResult | None]:
     """Claim and resolve a synthetic ``da:<session>`` button (#685).
 
     These buttons answer nothing on the wire (the underlying ExitPlanMode was
@@ -267,8 +273,8 @@ def _claim_synthetic(
     pending?" must be checked here, before acting — otherwise a Deny → Approve
     double tap re-applied the verdict and turned the deny into an approval.
     Everything between the check and the resolution is synchronous, so a
-    concurrent tap can't slip in. Returns the result to send when the button
-    was already resolved, or ``None`` when this tap now owns it.
+    concurrent tap can't slip in. Returns ``(True, None)`` when this tap now
+    owns it, else ``(False, result)`` — the result to send, if any (#945).
     """
     channel_id = ctx.message.channel_id
     owner = ctx.callback_query_id or new_control_claim_owner()
@@ -276,18 +282,20 @@ def _claim_synthetic(
         request_id, action=action, owner=owner, channel_id=channel_id
     )
     if lookup.status is ControlRequestStatus.NOT_FOUND:
-        return _not_found_result(
+        return False, _not_found_result(
             request_id, action, lookup.reason, channel_id=channel_id
         )
     if lookup.status is not ControlRequestStatus.PENDING:
-        return _already_handled_result(lookup.status, lookup.prior, request_id, action)
+        return False, _already_handled_result(
+            lookup.status, lookup.prior, request_id, action
+        )
     # Resolve before the first await: pop the registration and record the
     # verdict. #683: marking it handled also lets the reconcile loop complete
     # the synthetic claude.discuss_approve.N action it belongs to.
     _REQUEST_TO_SESSION.pop(request_id, None)
     mark_request_handled(request_id, action=action, channel_id=channel_id)
     release_control_claims(owner)
-    return None
+    return True, None
 
 
 class ClaudeControlCommand:
@@ -417,7 +425,8 @@ class ClaudeControlCommand:
             session_id = request_id.removeprefix("da:")
             # #685: classify + claim + resolve before acting, so a second tap
             # (e.g. Deny then Approve) can't re-apply — or flip — the verdict.
-            if (done := _claim_synthetic(ctx, request_id, action)) is not None:
+            owned, done = _claim_synthetic(ctx, request_id, action)
+            if not owned:
                 return done
 
             # Check if session is still alive — it may have ended
@@ -567,7 +576,8 @@ class ClaudeControlCommand:
         if request_id.startswith("da:"):
             session_id = request_id.removeprefix("da:")
             # #685: same claim-before-acting guard as the da: approve/deny.
-            if (done := _claim_synthetic(ctx, request_id, "chat")) is not None:
+            owned, done = _claim_synthetic(ctx, request_id, "chat")
+            if not owned:
                 return done
 
             if not session_alive(session_id):

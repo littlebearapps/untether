@@ -60,7 +60,10 @@ thread total; the bridge records it in `session_costs.json` (key
 thread (per field, with a per-field-max baseline so a lower total never
 re-counts). The first run of a fresh thread is `source=new_session`; a resumed
 thread Untether has never seen (e.g. `/continue` of a thread started in a
-terminal) records the raw total once as `source=baseline_unknown`. Tokens spent
+terminal) records the raw total once as `source=baseline_unknown`. A thread Untether started whose first run
+ended before it reported usage (a `/cancel`) is noted when it starts, so its next run records
+`source=unreported_runs` instead, and `/usage` says the last run includes that earlier run
+([#1370](https://github.com/littlebearapps/untether/issues/1370)). Tokens spent
 on the thread *outside* Untether between two Untether runs (a terminal
 `codex resume <id>`, or a rollback window) are inside the next total, so they
 land in the next run's delta as `source=ledger` — exact in aggregate, not per

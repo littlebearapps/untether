@@ -389,6 +389,31 @@ class TestUsageNonClaudeTokens:
         text = await _usage_reply("codex")
         assert "includes earlier runs outside Untether" in text
 
+    @pytest.mark.anyio
+    async def test_usage_after_cancelled_first_run_and_codex_limits_text(
+        self, export_history
+    ):
+        """#1370: a session Untether started whose first run was cancelled
+        before reporting usage isn't "outside Untether"; and the limits line
+        no longer blames exec mode on app-server."""
+        from untether.session_costs import get_session_cost_ledger
+
+        _seed_session("sid-cancel", "codex", _codex_totals(90000, 800))
+        ledger = get_session_cost_ledger()
+        ledger.note_new_session("codex", "sid-cancel")
+        ledger.record_tokens(
+            "codex",
+            "sid-cancel",
+            _codex_totals(90000, 800),
+            scope="thread_cumulative",
+            resumed=True,
+        )
+        text = await _usage_reply("codex")
+        assert "outside Untether" not in text
+        assert "includes an earlier run that ended before reporting usage" in text
+        assert "its exec mode" not in text
+        assert "doesn't read app-server's yet" in text
+
 
 # ---------------------------------------------------------------------------
 # /planmode engine gate

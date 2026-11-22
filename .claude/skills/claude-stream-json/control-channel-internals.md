@@ -284,6 +284,30 @@ The second user is the **#383 plan re-arm**:
 - Follow-up (`inject_when_idle`) and idle steer (`steer_into_session`) write it again under `live.lock` immediately before the user line if still needed — FIFO on stdin; no ack wait (a `plan` request can't be refused on 2.1.285; drift test `test_set_permission_mode_refusal_codes`).
 - Its `system/status` / `control_response` frames arrive while idle; that is only safe because re-arms are live-only (the #470 `last_event_type` check).
 
+The **#837 pending-requests probe** (`[watchdog] control_request_cli_probe`, default off) is a second `initialize`:
+```json
+{"type":"control_request","request_id":"ut_pending_probe_<sid>_<seq>","request":{"subtype":"initialize","hooks":null}}
+```
+- `ClaudeStreamState.cli_pending_check()` writes it from the run-level monitor (`ProgressEdits._finish_cli_pending_checks`,
+  after a `control_request.unanswerable` flag) and waits on `cli_probe_waiters`; the `StreamControlResponse` arm for
+  `ut_pending_probe_` ids stores `ControlSuccessResponse.pending_permission_requests` (None when absent). Zero-token
+  probe on 2.1.330: no `system/init` again, no hook re-run, one `background_tasks_changed` snapshot.
+
+The third is the **#845 interrupt** on `/cancel` (and anything else that sets `cancel_requested`, e.g. `/new`):
+```json
+{"type":"control_request","request_id":"ut_interrupt_<sid>_<seq>","request":{"subtype":"interrupt"}}
+```
+- Written by `interrupt_pending_turn()` (via the live backend's `interrupt_pending_turn`, from the bridge's
+  `wait_cancel`) only while the turn's `result` is outstanding (`result_received_at is None`, not live-idle) **and** a
+  control request is pending for the session (`pending_control_requests_for_session`). Otherwise the old stop path runs.
+- The ack is not parsed (it falls to the debug catch-all). The CLI (2.1.330 probe, ~40 ms) sends
+  `control_cancel_request` for the pending id (`_handle_control_cancel` strips the keyboard), a synthetic rejection
+  tool_result, `[Request interrupted by user for tool use]` and a `result` with `terminal_reason: "aborted_tools"`, with
+  no model call. Untether waits for `result_received_at` up to `INTERRUPT_RESULT_GRACE_S` (5 s; stops early if the
+  session's stdin is gone), then a live-idle session closes with `cancel`, an errored first result closes its own
+  stdin (`error`) and the bridge waits up to `_INTERRUPTED_EXIT_WAIT_S` for the exit. No result in time →
+  `claude.interrupt.no_result` WARN and the old stdin-close / signal path.
+
 ## After changes
 
 ```bash

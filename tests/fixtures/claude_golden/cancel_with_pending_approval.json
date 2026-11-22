@@ -367,16 +367,20 @@
   },
   {
    "logs": [
+    "debug action.recorded kind=\"command\" +[logger_name,title]",
+    "debug action.recorded kind=\"warning\" +[logger_name,title]",
     "debug session_lock.released engine=\"claude\" +[logger_name]",
     "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
     "info cancel.requested +[chat_id,logger_name,progress_message_id,thread_id]",
+    "info claude.interrupt.sent request_id=\"ut_interrupt_golden-session-1_1\" session_id=\"golden-session-1\" +[logger_name]",
     "info claude.live_session.lifecycle_exited close_reason=null reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
     "info claude.live_session.steer_window_closed reason=\"cancel\" session_id=\"golden-session-1\" +[logger_name]",
     "info claude.post_result_idle.task_exited reason=\"cancelled\" session_id=\"golden-session-1\" +[logger_name]",
     "info claude_runner.session_cleanup cleaned=[\"active_runners\", \"session_stdin\", \"session_bg_state\", \"live_session\", \"requests(1)\"] session_id=\"golden-session-1\" +[logger_name]",
     "info handle.cancelled +[elapsed_s,logger_name,resume]",
     "info session.summary cancelled=true engine=\"claude\" ok=null session_id=\"golden-session-1\" +[approval_surfaces,duration_seconds,event_count,followup_turns,hooks_started,last_event_type,liveness_stalls,logger_name,model,model_display,no_query_results,peak_idle_seconds,peak_live_idle_seconds,saw_result,stall_suppressions,stall_warnings,unanswerable_control_requests]",
-    "info subprocess.exit rc=-15 reason=\"teardown\" +[killed,logger_name,pid]"
+    "info subprocess.exit rc=-15 reason=\"teardown\" +[killed,logger_name,pid]",
+    "warning claude.interrupt.no_result request_id=\"ut_interrupt_golden-session-1_1\" session_id=\"golden-session-1\" +[grace_s,logger_name]"
    ],
    "registry": {
     "active_runners": [],
@@ -446,6 +450,15 @@
    ]
   },
   {
+   "stdin": [
+    {
+     "request": {
+      "subtype": "interrupt"
+     },
+     "request_id": "ut_interrupt_golden-session-1_1",
+     "type": "control_request"
+    }
+   ],
    "step": "end"
   }
  ]

@@ -13,6 +13,7 @@ from ..topics import _topic_key, _topics_chat_project
 from ..types import TelegramIncomingMessage
 from .file_transfer import (
     FILE_PUT_USAGE,
+    PROMPT_NOT_SENT,
     _format_file_put_failures,
     _handle_file_put_group,
     _save_file_put_group,
@@ -113,12 +114,16 @@ async def _handle_media_group(
                 topic_store,
             )
             if saved_group is None:
+                if resolved.prompt.strip():
+                    await reply(text=PROMPT_NOT_SENT)
                 return
             if not saved_group.saved:
                 failure_text = _format_file_put_failures(saved_group.failed)
                 text = "failed to upload files."
                 if failure_text is not None:
                     text = f"{text}\n\n{failure_text}"
+                if resolved.prompt.strip():
+                    text = f"{text}\n\n{PROMPT_NOT_SENT}"
                 await reply(text=text)
                 return
             if saved_group.failed:

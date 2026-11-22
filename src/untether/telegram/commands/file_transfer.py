@@ -42,6 +42,8 @@ logger = get_logger(__name__)
 
 FILE_PUT_USAGE = "usage: `/file put <path>`"
 FILE_GET_USAGE = "usage: `/file get <path>`"
+# #1365: a caption prompt whose file couldn't be saved is never run.
+PROMPT_NOT_SENT = "your message wasn't sent either. Send the file again with it."
 
 
 @dataclass(slots=True)
@@ -281,7 +283,7 @@ async def _save_document_payload(
             name=name,
             rel_path=None,
             size=None,
-            error="failed to fetch file metadata.",
+            error="couldn't get the file from Telegram, so it wasn't saved.",
         )
     file_path = file_info.file_path
     name = default_upload_name(document.file_name, file_path)
@@ -340,7 +342,7 @@ async def _save_document_payload(
             name=name,
             rel_path=None,
             size=None,
-            error="failed to download file.",
+            error="couldn't download the file from Telegram, so it wasn't saved.",
         )
     if len(payload) > cfg.files.max_upload_bytes:
         return _FilePutResult(

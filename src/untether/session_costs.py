@@ -138,7 +138,7 @@ class TokenDelta:
     delta: dict[str, int]  # this run
     cumulative: dict[str, int]  # session/thread total after this run
     # "ledger" | "new_session" | "baseline_unknown" | "zero_total" | "per_run"
-    # | "engine_run" (#1062)
+    # | "engine_run" (#1062) | "unreported_runs" (#1370)
     source: str
     runs: int
 
@@ -226,6 +226,16 @@ class SessionCostLedger:
             )
         return CostDelta(delta=delta, cumulative=cumulative, source=source)
 
+    def note_new_session(self, engine: str, session_id: str) -> None:
+        """#1370: Untether started this session. A run that ends before it
+        reports usage (a cancelled first run) records no tokens, so the next
+        resumed run would otherwise read as ``baseline_unknown``."""
+        entry = self._entries.setdefault(_key(engine, session_id), {})
+        if entry.get("started_here"):
+            return
+        entry.update(started_here=True, ts=time.time())
+        self._flush()
+
     def record_tokens(
         self,
         engine: str,
@@ -278,6 +288,9 @@ class SessionCostLedger:
                 source = "ledger"
             elif not resumed:
                 prev, source = {}, "new_session"
+            elif entry is not None and entry.get("started_here"):
+                # #1370: earlier runs were Untether's but reported nothing.
+                source = "unreported_runs"
             else:
                 source = "baseline_unknown"
             if prev is None:
