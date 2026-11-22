@@ -1570,6 +1570,84 @@ def session_turn_pending(session_id: str) -> bool:
     return not live.idle or bool(live.state.awaiting_injected)
 
 
+# #845: how long a /cancel waits for the interrupted turn's ``result`` before
+# falling back to stdin close / signals. CLI 2.1.330 answers in ~40 ms.
+INTERRUPT_RESULT_GRACE_S: float = 5.0
+
+
+async def interrupt_pending_turn(
+    session_id: str, *, grace_s: float | None = None, poll_s: float = 0.02
+) -> bool:
+    """#845: end a turn that is waiting on an approval with the CLI's native
+    ``interrupt`` request instead of closing stdin or signalling.
+
+    Only while the turn's ``result`` is outstanding and a control request
+    (approval or question) is pending for the session. The CLI withdraws the
+    request (``control_cancel_request`` -> :func:`_handle_control_cancel`
+    strips the keyboard), writes a synthetic tool_result and a ``result``
+    with ``terminal_reason: "aborted_tools"`` and no further model call
+    (probe on CLI 2.1.330); closing stdin instead costs one more model call.
+    Returns True once that ``result`` arrived within ``grace_s``; False means
+    the caller keeps its usual stop path.
+    """
+    state = _SESSION_BG_STATE.get(session_id)
+    stdin = _SESSION_STDIN.get(session_id)
+    if (
+        state is None
+        or stdin is None
+        or state.result_received_at is not None
+        or pending_control_requests_for_session(session_id) == 0
+    ):
+        return False
+    state.interrupt_seq += 1
+    request_id = f"ut_interrupt_{session_id}_{state.interrupt_seq}"
+    payload = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "interrupt"},
+    }
+    try:
+        await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+    except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+        logger.warning(
+            "claude.interrupt.write_failed",
+            session_id=session_id,
+            request_id=request_id,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+    started = time.monotonic()
+    logger.info("claude.interrupt.sent", session_id=session_id, request_id=request_id)
+    grace = INTERRUPT_RESULT_GRACE_S if grace_s is None else grace_s
+    with anyio.move_on_after(grace):
+        # The reader sets ``result_received_at`` in translate (no event to await).
+        while True:
+            if state.result_received_at is not None:
+                break
+            if _SESSION_STDIN.get(session_id) is not stdin:
+                logger.info(
+                    "claude.interrupt.process_gone",
+                    session_id=session_id,
+                    request_id=request_id,
+                )
+                return False
+            await anyio.sleep(poll_s)
+        logger.info(
+            "claude.interrupt.result",
+            session_id=session_id,
+            request_id=request_id,
+            waited_s=round(time.monotonic() - started, 2),
+        )
+        return True
+    logger.warning(
+        "claude.interrupt.no_result",
+        session_id=session_id,
+        request_id=request_id,
+        grace_s=grace,
+    )
+    return False
+
+
 SESSION_HANDOFF_POLL_S: float = 0.25
 
 
@@ -2300,6 +2378,8 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #845: ``ut_interrupt_<session_id>_<seq>`` (parent-initiated interrupt).
+    interrupt_seq: int = 0
     # #590: descendant PIDs captured while the subprocess was alive (at the
     # result event, at reader-done, and at limbo detection — see
     # _capture_orphan_descendants). Read by manage_subprocess's post-exit

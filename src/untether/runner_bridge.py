@@ -5497,6 +5497,11 @@ class RunOutcome:
 _EARLY_DELIVERY_TIMEOUT_S = 60.0
 
 
+# #845: after a native interrupt ended the turn, how long /cancel lets the
+# engine process exit by itself before the cancel scope tears it down.
+_INTERRUPTED_EXIT_WAIT_S = 5.0
+
+
 async def run_runner_with_cancel(
     runner: Runner,
     *,
@@ -5743,6 +5748,15 @@ async def run_runner_with_cancel(
                     # would be killed with the process. Later messages fall
                     # back to the queue path (and --resume).
                     await live.close_steer_window(task.resume.value, "cancel")
+                # #845: a turn waiting on an approval ends through the CLI's
+                # native interrupt (no further model call); a live session is
+                # then idle and closes cleanly just below.
+                interrupted = (
+                    task.resume is not None
+                    and live is not None
+                    and not running_task_is_live_idle(task)
+                    and await live.interrupt_pending_turn(task.resume.value)
+                )
                 # #776: /cancel (or /new) on a live session that is only
                 # holding between turns closes its stdin — the CLI stops its
                 # background tasks and exits cleanly (no SIGTERM, nothing
@@ -5754,6 +5768,11 @@ async def run_runner_with_cancel(
                     and await live.close(task.resume.value, "cancel", notice=True)
                 ):
                     with anyio.move_on_after(20):
+                        await runner_finished.wait()
+                elif interrupted:
+                    # The turn is over (an errored first result closes its
+                    # own stdin): let the CLI exit before falling back.
+                    with anyio.move_on_after(_INTERRUPTED_EXIT_WAIT_S):
                         await runner_finished.wait()
                 tg.cancel_scope.cancel()
 

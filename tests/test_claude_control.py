@@ -4972,3 +4972,39 @@ def test_882_schema_absent_flags_are_none() -> None:
     assert request.classifier_approvable is None
     assert request.requires_user_interaction is None
     assert request.default_to_no is None
+
+
+# #845 — native interrupt on /cancel with a pending approval
+
+
+@pytest.mark.anyio
+async def test_845_interrupt_only_with_a_pending_request_and_open_turn() -> None:
+    from untether.runners.claude import _SESSION_BG_STATE, interrupt_pending_turn
+
+    sid = "sess-845"
+    fake_stdin = AsyncMock()
+    _SESSION_STDIN[sid] = fake_stdin
+    state = ClaudeStreamState()
+    _SESSION_BG_STATE[sid] = state
+    try:
+        # Nothing pending: today's stop path, nothing written.
+        assert await interrupt_pending_turn(sid, grace_s=0.05) is False
+        _register_live_request("r-845", sid)
+        # The turn's result is already in (live idle): not interrupted.
+        state.result_received_at = 1.0
+        assert await interrupt_pending_turn(sid, grace_s=0.05) is False
+        fake_stdin.send.assert_not_awaited()
+        # Pending + open turn: one interrupt, then the grace runs out.
+        state.result_received_at = None
+        assert await interrupt_pending_turn(sid, grace_s=0.05) is False
+        (call,) = fake_stdin.send.await_args_list
+        assert json.loads(call.args[0]) == {
+            "type": "control_request",
+            "request_id": f"ut_interrupt_{sid}_1",
+            "request": {"subtype": "interrupt"},
+        }
+    finally:
+        _SESSION_BG_STATE.pop(sid, None)
+        _SESSION_STDIN.pop(sid, None)
+        _ACTIVE_RUNNERS.pop(sid, None)
+        _REQUEST_TO_SESSION.pop("r-845", None)
