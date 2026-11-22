@@ -367,6 +367,8 @@
   },
   {
    "logs": [
+    "debug action.recorded kind=\"command\" +[logger_name,title]",
+    "debug action.recorded kind=\"warning\" +[logger_name,title]",
     "debug session_lock.released engine=\"claude\" +[logger_name]",
     "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
     "info cancel.requested +[chat_id,logger_name,progress_message_id,thread_id]",

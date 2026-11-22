@@ -10,14 +10,14 @@ async def resolve_effective_engine(ctx: CommandContext) -> str:
 
     Resolution order: chat override → project default → global default.
     """
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
 
     chat_id = ctx.message.channel_id
     global_default = ctx.runtime.default_engine
 
     chat_override = None
     if ctx.config_path is not None:
-        prefs = ChatPrefsStore(resolve_prefs_path(ctx.config_path))
+        prefs = shared_prefs_store(ctx.config_path)
         chat_override = await prefs.get_default_engine(chat_id)
 
     if chat_override is not None:

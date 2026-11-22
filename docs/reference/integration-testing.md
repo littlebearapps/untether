@@ -1850,7 +1850,7 @@ Run in the Claude chat. The B-LIVE, RC12 and RC13 rows named here give the full 
 
 ### Core (#1207, #1174, #1176, #1194, #1195)
 
-R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PROXY` for `untether-dev` to a local CONNECT proxy you can switch to refuse (a refused CONNECT is a `ConnectError`, i.e. certainly unsent). Remove the drop-in afterwards; never touch staging. Known, accepted wrinkle: a redelivery cancelled by shutdown can send twice.
+R362-1207 needs an outage on the **dev unit only**: a drop-in setting `HTTPS_PROXY` for `untether-dev` to a local CONNECT proxy you can switch to refuse (a refused CONNECT is a `ConnectError`, i.e. certainly unsent). Remove the drop-in afterwards; never touch staging. A redelivery cancelled by shutdown finishes the send under way first, so it is never posted twice (#1270).
 
 | ID | Steps | Expected |
 |---|---|---|

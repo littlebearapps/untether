@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
-from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+from ..chat_prefs import ChatPrefsStore, shared_prefs_store
 from ..followup_mode import FollowupMode, resolve_followup_mode
 from ..topic_state import TopicStateStore
 from ..topics import _topic_key
@@ -160,7 +160,7 @@ class FollowupCommand:
                 text="follow-up settings are unavailable (no config path).",
                 notify=False,
             )
-        prefs = ChatPrefsStore(resolve_prefs_path(ctx.config_path))
+        prefs = shared_prefs_store(ctx.config_path)
         await prefs.set_followup_mode(ctx.message.channel_id, self._mode)
         logger.info(
             "followup.set",

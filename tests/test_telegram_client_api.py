@@ -114,6 +114,7 @@ async def test_client_methods_build_params_and_decode() -> None:
             data: dict | None = None,
             files: dict | None = None,
             request_timeout: float | None = None,
+            raise_transient: bool = False,
         ) -> object | None:
             self.calls.append((method, json, data, files, request_timeout))
             return payloads.get(method)
@@ -1180,3 +1181,68 @@ async def test_1111_send_message_read_timeout_stays_error() -> None:
     finally:
         await http.aclose()
     assert _levels(logs, "telegram.network_error") == ["error"]
+
+
+# --- #1365: getFile and file downloads retry transient failures -------------
+
+
+def _file_client(steps: list, monkeypatch) -> tuple[HttpBotClient, list[str]]:
+    """Each request takes the next step: an httpx error class to raise or an
+    HTTP status; then 200."""
+    from untether.telegram import client_api
+
+    monkeypatch.setattr(client_api, "_READ_RETRY_DELAYS_S", (0.0, 0.0))
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        step = steps.pop(0) if steps else 200
+        if isinstance(step, type):
+            raise step("boom", request=request)
+        if step != 200:
+            return httpx.Response(step, json={"ok": False, "error_code": step})
+        if "/file/" in request.url.path:
+            return httpx.Response(200, content=b"payload")
+        result = {"file_id": "f", "file_path": "doc/x.md"}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return HttpBotClient("123:abcDEF_ghij", http_client=http), calls
+
+
+@pytest.mark.anyio
+async def test_1365_get_file_read_timeout_once_then_succeeds(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    api, calls = _file_client([httpx.ReadTimeout], monkeypatch)
+    with capture_logs() as logs:
+        info = await api.get_file("f")
+    assert info is not None and info.file_path == "doc/x.md"
+    assert len(calls) == 2
+    assert _levels(logs, "telegram.read_retry") == ["warning"]
+    assert not _events(logs, "telegram.network_error")  # recovered: no ERROR
+
+
+@pytest.mark.anyio
+async def test_1365_get_file_gives_up_after_three_tries(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    api, calls = _file_client([httpx.ReadTimeout, 502, httpx.ReadTimeout], monkeypatch)
+    with capture_logs() as logs:
+        assert await api.get_file("f") is None
+    assert len(calls) == 3
+    assert _levels(logs, "telegram.network_error") == ["error"]
+
+
+@pytest.mark.anyio
+async def test_1365_get_file_refusal_is_not_retried(monkeypatch) -> None:
+    api, calls = _file_client([400], monkeypatch)
+    assert await api.get_file("f") is None
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_1365_download_retries_a_5xx_and_connect_error(monkeypatch) -> None:
+    api, calls = _file_client([503, httpx.ConnectError], monkeypatch)
+    assert await api.download_file("doc/x.md") == b"payload"
+    assert len(calls) == 3

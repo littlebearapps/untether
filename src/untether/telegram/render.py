@@ -892,10 +892,12 @@ def _split_block(
 
 
 def _update_fence_state(line: str, state: _FenceState | None) -> _FenceState | None:
-    """Track a top-level fenced block the way CommonMark does (#1249).
+    """Track a top-level fenced block the way CommonMark does (#1249), for
+    closing and reopening a fence across chunk splits.
 
-    shortcut: fences inside list items / blockquotes aren't modelled; a
-    container-aware scan is the follow-up if those start swallowing footers.
+    shortcut: a fence inside a list item or blockquote isn't reopened in its
+    container after a split; model containers here if that shows up. The
+    footer check (`_close_open_fence`) asks markdown-it, so it isn't affected.
     """
     if state is None:
         match = _FENCE_RE.match(line)
@@ -931,10 +933,22 @@ def _close_fence_chunk(text: str, state: _FenceState) -> str:
     return _ensure_trailing_newline(text) + f"{state.indent}{state.fence}\n"
 
 
+# A line no answer contains, standing in for the footer.
+_FOOTER_PROBE = "\ufdd0footer"
+
+
 def _close_open_fence(text: str) -> str:
-    """Close a fence the body leaves open, so the footer isn't code (#1249)."""
-    state = _scan_fence_state(text, None)
-    return text if state is None else _close_fence_chunk(text, state)
+    """Close a fence the body leaves open, so the footer isn't code (#1249).
+
+    markdown-it decides (#1271): a fence in a list item or blockquote ends
+    with its container, so only one that would take in the footer is closed.
+    """
+    tokens = _MD_RENDERER.parse(f"{text}\n\n{_FOOTER_PROBE}")
+    for token in tokens:
+        if token.type == "fence" and _FOOTER_PROBE in token.content:
+            # The footer line ends every container, so this fence is top-level.
+            return _ensure_trailing_newline(text) + f"{token.markup}\n"
+    return text
 
 
 def _reopen_fence_prefix(state: _FenceState) -> str:

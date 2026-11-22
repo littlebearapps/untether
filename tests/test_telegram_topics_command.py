@@ -286,6 +286,26 @@ async def test_chat_new_command_cancels_running(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_1372_new_after_final_does_not_claim_a_cancel(tmp_path: Path) -> None:
+    """The rc2 Pi repro: /new ~1 s after the final, while the process exits."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+    task = RunningTask(final_sent=True, engine="pi")
+    running_tasks = {MessageRef(channel_id=msg.chat_id, message_id=42): task}
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=(msg.chat_id, None), running_tasks=running_tasks
+    )
+
+    assert task.cancel_requested.is_set()  # the teardown still finishes
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled" not in text
+    assert "cleared" in text
+
+
+@pytest.mark.anyio
 async def test_chat_new_command_cancel_only_no_sessions(tmp_path: Path) -> None:
     """'/new' with running task but no stored sessions still succeeds."""
     transport = FakeTransport()
