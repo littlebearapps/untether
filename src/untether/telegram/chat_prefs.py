@@ -49,6 +49,29 @@ def resolve_prefs_path(config_path: Path) -> Path:
     return config_path.with_name(STATE_FILENAME)
 
 
+class ChatPrefsNotSaved(RuntimeError):
+    """A settings change refused because the prefs file can't be read."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "couldn't save this setting: the chat settings file can't be read"
+            " right now, so nothing changed. Try again shortly."
+        )
+
+
+_SHARED_STORES: dict[Path, ChatPrefsStore] = {}
+
+
+def shared_prefs_store(config_path: Path) -> ChatPrefsStore:
+    """#1373: one store per prefs file for runs and settings commands alike,
+    so while the file can't be read both see its last good state."""
+    path = resolve_prefs_path(config_path)
+    store = _SHARED_STORES.get(path)
+    if store is None:
+        store = _SHARED_STORES[path] = ChatPrefsStore(path)
+    return store
+
+
 def _chat_key(chat_id: ChannelId) -> str:
     return str(chat_id)
 
@@ -101,6 +124,13 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
         super()._reload_locked_if_needed()
         self._migrate_permission_modes_locked()
 
+    def _reload_for_write_locked(self) -> None:
+        """#1373: refuse a change while the file can't be read, before the
+        in-memory state is touched (the save would be skipped, #1277)."""
+        self._reload_locked_if_needed()
+        if not self._loaded:
+            raise ChatPrefsNotSaved
+
     def _migrate_permission_modes_locked(self) -> None:
         """One-shot rewrite of the legacy Claude ``auto`` spelling (#741).
 
@@ -142,7 +172,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def set_default_engine(self, chat_id: ChannelId, engine: str | None) -> None:
         normalized = _normalize_text(engine)
         async with self._lock:
-            self._reload_locked_if_needed()
+            self._reload_for_write_locked()
             chat = self._get_chat_locked(chat_id)
             if normalized is None:
                 if chat is None:
@@ -172,7 +202,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def set_listen_mode(self, chat_id: ChannelId, mode: str | None) -> None:
         normalized = _normalize_listen_mode(mode)
         async with self._lock:
-            self._reload_locked_if_needed()
+            self._reload_for_write_locked()
             chat = self._get_chat_locked(chat_id)
             if normalized is None:
                 if chat is None:
@@ -202,7 +232,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def set_followup_mode(self, chat_id: ChannelId, mode: str | None) -> None:
         normalized = normalize_followup_mode(mode)
         async with self._lock:
-            self._reload_locked_if_needed()
+            self._reload_for_write_locked()
             chat = self._get_chat_locked(chat_id)
             if normalized is None:
                 if chat is None:
@@ -248,7 +278,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
         project = _normalize_text(context.project) if context is not None else None
         branch = _normalize_text(context.branch) if context is not None else None
         async with self._lock:
-            self._reload_locked_if_needed()
+            self._reload_for_write_locked()
             chat = self._get_chat_locked(chat_id)
             if project is None:
                 if chat is None:
@@ -289,7 +319,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             return
         normalized = normalize_overrides(override)
         async with self._lock:
-            self._reload_locked_if_needed()
+            self._reload_for_write_locked()
             chat = self._get_chat_locked(chat_id)
             if normalized is None:
                 if chat is None:

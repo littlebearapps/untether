@@ -35,7 +35,7 @@ from . import arrival_order, first_start, settings_barrier
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
-from .chat_prefs import ChatPrefsStore, resolve_prefs_path
+from .chat_prefs import ChatPrefsStore, resolve_prefs_path, shared_prefs_store
 from .chat_sessions import ChatSessionStore, resolve_sessions_path
 from .client import poll_incoming
 from .commands.cancel import handle_callback_cancel, handle_cancel
@@ -2363,7 +2363,7 @@ async def run_main_loop(
             if isinstance(pending_finals, PendingFinals):
                 pending_finals.attach(resolve_pending_finals_path(config_path))
 
-            state.chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+            state.chat_prefs = shared_prefs_store(config_path)
             logger.info(
                 "chat_prefs.enabled",
                 state_path=str(resolve_prefs_path(config_path)),

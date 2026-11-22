@@ -67,7 +67,7 @@ class PlanModeCommand:
         return None
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
-        from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from ..chat_prefs import shared_prefs_store
         from ..engine_overrides import with_override
         from ._resolve_engine import resolve_effective_engine
 
@@ -94,7 +94,7 @@ class PlanModeCommand:
                 parse_mode="HTML",
             )
 
-        chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+        chat_prefs = shared_prefs_store(config_path)
         chat_id = ctx.message.channel_id
         engine = current_engine
         args = ctx.args_text.strip().lower()
@@ -180,11 +180,11 @@ async def _handle_antigravity(ctx: CommandContext, config_path) -> CommandResult
     """#981: ``/planmode`` for Antigravity maps onto its permission modes —
     ``on`` = Plan first; ``off`` = drop back to Workspace (or the TOML
     default when that isn't Plan first); ``show``; ``clear``."""
-    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import with_override
     from . import _antigravity_mode_text as agy_mode
 
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
     engine = agy_mode.ENGINE
     args = ctx.args_text.strip().lower()

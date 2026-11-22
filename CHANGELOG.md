@@ -76,6 +76,7 @@
 - **fix:** an answer ending inside a code block in a list item or blockquote no longer swallows the footer; Untether now asks the Markdown parser whether a block is still open, instead of adding a closer that could open a new block [#1271](https://github.com/littlebearapps/untether/issues/1271)
 - **fix(export):** `/export` shows a command that `/cancel` stopped as ✗, the same as the progress card, instead of still running (▸) [#1371](https://github.com/littlebearapps/untether/issues/1371)
 - **fix:** `/new` sent just after an answer arrives, while the engine is still exiting, no longer says it cancelled the run [#1372](https://github.com/littlebearapps/untether/issues/1372)
+- **fix:** while the chat settings file can't be read, `/planmode`, `/config` and the other settings commands show the settings runs actually use instead of the defaults, and a change made then says it couldn't be saved instead of being dropped silently [#1373](https://github.com/littlebearapps/untether/issues/1373)
 
 ### docs
 
