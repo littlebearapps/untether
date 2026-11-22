@@ -22,6 +22,7 @@
 - **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
 - **feat(claude):** `[watchdog] control_request_cli_probe` (default off): when an approval looks unanswerable, Untether asks Claude Code whether it is still waiting on it, and the `control_request.unanswerable` warning says `cli_not_pending` when it isn't; detect-only [#837](https://github.com/littlebearapps/untether/issues/837)
+- **chore(guard):** the release guard now also covers the sibling paths to a `master` merge: it denies `gh alias set`/`import` and risky existing aliases, retargeting a PR to `master` (`gh pr edit --base`, `gh api …/pulls/<n>` with `base=`, the GraphQL equivalent) and curl/wget writes to the GitHub API, and asks before `gh repo set-default`, `gh auth token` or `gh auth status --show-token`; 193 hook checks [#1242](https://github.com/littlebearapps/untether/issues/1242)
 
 ### fixes
 
@@ -92,6 +93,7 @@
 - **fix:** a queued follow-up waiting for a Claude live session's turn to end can be cancelled from its queued card again; it no longer runs anyway [#935](https://github.com/littlebearapps/untether/issues/935)
 - **fix(claude):** a tap on an approval someone already answered gets only the toast (`Already answered — approved`), no chat line; in group chats those lines queued ahead of the next approval's keyboard and kept the answered buttons on screen for 10–17 s [#945](https://github.com/littlebearapps/untether/issues/945)
 - **fix(claude):** `/cancel` while an approval or question is waiting stops the turn with Claude Code's own `interrupt` request: the buttons go at once, the run ends `cancelled` and no extra model call is made; Untether falls back to closing stdin if Claude Code hasn't stopped within 5 s [#845](https://github.com/littlebearapps/untether/issues/845)
+- **fix(guard):** the release guard no longer blocks an unrelated command (a `sed` or `echo` whose text mentions "push" next to an unbalanced quote) with an internal error: it reads push arguments only from a real `git … push` and no longer trims them with `xargs` [#1236](https://github.com/littlebearapps/untether/issues/1236)
 
 ### docs
 

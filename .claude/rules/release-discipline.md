@@ -87,7 +87,7 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 ## Release guard
 
 Rules: `CLAUDE.md` §Release guard. Hooks: registered in `.claude/settings.json` ([#915](https://github.com/littlebearapps/untether/issues/915),
-[#917](https://github.com/littlebearapps/untether/issues/917)). Tests: `bash .claude/hooks/tests/test-release-guard.sh`.
+[#917](https://github.com/littlebearapps/untether/issues/917), sibling paths [#1242](https://github.com/littlebearapps/untether/issues/1242)). Tests: `bash .claude/hooks/tests/test-release-guard.sh`.
 
 ## Fleet rollout (rc and stable)
 
