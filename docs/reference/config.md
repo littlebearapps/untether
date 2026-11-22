@@ -475,7 +475,7 @@ Controls how Untether handles Claude Code's scheduling tools (`CronCreate`, `Sch
 
 **Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
 
-State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. Alongside it are the per-loop cancel records and the sessions that may still hold an older Claude-side scheduled task; those resume with `CLAUDE_CODE_DISABLE_CRON=1` for up to 7 days so the task can't restart ([#926](https://github.com/littlebearapps/untether/issues/926)).
+State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. Alongside it are the per-loop cancel records and the sessions that may still hold an older Claude-side scheduled task; those resume with `CLAUDE_CODE_DISABLE_CRON=1` for up to 30 days so the task can't restart ([#926](https://github.com/littlebearapps/untether/issues/926)).
 
 !!! warning "Rolling back to 0.35.4 (or 0.35.5rc19 and earlier)"
     Older versions reject any config key they don't know, in every section, not just `[loop]`. Remove `own_schedule` and the other keys added in v0.36.0, and change `plan-auto` back to `auto`, before downgrading, or the config won't load. See [Rolling back to 0.35.4](../how-to/update.md#rolling-back-to-0354) for the full list.

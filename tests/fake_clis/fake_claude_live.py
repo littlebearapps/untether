@@ -2206,8 +2206,8 @@ def scenario_bg_agent_progressing(first: dict) -> None:
     n = 0
     while time.monotonic() < deadline:
         n += 1
+        _mark_progress()  # #1376: before the frame, so it never post-dates it
         _task_progress("a1", n)
-        _mark_progress()
         _wait_or_shutdown(PROGRESS_S)
     if os.environ.get("FAKE_CLAUDE_PROGRESS_THEN", "finish") != "finish":
         _silent_until_eof()

@@ -8127,7 +8127,7 @@ def _note_wake_turn(
     tool_use can only be a CLI cron job firing (a legacy Loop-off job the
     CLI resurrected — the hook can't stop those). It is tagged
     ``source=cron`` and, with ``own_schedule`` on, the session is marked
-    cron-suppressed for the CLI's 7-day window and closed once idle, so
+    cron-suppressed for the CLI's resurrect window and closed once idle, so
     later spawns run with CLAUDE_CODE_DISABLE_CRON=1. It misses the first
     resurrected fire (the run's own first turn, F4): up to two stray fires
     per legacy session. Other wake turns count toward the wake cap; a user
