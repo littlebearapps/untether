@@ -115,6 +115,12 @@ bash_check "git -C ../onmaster push"                      deny
 bash_check "cd ../onmaster && git push origin HEAD"       deny
 bash_check "cd ../repo && git push -u origin feature/x"   allow
 bash_check "git push"                                     allow
+bash_check "GIT_DIR=../onmaster/.git git push"            deny
+bash_check "env -C ../onmaster git push"                  deny
+bash_check "bash -c 'git push'"                           deny
+bash_check "eval git push"                                deny
+bash_check "git -c core.worktree=../onmaster push"        deny
+bash_check "GIT_DIR=../onmaster/.git git push origin fix/y"  allow
 bash_check "git tag v0.36.0"                              deny
 bash_check "git tag -l"                                   allow
 bash_check "gh release create v0.36.0"                    deny

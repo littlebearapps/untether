@@ -82,9 +82,11 @@ if echo "$COMMAND" | grep -qPi '\bgit\b.*\bpush\b' && \
     # Every push in the command is checked, not only the first; no match
     # leaves one empty line, which fails closed on master/main.
     CURRENT=$(git branch --show-current 2>/dev/null || echo "")
-    # The hook's cwd says nothing about a push after cd/pushd or git -C /
-    # --git-dir / --work-tree: treat the branch as master so it needs a target.
-    if echo "$COMMAND" | grep -qP '(^|[;&|({`]\s*)(cd|pushd)\b|\bgit\b[^;&|]*?\s(-C|--git-dir|--work-tree)\b'; then
+    # The hook's cwd says nothing about a push after a directory or repo
+    # switch (cd/pushd/popd, git -C/--git-dir/--work-tree/-c core.worktree,
+    # GIT_DIR-style env, env -C) or inside another shell (sh -c, eval):
+    # treat the branch as master so the push needs an explicit target.
+    if echo "$COMMAND" | grep -qP '\b(cd|pushd|popd)\b|\bgit\b[^;&|]*?\s(-C|--git-dir|--work-tree)\b|\bcore\.worktree\b|\bGIT_(DIR|WORK_TREE|COMMON_DIR)=|\benv\b[^;&|]*?\s(-C|--chdir)\b|\b(ba|z|da)?sh\s+(-\w*c|-c)\b|\beval\b'; then
       CURRENT=master
     fi
     if [ "$CURRENT" = "master" ] || [ "$CURRENT" = "main" ]; then
