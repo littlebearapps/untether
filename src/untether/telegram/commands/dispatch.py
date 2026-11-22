@@ -400,14 +400,16 @@ async def _dispatch_command(
     try:
         result = await backend.handle(ctx)
     except Exception as exc:
-        # #1373: an unreadable prefs file is an expected, reported refusal, not a crash
-        log = logger.warning if isinstance(exc, ChatPrefsNotSaved) else logger.exception
-        log(
-            "command.failed",
-            command=command_id,
-            error=str(exc),
-            error_type=exc.__class__.__name__,
-        )
+        fields = {
+            "command": command_id,
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+        }
+        if isinstance(exc, ChatPrefsNotSaved):
+            # #1373: an unreadable prefs file is an expected, reported refusal
+            logger.warning("command.failed", **fields)
+        else:
+            logger.exception("command.failed", **fields)
         # #201: user sees a sanitised summary; full exception is in the
         # structlog record above (including error_type).
         await executor.send(

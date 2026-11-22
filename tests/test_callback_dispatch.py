@@ -1348,5 +1348,5 @@ async def test_1373_unsaved_setting_logs_a_warning_not_a_traceback(
     assert len(failed) == 1
     assert failed[0]["log_level"] == "warning"
     assert "exc_info" not in failed[0]
-    sent = [m for m in cfg.exec_cfg.transport.send_calls]
+    sent = cfg.exec_cfg.transport.send_calls
     assert any("couldn't save this setting" in m["message"].text for m in sent)
