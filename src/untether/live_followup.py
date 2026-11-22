@@ -40,7 +40,10 @@ async def inject_live_followup(
     *,
     options_for: OptionsFor | None = None,
     cwd_for: CwdFor | None = None,
+    cancel: Any = None,
 ) -> bool:
+    """``cancel``: the scheduler's #935 token (``InjectCancel``), passed on
+    so a cancel from the queued card stops the wait before the write."""
     token = job.resume_token
     backend = live_backend(token.engine)
     if backend is None or not backend.enabled():
@@ -184,7 +187,10 @@ async def inject_live_followup(
     ok = False
     try:
         ok = await backend.inject_when_idle(
-            session_id, job.text, command_uuid=command_uuid
+            session_id,
+            job.text,
+            command_uuid=command_uuid,
+            **({} if cancel is None else {"cancel": cancel}),
         )
     finally:
         settle_followup_anchor(command_uuid, written=ok)

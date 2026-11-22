@@ -103,8 +103,10 @@ class LiveSessionBackend(Protocol):
         ...
 
     async def inject_when_idle(
-        self, session_id: str, text: str, *, command_uuid: str
-    ) -> bool: ...
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
+    ) -> bool:
+        """``cancel=`` (optional): the scheduler's #935 token."""
+        ...
 
     async def close(
         self,
@@ -189,10 +191,10 @@ class _ClaudeLive:
         return await self._claude().close_idle_live_sessions_for_continue(cwd)
 
     async def inject_when_idle(
-        self, session_id: str, text: str, *, command_uuid: str
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
     ) -> bool:
         return await self._claude().inject_when_idle(
-            session_id, text, command_uuid=command_uuid
+            session_id, text, command_uuid=command_uuid, **kwargs
         )
 
     async def close(self, session_id: str, reason: str, **kwargs: Any) -> bool:

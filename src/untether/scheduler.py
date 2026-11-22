@@ -27,10 +27,29 @@ class ThreadJob:
     progress_ref: MessageRef | None = None
 
 
+@dataclass(slots=True)
+class InjectCancel:
+    """#935: the cancel token of a job being offered to a live session.
+
+    ``inject_when_idle`` can hold a job for a whole turn. The job stays
+    listed (cancellable from its queued card) until the injector calls
+    :meth:`claim` immediately before writing it; ``cancel_queued`` refuses a
+    claimed job. Both are synchronous, so exactly one of them wins."""
+
+    cancelled: bool = False
+    claimed: bool = False
+
+    def claim(self) -> bool:
+        if not self.cancelled:
+            self.claimed = True
+        return self.claimed
+
+
 RunJob = Callable[[ThreadJob], Awaitable[None]]
 # #776: returns True when the job was delivered into a live engine process
-# (so it must not also be run via --resume).
-InjectJob = Callable[[ThreadJob], Awaitable[bool]]
+# (so it must not also be run via --resume). Called as
+# ``inject(job, cancel=InjectCancel())`` (#935).
+InjectJob = Callable[..., Awaitable[bool]]
 
 
 class TaskGroup(Protocol):
@@ -58,6 +77,9 @@ class ThreadScheduler:
         # session's previous run is done. Still listed in
         # ``_queued_by_progress``, so /cancel can drop them from their card.
         self._held: set[tuple[ChannelId, MessageId]] = set()
+        # #935: jobs being offered to the injector, also still listed in
+        # ``_queued_by_progress``; /cancel sets the token.
+        self._injecting: dict[tuple[ChannelId, MessageId], InjectCancel] = {}
         self._active_threads: set[str] = set()
         self._busy_until: dict[str, anyio.Event] = {}
         # #1164: jobs taken off the queue that haven't started yet (being
@@ -155,9 +177,15 @@ class ThreadScheduler:
     ) -> ThreadJob | None:
         progress_key = (chat_id, progress_msg_id)
         async with self._lock:
+            token = self._injecting.get(progress_key)
+            if token is not None and token.claimed:
+                return None  # #935: being written into the live session
             job = self._queued_by_progress.pop(progress_key, None)
             if job is None:
                 return None
+            if token is not None:
+                token.cancelled = True  # #935: the injector drops it
+                return job
             if progress_key in self._held:
                 # #1082: the worker sees it gone and never runs it.
                 self._held.discard(progress_key)
@@ -204,8 +232,6 @@ class ThreadScheduler:
             tg.start_soon(self._live_pump, key, finished)
 
     async def _live_pump(self, key: str, finished: anyio.Event) -> None:
-        inject = self._inject_job
-        assert inject is not None
         while not finished.is_set():
             with anyio.move_on_after(self._live_pump_interval_s):
                 await finished.wait()
@@ -216,23 +242,15 @@ class ThreadScheduler:
                 if not queue:
                     continue
                 job = queue.popleft()
-                if job.progress_ref is not None:
-                    self._queued_by_progress.pop(
-                        (job.chat_id, job.progress_ref.message_id), None
-                    )
+                token = self._take_for_inject(job)
                 self._mark_unstarted(key, 1)
             # Shielded: once a job is taken off the queue it is either written
-            # into the live session or put back — never lost, never run twice.
+            # into the live session or put back — never lost, never run twice
+            # (#935: or dropped, cancelled from its card before the write).
             with anyio.CancelScope(shield=True):
                 try:
-                    try:
-                        injected = await inject(job)
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "scheduler.inject_failed", key=key, exc_info=True
-                        )
-                        injected = False
-                    if not injected:
+                    injected = await self._offer(key, job, token)
+                    if injected is False:
                         async with self._lock:
                             self._pending_by_thread.setdefault(key, deque()).appendleft(
                                 job
@@ -245,6 +263,46 @@ class ThreadScheduler:
                         # keep FIFO order and look again next tick.
                 finally:
                     self._mark_unstarted(key, -1)
+
+    def _take_for_inject(self, job: ThreadJob) -> InjectCancel:
+        """#935: under ``_lock``, as the job leaves its queue — it stays
+        listed for /cancel until the injector claims it."""
+        token = InjectCancel()
+        if job.progress_ref is not None:
+            self._injecting[(job.chat_id, job.progress_ref.message_id)] = token
+        return token
+
+    async def _offer(
+        self, key: str, job: ThreadJob, token: InjectCancel
+    ) -> bool | None:
+        """Offer ``job`` to the injector: True = written into the live
+        session, False = not injectable now, None = cancelled from its queued
+        card before the write (#935)."""
+        inject = self._inject_job
+        assert inject is not None
+        try:
+            injected = await inject(job, cancel=token)
+        except Exception:  # noqa: BLE001 — fall back to resume
+            logger.warning("scheduler.inject_failed", key=key, exc_info=True)
+            injected = False
+        finally:
+            if job.progress_ref is not None:
+                progress_key = (job.chat_id, job.progress_ref.message_id)
+                with anyio.CancelScope(shield=True):
+                    async with self._lock:
+                        self._injecting.pop(progress_key, None)
+                        if not token.cancelled:
+                            self._queued_by_progress.pop(progress_key, None)
+        if injected or not token.cancelled:
+            return bool(injected)
+        logger.info(
+            "scheduler.injecting_job_dropped",
+            chat_id=job.chat_id,
+            progress_message_id=job.progress_ref.message_id
+            if job.progress_ref is not None
+            else None,
+        )
+        return None
 
     async def _hold_until(self, job: ThreadJob, done: anyio.Event) -> bool:
         """Wait for the session's previous run, keeping ``job`` cancellable
@@ -284,7 +342,10 @@ class ThreadScheduler:
                         self._active_threads.discard(key)
                         return
                     job = queue.popleft()
-                    if job.progress_ref is not None:
+                    token = None
+                    if self._inject_job is not None:
+                        token = self._take_for_inject(job)
+                    elif job.progress_ref is not None:
                         progress_key = (job.chat_id, job.progress_ref.message_id)
                         self._queued_by_progress.pop(progress_key, None)
                     self._mark_unstarted(key, 1)
@@ -293,16 +354,13 @@ class ThreadScheduler:
                     # #776: a follow-up for a session whose process is still
                     # live goes into that process (queued until its turn
                     # ends) instead of waiting for it to exit and resuming.
-                    if self._inject_job is not None:
-                        try:
-                            injected = await self._inject_job(job)
-                        except Exception:  # noqa: BLE001 — fall back to resume
-                            logger.warning(
-                                "scheduler.inject_failed", key=key, exc_info=True
-                            )
-                            injected = False
-                        if injected:
-                            continue
+                    # False (not injectable) falls back to resume; None =
+                    # cancelled from its card meanwhile (#935).
+                    if (
+                        token is not None
+                        and await self._offer(key, job, token) is not False
+                    ):
+                        continue
 
                     if (
                         done is not None

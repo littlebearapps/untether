@@ -1314,6 +1314,7 @@ async def inject_when_idle(
     *,
     command_uuid: str,
     poll_s: float = 0.2,
+    cancel: Any = None,
 ) -> bool:
     """Queue-semantics follow-up (#776 phase 06): wait until the live session
     is idle — its turn ended and no earlier injected line is still waiting to
@@ -1322,9 +1323,15 @@ async def inject_when_idle(
 
     Writing mid-turn would fold the message into the running turn (probe F5
     — that is #775's *steer*), which is why this waits.
+
+    ``cancel`` (#935, the scheduler's ``InjectCancel``): /cancel from the
+    queued card stops the wait (False; the scheduler drops the job), and
+    ``cancel.claim()`` under ``live.lock`` decides the race with the write.
     """
     unaccounted_since: float | None = None
     while True:
+        if cancel is not None and cancel.cancelled:
+            return False
         live = _LIVE_SESSIONS.get(session_id)
         if live is None or not live.accepting_input:
             return False
@@ -1354,6 +1361,8 @@ async def inject_when_idle(
                         # #383: the CLI refused the plan re-arm — resume a
                         # fresh plan-mode process instead.
                         return False
+                    if cancel is not None and not cancel.claim():
+                        return False  # #935: cancelled from its queued card
                     await _write_plan_rearm_if_needed(
                         live, reason="followup", command_uuid=command_uuid
                     )
