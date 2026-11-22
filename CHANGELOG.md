@@ -21,6 +21,7 @@
 - **feat(codex):** groundwork for the Codex app-server transport: a zero-token schema drift probe and a pre-spawn support check that refuses a Codex CLI missing the protocol Untether needs, tested from codex-cli 0.169.0. The transport can't be selected yet; every Codex run still uses `codex exec` [#961](https://github.com/littlebearapps/untether/issues/961)
 - **feat(claude):** approval prompts now show why Claude Code is asking (the hook, rule or classifier reason) [#939](https://github.com/littlebearapps/untether/issues/939)
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
+- **feat(claude):** `[watchdog] control_request_cli_probe` (default off): when an approval looks unanswerable, Untether asks Claude Code whether it is still waiting on it, and the `control_request.unanswerable` warning says `cli_not_pending` when it isn't; detect-only [#837](https://github.com/littlebearapps/untether/issues/837)
 
 ### fixes
 
@@ -87,6 +88,10 @@
 - **fix(antigravity):** a `/cancel` during background work no longer says agy was holding its answer unless agy's own `Stop` hook (through the gate plugin) reported the turn over; otherwise the note says background work was still running and that any answer agy had written is in the conversation [#1372](https://github.com/littlebearapps/untether/issues/1372)
 - **fix(codex):** on app-server, `/model clear` now takes effect on a resumed thread: a resume with no model override carries Codex's own configured model instead of the thread's saved one, and the model-not-found hint also mentions `/new` [#1369](https://github.com/littlebearapps/untether/issues/1369)
 - **fix(codex):** `/usage` no longer says a run cancelled before it reported usage happened "outside Untether" (it says the last run includes an earlier run that ended before reporting usage), and its limits line no longer blames exec mode when Codex runs on app-server [#1370](https://github.com/littlebearapps/untether/issues/1370)
+- **fix(claude):** `/cancel` on a live session held open only by a Codex plugin job sends one reply, the `⏹ Stopped 1 background task` notice, instead of also saying "nothing running" [#1267](https://github.com/littlebearapps/untether/issues/1267)
+- **fix:** a queued follow-up waiting for a Claude live session's turn to end can be cancelled from its queued card again; it no longer runs anyway [#935](https://github.com/littlebearapps/untether/issues/935)
+- **fix(claude):** a tap on an approval someone already answered gets only the toast (`Already answered — approved`), no chat line; in group chats those lines queued ahead of the next approval's keyboard and kept the answered buttons on screen for 10–17 s [#945](https://github.com/littlebearapps/untether/issues/945)
+- **fix(claude):** `/cancel` while an approval or question is waiting stops the turn with Claude Code's own `interrupt` request: the buttons go at once, the run ends `cancelled` and no extra model call is made; Untether falls back to closing stdin if Claude Code hasn't stopped within 5 s [#845](https://github.com/littlebearapps/untether/issues/845)
 
 ### docs
 

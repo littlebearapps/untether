@@ -711,6 +711,8 @@ def _fast_684(monkeypatch: pytest.MonkeyPatch, **watchdog: Any) -> None:
         **{**WatchdogSettings().model_dump(), "tool_timeout": 0.5, **watchdog}
     )
     monkeypatch.setattr(bridge_mod, "_load_watchdog_settings", lambda: wd)
+    # #845: a fake that ignores ``interrupt`` falls back quickly.
+    monkeypatch.setattr(claude_mod, "INTERRUPT_RESULT_GRACE_S", 0.3)
 
 
 async def _drive_684(
@@ -841,6 +843,55 @@ async def test_684_harness_cancel_strips_keyboard(
     assert any("Stopped." in m.text for m in later)
     # A healthy wait (keyboard on screen), then retired: never unanswerable.
     assert _unanswerable(logs) == []
+
+
+async def test_845_cancel_with_pending_approval_sends_native_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#845: /cancel while an approval is pending writes the CLI's native
+    ``interrupt``; the CLI withdraws the request (keyboard stripped) and ends
+    the turn with ``aborted_tools``, and the idle session then closes its
+    stdin — no signal, rendered ``cancelled``."""
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch)
+    with capture_logs() as logs:
+        transport = await _drive_684("control_interrupt", cancel_after=1.0)
+    events = [e.get("event") for e in logs]
+    (sent,) = [e for e in logs if e.get("event") == "claude.interrupt.sent"]
+    assert sent["request_id"] == "ut_interrupt_fake-live-session_1"
+    assert "claude.interrupt.result" in events
+    assert "claude.interrupt.no_result" not in events
+    assert "control_request.cancelled_by_cli" in events
+    # An errored first result never stays live (#776 review): stdin closes.
+    (closed,) = [
+        e for e in logs if e.get("event") == "claude.live_session.stdin_closed"
+    ]
+    assert closed["reason"] == "error"
+    exited = [
+        e for e in logs if e.get("event") == "claude.live_session.lifecycle_exited"
+    ]
+    assert exited and exited[0]["reason"] == "exited_after_close"
+    assert any(_control_cbs(m) for m in transport.rendered)
+    assert not _control_cbs(transport.rendered[-1])
+    assert "cancelled" in transport.rendered[-1].text
+
+
+async def test_845_interrupt_without_result_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#845: a CLI that never answers the interrupt within the grace gets
+    today's stop path (the run still ends cancelled)."""
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch)
+    with capture_logs() as logs:
+        transport = await _drive_684("control_unanswered", cancel_after=1.0)
+    events = [e.get("event") for e in logs]
+    assert "claude.interrupt.sent" in events
+    assert "claude.interrupt.no_result" in events
+    assert "claude.interrupt.result" not in events
+    assert "cancelled" in transport.rendered[-1].text
 
 
 # ── #819: compaction and % ctx end to end ──────────────────────────────────

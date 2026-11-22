@@ -417,6 +417,10 @@ class ControlSuccessResponse(
 ):
     request_id: str
     response: dict[str, Any] | None = None
+    # #837: on an ``initialize`` reply, the requests the CLI is waiting on
+    # (``{type, request_id, request}`` each; CLI >= 2.1.268, probed on
+    # 2.1.330). A sibling of ``response``; absent = unknown, never "none".
+    pending_permission_requests: list[Any] | None = None
 
 
 class ControlErrorResponse(

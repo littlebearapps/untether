@@ -1273,6 +1273,13 @@ def test_684_watchdog_detect_unanswerable_default_true_and_toggle() -> None:
     assert off.detect_unanswerable_control_requests is False
 
 
+def test_837_watchdog_cli_probe_default_off() -> None:
+    from untether.settings import WatchdogSettings
+
+    assert WatchdogSettings().control_request_cli_probe is False
+    assert WatchdogSettings(control_request_cli_probe=True).control_request_cli_probe
+
+
 def test_engine_config_flat_table_alongside_nested_engines(tmp_path: Path) -> None:
     """A flat [antigravity] table still applies when other engines use
     [engines.*]; when both layouts name the same engine the nested one wins."""

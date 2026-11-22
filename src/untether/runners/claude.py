@@ -660,6 +660,19 @@ def get_live_session(session_id: str) -> LiveSession | None:
     return _LIVE_SESSIONS.get(session_id)
 
 
+def session_holds_plugin_jobs(session_id: str) -> bool:
+    """#1267: a Codex plugin job owned by this live session is queued or
+    running (the #1186 hold), so closing it stops work. Sync file reads: only
+    ``/cancel`` and ``/new`` ask. Fails open (False: today's idle wording)."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None or live.closing:
+        return False
+    try:
+        return bool(session_plugin_jobs(session_id, live.codex_plugin_roots))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_session_accepting(session_id: str) -> bool:
     """True when ``session_id`` has a live Claude process whose stdin is open
     and not closing — i.e. a follow-up can be written into it (#776)."""
@@ -1301,6 +1314,7 @@ async def inject_when_idle(
     *,
     command_uuid: str,
     poll_s: float = 0.2,
+    cancel: Any = None,
 ) -> bool:
     """Queue-semantics follow-up (#776 phase 06): wait until the live session
     is idle — its turn ended and no earlier injected line is still waiting to
@@ -1309,9 +1323,15 @@ async def inject_when_idle(
 
     Writing mid-turn would fold the message into the running turn (probe F5
     — that is #775's *steer*), which is why this waits.
+
+    ``cancel`` (#935, the scheduler's ``InjectCancel``): /cancel from the
+    queued card stops the wait (False; the scheduler drops the job), and
+    ``cancel.claim()`` under ``live.lock`` decides the race with the write.
     """
     unaccounted_since: float | None = None
     while True:
+        if cancel is not None and cancel.cancelled:
+            return False
         live = _LIVE_SESSIONS.get(session_id)
         if live is None or not live.accepting_input:
             return False
@@ -1341,6 +1361,8 @@ async def inject_when_idle(
                         # #383: the CLI refused the plan re-arm — resume a
                         # fresh plan-mode process instead.
                         return False
+                    if cancel is not None and not cancel.claim():
+                        return False  # #935: cancelled from its queued card
                     await _write_plan_rearm_if_needed(
                         live, reason="followup", command_uuid=command_uuid
                     )
@@ -1546,6 +1568,89 @@ def session_turn_pending(session_id: str) -> bool:
     if live is None:
         return False
     return not live.idle or bool(live.state.awaiting_injected)
+
+
+# #837: the pending-requests probe (a second ``initialize``).
+_CLI_PROBE_ID_PREFIX = "ut_pending_probe_"
+CLI_PROBE_TIMEOUT_S: float = 5.0
+CLI_PROBE_MIN_INTERVAL_S: float = 1800.0
+
+# #845: how long a /cancel waits for the interrupted turn's ``result`` before
+# falling back to stdin close / signals. CLI 2.1.330 answers in ~40 ms.
+INTERRUPT_RESULT_GRACE_S: float = 5.0
+
+
+async def interrupt_pending_turn(
+    session_id: str, *, grace_s: float | None = None, poll_s: float = 0.02
+) -> bool:
+    """#845: end a turn that is waiting on an approval with the CLI's native
+    ``interrupt`` request instead of closing stdin or signalling.
+
+    Only while the turn's ``result`` is outstanding and a control request
+    (approval or question) is pending for the session. The CLI withdraws the
+    request (``control_cancel_request`` -> :func:`_handle_control_cancel`
+    strips the keyboard), writes a synthetic tool_result and a ``result``
+    with ``terminal_reason: "aborted_tools"`` and no further model call
+    (probe on CLI 2.1.330); closing stdin instead costs one more model call.
+    Returns True once that ``result`` arrived within ``grace_s``; False means
+    the caller keeps its usual stop path.
+    """
+    state = _SESSION_BG_STATE.get(session_id)
+    stdin = _SESSION_STDIN.get(session_id)
+    if (
+        state is None
+        or stdin is None
+        or state.result_received_at is not None
+        or pending_control_requests_for_session(session_id) == 0
+    ):
+        return False
+    state.interrupt_seq += 1
+    request_id = f"ut_interrupt_{session_id}_{state.interrupt_seq}"
+    payload = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "interrupt"},
+    }
+    try:
+        await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+    except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+        logger.warning(
+            "claude.interrupt.write_failed",
+            session_id=session_id,
+            request_id=request_id,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+    started = time.monotonic()
+    logger.info("claude.interrupt.sent", session_id=session_id, request_id=request_id)
+    grace = INTERRUPT_RESULT_GRACE_S if grace_s is None else grace_s
+    with anyio.move_on_after(grace):
+        # The reader sets ``result_received_at`` in translate (no event to await).
+        while True:
+            if state.result_received_at is not None:
+                break
+            if _SESSION_STDIN.get(session_id) is not stdin:
+                logger.info(
+                    "claude.interrupt.process_gone",
+                    session_id=session_id,
+                    request_id=request_id,
+                )
+                return False
+            await anyio.sleep(poll_s)
+        logger.info(
+            "claude.interrupt.result",
+            session_id=session_id,
+            request_id=request_id,
+            waited_s=round(time.monotonic() - started, 2),
+        )
+        return True
+    logger.warning(
+        "claude.interrupt.no_result",
+        session_id=session_id,
+        request_id=request_id,
+        grace_s=grace,
+    )
+    return False
 
 
 SESSION_HANDOFF_POLL_S: float = 0.25
@@ -2287,6 +2392,15 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #845: ``ut_interrupt_<session_id>_<seq>`` (parent-initiated interrupt).
+    interrupt_seq: int = 0
+    # #837: ``ut_pending_probe_<session_id>_<seq>`` (a second ``initialize``
+    # asking the CLI which requests it still waits on). Replies by id: the
+    # ``pending_permission_requests`` list, or None when the field is absent.
+    cli_probe_seq: int = 0
+    cli_probe_last_at: float | None = None
+    cli_probe_waiters: dict[str, anyio.Event] = field(default_factory=dict)
+    cli_probe_replies: dict[str, list[Any] | None] = field(default_factory=dict)
     # #590: descendant PIDs captured while the subprocess was alive (at the
     # result event, at reader-done, and at limbo detection — see
     # _capture_orphan_descendants). Read by manage_subprocess's post-exit
@@ -2555,6 +2669,73 @@ class ClaudeStreamState:
                 )
             )
         return snaps
+
+    async def cli_pending_check(
+        self, request_ids: Iterable[str], *, timeout_s: float = CLI_PROBE_TIMEOUT_S
+    ) -> dict[str, bool | None]:
+        """#837: ask the CLI whether it still waits on ``request_ids``.
+
+        Writes a second ``initialize`` (``hooks: None``, like the spawn's)
+        and reads ``pending_permission_requests`` off the success envelope.
+        Probe on CLI 2.1.330 (2026-11-22): no ``system/init`` again, no hook
+        re-run, the request stays answerable; the only extra frame is a
+        ``background_tasks_changed`` snapshot of the current list. Per id:
+        True = listed, False = not listed, None = unknown (no reply in
+        ``timeout_s``, no field, a synthetic ``da:`` button, or the id was
+        registered after the write, answered meanwhile or in flight). At most
+        one write per ``CLI_PROBE_MIN_INTERVAL_S`` per session, so the reply
+        resets the watchdog's idle clock at most that often.
+        """
+        ids = list(request_ids)
+        unknown: dict[str, bool | None] = dict.fromkeys(ids)
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        stdin = _SESSION_STDIN.get(sid) if sid else None
+        now = time.monotonic()
+        if sid is None or stdin is None:
+            return unknown
+        if (
+            self.cli_probe_last_at is not None
+            and now - self.cli_probe_last_at < CLI_PROBE_MIN_INTERVAL_S
+        ):
+            logger.debug("control_request.cli_probe_rate_limited", session_id=sid)
+            return unknown
+        self.cli_probe_last_at = now
+        self.cli_probe_seq += 1
+        request_id = f"{_CLI_PROBE_ID_PREFIX}{sid}_{self.cli_probe_seq}"
+        before = {rid for rid, owner in _REQUEST_TO_SESSION.items() if owner == sid}
+        waiter = self.cli_probe_waiters[request_id] = anyio.Event()
+        payload = {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "initialize", "hooks": None},
+        }
+        try:
+            await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+            with anyio.move_on_after(timeout_s):
+                await waiter.wait()
+        except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            self.cli_probe_waiters.pop(request_id, None)
+        if request_id not in self.cli_probe_replies:
+            return unknown
+        listed = self.cli_probe_replies.pop(request_id)
+        if listed is None:
+            return unknown
+        pending = {
+            entry.get("request_id") for entry in listed if isinstance(entry, dict)
+        }
+        return {
+            rid: (
+                None
+                if rid.startswith("da:")
+                or rid not in before
+                or _REQUEST_TO_SESSION.get(rid) != sid
+                or rid in _INFLIGHT_CONTROL_RESPONSES
+                else rid in pending
+            )
+            for rid in ids
+        }
 
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
@@ -10050,6 +10231,19 @@ def _translate_claude_event_base(
                 resp,
                 session_id=factory.resume.value if factory.resume else None,
             )
+            return []
+        case claude_schema.StreamControlResponse(response=resp) if (
+            resp.request_id.startswith(_CLI_PROBE_ID_PREFIX)
+        ):
+            # #837: the reply to our pending-requests probe.
+            waiter = state.cli_probe_waiters.get(resp.request_id)
+            if waiter is not None:
+                state.cli_probe_replies[resp.request_id] = (
+                    resp.pending_permission_requests
+                    if isinstance(resp, claude_schema.ControlSuccessResponse)
+                    else None
+                )
+                waiter.set()
             return []
         case claude_schema.StreamControlCancelRequest(request_id=cancel_rid):
             # #684: the CLI withdrew a request it no longer needs.

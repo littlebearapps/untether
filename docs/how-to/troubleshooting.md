@@ -738,7 +738,7 @@ Your `untether.toml` holds the bot token or a webhook secret and other local use
 
 | Popup | Meaning |
 |---|---|
-| `Already answered` | Someone already answered this request. A silent `ℹ️ Already answered — <what the first tap did>` line follows; nothing more is sent to Claude Code ([#685](https://github.com/littlebearapps/untether/issues/685)). |
+| `Already answered — <what the first tap did>` | Someone already answered this request. Nothing more is sent to Claude Code and nothing is posted in the chat ([#685](https://github.com/littlebearapps/untether/issues/685), [#945](https://github.com/littlebearapps/untether/issues/945)). |
 | `No longer needed` | Claude Code withdrew the request (for example the turn ended) ([#684](https://github.com/littlebearapps/untether/issues/684)). |
 | `This request has expired` | A newer request replaced it, or Untether no longer knows about it (for example after a restart). Requests no longer time out after 5 minutes ([#844](https://github.com/littlebearapps/untether/issues/844)). |
 

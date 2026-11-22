@@ -158,7 +158,7 @@ GOLDEN_SHA256: dict[str, str] = {
     "background_task_drain_notice.jsonl": "cb835f86ca19dc7d4a004c5fae1ed74ceda5ff4b3f305356e35ca686d79a6530",
     "background_task_options_changed.json": "40b1ee0257657ecd7e4bb546ac97ce439497128b262e8f54cef358418cf667f0",
     "background_task_options_changed.jsonl": "8c572adad4eca7a68cbb6efad966b1416de32b15d28f7a7e2033b25032ec8eb5",
-    "cancel_with_pending_approval.json": "4efc61bc7e1440110798855a2a2d48aeb34e8b2a41bf5757d49bf87b8c420d75",
+    "cancel_with_pending_approval.json": "65608f4aa49cc573be17219c1bd884c0def1b5d4ed36318997501278ab6d2c43",
     "cancel_with_pending_approval.jsonl": "f72dfa5b9cc8af2e0d4ff9ef6a41d22d856a2946c2c7a9092f5811438eb6a674",
     "idle_agent_approval.json": "c863e6228112f38e1cd4906bb3daaacb5966f8743cc4d407bff65f7c671d0c65",
     "idle_agent_approval.jsonl": "06a22dd133572a3534b268d15cd75f444e2e37f3eaa45df3de8fc60f27a4efb8",
@@ -174,13 +174,13 @@ GOLDEN_SHA256: dict[str, str] = {
     "plan_outline_abandoned.jsonl": "de15f0161a7628efc3517c608f84f64f2f62b4cce9f9448990fc14327118e424",
     "plan_outline_guard.json": "19632f4e9e968668610e095e22ad5f45f4d9952ebeac09ba58eaf0e39e671591",
     "plan_outline_guard.jsonl": "0d7f070a1acb8ca69125f79dcc2692a25f5dce31d2f905351936a63a7aae2bf8",
-    "plan_outline_hold.json": "c695514ec2f931cfed38b6968cb9fe363cd11e6609afcfd30a115b9b983c95a4",
+    "plan_outline_hold.json": "f76a5f1619307bdda19925d4ee20cc6fe2e37e7746a9b4ebc69862378c15daab",
     "plan_outline_hold.jsonl": "4920222856240ed72e4bff0a7696f99d145edb6138be3d78bd1dddc2e8cc8cee",
     "plan_rearm_refused.json": "49bab15e2bc29202be7861e5654b1c7d76a2311fbbb36baf8f90e5a742398e47",
     "plan_rearm_refused.jsonl": "070ed57af149ff77c66a13b3c4925af6a142c99b966ddce1dc1f8d2ba52f8a92",
     "resume_waits_for_background_owner.json": "ece3ba2c596a7997a25e8fb36bb8edc236366f071680174a71610dfbe9195e6c",
     "resume_waits_for_background_owner.jsonl": "551e1e1ec3622fb8b8656f7a063725941ba580a5ea17f7527f5760a27534b08c",
-    "tool_approve_deny.json": "d8f0a88abdfedd689d16e4e1901c1fbde47ade1345ecab44289adb9d23dc6605",
+    "tool_approve_deny.json": "0587a3c2a463bad9bb383e76de1c0f6038c7fa80b5ab32401ea2f5038f3224f9",
     "tool_approve_deny.jsonl": "88e09163371958159ebae06eee84d937790786147989be76ec9a4756c12646ed",
     "unattended_denies.json": "2b26ff670e03fb8470dc6c1177defa6b9c24eae4996064888435f9e978931e86",
     "unattended_denies.jsonl": "3e9b8e31c3208dd0574fb3e9b140d9962f77212fb03c56cc7e8ae2782476ddac",
@@ -800,6 +800,8 @@ class _Replay:
             lambda *a, **k: (SimpleNamespace(watchdog=watchdog), Path("x")),
         )
         mp.setattr(claude_mod, "time", self.time)
+        # #845: the puppet never answers an ``interrupt``; replay-sized grace.
+        mp.setattr(claude_mod, "INTERRUPT_RESULT_GRACE_S", POLL_S * 4)
         # The background-status message finalises on its own 1 s poll; at
         # that pace the edit would land in whichever step happened to be
         # open. Same code, replay-sized interval.

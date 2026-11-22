@@ -1277,6 +1277,33 @@ async def test_902_busy_live_session_unchanged(make_task) -> None:
 
 
 @pytest.mark.anyio
+async def test_1267_codex_plugin_job_hold_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1267: a session held only by a Codex plugin job is running work —
+    /cancel stops it without the "nothing running" line (the close's
+    "⏹ Stopped …" notice is the one reply)."""
+    import untether.runners.claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "session_holds_plugin_jobs", lambda sid: sid == "s-902"
+    )
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = _idle_live_task()
+
+    with capture_logs() as logs:
+        await handle_cancel(
+            cfg, _plain_cancel_msg(), {MessageRef(channel_id=123, message_id=42): task}
+        )
+
+    assert task.cancel_requested.is_set()
+    assert [e for e in logs if e.get("event") == "cancel.requested"]
+    assert not [e for e in logs if e.get("event") == "cancel.idle_session_closed"]
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
 async def test_902_idle_plus_busy_still_ambiguous() -> None:
     """Mixed idle + busy keeps the existing ambiguity prompt."""
     transport = FakeTransport()

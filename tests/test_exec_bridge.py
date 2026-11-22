@@ -12470,6 +12470,52 @@ def test_684_no_warn_when_newer_request_shows_buttons() -> None:
     assert _unanswerable(logs) == []
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("verdict", "reasons", "pending"),
+    [
+        pytest.param(False, ["no_keyboard", "cli_not_pending"], False, id="gone"),
+        pytest.param(True, ["no_keyboard"], True, id="still-pending"),
+        pytest.param(None, ["no_keyboard"], "unknown", id="unknown"),
+    ],
+)
+async def test_837_cli_probe_decides_the_warn(verdict, reasons, pending) -> None:
+    """#837: with ``control_request_cli_probe`` on, a flagged request's WARN
+    waits for one CLI probe and carries ``cli_not_pending`` when the CLI no
+    longer lists it; later ticks don't probe again."""
+    edits, _ = _edits_684([_snap_684()])
+    edits._cli_probe = True
+    probes: list[list[str]] = []
+
+    async def _check(ids):
+        probes.append(list(ids))
+        return dict.fromkeys(ids, verdict)
+
+    edits.stream.engine_state.cli_pending_check = _check
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+        assert _unanswerable(logs) == []  # held for the probe
+        await edits._finish_cli_pending_checks()
+        edits._check_unanswerable_control_requests()
+        await edits._finish_cli_pending_checks()
+    assert probes == [["r-1"]]
+    (hit,) = _unanswerable(logs)
+    assert hit["reasons"] == reasons and hit["cli_pending"] == pending
+    (check,) = [
+        e for e in logs if e.get("event") == "control_request.cli_pending_check"
+    ]
+    assert check["pending"] == pending
+
+
+def test_837_cli_probe_off_by_default_warns_at_once() -> None:
+    edits, _ = _edits_684([_snap_684()])
+    assert edits._cli_probe is False
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    (hit,) = _unanswerable(logs)
+    assert "cli_pending" not in hit
+
+
 def test_684_no_warn_below_threshold() -> None:
     edits, _ = _edits_684([_snap_684(age_s=599.0)])
     with structlog.testing.capture_logs() as logs:

@@ -89,9 +89,22 @@ def status_frame() -> None:
         )
 
 
+# #845: set by a host ``interrupt`` control_request (acknowledged at once).
+_interrupted = threading.Event()
+
+
 def _handle_control_request(obj: dict) -> None:
     global _mode
     request = obj.get("request") or {}
+    if request.get("subtype") == "interrupt":
+        emit(
+            {
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": obj.get("request_id")},
+            }
+        )
+        _interrupted.set()
+        return
     if request.get("subtype") != "set_permission_mode":
         return
     request_id = obj.get("request_id")
@@ -2686,7 +2699,55 @@ def scenario_control_unanswered(first: dict) -> None:
             break
 
 
+def scenario_control_interrupt(first: dict) -> None:
+    """#845: a Bash permission request the host ends with a native
+    ``interrupt`` — what CLI 2.1.330 does (probe 2026-11-22): withdraw the
+    request, synthetic rejection tool_result, an interrupted-by-user line and
+    a ``result`` with ``terminal_reason: aborted_tools``; no model call. An
+    answer or EOF instead of the interrupt ends the turn as before."""
+    init()
+    req_id, tool_id = "req-int-1", "toolu_int"
+    _raise_can_use_tool(req_id, tool_id)
+    if _interrupted.wait(timeout=30.0):
+        emit({"type": "control_cancel_request", "request_id": req_id})
+        log_stdin(f"cancel_sent:{req_id}")
+        tool_result(
+            tool_id,
+            "The user doesn't want to proceed with this tool use. The tool use "
+            "was rejected.",
+        )
+        emit(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "[Request interrupted by user for tool use]",
+                        }
+                    ],
+                },
+            }
+        )
+        emit(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "duration_ms": 40,
+                "duration_api_ms": 0,
+                "num_turns": 1,
+                "total_cost_usd": _cost,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "terminal_reason": "aborted_tools",
+            }
+        )
+    serve_followups()
+
+
 _SCENARIOS = {
+    "control_interrupt": scenario_control_interrupt,  # #845
     "plan_approve_agent_wake": scenario_plan_approve_agent_wake,
     "plan_approve_agent_chain": scenario_plan_approve_agent_chain,
     "plan_approve_agent_before": scenario_plan_approve_agent_before,

@@ -544,6 +544,11 @@ class WatchdogSettings(BaseModel):
     # answer it (no approval/option button, no text-reply route) or no stdin
     # writer. Never denies, never releases a live-session hold. Kill switch.
     detect_unanswerable_control_requests: bool = True
+    # #837: when the detector above flags a request, ask the CLI (a second
+    # ``initialize``) whether it still waits on it; the WARN then carries
+    # ``cli_not_pending``. Detect-only, at most one probe per session per
+    # 30 min. Off until fleet data says it is quiet.
+    control_request_cli_probe: bool = False
 
     # Engine-agnostic "stuck after tool_result" detector (issue #322).
     # Default threshold of 300s matches undici's non-configurable 5-min
