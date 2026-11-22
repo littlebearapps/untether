@@ -1849,6 +1849,12 @@ class ClaudeStreamState:
     factory: EventFactory = field(default_factory=lambda: EventFactory(ENGINE))
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_assistant_text: str | None = None
+    # #1375: main-thread text since its last tool_use (subagent text never
+    # lands here), its snapshot at the turn's first Stop hook, and whether
+    # main-thread text followed that hook (the hook continued the turn).
+    main_text: str | None = None
+    pre_stop_text: str | None = None
+    stop_continued: bool = False
     note_seq: int = 0
     # Phase 2: Control request tracking
     pending_control_requests: dict[
@@ -1875,6 +1881,9 @@ class ClaudeStreamState:
     last_tool_use_id: str | None = None
     # Map tool_use_id -> control action_id for completing control actions on tool result
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
+    # #1372: AskUserQuestion tool calls answered by a typed reply — a deny
+    # that carries the answer, so its error ``tool_result`` reads as ✓.
+    answered_ask_tools: set[str] = field(default_factory=set)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
     # #942: request_id -> ``turn`` its keyboard action was emitted in. A live
@@ -4217,6 +4226,8 @@ def _apply_hook_event(
     session_id = event.session_id
     if subtype == "hook_started":
         state.hooks_started += 1
+        if hook_event == "Stop" and state.turn_open and state.pre_stop_text is None:
+            state.pre_stop_text = state.main_text  # #1375
         if hook_id is None or _hook_never_holds(hook_event):
             return
         if hook_id not in state.pending_hooks and (
@@ -7116,6 +7127,7 @@ def _tool_result_event(
     *,
     action: Action,
     factory: EventFactory,
+    answered: bool = False,
 ) -> UntetherEvent:
     is_error = content.is_error is True
     raw_result = content.content
@@ -7132,7 +7144,7 @@ def _tool_result_event(
         action_id=action.id,
         kind=action.kind,
         title=action.title,
-        ok=not is_error,
+        ok=answered or not is_error,
         detail=detail,
     )
 
@@ -7544,6 +7556,12 @@ def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]
     ]
     for rid in handled:
         state.pending_control_requests.pop(rid, None)
+        record = _HANDLED_REQUESTS.get(rid)
+        if record is not None and record.action == "answer":
+            action_id = state.request_to_action.get(rid)
+            state.answered_ask_tools.update(
+                k for k, v in state.control_action_for_tool.items() if v == action_id
+            )
         # #942: an action from an earlier turn isn't in this turn's tracker —
         # retire the mapping silently instead of adding a fresh row here.
         same_turn = state.request_turn.get(rid, state.turn) == state.turn
@@ -8119,7 +8137,7 @@ def _note_wake_turn(
     tool_use can only be a CLI cron job firing (a legacy Loop-off job the
     CLI resurrected — the hook can't stop those). It is tagged
     ``source=cron`` and, with ``own_schedule`` on, the session is marked
-    cron-suppressed for the CLI's 7-day window and closed once idle, so
+    cron-suppressed for the CLI's resurrect window and closed once idle, so
     later spawns run with CLAUDE_CODE_DISABLE_CRON=1. It misses the first
     resurrected fire (the run's own first turn, F4): up to two stray fires
     per legacy session. Other wake turns count toward the wake cap; a user
@@ -8308,6 +8326,9 @@ def _open_followup_turn(
     state.safeguard = SafeguardTurn()
     state.unattended_denials = []  # #835
     state.last_assistant_text = None
+    state.main_text = None
+    state.pre_stop_text = None
+    state.stop_continued = False
     state.last_exitplanmode_plan = None
     state.last_schedule_wakeup_arm_delay = None
     state.last_bg_bash_launched_at = None
@@ -8950,6 +8971,8 @@ def _translate_claude_event_base(
                             state.tool_parents[content.id] = parent_tool_use_id
                         state.pending_actions[action.id] = action
                         state.last_tool_use_id = content.id
+                        if parent_tool_use_id is None:
+                            state.main_text = None  # #1375: a preamble
                         # #347 track long-running primitives that outlive
                         # this tool_use → tool_result cycle
                         _register_background_handle(state, content)
@@ -8999,6 +9022,11 @@ def _translate_claude_event_base(
                     case claude_schema.StreamTextBlock(text=text):
                         if text:
                             state.last_assistant_text = text
+                            if parent_tool_use_id is None:
+                                # #1375: text after the Stop hook's snapshot.
+                                if state.pre_stop_text is not None:
+                                    state.stop_continued = True
+                                state.main_text = text
                             if len(text) > state.max_text_len_since_cooldown:
                                 state.max_text_len_since_cooldown = len(text)
                             # When outline is pending (user clicked "Pause & Outline Plan"),
@@ -9079,11 +9107,11 @@ def _translate_claude_event_base(
                         title="tool result",
                         detail={},
                     )
+                answered = tool_use_id in state.answered_ask_tools
+                state.answered_ask_tools.discard(tool_use_id)
                 out.append(
                     _tool_result_event(
-                        content,
-                        action=action,
-                        factory=factory,
+                        content, action=action, factory=factory, answered=answered
                     )
                 )
                 # Complete any associated control action (e.g. permission approval)
@@ -9138,6 +9166,17 @@ def _translate_claude_event_base(
             result_text = event.result or ""
             if ok and not result_text and state.last_assistant_text:
                 result_text = state.last_assistant_text
+            # #1375: a Stop hook continued the turn, so ``result`` holds only
+            # the follow-up — keep the answer written before the hook.
+            pre_stop = state.pre_stop_text
+            if ok and state.stop_continued and pre_stop and pre_stop not in result_text:
+                logger.info(
+                    "claude.stop_hook.answer_kept",
+                    session_id=event.session_id,
+                    answer_chars=len(pre_stop),
+                    followup_chars=len(result_text),
+                )
+                result_text = f"{pre_stop}\n\n{result_text}".rstrip()
 
             # #510 / #508: re-emit the ExitPlanMode plan body when the
             # post-approval final answer is brief/empty. Done HERE on the

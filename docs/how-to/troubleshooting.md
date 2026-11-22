@@ -760,6 +760,8 @@ Messages that arrive within about a second of each other are merged into one pro
 
 This happens when Claude Code plugins with **Stop hooks** consume the final response. In a terminal, the user can scroll up to see earlier output. In Telegram, only the final message is visible — so if a Stop hook causes Claude to address hook concerns in its last turn, the actual content is replaced.
 
+From v0.36.2 Untether keeps that content: when a Stop hook continues the turn, the final shows the answer Claude wrote before the hook, then the follow-up ([#1375](https://github.com/littlebearapps/untether/issues/1375); log `claude.stop_hook.answer_kept`). If your final still loses its content, check that `[watchdog] hold_for_async_hooks` is not set to `false` (it also turns on the hook events this needs). The steps below remove the follow-up as well.
+
 **Affected plugins:** Any Claude Code plugin that uses `"decision": "block"` in a Stop hook. The most common example is [PitchDocs](https://github.com/littlebearapps/lba-plugins) context-guard, which nudges Claude to update AI context docs when structural files change.
 
 **Fix:**

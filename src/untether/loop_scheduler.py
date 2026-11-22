@@ -22,7 +22,7 @@ has gone; a live session fires its own wake-up (``cli_fired_live``).
 Residual CLI jobs (``-p`` chats, ``[loop] own_schedule = false``, pre-rc20
 state) are tracked as *cron suppression* records (#926): a later
 control-channel spawn resuming that session gets
-``CLAUDE_CODE_DISABLE_CRON=1`` until the CLI's own 7-day resurrect window
+``CLAUDE_CODE_DISABLE_CRON=1`` until the CLI's own 30-day resurrect window
 has passed.
 
 State is persisted to ``active_loops.json`` (sibling to the config file)
@@ -89,11 +89,13 @@ __all__ = [
 STATE_FILENAME = "active_loops.json"
 
 # #926: the CLI resurrects a session-only CronCreate job on ``--resume`` for
-# as long as it is younger than ``recurringMaxAgeMs`` (default 604800000 ms
-# = 7 days; drift-probed in tests/test_claude_cli_schema_drift.py). Remote
-# config can change it — ``0`` means no age limit — which is a documented
+# as long as it is younger than ``recurringMaxAgeMs`` (default 2592000000 ms
+# = 30 days from CLI 2.1.330, #1376; 7 days up to 2.1.328; drift-probed in
+# tests/test_claude_cli_schema_drift.py). 30 days covers both and is also the
+# remote-config cap, so one constant is safe: on an older CLI it only keeps
+# suppression longer than needed. ``0`` (no age limit) is a documented
 # residual: suppression records still lapse after this window.
-CLI_CRON_MAX_AGE_S = 7 * 86_400
+CLI_CRON_MAX_AGE_S = 30 * 86_400
 
 LoopKind = Literal["cron", "wakeup"]
 RunJobFn = Callable[..., Awaitable[None]]
@@ -1463,7 +1465,7 @@ def _restore_sentinels(raw: dict[str, Any]) -> bool:
 
     A v1 file (rc19: a ``do_not_resume`` list, no ``do_not_resume_at``)
     records cancels that always left a CLI job behind, so each session gets
-    a cancel time of now **and** a 7-day suppression (``source=restore_v1``,
+    a cancel time of now **and** a ``CLI_CRON_MAX_AGE_S`` suppression (``source=restore_v1``,
     logged once per session — §13 amendment 3 accepts the over-suppression
     of ScheduleWakeup-only cancels). Returns True when a migration changed
     state that should be written back."""

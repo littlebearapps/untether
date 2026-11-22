@@ -72,6 +72,10 @@
 - **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
 - **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
+- **fix(claude):** when a Stop hook continues the turn (`additionalContext`, `decision: "block"` or exit 2), the final keeps the answer Claude wrote before the hook, followed by the hook's follow-up, instead of showing only the follow-up (closes [#1364](https://github.com/littlebearapps/untether/issues/1364)) [#1375](https://github.com/littlebearapps/untether/issues/1375)
+- **test(claude):** confirmed on CLI 2.1.330 that a subagent's own Agent calls, which now run in the foreground by default, never hold a live session open or show in the background panel; no code change needed [#1172](https://github.com/littlebearapps/untether/issues/1172)
+- **fix(claude):** sessions that may still hold an older Claude-side scheduled task stay protected for 30 days, matching the CLI's resurrect window from 2.1.330 (was 7 days); the flaky live-session hold-timing test is steadied [#1376](https://github.com/littlebearapps/untether/issues/1376)
+- **fix(claude):** a question answered by typing a reply now closes its `ask user` row as ✓ instead of ✗ [#1372](https://github.com/littlebearapps/untether/issues/1372)
 
 ### docs
 

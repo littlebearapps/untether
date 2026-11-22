@@ -1200,7 +1200,9 @@ async def test_829_close_is_timed_from_the_last_progress(
     assert _engine_state(runner).live_close_reason == "max_hold"
     _, closed_at = clock.first("closing")
     last_progress = float(marker.read_text())
-    assert 0.5 <= closed_at - last_progress < 1.2
+    # #1376: cross-process clocks; the authoritative floor is Untether's own
+    # ``last_progress_age_s`` below.
+    assert 0.4 <= closed_at - last_progress < 1.2
     assert clock.result_at is not None and closed_at - clock.result_at >= 1.3
     closes = _events(logs, "claude.live_session.stdin_closed")
     assert closes[0]["reason"] == "max_hold"

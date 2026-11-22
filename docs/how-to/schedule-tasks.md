@@ -79,7 +79,7 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 
 With Loop mode off there is nothing to stop: Claude can't schedule on its own, and a self-paced wait ends with `/cancel` or `/new`.
 
-A session that may still hold an older Claude-side scheduled task (one created before v0.36.0, in a chat without a permission mode, or with `own_schedule = false`) resumes with Claude's scheduling switched off for up to 7 days, so the old task can't restart; the progress message says so. `/new` starts a session that can schedule again. A legacy task in a Loop-off session can still fire up to twice after the upgrade (the first time before your reply) before Untether catches it.
+A session that may still hold an older Claude-side scheduled task (one created before v0.36.0, in a chat without a permission mode, or with `own_schedule = false`) resumes with Claude's scheduling switched off for up to 30 days, so the old task can't restart; the progress message says so. `/new` starts a session that can schedule again. A legacy task in a Loop-off session can still fire up to twice after the upgrade (the first time before your reply) before Untether catches it.
 
 ## Telegram scheduling
 

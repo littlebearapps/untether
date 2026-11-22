@@ -920,3 +920,170 @@ def test_923_unknown_hook_id_long_exit_2_is_not_a_candidate() -> None:
     assert state.hook_idle_rewake_hint is None
     (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
     assert blocked["known"] is False and blocked["rewake_candidate"] is False
+
+
+# --- #1375: a Stop hook that continues the turn keeps the answer -----------
+
+
+def _answer(events: list[Any]) -> str:
+    done = [
+        e
+        for e in events
+        if getattr(e, "type", None) == "completed"
+        or (isinstance(e, TurnEvent) and e.phase == "completed")
+    ]
+    assert len(done) == 1
+    return done[0].answer
+
+
+def _subagent_text(msg: str) -> dict[str, Any]:
+    return {**_text(msg), "parent_tool_use_id": "toolu_agent"}
+
+
+def _tool_use(tool_id: str) -> dict[str, Any]:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": f"m-{tool_id}",
+            "role": "assistant",
+            "model": "claude-fake",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": "Bash",
+                    "input": {"command": "ls"},
+                }
+            ],
+        },
+    }
+
+
+def _stop_feedback() -> dict[str, Any]:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "Stop hook feedback:\nupdate it"}],
+        },
+    }
+
+
+def _stop_hook(hook_id: str = "h-stop") -> list[dict[str, Any]]:
+    return [_started(hook_id, "Stop"), _response(hook_id, "Stop")]
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_1375_additional_context_continuation_keeps_the_answer(live: bool) -> None:
+    state, factory = _state(live=live)
+    with capture_logs() as logs:
+        events = _feed(
+            state,
+            factory,
+            _init(),
+            _text("ANSWER: 391"),
+            *_stop_hook("h1"),
+            _text("BOARD UPDATED"),
+            *_stop_hook("h2"),
+            _result("BOARD UPDATED"),
+        )
+    assert _answer(events) == "ANSWER: 391\n\nBOARD UPDATED"
+    assert _hook_logs(logs, "claude.stop_hook.answer_kept")
+
+
+def test_1375_block_continuation_keeps_the_answer() -> None:
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("ANSWER: 391"),
+        _started("h1", "Stop"),
+        _response("h1", "Stop", outcome="error", exit_code=2, stderr="update it"),
+        _stop_feedback(),
+        _text("BOARD UPDATED"),
+        _result("BOARD UPDATED"),
+    )
+    assert _answer(events) == "ANSWER: 391\n\nBOARD UPDATED"
+
+
+def test_1375_hook_free_stop_is_unchanged() -> None:
+    state, factory = _state()
+    events = _feed(
+        state, factory, _init(), _text("ANSWER"), *_stop_hook(), _result("ANSWER")
+    )
+    assert _answer(events) == "ANSWER"
+
+
+def test_1375_result_already_holding_the_answer_is_not_duplicated() -> None:
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("ANSWER"),
+        *_stop_hook(),
+        _text("ANSWER, and the board"),
+        _result("ANSWER, and the board"),
+    )
+    assert _answer(events) == "ANSWER, and the board"
+
+
+def test_1375_subagent_text_is_neither_snapshot_nor_continuation() -> None:
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("ANSWER"),
+        _subagent_text("sub before"),
+        *_stop_hook(),
+        _subagent_text("sub after"),
+        _result("ANSWER"),
+    )
+    assert state.pre_stop_text == "ANSWER"
+    assert not state.stop_continued
+    assert _answer(events) == "ANSWER"
+
+
+def test_1375_turn_ending_on_a_tool_use_takes_no_snapshot() -> None:
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("Let me check"),
+        _tool_use("toolu_1"),
+        *_stop_hook(),
+        _text("BOARD UPDATED"),
+        _result("BOARD UPDATED"),
+    )
+    assert _answer(events) == "BOARD UPDATED"
+
+
+def test_1375_live_followup_turn_resets_and_behaves_the_same() -> None:
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("A1"),
+        *_stop_hook("h1"),
+        _text("chore"),
+        _result("chore"),
+    )
+    assert _answer(events) == "A1\n\nchore"
+    # Turn 2 opens: nothing carries over from turn 1's snapshot.
+    events = _feed(state, factory, _init(), _text("A2"), _result("A2"))
+    assert _answer(events) == "A2"
+    assert state.pre_stop_text is None
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("A3"),
+        *_stop_hook("h3"),
+        _text("chore 3"),
+        _result("chore 3"),
+    )
+    assert _answer(events) == "A3\n\nchore 3"
