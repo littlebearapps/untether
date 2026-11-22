@@ -503,6 +503,25 @@ def _warn_unknown_mode_safe(mode: str) -> None:
     )
 
 
+def _run_model() -> str | None:
+    """The chat's /model override (or a trigger's model), if any."""
+    run_options = get_run_options()
+    if run_options is not None and run_options.model:
+        return str(run_options.model)
+    return None
+
+
+def _config_model(result: Any) -> str | None:
+    """``config.model`` from a config/read result (#1369).
+
+    shortcut: with no model in Codex's config a resumed thread stays on its
+    saved model (the modelNotFound hint says /new); model/list's
+    ``isDefault`` would cover it at one more request."""
+    config = result.get("config") if isinstance(result, dict) else None
+    model = config.get("model") if isinstance(config, dict) else None
+    return model if isinstance(model, str) and model else None
+
+
 @dataclass(slots=True)
 class AppServerRunState(CodexRunState):
     prompt: str = ""
@@ -511,6 +530,9 @@ class AppServerRunState(CodexRunState):
     sandbox: str | None = None
     # Full auto: config/read decides whether omitting the sandbox is safe.
     check_trust: bool = False
+    # #1369: Codex's configured model (config/read), sent on a resume with no
+    # /model override, since a resumed thread otherwise keeps its saved model.
+    config_model: str | None = None
     proc: Any = None
     peer: CodexRpcPeer | None = None
     reader: BufferedByteReceiveStream | None = None
@@ -1050,12 +1072,14 @@ class CodexAppServerRunner(CodexRunner):
                 init = cas.decode_result("initialize", msg.result)
                 logger.info("codex.app_server.initialized", user_agent=init.user_agent)
                 state.outbox.append(("notify", "initialized", {}))
-                if state.check_trust:
+                if state.check_trust or (resume is not None and not _run_model()):
                     state.outbox.append(("request", "config/read", {"cwd": state.cwd}))
                 else:
                     self._open_thread(state, resume)
             case "config/read":
-                self._decide_sandbox(state, msg.result)
+                if state.check_trust:
+                    self._decide_sandbox(state, msg.result)
+                state.config_model = _config_model(msg.result)
                 self._open_thread(state, resume)
             case "thread/list":
                 listed = cas.decode_result("thread/list", msg.result)
@@ -1119,9 +1143,9 @@ class CodexAppServerRunner(CodexRunner):
         }
         if state.sandbox is not None:
             params["sandbox"] = state.sandbox
-        run_options = get_run_options()
-        if run_options is not None and run_options.model:
-            params["model"] = str(run_options.model)
+        model = _run_model() or state.config_model
+        if model:
+            params["model"] = model
         return params
 
     def _resume_params(

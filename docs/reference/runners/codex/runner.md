@@ -34,7 +34,10 @@ switch transport without losing its session.
 
 Every `thread/start` and `thread/resume` sends `approvalPolicy: "never"`, `approvalsReviewer: "user"`, the cwd, the
 sandbox (when set) and the chat's model (`thread/resume` adds `excludeTurns: true`: Untether never reads the
-history, and full-history hydration draws a deprecation warning on 0.170.0), and compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
+history, and full-history hydration draws a deprecation warning on 0.170.0). A resumed thread restores its saved
+model, so a resume with no `/model` override sends Codex's own configured model from `config/read` (`config.model`)
+instead ([#1369](https://github.com/littlebearapps/untether/issues/1369)): `/model clear` then takes effect on the
+next message rather than only after `/new`. Untether then compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
 adds a ⚠️ row. A server request (approval, user input, …) is declined with one ⚠️ row until approvals land (#963).
 `/continue` lists the project's most recent thread (`thread/list`, source kinds `cli`, `vscode`, `exec`, `appServer`)
 and resumes it, or starts a new one with a note.
@@ -149,4 +152,5 @@ What the Codex runner builds itself, and why (native-first rule, step 4). Checke
 | Moderated answers | native passthrough | 0.170.0, 2026-11-18 (E2, PLAN Q6) | `agentMessage.moderation` is untyped (its `display` shape changed in one release); the text is shown as sent and `codex.app_server.moderated` logged once per run |
 | Rows for items exec never emits | custom (rendering) | 0.170.0, 2026-11-19 | `collabAgentToolCall` (sub-agent row), `imageView`, and one generic row per unknown item type (logged once). Untether's own progress surface, fed from native items |
 | Declined server requests | custom (policy) | 0.170.0, 2026-11-19 | Approvals and user input aren't wired until #963 / #965, so every server request is declined (fail closed) with one ⚠️ row |
+| Model after `/model clear` on a resumed thread ([#1369](https://github.com/littlebearapps/untether/issues/1369)) | native: `config/read` + `thread/resume.model` (stable) | 0.170.0, 2026-11-22 | Probed: a thread started on `gpt-nonexistent` (its one turn failed `modelNotFound`, no tokens) resumed on `gpt-nonexistent` with no `model` and on the configured `gpt-6.1-sol` when `thread/resume` carried `config/read`'s `config.model`. With no model in Codex's config the thread keeps its saved model (`shortcut:`; `model/list`'s `isDefault` would cover it), so the `modelNotFound` hint also names `/new` |
 | `% ctx`, compaction row | native | 0.170.0, 2026-11-19 (P8) | `thread/tokenUsage/updated` and the `contextCompaction` item (#832); no rollout-file reading (DEC-13) |

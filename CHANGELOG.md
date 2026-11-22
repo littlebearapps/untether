@@ -74,6 +74,7 @@
 - **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
 - **fix(antigravity):** Workspace's agent now names agy 1.5's file tools (`read_file`, `write_file`, `edit_file`) and, since agy 1.5 has no tool to list or search a project, says so plainly and points to the route for running a command instead of claiming tools it doesn't have [#1368](https://github.com/littlebearapps/untether/issues/1368)
 - **fix(antigravity):** a `/cancel` during background work no longer says agy was holding its answer unless agy's own `Stop` hook (through the gate plugin) reported the turn over; otherwise the note says background work was still running and that any answer agy had written is in the conversation [#1372](https://github.com/littlebearapps/untether/issues/1372)
+- **fix(codex):** on app-server, `/model clear` now takes effect on a resumed thread: a resume with no model override carries Codex's own configured model instead of the thread's saved one, and the model-not-found hint also mentions `/new` [#1369](https://github.com/littlebearapps/untether/issues/1369)
 
 ### docs
 
