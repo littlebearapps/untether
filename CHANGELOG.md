@@ -75,6 +75,7 @@
 - **fix:** a resent final can no longer be posted twice when a shutdown lands while it is being sent: the send and its removal from `pending_finals.json` finish together [#1270](https://github.com/littlebearapps/untether/issues/1270)
 - **fix:** an answer ending inside a code block in a list item or blockquote no longer swallows the footer; Untether now asks the Markdown parser whether a block is still open, instead of adding a closer that could open a new block [#1271](https://github.com/littlebearapps/untether/issues/1271)
 - **fix(export):** `/export` shows a command that `/cancel` stopped as ✗, the same as the progress card, instead of still running (▸) [#1371](https://github.com/littlebearapps/untether/issues/1371)
+- **fix:** `/new` sent just after an answer arrives, while the engine is still exiting, no longer says it cancelled the run [#1372](https://github.com/littlebearapps/untether/issues/1372)
 
 ### docs
 

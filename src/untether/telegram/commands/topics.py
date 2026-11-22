@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, NamedTuple
 from ...context import RunContext
 from ...logging import get_logger
 from ...markdown import MarkdownParts
-from ...runner_bridge import RunningTasks, running_task_is_idle_after_result
+from ...runner_bridge import (
+    RunningTasks,
+    running_task_is_delivered_teardown,
+    running_task_is_idle_after_result,
+)
 from ...transport import RenderedMessage, SendOptions
 from ...transport_runtime import TransportRuntime
 from ..chat_prefs import ChatPrefsStore
@@ -73,6 +77,7 @@ def _cancel_chat_tasks_counted(
     """
     cancelled = 0
     idle = 0
+    delivered = 0
     skipped: set[int] = set()
     if running_tasks:
         for ref, task in running_tasks.items():
@@ -82,11 +87,16 @@ def _cancel_chat_tasks_counted(
                 # #776: a live run sits under several refs — count it once.
                 skipped.add(id(task))
                 continue
+            task.cancel_requested.set()
+            if running_task_is_delivered_teardown(task):
+                # #1372: its answer is out and only the process is exiting,
+                # so the reply mustn't claim a cancel (#1176's /cancel rule).
+                delivered += 1
+                continue
             if running_task_is_idle_after_result(task):
                 idle += 1
-            task.cancel_requested.set()
             cancelled += 1
-    if cancelled or skipped:
+    if cancelled or skipped or delivered:
         logger.info(
             "new.cancel_scope",
             chat_id=chat_id,
@@ -94,6 +104,7 @@ def _cancel_chat_tasks_counted(
             scoped=thread_filter is not None,
             cancelled=cancelled,
             idle=idle,
+            delivered_teardown=delivered,
             skipped_other_threads=len(skipped),
         )
     # #1157: messages waiting on a first run that hasn't reported its
