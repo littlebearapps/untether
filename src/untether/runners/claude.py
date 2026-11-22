@@ -1881,6 +1881,9 @@ class ClaudeStreamState:
     last_tool_use_id: str | None = None
     # Map tool_use_id -> control action_id for completing control actions on tool result
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
+    # #1372: AskUserQuestion tool calls answered by a typed reply — a deny
+    # that carries the answer, so its error ``tool_result`` reads as ✓.
+    answered_ask_tools: set[str] = field(default_factory=set)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
     # #942: request_id -> ``turn`` its keyboard action was emitted in. A live
@@ -7124,6 +7127,7 @@ def _tool_result_event(
     *,
     action: Action,
     factory: EventFactory,
+    answered: bool = False,
 ) -> UntetherEvent:
     is_error = content.is_error is True
     raw_result = content.content
@@ -7140,7 +7144,7 @@ def _tool_result_event(
         action_id=action.id,
         kind=action.kind,
         title=action.title,
-        ok=not is_error,
+        ok=answered or not is_error,
         detail=detail,
     )
 
@@ -7552,6 +7556,12 @@ def _reconcile_handled_requests(state: ClaudeStreamState) -> list[UntetherEvent]
     ]
     for rid in handled:
         state.pending_control_requests.pop(rid, None)
+        record = _HANDLED_REQUESTS.get(rid)
+        if record is not None and record.action == "answer":
+            action_id = state.request_to_action.get(rid)
+            state.answered_ask_tools.update(
+                k for k, v in state.control_action_for_tool.items() if v == action_id
+            )
         # #942: an action from an earlier turn isn't in this turn's tracker —
         # retire the mapping silently instead of adding a fresh row here.
         same_turn = state.request_turn.get(rid, state.turn) == state.turn
@@ -9097,11 +9107,11 @@ def _translate_claude_event_base(
                         title="tool result",
                         detail={},
                     )
+                answered = tool_use_id in state.answered_ask_tools
+                state.answered_ask_tools.discard(tool_use_id)
                 out.append(
                     _tool_result_event(
-                        content,
-                        action=action,
-                        factory=factory,
+                        content, action=action, factory=factory, answered=answered
                     )
                 )
                 # Complete any associated control action (e.g. permission approval)

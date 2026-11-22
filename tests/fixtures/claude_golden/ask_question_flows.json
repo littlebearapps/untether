@@ -1018,7 +1018,7 @@
       "kind": "note",
       "title": "ask user"
      },
-     "ok": false,
+     "ok": true,
      "phase": "completed",
      "type": "action"
     }
@@ -1057,7 +1057,7 @@
       ]
      ],
      "op": "edit",
-     "text": "working · claude · <t> · step 4\n\n✓ ask user\n✓ Permission resolved\n✗ ask user\n✓ Permission resolved\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+     "text": "working · claude · <t> · step 4\n\n✓ ask user\n✓ Permission resolved\n✓ ask user\n✓ Permission resolved\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
     },
     {
      "id": 5,

@@ -733,6 +733,67 @@ def test_ask_question_not_denied_when_on() -> None:
         reset_run_options(token)
 
 
+@pytest.mark.parametrize(("action", "ok"), [("answer", True), ("deny", False)])
+def test_1372_typed_answer_closes_the_ask_row_as_answered(
+    action: str, ok: bool
+) -> None:
+    """#1372: a typed answer is a deny that carries it, so the CLI's error
+    ``tool_result`` must still close the row ✓; a Deny tap stays ✗."""
+    from untether.runners.claude import mark_request_handled
+
+    state, factory = _make_state_with_session()
+    frames = [
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_ask",
+                        "name": "AskUserQuestion",
+                        "input": {"question": "Any deadline?"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "control_request",
+            "request_id": "req-ask",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "tool_use_id": "toolu_ask",
+                "input": {"question": "Any deadline?"},
+            },
+        },
+    ]
+    for frame in frames:
+        translate_claude_event(
+            _decode_event(frame), title="claude", state=state, factory=factory
+        )
+    mark_request_handled("req-ask", action=action)
+    result = {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_ask",
+                    "content": "The user answered.",
+                    "is_error": True,
+                }
+            ]
+        },
+    }
+    events = translate_claude_event(
+        _decode_event(result), title="claude", state=state, factory=factory
+    )
+    (row,) = [e for e in events if e.action.id == "toolu_ask"]
+    assert row.ok is ok
+    assert not state.answered_ask_tools
+
+
 # ===========================================================================
 # Cross-chat isolation (#144)
 # ===========================================================================

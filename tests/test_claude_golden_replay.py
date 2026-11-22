@@ -146,7 +146,7 @@ CLOSE_GRACE_S = 2 * REPLAY_TIMEOUT_S
 GOLDEN_SHA256: dict[str, str] = {
     "approval_pending_across_result.json": "153d570e0bd38978ab2a5dd8c5dab8cd3ab2e8d9e1645d55d5da1f4630583413",
     "approval_pending_across_result.jsonl": "cb679ff7082bf4677a39a9ded3fb4c752fbbdf18f4c1acadc87f2a23cdfcf201",
-    "ask_question_flows.json": "98bd5e53b8c8500f235cc8ceacc45c006d80162f130edd33aa48f775a9a88cc2",
+    "ask_question_flows.json": "cdd82ecea33c9f9c398d87b030a0120b7847795873f8a2356f6d0b7000a3f837",
     "ask_question_flows.jsonl": "12c656ff8f8957afa9cb21ade36d36b7693401617cb7fd68abcefdd35b40cdfc",
     "auto_handled_requests.json": "624bb67467481d736d3ec54a120e5d7b0f7f3f126fed08ab2e601ab832eccc71",
     "auto_handled_requests.jsonl": "33d316117774e476785d8b039c68b912cdb0467ab49ad5bdde7f600904ac6894",
