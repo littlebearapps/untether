@@ -73,6 +73,7 @@
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
 - **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
 - **fix:** a resent final can no longer be posted twice when a shutdown lands while it is being sent: the send and its removal from `pending_finals.json` finish together [#1270](https://github.com/littlebearapps/untether/issues/1270)
+- **fix:** an answer ending inside a code block in a list item or blockquote no longer swallows the footer; Untether now asks the Markdown parser whether a block is still open, instead of adding a closer that could open a new block [#1271](https://github.com/littlebearapps/untether/issues/1271)
 
 ### docs
 
