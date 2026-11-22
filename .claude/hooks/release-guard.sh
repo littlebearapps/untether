@@ -74,35 +74,6 @@ if echo "$COMMAND" | grep -qPi '\bgit\b.*\bpush\b' && \
     REASON="git push of a version tag is blocked. Tags are created by auto-tag-on-master.yml."
   fi
 
-  # No explicit branch target — check if current branch is master/main
-  if [ "$BLOCKED" = false ]; then
-    # #1236: read the args of a real `git … push` only, and never through
-    # xargs, which aborts on an unbalanced quote in unrelated text (fail-closed
-    # block). awk splits on whitespace; quotes are dropped so "HEAD" is HEAD.
-    # Every push in the command is checked, not only the first; no match
-    # leaves one empty line, which fails closed on master/main.
-    CURRENT=$(git branch --show-current 2>/dev/null || echo "")
-    # The hook's cwd says nothing about a push after a directory or repo
-    # switch (cd/pushd/popd, git -C/--git-dir/--work-tree/-c core.worktree,
-    # GIT_DIR-style env, env -C) or inside another shell (sh -c, eval):
-    # treat the branch as master so the push needs an explicit target.
-    if echo "$COMMAND" | grep -qP '\b(cd|pushd|popd)\b|\bgit\b[^;&|]*?\s(-C|--git-dir|--work-tree)\b|\bcore\.worktree\b|\bGIT_(DIR|WORK_TREE|COMMON_DIR)=|\benv\b[^;&|]*?\s(-C|--chdir)\b|\b(ba|z|da)?sh\s+(-\w*c|-c)\b|\beval\b'; then
-      CURRENT=master
-    fi
-    if [ "$CURRENT" = "master" ] || [ "$CURRENT" = "main" ]; then
-      while IFS= read -r PUSH_ARGS; do
-        PUSH_NOFLAG=$(echo "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_-]*//g' | tr -d "'\"")
-        PUSH_BRANCH=$(echo "$PUSH_NOFLAG" | awk '{print $3}')
-        case "$PUSH_BRANCH" in
-          "" | HEAD | @)
-            BLOCKED=true
-            REASON="git push on master/main without explicit feature branch target is blocked. Use: git push -u origin <feature-branch>"
-            ;;
-        esac
-        # each match starts with "push" (grep -o drops empty matches): push remote branch
-      done <<< "$(echo "$COMMAND" | grep -oP '(?i)\bgit\b[^;&|]*?\K\bpush\b[^;&|]*' || true)"
-    fi
-  fi
 fi
 
 # ── git tag with version arg ─────────────────────────────────────
@@ -280,7 +251,7 @@ SEG_TAIL='(?:\$\([^()]*(?:\([^()]*\)[^()]*)*\)|`[^`]*`|[^;&|])*'
 
 # None of this applies to a command that never mentions gh, curl or wget, so
 # those skip the extra work.
-if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget)([^A-Za-z0-9_]|$) ]]; then
+if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push)([^A-Za-z0-9_]|$) ]]; then
   # A command that hands a quoted string to another shell (`bash -c '…'`, `eval`,
   # `ssh host '…'`, `xargs`, `bash <<EOF`) runs that string, so its quotes are
   # treated as command separators and nothing is blanked.
@@ -289,6 +260,25 @@ if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget)([^A-Za-z0-9_]|$) ]]; then
   else
     STRUCT_COMMAND=$(printf '%s' "$COMMAND" | struct_command)
   fi
+
+  # 0. git push names its target (#1390, #1236). Every `git … push` in command
+  #    position must give a literal branch or refspec other than HEAD/@; a bare
+  #    push, a $VAR or a blanked quote is denied. The hook's cwd is never
+  #    trusted (cd, git -C, GIT_DIR, sh -c all move the push elsewhere), and
+  #    quoted text that only mentions push is blanked, so it doesn't count.
+  #    master/main targets are denied by the keyword checks above.
+  while IFS= read -r PUSH_ARGS; do
+    [ -n "$PUSH_ARGS" ] || continue
+    PUSH_NOFLAG=$(printf '%s\n' "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_=-]*//g' | tr -d "'\"")
+    PUSH_TARGET=$(printf '%s\n' "$PUSH_NOFLAG" | awk '{print $3}')
+    if [[ ! "$PUSH_TARGET" =~ ^\+?[A-Za-z0-9_./:-]+$ ]] || [[ "$PUSH_TARGET" =~ ^\+?(HEAD|@)$ ]]; then
+      BLOCKED=true
+      REASON="git push must name its branch: use git push -u origin <feature-branch> (no bare push, HEAD, @ or variable target)."
+    fi
+  done <<< "$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "${CMD_POS}(?:(?:eval|env(?:\\s+(?:-\\S+(?:\\s+[^\\s;&|-]\\S*)?|[A-Za-z_]\\w*=\\S*))*)\\s+)*(?:[\\w./~-]*/)?git(?:\\s+-\\S+(?:\\s+[^\\s;&|-]\\S*)?)*?\\s+\\Kpush\\b${SEG_TAIL}" || true)"
+
+  # Everything below is about gh, curl and wget only.
+  if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget)([^A-Za-z0-9_]|$) ]]; then
 
   # 1. gh aliases. An alias set in one command and used in the next hides a merge
   #    or release from every check here. Setting one is never needed.
@@ -373,6 +363,7 @@ if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget)([^A-Za-z0-9_]|$) ]]; then
      ! printf '%s' "$STRUCT_COMMAND" | grep -qP -- "${GH_POS}\\s+repo\\s+set-default\\s+(--view|-v)\\s*(\$|[;&|)])"; then
     ASK=true
     ASK_REASON="⚠️ gh repo set-default changes which repository gh pr, gh release and gh workflow act on in this checkout. Approve only if Nathan asked for it."
+  fi
   fi
 fi
 

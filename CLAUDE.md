@@ -120,7 +120,8 @@ versions to PyPI. Third-party actions are pinned to SHAs.
   releases and non-`dev`-head or red-CI `master` merges, and asks before a release merge, any `gh workflow run` / `gh run rerun`, or a non-dev Untether restart.
   Its sibling-path checks ([#1242](https://github.com/littlebearapps/untether/issues/1242)) also deny retargeting a PR to `master`
   (`gh pr edit --base`, `gh api …/pulls/<n>` with `base=`), risky `gh` aliases and curl/wget writes to the GitHub API,
-  and ask before `gh repo set-default` or showing the `gh` token.
+  and ask before `gh repo set-default` or showing the `gh` token. Every `git push` must name its branch
+  (`git push -u origin <branch>`): a bare push, `HEAD`, `@` or a variable target is denied ([#1390](https://github.com/littlebearapps/untether/issues/1390)).
   It's a tripwire, not a boundary — obey the rules regardless, and never work around a block. **Never edit
   `.claude/settings.json` or the guard scripts** (`.claude/hooks/release-guard*.sh`, `help-faq-protect.sh`); personal
   settings go in `.claude/settings.local.json`.

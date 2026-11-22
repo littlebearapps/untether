@@ -114,7 +114,16 @@ bash_check "cd ../onmaster && git push"                   deny
 bash_check "git -C ../onmaster push"                      deny
 bash_check "cd ../onmaster && git push origin HEAD"       deny
 bash_check "cd ../repo && git push -u origin feature/x"   allow
-bash_check "git push"                                     allow
+bash_check "git push"                                     deny
+# #1390: every push names a literal branch, wherever it runs
+bash_check "git push -u origin HEAD"                     deny
+bash_check "git push origin \$BRANCH"                    deny
+bash_check "git push --force-with-lease"                 deny
+bash_check "direnv exec . git push -q origin fix/x"      allow
+bash_check "git push origin HEAD:feature/x"              allow
+# text that only mentions push is not a push
+bash_check "git commit -m 'fix the git push args'"      allow
+bash_check "grep -rn 'git push' docs/"                  allow
 bash_check "GIT_DIR=../onmaster/.git git push"            deny
 bash_check "env -C ../onmaster git push"                  deny
 bash_check "bash -c 'git push'"                           deny
