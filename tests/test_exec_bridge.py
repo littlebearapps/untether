@@ -541,6 +541,17 @@ async def test_962_cancelled_card_closes_rows_left_running() -> None:
     assert "✓ `echo ok`" in last_edit
     assert "▸" not in last_edit
 
+    # #1371: /export closes the stopped command the same way.
+    from untether.telegram.commands.export import (
+        _format_export_markdown,
+        latest_session_for_chat,
+    )
+
+    session = latest_session_for_chat(123)
+    assert session is not None
+    export = _format_export_markdown(session.session_id, session.events, None)
+    assert export.rstrip().endswith("- ✗ `sleep 60`")
+
 
 @contextlib.contextmanager
 def _run_model(model: str | None):

@@ -1981,6 +1981,27 @@ def _record_export_event(
         )
 
 
+def _close_cancelled_actions(
+    state: ProgressState, *, channel_id: ChannelId
+) -> ProgressState:
+    """#962's ✗ rows for a cancelled card, recorded for /export too (#1371),
+    so the transcript no longer lists a stopped command as still running."""
+    factory = EventFactory(engine=state.engine)
+    for a in state.actions:
+        if not a.completed:
+            _record_export_event(
+                factory.action_completed(
+                    action_id=a.action.id,
+                    kind=a.action.kind,
+                    title=a.action.title,
+                    ok=False,
+                ),
+                state.resume,
+                channel_id=channel_id,
+            )
+    return close_open_actions(state)
+
+
 def _log_runner_event(evt: UntetherEvent) -> None:
     for line in render_event_cli(evt):
         logger.debug(
@@ -8790,12 +8811,13 @@ async def handle_message(
             return
         # #890: a cancelled turn ends a run of capped repeats too.
         capped_wake_error.clear()
-        state = close_open_actions(
+        state = _close_cancelled_actions(
             ctx.tracker.snapshot(
                 resume_formatter=runner.format_resume,
                 context_line=context_line,
                 meta_formatter=format_meta_line,
-            )
+            ),
+            channel_id=incoming.channel_id,
         )
         rendered = effective_presenter.render_progress(
             state,
@@ -9319,12 +9341,13 @@ async def handle_message(
                 session_id=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
-            state = close_open_actions(
+            state = _close_cancelled_actions(
                 progress_tracker.snapshot(
                     resume_formatter=runner.format_resume,
                     context_line=context_line,
                     meta_formatter=format_meta_line,
-                )
+                ),
+                channel_id=incoming.channel_id,
             )
             # #1061: an engine holding its answer for background work
             # (Antigravity) says where the answer went.
