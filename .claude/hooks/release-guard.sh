@@ -79,16 +79,21 @@ if echo "$COMMAND" | grep -qPi '\bgit\b.*\bpush\b' && \
     # #1236: read the args of a real `git … push` only, and never through
     # xargs, which aborts on an unbalanced quote in unrelated text (fail-closed
     # block). awk splits on whitespace; quotes are dropped so "HEAD" is HEAD.
-    PUSH_ARGS=$(echo "$COMMAND" | grep -oP '(?i)\bgit\b[^;&|]*?\bpush\b\K[^;&|]*' | head -1 || true)
-    PUSH_NOFLAG=$(echo "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_-]*//g' | tr -d "'\"")
-    PUSH_BRANCH=$(echo "$PUSH_NOFLAG" | awk '{print $2}')
-
-    if [ -z "$PUSH_BRANCH" ] || [ "$PUSH_BRANCH" = "HEAD" ]; then
-      CURRENT=$(git branch --show-current 2>/dev/null || echo "")
-      if [ "$CURRENT" = "master" ] || [ "$CURRENT" = "main" ]; then
-        BLOCKED=true
-        REASON="git push on master/main without explicit feature branch target is blocked. Use: git push -u origin <feature-branch>"
-      fi
+    # Every push in the command is checked, not only the first; no match
+    # leaves one empty line, which fails closed on master/main.
+    CURRENT=$(git branch --show-current 2>/dev/null || echo "")
+    if [ "$CURRENT" = "master" ] || [ "$CURRENT" = "main" ]; then
+      while IFS= read -r PUSH_ARGS; do
+        PUSH_NOFLAG=$(echo "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_-]*//g' | tr -d "'\"")
+        PUSH_BRANCH=$(echo "$PUSH_NOFLAG" | awk '{print $3}')
+        case "$PUSH_BRANCH" in
+          "" | HEAD | @)
+            BLOCKED=true
+            REASON="git push on master/main without explicit feature branch target is blocked. Use: git push -u origin <feature-branch>"
+            ;;
+        esac
+        # each match starts with "push" (grep -o drops empty matches): push remote branch
+      done <<< "$(echo "$COMMAND" | grep -oP '(?i)\bgit\b[^;&|]*?\K\bpush\b[^;&|]*' || true)"
     fi
   fi
 fi

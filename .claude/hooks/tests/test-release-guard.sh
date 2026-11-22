@@ -101,6 +101,14 @@ bash_check "git push origin dev"                          allow
 bash_check "sed -i 's/old/dev recreated via git push it'\"'\"'s fine/' notes.md"  allow
 bash_check "echo \"we push it's done\""                   allow
 bash_check "git push origin \"feature/x\""                allow
+# #1236 hardening: on master every push without a feature target is denied
+git -C "$TMP" init -q -b master onmaster 2>/dev/null
+cd "$TMP/onmaster" || exit 2
+bash_check "git push origin feature/x; git push"          deny
+bash_check "git push origin @"                            deny
+bash_check "git push origin \"HEAD\""                     deny
+bash_check "git push -u origin feature/x"                 allow
+cd "$TMP/repo" || exit 2
 bash_check "git tag v0.36.0"                              deny
 bash_check "git tag -l"                                   allow
 bash_check "gh release create v0.36.0"                    deny
