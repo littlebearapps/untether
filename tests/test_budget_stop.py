@@ -233,6 +233,93 @@ class TestPerRunStop:
         assert [c[1] for c in closes] == ["budget_stop"]
 
 
+# ---------------------------------------------------------------------------
+# #1323: the per-run alert and Stop at limit share one run total
+# ---------------------------------------------------------------------------
+
+
+def _ten_turns() -> ScriptRunner:
+    """Ten $0.50 results in one live session (Claude reports a running
+    session total, so turn N says N * $0.50)."""
+    steps: list = [
+        Emit(StartedEvent(engine="claude", resume=_TOKEN)),
+        Emit(
+            CompletedEvent(
+                engine="claude",
+                resume=_TOKEN,
+                ok=True,
+                answer="ANSWER-1",
+                usage={"total_cost_usd": 0.50, "num_turns": 1},
+            )
+        ),
+    ]
+    for turn in range(2, 11):
+        steps += [
+            Emit(
+                TurnEvent(
+                    engine="claude", phase="started", turn=turn, reason="followup"
+                )
+            ),
+            Emit(
+                TurnEvent(
+                    engine="claude",
+                    phase="completed",
+                    turn=turn,
+                    reason="followup",
+                    ok=True,
+                    answer=f"ANSWER-{turn}",
+                    resume=_TOKEN,
+                    usage={"total_cost_usd": 0.50 * turn, "num_turns": turn},
+                )
+            ),
+        ]
+    return ScriptRunner(steps, engine="claude", resume_value=_TOKEN.value)
+
+
+def _final_of(transport: FakeTransport, turn: int) -> str:
+    texts = _texts_with(transport, f"ANSWER-{turn}\n")
+    assert texts, turn
+    return texts[-1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("auto_cancel", [False, True])
+async def test_1323_alert_and_stop_use_the_run_total(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch, auto_cancel: bool
+) -> None:
+    """The issue's acceptance numbers: max_cost_per_run = 2 (warn at 80%,
+    so 75% after turn 3 stays quiet). The suffix first shows on turn 4
+    ($2.00); with Stop at limit, turn 4's reply carries the stop line and
+    the session closes after it, and both report the same total."""
+    budget = (
+        f"enabled = true\nmax_cost_per_run = 2.00\nwarn_at_pct = 80\n"
+        f"auto_cancel = {str(auto_cancel).lower()}"
+    )
+    _write_config(cfg_path, budget)
+    transport, closes, logs = await _drive_live(monkeypatch, _ten_turns())
+
+    for turn in (1, 2, 3):
+        final = _final_of(transport, turn)
+        assert "budget" not in final and "\N{WARNING SIGN}" not in final, turn
+    turn4 = _final_of(transport, 4)
+    assert "\N{OCTAGONAL SIGN} budget" in turn4  # the 💰 line's suffix
+    stopped = [e for e in logs if e["event"] == "cost_budget.run_stopped"]
+    if not auto_cancel:
+        # Before #1323 no turn's own $0.50 ever reached $2: no suffix at all.
+        assert "\N{OCTAGONAL SIGN} budget" in _final_of(transport, 10)
+        assert closes == [] and stopped == []
+        return
+    assert "Stopped: run cost $2.00 passed the per-run budget $2.00" in turn4
+    assert [c[1] for c in closes] == ["budget_stop"]
+    assert closes[0][3] > next(
+        i
+        for i, c in enumerate(transport.send_calls)
+        if "ANSWER-4\n" in c["message"].text
+    )  # closed after turn 4's reply went out
+    assert len(stopped) == 1 and stopped[0]["run_cost"] == pytest.approx(2.0)
+    assert not any("Stopped:" in _final_of(transport, t) for t in (1, 2, 3))
+
+
 def test_budget_stop_is_a_clean_close_reason() -> None:
     """A budget close at idle may stop cleanly (no quarantine), and the
     background panel and closing notice name it."""

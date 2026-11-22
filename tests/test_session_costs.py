@@ -163,10 +163,10 @@ async def test_live_followup_turn_budget_sees_delta(
     seen: list[float] = []
     real_check = rb._check_cost_budget
 
-    def _spy(usage: dict[str, Any] | None):
+    def _spy(usage: dict[str, Any] | None, **kwargs: Any):
         if usage is not None:
             seen.append(usage["total_cost_usd"])
-        return real_check(usage)
+        return real_check(usage, **kwargs)
 
     monkeypatch.setattr(rb, "_check_cost_budget", _spy)
     sid = "fake-live-session"

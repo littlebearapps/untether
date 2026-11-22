@@ -78,6 +78,7 @@
 - **fix:** `/new` sent just after an answer arrives, while the engine is still exiting, no longer says it cancelled the run [#1372](https://github.com/littlebearapps/untether/issues/1372)
 - **fix:** while the chat settings file can't be read, `/planmode`, `/config` and the other settings commands show the settings runs actually use instead of the defaults, and a change made then says it couldn't be saved instead of being dropped silently [#1373](https://github.com/littlebearapps/untether/issues/1373)
 - **fix:** a file sent with a caption survives a brief Telegram network error: fetching and downloading the file is tried up to three times, and if it still fails the reply says the file wasn't saved and your message wasn't sent, instead of dropping the caption silently [#1365](https://github.com/littlebearapps/untether/issues/1365)
+- **fix:** the per-run budget alert in a live session now counts the whole run (every turn so far), the same total Stop at limit uses, so the ⚠️/🛑 footer and the stop line agree; the cost budgets guide now says a run can go over the limit by up to one turn [#1323](https://github.com/littlebearapps/untether/issues/1323)
 
 ### docs
 

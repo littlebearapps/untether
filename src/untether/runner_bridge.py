@@ -1739,12 +1739,18 @@ def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
 
 def _check_cost_budget(
     usage: dict[str, Any] | None,
+    *,
+    run_cost: float | None = None,
 ) -> tuple[str | None, object | None]:
     """Check run cost against budget.
 
     Returns ``(alert_text, alert_object)`` where *alert_object* is a
     :class:`CostAlert` (or *None*) containing ``ratio`` and ``level`` fields
     for inline budget suffix rendering.
+
+    ``usage`` is this result's cost (added to the daily total). ``run_cost``
+    (#1323) is the run's total so far, every turn of a live session, which
+    the per-run alert compares, the same total "Stop at limit" uses.
 
     Per-chat overrides for ``budget_enabled`` and ``budget_auto_cancel``
     are read from :func:`get_run_options` when available.
@@ -1793,7 +1799,7 @@ def _check_cost_budget(
             warn_at_pct=budget_cfg.warn_at_pct,
             auto_cancel=auto_cancel,
         )
-        alert = check_run_budget(cost, budget)
+        alert = check_run_budget(cost if run_cost is None else run_cost, budget)
         if alert is not None:
             return format_cost_alert(alert), alert
         return None, None
@@ -1821,20 +1827,30 @@ class _CompletionAccounting:
     budget_stop_text: str | None = None
 
 
+def _add_budget_run_cost(
+    state: dict[str, Any], run_usage: dict[str, Any] | None
+) -> float:
+    """#896: add a result's spend (the #778 per-run / per-turn delta) to the
+    run's cumulative cost, the whole live run's spend; returns the total."""
+    cost = (run_usage or {}).get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+        state["run_cost"] += float(cost)
+    return state["run_cost"]
+
+
 def _note_budget_run_cost(
     state: dict[str, Any],
-    run_usage: dict[str, Any] | None,
     *,
     engine: str,
     session_id: str | None,
 ) -> str | None:
-    """#896: add a result's spend to the run's cumulative cost and decide
-    whether its live session must end after this reply.
+    """#896: decide whether a live session must end after this reply, from
+    the run's cumulative cost (``_add_budget_run_cost`` has added this
+    result already).
 
-    ``run_usage`` is the #778 per-run / per-turn delta, so the running sum is
-    the whole live run's spend. Returns the stop line the first time the
-    budget is passed (the session id is then kept in ``state["sid"]`` for
-    ``close`` after delivery); ``None`` otherwise. Never raises.
+    Returns the stop line the first time the budget is passed (the session
+    id is then kept in ``state["sid"]`` for ``close`` after delivery);
+    ``None`` otherwise. Never raises.
 
     Synchronous on purpose: when it stops, the live session refuses further
     input (``stop_live_session_input``) before the caller awaits anything, so
@@ -1842,9 +1858,6 @@ def _note_budget_run_cost(
     while the stopping reply is still being sent. Either way the result is
     then marked accounted, releasing any follow-up waiting on the check.
     """
-    cost = (run_usage or {}).get("total_cost_usd")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
-        state["run_cost"] += float(cost)
     if engine != "claude" or not session_id:
         return None
     try:
@@ -7686,7 +7699,10 @@ async def handle_message(
             triggered=bool(context and context.trigger_source),
         )
         # Records the daily total (record_run_cost) as well as checking it.
-        alert_text, alert = _check_cost_budget(run_usage)
+        # #1323: the per-run alert reads the same run total as Stop at limit.
+        alert_text, alert = _check_cost_budget(
+            run_usage, run_cost=_add_budget_run_cost(budget_stop, run_usage)
+        )
         acct = _CompletionAccounting(
             resume_value=resume_value,
             run_usage=run_usage,
@@ -7694,10 +7710,7 @@ async def handle_message(
             cost_alert=alert,
             outlier_text=_check_run_cost_outlier(run_usage),
             budget_stop_text=_note_budget_run_cost(
-                budget_stop,
-                run_usage,
-                engine=runner.engine,
-                session_id=resume_value,
+                budget_stop, engine=runner.engine, session_id=resume_value
             ),
         )
         if turn is not None:
