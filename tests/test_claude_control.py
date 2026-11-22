@@ -5010,6 +5010,39 @@ async def test_845_interrupt_only_with_a_pending_request_and_open_turn() -> None
         _REQUEST_TO_SESSION.pop("r-845", None)
 
 
+@pytest.mark.anyio
+async def test_845_result_logged_when_the_run_ends_inside_a_poll_tick() -> None:
+    """#845: the errored first result ends the run, and the bridge cancels
+    the waiter, often inside one poll tick (seen on CI). The result still
+    logs ``claude.interrupt.result``, never ``no_result``."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _SESSION_BG_STATE, interrupt_pending_turn
+
+    sid = "sess-845-race"
+    _SESSION_STDIN[sid] = AsyncMock()
+    state = ClaudeStreamState()
+    _SESSION_BG_STATE[sid] = state
+    _register_live_request("r-845-race", sid)
+    try:
+        with capture_logs() as logs:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    lambda: interrupt_pending_turn(sid, grace_s=5.0, poll_s=10.0)
+                )
+                await anyio.sleep(0.05)  # the waiter is inside its poll sleep
+                state.result_received_at = 1.0
+                tg.cancel_scope.cancel()
+        events = [e["event"] for e in logs]
+        assert "claude.interrupt.result" in events
+        assert "claude.interrupt.no_result" not in events
+    finally:
+        _SESSION_BG_STATE.pop(sid, None)
+        _SESSION_STDIN.pop(sid, None)
+        _ACTIVE_RUNNERS.pop(sid, None)
+        _REQUEST_TO_SESSION.pop("r-845-race", None)
+
+
 # #837 — cross-check a flagged request against the CLI's pending list
 
 

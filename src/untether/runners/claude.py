@@ -1624,26 +1624,38 @@ async def interrupt_pending_turn(
     started = time.monotonic()
     logger.info("claude.interrupt.sent", session_id=session_id, request_id=request_id)
     grace = INTERRUPT_RESULT_GRACE_S if grace_s is None else grace_s
-    with anyio.move_on_after(grace):
-        # The reader sets ``result_received_at`` in translate (no event to await).
-        while True:
-            if state.result_received_at is not None:
-                break
-            if _SESSION_STDIN.get(session_id) is not stdin:
-                logger.info(
-                    "claude.interrupt.process_gone",
-                    session_id=session_id,
-                    request_id=request_id,
-                )
-                return False
-            await anyio.sleep(poll_s)
+
+    def _log_result() -> None:
         logger.info(
             "claude.interrupt.result",
             session_id=session_id,
             request_id=request_id,
             waited_s=round(time.monotonic() - started, 2),
         )
+
+    with anyio.move_on_after(grace):
+        # The reader sets ``result_received_at`` in translate (no event to await).
+        try:
+            while True:
+                if state.result_received_at is not None:
+                    break
+                if _SESSION_STDIN.get(session_id) is not stdin:
+                    logger.info(
+                        "claude.interrupt.process_gone",
+                        session_id=session_id,
+                        request_id=request_id,
+                    )
+                    return False
+                await anyio.sleep(poll_s)
+        except anyio.get_cancelled_exc_class():
+            # The run can end (and cancel its caller) inside one poll tick.
+            if state.result_received_at is not None:
+                _log_result()
+            raise
+        _log_result()
         return True
+    if state.result_received_at is not None:
+        return True  # landed as the grace expired; logged in the except
     logger.warning(
         "claude.interrupt.no_result",
         session_id=session_id,
