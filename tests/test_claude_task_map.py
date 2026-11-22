@@ -17,6 +17,7 @@ from untether.runners.claude import (
     BG_BASH_MAX_KEEP_S,
     ClaudeStreamState,
     _bash_output_activity,
+    _live_background_counts,
     background_task_summary,
     has_live_background_work,
     latest_background_activity,
@@ -335,6 +336,29 @@ def test_native_events_make_legacy_bash_agent_handles_ignored() -> None:
     assert "toolu_a" in state.live_bg_agents  # legacy handle registered
     _feed(state, _started_agent("a1", "toolu_a"))
     _feed(state, _notification("a1", "toolu_a", "completed"))
+    assert has_live_background_work(state) is False
+
+
+def test_1172_nested_agent_without_flag_runs_foreground_and_never_holds() -> None:
+    """#1172, probed on CLI 2.1.330: a subagent's own Agent call omits
+    ``run_in_background`` and the CLI runs it in the foreground
+    (``task_started.is_backgrounded: false``). The legacy handle still
+    registers (``_agent_runs_in_background`` reads input only), but the parent's
+    ``task_started`` always precedes the nested call, so the native map —
+    which says foreground — already decides liveness and the #777 panel."""
+    state = ClaudeStreamState()
+    _feed(state, _tool_use("Agent", "toolu_p", {"description": "x", "prompt": "y"}))
+    _feed(state, _started_agent("a_p", "toolu_p"))
+    nested = _tool_use("Agent", "toolu_n", {"description": "n", "prompt": "PONG"})
+    _feed(state, {**nested, "parent_tool_use_id": "toolu_p"})
+    assert "toolu_n" in state.live_bg_agents  # legacy handle, inert here
+    _feed(
+        state,
+        {**_started_agent("a_n", "toolu_n"), "is_backgrounded": False},
+    )
+    assert _live_background_counts(state) == (0, 1)  # the parent only
+    _feed(state, _notification("a_n", "toolu_n", "completed"))
+    _feed(state, _notification("a_p", "toolu_p", "completed"))
     assert has_live_background_work(state) is False
 
 
