@@ -306,6 +306,62 @@ async def test_pending_final_survives_a_restart(tmp_path) -> None:
     assert json.loads(path.read_text()) == {}
 
 
+class _SlowReplyBot(_ScriptedBot):
+    """Telegram takes the send at once, but the reply is still on its way."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.accepted = anyio.Event()
+
+    async def send_message(self, *args: Any, **kwargs: Any) -> Message | None:  # type: ignore[override]
+        sent = await super().send_message(*args, **kwargs)
+        self.accepted.set()
+        await anyio.sleep(0.05)
+        return sent
+
+
+async def test_1270_shutdown_mid_redelivery_never_posts_twice(tmp_path) -> None:
+    path = tmp_path / pf.STATE_FILENAME
+    first = TelegramTransport(_ScriptedBot(["resend"]))
+    first.pending_finals.attach(path)
+    await _send_final(first, _final("answer"))
+
+    bot = _SlowReplyBot()
+    second = TelegramTransport(bot)
+    second.pending_finals.attach(path)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(second.pending_finals.redeliver, bot)
+        await bot.accepted.wait()
+        tg.cancel_scope.cancel()  # shutdown lands after Telegram took it
+
+    assert _texts(bot) == ["answer"]
+    third = TelegramTransport(bot)
+    third.pending_finals.attach(path)
+    assert len(third.pending_finals) == 0
+    await third.pending_finals.redeliver(bot)
+    assert _texts(bot) == ["answer"]
+
+
+async def test_1270_shutdown_between_chunks_keeps_only_the_rest(tmp_path) -> None:
+    path = tmp_path / pf.STATE_FILENAME
+    first = TelegramTransport(_ScriptedBot(["resend"]))
+    first.pending_finals.attach(path)
+    await _send_final(first, _final("one", "two"))
+
+    bot = _SlowReplyBot()
+    second = TelegramTransport(bot)
+    second.pending_finals.attach(path)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(second.pending_finals.redeliver, bot)
+        await bot.accepted.wait()
+        tg.cancel_scope.cancel()
+
+    third = TelegramTransport(bot)
+    third.pending_finals.attach(path)
+    await third.pending_finals.redeliver(bot)
+    assert _texts(bot) == ["one", "two"]
+
+
 async def test_corrupt_state_file_loads_empty(tmp_path) -> None:
     path = tmp_path / pf.STATE_FILENAME
     path.write_text("{not json")
