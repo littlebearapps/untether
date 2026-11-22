@@ -375,6 +375,8 @@ def _session_token_lines(channel_id: object, engine: str) -> list[str] | None:
         last = html.escape(_format_token_breakdown(ledger.last_run))
         if ledger.last_source == "baseline_unknown" and runs == 1:
             last += " (includes earlier runs outside Untether)"
+        elif ledger.last_source == "unreported_runs" and runs == 1:
+            last += " (includes an earlier run that ended before reporting usage)"
         lines.append(f"<b>Last run:</b> {last}")
     else:
         lines.append(session_line)
@@ -412,11 +414,19 @@ def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
             notify=True,
             parse_mode="HTML",
         )
-    source = "its exec mode" if engine == "codex" else "its CLI"
-    lines.append(
-        f"Quota and plan limits are not available for {esc_engine} — {source}"
-        " doesn't report them. Transcript: /export"
-    )
+    if engine == "codex":
+        # #1370: app-server has account/rateLimits/read; Untether doesn't
+        # call it yet (gap recorded in the Codex register).
+        limits = (
+            "Quota and plan limits are not shown for codex — `codex exec`"
+            " doesn't report them, and Untether doesn't read app-server's yet."
+        )
+    else:
+        limits = (
+            f"Quota and plan limits are not available for {esc_engine} — its"
+            " CLI doesn't report them."
+        )
+    lines.append(f"{limits} Transcript: /export")
     return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
 
 

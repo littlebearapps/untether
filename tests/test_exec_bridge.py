@@ -15402,3 +15402,34 @@ async def test_1176_final_sent_is_marked_on_the_running_task() -> None:
     )
     assert seen
     assert all(task.final_sent for task in seen)
+
+
+# ── #1370: a session Untether started is noted before any usage arrives ─────
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_1370_fresh_run_notes_its_session_for_the_token_ledger(
+    resumed: bool,
+) -> None:
+    """A first run cancelled before reporting usage left no ledger entry,
+    so the next resumed run read as "outside Untether"."""
+    from untether.runner_bridge import run_runner_with_cancel
+    from untether.session_costs import get_session_cost_ledger
+
+    runner = ScriptRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="s-1370"
+    )
+    await run_runner_with_cancel(
+        runner,
+        prompt="p",
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="s-1370")
+        if resumed
+        else None,
+        edits=_make_edits(FakeTransport(), _KeyboardPresenter()),
+        running_task=None,
+        on_thread_known=None,
+        channel_id=123,
+    )
+    entry = get_session_cost_ledger()._entries.get(f"{CODEX_ENGINE}:s-1370", {})
+    assert bool(entry.get("started_here")) is not resumed
