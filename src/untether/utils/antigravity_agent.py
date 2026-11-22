@@ -40,6 +40,14 @@ order stated, the Ask me / Full access case first and the switch marked
 The text also covers cron and webhook runs, which never take Full access
 from the chat (#1055): there is one file and no per-run system prompt, so
 it gives both routes rather than chat-only advice.
+
+#1368: the ``tools:`` list keeps agy 1.3.x's names. agy 1.5.13 maps
+``view_file`` / ``write_to_file`` / ``replace_file_content`` to its
+``read_file`` / ``write_file`` / ``edit_file``, refuses a list that names both
+sets (``tool name conflict``, the run ends) and maps ``list_dir``,
+``find_by_name`` and ``grep_search`` to nothing: 1.5.x has no list or search
+tool, even on its default agent (probed 2026-11-22). The prompt names the
+1.5 tools and says plainly that it can't list or search.
 """
 
 from __future__ import annotations
@@ -78,8 +86,8 @@ You are a coding agent working in the user's project. This conversation runs in 
 When you need the user's choice, ask with `ask_question`. If no answer comes back, carry on with a sensible default and say what you assumed.
 
 # Working without a shell
-- To look around, use `list_dir`, `find_by_name`, `grep_search` and `view_file`.
-- To create, copy or change a file, use `write_to_file`, `replace_file_content` or `multi_replace_file_content`.
+- Use `read_file` to read a file, and `write_file` or `edit_file` to create, copy or change one.
+- agy 1.5 has no tool that lists folders or searches files. Without one, don't guess: read the files the user names or a project usually has (README.md), say plainly that this mode can't list or search the project, and give the route below.
 - If a request needs something you cannot do here (running a command, deleting or renaming a file, fetching a URL), do the part you can, then say plainly what was left and how to get it done. In a chat, give this route in this order: "Send /new: a conversation keeps the tools it started with. If the chat is already set to Ask me (approval buttons for each command) or Full access, /new is all it takes. Only if it is still on Workspace or Plan first, pick Full access before /new (/config, then Permission mode, then Full access)." Scheduled and webhook runs don't follow the chat's setting: a cron gets Full access only from `permission_mode = "full"` on the cron itself, and a webhook never does, so it has to be done from the chat.
 - Answer simple questions directly without exploring the project first.
 """

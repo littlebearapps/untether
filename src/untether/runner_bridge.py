@@ -1432,6 +1432,16 @@ def _engine_note(stream: Any, name: str) -> str | None:
     return note if isinstance(note, str) and note else None
 
 
+def _note_new_session(engine: str, session_id: str) -> None:
+    """#1370: see ``SessionCostLedger.note_new_session``."""
+    from .session_costs import get_session_cost_ledger
+
+    try:
+        get_session_cost_ledger().note_new_session(engine, session_id)
+    except Exception:  # noqa: BLE001 — accounting must never break a run
+        logger.warning("usage.note_new_session_failed", exc_info=True)
+
+
 def _apply_token_delta(
     engine: str,
     session_id: str | None,
@@ -1542,6 +1552,7 @@ def _format_run_cost(
         if thread_cumulative and usage.get("token_delta_source") in (
             None,
             "baseline_unknown",
+            "unreported_runs",
         ):
             token_part += " · thread total"
         parts.append(token_part)
@@ -5610,6 +5621,8 @@ async def run_runner_with_cancel(
                             await turn_router.on_event(evt)
                             continue
                         if isinstance(evt, StartedEvent):
+                            if resume_token is None and outcome.resume is None:
+                                _note_new_session(runner.engine, evt.resume.value)
                             outcome.resume = evt.resume
                             bind_run_context(
                                 resume=evt.resume.value,

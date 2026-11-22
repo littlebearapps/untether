@@ -611,3 +611,21 @@ def test_usage_marker_overrides_the_backend_declaration() -> None:
     # An explicit empty marker turns a declared engine's delta off.
     claude = {"usage_scope": {}, "total_cost_usd": 2.0}
     assert rb._apply_cost_delta("claude", "c-marked", claude, resumed=True) is claude
+
+
+def test_token_ledger_cancelled_first_run_is_not_outside_untether() -> None:
+    """#1370: /new, a run cancelled before it reported usage, then a resumed
+    run: the earlier run was Untether's, so the source isn't
+    ``baseline_unknown`` ("outside Untether")."""
+    ledger = SessionCostLedger(path=None)
+    ledger.note_new_session("codex", "t")
+    ledger.note_new_session("codex", "t")  # a second StartedEvent: no-op
+    assert ledger.session_tokens("codex", "t") is None
+    r = ledger.record_tokens(
+        "codex", "t", _tok(300, 20), scope="thread_cumulative", resumed=True
+    )
+    assert (r.source, r.delta["input_tokens"], r.runs) == ("unreported_runs", 300, 1)
+    unseen = ledger.record_tokens(
+        "codex", "u", _tok(300, 20), scope="thread_cumulative", resumed=True
+    )
+    assert unseen.source == "baseline_unknown"

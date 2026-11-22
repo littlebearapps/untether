@@ -661,7 +661,9 @@ class TestCodexErrorInfoHints:
         assert hint == CODEX_ERROR_INFO_HINTS[code]
 
     def test_specific_wording(self) -> None:
+        # #1369: with no model in Codex's config a resumed thread keeps it.
         assert "/model" in (codex_error_info_hint("modelNotFound") or "")
+        assert "/new" in (codex_error_info_hint("modelNotFound") or "")
         assert "codex login" in (codex_error_info_hint("unauthorized") or "")
         assert "/new" in (codex_error_info_hint("contextWindowExceeded") or "")
 

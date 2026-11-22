@@ -1530,10 +1530,16 @@ class AntigravityStreamState:
 
     def cancelled_hold_note(self) -> str | None:
         """The cancelled progress message's note, when the run was cancelled
-        while a listed background task was still running."""
+        while a listed background task was still running. #1372: only the
+        gate's ``Stop`` hook (``fullyIdle: false``) shows an answer was being
+        held; a task listed after its 5 s foreground window says nothing about
+        whether the model had answered yet."""
         if not live_shown(self.tasks.values()):
             return None
-        return CANCELLED_HOLD_NOTE
+        gate = self.gate
+        if gate is not None and gate.stop_not_idle:
+            return CANCELLED_HOLD_NOTE
+        return CANCELLED_BACKGROUND_NOTE
 
 
 # #1061. The held answer stays in agy's conversation (probe rc4-h2: a
@@ -1550,6 +1556,11 @@ CANCELLED_HOLD_NOTE = (
     "⏳ Cancelled while agy was holding its answer for background work, so"
     " it wasn't shown. The conversation kept it: send a message such as"
     ' "repeat your last answer" to see it.'
+)
+CANCELLED_BACKGROUND_NOTE = (
+    "⏳ Cancelled while background work was still running. If agy had"
+    " already written an answer, the conversation kept it: send a message"
+    ' such as "repeat your last answer" to see it.'
 )
 
 

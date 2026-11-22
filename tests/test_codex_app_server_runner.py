@@ -685,6 +685,26 @@ async def test_resume_uses_thread_resume_with_the_same_overrides(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("configured", ["gpt-default", None])
+async def test_resume_without_override_sends_codex_configured_model(
+    tmp_path: Path, project: Path, gate_calls: list[str], configured: str | None
+) -> None:
+    """#1369: a resumed thread restores its saved model, so after
+    `/model clear` a bad model stuck until /new. With no override the resume
+    carries Codex's own configured model (config/read), even in safe mode."""
+    fake = Fake(tmp_path, config={"model": configured})
+    token = ResumeToken(engine="codex", value=THREAD)
+    events = await _run(
+        _runner(fake), resume=token, options=EngineRunOptions(permission_mode="safe")
+    )
+    assert _completed(events).ok
+    assert fake.requests("config/read") == [{"cwd": str(project)}]
+    resumed = fake.requests("thread/resume")[0]
+    assert resumed.get("model") == configured
+    assert resumed["sandbox"] == "read-only"
+
+
+@pytest.mark.anyio
 async def test_resume_failure_keeps_codex_text_for_the_bridge(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

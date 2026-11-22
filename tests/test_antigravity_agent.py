@@ -64,6 +64,20 @@ def test_agent_file_lists_file_tools_and_ask_only() -> None:
     assert "/new" in agent.AGENT_MD and "Full access" in agent.AGENT_MD
 
 
+def test_agent_prompt_names_agy_15_tools_and_no_listing() -> None:
+    """#1368: agy 1.5.x shows the model ``read_file`` / ``write_file`` /
+    ``edit_file`` and has no list or search tool, so the prompt names those
+    tools and says it can't list or search. The ``tools:`` list keeps the
+    1.3.x names only: naming both sets ends a 1.5.13 run with ``tool name
+    conflict``."""
+    head, body = agent.AGENT_MD.split("---")[1:3]
+    for tool in ("`read_file`", "`write_file`", "`edit_file`"):
+        assert tool in body
+    assert "can't list or search the project" in body
+    tools = {line.strip()[2:] for line in head.splitlines() if line.startswith("  - ")}
+    assert not {"read_file", "write_file", "edit_file"} & tools
+
+
 # The rc3 text (#1037), as installed on hosts before #1055.
 _RC3_ADVICE = (
     "Tell the user that this needs Full access: /config, then Permission mode, "
@@ -81,7 +95,7 @@ def test_agent_advice_covers_cron_and_webhook_runs() -> None:
     assert '`permission_mode = "full"` on the cron itself' in advice
     assert "a webhook never does" in advice
     # Still a short agent: four bullets, no essay.
-    assert advice.count("\n- ") == 4 and len(advice) < 1100
+    assert advice.count("\n- ") == 4 and len(advice) < 1200
 
 
 # The rc5 chat route (#1055), which knew only Workspace and Full access.
