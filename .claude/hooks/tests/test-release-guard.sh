@@ -124,6 +124,17 @@ bash_check "git push origin HEAD:feature/x"              allow
 # text that only mentions push is not a push
 bash_check "git commit -m 'fix the git push args'"      allow
 bash_check "grep -rn 'git push' docs/"                  allow
+# #1390 review: hidden pushes fail closed, git aliases, every ref
+bash_check "if git push; then :; fi"                     deny
+bash_check "git push origin fix/x; if git push; then :; fi"  deny
+bash_check "\\git push"                                 deny
+bash_check "git -c alias.p=push p"                       deny
+bash_check "git config alias.p push"                     deny
+bash_check "git push origin fix/x HEAD"                  deny
+bash_check "git push -o ci.skip origin fix/x"            allow
+bash_check "git stash push -m wip"                       allow
+bash_check "direnv exec . git push -q origin fix/x 2>&1 | tail -1"  allow
+bash_check "git push origin fix/x >/dev/null"            allow
 bash_check "GIT_DIR=../onmaster/.git git push"            deny
 bash_check "env -C ../onmaster git push"                  deny
 bash_check "bash -c 'git push'"                           deny

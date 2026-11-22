@@ -262,20 +262,49 @@ if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push)([^A-Za-z0-9_]|$) ]]; th
   fi
 
   # 0. git push names its target (#1390, #1236). Every `git … push` in command
-  #    position must give a literal branch or refspec other than HEAD/@; a bare
-  #    push, a $VAR or a blanked quote is denied. The hook's cwd is never
-  #    trusted (cd, git -C, GIT_DIR, sh -c all move the push elsewhere), and
-  #    quoted text that only mentions push is blanked, so it doesn't count.
-  #    master/main targets are denied by the keyword checks above.
+  #    position must give at least one ref, and every ref must be a literal
+  #    branch or refspec other than HEAD/@; a bare push, a $VAR or a blanked
+  #    quote is denied. The hook's cwd is never trusted (cd, git -C, GIT_DIR,
+  #    sh -c all move the push elsewhere), and quoted text that only mentions
+  #    push is blanked, so it doesn't count. master/main targets are denied by
+  #    the keyword checks above.
+  #    Git aliases can hide a push: setting one is denied, and an existing alias
+  #    that expands to push is read as push.
+  if printf '%s' "$STRUCT_COMMAND" | grep -qP -- '\bgit\b[^;&|]*\s-c\s*alias\.|\bgit\b[^;&|]*\bconfig\b[^;&|]*\balias\.'; then
+    BLOCKED=true
+    REASON="Setting a git alias is blocked: an alias can hide a push from this guard. Run the full git command instead."
+  fi
+  PUSH_VERBS=push
+  while IFS= read -r ALIAS_LINE; do
+    ALIAS_NAME=${ALIAS_LINE%% *}
+    ALIAS_NAME=${ALIAS_NAME#alias.}
+    [[ "$ALIAS_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] && PUSH_VERBS="$PUSH_VERBS|$(printf '%s' "$ALIAS_NAME" | sed 's/[.]/\\./g')"
+  done <<< "$(git config --get-regexp '^alias\.' 2>/dev/null | grep -P '^\S+\s.*\bpush\b' || true)"
+  PUSH_SEGS=$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "${CMD_POS}(?:(?:eval|env(?:\\s+(?:-\\S+(?:\\s+[^\\s;&|-]\\S*)?|[A-Za-z_]\\w*=\\S*))*)\\s+)*(?:[\\w./~-]*/)?git(?:\\s+-\\S+(?:\\s+[^\\s;&|-]\\S*)?)*?\\s+\\K(?:${PUSH_VERBS})\\b${SEG_TAIL}" || true)
   while IFS= read -r PUSH_ARGS; do
     [ -n "$PUSH_ARGS" ] || continue
-    PUSH_NOFLAG=$(printf '%s\n' "$PUSH_ARGS" | sed -E 's/(^|\s)--?[a-zA-Z][a-zA-Z0-9_=-]*//g' | tr -d "'\"")
-    PUSH_TARGET=$(printf '%s\n' "$PUSH_NOFLAG" | awk '{print $3}')
-    if [[ ! "$PUSH_TARGET" =~ ^\+?[A-Za-z0-9_./:-]+$ ]] || [[ "$PUSH_TARGET" =~ ^\+?(HEAD|@)$ ]]; then
+    # Drop redirections (2>&1 ends the segment at `&`), flags (and the value
+    # of the ones that take one), then quotes.
+    PUSH_NOFLAG=$(printf '%s\n' "$PUSH_ARGS" | sed -E 's/(^|\s)[0-9]*[<>]+\S*//g; s/(^|\s)(-o|--push-option|--repo|--receive-pack|--exec)(\s+|=)\S+//g; s/(^|\s)--?[a-zA-Z][a-zA-Z0-9_=-]*//g' | tr -d "'\"")
+    read -r -a PUSH_WORDS <<< "$PUSH_NOFLAG"
+    if [ "${#PUSH_WORDS[@]}" -lt 3 ]; then
       BLOCKED=true
       REASON="git push must name its branch: use git push -u origin <feature-branch> (no bare push, HEAD, @ or variable target)."
     fi
-  done <<< "$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "${CMD_POS}(?:(?:eval|env(?:\\s+(?:-\\S+(?:\\s+[^\\s;&|-]\\S*)?|[A-Za-z_]\\w*=\\S*))*)\\s+)*(?:[\\w./~-]*/)?git(?:\\s+-\\S+(?:\\s+[^\\s;&|-]\\S*)?)*?\\s+\\Kpush\\b${SEG_TAIL}" || true)"
+    for PUSH_REF in "${PUSH_WORDS[@]:2}"; do
+      if [[ ! "$PUSH_REF" =~ ^\+?[A-Za-z0-9_./:-]+$ ]] || [[ "$PUSH_REF" =~ ^\+?(HEAD|@)$ ]]; then
+        BLOCKED=true
+        REASON="git push must name its branch: use git push -u origin <feature-branch> (no bare push, HEAD, @ or variable target)."
+      fi
+    done
+  done <<< "$PUSH_SEGS"
+  # Fail closed: more git+push words in the blanked command than pushes found
+  # in command position means one was missed (if/while, nice -n, \git, …).
+  PUSH_KW=$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "\\bgit\\b(?![^;&|]*\\bstash\\b)[^;&|]*?\\b(?:${PUSH_VERBS})\\b" | wc -l || true)
+  if [ "$PUSH_KW" -gt "$(printf '%s' "$PUSH_SEGS" | grep -c . || true)" ]; then
+    BLOCKED=true
+    REASON="git push blocked: the guard couldn't read this push. Run it on its own: git push -u origin <feature-branch>"
+  fi
 
   # Everything below is about gh, curl and wget only.
   if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget)([^A-Za-z0-9_]|$) ]]; then
