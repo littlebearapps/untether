@@ -133,6 +133,12 @@ bash_check "git config alias.p push"                     deny
 bash_check "git push origin fix/x HEAD"                  deny
 bash_check "git push -o ci.skip origin fix/x"            allow
 bash_check "git stash push -m wip"                       allow
+bash_check "if git push origin fix/stash; then :; fi"   deny
+# an existing git alias for push is denied outright (it would skip the master checks)
+git config alias.pp push
+bash_check "git pp origin master"                        deny
+bash_check "git pp origin fix/x"                         deny
+git config --unset alias.pp
 bash_check "direnv exec . git push -q origin fix/x 2>&1 | tail -1"  allow
 bash_check "git push origin fix/x >/dev/null"            allow
 bash_check "GIT_DIR=../onmaster/.git git push"            deny

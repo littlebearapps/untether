@@ -251,7 +251,7 @@ SEG_TAIL='(?:\$\([^()]*(?:\([^()]*\)[^()]*)*\)|`[^`]*`|[^;&|])*'
 
 # None of this applies to a command that never mentions gh, curl or wget, so
 # those skip the extra work.
-if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push)([^A-Za-z0-9_]|$) ]]; then
+if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push|git)([^A-Za-z0-9_]|$) ]]; then
   # A command that hands a quoted string to another shell (`bash -c '…'`, `eval`,
   # `ssh host '…'`, `xargs`, `bash <<EOF`) runs that string, so its quotes are
   # treated as command separators and nothing is blanked.
@@ -287,6 +287,11 @@ if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push)([^A-Za-z0-9_]|$) ]]; th
     # of the ones that take one), then quotes.
     PUSH_NOFLAG=$(printf '%s\n' "$PUSH_ARGS" | sed -E 's/(^|\s)[0-9]*[<>]+\S*//g; s/(^|\s)(-o|--push-option|--repo|--receive-pack|--exec)(\s+|=)\S+//g; s/(^|\s)--?[a-zA-Z][a-zA-Z0-9_=-]*//g' | tr -d "'\"")
     read -r -a PUSH_WORDS <<< "$PUSH_NOFLAG"
+    # A push through an alias skips the master/tag keyword checks: deny it.
+    if [ "${PUSH_WORDS[0]:-}" != "push" ]; then
+      BLOCKED=true
+      REASON="git push through an alias is blocked: run git push -u origin <feature-branch> directly."
+    fi
     if [ "${#PUSH_WORDS[@]}" -lt 3 ]; then
       BLOCKED=true
       REASON="git push must name its branch: use git push -u origin <feature-branch> (no bare push, HEAD, @ or variable target)."
@@ -300,7 +305,7 @@ if [[ "$COMMAND" =~ (^|[^A-Za-z0-9_])(gh|curl|wget|push)([^A-Za-z0-9_]|$) ]]; th
   done <<< "$PUSH_SEGS"
   # Fail closed: more git+push words in the blanked command than pushes found
   # in command position means one was missed (if/while, nice -n, \git, …).
-  PUSH_KW=$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "\\bgit\\b(?![^;&|]*\\bstash\\b)[^;&|]*?\\b(?:${PUSH_VERBS})\\b" | wc -l || true)
+  PUSH_KW=$(printf '%s' "$STRUCT_COMMAND" | grep -oP -- "\\bgit\\b(?:\\s+-\\S+(?:\\s+[^\\s;&|-]\\S*)?)*\\s+(?!stash\\b)[^;&|]*?\\b(?:${PUSH_VERBS})\\b" | wc -l || true)
   if [ "$PUSH_KW" -gt "$(printf '%s' "$PUSH_SEGS" | grep -c . || true)" ]; then
     BLOCKED=true
     REASON="git push blocked: the guard couldn't read this push. Run it on its own: git push -u origin <feature-branch>"
