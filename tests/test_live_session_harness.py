@@ -855,6 +855,8 @@ async def test_845_cancel_with_pending_approval_sends_native_interrupt(
     from structlog.testing import capture_logs
 
     _fast_684(monkeypatch)
+    # The fake answers in ms locally but can take > 0.3 s on a loaded CI runner.
+    monkeypatch.setattr(claude_mod, "INTERRUPT_RESULT_GRACE_S", 5.0)
     with capture_logs() as logs:
         transport = await _drive_684("control_interrupt", cancel_after=1.0)
     events = [e.get("event") for e in logs]
