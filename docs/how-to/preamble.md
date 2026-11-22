@@ -57,11 +57,13 @@ Untether appends one more line to the preamble, the built-in one or your own `te
 
 Claude Code plugins can install hooks that fire at session end (Stop hooks). In a terminal, these are harmless — the user can scroll up. But in Telegram, only the final assistant message is visible. If a Stop hook causes Claude to spend its final response addressing hook concerns, the user's actual content is lost.
 
-Untether addresses this in two ways:
+Untether addresses this in three ways:
 
 1. **Preamble guidance** — the default preamble includes: "If hooks fire at session end, your final response MUST still contain the user's requested content. Hook concerns are secondary."
 
 2. **`UNTETHER_SESSION` env var** — the Claude runner sets `UNTETHER_SESSION=1` in the subprocess environment. Well-behaved Claude Code plugins check for this variable and skip blocking hooks in Telegram sessions. For example, [PitchDocs](https://github.com/littlebearapps/lba-plugins) context-guard detects `$UNTETHER_SESSION` and allows the session to stop without blocking.
+
+3. **Keeping the answer** ([#1375](https://github.com/littlebearapps/untether/issues/1375)) — when a Stop hook continues the turn anyway (`additionalContext`, `decision: "block"` or exit 2) and Claude writes a new last message, Untether shows the answer Claude wrote before the hook, a blank line, then the follow-up. Runs without hook events (`[watchdog] hold_for_async_hooks = false`, or a CLI without `--include-hook-events`) behave as before.
 
 !!! tip "For plugin authors"
     If your Claude Code plugin includes Stop hooks, add an early exit for Untether sessions:
@@ -71,6 +73,8 @@ Untether addresses this in two ways:
     # user-requested content in the Telegram final message.
     [ -n "${UNTETHER_SESSION:-}" ] && echo '{}' && exit 0
     ```
+
+    Untether now keeps the answer written before your hook continued the turn (point 3 above), but the skip is still kinder to the reader: the final otherwise ends with your hook's chore.
 
     This is not a security bypass — it simply prevents your hook from interfering with Telegram's single-message output model. See the [interference audit](../audits/pitchdocs-context-guard-interference.md) for a detailed case study.
 
