@@ -16,6 +16,7 @@ from ...runners.run_options import EngineRunOptions
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
 from ...utils.error_display import user_safe_error
+from ..chat_prefs import ChatPrefsNotSaved
 from ..files import split_command_args
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .executor import _TelegramCommandExecutor
@@ -399,7 +400,9 @@ async def _dispatch_command(
     try:
         result = await backend.handle(ctx)
     except Exception as exc:
-        logger.exception(
+        # #1373: an unreadable prefs file is an expected, reported refusal, not a crash
+        log = logger.warning if isinstance(exc, ChatPrefsNotSaved) else logger.exception
+        log(
             "command.failed",
             command=command_id,
             error=str(exc),

@@ -1300,3 +1300,53 @@ async def test_388_originator_only_rejects_ask_option_tap(
         assert claude_mod._ASK_QUESTION_FLOWS["req-ask"] is flow
     finally:
         claude_mod._ASK_QUESTION_FLOWS.pop("req-ask", None)
+
+
+@pytest.mark.anyio
+async def test_1373_unsaved_setting_logs_a_warning_not_a_traceback(
+    monkeypatch,
+) -> None:
+    """#1373: a settings change refused while the prefs file can't be read is
+    reported to the user and logged at warning, with no traceback (the issue
+    watcher files every error-level ``command.failed``)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.chat_prefs import ChatPrefsNotSaved
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    class _Refusing(_CapturingBackend):
+        async def handle(self, ctx: CommandContext) -> CommandResult | None:
+            raise ChatPrefsNotSaved
+
+    cfg = make_cfg(FakeTransport())
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: _Refusing())
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+    with capture_logs() as logs:
+        await _dispatch_command(
+            cfg,
+            msg,
+            "/test_cmd",
+            "test_cmd",
+            "",
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            None,
+        )
+    failed = [e for e in logs if e["event"] == "command.failed"]
+    assert len(failed) == 1
+    assert failed[0]["log_level"] == "warning"
+    assert "exc_info" not in failed[0]
+    sent = [m for m in cfg.exec_cfg.transport.send_calls]
+    assert any("couldn't save this setting" in m["message"].text for m in sent)
