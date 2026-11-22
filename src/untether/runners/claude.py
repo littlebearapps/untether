@@ -660,6 +660,19 @@ def get_live_session(session_id: str) -> LiveSession | None:
     return _LIVE_SESSIONS.get(session_id)
 
 
+def session_holds_plugin_jobs(session_id: str) -> bool:
+    """#1267: a Codex plugin job owned by this live session is queued or
+    running (the #1186 hold), so closing it stops work. Sync file reads: only
+    ``/cancel`` and ``/new`` ask. Fails open (False: today's idle wording)."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None or live.closing:
+        return False
+    try:
+        return bool(session_plugin_jobs(session_id, live.codex_plugin_roots))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_session_accepting(session_id: str) -> bool:
     """True when ``session_id`` has a live Claude process whose stdin is open
     and not closing — i.e. a follow-up can be written into it (#776)."""

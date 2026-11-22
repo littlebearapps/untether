@@ -80,6 +80,11 @@ class LiveSessionBackend(Protocol):
         """Live background handles held by the owning process (#647)."""
         ...
 
+    def holds_background_jobs(self, session_id: str) -> bool:
+        """Work outside the engine's own task map holds the session open
+        (Claude: a Codex plugin job, #1186) — closing it stops that work (#1267)."""
+        ...
+
     def spawn_options(self, session_id: str) -> Any:
         """The run options the live process was spawned with (None: no session)."""
         ...
@@ -161,6 +166,9 @@ class _ClaudeLive:
 
     def live_bg_count(self, session_id: str) -> int:
         return self._claude().session_live_bg_count(session_id)
+
+    def holds_background_jobs(self, session_id: str) -> bool:
+        return self._claude().session_holds_plugin_jobs(session_id)
 
     def spawn_options(self, session_id: str) -> Any:
         live = self.get(session_id)

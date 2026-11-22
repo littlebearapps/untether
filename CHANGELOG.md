@@ -72,6 +72,7 @@
 - **fix(antigravity):** the invalid-model message lists `@` and `+`, which model ids may use [#1181](https://github.com/littlebearapps/untether/issues/1181)
 - **fix(antigravity):** `antigravity.session.started` no longer logs `agy_version=None` on the first run after agy updates itself [#1212](https://github.com/littlebearapps/untether/issues/1212)
 - **fix:** cancelled Claude runs log `subprocess.exit reason=teardown` like the other engines, and so does a run on any engine cancelled just after its process exited [#1194](https://github.com/littlebearapps/untether/issues/1194)
+- **fix(claude):** `/cancel` on a live session held open only by a Codex plugin job sends one reply, the `⏹ Stopped 1 background task` notice, instead of also saying "nothing running" [#1267](https://github.com/littlebearapps/untether/issues/1267)
 
 ### docs
 

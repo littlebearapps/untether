@@ -6075,9 +6075,14 @@ def running_task_is_idle_after_result(task: Any) -> bool:
     ):
         return False
     resume = getattr(task, "resume", None)
-    return resume is None or all(
-        entry[0] != resume.value for entry in _FOLLOWUP_ANCHORS.values()
-    )
+    if resume is None:
+        return True
+    # #1267: a Codex plugin job holding the session is work /cancel stops —
+    # the close's "⏹ Stopped …" notice is then the only reply.
+    live = live_backend(resume.engine)
+    if live is not None and live.holds_background_jobs(resume.value):
+        return False
+    return all(entry[0] != resume.value for entry in _FOLLOWUP_ANCHORS.values())
 
 
 async def close_idle_live_sessions(
