@@ -23,6 +23,7 @@
 - **ci:** Dependabot auto-merge only fires for PRs that target `dev` [#1235](https://github.com/littlebearapps/untether/issues/1235)
 - **feat(claude):** `[watchdog] control_request_cli_probe` (default off): when an approval looks unanswerable, Untether asks Claude Code whether it is still waiting on it, and the `control_request.unanswerable` warning says `cli_not_pending` when it isn't; detect-only [#837](https://github.com/littlebearapps/untether/issues/837)
 - **chore(guard):** the release guard now also covers the sibling paths to a `master` merge: it denies `gh alias set`/`import` and risky existing aliases, retargeting a PR to `master` (`gh pr edit --base`, `gh api …/pulls/<n>` with `base=`, the GraphQL equivalent) and curl/wget writes to the GitHub API, and asks before `gh repo set-default`, `gh auth token` or `gh auth status --show-token`; 193 hook checks [#1242](https://github.com/littlebearapps/untether/issues/1242)
+- **chore(guard):** every `git push` must now name its branch (`git push -u origin <branch>`), on any branch and after any `cd`, `git -C` or `sh -c`: a bare push, `HEAD`, `@` or a variable target is denied, and the guard no longer guesses the current branch from its own working directory. Quoted text that only mentions push (a commit message, a `grep`) doesn't count, a push the guard can't read fails closed, and setting a git alias or pushing through one is denied; 213 hook checks [#1390](https://github.com/littlebearapps/untether/issues/1390)
 
 ### fixes
 
