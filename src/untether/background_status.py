@@ -435,6 +435,7 @@ _CLOSE_REASONS = {
     "drain": "Untether restarting",
     "options_changed": "chat settings changed",
     "budget_stop": "cost budget reached",  # #896
+    "max_elapsed": "trigger time limit reached",  # #1125
     "idle_no_tasks": "session closed",
     "loop_fire": "loop iteration due",  # #925
     "wake_cap": "self-paced wake-up limit reached",  # #925

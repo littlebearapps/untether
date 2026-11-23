@@ -275,6 +275,9 @@ _PARITY_VALUES: dict[str, Any] = {
     "allowed_tools": ["Read"],
     "env": {"TR_ROLE": "qa"},  # #1121
     "agent": "qa-desk",  # #1121
+    "max_turns": 3,  # #1125
+    "max_budget_usd": 0.5,
+    "max_elapsed_s": 60,
 }
 
 

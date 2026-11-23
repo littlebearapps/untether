@@ -1875,6 +1875,10 @@ def _add_budget_run_cost(
     cost = (run_usage or {}).get("total_cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
         state["run_cost"] += float(cost)
+    # #1125: the run's model turns too, for a trigger's run-wide max_turns.
+    turns = (run_usage or {}).get("num_turns")
+    if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
+        state["run_turns"] = state.get("run_turns", 0) + turns
     return state["run_cost"]
 
 
@@ -1920,7 +1924,11 @@ def _decide_budget_stop(state: dict[str, Any], session_id: str) -> str | None:
         live = get_live_session(session_id)
         if live is None or getattr(live, "closing", False):
             return None  # the run has already ended: nothing to stop
-        stop = run_stop(state["run_cost"], get_run_options())
+        stop = run_stop(
+            state["run_cost"],
+            get_run_options(),
+            run_turns=state.get("run_turns", 0),
+        )
         if stop is not None:
             # Before any await: nothing queued behind this reply may start
             # another paid turn. A follow-up refused here takes the resume
@@ -2485,6 +2493,9 @@ class RunningTask:
     engine: str | None = None
     # #1176: the run's final has been handed to the transport.
     final_sent: bool = False
+    # #1125: why Untether itself stopped the run (``"max_elapsed"``: a
+    # trigger's time limit); None for a user's /cancel.
+    stop_reason: str | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -5624,6 +5635,68 @@ _EARLY_DELIVERY_TIMEOUT_S = 60.0
 # engine process exit by itself before the cancel scope tears it down.
 _INTERRUPTED_EXIT_WAIT_S = 5.0
 
+# #1125: the card of a trigger run stopped at its ``max_elapsed_s``.
+_TIME_LIMIT_LABEL = "`stopped: time limit`"
+_TIME_LIMIT_FOOTER = (
+    "\N{STOPWATCH}\N{VARIATION SELECTOR-16} Stopped at this trigger's time "
+    "limit (max_elapsed_s)"
+)
+
+# #1125: engines that enforce a trigger's ``max_elapsed_s`` themselves
+# (Antigravity's ``--print-timeout``) get the bridge's timer this much later,
+# as a backstop for an engine that doesn't stop.
+_NATIVE_ELAPSED_ENGINES: frozenset[str] = frozenset({"antigravity"})
+_NATIVE_ELAPSED_BACKSTOP_S = 30.0
+
+
+def trigger_journal_outcome(
+    usage: Mapping[str, Any] | None, *, ok: bool | None, stop_reason: str | None
+) -> str:
+    """#1123/#1125: a trigger run's journal ``outcome`` from its first result.
+
+    ``max_elapsed`` (the bridge's time limit, or agy's ``--print-timeout``),
+    ``max_turns`` / ``max_budget`` (Claude's ``error_max_turns`` /
+    ``error_max_budget_usd`` result subtypes), ``cancelled`` (an interrupted
+    turn), else ``ok`` / ``error``.
+    """
+    from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+    usage = usage or {}
+    if stop_reason == "max_elapsed" or usage.get("limit") == "max_elapsed":
+        return "max_elapsed"
+    subtype = usage.get("subtype")
+    if subtype == "error_max_turns":
+        return "max_turns"
+    if subtype == "error_max_budget_usd":
+        return "max_budget"
+    if usage.get("terminal_reason") in CLAUDE_ABORTED_TERMINAL_REASONS:
+        return "cancelled"
+    return "ok" if ok else "error"
+
+
+def trigger_elapsed_limit(engine: str, context: RunContext | None) -> float | None:
+    """#1125: seconds after which the bridge stops a trigger run, or None.
+
+    A Claude limit above ``[watchdog] live_session_max_s`` is clamped to it
+    (the session can't outlive that cap anyway) with a WARN.
+    """
+    limit = context.max_elapsed_s if context is not None else None
+    if limit is None:
+        return None
+    if engine in _NATIVE_ELAPSED_ENGINES:
+        return float(limit) + _NATIVE_ELAPSED_BACKSTOP_S
+    if engine == "claude":
+        cap = getattr(_load_watchdog_settings(), "live_session_max_s", None)
+        if isinstance(cap, (int, float)) and limit > cap:
+            logger.warning(
+                "trigger.max_elapsed.clamped",
+                trigger=context.trigger_source if context else None,
+                max_elapsed_s=limit,
+                live_session_max_s=cap,
+            )
+            return float(cap)
+    return float(limit)
+
 
 async def run_runner_with_cancel(
     runner: Runner,
@@ -5858,9 +5931,27 @@ async def run_runner_with_cancel(
                         runner_finished.set()
                     tg.cancel_scope.cancel()
 
+            async def elapsed_deadline(task: RunningTask, limit_s: float) -> None:
+                """#1125: a trigger's ``max_elapsed_s`` — stop the run through
+                the /cancel path below, marked as a time-limit stop."""
+                await anyio.sleep(limit_s)
+                if task.cancel_requested.is_set():
+                    return
+                task.stop_reason = "max_elapsed"
+                logger.warning(
+                    "trigger.max_elapsed.reached",
+                    trigger=task.context.trigger_source if task.context else None,
+                    run_id=task.context.run_id if task.context else None,
+                    engine=runner.engine,
+                    limit_s=limit_s,
+                    live_idle=running_task_is_live_idle(task),
+                )
+                task.cancel_requested.set()
+
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
+                time_limit = task.stop_reason == "max_elapsed"
                 # #977: the engine's live-session backend (None: the engine
                 # keeps no process live, so there is nothing to close).
                 live = (
@@ -5876,11 +5967,15 @@ async def run_runner_with_cancel(
                 # #845: a turn waiting on an approval ends through the CLI's
                 # native interrupt (no further model call); a live session is
                 # then idle and closes cleanly just below.
+                # #1125: a time-limit stop interrupts the turn natively even
+                # with nothing pending (no further model call, session kept).
                 interrupted = (
                     task.resume is not None
                     and live is not None
                     and not running_task_is_live_idle(task)
-                    and await live.interrupt_pending_turn(task.resume.value)
+                    and await live.interrupt_pending_turn(
+                        task.resume.value, any_turn=time_limit
+                    )
                 )
                 # #776: /cancel (or /new) on a live session that is only
                 # holding between turns closes its stdin — the CLI stops its
@@ -5890,7 +5985,11 @@ async def run_runner_with_cancel(
                     running_task_is_live_idle(task)
                     and task.resume is not None
                     and live is not None
-                    and await live.close(task.resume.value, "cancel", notice=True)
+                    and await live.close(
+                        task.resume.value,
+                        "max_elapsed" if time_limit else "cancel",
+                        notice=True,
+                    )
                 ):
                     with anyio.move_on_after(20):
                         await runner_finished.wait()
@@ -5915,6 +6014,9 @@ async def run_runner_with_cancel(
             if running_task is not None:
                 edits.cancel_event = running_task.cancel_requested
                 tg.start_soon(wait_cancel, running_task)
+                limit_s = trigger_elapsed_limit(runner.engine, running_task.context)
+                if limit_s is not None:
+                    tg.start_soon(elapsed_deadline, running_task, limit_s)
     except BaseExceptionGroup as eg:
         # Unwrap ExceptionGroup from anyio TaskGroup so callers' `except Exception`
         # handlers can catch the real error.  Filter out cancellation exceptions
@@ -6566,6 +6668,7 @@ def _live_closing_notice(
             "max_hold": "the background hold limit",
             "abs_cap": "the session time limit",
             "budget_stop": "the cost budget",  # #896
+            "max_elapsed": "the trigger's time limit",  # #1125
         }.get(reason, "the session limit")
         why = f"at {limit}"
     return (
@@ -7767,7 +7870,12 @@ async def handle_message(
 
     # #896: this run's cumulative spend (every turn of a live session) and,
     # once "Stop at limit" fires, the session to close after delivery.
-    budget_stop: dict[str, Any] = {"run_cost": 0.0, "sid": None, "closed": False}
+    budget_stop: dict[str, Any] = {
+        "run_cost": 0.0,
+        "run_turns": 0,  # #1125
+        "sid": None,
+        "closed": False,
+    }
 
     async def _budget_stop_close() -> None:
         """#896: end the live session after the reply that passed the budget.
@@ -7872,13 +7980,12 @@ async def handle_message(
         if turn is None:
             # #1123: the run's first result is its journal line; a live
             # session's later turns are human follow-ups or wake turns.
-            from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
-
-            aborted = (completed.usage or {}).get(
-                "terminal_reason"
-            ) in CLAUDE_ABORTED_TERMINAL_REASONS
             _journal(
-                "cancelled" if aborted else ("ok" if completed.ok else "error"),
+                trigger_journal_outcome(
+                    completed.usage,
+                    ok=completed.ok,
+                    stop_reason=running_task.stop_reason if running_task else None,
+                ),
                 ok=bool(completed.ok),
                 error=completed.error,
                 session_id=resume_value,
@@ -8386,6 +8493,15 @@ async def handle_message(
         if acct.budget_stop_text:  # #896
             final_rendered = _insert_footer_line(
                 final_rendered, f"\n{acct.budget_stop_text}"
+            )
+        if (
+            turn is None
+            and running_task is not None
+            and running_task.stop_reason == "max_elapsed"
+        ):
+            # #1125: the interrupted turn's own result reached the chat.
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{_TIME_LIMIT_FOOTER}"
             )
 
         if safeguard is not None:
@@ -9556,8 +9672,12 @@ async def handle_message(
                 resume=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
+            # #1125: a trigger's time limit stopped it, not a user.
+            time_limit = running_task is not None and (
+                running_task.stop_reason == "max_elapsed"
+            )
             _journal(
-                "cancelled",
+                "max_elapsed" if time_limit else "cancelled",
                 ok=False,
                 session_id=resume.value if resume else None,
                 elapsed_s=elapsed,
@@ -9578,7 +9698,7 @@ async def handle_message(
             final_rendered = effective_presenter.render_progress(
                 state,
                 elapsed_s=elapsed,
-                label="`cancelled`",
+                label=_TIME_LIMIT_LABEL if time_limit else "`cancelled`",
             )
             await send_result_message(
                 cfg,
@@ -9586,7 +9706,8 @@ async def handle_message(
                 reply_to=user_ref,
                 progress_ref=progress_ref,
                 message=final_rendered,
-                notify=False,
+                # #1125: nobody asked for this stop, so the chat is told.
+                notify=time_limit,
                 edit_ref=progress_ref,
                 replace_ref=progress_ref,
                 delete_tag="cancel",

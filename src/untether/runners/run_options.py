@@ -49,6 +49,13 @@ class EngineRunOptions:
     # None = Codex's own config (default "cached"). Only the Codex runners
     # read it.
     web_search: bool | None = None
+    # #1125: a trigger's run budgets. Claude passes ``--max-turns`` /
+    # ``--max-budget-usd`` (per query) and the bridge checks both across a
+    # live session's turns; Antigravity maps ``max_elapsed_s`` to
+    # ``--print-timeout``; the bridge enforces it for every engine.
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+    max_elapsed_s: int | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.

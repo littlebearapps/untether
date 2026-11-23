@@ -31,6 +31,9 @@ _SAFE_PATH_RE = re.compile(r"^/[a-zA-Z0-9/_.-]+$")
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
+#: #1125: the shortest per-trigger ``max_elapsed_s``.
+MIN_MAX_ELAPSED_S = 30
+
 
 # #1121: a trigger's `env` names and `agent` value.
 _ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
@@ -105,6 +108,20 @@ class TriggerRunOptions(BaseModel):
     # never logged), and a named Claude Code agent (`--agent=<name>`).
     env: dict[str, str] | None = None
     agent: NonEmptyStr | None = None
+    # #1125: run budgets. Claude's native `--max-turns` / `--max-budget-usd`
+    # (both per query, probe 8) plus a run-wide check across live-session
+    # wake turns; `max_elapsed_s` is Untether's wall-clock limit (agy's own
+    # `--print-timeout`), every engine.
+    max_turns: StrictInt | None = Field(default=None, ge=1)
+    max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_elapsed_s: StrictInt | None = Field(default=None, ge=MIN_MAX_ELAPSED_S)
+
+    @field_validator("max_budget_usd", mode="before")
+    @classmethod
+    def _reject_bool_budget(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("max_budget_usd must be a number of US dollars")
+        return v
 
     @field_validator("env")
     @classmethod
@@ -238,6 +255,10 @@ class TriggerRunOptions(BaseModel):
             raise ValueError('allowed_tools needs engine = "claude"')
         if self.agent is not None and self.engine != "claude":
             raise ValueError('agent needs engine = "claude"')  # #1121
+        # #1125: only Claude has a native turn or cost cap.
+        for name in ("max_turns", "max_budget_usd"):
+            if getattr(self, name) is not None and self.engine != "claude":
+                raise ValueError(f'{name} needs engine = "claude"')
         return self
 
 
@@ -349,6 +370,9 @@ class WebhookConfig(TriggerRunOptions):
                 "reasoning",
                 "allowed_tools",
                 "agent",
+                "max_turns",  # #1125
+                "max_budget_usd",
+                "max_elapsed_s",
             )
             if getattr(self, name) is not None
         ]

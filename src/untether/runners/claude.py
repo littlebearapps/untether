@@ -982,6 +982,7 @@ _STOPPED_CLEAN_REASONS = frozenset(
         "max_hold",
         "abs_cap",
         "cancel",
+        "max_elapsed",  # #1125: a trigger's time limit, closed between turns
         "new",
         "drain",
         "options_changed",
@@ -1581,7 +1582,11 @@ INTERRUPT_RESULT_GRACE_S: float = 5.0
 
 
 async def interrupt_pending_turn(
-    session_id: str, *, grace_s: float | None = None, poll_s: float = 0.02
+    session_id: str,
+    *,
+    grace_s: float | None = None,
+    poll_s: float = 0.02,
+    any_turn: bool = False,
 ) -> bool:
     """#845: end a turn that is waiting on an approval with the CLI's native
     ``interrupt`` request instead of closing stdin or signalling.
@@ -1594,6 +1599,10 @@ async def interrupt_pending_turn(
     (probe on CLI 2.1.330); closing stdin instead costs one more model call.
     Returns True once that ``result`` arrived within ``grace_s``; False means
     the caller keeps its usual stop path.
+
+    ``any_turn`` (#1125, a trigger's ``max_elapsed_s``): interrupt the turn
+    whether or not a request is pending; the CLI then reports the result
+    with ``terminal_reason`` ``aborted_streaming`` / ``aborted_tools``.
     """
     state = _SESSION_BG_STATE.get(session_id)
     stdin = _SESSION_STDIN.get(session_id)
@@ -1601,7 +1610,7 @@ async def interrupt_pending_turn(
         state is None
         or stdin is None
         or state.result_received_at is not None
-        or pending_control_requests_for_session(session_id) == 0
+        or (not any_turn and pending_control_requests_for_session(session_id) == 0)
     ):
         return False
     state.interrupt_seq += 1
@@ -10628,6 +10637,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append(engine_argv.joined("--agent", agent))
         if self.fallback_model:
             args.append(engine_argv.joined("--fallback-model", self.fallback_model))
+        if run_options is not None:
+            # #1125: a trigger's native caps. Both "only work with --print",
+            # which the control-channel spawn is to the CLI; `--max-turns` is
+            # hidden from --help but parsed and honoured (probe 8, 2.1.328;
+            # the drift test's `_209_HIDDEN` fails if the parser drops it).
+            # Both count per query; the bridge's run-wide check covers wake
+            # turns. Validated ints / positive floats at config load.
+            if run_options.max_turns is not None:
+                args.append(f"--max-turns={int(run_options.max_turns)}")
+            if run_options.max_budget_usd is not None:
+                args.append(f"--max-budget-usd={float(run_options.max_budget_usd)}")
         reasoning = None
         if run_options is not None and run_options.reasoning:
             reasoning = run_options.reasoning

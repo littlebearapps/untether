@@ -475,6 +475,32 @@ secrets in `env`: values are visible in the process environment; pass a secret
 through with `[security] env_extra_allow` instead. A reply to the run uses the
 chat's own settings, without the variables or the agent.
 
+## Limit a trigger's turns, cost and time
+
+An unattended run can be capped so a stuck or chatty one can't run up a bill
+([#1125](https://github.com/littlebearapps/untether/issues/1125)):
+
+```toml
+[[triggers.crons]]
+id = "inbox-watch"
+schedule = "*/30 * * * *"
+project = "myapp"
+chat_id = -1001234567890
+engine = "claude"
+permission_mode = "auto"
+max_turns = 8
+max_budget_usd = 0.25
+max_elapsed_s = 300
+prompt = "Check the inbox and draft replies."
+```
+
+`max_turns` and `max_budget_usd` use Claude Code's own limits and need
+`engine = "claude"`. `max_elapsed_s` (at least 30 seconds) works with every
+engine: when it runs out, Untether stops the run and the card reads
+`stopped: time limit`. A run stopped by a limit is never silent, and the run
+journal records `max_turns`, `max_budget` or `max_elapsed`. Details:
+[Run budgets](../reference/triggers/triggers.md#run-budgets).
+
 ## Delayed runs with `/at`
 
 For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TOML edit required:

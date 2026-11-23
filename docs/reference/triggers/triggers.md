@@ -150,11 +150,15 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `allowed_tools` | string[]\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Tools pre-approved for this webhook's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing. Sent in every mode, like an explicit engine list ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 | `env` | table\|null | `null` | (`agent_run` only) Literal environment variables added to this webhook's runs, e.g. `env = { APP_SESSION_ROLE = "qa" }`. Names are `A-Z`, `0-9`, `_`; values are never templated (`{{` is refused) and never logged. Names the service or engine manages are refused (`PATH`, `HOME`, `LD_*`, `DYLD_*`, `PYTHON*`, `NODE_*`, `GIT_*`, provider keys and tokens, `CLAUDE_*`, `UNTETHER_*`, proxy/CA names), and a name Untether already passes through keeps its own value. Not for secrets: values are visible in the process environment. A reply to the run doesn't get them ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
 | `agent` | string\|null | `null` | (`agent_run` only) (needs `engine = "claude"`) Claude Code agent for this webhook's runs, passed as `--agent=<name>` (letters, digits, `.` `_` `:` `/` `-`; plugin agents like `plugin:name` work). Replaces an `--agent` in `[claude] extra_args` for that run only. Not the same as `/agent`, which picks a chat's default engine ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
+| `max_turns` | int\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Model turns this webhook's run may use. See [Run budgets](#run-budgets) ([#1125](https://github.com/littlebearapps/untether/issues/1125)). |
+| `max_budget_usd` | float\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Spend cap in US dollars for this webhook's run. See [Run budgets](#run-budgets). |
+| `max_elapsed_s` | int\|null | `null` | (`agent_run` only) Wall-clock limit in seconds (at least 30), every engine. See [Run budgets](#run-budgets). |
 | `allow_unsafe_permission_mode` | bool | `false` | Lets this webhook's own `permission_mode` be one that skips approvals. Needs `engine` and such a mode; anything else is an error ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 
 Webhook IDs and paths must each be unique across all configured webhooks. Run
 options (`permission_mode`, `model`, `reasoning`, `allowed_tools`, `env`,
-`agent`, `allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
+`agent`, `max_turns`, `max_budget_usd`, `max_elapsed_s`,
+`allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
 `notify_only` webhook make that entry invalid, since nothing would use them.
 
 ### `[[triggers.crons]]`
@@ -187,6 +191,9 @@ options (`permission_mode`, `model`, `reasoning`, `allowed_tools`, `env`,
 | `allowed_tools` | string[]\|null | `null` | (needs `engine = "claude"`) Tools pre-approved for this cron's runs, replacing `[engines.claude] allowed_tools`; `[]` pre-approves nothing ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 | `env` | table\|null | `null` | Literal environment variables added to this cron's runs, e.g. `env = { APP_SESSION_ROLE = "qa" }`. Names are `A-Z`, `0-9`, `_`; values are never templated (`{{` is refused) and never logged. Names the service or engine manages are refused (`PATH`, `HOME`, `LD_*`, `DYLD_*`, `PYTHON*`, `NODE_*`, `GIT_*`, provider keys and tokens, `CLAUDE_*`, `UNTETHER_*`, proxy/CA names), and a name Untether already passes through keeps its own value. Not for secrets: values are visible in the process environment. A reply to the run doesn't get them ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
 | `agent` | string\|null | `null` | (needs `engine = "claude"`) Claude Code agent for this cron's runs, passed as `--agent=<name>` (letters, digits, `.` `_` `:` `/` `-`; plugin agents like `plugin:name` work). Replaces an `--agent` in `[claude] extra_args` for that run only. Not the same as `/agent`, which picks a chat's default engine ([#1121](https://github.com/littlebearapps/untether/issues/1121)). |
+| `max_turns` | int\|null | `null` | (needs `engine = "claude"`) Model turns this cron's run may use. See [Run budgets](#run-budgets) ([#1125](https://github.com/littlebearapps/untether/issues/1125)). |
+| `max_budget_usd` | float\|null | `null` | (needs `engine = "claude"`) Spend cap in US dollars for this cron's run. See [Run budgets](#run-budgets). |
+| `max_elapsed_s` | int\|null | `null` | Wall-clock limit in seconds (at least 30), every engine. See [Run budgets](#run-budgets). |
 | `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only. With `engine` set it must be one of that engine's levels (Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low`…`xhigh`; Antigravity `low`, `medium`, `high`; an engine without reasoning support is an error); without `engine`, one of `low`…`max`, and a level the resolved engine doesn't allow is ignored with a note in the run. Normalised to lower case. |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
@@ -203,6 +210,51 @@ with ([#1144](https://github.com/littlebearapps/untether/issues/1144)). A bad sc
 backwards, or a name like `MON`) skips that cron like any other invalid entry: ERROR
 `triggers.trigger_invalid` and a Telegram notice naming the cron and the bad field
 (see [Hot-reload: How it works](#how-it-works)). See [Cron expressions](#cron-expressions) for what's accepted.
+
+### Run budgets
+
+A cron or an `agent_run` webhook can bound its own run
+([#1125](https://github.com/littlebearapps/untether/issues/1125)):
+
+```toml
+[[triggers.crons]]
+id = "inbox-watch"
+schedule = "*/30 * * * *"
+project = "myapp"
+chat_id = -1001234567890
+engine = "claude"
+max_turns = 8          # model turns for the whole run
+max_budget_usd = 0.25  # US dollars for the whole run
+max_elapsed_s = 300    # wall-clock seconds, any engine
+prompt = "Check the inbox and draft replies."
+```
+
+| Key | Engines | How it is enforced |
+|---|---|---|
+| `max_turns` | Claude | Claude Code's own `--max-turns` stops the turn (result `error_max_turns`, error card). It counts per query, so Untether also adds up the turns of the run's live session and closes it after the turn that reaches the limit, ending any background wake turns. |
+| `max_budget_usd` | Claude | Claude Code's own `--max-budget-usd` (result `error_max_budget_usd`). The CLI checks after each model call, so a run can go a little over. Untether closes the live session after the turn whose run total reaches the limit, like `max_turns`. |
+| `max_elapsed_s` | all | Untether's timer, from the run's start. Claude: the turn is stopped with the CLI's native `interrupt` request, then the run ends as on `/cancel`. Antigravity: agy's own `--print-timeout`, with Untether's timer 30 s later as a backstop. Codex, OpenCode, Pi: the run is cancelled like `/cancel`. |
+
+- `max_turns` and `max_budget_usd` need `engine = "claude"`; on any other
+  engine, or with no `engine`, the entry is skipped with a notice. `max_elapsed_s`
+  must be at least 30.
+- The time limit covers the whole run, including a live session's idle hold
+  and background wake turns after the answer. The card reads
+  `stopped: time limit` (with a push notification); if the stopped turn's own
+  result reached the chat first, its footer says
+  `⏱️ Stopped at this trigger's time limit`. Log: WARNING
+  `trigger.max_elapsed.reached`. Time spent waiting on a rate limit counts.
+- A Claude `max_elapsed_s` above `[watchdog] live_session_max_s` is lowered to
+  it (WARNING `trigger.max_elapsed.clamped`): the session can't outlive that
+  cap anyway.
+- A budget stop after a successful answer adds a footer line such as
+  `🛑 Stopped: the run used 8 turns, this trigger's max_turns is 8` and logs
+  `cost_budget.run_stopped` with `scope=trigger_turns` or `trigger_budget`.
+- `max_budget_usd` is separate from `[cost_budget]`: both apply, and the
+  first limit reached stops the run.
+- The journal records `max_turns`, `max_budget` or `max_elapsed` as the
+  run's `outcome`. A reply to the run uses the chat's own settings, without
+  these limits.
 
 ### Cron permission modes
 
@@ -976,6 +1028,8 @@ the prompt or the answer:
 |---|---|
 | `ok` / `error` | the run's first result (a live session's later turns aren't journaled) |
 | `cancelled` | the run was cancelled or its turn interrupted |
+| `max_turns` / `max_budget` | Claude stopped at the trigger's `max_turns` / `max_budget_usd` ([Run budgets](#run-budgets)) |
+| `max_elapsed` | the trigger's `max_elapsed_s` stopped the run |
 | `refused` | the daily cost budget's **Stop at limit** refused it; nothing ran |
 | `announce_failed` | the `⏰ Scheduled:` / `⚡ Trigger:` message couldn't be posted, so nothing ran (a `run_once` cron's retries each add a line) |
 | `fetch_aborted` | the cron's fetch step failed with `on_failure = "abort"` |

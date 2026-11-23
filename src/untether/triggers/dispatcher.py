@@ -64,6 +64,9 @@ def build_run_context(
         strict_webhook=strict and kind == "webhook",
         env=tuple(sorted((trigger.env or {}).items())),  # #1121
         agent=trigger.agent,
+        max_turns=trigger.max_turns,  # #1125
+        max_budget_usd=trigger.max_budget_usd,
+        max_elapsed_s=trigger.max_elapsed_s,
     )
 
 
