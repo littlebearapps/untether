@@ -1,0 +1,11 @@
+{"type":"queue_update","steering":["focus on tests"],"followUp":[]}
+{"type":"entry_appended","entry":{"type":"context_edit","id":"be84f578","parentId":"56af16d8","targetId":"56af16d8","replacement":null}}
+{"type":"session_info_changed","name":"Review"}
+{"type":"session_info_changed"}
+{"type":"thinking_level_changed","level":"high"}
+{"type":"summarization_retry_scheduled","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"terminated"}
+{"type":"summarization_retry_attempt_start","source":"compaction","reason":"threshold"}
+{"type":"summarization_retry_attempt_start","source":"branchSummary"}
+{"type":"summarization_retry_finished"}
+{"type":"bash_execution_update","id":"req-1","delta":"total 48\n"}
+{"type":"extension_error","extensionPath":"/path/to/extension.ts","event":"tool_call","error":"Error message"}

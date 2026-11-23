@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_args
 
 import msgspec
 
@@ -108,6 +108,53 @@ class AutoRetryEnd(_Event, tag="auto_retry_end"):
     finalError: str | None = None
 
 
+# #1385: the rest of Pi 1.5.2's AgentSessionEvent union
+# (dist/core/agent-session.d.ts, docs/json.md). Untether renders none of them;
+# declaring them keeps them out of the ``jsonl.msgspec.invalid`` warning.
+class QueueUpdate(_Event, tag="queue_update"):
+    steering: list[str] | None = None
+    followUp: list[str] | None = None
+
+
+class EntryAppended(_Event, tag="entry_appended"):
+    entry: dict[str, Any] | None = None
+
+
+class SessionInfoChanged(_Event, tag="session_info_changed"):
+    name: str | None = None
+
+
+class ThinkingLevelChanged(_Event, tag="thinking_level_changed"):
+    level: str | None = None
+
+
+class SummarizationRetryScheduled(_Event, tag="summarization_retry_scheduled"):
+    attempt: int | None = None
+    maxAttempts: int | None = None
+    delayMs: int | None = None
+    errorMessage: str | None = None
+
+
+class SummarizationRetryAttemptStart(_Event, tag="summarization_retry_attempt_start"):
+    source: str | None = None
+    reason: str | None = None
+
+
+class SummarizationRetryFinished(_Event, tag="summarization_retry_finished"):
+    pass
+
+
+class BashExecutionUpdate(_Event, tag="bash_execution_update"):
+    id: str | None = None
+    delta: str | None = None
+
+
+class ExtensionError(_Event, tag="extension_error"):
+    extensionPath: str | None = None
+    event: str | None = None
+    error: str | None = None
+
+
 type PiEvent = (
     SessionHeader
     | AgentStart
@@ -127,10 +174,38 @@ type PiEvent = (
     | AutoCompactionEnd
     | AutoRetryStart
     | AutoRetryEnd
+    | QueueUpdate
+    | EntryAppended
+    | SessionInfoChanged
+    | ThinkingLevelChanged
+    | SummarizationRetryScheduled
+    | SummarizationRetryAttemptStart
+    | SummarizationRetryFinished
+    | BashExecutionUpdate
+    | ExtensionError
 )
 
 _DECODER = msgspec.json.Decoder(PiEvent)
 
+KNOWN_TYPES: frozenset[str] = frozenset(
+    cls.__struct_config__.tag for cls in get_args(PiEvent.__value__)
+)
+
 
 def decode_event(line: str | bytes) -> PiEvent:
     return _DECODER.decode(line)
+
+
+def unknown_event_type(line: str | bytes) -> str | None:
+    """The ``type`` of a JSON object line that is not a declared Pi event (a
+    newer Pi's addition), else None (malformed JSON, or a known type)."""
+    try:
+        raw = msgspec.json.decode(line)
+    except msgspec.DecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    event_type = raw.get("type")
+    if isinstance(event_type, str) and event_type not in KNOWN_TYPES:
+        return event_type
+    return None

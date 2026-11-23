@@ -120,7 +120,11 @@ def test_parse_directives_bot_suffix() -> None:
         ("@untether_dev_bot fix the failing tests", None, "fix the failing tests"),
         ("@TetrisBot @feat/api go", "feat/api", "go"),
         ("@feat/robot go", "feat/robot", "go"),
-        ("@develop go", "develop", "go"),
+        ("@fix-1 go", "fix-1", "go"),
+        ("@dev go", "dev", "go"),
+        # #1383: a person mention isn't a branch either.
+        ("@alice can you fix the tests", None, "can you fix the tests"),
+        ("@develop go", None, "go"),
     ],
 )
 def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
@@ -129,6 +133,26 @@ def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
     )
     assert directives.branch == branch
     assert directives.prompt == prompt
+
+
+@pytest.mark.parametrize(
+    ("text", "existing", "branch"),
+    [
+        ("@chatbot rename the file", {"chatbot"}, "chatbot"),
+        ("@develop go", {"develop"}, "develop"),
+        ("@alice go", {"develop"}, None),
+    ],
+)
+def test_1383_username_shaped_branch_only_when_it_exists(
+    text, existing, branch
+) -> None:
+    directives = parse_directives(
+        text,
+        engine_ids=("claude",),
+        projects=_empty_projects(),
+        branch_exists=existing.__contains__,
+    )
+    assert directives.branch == branch
 
 
 def test_parse_directives_only_first_non_empty_line() -> None:
@@ -3515,6 +3539,53 @@ async def test_run_main_loop_ignores_duplicate_update_id() -> None:
 
     assert len(runner.calls) == 1
     assert runner.calls[0][0].endswith("first")
+
+
+@pytest.mark.anyio
+async def test_1381_quarantined_prefs_file_notifies_admin(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    resolve_prefs_path(config_path).write_bytes(b'{"version": 99, "chats": {}}')
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=TransportRuntime(
+            router=_make_router(runner),
+            projects=_empty_projects(),
+            config_path=config_path,
+        ),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="hello",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    notices = [
+        c
+        for c in transport.send_calls
+        if "Saved settings were reset" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert notices[0]["channel_id"] == 123
+    assert list(tmp_path.glob("telegram_chat_prefs_state.json.corrupt-*"))
 
 
 @pytest.mark.anyio

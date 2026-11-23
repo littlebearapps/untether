@@ -493,6 +493,22 @@ async def test_new_run_end_to_end(
 
 
 @pytest.mark.anyio
+async def test_session_summary_names_the_last_jsonrpc_method(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#1386: last_event_type (session.summary's source) is the frame's
+    JSON-RPC method, not unknown."""
+    fake = Fake(tmp_path, messages=[["the answer", "final_answer"]])
+    runner = _runner(fake)
+    assert _completed(await _run(runner)).ok
+    stream = runner.current_stream
+    assert stream is not None
+    assert stream.last_event_type == "turn/completed"
+    labels = [label for _, label in stream.recent_events]
+    assert "unknown" not in labels
+
+
+@pytest.mark.anyio
 async def test_answer_falls_back_to_the_last_agent_message(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

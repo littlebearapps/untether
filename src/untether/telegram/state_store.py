@@ -41,6 +41,9 @@ class JsonStateStore[T: _VersionedState]:
         self._log_prefix = log_prefix
         self._logger = logger
         self._state = state_factory()
+        # #1381: called with (path, backup) after a quarantine, so the
+        # transport can tell the admins their saved settings were reset.
+        self.on_quarantine: Callable[[Path, Path], None] | None = None
 
     def _stat_mtime_ns(self) -> int | None:
         try:
@@ -115,6 +118,13 @@ class JsonStateStore[T: _VersionedState]:
         self._loaded = True
         self._mtime_ns = None
         self._state = self._state_factory()
+        if self.on_quarantine is not None:
+            try:
+                self.on_quarantine(self._path, backup)
+            except Exception as exc:  # noqa: BLE001 — a notice must not break reads
+                self._logger.warning(
+                    f"{self._log_prefix}.quarantine_notice_failed", error=str(exc)
+                )
 
     def _save_locked(self) -> None:
         if not self._loaded:

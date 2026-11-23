@@ -62,6 +62,29 @@ async def test_1277_unreadable_prefs_file_is_kept_not_wiped(tmp_path, damage) ->
 
 
 @pytest.mark.anyio
+async def test_1381_quarantine_calls_admin_notice_hook(tmp_path) -> None:
+    from untether.telegram.loop import format_state_quarantined_notice
+
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    good = await _saved_store(path)
+    path.write_bytes(good[:-20])
+    store = ChatPrefsStore(path)
+    calls: list[tuple] = []
+    store.on_quarantine = lambda p, b: calls.append((p, b))
+    assert await store.get_default_engine(123) is None
+    (backup,) = tmp_path.glob("telegram_chat_prefs_state.json.corrupt-*")
+    assert calls == [(path, backup)]
+    text = format_state_quarantined_notice(path, backup)
+    assert "permission mode" in text
+    assert f"mv {backup} {path}" in text
+
+    # A failing hook never breaks the read.
+    path.write_bytes(good[:-20])
+    store.on_quarantine = lambda p, b: 1 / 0
+    assert await store.get_default_engine(123) is None
+
+
+@pytest.mark.anyio
 async def test_1277_failed_read_keeps_state_and_refuses_saves(
     tmp_path, monkeypatch
 ) -> None:

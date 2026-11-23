@@ -664,3 +664,60 @@ async def test_run_exhausted_retry_still_reports_error(tmp_path: Path) -> None:
     assert len(completed) == 1
     assert completed[0].ok is False
     assert completed[0].error == "503 overloaded"
+
+
+# ---------------------------------------------------------------------------
+# #1385 — Pi 1.5.2 events Untether doesn't render must not warn
+# ---------------------------------------------------------------------------
+
+_ENTRY_APPENDED = (
+    '{"type":"entry_appended","entry":{"type":"context_edit","id":"be84f578",'
+    '"parentId":"56af16d8","targetId":"56af16d8","replacement":null}}'
+)
+
+
+@pytest.mark.anyio
+async def test_retry_entry_appended_does_not_warn(tmp_path: Path) -> None:
+    """Pi 1.5.2 sends entry_appended between auto_retry_start and the retried
+    agent_start; a type from a newer Pi is skipped quietly too."""
+    from structlog.testing import capture_logs
+
+    lines = _retry_stream(will_retry=True, settled=True)
+    lines.insert(lines.index('{"type":"agent_start"}', 2), _ENTRY_APPENDED)
+    lines.insert(-1, '{"type":"brand_new_pi_event","x":1}')
+    script = _fake_pi(tmp_path, lines)
+    with capture_logs() as logs:
+        events = await _run_fake_pi(tmp_path, script)
+
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert completed[0].answer == "Retried answer"
+    assert not [r for r in logs if r.get("event") == "jsonl.msgspec.invalid"]
+    assert not [
+        e for e in events if isinstance(e, ActionEvent) and "invalid" in e.action.title
+    ]
+
+
+def test_malformed_known_event_still_warns() -> None:
+    from structlog.testing import capture_logs
+
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    line = '{"type":"tool_execution_start"}'  # toolCallId is required
+    try:
+        pi_schema.decode_event(line)
+    except Exception as exc:  # noqa: BLE001
+        error = exc
+    with capture_logs() as logs:
+        out = runner.decode_error_events(
+            raw=line, line=line, error=error, state=runner.new_state("hi", None)
+        )
+    assert out == []
+    warned = [r for r in logs if r.get("event") == "jsonl.msgspec.invalid"]
+    assert len(warned) == 1 and warned[0]["log_level"] == "warning"
+
+
+def test_unknown_event_type_helper() -> None:
+    assert pi_schema.unknown_event_type('{"type":"brand_new"}') == "brand_new"
+    assert pi_schema.unknown_event_type('{"type":"entry_appended"}') is None
+    assert pi_schema.unknown_event_type("not json") is None
+    assert pi_schema.unknown_event_type("[1]") is None

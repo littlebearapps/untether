@@ -1087,3 +1087,51 @@ def test_1375_live_followup_turn_resets_and_behaves_the_same() -> None:
         _result("chore 3"),
     )
     assert _answer(events) == "A3\n\nchore 3"
+
+
+# --- #1393: a follow-up that restates part of the kept answer ---------------
+
+
+@pytest.mark.parametrize(
+    ("followup", "expected_tail"),
+    [
+        # Restates the answer's first line, then does the chore.
+        ("17 × 23 = 391\n\nBOARD UPDATED", "BOARD UPDATED"),
+        # Restates its last line.
+        ("BOARD UPDATED\n\n17×20 + 17×3", "BOARD UPDATED"),
+        # Nothing but restatement: the kept answer stands alone.
+        ("17 × 23 = 391", ""),
+        # A line that only resembles the answer is kept.
+        ("17 × 23 = 391, and BOARD UPDATED", "17 × 23 = 391, and BOARD UPDATED"),
+    ],
+)
+def test_1393_partial_restatement_is_not_repeated(
+    followup: str, expected_tail: str
+) -> None:
+    answer = "17 × 23 = 391\n\n17×20 + 17×3"
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text(answer),
+        *_stop_hook(),
+        _text(followup),
+        _result(followup),
+    )
+    assert _answer(events) == f"{answer}\n\n{expected_tail}".rstrip()
+
+
+def test_1393_followup_with_a_code_fence_is_left_whole() -> None:
+    followup = "```\n17 × 23 = 391\n```\n\nBOARD UPDATED"
+    state, factory = _state()
+    events = _feed(
+        state,
+        factory,
+        _init(),
+        _text("17 × 23 = 391\n\n17×20 + 17×3"),
+        *_stop_hook(),
+        _text(followup),
+        _result(followup),
+    )
+    assert _answer(events) == f"17 × 23 = 391\n\n17×20 + 17×3\n\n{followup}"

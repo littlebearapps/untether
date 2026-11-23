@@ -74,6 +74,12 @@ runner reference).
   for rules you configured yourself. The built-in exceptions are access outside
   the project directory, `.env` reads and, on v1, `doom_loop`.
 
+When the run ends on a rejected permission with no text from the model, Untether
+ends it as an error and says which permission `opencode run` rejected (from its
+`permission requested: …; auto-rejecting` stderr line), rather than showing
+OpenCode's "The user rejected permission…" wording as the answer
+([#1384](https://github.com/littlebearapps/untether/issues/1384)).
+
 If a tool fails under Untether but works in the OpenCode TUI, look for an `ask`
 rule in your OpenCode config: change it to `allow` for the tools you want
 OpenCode to run unattended.

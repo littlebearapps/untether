@@ -417,14 +417,21 @@ def _background_pending(stream: JsonlStreamState, logger: Any = None) -> int:
 
 
 def _event_type(raw: dict[str, Any]) -> str:
-    """The frame's event name: ``type`` (every engine but Antigravity), else
-    agy's ``event`` envelope key (#558), else ``"unknown"``."""
+    """The frame's event name: ``type`` (every engine but Antigravity and
+    Codex app-server), else agy's ``event`` envelope key (#558), else the
+    JSON-RPC ``method`` of an app-server notification or request (#1386),
+    ``"response"`` for a JSON-RPC response, else ``"unknown"``."""
     t = raw.get("type")
     if isinstance(t, str):
         return t
     e = raw.get("event")
     if isinstance(e, str):
         return e
+    m = raw.get("method")
+    if isinstance(m, str):
+        return m
+    if "id" in raw and ("result" in raw or "error" in raw):
+        return "response"
     return "unknown"
 
 
@@ -1704,7 +1711,9 @@ class JsonlSubprocessRunner(BaseRunner):
         effective_block_mb = block_mb + per_run_reserve * live_runs
 
         if block_mb > 0 and avail_mb < effective_block_mb:
-            logger.error(
+            # #1388: WARN — an expected guard decision, and the bridge's
+            # RAM hold re-checks it every 15 s.
+            logger.warning(
                 "subprocess.prespawn.ram_blocked",
                 engine=self.engine,
                 avail_mb=avail_mb,

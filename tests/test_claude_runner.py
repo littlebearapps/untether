@@ -254,6 +254,7 @@ async def test_838_run_impl_blocks_before_spawn_on_low_ram(
     assert evt.usage == {"prespawn_blocked": "ram"}
     blocked = [r for r in logs if r["event"] == "subprocess.prespawn.ram_blocked"]
     assert blocked and blocked[0]["engine"] == "claude"
+    assert blocked[0]["log_level"] == "warning"  # #1388
     assert not [r for r in logs if r["event"] == "runner.start"]
 
 

@@ -684,3 +684,27 @@ class TestCodexErrorInfoHints:
         assert _run_error_hint(
             "rate limit", usage=None, close_reason=None
         ) == get_error_hint("rate limit")
+
+
+# --- #1380: Claude Code's logged-out result names the host ------------------
+
+
+def test_claude_logged_out_hint_names_the_host(monkeypatch) -> None:
+    import socket
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "lba-1")
+    hint = get_error_hint(
+        "Not logged in \N{MIDDLE DOT} Please run /login\nsession: 157eda21"
+    )
+    assert hint is not None
+    assert hint.startswith("Claude Code on `lba-1` isn't logged in.")
+    assert "send your message again" in hint
+    assert "`claude auth login`" in hint and hint.endswith("on `lba-1`.")
+
+
+def test_claude_logged_out_hint_without_a_hostname(monkeypatch) -> None:
+    import socket
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "")
+    hint = get_error_hint("Not logged in \N{MIDDLE DOT} Please run /login") or ""
+    assert hint.startswith("Claude Code on `the host` isn't logged in.")

@@ -687,6 +687,12 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: PiStreamState,
     ) -> list[UntetherEvent]:
         if isinstance(error, msgspec.DecodeError):
+            # #1385: a type this schema doesn't declare is a newer Pi's
+            # event, not a broken line: skip it quietly.
+            unknown = pi_schema.unknown_event_type(line)
+            if unknown is not None:
+                self.get_logger().debug("pi.event.unknown_type", event_type=unknown)
+                return []
             self.get_logger().warning(
                 "jsonl.msgspec.invalid",
                 tag=self.tag(),
