@@ -8670,6 +8670,23 @@ def _close_no_query_turn(
     ]
 
 
+def _drop_restated(followup: str, answer: str) -> str:
+    """#1393: the follow-up's paragraphs minus those whose every line is
+    already in the kept pre-Stop-hook ``answer`` (a partial restatement).
+
+    shortcut: a follow-up with a code fence is left whole, since a paragraph
+    split inside a fence can't be judged safely."""
+    if "```" in followup:
+        return followup
+    seen = {line.strip() for line in answer.splitlines() if line.strip()}
+    kept = []
+    for para in re.split(r"\n\s*\n", followup):
+        lines = [line.strip() for line in para.splitlines() if line.strip()]
+        if lines and not all(line in seen for line in lines):
+            kept.append(para)
+    return "\n\n".join(kept)
+
+
 def translate_claude_event(
     event: claude_schema.StreamJsonMessage,
     *,
@@ -9369,7 +9386,8 @@ def _translate_claude_event_base(
                     answer_chars=len(pre_stop),
                     followup_chars=len(result_text),
                 )
-                result_text = f"{pre_stop}\n\n{result_text}".rstrip()
+                followup = _drop_restated(result_text, pre_stop)  # #1393
+                result_text = f"{pre_stop}\n\n{followup}".rstrip()
 
             # #510 / #508: re-emit the ExitPlanMode plan body when the
             # post-approval final answer is brief/empty. Done HERE on the
