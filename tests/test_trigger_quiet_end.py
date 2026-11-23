@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -269,7 +270,7 @@ async def test_unattended_denial_is_never_quiet(journal_path) -> None:
 
 @pytest.mark.anyio
 async def test_outbox_file_is_never_quiet(journal_path, monkeypatch) -> None:
-    monkeypatch.setattr(bridge, "outbox_has_files", lambda cfg: True)
+    monkeypatch.setattr(bridge, "outbox_has_files", lambda cfg, since=None: True)
     transport = await _run(Return(answer="[quiet] nothing"))
     assert any("nothing" in t for t in _final_texts(transport))
     (line,) = _lines(journal_path)
@@ -288,8 +289,17 @@ def test_outbox_has_files(tmp_path, monkeypatch) -> None:
         assert bridge.outbox_has_files(cfg) is False  # no outbox dir
         (tmp_path / ".untether-outbox").mkdir()
         assert bridge.outbox_has_files(cfg) is False  # empty
-        (tmp_path / ".untether-outbox" / "report.txt").write_text("x")
+        # Untether's own graveyard of archived files is not run output
+        # (dev-bot TR-1220a: it kept every quiet run in that project posting).
+        (tmp_path / ".untether-outbox" / ".skipped").mkdir()
+        assert bridge.outbox_has_files(cfg) is False
+        report = tmp_path / ".untether-outbox" / "report.txt"
+        report.write_text("x")
         assert bridge.outbox_has_files(cfg) is True
+        # A file from before this run is delivery's to archive, not ours
+        # (entry_changed_at uses ctime too, so move the run start instead).
+        assert bridge.outbox_has_files(cfg, since=time.time() + 3600) is False
+        assert bridge.outbox_has_files(cfg) is True  # no cutoff: still counts
         # No file sending configured: nothing would be delivered anyway.
         assert bridge.outbox_has_files(SimpleNamespace(send_file=None)) is False
     finally:

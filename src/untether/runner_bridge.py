@@ -5652,21 +5652,36 @@ _NATIVE_ELAPSED_ENGINES: frozenset[str] = frozenset({"antigravity"})
 _NATIVE_ELAPSED_BACKSTOP_S = 30.0
 
 
-def outbox_has_files(cfg: ExecBridgeConfig) -> bool:
-    """#1220: anything in the run's outbox keeps a quiet run posting (a
-    stale file too: posting is the safe side)."""
+def outbox_has_files(cfg: ExecBridgeConfig, since: float | None = None) -> bool:
+    """#1220: an outbox entry this run would deliver (or report as skipped)
+    keeps a quiet run posting. Uses delivery's own scan, so Untether's
+    ``.skipped`` graveyard and files older than *since* don't count."""
     oc = _load_outbox_settings(cfg)
     if cfg.send_file is None or oc is None:
         return False
+    from .telegram.outbox_delivery import _OUTBOX_FRESH_GRACE_S, classify_outbox
     from .utils.paths import get_run_base_dir
 
     run_root = get_run_base_dir()
     if run_root is None:
         return False
+    send_after = (
+        since - _OUTBOX_FRESH_GRACE_S
+        if since is not None and getattr(oc, "outbox_stale_policy", "archive") != "send"
+        else None
+    )
     try:
-        return any((run_root / oc.outbox_dir).iterdir())
+        scan = classify_outbox(
+            run_root,
+            outbox_dir=oc.outbox_dir,
+            deny_globs=(),  # a denied file still gets a notice: count it
+            max_download_bytes=1 << 62,
+            max_files=1 << 30,
+            send_after=send_after,
+        )
     except OSError:
         return False
+    return bool(scan.files or scan.skipped)
 
 
 #: #1220: the journal keeps at most this much of a quiet run's sentinel line.
@@ -8433,7 +8448,7 @@ async def handle_message(
             and (running_task is None or running_task.stop_reason is None)
             else None
         )
-        if quiet_line is not None and outbox_has_files(cfg):
+        if quiet_line is not None and outbox_has_files(cfg, run_outbox_since):
             quiet_line = None
         acct = _account_completion(
             completed,
