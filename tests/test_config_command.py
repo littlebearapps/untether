@@ -5798,3 +5798,8 @@ class TestStaleButtons1281:
         assert ConfigCommand.defers_answer("tg:pause")
         assert not ConfigCommand.defers_answer("pm")
         assert not ConfigCommand.defers_answer("vb:on")
+
+
+def test_ultra_tap_has_a_toast() -> None:
+    """#846: every Reasoning button confirms what it set."""
+    assert ConfigCommand.early_answer_toast("rs:ult") == "Reasoning: ultra"

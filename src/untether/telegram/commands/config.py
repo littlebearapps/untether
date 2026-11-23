@@ -3276,6 +3276,7 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "hi": "Reasoning: high",
         "xhi": "Reasoning: xhigh",
         "max": "Reasoning: max",
+        "ult": "Reasoning: ultra",
         "clr": "Reasoning: cleared",
     },
     "aq": {
