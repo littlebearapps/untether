@@ -148,12 +148,12 @@ def test_743_builds_options_when_none():
 
 
 def test_743_unsupported_reasoning_dropped_for_engine():
-    """Matches the executor's sanitiser: codex has no `max`."""
-    ctx = RunContext(trigger_source="at:z", reasoning="max")
+    """Matches the executor's sanitiser: codex has no `minimal` (#416)."""
+    ctx = RunContext(trigger_source="at:z", reasoning="minimal")
     out = _apply_trigger_overrides(EngineRunOptions(), ctx, engine="codex")
     assert out is not None
     assert out.reasoning is None
-    assert out.ignored_reasoning == "max"
+    assert out.ignored_reasoning == "minimal"
 
 
 def test_743_cron_reasoning_clears_stale_ignored_reasoning():
