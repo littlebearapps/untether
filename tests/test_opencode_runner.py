@@ -1161,3 +1161,84 @@ def test_opencode_env_logs_dropped_names_once(
     assert dropped[0]["engine"] == "opencode"
     assert "ZZ_CANARY_SECRET" in dropped[0]["names"]
     assert "leak-value" not in repr(dropped[0])
+
+
+# ---------------------------------------------------------------------------
+# #1384: an auto-rejected permission is not the answer
+# ---------------------------------------------------------------------------
+
+_PERMISSION_STDERR = (
+    "\x1b[1;33m!\x1b[0m permission requested: external_directory "
+    "(/nonexistent/file/*); auto-rejecting"
+)
+
+
+def _run_permission_fixture(
+    runner: OpenCodeRunner, *, stderr: str | None
+) -> list[CompletedEvent]:
+    state = OpenCodeStreamState()
+    if stderr is not None:
+        runner.on_stderr_line(stderr, state=state, proc=None)
+    events = []
+    for event in _load_fixture("opencode_permission_auto_rejected.jsonl"):
+        events.extend(translate_opencode_event(event, title="opencode", state=state))
+    assert not any(isinstance(e, CompletedEvent) for e in events)
+    session = ResumeToken(engine=ENGINE, value="ses_permreject01")
+    return [
+        e
+        for e in runner.stream_end_events(
+            resume=None, found_session=session, state=state
+        )
+        if isinstance(e, CompletedEvent)
+    ]
+
+
+def test_permission_auto_rejected_ends_as_error_with_note() -> None:
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    [completed] = _run_permission_fixture(runner, stderr=_PERMISSION_STDERR)
+    assert completed.ok is False
+    assert "user rejected" not in completed.answer
+    assert "`external_directory` (`/nonexistent/file/*`)" in completed.answer
+    assert "opencode.json" in completed.answer
+    assert completed.error == completed.answer
+    assert completed.resume == ResumeToken(engine=ENGINE, value="ses_permreject01")
+
+
+def test_permission_auto_rejected_without_stderr_detail() -> None:
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    [completed] = _run_permission_fixture(runner, stderr=None)
+    assert completed.ok is False
+    assert completed.answer.startswith("OpenCode needed permission, and")
+
+
+def test_permission_rejected_with_text_keeps_answer() -> None:
+    """The model explained the refusal itself: keep its text as a success."""
+    state = OpenCodeStreamState(session_id="ses_test", permission_rejected=True)
+    state.last_text = "I couldn't read that file."
+    event = opencode_schema.StepFinish(part={"reason": "stop"})
+    [completed] = translate_opencode_event(event, title="opencode", state=state)
+    assert completed.ok is True
+    assert completed.answer == "I couldn't read that file."
+
+
+def test_permission_rejected_stop_without_text_is_error() -> None:
+    state = OpenCodeStreamState(session_id="ses_test", permission_rejected=True)
+    event = opencode_schema.StepFinish(part={"reason": "stop"})
+    [completed] = translate_opencode_event(event, title="opencode", state=state)
+    assert completed.ok is False
+    assert "opencode run" in completed.answer
+
+
+def test_other_tool_error_still_falls_back_ok() -> None:
+    """#150 behaviour is unchanged for errors that are not a rejection."""
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    state = OpenCodeStreamState(saw_step_finish=True)
+    runner.on_stderr_line("some unrelated stderr", state=state, proc=None)
+    state.last_tool_error = "ENOENT: no such file"
+    session = ResumeToken(engine=ENGINE, value="ses_test")
+    [completed] = runner.stream_end_events(
+        resume=None, found_session=session, state=state
+    )
+    assert completed.ok is True
+    assert completed.answer == "ENOENT: no such file"
+    assert state.rejected_permission is None

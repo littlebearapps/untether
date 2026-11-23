@@ -136,6 +136,16 @@ _RESUME_RE = re.compile(
 # control (environment, cwd, cancel, stall watchdog), so only the 1.x CLI
 # (npm ``opencode-ai``) is supported until a v2 adapter is built.
 _SUPPORTED_MAJOR = 1
+
+# #1384: ``opencode run`` rejects every ``ask`` permission by itself (#969).
+# The tool then fails with OpenCode's PermissionRejectedError text, and the
+# permission and its patterns appear only in the stderr warning line.
+_PERMISSION_REJECTED_PREFIX = (
+    "The user rejected permission to use this specific tool call"
+)
+_PERMISSION_STDERR_RE = re.compile(
+    r"permission requested: (?P<permission>\S+) \((?P<patterns>.*)\); auto-rejecting"
+)
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 _VERSION_PROBE_TIMEOUT_S = 10.0
 _VERSION_CACHE: dict[tuple[str, float], str | None] = {}
@@ -242,8 +252,45 @@ class OpenCodeStreamState:
     session_id: str | None = None
     emitted_started: bool = False
     saw_step_finish: bool = False
+    # #1384: a tool call failed because ``opencode run`` auto-rejected its
+    # permission; ``rejected_permission`` names it when stderr said which.
+    permission_rejected: bool = False
+    rejected_permission: str | None = None
     accumulated_cost: float = 0.0
     accumulated_tokens: dict[str, int] = field(default_factory=dict)
+
+
+def _permission_rejected_completed(
+    state: OpenCodeStreamState,
+    *,
+    resume: ResumeToken | None,
+    usage: dict[str, Any] | None,
+) -> CompletedEvent | None:
+    """#1384: the run ended on an auto-rejected permission with no text, so
+    say what happened instead of passing OpenCode's "The user rejected"
+    wording off as the answer. None when that isn't the case."""
+    if state.last_text or not state.permission_rejected:
+        return None
+    what = f" for {state.rejected_permission}" if state.rejected_permission else ""
+    message = (
+        f"OpenCode needed permission{what}, and `opencode run` rejects "
+        "permission requests automatically, so that tool call did not run. "
+        "To allow it, add a rule to the `permission` settings in the "
+        "project's `opencode.json`."
+    )
+    logger.info(
+        "opencode.permission.auto_rejected",
+        session_id=state.session_id,
+        permission=state.rejected_permission,
+    )
+    return CompletedEvent(
+        engine=ENGINE,
+        ok=False,
+        answer=message,
+        resume=resume,
+        error=message,
+        usage=usage,
+    )
 
 
 def _action_event(
@@ -453,6 +500,8 @@ def translate_opencode_event(
                 if error is not None:
                     detail["error"] = error
                     state.last_tool_error = str(error)
+                    if str(error).startswith(_PERMISSION_REJECTED_PREFIX):
+                        state.permission_rejected = True
                 detail["exit_code"] = exit_code
 
                 state.pending_actions.pop(action.id, None)
@@ -502,6 +551,11 @@ def translate_opencode_event(
                     resume = ResumeToken(engine=ENGINE, value=state.session_id)
 
                 usage = _build_usage(state)
+                rejected = _permission_rejected_completed(
+                    state, resume=resume, usage=usage
+                )
+                if rejected is not None:
+                    return [rejected]
                 # When OpenCode handles errors internally (e.g. file not
                 # found), it may complete normally with no Text events.
                 # Fall back to the last tool error message.
@@ -696,6 +750,19 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> None:
         pass
 
+    def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
+        """#1384: remember which permission ``opencode run`` auto-rejected."""
+        if not isinstance(state, OpenCodeStreamState):
+            return
+        match = _PERMISSION_STDERR_RE.search(line)
+        if match is None:
+            return
+        permission = match.group("permission").replace("`", "")
+        patterns = match.group("patterns").replace("`", "").strip()
+        state.rejected_permission = (
+            f"`{permission}` (`{patterns}`)" if patterns else f"`{permission}`"
+        )
+
     def invalid_json_events(
         self,
         *,
@@ -833,6 +900,12 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
 
         if state.saw_step_finish:
+            usage = _build_usage(state)
+            rejected = _permission_rejected_completed(
+                state, resume=found_session, usage=usage
+            )
+            if rejected is not None:
+                return [rejected]
             answer = state.last_text or state.last_tool_error or ""
             return [
                 CompletedEvent(
@@ -840,7 +913,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     ok=True,
                     answer=answer,
                     resume=found_session,
-                    usage=_build_usage(state),
+                    usage=usage,
                 )
             ]
 
