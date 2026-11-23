@@ -502,3 +502,23 @@ def test_fixture_catalogue_matches_a_live_read() -> None:
     catalogue = fixture_catalogue()
     assert catalogue.default_model == "gpt-6.2-sol"
     assert len([m for m in catalogue.models.values() if not m.hidden]) == 10
+
+
+@pytest.mark.anyio
+async def test_prespawn_guard_blocks_the_read(
+    tmp_path: Path, supported: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#838: a read is a spawn; a host short of memory or at its run limit
+    refuses it before anything starts."""
+    from untether.runner import JsonlSubprocessRunner
+
+    monkeypatch.setattr(
+        JsonlSubprocessRunner,
+        "_check_prespawn_ram_guard",
+        lambda self, resume: object(),
+    )
+    fake = Fake(tmp_path)
+    with pytest.raises(reads.CodexReadError) as exc:
+        await reads.get_usage(fake.runner())
+    assert exc.value.kind == "prespawn_blocked"
+    assert fake.spawn_count() == 0

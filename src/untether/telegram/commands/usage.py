@@ -635,7 +635,7 @@ def _codex_error_line(exc: Exception) -> str:
                 f"Codex didn't answer within {codex_reads.READ_TIMEOUT_S:.0f} s"
                 " — try again shortly."
             )
-        return f"Couldn't read Codex's quota ({html.escape(exc.kind)})."
+        return f"Couldn't read Codex's quota ({_slash_error_reason(exc.kind)})."
     return f"Couldn't read Codex's quota ({html.escape(type(exc).__name__)})."
 
 

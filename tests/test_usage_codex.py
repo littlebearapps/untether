@@ -180,6 +180,11 @@ async def test_non_chatgpt_auth(
             "Codex didn't answer within 10 s — try again shortly.",
         ),
         (reads.CodexReadError("exited"), "Couldn't read Codex's quota (exited)."),
+        (
+            reads.CodexReadError("prespawn_blocked"),
+            "Couldn't read Codex's quota (the host is short of memory or at its"
+            " run limit right now; try /usage again in a minute).",
+        ),
         (RuntimeError("x"), "Couldn't read Codex's quota (RuntimeError)."),
     ],
 )

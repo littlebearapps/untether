@@ -140,6 +140,10 @@ async def app_server_read(
     support = await anyio.to_thread.run_sync(codex_app_server_support, cmd)
     if not support.ok:
         raise CodexReadUnavailable(support.version)
+    # #838: a read is a spawn too — refuse on a host short of memory or at
+    # its run limit, like every engine run.
+    if runner._check_prespawn_ram_guard(None) is not None:
+        raise CodexReadError("prespawn_blocked")
     argv = [cmd, *read_args(runner.extra_args), "app-server", "--listen", "stdio://"]
     env = apply_run_env(runner.env(state=None), None)
     tmp_dir = tempfile.mkdtemp(prefix="untether-codex-read-")
