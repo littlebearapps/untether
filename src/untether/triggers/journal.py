@@ -65,6 +65,8 @@ def record_run(
     model: str | None = None,
     elapsed_s: float | None = None,
     usage: dict[str, Any] | None = None,
+    quiet: bool = False,
+    quiet_line: str | None = None,
 ) -> None:
     """Append one line for a cron/webhook run; a no-op for any other run.
 
@@ -72,6 +74,8 @@ def record_run(
     ``refused`` / ``announce_failed`` / ``fetch_aborted`` (nothing ran).
     ``usage`` is the result's usage dict: ``num_turns``, the per-run
     ``total_cost_usd`` and Claude's per-result ``throttle`` delta are read.
+    ``quiet`` / ``quiet_line`` (#1220): the run ended quietly, and the
+    answer's sentinel line (the only answer text a line ever holds).
     """
     if _path is None or context is None or not context.trigger_source:
         return
@@ -103,6 +107,8 @@ def record_run(
         "api_retry_count": throttle.get("api_retry_count", 0),
         "api_retry_total_s": throttle.get("api_retry_total_s", 0.0),
         "rejected": bool(throttle.get("rejected", False)),
+        "quiet": quiet,
+        "quiet_line": redact_url_secrets(quiet_line)[:200] if quiet_line else None,
     }
     try:
         _append(_path, json.dumps(record, separators=(",", ":")) + "\n")

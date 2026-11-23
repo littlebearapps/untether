@@ -30,7 +30,9 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-type StopScope = Literal["per_run", "per_day"]
+# ``trigger_*``: a cron / webhook's own ``max_budget_usd`` / ``max_turns``
+# (#1125), checked across every turn of the run's live session.
+type StopScope = Literal["per_run", "per_day", "trigger_budget", "trigger_turns"]
 type RunStop = tuple[StopScope, float, float]  # (scope, spent, limit)
 
 RUN_ANYWAY_PREFIX = "budget:run:"
@@ -93,12 +95,32 @@ def daily_gate(run_options: Any = None) -> tuple[float, float] | None:
     return daily, budget.max_cost_per_day
 
 
-def run_stop(run_cost: float, run_options: Any = None) -> RunStop | None:
+def trigger_run_stop(
+    run_cost: float, run_turns: int, run_options: Any = None
+) -> RunStop | None:
+    """#1125: a trigger's own budget, run-wide. Claude's ``--max-turns`` and
+    ``--max-budget-usd`` count per query (probe 8), so each wake turn of a
+    live session gets a fresh allowance; this ends the session once the run
+    as a whole has used it. Independent of ``[cost_budget]``."""
+    max_budget = getattr(run_options, "max_budget_usd", None)
+    if max_budget is not None and run_cost >= max_budget:
+        return "trigger_budget", run_cost, float(max_budget)
+    max_turns = getattr(run_options, "max_turns", None)
+    if max_turns is not None and run_turns >= max_turns:
+        return "trigger_turns", float(run_turns), float(max_turns)
+    return None
+
+
+def run_stop(
+    run_cost: float, run_options: Any = None, *, run_turns: int = 0
+) -> RunStop | None:
     """Whether a live session must end after the reply just delivered.
 
     ``run_cost`` is the run's cumulative spend (every turn of a live session),
-    not the last turn's delta.
+    not the last turn's delta; ``run_turns`` its model turns so far.
     """
+    if (stop := trigger_run_stop(run_cost, run_turns, run_options)) is not None:
+        return stop
     budget = effective_budget(run_options)
     if budget is None or not budget.auto_cancel:
         return None
@@ -113,6 +135,16 @@ def run_stop(run_cost: float, run_options: Any = None) -> RunStop | None:
 
 def run_stop_text(stop: RunStop) -> str:
     scope, spent, limit = stop
+    if scope == "trigger_budget":
+        return (
+            f"\N{OCTAGONAL SIGN} Stopped: run cost ${spent:.2f} reached this "
+            f"trigger's max_budget_usd ${limit:.2f}"
+        )
+    if scope == "trigger_turns":
+        return (
+            f"\N{OCTAGONAL SIGN} Stopped: the run used {int(spent)} turns, this "
+            f"trigger's max_turns is {int(limit)}"
+        )
     if scope == "per_run":
         return (
             f"\N{OCTAGONAL SIGN} Stopped: run cost ${spent:.2f} passed the "

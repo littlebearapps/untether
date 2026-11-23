@@ -118,6 +118,10 @@ CONVERSATION_GONE_TEXT = (
     "not found), so it wasn't resumed — send your message again to start a "
     "new one."
 )
+# #1125: agy's ``--print-timeout`` expired (a trigger's ``max_elapsed_s``).
+PRINT_TIMEOUT_FLAG = "antigravity.print_timeout"
+PRINT_TIMEOUT_TEXT = "Stopped: the trigger's time limit (max_elapsed_s) was reached."
+
 INTERRUPTED_TEXT = (
     "Antigravity was interrupted — the conversation can be resumed by "
     "replying to its resume line."
@@ -2338,13 +2342,21 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         from ..utils.antigravity_argv import AgyArgvError, agy_flag
 
         mode = self._effective_mode()
+        # #1125: a trigger's `max_elapsed_s` uses agy's own limit; the
+        # completion turns its partial "SUCCESS" into a time-limit error, and
+        # the bridge's wall-clock timer stays as the backstop.
+        options = get_run_options()
+        max_elapsed = options.max_elapsed_s if options is not None else None
         args = [
             "--input-format",
             "stream-json",
             "--output-format",
             "stream-json",
-            "--print-timeout",
-            "0",
+            *(
+                [agy_flag("--print-timeout", max_elapsed)]
+                if max_elapsed is not None
+                else ["--print-timeout", "0"]
+            ),
         ]
         if mode != "plan" and native_compact_prompt(prompt) is None:
             # C7: the flag turns ``--mode=plan`` into a no-op, so a plan run
@@ -2695,7 +2707,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._note_stderr_once(state, "antigravity.mode.rejected", stripped)
         elif lower.startswith("[agy] print timeout after"):
             # agy then reports SUCCESS with a partial answer (REVIEW m2).
-            self._note_stderr_once(state, "antigravity.print_timeout", stripped)
+            self._note_stderr_once(state, PRINT_TIMEOUT_FLAG, stripped)
         elif lower.startswith("jetski: no output produced"):
             state.stderr_flags.add("no_output")
             logger.debug("antigravity.stderr.no_output")
@@ -4110,7 +4122,25 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if state.superseded_cards:
             usage = _with_retired_cards(usage, state.superseded_cards)
         factory = state.factory
-        if status == "SUCCESS":
+        run_options = get_run_options()
+        if (
+            status == "SUCCESS"
+            and PRINT_TIMEOUT_FLAG in state.stderr_flags
+            and run_options is not None
+            and run_options.max_elapsed_s is not None
+        ):
+            # #1125: agy hit the trigger's `--print-timeout` and reports
+            # SUCCESS with a partial answer (REVIEW m2): a time-limit stop.
+            # Read only if agy wrote the stderr line before its result.
+            out.append(
+                factory.completed_error(
+                    error=PRINT_TIMEOUT_TEXT,
+                    answer=answer,
+                    resume=resume_token,
+                    usage={**usage, "limit": "max_elapsed"},
+                )
+            )
+        elif status == "SUCCESS":
             out.append(
                 factory.completed_ok(answer=answer, resume=resume_token, usage=usage)
             )

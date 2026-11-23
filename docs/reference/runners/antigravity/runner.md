@@ -103,7 +103,11 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 [--
   [Permission modes](#permission-modes)), and agy's own `/compact`
   ([#1114](https://github.com/littlebearapps/untether/issues/1114), see [`/compact`](#compact)).
 - `--print-timeout 0` is agy's default (no limit) made explicit. If agy ever hits a print timeout it reports
-  success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line.
+  success with a partial answer, so Untether logs `antigravity.print_timeout` when it sees that line. A cron or
+  webhook with `max_elapsed_s` passes `--print-timeout=<n>s` instead
+  ([#1125](https://github.com/littlebearapps/untether/issues/1125)); when that run's result arrives after the
+  timeout line, Untether reports it as an error ("Stopped: the trigger's time limit …", partial answer kept, journal
+  `max_elapsed`) rather than as an answer.
 - The last arguments are the permission mode: `--mode=accept-edits --agent=untether-workspace` for Workspace,
   `--mode=plan --agent=untether-workspace` for Plan first, and `--dangerously-skip-permissions` only in Full access
   or in Ask me once the gate is ready (see [Permission modes](#permission-modes)). The `--mode` and `--agent`
@@ -1023,6 +1027,7 @@ rows give their own version and date (latest: agy 1.5.12, 2026-11-19).
 | Quota line under an answer | The cached answer of `agy -p /usage` | Partly custom: agy has no push or cheap in-stream quota value (`/usage` is refused inside a stream-json session), and a probe before each final would delay it, so the line only reads what `/usage` cached (15 min at most). Checked 2026-10-12, agy 1.3.3. Revisit if the stream starts carrying quota |
 | Plan first ([#981](https://github.com/littlebearapps/untether/issues/981)) | `--mode=plan` under the no-shell agent; approve = `--conversation=<id> --mode=accept-edits`; revise = `--conversation=<id> --mode=plan` | Partly **custom**: agy has no headless "plan ready" signal (`result` and `init.permission_mode` are the same as any turn's) and no way to answer a plan from print mode, so Untether detects the plan from the finished `write_to_file` into `brain/<conversation id>/`, reads that one file and its sidecar (realpath-contained; the D33 exception extended to this file), and keeps the pending-card store itself. agy 1.3.2's `artifactReviewPolicy` is a settings key (changing it would edit the user's agy settings). Checked 2026-10-12/13, agy 1.3.3. Retire when the stream carries the plan or agy can wait for a review headless |
 | `/export` | — (**custom**: Untether's in-memory record of the events it saw) | agy writes `transcript_full.jsonl` under `brain/<id>/` but has no export command or flag for it, and reading it is rule 3 (an engine state file, holding whole file contents). Not read. Checked 2026-10-12, agy 1.3.3 |
+| A trigger's wall-clock limit (`max_elapsed_s`, [#1125](https://github.com/littlebearapps/untether/issues/1125)) | `--print-timeout=<n>s` | **Partial**: on expiry agy reports `SUCCESS` with a partial answer and prints `[agy] print timeout after …` on stderr (REVIEW m2). Untether turns that result into a time-limit error when it has seen the stderr line by then, and keeps its own timer 30 s later as a backstop. Not live-tested; checked against `agy --help` on 1.5.14, 2026-11-23 |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
 lets `--agent` change on a resume.

@@ -172,12 +172,20 @@ def native_compact_prompt(prompt: Any) -> str | None:
     return f"{COMPACT_COMMAND} {message}" if message else COMPACT_COMMAND
 
 
+def check_print_timeout(value: Any) -> str:
+    """#1125: a trigger's ``max_elapsed_s`` as agy's Go duration (``60s``)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AgyArgvError("print-timeout", "not_positive_seconds")
+    return f"{value}s"
+
+
 _CHECKS = {
     "--model": check_model,
     "--conversation": check_conversation,
     "--effort": check_effort,
     "--mode": check_mode,
     "--agent": check_agent,
+    "--print-timeout": check_print_timeout,
 }
 
 

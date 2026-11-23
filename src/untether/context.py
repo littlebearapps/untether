@@ -31,6 +31,13 @@ class RunContext:
     # an existing name) and its Claude ``--agent``.
     env: tuple[tuple[str, str], ...] = ()
     agent: str | None = None
+    # #1125: a trigger's run budgets (Claude turn / cost caps; wall-clock for
+    # every engine, enforced by the bridge).
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+    max_elapsed_s: int | None = None
+    # #1220: the quiet-end sentinel when ``quiet_unless_output`` is on.
+    quiet_sentinel: str | None = None
 
 
 # #751 / #835: trigger sources with nobody present to answer a Telegram

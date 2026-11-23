@@ -233,6 +233,9 @@ _TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = (
     "reasoning",
     "allowed_tools",  # #1118
     "agent",  # #1121
+    "max_turns",  # #1125
+    "max_budget_usd",
+    "max_elapsed_s",
 )
 
 # #1118: the mode a webhook with no own `permission_mode` runs in under

@@ -1006,6 +1006,18 @@ and the Agent SDK docs (Python 0.2.165); a docs comparison, not live-tested. Re-
 CLI that folds without per-line frames would leave the line waiting until the 120 s
 `claude.live_session.injected_turn_timeout` backstop, which is the drift signal.
 
+**Trigger run budgets ([#1125](https://github.com/littlebearapps/untether/issues/1125), CLI 2.1.330, 2026-11-23,
+built on probe 8):** a cron or webhook's `max_turns` / `max_budget_usd` are passed as the native `--max-turns=<n>` /
+`--max-budget-usd=<x>` on that run's spawn only (after `extra_args`, so they win over an engine-wide copy). Both are
+**partial** for a run: they count per query, so a live session's background wake turns each get a fresh allowance.
+Untether fills only that gap: it adds up the run's `num_turns` and per-turn cost deltas and, after the turn that reaches
+either limit, refuses further input and closes the session at idle (the #896 "Stop at limit" path, scope
+`trigger_turns` / `trigger_budget`). `--max-turns` is hidden from `--help`; `_209_HIDDEN` in the drift test fails if
+the parser drops it. There is no native wall-clock limit: `max_elapsed_s` is Untether's timer, and when it fires the
+open turn is ended with the native `interrupt` request (`interrupt_pending_turn(any_turn=True)`, the #845 helper,
+without its "approval pending" condition), then the usual `/cancel` teardown; an idle live session is closed with
+reason `max_elapsed`. `/cancel` itself is unchanged. Not live-tested yet (TR-1125a–e).
+
 **Custom because native fails a "works on Untether's surface" test:**
 
 | Untether feature | Why native doesn't count |

@@ -1865,6 +1865,9 @@ class _CompletionAccounting:
     outlier_text: str | None
     # #896: "Stop at limit" footer line when this result ends the session.
     budget_stop_text: str | None = None
+    # #1220: the run's journal line, when the caller writes it itself (a
+    # quiet-end candidate, decided only after the accounting).
+    journal_fields: dict[str, Any] | None = None
 
 
 def _add_budget_run_cost(
@@ -1875,6 +1878,10 @@ def _add_budget_run_cost(
     cost = (run_usage or {}).get("total_cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
         state["run_cost"] += float(cost)
+    # #1125: the run's model turns too, for a trigger's run-wide max_turns.
+    turns = (run_usage or {}).get("num_turns")
+    if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
+        state["run_turns"] = state.get("run_turns", 0) + turns
     return state["run_cost"]
 
 
@@ -1920,7 +1927,11 @@ def _decide_budget_stop(state: dict[str, Any], session_id: str) -> str | None:
         live = get_live_session(session_id)
         if live is None or getattr(live, "closing", False):
             return None  # the run has already ended: nothing to stop
-        stop = run_stop(state["run_cost"], get_run_options())
+        stop = run_stop(
+            state["run_cost"],
+            get_run_options(),
+            run_turns=state.get("run_turns", 0),
+        )
         if stop is not None:
             # Before any await: nothing queued behind this reply may start
             # another paid turn. A follow-up refused here takes the resume
@@ -2485,6 +2496,9 @@ class RunningTask:
     engine: str | None = None
     # #1176: the run's final has been handed to the transport.
     final_sent: bool = False
+    # #1125: why Untether itself stopped the run (``"max_elapsed"``: a
+    # trigger's time limit); None for a user's /cancel.
+    stop_reason: str | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -5624,6 +5638,114 @@ _EARLY_DELIVERY_TIMEOUT_S = 60.0
 # engine process exit by itself before the cancel scope tears it down.
 _INTERRUPTED_EXIT_WAIT_S = 5.0
 
+# #1125: the card of a trigger run stopped at its ``max_elapsed_s``.
+_TIME_LIMIT_LABEL = "`stopped: time limit`"
+_TIME_LIMIT_FOOTER = (
+    "\N{STOPWATCH}\N{VARIATION SELECTOR-16} Stopped at this trigger's time "
+    "limit (max_elapsed_s)"
+)
+
+# #1125: engines that enforce a trigger's ``max_elapsed_s`` themselves
+# (Antigravity's ``--print-timeout``) get the bridge's timer this much later,
+# as a backstop for an engine that doesn't stop.
+_NATIVE_ELAPSED_ENGINES: frozenset[str] = frozenset({"antigravity"})
+_NATIVE_ELAPSED_BACKSTOP_S = 30.0
+
+
+def outbox_has_files(cfg: ExecBridgeConfig, since: float | None = None) -> bool:
+    """#1220: an outbox entry this run would deliver (or report as skipped)
+    keeps a quiet run posting. Uses delivery's own scan, so Untether's
+    ``.skipped`` graveyard and files older than *since* don't count."""
+    oc = _load_outbox_settings(cfg)
+    if cfg.send_file is None or oc is None:
+        return False
+    from .telegram.outbox_delivery import _OUTBOX_FRESH_GRACE_S, classify_outbox
+    from .utils.paths import get_run_base_dir
+
+    run_root = get_run_base_dir()
+    if run_root is None:
+        return False
+    send_after = (
+        since - _OUTBOX_FRESH_GRACE_S
+        if since is not None and getattr(oc, "outbox_stale_policy", "archive") != "send"
+        else None
+    )
+    try:
+        scan = classify_outbox(
+            run_root,
+            outbox_dir=oc.outbox_dir,
+            deny_globs=(),  # a denied file still gets a notice: count it
+            max_download_bytes=1 << 62,
+            max_files=1 << 30,
+            send_after=send_after,
+        )
+    except OSError:
+        return False
+    return bool(scan.files or scan.skipped)
+
+
+#: #1220: the journal keeps at most this much of a quiet run's sentinel line.
+_QUIET_LINE_MAX = 200
+
+
+def quiet_end_line(answer: str | None, sentinel: str) -> str | None:
+    """#1220: the answer's first non-blank line (stripped, at most 200
+    characters) when it starts with *sentinel*, else None."""
+    for line in (answer or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:_QUIET_LINE_MAX] if stripped.startswith(sentinel) else None
+    return None
+
+
+def trigger_journal_outcome(
+    usage: Mapping[str, Any] | None, *, ok: bool | None, stop_reason: str | None
+) -> str:
+    """#1123/#1125: a trigger run's journal ``outcome`` from its first result.
+
+    ``max_elapsed`` (the bridge's time limit, or agy's ``--print-timeout``),
+    ``max_turns`` / ``max_budget`` (Claude's ``error_max_turns`` /
+    ``error_max_budget_usd`` result subtypes), ``cancelled`` (an interrupted
+    turn), else ``ok`` / ``error``.
+    """
+    from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+    usage = usage or {}
+    if stop_reason == "max_elapsed" or usage.get("limit") == "max_elapsed":
+        return "max_elapsed"
+    subtype = usage.get("subtype")
+    if subtype == "error_max_turns":
+        return "max_turns"
+    if subtype == "error_max_budget_usd":
+        return "max_budget"
+    if usage.get("terminal_reason") in CLAUDE_ABORTED_TERMINAL_REASONS:
+        return "cancelled"
+    return "ok" if ok else "error"
+
+
+def trigger_elapsed_limit(engine: str, context: RunContext | None) -> float | None:
+    """#1125: seconds after which the bridge stops a trigger run, or None.
+
+    A Claude limit above ``[watchdog] live_session_max_s`` is clamped to it
+    (the session can't outlive that cap anyway) with a WARN.
+    """
+    limit = context.max_elapsed_s if context is not None else None
+    if limit is None:
+        return None
+    if engine in _NATIVE_ELAPSED_ENGINES:
+        return float(limit) + _NATIVE_ELAPSED_BACKSTOP_S
+    if engine == "claude":
+        cap = getattr(_load_watchdog_settings(), "live_session_max_s", None)
+        if isinstance(cap, (int, float)) and limit > cap:
+            logger.warning(
+                "trigger.max_elapsed.clamped",
+                trigger=context.trigger_source if context else None,
+                max_elapsed_s=limit,
+                live_session_max_s=cap,
+            )
+            return float(cap)
+    return float(limit)
+
 
 async def run_runner_with_cancel(
     runner: Runner,
@@ -5858,9 +5980,27 @@ async def run_runner_with_cancel(
                         runner_finished.set()
                     tg.cancel_scope.cancel()
 
+            async def elapsed_deadline(task: RunningTask, limit_s: float) -> None:
+                """#1125: a trigger's ``max_elapsed_s`` — stop the run through
+                the /cancel path below, marked as a time-limit stop."""
+                await anyio.sleep(limit_s)
+                if task.cancel_requested.is_set():
+                    return
+                task.stop_reason = "max_elapsed"
+                logger.warning(
+                    "trigger.max_elapsed.reached",
+                    trigger=task.context.trigger_source if task.context else None,
+                    run_id=task.context.run_id if task.context else None,
+                    engine=runner.engine,
+                    limit_s=limit_s,
+                    live_idle=running_task_is_live_idle(task),
+                )
+                task.cancel_requested.set()
+
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
+                time_limit = task.stop_reason == "max_elapsed"
                 # #977: the engine's live-session backend (None: the engine
                 # keeps no process live, so there is nothing to close).
                 live = (
@@ -5876,11 +6016,15 @@ async def run_runner_with_cancel(
                 # #845: a turn waiting on an approval ends through the CLI's
                 # native interrupt (no further model call); a live session is
                 # then idle and closes cleanly just below.
+                # #1125: a time-limit stop interrupts the turn natively even
+                # with nothing pending (no further model call, session kept).
                 interrupted = (
                     task.resume is not None
                     and live is not None
                     and not running_task_is_live_idle(task)
-                    and await live.interrupt_pending_turn(task.resume.value)
+                    and await live.interrupt_pending_turn(
+                        task.resume.value, any_turn=time_limit
+                    )
                 )
                 # #776: /cancel (or /new) on a live session that is only
                 # holding between turns closes its stdin — the CLI stops its
@@ -5890,7 +6034,11 @@ async def run_runner_with_cancel(
                     running_task_is_live_idle(task)
                     and task.resume is not None
                     and live is not None
-                    and await live.close(task.resume.value, "cancel", notice=True)
+                    and await live.close(
+                        task.resume.value,
+                        "max_elapsed" if time_limit else "cancel",
+                        notice=True,
+                    )
                 ):
                     with anyio.move_on_after(20):
                         await runner_finished.wait()
@@ -5915,6 +6063,9 @@ async def run_runner_with_cancel(
             if running_task is not None:
                 edits.cancel_event = running_task.cancel_requested
                 tg.start_soon(wait_cancel, running_task)
+                limit_s = trigger_elapsed_limit(runner.engine, running_task.context)
+                if limit_s is not None:
+                    tg.start_soon(elapsed_deadline, running_task, limit_s)
     except BaseExceptionGroup as eg:
         # Unwrap ExceptionGroup from anyio TaskGroup so callers' `except Exception`
         # handlers can catch the real error.  Filter out cancellation exceptions
@@ -6566,6 +6717,7 @@ def _live_closing_notice(
             "max_hold": "the background hold limit",
             "abs_cap": "the session time limit",
             "budget_stop": "the cost budget",  # #896
+            "max_elapsed": "the trigger's time limit",  # #1125
         }.get(reason, "the session limit")
         why = f"at {limit}"
     return (
@@ -7767,7 +7919,12 @@ async def handle_message(
 
     # #896: this run's cumulative spend (every turn of a live session) and,
     # once "Stop at limit" fires, the session to close after delivery.
-    budget_stop: dict[str, Any] = {"run_cost": 0.0, "sid": None, "closed": False}
+    budget_stop: dict[str, Any] = {
+        "run_cost": 0.0,
+        "run_turns": 0,  # #1125
+        "sid": None,
+        "closed": False,
+    }
 
     async def _budget_stop_close() -> None:
         """#896: end the live session after the reply that passed the budget.
@@ -7796,6 +7953,7 @@ async def handle_message(
         turn: _TurnCtx | None,
         elapsed_s: float,
         answer_len: int,
+        defer_journal: bool = False,
     ) -> _CompletionAccounting:
         """#806: the accounting every delivered result owes, whatever it
         renders as — the #778 session-cost delta (and its ledger write), the
@@ -7869,26 +8027,28 @@ async def handle_message(
             # previously logged with no record of which model produced it.
             **_model_log_fields(t_tracker.meta),
         )
+        journal_fields: dict[str, Any] | None = None
         if turn is None:
             # #1123: the run's first result is its journal line; a live
             # session's later turns are human follow-ups or wake turns.
-            from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
-
-            aborted = (completed.usage or {}).get(
-                "terminal_reason"
-            ) in CLAUDE_ABORTED_TERMINAL_REASONS
-            _journal(
-                "cancelled" if aborted else ("ok" if completed.ok else "error"),
-                ok=bool(completed.ok),
-                error=completed.error,
-                session_id=resume_value,
-                model=_model_log_fields(t_tracker.meta).get("model"),
-                elapsed_s=elapsed_s,
-                usage={
+            journal_fields = {
+                "outcome": trigger_journal_outcome(
+                    completed.usage,
+                    ok=completed.ok,
+                    stop_reason=running_task.stop_reason if running_task else None,
+                ),
+                "ok": bool(completed.ok),
+                "error": completed.error,
+                "session_id": resume_value,
+                "model": _model_log_fields(t_tracker.meta).get("model"),
+                "elapsed_s": elapsed_s,
+                "usage": {
                     **(completed.usage or {}),
                     "total_cost_usd": (cost_usage or {}).get("total_cost_usd"),
                 },
-            )
+            }
+            if not defer_journal:
+                _journal(**journal_fields)
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
 
@@ -7912,6 +8072,7 @@ async def handle_message(
             budget_stop_text=_note_budget_run_cost(
                 budget_stop, engine=runner.engine, session_id=resume_value
             ),
+            journal_fields=journal_fields,
         )
         if turn is not None:
             turn.accounting = acct
@@ -8269,13 +8430,53 @@ async def handle_message(
             )
         )
         final_resume = completed.resume or run_outcome.resume
+        # #1220: a trigger's opt-in quiet end — only a clean, successful
+        # first result whose answer opens with the sentinel, with nothing
+        # else to show (no denial, safeguard, time limit or outbox file).
+        quiet_line = (
+            quiet_end_line(completed.answer, context.quiet_sentinel)
+            if turn is None
+            and context is not None
+            and context.quiet_sentinel
+            and run_ok is True
+            and status == "done"
+            and not run_outcome.cancelled
+            and not empty_result_anomaly
+            and safeguard is None
+            and unattended is None
+            and not plain_refusal
+            and (running_task is None or running_task.stop_reason is None)
+            else None
+        )
+        if quiet_line is not None and outbox_has_files(cfg, run_outbox_since):
+            quiet_line = None
         acct = _account_completion(
             completed,
             final_resume,
             turn=turn,
             elapsed_s=elapsed_final,
             answer_len=len(final_answer or ""),
+            defer_journal=quiet_line is not None,
         )
+        if quiet_line is not None:
+            quiet = (
+                acct.cost_alert is None
+                and not acct.outlier_text
+                and not acct.budget_stop_text
+                and await _quiet_end(t_edits, t_progress_ref)
+            )
+            if acct.journal_fields is not None:
+                _journal(
+                    **acct.journal_fields,
+                    quiet=quiet,
+                    quiet_line=quiet_line if quiet else None,
+                )
+            if quiet:
+                delivery["sent"] = True
+                if running_task is not None:
+                    running_task.final_sent = True
+                _release_progress(t_progress_ref, reason="quiet")
+                return
         resume_value = acct.resume_value
         run_usage = acct.run_usage
         sync_resume_token(t_tracker, final_resume)
@@ -8386,6 +8587,15 @@ async def handle_message(
         if acct.budget_stop_text:  # #896
             final_rendered = _insert_footer_line(
                 final_rendered, f"\n{acct.budget_stop_text}"
+            )
+        if (
+            turn is None
+            and running_task is not None
+            and running_task.stop_reason == "max_elapsed"
+        ):
+            # #1125: the interrupted turn's own result reached the chat.
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{_TIME_LIMIT_FOOTER}"
             )
 
         if safeguard is not None:
@@ -8584,6 +8794,35 @@ async def handle_message(
             - _OUTBOX_FRESH_GRACE_S
         )
         return send_after, archive_before
+
+    async def _quiet_end(
+        t_edits: ProgressEdits | None, t_progress_ref: MessageRef | None
+    ) -> bool:
+        """#1220: delete the run's progress message and its trigger label
+        instead of sending a final. False (send the final as usual) when the
+        progress message couldn't be deleted."""
+        if t_edits is not None:
+            await t_edits.stop_repaints()
+        if t_progress_ref is not None:
+            try:
+                with message_kind("progress"):
+                    deleted = await cfg.transport.delete(ref=t_progress_ref)
+            except Exception:  # noqa: BLE001 — fall back to a normal final
+                deleted = False
+            if not deleted:
+                logger.warning(
+                    "trigger.quiet_end.delete_failed",
+                    trigger=context.trigger_source if context else None,
+                )
+                return False
+        with contextlib.suppress(Exception):
+            await cfg.transport.delete(ref=user_ref)  # the trigger's label
+        logger.info(
+            "trigger.quiet_end",
+            trigger=context.trigger_source if context else None,
+            run_id=context.run_id if context else None,
+        )
+        return True
 
     async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
         """Deliver ``.untether-outbox/`` right after a live turn's final —
@@ -9556,8 +9795,12 @@ async def handle_message(
                 resume=resume.value if resume else None,
                 elapsed_s=elapsed,
             )
+            # #1125: a trigger's time limit stopped it, not a user.
+            time_limit = running_task is not None and (
+                running_task.stop_reason == "max_elapsed"
+            )
             _journal(
-                "cancelled",
+                "max_elapsed" if time_limit else "cancelled",
                 ok=False,
                 session_id=resume.value if resume else None,
                 elapsed_s=elapsed,
@@ -9578,7 +9821,7 @@ async def handle_message(
             final_rendered = effective_presenter.render_progress(
                 state,
                 elapsed_s=elapsed,
-                label="`cancelled`",
+                label=_TIME_LIMIT_LABEL if time_limit else "`cancelled`",
             )
             await send_result_message(
                 cfg,
@@ -9586,7 +9829,8 @@ async def handle_message(
                 reply_to=user_ref,
                 progress_ref=progress_ref,
                 message=final_rendered,
-                notify=False,
+                # #1125: nobody asked for this stop, so the chat is told.
+                notify=time_limit,
                 edit_ref=progress_ref,
                 replace_ref=progress_ref,
                 delete_tag="cancel",

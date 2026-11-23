@@ -80,9 +80,12 @@ class LiveSessionBackend(Protocol):
         """Live background handles held by the owning process (#647)."""
         ...
 
-    async def interrupt_pending_turn(self, session_id: str) -> bool:
+    async def interrupt_pending_turn(
+        self, session_id: str, *, any_turn: bool = False
+    ) -> bool:
         """End a turn waiting on an approval with the engine's native interrupt
-        (#845); True once the turn ended, else the caller's stop path runs."""
+        (#845); True once the turn ended, else the caller's stop path runs.
+        ``any_turn``: interrupt even with nothing pending (#1125)."""
         ...
 
     def holds_background_jobs(self, session_id: str) -> bool:
@@ -174,8 +177,12 @@ class _ClaudeLive:
     def live_bg_count(self, session_id: str) -> int:
         return self._claude().session_live_bg_count(session_id)
 
-    async def interrupt_pending_turn(self, session_id: str) -> bool:
-        return await self._claude().interrupt_pending_turn(session_id)
+    async def interrupt_pending_turn(
+        self, session_id: str, *, any_turn: bool = False
+    ) -> bool:
+        return await self._claude().interrupt_pending_turn(
+            session_id, any_turn=any_turn
+        )
 
     def holds_background_jobs(self, session_id: str) -> bool:
         return self._claude().session_holds_plugin_jobs(session_id)
