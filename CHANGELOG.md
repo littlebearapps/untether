@@ -27,6 +27,14 @@
 
 ### fixes
 
+- **fix:** a message starting with `@someone` no longer creates a branch or worktree; a username-like `@name` is a branch only after `/<project>` or when that branch already exists [#1383](https://github.com/littlebearapps/untether/issues/1383)
+- **fix:** a prompt blocked by the pre-spawn RAM guard is held for up to 5 minutes and starts by itself when memory frees (`/cancel` still works); on timeout the prompt is quoted back so a voice transcript isn't lost [#1388](https://github.com/littlebearapps/untether/issues/1388)
+- **fix:** a quarantined settings file now sends the admins a DM with the backup path and a restore command, instead of silently resetting every chat's permission mode [#1381](https://github.com/littlebearapps/untether/issues/1381)
+- **fix(claude):** when a Stop hook continues the turn and Claude restates part of its answer, the final no longer shows that line twice [#1393](https://github.com/littlebearapps/untether/issues/1393)
+- **fix(claude):** a "Not logged in · Please run /login" error now comes with a hint naming the host, suggesting one resend, then `claude auth login` on that host [#1380](https://github.com/littlebearapps/untether/issues/1380)
+- **fix(opencode):** a run that ends on a permission `opencode run` rejected by itself now ends as an error naming the permission, not as "done" with "The user rejected permission…" as the answer [#1384](https://github.com/littlebearapps/untether/issues/1384)
+- **fix(pi):** Pi 1.5.2's `entry_appended` and other unrendered events no longer log `jsonl.msgspec.invalid` on every retry; unknown event types log at debug [#1385](https://github.com/littlebearapps/untether/issues/1385)
+- **fix(codex):** `session.summary` on the app-server transport records the last JSON-RPC method (e.g. `turn/completed`) instead of `unknown` [#1386](https://github.com/littlebearapps/untether/issues/1386)
 - **fix(watchdog):** the stream-idle auto-retry's budget check compares Claude's cost for the failed run, not the session's running total, with `max_cost_per_run`, so a long resumed session no longer blocks every retry [#1322](https://github.com/littlebearapps/untether/issues/1322)
 - **fix(export):** `/export` labels Claude's cost as the session total instead of the last run, because Claude reports a running total across resumed turns; turns and duration stay labelled as the last run [#1266](https://github.com/littlebearapps/untether/issues/1266)
 - **security(gemini, amp):** the deprecated Gemini CLI and AMP engines no longer inherit Untether's whole environment; like Codex and OpenCode they now get the env allowlist plus your `[security]` extras and the few names each CLI documents (`GEMINI_*` and Gemini's base-URL/project names; `AMP_*` and `NODE_EXTRA_CA_CERTS`), so unrelated tokens in the service environment no longer reach them or their tool calls [#1354](https://github.com/littlebearapps/untether/issues/1354)
@@ -98,6 +106,7 @@
 
 ### docs
 
+- integration row R362-1121a now checks log lines the journal actually shows [#1382](https://github.com/littlebearapps/untether/issues/1382)
 - FAQ and Claude runner notes on the Codex plugin's shared per-repo helper: when any Claude session in a repo ends, the plugin stops every other session's background Codex job there (an upstream bug, openai/codex-plugin-cc#671). The workaround is one git repo per project, or `codex exec` for long jobs [#1253](https://github.com/littlebearapps/untether/issues/1253)
 - upgrade notes for v0.36.2, troubleshooting entries for a resent or lost reply and the config-permission warning, and webhook Full access / own-mode statements brought up to date across the guides [#1122](https://github.com/littlebearapps/untether/issues/1122), [#1207](https://github.com/littlebearapps/untether/issues/1207), [#1219](https://github.com/littlebearapps/untether/issues/1219)
 
