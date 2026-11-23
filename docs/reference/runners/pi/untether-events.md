@@ -200,9 +200,16 @@ Mapping:
 ### 4.7 Other events
 
 Other known types (`agent_start`, `turn_*`, `message_start`, `message_update`,
-`tool_execution_update`) are decoded and ignored. A line with an unknown `type`
-or malformed JSON is dropped with a `jsonl.msgspec.invalid` warning log; no
-action is emitted.
+`tool_execution_update`) are decoded and ignored, and so is the rest of Pi
+1.5.2's event union: `queue_update`, `entry_appended` (Pi sends one between
+`auto_retry_start` and the retried `agent_start`), `session_info_changed`,
+`thinking_level_changed`, `summarization_retry_scheduled` /
+`_attempt_start` / `_finished`, `bash_execution_update` and `extension_error`
+([#1385](https://github.com/littlebearapps/untether/issues/1385)). A line whose
+`type` the schema doesn't declare (a newer Pi's event) is dropped with a
+`pi.event.unknown_type` debug log. Malformed JSON, or a known type with bad
+fields, is dropped with a `jsonl.msgspec.invalid` warning log. Neither emits an
+action.
 
 If the first translated event is not the `session` header, `started` is emitted
 on that event instead.
