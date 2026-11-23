@@ -26,19 +26,22 @@ switch transport without losing its session.
 | `profile` | `--profile <name>` | refused at load (`codex app-server` has no `--profile`, DEC-19) |
 | Full auto | no sandbox flag (Codex's own setting) | `sandbox` omitted only when `config/read` shows a `[projects]` entry for the cwd or a parent, else `read-only` with a ⚠️ row when the user sandbox is writable (P1: a writable sandbox in an unlisted project makes Codex save it as trusted) |
 | Safe | `--sandbox read-only` | `sandbox: "read-only"` on `thread/start` / `thread/resume` |
+| Ask me / Ask before writes / Auto-review ([#421](https://github.com/littlebearapps/untether/issues/421)) | refused before spawn (`codex_mode_needs_app_server`, session kept): exec can't ask | `on-request` with `workspace-write` (read-only + ⚠️ row in a project Codex doesn't list, D1) / `read-only` / `workspace-write` + `auto_review`; see [Approvals and tiers](#approvals-and-tiers-963-421) |
+| Approvals, diff preview ([#963](https://github.com/littlebearapps/untether/issues/963)) | none (`codex exec` rejects every approval request) | Telegram cards for command, file-change and permission requests; Diff preview applies |
 | Unknown `permission_mode` | runs full auto, logs `codex.permission_mode.unknown` | runs read-only, logs `codex.app_server.unknown_mode_safe` once (DEC-5, fail closed) |
 | Final answer | `_select_final_answer` over `agent_message` items | `agentMessage.phase = "final_answer"` |
 | `/cancel` | SIGTERM | `turn/interrupt`, SIGTERM after 3 s |
 | `% ctx` / 🗜️ row | none | `thread/tokenUsage/updated` / `contextCompaction` item (#832) |
 | Before spawning | nothing | the #961 support gate (below) |
 
-Every `thread/start` and `thread/resume` sends `approvalPolicy: "never"`, `approvalsReviewer: "user"`, the cwd, the
-sandbox (when set) and the chat's model (`thread/resume` adds `excludeTurns: true`: Untether never reads the
+Every `thread/start` and `thread/resume` sends the tier's `approvalPolicy` and `approvalsReviewer` (`never` + `user`
+for Full auto, Safe and every cron or webhook run), the cwd, the sandbox (when set) and the chat's model (`thread/resume` adds `excludeTurns: true`: Untether never reads the
 history, and full-history hydration draws a deprecation warning on 0.170.0). A resumed thread restores its saved
 model, so a resume with no `/model` override sends Codex's own configured model from `config/read` (`config.model`)
 instead ([#1369](https://github.com/littlebearapps/untether/issues/1369)): `/model clear` then takes effect on the
 next message rather than only after `/new`. Untether then compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
-adds a ⚠️ row. A server request (approval, user input, …) is declined with one ⚠️ row until approvals land (#963).
+adds a ⚠️ row. Approval requests become cards (below); any other server request (user input, MCP elicitation, …) is
+declined with one ⚠️ row.
 `/continue` lists the project's most recent thread (`thread/list`, source kinds `cli`, `vscode`, `exec`, `appServer`)
 and resumes it, or starts a new one with a note.
 
@@ -81,7 +84,7 @@ that, never a version comparison, to decide whether a CLI can run the app-server
 - **Subset.** `runners/codex_app_server.schema_subset()` reduces both bundles to `{key: {tier, names}}`: a method's
   params (`params.*`) and response (`result.*`) property names, a type's properties, an enum's values. Anything in
   the stable bundle is `S`; anything only in the experimental bundle is `E`.
-- **Fixture.** `tests/fixtures/codex_app_server/schema-subset-0.169.0.json` (codex-cli 0.169.0, 2026-11-18), written
+- **Fixture.** `tests/fixtures/codex_app_server/schema-subset-0.171.0.json` (codex-cli 0.171.0, 2026-11-23), written
   by `scripts/codex_app_server_schema_subset.py`. `tests/test_codex_app_server_schema.py` (CI) checks the contract
   against it; `tests/test_codex_app_server_drift.py` (lba-1 only) regenerates both bundles from the installed CLI and
   fails when a fixture method, field, variant or enum value is removed or changes tier. The same file runs one
@@ -122,6 +125,52 @@ Untether hands to Codex, as for Claude, Pi and Antigravity. The spawn environmen
 surface. Not covered: the `codex --version`, schema-probe and `/auth codex` calls still inherit the full env (they run
 no model or tools; see [#375](https://github.com/littlebearapps/untether/issues/375)).
 
+## Approvals and tiers (#963, #421)
+
+App-server only. Checked against codex-cli 0.171.0 (schema, source, and the token probes P-A and P-B, 2026-11-23).
+
+| Tier (stored) | `approvalPolicy` | `sandbox` | `approvalsReviewer` |
+|---|---|---|---|
+| Full auto (`auto` / none) | `never` | omitted if Codex lists the project, else `read-only` | `user` |
+| Safe (`safe`) | `never` | `read-only` | `user` |
+| Ask me (`ask`) | `on-request` | `workspace-write` if Codex lists the project, else `read-only` + ⚠️ row | `user` |
+| Ask before writes (`ask-writes`) | `on-request` | `read-only` | `user` |
+| Auto-review (`review`) | `on-request` | as Ask me | `auto_review` |
+| any tier, cron or webhook run | `never` | per tier | `user` |
+
+- **Requests.** `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` and
+  `item/permissions/requestApproval` are deferred by the peer (`codex_rpc.DEFER`) and posted as a card
+  (`runners/codex_approvals.py`): "Permission Request [codex] - Run command", "Network access to `host`", "Send input
+  to a running command", "Edit files" or "Extra permissions", with "(sub-agent)" when the request's `threadId` isn't
+  the run's. A command card always shows `params.command`, the string that runs (redacted); Codex's `commandActions`
+  parse is only an extra "Codex reads it as" line. File cards take the diff from the `fileChange` item
+  (`item/started`, refreshed by `item/fileChange/patchUpdated`), cached by item id from any thread before the
+  sub-agent filter; P-B saw `item/started` about 5 ms before the request. Diff preview off shows the paths only.
+- **Buttons.** ✅ Approve = `accept`, 🔁 Allow for session = `acceptForSession`, 📌 Always allow `<prefix>` / `<host>`
+  (saved on this host) = `acceptWithExecpolicyAmendment` / `applyNetworkPolicyAmendment` (Codex writes
+  `$CODEX_HOME/rules/default.rules`), ❌ Deny = `decline` (always offered, D2), 🛑 Stop = `cancel` (the turn ends and
+  the final says to tell Codex what to do differently). Which buttons show comes from `availableDecisions` when Codex
+  sends it, else from Codex's own default set. Permissions: Approve and session grant only what the card shows; Deny
+  grants nothing.
+- **Answers.** `CodexResponder` (engine `codex`, `ia:` prefix) writes the answer from the tap through the peer's
+  locked write. `serverRequest/resolved` closes the card with the answer, or withdraws it ("⏹️ Withdrawn by Codex")
+  when Codex dropped it unanswered. Cards still open at `turn/completed` are retired, and the run's end drops the
+  session, so a late tap writes nothing. There's no deadline: Codex has none for these requests.
+- **Auto-review.** `item/autoApprovalReview/started|completed` give 🛡️ rows (allowed, denied with the rationale,
+  timed out, stopped); no card, no push. `guardianWarning` gives a ⚠️ row. `codexErrorInfo: "tooManyDenials"` (with
+  `auto_review.circuit_break_action = "strict"`) gets a hint naming Ask me.
+- **Unattended.** Cron and webhook runs send `never`. A request that still arrives is declined by the peer, with one
+  🔒 row, `permission.unattended_deny` and `usage["unattended"]` for the footer (#835 posture).
+- **P-A (0.171.0).** `on-request` + `workspace-write`, trusted scratch repo: a `curl` retry outside the sandbox asked
+  with `kind: "command"`, a `reason`, `proposedExecpolicyAmendment` and `availableDecisions: ["accept",
+  {acceptWithExecpolicyAmendment}, "cancel"]` on a stable connection, and no `networkApprovalContext`. The unlisted
+  `decline` was accepted: `serverRequest/resolved` came at once, the item completed `declined`, and the turn went on
+  to `completed`. `cancel` wasn't exercised (the model didn't ask again), so Stop's end-of-turn behaviour rests on
+  the schema text ("the turn will also be immediately interrupted") until CX-12.
+- **P-B (0.171.0).** `on-request` + `read-only`: `acceptForSession` on the first `apply_patch` let the second edit to
+  the same file through without a request. No `patchUpdated` was sent. `add` diffs are the file content; `update`
+  diffs are a unified hunk.
+
 ## App-server cancel and resume failures
 
 `/cancel` on an app-server run sends `turn/interrupt {threadId, turnId}` and keeps reading the same buffered stdout
@@ -138,7 +187,8 @@ the thread UUIDs on both transports, so a chat can switch transport and keep its
 
 ## Native-vs-custom register
 
-What the Codex runner builds itself, and why (native-first rule, step 4). Checked against codex-cli 0.170.0.
+What the Codex runner builds itself, and why (native-first rule, step 4). Checked against codex-cli 0.170.0; the #963
+/ #421 rows against 0.171.0.
 
 | Piece | Kind | Checked | Why custom / notes |
 |---|---|---|---|
@@ -146,12 +196,19 @@ What the Codex runner builds itself, and why (native-first rule, step 4). Checke
 | One app-server process per run | custom (process model) | 0.170.0, 2026-11-18 (DEC-4) | Native would be a long-lived session; per-session processes come with live sessions (#964). Stdio exit on stdin close is about 0.1 s |
 | Cancel | native: `turn/interrupt` (stable) | 0.170.0, 2026-11-19 | SIGTERM only as the fallback when the turn doesn't end within 3 s |
 | Closing items Codex leaves open after an interrupt or a failed turn | custom | 0.170.0, 2026-11-18 (Δ D19) | No native signal: an interrupted `commandExecution` never gets `item/completed`. A failed turn's open rows are closed (`ok: false`, `failed` / `cancelled`) before the error final; on `/cancel` the bridge has stopped reading, so they're only counted in the log |
-| Full auto read-only in an untrusted project | custom (policy) | 0.170.0, 2026-11-19 (P1, DEC-7) | Codex saves `trust_level = "trusted"` for an unlisted project when a thread starts there with a writable sandbox, sent or inherited. Untether never grants trust, so it sends `read-only` unless `config/read` lists the project (or a parent); unknown or missing config fails closed. The native signal (`config/read`) decides; only the fallback is custom |
-| Unknown `permission_mode` runs read-only | custom (policy) | 0.170.0, 2026-11-18 (DEC-5) | No native notion of Untether's mode names. Fail closed (exec keeps its old fail-open for now) |
+| Writable tiers read-only in an untrusted project (Full auto, Ask me, Auto-review) | custom (policy) | 0.170.0, 2026-11-19 (P1, DEC-7); 0.171.0, 2026-11-23 (D1) | Codex saves `trust_level = "trusted"` for an unlisted project when a thread starts there with a writable sandbox, sent or inherited. Untether never grants trust, so it sends `read-only` unless `config/read` lists the project (or a parent); unknown or missing config fails closed. The native signal (`config/read`) decides; only the fallback is custom. `turn/start.sandboxPolicy` may avoid the trust write (P-C, not run) |
+| Unknown `permission_mode` runs read-only | custom (policy) | 0.170.0, 2026-11-18 (DEC-5) | No native notion of Untether's mode names. Fail closed (exec keeps its old fail-open; an app-server-only tier on exec is refused before spawn) |
+| Tier names and labels (Full auto, Safe, Ask me, Ask before writes, Auto-review) | custom (labels) | 0.171.0, 2026-11-23 (#421, DEC-5) | Codex has no named presets on app-server (the TUI's are client-side). Each tier is only a native (`approvalPolicy`, `sandbox`, `approvalsReviewer`) triple; `untrusted` is retired in the docs and `granular` is experimental, so neither is offered |
 | Preamble | custom (prompt prefix) | 0.170.0, 2026-11-18 (DEC-15, PLAN Q2) | Native `thread/start.developerInstructions` exists, so this fails "no instructions prepended when a system-prompt option exists". The MVP keeps the bridge's prefix, as for every engine, because moving one engine needs a bridge seam; owed as a follow-up |
 | Moderated answers | native passthrough | 0.170.0, 2026-11-18 (E2, PLAN Q6) | `agentMessage.moderation` is untyped (its `display` shape changed in one release); the text is shown as sent and `codex.app_server.moderated` logged once per run |
 | Rows for items exec never emits | custom (rendering) | 0.170.0, 2026-11-19 | `collabAgentToolCall` (sub-agent row), `imageView`, and one generic row per unknown item type (logged once). Untether's own progress surface, fed from native items |
-| Declined server requests | custom (policy) | 0.170.0, 2026-11-19 | Approvals and user input aren't wired until #963 / #965, so every server request is declined (fail closed) with one ⚠️ row |
+| Approval cards | native + rendering | 0.171.0, 2026-11-23 (#963) | The three stable approval requests, `serverRequest/resolved` and Codex's own decisions; the card text and buttons are Untether's surface. User input (#965) and MCP elicitation (#1243) are still declined with one ⚠️ row |
+| `availableDecisions` read from an experimental field | native by exception (read-only) | 0.171.0, 2026-11-23 (findings H2, P-A) | The schema marks it experimental, yet the server sends it on stable connections (only `additionalPermissions` is stripped). Untether reads it as a hint and never asks for experimental fields |
+| Decision-list fallback | custom | 0.171.0, 2026-11-23 (#963) | The stable schema has no decision list; when `availableDecisions` is absent Untether mirrors Codex's own `default_available_decisions` (approvals.rs L379) so the buttons match what Codex would offer |
+| Deny always offered (`decline`) | custom (policy) | 0.171.0, 2026-11-23 (D2, P-A) | Codex's plain-command default set has no `decline`; it is in the decision enum, and P-A shows Codex accepts it unlisted and carries on. Stop (`cancel`) shows where Codex lists it |
+| Permission grants limited to what the card shows | custom (policy) | 0.171.0, 2026-11-23 (#963) | Codex takes a granted subset (`GrantedPermissionProfile`); Untether grants only the network flag, paths, entries and glob depth it rendered, and names the rest as not granted |
+| Unattended decline fallback | custom | 0.171.0, 2026-11-23 (#963, D4) | Cron and webhook runs send `never`, so none is expected; one that arrives is declined fail closed with the #835 🔒 row, log and footer, as for Claude |
+| Auto-review rows | native + rendering | 0.171.0, 2026-11-23 (#963) | `item/autoApprovalReview/*` are stable methods with an `[UNSTABLE]` payload, read as dicts (a missing key gives a generic row). Overriding a denial (`thread/approveGuardianDeniedAction`) is #1245 |
 | `/usage` quota and plan limits ([#1370](https://github.com/littlebearapps/untether/issues/1370)) | **gap** (native exists, not wired) | 0.170.0, 2026-11-22 | `account/rateLimits/read` (stable; `rateLimits.primary` / `secondary` windows with `usedPercent`, `resetsAt`, `windowDurationMins`, plus `planType`) is on app-server; exec has nothing. Untether's `/usage` runs no engine process, so reading it means spawning `codex app-server` for one request; not built yet. `/usage` says so instead of blaming exec mode |
 | Model after `/model clear` on a resumed thread ([#1369](https://github.com/littlebearapps/untether/issues/1369)) | native: `config/read` + `thread/resume.model` (stable) | 0.170.0, 2026-11-22 | Probed: a thread started on `gpt-nonexistent` (its one turn failed `modelNotFound`, no tokens) resumed on `gpt-nonexistent` with no `model` and on the configured `gpt-6.1-sol` when `thread/resume` carried `config/read`'s `config.model`. With no model in Codex's config the thread keeps its saved model (`shortcut:`; `model/list`'s `isDefault` would cover it), so the `modelNotFound` hint also names `/new` |
 | `% ctx`, compaction row | native | 0.170.0, 2026-11-19 (P8) | `thread/tokenUsage/updated` and the `contextCompaction` item (#832); no rollout-file reading (DEC-13) |
