@@ -74,12 +74,21 @@ Some engines support reasoning levels that control how much thinking the model d
 Valid levels depend on the engine:
 
 - **Claude Code**: `low`, `medium`, `high`, `xhigh`, `max` (passed as `--effort`)
-- **Codex CLI**: `low`, `medium`, `high`, `xhigh`
+- **Codex CLI**: the levels the chat's model lists — `low`, `medium`, `high`, `xhigh`, and on most models `max` and `ultra` — see [Codex reasoning](#codex-reasoning)
 - **Antigravity CLI**: `low`, `medium`, `high` (passed as `--effort`), narrowed to what the chat's model accepts — see [Antigravity effort](#antigravity-effort)
 
 `minimal` was removed for Codex in v0.36.0: no current Codex model supports it, and it fails alongside Codex's default web search. A saved `minimal` is ignored with a one-line note on each run, and the run uses the engine default until you pick another level.
 
 Other engines (OpenCode, Pi, and the deprecated Gemini CLI and Amp) ignore this setting.
+
+### Codex reasoning
+
+Codex models don't all offer the same levels. When you open `/config` → **Reasoning** in a Codex chat, Untether asks Codex which levels the chat's model lists (this uses no tokens and is reused for an hour) and shows those buttons with Codex's own description of each, plus where the model comes from: this chat, your Codex config, or Codex's default ([#846](https://github.com/littlebearapps/untether/issues/846)). If Codex can't be asked, the page shows the usual four (`low` to `xhigh`) with a note.
+
+- **max** is the deepest single-agent reasoning. **ultra** is "maximum reasoning with automatic task delegation": Codex may start sub-agents for the task, so it is the slowest level and uses your plan fastest. Both appear only on models that list them.
+- **Default** is your Codex config's `model_reasoning_effort` when the model supports it, otherwise the model's own default.
+- If a saved level isn't one the model lists (for example `ultra` after switching to a model without it), the run drops it with a one-line note and uses the default.
+- `/reasoning` with no arguments lists the levels from the last read; a level you set with `/reasoning set` is still checked against the model when the run starts.
 
 ### Antigravity effort
 
@@ -125,7 +134,7 @@ The resolution order for model and reasoning is (highest priority first):
 1. **Cron override** — a `[[triggers.crons]]` entry's own `model` / `reasoning`, for that scheduled run only ([#743](https://github.com/littlebearapps/untether/issues/743); see [Schedule tasks](schedule-tasks.md#pick-a-model-per-cron))
 2. **Topic override** — set via `/model set` or `/reasoning set` in a forum topic
 3. **Chat default** — set via `/model set` or `/reasoning set` in a private or group chat
-4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]`, `[engines.pi]` or `[engines.antigravity]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
+4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]`, `[engines.pi]` or `[engines.antigravity]` in `untether.toml` (Codex takes its model and default reasoning from its own `~/.codex/config.toml` or `profile`, read through Codex itself; there is no `untether.toml` default for either)
 5. **CLI default** — whatever the engine CLI picks on its own
 
 There is no per-project model setting; projects only pick a `default_engine`.

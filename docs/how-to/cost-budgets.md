@@ -152,14 +152,14 @@ A limit that hasn't been touched shows no reset time. Because agy reports a runn
 
 ### Other engines
 
-Codex, OpenCode and the other engines don't report subscription quota, so in their chats `/usage` shows the token totals of the chat's last session of that engine instead: the session total, the last run, the run count, and the last run's cost when the engine reports one. Codex reports a running total for the whole thread, so Untether records each run's difference — the footer (`🔢12.3k/400`) shows *this run's* tokens, and `/usage` shows the thread total. A token-only footer uses `🔢`; `💰` means the footer carries a cost.
+Codex shows its own ChatGPT plan quota first ([Subscription usage → Codex](subscription-usage.md#codex), [#966](https://github.com/littlebearapps/untether/issues/966)), then the same last-session block. OpenCode and the other engines don't report subscription quota, so in their chats `/usage` shows the token totals of the chat's last session of that engine instead: the session total, the last run, the run count, and the last run's cost when the engine reports one. Codex reports a running total for the whole thread, so Untether records each run's difference — the footer (`🔢12.3k/400`) shows *this run's* tokens, and `/usage` shows the thread total. A token-only footer uses `🔢`; `💰` means the footer carries a cost. Codex reports no dollar cost on ChatGPT plans, so `[cost_budget]` limits don't trip for it.
 
 !!! untether "Untether"
-    📊 **codex** · last session in this chat<br>
-    Session `019dc356…` · 3 runs<br>
+    📊 **opencode** · last session in this chat<br>
+    Session `ses_3f1a…` · 3 runs<br>
     **Session total:** 168k in (142k cached) · 1.6k out (reasoning 900)<br>
     **Last run:** 12k in · 400 out<br>
-    Quota and plan limits are not available for codex — its exec mode doesn't report them. Transcript: /export
+    Quota and plan limits are not available for opencode — its CLI doesn't report them. Transcript: /export
 
 The history behind `/usage` is kept in memory, so straight after a restart it says there is no completed run yet; send a prompt first.
 

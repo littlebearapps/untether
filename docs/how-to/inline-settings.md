@@ -49,7 +49,7 @@ Effort: default  · high
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox; on the app-server transport also ask me / ask before writes / auto-review) and, on app-server, **Diff preview**. **Antigravity CLI** shows **Permission mode** (workspace / plan first / ask me / full access) and **Effort**, plus **Ask mode**, **Diff preview** and **Follow-up** once Untether's agy plugin is installed on the host. **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox; on the app-server transport also ask me / ask before writes / auto-review), **Web search** and, on app-server, **Diff preview**. **Antigravity CLI** shows **Permission mode** (workspace / plan first / ask me / full access) and **Effort**, plus **Ask mode**, **Diff preview** and **Follow-up** once Untether's agy plugin is installed on the host. **Gemini CLI** (deprecated) shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -95,7 +95,8 @@ Settings are engine-specific and only appear when relevant:
 - **Diff preview** — Claude Code, Codex CLI on the app-server transport (its approval cards show the diff; off shows file names only, [#963](https://github.com/littlebearapps/untether/issues/963)), and Antigravity CLI once [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) is installed on the host ([#1090](https://github.com/littlebearapps/untether/issues/1090)), where it only changes [Ask me](interactive-approval.md#antigravity-ask-me)'s approval cards. Hidden for other engines.
 - **🔐 Telegram approvals** — Antigravity CLI only, from the home page or Permission mode: whether Untether's agy plugin is installed and loaded for the chat's project, the host commands to install or remove it, and a **Re-check** button. Read-only: the plugin is installed on the host, never from Telegram.
 - **Follow-up** — Claude Code, and Antigravity CLI with Untether's agy plugin ([#775](https://github.com/littlebearapps/untether/issues/775), [#981](https://github.com/littlebearapps/untether/issues/981)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
-- **Reasoning** — Claude Code, Codex and Antigravity CLI (where the page is called **Effort** and shows only the levels the chat's model accepts). Hidden for OpenCode, Pi, Gemini, and Amp.
+- **Reasoning** — Claude Code, Codex (the levels the chat's model lists, with Codex's own descriptions, [#846](https://github.com/littlebearapps/untether/issues/846)) and Antigravity CLI (where the page is called **Effort** and shows only the levels the chat's model accepts). Hidden for OpenCode, Pi, Gemini, and Amp.
+- **Web search** — Codex CLI only ([#423](https://github.com/littlebearapps/untether/issues/423)). **Codex default** leaves it to your Codex config (normally cached search from an OpenAI index, with no live browsing); **Live** lets Codex search the live web; **Off** removes the web search tool. Works on both Codex transports. Hidden when Codex says its model provider can't search, and a managed Codex policy can rule out Live or Off. A resumed session may keep the search tool it already used.
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.
@@ -117,7 +118,8 @@ When you switch engines via the Engine & model page, the home page automatically
 | Verbose | off, on | No (in memory, cleared on restart) |
 | Diff preview | default (not set), on, off | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh; Antigravity: low, medium, high (only those the model accepts) | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: what the model lists (low … xhigh, max, ultra); Antigravity: low, medium, high (only those the model accepts) | Yes (chat prefs) |
+| Web search | Codex default, Live, Off (Codex) | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
@@ -177,7 +179,7 @@ Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`);
 The Cost & Usage sub-page merges cost display and budget controls into a unified page with toggle rows:
 
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
-- **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code), or the quota line built from your last `/usage` (Antigravity CLI)
+- **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code), or the quota line built from what Untether last read (Antigravity CLI from `/usage`; Codex from `/usage`, its own updates and a background read)
 - **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
 - **Stop at limit** — per-chat override of `[cost_budget] auto_cancel`. Stops new runs once the daily budget is reached and ends a session after the reply that passes the per-run budget. It can't interrupt a reply in progress (see [Cost budgets](cost-budgets.md#stop-at-limit))
 
