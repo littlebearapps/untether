@@ -275,11 +275,24 @@ Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex w
 | CX-16 | **Auto-review** | Auto-review; `delete /tmp/cx16-dir` (outside the project) | 🛡️ "Auto-review: …" then allowed / denied with the rationale; no buttons, no push |
 | CX-17 | **Unattended + Ask me** | `run_once` cron in an Ask me chat that needs network | `approvalPolicy: never` requested and echoed; no card; run finishes; any request gives one 🔒 row + footer line |
 | CX-18 | **Originator + push** | Group chat, `approval_originator_only = true`; a second account taps | Refused before the early answer; the originator's tap works; push deleted after the answer |
+| CX-19 | **`/usage`** | `/usage` | Plan line, `7d` bar with % and reset matching the Codex TUI `/status`; credits and reset count; "no quota spent" line; last-session block; log `codex.reads.usage` with `elapsed_ms` < 3000; no `thread/start` in the debug log |
+| CX-19a | **`/usage` cached** | `/usage` twice within 60 s | One `codex app-server` spawn in the log |
+| CX-19b | **Logged out (exec, dev instance only)** | point `untether-dev` at an empty `CODEX_HOME` via the dev unit's env, `/usage`, restore | "isn't signed in" line; no traceback |
+| CX-19c | **Footer** | `/config` → Cost & usage → subscription footer on; U1 | Footer `⚡ 7d: N%`; app-server log shows `account/rateLimits/updated` merged; exec footer appears once `/usage` or the warm-up has run |
+| CX-20 | **Reasoning catalogue** | `/config` → Reasoning with no chat model | Model `gpt-6.1-sol (from your Codex config)`; six buttons with Codex's descriptions; default `low` |
+| CX-20a | **Model without `ultra`** | `/model set gpt-6-luna`, open Reasoning; then set Ultra on `gpt-6.1-sol` first and switch to luna, send U1 | Five buttons; saved `ultra` shown as ignored; run argv / `turn/start` has no effort; progress note names the ignored level |
+| CX-20b | **Picked level reaches Codex** | Set High, U1 | exec argv `-c model_reasoning_effort=high`; app-server `turn/start.effort = "high"`; footer shows `high` |
+| CX-20c | **Exec footer model (#1360, exec)** | `/model clear`, U1 straight after a restart | Footer model = `gpt-6.1-sol` (Codex config), never `codex-mini-latest`; log shows `codex.reads.catalogue` from the warm-up; if the read fails or a `--profile` is set, no model shown |
+| CX-21 | **Web search Live** | `/config` → Web search → Live; R15-15a prompt | Web-search row; argv `-c web_search="live"` / `thread/start.config.web_search = "live"` |
+| CX-21a | **Web search Off** | Off; same prompt | No web-search row; Codex says it can't search |
+| CX-21b | **Resume keeps setting** | reply to the CX-21 resume line with Off set | `thread/resume.config.web_search = "disabled"` in the log; note #62144 provider pinning if a search still happens |
 | CX-21c | **`--remote` refused** | Add `extra_args = ["--remote", "ws://127.0.0.1:1"]` to the dev config | Reload fails naming `--remote` (not the value), the previous config stays in effect; remove it |
 | CX-38 | **Session approval** | Ask before writes; `create a.txt, then append to a.txt`; tap 🔁 Allow for session on the first | Second write doesn't prompt (same run) |
 | CX-39 | **Sub-agent** | Ask before writes; `use a sub-agent to create child.txt` | Card says "(sub-agent)" and shows the diff; Approve → file exists |
 | CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 5 tiers, then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
 | CX-41 | **Untrusted project** | Ask me in a project with no `[projects]` entry | `sandbox: read-only` sent, ⚠️ row; `~/.codex/config.toml` sha unchanged |
+
+CX-19…CX-21b run on both transports unless the row says otherwise.
 
 Untrusted project (P1): CX-1 in a project with no `[projects]` entry in `~/.codex/config.toml` and a writable
 `sandbox_mode` shows the ⚠️ read-only row, and `~/.codex/config.toml` is unchanged afterwards (`cmp` against a
@@ -582,6 +595,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
 | Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, and the drift row above |
 | Codex approvals and tiers (`runners/codex_approvals.py`, the tiers in `runners/codex_app_server.py`, Codex rows of `runners/run_options.py` and `commands/config.py`) | CX-11…CX-18, CX-38…CX-41, CX-21c, plus Tier 4 O2 on Codex |
+| Codex reads, quota footer, reasoning, web search (`runners/codex_reads.py`, `telegram/commands/usage.py`, the Codex rows of `engine_overrides.py` / `commands/config.py` / `runner_bridge.py` footer) | CX-19…CX-21b, Tier 1 U1 on Codex (both transports), Tier 4 O2 on Codex |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, CX-10, CX-21c, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
 
 ---
