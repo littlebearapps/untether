@@ -429,8 +429,31 @@ def test_plain_command_without_available_decisions_uses_codex_default_set() -> N
         "stop": {"decision": "cancel"},
     }
     assert card.title.startswith("Permission Request [codex] - Run command")
-    assert "$ `curl -sI https://example.com`" in card.title
-    assert "zsh -lc" not in card.title  # commandActions, not the wrapper
+    assert all(
+        b["callback_data"].startswith("ia:") for row in card.buttons for b in row
+    )
+
+
+def test_card_shows_the_command_that_runs_not_the_parsed_summary() -> None:
+    # Security follow-up: commandActions is Codex's parse; the card must show
+    # params.command (what executes), the summary only as an extra line.
+    req = _command_request()["params"]
+    req["command"] = "/usr/bin/zsh -lc 'curl -sI https://example.com; rm -rf ~'"
+    req["commandActions"] = [
+        {"type": "unknown", "command": "curl -sI https://example.com"}
+    ]
+    card = _card(approvals.COMMAND_APPROVAL, req)
+    lines = card.title.splitlines()
+    assert lines[1] == ("$ `/usr/bin/zsh -lc 'curl -sI https://example.com; rm -rf ~'`")
+    assert lines[2] == "Codex reads it as: `curl -sI https://example.com`"
+
+
+def test_long_command_says_it_was_cut() -> None:
+    req = _command_request()["params"]
+    req["command"] = "echo " + "x" * 1500
+    req["commandActions"] = None
+    card = _card(approvals.COMMAND_APPROVAL, req)
+    assert "more characters not shown" in card.title
 
 
 def test_command_with_amendment_fallback_offers_always() -> None:
@@ -536,14 +559,58 @@ def test_permissions_card() -> None:
     assert _actions(card) == ["approve", "deny", "session"]
 
 
+def test_permissions_grant_only_what_the_card_shows() -> None:
+    # Security follow-up: every path shown (no trimming), unknown keys listed
+    # as not granted, and the grant built from the shown fields only.
+    write = [f"/tmp/repo/dir{i}" for i in range(8)]
+    params = _permissions_request(1)["params"]
+    params["permissions"] = {
+        "network": {"enabled": True, "proxy": "x"},
+        "fileSystem": {
+            "write": write,
+            "entries": [
+                {"access": "read", "path": {"type": "path", "path": "/etc/hosts"}},
+                {"access": "write", "path": {"type": "mystery", "x": 1}},
+            ],
+            "somethingNew": True,
+        },
+        "brandNewKey": {"a": 1},
+    }
+    card = _card(approvals.PERMISSIONS_APPROVAL, params)
+    for path in write:
+        assert path in card.title
+    assert "Read: /etc/hosts" in card.title
+    assert "Not granted from Telegram" in card.title
+    for skipped in (
+        "brandNewKey",
+        "fileSystem.entries",
+        "fileSystem.somethingNew",
+        "network.proxy",
+    ):
+        assert skipped in card.title
+    grant = card.decisions["approve"]["permissions"]
+    assert grant == {
+        "network": {"enabled": True},
+        "fileSystem": {
+            "write": write,
+            "entries": [
+                {"access": "read", "path": {"type": "path", "path": "/etc/hosts"}}
+            ],
+        },
+    }
+    assert card.decisions["session"]["permissions"] == grant
+
+
 def test_card_text_is_redacted() -> None:
     req = _command_request()["params"]
     req["commandActions"] = [
         {"type": "unknown", "command": "curl https://x.test/?token=SECRET123"}
     ]
+    req["command"] = "zsh -lc 'curl https://x.test/?token=SECRET789'"
     req["reason"] = "fetch https://x.test/?key=SECRET456"
     card = _card(approvals.COMMAND_APPROVAL, req)
-    assert "SECRET123" not in card.title and "SECRET456" not in card.title
+    for secret in ("SECRET123", "SECRET456", "SECRET789"):
+        assert secret not in card.title
 
 
 def test_subagent_suffix() -> None:
@@ -645,3 +712,112 @@ async def test_stop_tap_ends_with_the_feedback_hint(
     done = _completed(events)
     assert not done.ok
     assert done.error == gate._STOPPED_BY_CARD
+
+
+# --- 963-4: auto-review rows, guardianWarning, hints ------------------------------
+
+
+def _review(method: str, review_id: str, **params: Any) -> dict:
+    return {
+        "method": method,
+        "params": {
+            "threadId": THREAD,
+            "turnId": "turn-1",
+            "reviewId": review_id,
+            "startedAtMs": 1,
+            **params,
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_auto_review_rows_loose_payload(tmp_path: Path, project: Path) -> None:
+    started = "item/autoApprovalReview/started"
+    completed = "item/autoApprovalReview/completed"
+    cmd = {"type": "command", "command": "rm -rf /tmp/x", "cwd": "/", "source": "x"}
+    fake = Fake(
+        tmp_path,
+        notifications=[
+            _review(started, "r1", action=cmd, review={"status": "inProgress"}),
+            _review(
+                completed,
+                "r1",
+                action=cmd,
+                review={"status": "denied", "rationale": "outside the project"},
+            ),
+            _review(
+                started,
+                "r2",
+                action={"type": "networkAccess", "host": "example.com"},
+            ),
+            _review(
+                completed,
+                "r2",
+                action={"type": "networkAccess", "host": "example.com"},
+                review={"status": "approved", "riskLevel": "low"},
+            ),
+            # Reshaped payload: no action, review is a string → generic row.
+            _review(completed, "r3", review="weird"),
+            {
+                "method": "guardianWarning",
+                "params": {"threadId": THREAD, "message": "Reviewer is slow"},
+            },
+        ],
+    )
+    review_opts = EngineRunOptions(permission_mode="ask-writes")
+    with capture_logs() as logs:
+        events = await _drive(fake, [], options=review_opts)
+    rows = [
+        (e.phase, e.action.id, e.action.title, e.ok)
+        for e in events
+        if isinstance(e, ActionEvent)
+    ]
+    assert rows[0] == (
+        "started",
+        "codex.review.r1",
+        "🛡️ Auto-review: `rm -rf /tmp/x`…",
+        None,
+    )
+    assert rows[1][:2] == ("completed", "codex.review.r1")
+    assert rows[1][2] == "🛡️ Auto-review denied `rm -rf /tmp/x`: outside the project"
+    assert rows[1][3] is False
+    assert rows[3][2] == "🛡️ Auto-review allowed network access to `example.com`"
+    assert rows[4][2] == "🛡️ Auto-review an action"
+    assert "Reviewer is slow" in rows[5][2]
+    assert not _cards(events)  # nobody is asked
+    assert _completed(events).ok
+    assert [e["status"] for e in logs if e["event"] == "codex.app_server.auto_review"][
+        :2
+    ] == ["inProgress", "denied"]
+
+
+def test_review_action_text_variants() -> None:
+    text = approvals.review_action_text
+    assert text({"type": "applyPatch", "files": ["a", "b"]}) == "an edit to 2 files"
+    assert text({"type": "execve", "argv": ["ls", "-la"]}) == "`ls -la`"
+    assert text({"type": "mcpToolCall", "toolName": "fetch"}) == "MCP tool `fetch`"
+    assert text({"type": "somethingNew"}) == "`somethingNew`"
+    assert text(None) == "an action"
+
+
+def test_interrupted_review_row_is_closed() -> None:
+    runner, state = _state()
+    from untether.runners.codex_rpc import Notification
+
+    runner._review_rows(
+        Notification(
+            "item/autoApprovalReview/started",
+            _review("item/autoApprovalReview/started", "r9")["params"],
+        ),
+        state,
+    )
+    assert "codex.review.r9" in state.open_items
+    rows = runner._close_open_items(state, "cancelled")
+    assert [r.action.id for r in rows] == ["codex.review.r9"]
+
+
+def test_error_hints_for_auto_review_and_bio_policy() -> None:
+    from untether.error_hints import codex_error_info_hint
+
+    assert "Ask me" in (codex_error_info_hint("tooManyDenials") or "")
+    assert "biosecurity" in (codex_error_info_hint("bioPolicy") or "")

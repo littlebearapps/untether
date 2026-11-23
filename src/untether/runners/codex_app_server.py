@@ -1129,6 +1129,36 @@ class CodexAppServerRunner(CodexRunner):
         cards.by_rpc.clear()
         return rows
 
+    def _review_rows(
+        self, msg: Notification, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """🛡️ rows for Codex's auto-review: no card, no push (the reviewer
+        decides). The payload is ``[UNSTABLE]``: read loosely, never fail."""
+        phase = "started" if msg.method.endswith("/started") else "completed"
+        row_id, title, ok, warn = approvals.review_row(phase, msg.params)
+        review = msg.params.get("review")
+        logger.info(
+            "codex.app_server.auto_review",
+            phase=phase,
+            status=review.get("status") if isinstance(review, dict) else None,
+            row=row_id,
+        )
+        if phase == "started":
+            state.open_items[row_id] = ("note", title)
+            row = state.factory.action_started(
+                action_id=row_id, kind="note", title=title
+            )
+        else:
+            state.open_items.pop(row_id, None)
+            row = state.factory.action_completed(
+                action_id=row_id,
+                kind="note",
+                title=title,
+                ok=ok,
+                level="warning" if warn else "info",
+            )
+        return self._rows(state, [row])
+
     @staticmethod
     def _cache_file_change(state: AppServerRunState, method: str, params: Any) -> None:
         """Keep each fileChange item's changes for its card's diff, from any
@@ -1510,6 +1540,8 @@ class CodexAppServerRunner(CodexRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        if msg.method in cas.DICT_NOTIFICATIONS:
+            return self._review_rows(msg, state)  # #963 Auto-review
         if msg.method not in cas.NOTIFICATION_TYPES:
             if msg.method not in state.seen_unknown:
                 state.seen_unknown.add(msg.method)
@@ -1559,6 +1591,8 @@ class CodexAppServerRunner(CodexRunner):
                 return self._warning_rows(state, msg.method, params.summary)
             case "serverRequest/resolved":
                 return self._on_request_resolved(params, state)
+            case "guardianWarning":
+                return self._warning_rows(state, msg.method, params.message)
             case "thread/tokenUsage/updated":
                 return self._on_token_usage(params.token_usage, state=state)
             case "turn/completed":

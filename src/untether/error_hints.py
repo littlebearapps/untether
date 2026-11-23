@@ -522,6 +522,14 @@ CODEX_ERROR_INFO_HINTS: dict[str, str] = {
     "unauthorized": "Run `codex login` to re-authenticate.",
     "cyberPolicy": "Codex declined this request under OpenAI's cybersecurity"
     " policy. Try rephrasing it.",
+    # 0.171.0 (F3).
+    "bioPolicy": "Codex declined this request under OpenAI's biosecurity"
+    " policy. Try rephrasing it.",
+    # #963: Auto-review's circuit breaker (with auto_review.circuit_break_action
+    # = "strict" in Codex's config).
+    "tooManyDenials": "Codex's auto-review denied too many actions and stopped"
+    " the turn. Switch to Ask me in /config → Approval policy to decide"
+    " yourself.",
     "inferenceHookDenied": "Your Codex workspace's inference hook denied this"
     " request. Check the hook in your Codex config.",
 }

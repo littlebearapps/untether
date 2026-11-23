@@ -26,10 +26,14 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..interactive.buttons import approval_keyboard
-from ..interactive.preview import format_diff_preview, format_unified_diff_preview
+from ..interactive.preview import (
+    format_command_preview,
+    format_diff_preview,
+    format_unified_diff_preview,
+)
 from ..interactive.registry import Decision
 from ..logging import get_logger
+from ..markdown import inline_code
 from ..schemas import codex_app_server as cas
 from ..utils.error_display import redact_url_secrets
 from ..utils.paths import relativize_path
@@ -104,17 +108,15 @@ def new_request_id() -> str:
     return f"cx_{secrets.token_hex(6)}"
 
 
-def _command_text(params: cas.CommandApprovalParams) -> str:
-    """The friendly command (``commandActions``), else Codex's own string
-    (often the ``zsh -lc '…'`` wrapper)."""
+def _command_actions(params: cas.CommandApprovalParams) -> str:
+    """Codex's parsed summary (``commandActions``): an extra line only, never
+    a stand-in for the command that actually runs."""
     actions = [
         a.get("command")
         for a in params.command_actions or ()
         if isinstance(a, dict) and isinstance(a.get("command"), str)
     ]
-    if actions:
-        return "\n".join(actions)
-    return params.command or ""
+    return "; ".join(actions)
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -184,7 +186,20 @@ def _always_label(decision: dict[str, Any]) -> str | None:
 def _keyboard(
     request_id: str, decisions: dict[str, Any], labels: dict[str, str]
 ) -> list[list[dict[str, str]]]:
-    rows = approval_keyboard(request_id)  # ✅ Approve / ❌ Deny
+    # Built before the request is registered, so the prefix is spelled out
+    # (approval_keyboard would read it from the registry).
+    rows = [
+        [
+            {
+                "text": "✅ Approve",
+                "callback_data": f"{CALLBACK_PREFIX}:approve:{request_id}",
+            },
+            {
+                "text": "❌ Deny",
+                "callback_data": f"{CALLBACK_PREFIX}:deny:{request_id}",
+            },
+        ]
+    ]
     for action, default in (
         ("session", "🔁 Allow for session"),
         ("always", ""),
@@ -227,20 +242,92 @@ def _file_change_lines(changes: list[Any], *, diff: bool) -> list[str]:
     return lines
 
 
-def _permission_lines(permissions: dict[str, Any]) -> list[str]:
-    """TUI ``format_additional_permissions_rule`` wording, loosely."""
+def _entry_text(entry: Any) -> str | None:
+    """One ``FileSystemSandboxEntry`` as a line, or None when Untether can't
+    show it (then it isn't granted either)."""
+    if not isinstance(entry, dict) or entry.get("access") not in {
+        "read",
+        "write",
+        "deny",
+    }:
+        return None
+    path = entry.get("path")
+    if not isinstance(path, dict):
+        return None
+    if path.get("type") == "path" and isinstance(path.get("path"), str):
+        where = relativize_path(path["path"])
+    elif path.get("type") == "glob_pattern" and isinstance(path.get("pattern"), str):
+        where = f"pattern {path['pattern']}"
+    elif path.get("type") == "special" and isinstance(path.get("value"), str):
+        where = f"special {path['value']}"
+    else:
+        return None
+    return f"{entry['access'].title()}: {where}"
+
+
+def permission_view(permissions: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """(card lines, the grant) for ``item/permissions/requestApproval``.
+
+    The grant is built only from what the lines show (Codex takes a granted
+    subset, ``GrantedPermissionProfile``), so a tap never grants something
+    the user didn't see. Anything Untether can't show is listed as not
+    granted. Every path is shown: nothing is trimmed."""
     lines: list[str] = []
-    network = permissions.get("network")
-    if isinstance(network, dict) and network.get("enabled") is not None:
-        lines.append(f"Network: {'on' if network['enabled'] else 'off'}")
-    fs = permissions.get("fileSystem")
-    if isinstance(fs, dict):
-        for key, name in (("read", "Read"), ("write", "Write")):
-            paths = fs.get(key)
-            if isinstance(paths, list) and paths:
-                shown = ", ".join(relativize_path(str(p)) for p in paths[:5])
-                lines.append(f"{name}: {shown}")
-    return lines
+    grant: dict[str, Any] = {}
+    skipped: list[str] = []
+    for key, value in permissions.items():
+        if value is None:
+            continue
+        if key == "network" and isinstance(value, dict):
+            enabled = value.get("enabled")
+            if isinstance(enabled, bool):
+                lines.append(f"Network: {'on' if enabled else 'off'}")
+                grant["network"] = {"enabled": enabled}
+            skipped += [
+                f"network.{k}"
+                for k, v in value.items()
+                if k != "enabled" and v is not None
+            ]
+        elif key == "fileSystem" and isinstance(value, dict):
+            fs: dict[str, Any] = {}
+            for name, item in value.items():
+                if item is None:
+                    continue
+                if (
+                    name in ("read", "write")
+                    and isinstance(item, list)
+                    and all(isinstance(p, str) for p in item)
+                ):
+                    if item:
+                        shown = ", ".join(relativize_path(p) for p in item)
+                        lines.append(f"{name.title()}: {shown}")
+                        fs[name] = list(item)
+                elif name == "entries" and isinstance(item, list):
+                    kept = []
+                    for entry in item:
+                        text = _entry_text(entry)
+                        if text is None:
+                            skipped.append("fileSystem.entries")
+                        else:
+                            lines.append(text)
+                            kept.append(entry)
+                    if kept:
+                        fs["entries"] = kept
+                elif name == "globScanMaxDepth" and isinstance(item, int):
+                    lines.append(f"Glob scan depth: {item}")
+                    fs[name] = item
+                else:
+                    skipped.append(f"fileSystem.{name}")
+            if fs:
+                grant["fileSystem"] = fs
+        else:
+            skipped.append(key)
+    if skipped:
+        lines.append(
+            "Not granted from Telegram (Untether can't show it): "
+            + ", ".join(sorted(set(skipped)))
+        )
+    return lines, grant
 
 
 def build_card(
@@ -257,8 +344,12 @@ def build_card(
     body: list[str] = []
     decisions: dict[str, Any]
     if isinstance(params, cas.CommandApprovalParams):
-        command = redact_url_secrets(_command_text(params))
+        # Always Codex's own command string, the one that runs (redacted);
+        # the parsed commandActions only as an extra summary line.
+        command = redact_url_secrets(params.command or "")
+        summary = redact_url_secrets(_command_actions(params))
         net = params.network_approval_context or {}
+        label = _short(summary or command)
         if params.network_approval_context is not None:
             host = str(net.get("host") or "?")
             protocol = net.get("protocol")
@@ -268,16 +359,13 @@ def build_card(
             label = host
         elif params.kind == "writeStdin":
             what = "Send input to a running command"
-            body.append(format_diff_preview("Bash", {"command": command}))
-            label = _short(command)
         elif params.kind == "humanCommand":
             what = "Command needs your approval"
-            body.append(format_diff_preview("Bash", {"command": command}))
-            label = _short(command)
         else:
             what = "Run command"
-            body.append(format_diff_preview("Bash", {"command": command}))
-            label = _short(command)
+        body.append(format_command_preview(command))
+        if summary and summary != command:
+            body.append(f"Codex reads it as: {inline_code(_short(summary, 200))}")
         if params.cwd and params.network_approval_context is None:
             body.append(f"in {relativize_path(params.cwd)}")
         decisions = {"deny": "decline"}  # D2: always offered
@@ -317,11 +405,12 @@ def build_card(
         }
     else:
         what = "Extra permissions"
-        body.extend(_permission_lines(params.permissions))
+        lines, grant = permission_view(params.permissions)
+        body.extend(lines)
         label = "extra permissions"
         decisions = {
-            "approve": {"permissions": params.permissions, "scope": "turn"},
-            "session": {"permissions": params.permissions, "scope": "session"},
+            "approve": {"permissions": grant, "scope": "turn"},
+            "session": {"permissions": grant, "scope": "session"},
             "deny": {"permissions": {}, "scope": "turn"},
         }
     if not isinstance(params, cas.PermissionsApprovalParams):
@@ -340,6 +429,58 @@ def build_card(
         decisions=decisions,
         buttons=_keyboard(request_id, decisions, labels),
     )
+
+
+_SHIELD = "\N{SHIELD}\N{VARIATION SELECTOR-16}"
+# review.status → (title verb, ok, warning level).
+_REVIEW_OUTCOMES: dict[str, tuple[str, bool, bool]] = {
+    "approved": ("Auto-review allowed", True, False),
+    "denied": ("Auto-review denied", False, True),
+    "timedOut": ("Auto-review timed out on", False, True),
+    "aborted": ("Auto-review stopped on", False, False),
+}
+
+
+def review_action_text(action: Any) -> str:
+    """What an auto-review looked at, from the ``[UNSTABLE]`` action payload
+    (read as a dict: a missing key gives the bare type, never an error)."""
+    if not isinstance(action, dict):
+        return "an action"
+    kind = action.get("type")
+    if kind == "command" and isinstance(action.get("command"), str):
+        return f"`{_short(redact_url_secrets(action['command']))}`"
+    if kind == "execve" and isinstance(action.get("argv"), list):
+        return f"`{_short(redact_url_secrets(' '.join(map(str, action['argv']))))}`"
+    if kind == "applyPatch" and isinstance(action.get("files"), list):
+        count = len(action["files"])
+        return f"an edit to {count} file{'s' if count != 1 else ''}"
+    if kind == "networkAccess" and isinstance(action.get("host"), str):
+        return f"network access to `{action['host']}`"
+    if kind == "mcpToolCall" and isinstance(action.get("toolName"), str):
+        return f"MCP tool `{action['toolName']}`"
+    if kind == "requestPermissions":
+        return "extra permissions"
+    if kind == "writeStdin":
+        return "input to a running command"
+    return f"`{kind}`" if isinstance(kind, str) and kind else "an action"
+
+
+def review_row(phase: str, params: dict[str, Any]) -> tuple[str, str, bool, bool]:
+    """``item/autoApprovalReview/started|completed`` → (row id, title, ok,
+    warning). The reviewer decides; nobody is asked (#963 Auto-review)."""
+    review_id = params.get("reviewId")
+    row_id = f"codex.review.{review_id if isinstance(review_id, str) else 'x'}"
+    what = review_action_text(params.get("action"))
+    if phase == "started":
+        return row_id, f"{_SHIELD} Auto-review: {what}…", True, False
+    review = params.get("review") if isinstance(params.get("review"), dict) else {}
+    status = review.get("status")
+    verb, ok, warn = _REVIEW_OUTCOMES.get(status, ("Auto-review", True, False))
+    title = f"{_SHIELD} {verb} {what}"
+    rationale = review.get("rationale")
+    if not ok and isinstance(rationale, str) and rationale:
+        title += f": {_short(redact_url_secrets(rationale), 200)}"
+    return row_id, title, ok, warn
 
 
 class CodexResponder:

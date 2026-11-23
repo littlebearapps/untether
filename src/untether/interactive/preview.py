@@ -31,6 +31,21 @@ def _fenced(lines: list[str], info: str = "diff") -> str:
     return f"{fence}{info}\n{body}\n{fence}"
 
 
+def format_command_preview(command: str, max_len: int = 1000) -> str:
+    """The exact command an approval runs (#963): ``$ `cmd``` or a fenced
+    block, cut only past *max_len* with the cut said out loud."""
+    command = command.strip("\n")
+    if not command:
+        return ""
+    shown = command[:max_len]
+    cut = len(command) - len(shown)
+    if len(shown.splitlines()) > 1:
+        text = f"$\n{_fenced(shown.splitlines(), info='sh')}"
+    else:
+        text = f"$ {inline_code(shown)}"
+    return text + (f"\n…({cut} more characters not shown)" if cut else "")
+
+
 def format_unified_diff_preview(path: str, diff: str) -> str:
     """A unified diff (Codex's ``fileChange`` update, #963) as the same
     compact fenced preview: hunk headers dropped, 8 lines of 60 columns."""
