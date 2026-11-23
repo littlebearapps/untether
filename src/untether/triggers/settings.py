@@ -243,18 +243,13 @@ class TriggerRunOptions(BaseModel):
 
 # #1118: modes a webhook runs in only with `allow_unsafe_permission_mode =
 # true` (they skip every approval, and a webhook's prompt is built from its
-# request payload).
-# shortcut: Codex modes are the exec runner's (`safe`, `auto` = full auto);
-# add the app-server mode names when #962/#963 land.
+# request payload). Codex `auto` (Full auto) uses the user's own sandbox
+# setting; its app-server tiers (#421) run `never` unattended and at most
+# `workspace-write`, like Antigravity's Workspace, so they aren't listed.
 UNSAFE_WEBHOOK_PERMISSION_MODES: dict[str, frozenset[str]] = {
     "claude": frozenset({"bypassPermissions"}),
     "antigravity": frozenset({"full"}),
     "codex": frozenset({"auto"}),
-}
-# #1118: a webhook's own `permission_mode` values for engines missing from
-# `VALID_PERMISSION_MODES_BY_ENGINE`. Other engines have none to set.
-WEBHOOK_EXTRA_PERMISSION_MODES: dict[str, frozenset[str]] = {
-    "codex": frozenset({"safe", "auto"}),
 }
 
 
@@ -375,9 +370,7 @@ class WebhookConfig(TriggerRunOptions):
                 )
             from ..runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
 
-            allowed = VALID_PERMISSION_MODES_BY_ENGINE.get(
-                self.engine
-            ) or WEBHOOK_EXTRA_PERMISSION_MODES.get(self.engine)
+            allowed = VALID_PERMISSION_MODES_BY_ENGINE.get(self.engine)
             if allowed is None:
                 raise ValueError(
                     f"engine {self.engine!r} has no permission_mode a webhook can set"

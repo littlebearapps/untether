@@ -56,8 +56,6 @@ from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
 from .codex import (
-    _CODEX_FULL_AUTO_MODES,
-    CODEX_SAFE_PERMISSION_MODE,
     ENGINE,
     CodexRunner,
     CodexRunState,
@@ -497,6 +495,41 @@ def has_trust_entry(projects: Any, cwd: str) -> bool:
     return any(isinstance(projects.get(str(p)), dict) for p in paths)
 
 
+@dataclass(frozen=True, slots=True)
+class Tier:
+    """One Codex permission tier (#421) as ``thread/start`` fields.
+    ``sandbox`` None = Codex's own setting (Full auto). A writable sandbox
+    (or None) is sent only where ``config/read`` lists the project (DEC-7, D1)."""
+
+    approval_policy: str
+    sandbox: str | None
+    reviewer: str = "user"
+    # Footer label; None for Full auto (the default shows none).
+    label: str | None = None
+
+
+# #421 / #963 (DEC-5 labels): mode → tier. Unknown modes run as Safe (DEC-5).
+TIERS: dict[str, Tier] = {
+    "auto": Tier("never", None),
+    "safe": Tier("never", "read-only", label="safe"),
+    "ask": Tier("on-request", "workspace-write", label="ask me"),
+    "ask-writes": Tier("on-request", "read-only", label="ask before writes"),
+    "review": Tier("on-request", "workspace-write", "auto_review", "auto-review"),
+}
+
+
+def _tier(mode: str | None, *, unattended: bool) -> Tier:
+    tier = TIERS.get("auto" if mode is None else mode)
+    if tier is None:
+        _warn_unknown_mode_safe(str(mode))  # DEC-5: fail closed
+        tier = TIERS["safe"]
+    if unattended and tier.approval_policy != "never":
+        # #835 / D4: nobody can answer; Codex asks nothing and actions that
+        # need approval fail inside the sandbox.
+        tier = Tier("never", tier.sandbox, "user", tier.label)
+    return tier
+
+
 def _warn_unknown_mode_safe(mode: str) -> None:
     if mode in _UNKNOWN_MODE_SAFE_WARNED:
         return
@@ -531,9 +564,11 @@ def _config_model(result: Any) -> str | None:
 class AppServerRunState(CodexRunState):
     prompt: str = ""
     cwd: str = ""
-    # Sandbox sent on thread/start|resume; None = Codex's own setting.
+    # #421: the run's tier; ``sandbox`` is what thread/start|resume sends
+    # (None = Codex's own setting), read-only where trust would be saved.
+    tier: Tier = field(default_factory=lambda: TIERS["safe"])
     sandbox: str | None = None
-    # Full auto: config/read decides whether omitting the sandbox is safe.
+    # Writable tiers: config/read decides whether that sandbox is safe to send.
     check_trust: bool = False
     # #1369: Codex's configured model (config/read), sent on a resume with no
     # /model override, since a resumed thread otherwise keeps its saved model.
@@ -572,6 +607,7 @@ class CodexAppServerRunner(CodexRunner):
     seams so the process stays open for JSON-RPC."""
 
     process_label = "codex app-server"
+    transport = "app-server"
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
@@ -602,13 +638,10 @@ class CodexAppServerRunner(CodexRunner):
         webhook = _webhook_safe_trigger(run_options)
         if webhook is not None and raw_mode is not None:
             _warn_webhook_unknown_mode(webhook, raw_mode)
-        mode = self._permission_mode()
-        if mode is None or mode in _CODEX_FULL_AUTO_MODES:
-            state.check_trust = True
-        else:
-            if mode != CODEX_SAFE_PERMISSION_MODE:
-                _warn_unknown_mode_safe(mode)  # DEC-5: fail closed
-            state.sandbox = "read-only"
+        unattended = run_options is not None and bool(run_options.unattended_trigger)
+        state.tier = _tier(self._permission_mode(), unattended=unattended)
+        state.sandbox = state.tier.sandbox
+        state.check_trust = state.sandbox != "read-only"
         state.cwd = str(get_run_base_dir() or Path.cwd())
         args = [*self.extra_args, "app-server", "--listen", "stdio://"]
         state.argv = list(args)
@@ -1113,21 +1146,24 @@ class CodexAppServerRunner(CodexRunner):
         return []
 
     def _decide_sandbox(self, state: AppServerRunState, result: Any) -> None:
-        """Full auto omits ``sandbox`` (Codex's own setting) only where that
-        can't make Codex trust the project (DEC-7, P1): a writable sandbox in
-        a project with no ``[projects]`` entry saves it as trusted."""
+        """Full auto omits ``sandbox`` (Codex's own setting), and Ask me /
+        Auto-review send ``workspace-write``, only where that can't make Codex
+        trust the project (DEC-7, P1, D1): a writable sandbox in a project
+        with no ``[projects]`` entry saves it as trusted."""
         config = result.get("config") if isinstance(result, dict) else None
         config = config if isinstance(config, dict) else {}
         if has_trust_entry(config.get("projects"), state.cwd):
             return
-        state.sandbox = "read-only"
         sandbox_mode = config.get("sandbox_mode")
+        wanted = state.sandbox or sandbox_mode
+        state.sandbox = "read-only"
         logger.info(
             "codex.app_server.untrusted_read_only",
             cwd=state.cwd,
             sandbox_mode=sandbox_mode,
+            mode_sandbox=wanted,
         )
-        if sandbox_mode in _WRITABLE_SANDBOX_MODES:
+        if wanted in _WRITABLE_SANDBOX_MODES:
             state.pending_rows.append(
                 state.factory.action_completed(
                     action_id="codex.untrusted_read_only",
@@ -1143,8 +1179,8 @@ class CodexAppServerRunner(CodexRunner):
         thread's saved settings, so anything omitted is inherited."""
         params: dict[str, Any] = {
             "cwd": state.cwd,
-            "approvalPolicy": "never",
-            "approvalsReviewer": "user",
+            "approvalPolicy": state.tier.approval_policy,
+            "approvalsReviewer": state.tier.reviewer,
         }
         if state.sandbox is not None:
             params["sandbox"] = state.sandbox
@@ -1194,8 +1230,8 @@ class CodexAppServerRunner(CodexRunner):
         state.model = meta["model"]
         if run_options is not None and run_options.reasoning:
             meta["effort"] = run_options.reasoning
-        if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
-            meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
+        if state.tier.label is not None:
+            meta["permissionMode"] = state.tier.label
         token = ResumeToken(engine=ENGINE, value=result.thread.id)
         events: list[UntetherEvent] = [
             state.factory.started(token, title=self.session_title, meta=meta)
@@ -1218,8 +1254,8 @@ class CodexAppServerRunner(CodexRunner):
     ) -> list[UntetherEvent]:
         """Requested vs effective, on the stable echo fields only."""
         requested: dict[str, Any] = {
-            "approvalPolicy": "never",
-            "approvalsReviewer": "user",
+            "approvalPolicy": state.tier.approval_policy,
+            "approvalsReviewer": state.tier.reviewer,
         }
         if state.sandbox is not None:
             requested["sandbox"] = state.sandbox

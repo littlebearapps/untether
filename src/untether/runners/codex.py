@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from ..logging import get_logger
 from ..model import ActionPhase, EngineId, ResumeToken, UntetherEvent
 from ..runner import (
     _URL_RE,
+    PRESPAWN_BLOCKED_KEY,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
@@ -44,7 +47,12 @@ from .extra_args_guard import (
     normalise_value,
     option_value,
 )
-from .run_options import EngineRunOptions, get_run_options
+from .run_options import (
+    CODEX_APP_SERVER_ONLY_MODES,
+    CODEX_PERMISSION_MODES_APP_SERVER,
+    EngineRunOptions,
+    get_run_options,
+)
 
 logger = get_logger(__name__)
 
@@ -132,10 +140,39 @@ _WEBHOOK_UNKNOWN_PM_WARNED_MAX = 256
 
 
 def _is_unknown_permission_mode(mode: str | None) -> bool:
-    return (
-        mode is not None
-        and mode != CODEX_SAFE_PERMISSION_MODE
-        and mode not in _CODEX_FULL_AUTO_MODES
+    # The app-server tiers (#421) are known on exec too: refused before
+    # spawn there, never run as something else.
+    return mode is not None and mode not in CODEX_PERMISSION_MODES_APP_SERVER
+
+
+CODEX_MODE_NEEDS_APP_SERVER_BLOCK = "codex_mode_needs_app_server"
+# #421: tier labels (DEC-5 wording), for the footer and the exec refusal.
+CODEX_MODE_LABELS: dict[str, str] = {
+    "auto": "Full auto",
+    "safe": "Safe",
+    "ask": "Ask me",
+    "ask-writes": "Ask before writes",
+    "review": "Auto-review",
+}
+
+
+def codex_mode_needs_app_server_event(
+    mode: str | None, resume: ResumeToken | None
+) -> UntetherEvent | None:
+    """#421: an app-server-only tier on the exec transport is refused before
+    spawn, naming the fix; never a silent downgrade. Keeps the session."""
+    if mode not in CODEX_APP_SERVER_ONLY_MODES:
+        return None
+    logger.warning("codex.permission_mode.needs_app_server", mode=mode)
+    return EventFactory(ENGINE).completed_error(
+        error=(
+            f"\N{OCTAGONAL SIGN} Codex's {CODEX_MODE_LABELS[mode]} mode needs the"
+            ' app-server transport. Set `transport = "app-server"` under'
+            " `[engines.codex]`, or pick Full auto or Safe in /config →"
+            " Approval policy."
+        ),
+        resume=resume,
+        usage={PRESPAWN_BLOCKED_KEY: CODEX_MODE_NEEDS_APP_SERVER_BLOCK},
     )
 
 
@@ -177,7 +214,7 @@ def _warn_unknown_permission_mode(mode: str) -> None:
     logger.warning(
         "codex.permission_mode.unknown",
         mode=mode,
-        note="unknown Codex permission_mode runs as full auto; valid: safe",
+        note="unknown Codex permission_mode runs as full auto; valid: auto, safe",
     )
 
 
@@ -223,6 +260,9 @@ _CODEX_WORKSPACE_HINT = (
     "is managed by Untether: Untether sets the working directory from the"
     " project (`/ctx`, worktrees)"
 )
+_CODEX_REMOTE_HINT = (
+    "runs Codex on another app server; Untether can't apply its permission modes there"
+)
 _CODEX_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
     # managed (existing #407 set, every spelling)
     "--skip-git-repo-check": ("managed", _CODEX_MANAGED_HINT),
@@ -261,6 +301,10 @@ _CODEX_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
         ' in `extra_args`; set `[projects."<path>"] trust_level` in'
         " `~/.codex/config.toml` yourself",
     ),
+    # 0.171.0 (#1394): exec accepts them too; the run would use another app
+    # server's config, sandbox, approvals and credentials, outside Untether.
+    "--remote": ("workspace", _CODEX_REMOTE_HINT),
+    "--remote-auth-token-env": ("workspace", _CODEX_REMOTE_HINT),
     "--": (
         "separator",
         "is not accepted: a bare `--` would turn `exec …` into prompt text",
@@ -885,6 +929,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     logger = logger
     # How failures name the process ("codex app-server" on #962's transport).
     process_label = "codex exec"
+    # #421: which tiers /config offers and whether diff preview applies.
+    transport = "exec"
 
     def __init__(
         self,
@@ -899,6 +945,20 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def command(self) -> str:
         return self.codex_cmd
+
+    async def run_impl(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> AsyncIterator[UntetherEvent]:
+        # #421: exec can't ask, so the prompting tiers are refused here.
+        refusal = codex_mode_needs_app_server_event(self._permission_mode(), resume)
+        if refusal is not None:
+            yield refusal
+            return
+        async with contextlib.aclosing(
+            JsonlSubprocessRunner.run_impl(self, prompt, resume)
+        ) as events:
+            async for evt in events:
+                yield evt
 
     def check_resume_value(self, value: Any) -> str:
         """#1065: only a thread UUID — anything else would start an orphan

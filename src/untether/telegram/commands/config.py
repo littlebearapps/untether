@@ -299,7 +299,7 @@ async def _page_home(ctx: CommandContext) -> None:
             # #747: only acceptEdits is "off"; hand-stored modes show their name.
             pm_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
         elif current_engine == "codex":
-            pm_label = "safe" if pm == "safe" else "full auto"
+            pm_label = _codex_pm_label(pm, _codex_transport(ctx))
         elif current_engine == "antigravity":
             # #558 REVIEW M4: same resolver as the permission page, so a TOML
             # Full access shows on both.
@@ -366,7 +366,10 @@ async def _page_home(ctx: CommandContext) -> None:
     show_plan_mode = current_engine in PERMISSION_MODE_SUPPORTED_ENGINES
     show_reasoning = supports_reasoning(current_engine)
     show_ask_questions = ask_questions_supported(current_engine)
-    show_diff_preview = diff_preview_supported(current_engine)
+    show_diff_preview = diff_preview_supported(
+        current_engine,
+        transport=_codex_transport(ctx) if current_engine == "codex" else None,
+    )
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -427,6 +430,8 @@ async def _page_home(ctx: CommandContext) -> None:
             lines.append(
                 f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
             )
+            if show_diff_preview:
+                lines.append(f"Diff preview: <b>{dp_display}</b>")  # #963
         elif current_engine == "antigravity":
             lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
             lines.append(
@@ -574,6 +579,9 @@ async def _page_home(ctx: CommandContext) -> None:
         if show_cost_usage:
             row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
         buttons.append(row1)
+        if show_diff_preview:
+            # #963: app-server approval cards.
+            buttons.append([{"text": "📝 Diff preview", "callback_data": "config:dp"}])
         buttons.append(
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
@@ -688,7 +696,95 @@ _PM_MODES: dict[str, str] = {
     "off": "acceptEdits",
 }
 
-_CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
+_CODEX_PM_MODES: dict[str, str] = {
+    "fa": "auto",
+    "safe": "safe",
+    # #421: app-server only (exec can't ask); the page offers them there.
+    "ask": "ask",
+    "aw": "ask-writes",
+    "rev": "review",
+}
+_CODEX_EXEC_PM_ACTIONS = frozenset({"fa", "safe", "cxc"})
+# Home-page label per stored Codex mode (None = Full auto); unknown → as
+# each transport runs it (exec: full auto, app-server: safe, DEC-5).
+_CODEX_PM_LABELS: dict[str, str] = {
+    "safe": "safe",
+    "ask": "ask me",
+    "ask-writes": "ask before writes",
+    "review": "auto-review",
+}
+
+
+def _codex_transport(ctx: CommandContext) -> str:
+    """``exec`` or ``app-server``: the Codex runner's ``transport`` (#421)."""
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="codex"
+        ).runner
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return "exec"
+    transport = getattr(runner, "transport", "exec")
+    return transport if transport == "app-server" else "exec"
+
+
+def _codex_pm_label(pm: str | None, transport: str) -> str:
+    if pm is None or pm == "auto":
+        return "full auto"
+    label = _CODEX_PM_LABELS.get(pm)
+    if label is None:
+        return "safe" if transport == "app-server" else "full auto"
+    if transport != "app-server" and pm != "safe":
+        return f"{label} (needs app-server)"  # exec refuses it before spawn
+    return label
+
+
+def _codex_app_server_pm_page(
+    current_label: str,
+) -> tuple[list[str], list[list[dict[str, str]]]]:
+    """#421: the five app-server tiers (plan §5.6 wording)."""
+    lines = [
+        "<b>📋 Approval policy</b>",
+        "",
+        "Codex asks when an action needs more than its sandbox allows, not"
+        " before every tool like Claude.",
+        "",
+        "• <b>Full auto</b> — no prompts; uses your Codex sandbox setting (default)",
+        "• <b>Safe</b> — read-only, no prompts; tests, builds and installs fail",
+        "• <b>Ask me</b> — edits files in this project on its own; asks you"
+        " here before network access, files outside the project or commands"
+        " its rules flag. <i>Read-only in projects Codex doesn't trust yet.</i>",
+        "• <b>Ask before writes</b> — read-only; asks you before every file"
+        " change and every command that needs more",
+        "• <b>Auto-review</b> — like Ask me, but Codex's reviewer decides"
+        " instead of you (extra Codex usage)",
+        "",
+        "Cron and webhook runs never ask: actions that need approval fail.",
+        "",
+        f"Current: <b>{current_label}</b>",
+        "",
+        _learn_more("interactive-approval", "codex-cli--approval-policy"),
+    ]
+
+    def button(text: str, action: str, label: str) -> dict[str, str]:
+        return {
+            "text": _check(text, active=current_label == label),
+            "callback_data": f"config:pm:{action}",
+        }
+
+    buttons = [
+        [button("Full auto", "fa", "full auto"), button("Safe", "safe", "safe")],
+        [
+            button("Ask me", "ask", "ask me"),
+            button("Ask before writes", "aw", "ask before writes"),
+        ],
+        [button("Auto-review", "rev", "auto-review")],
+        [
+            {"text": "Clear override", "callback_data": "config:pm:cxc"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+    return lines, buttons
+
 
 _GEMINI_AM_MODES: dict[str, str] = {"ya": "yolo", "ae": "auto_edit"}
 
@@ -728,10 +824,11 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         return
 
     engine = current_engine
+    codex_transport = _codex_transport(ctx) if engine == "codex" else None
     if action is not None and ctx.callback_query_id is not None:
         # #1281: a tap from a page left open for another engine (the chat
         # switched since) changes nothing; a typed `pm:clr` still clears.
-        if _pm_page_offers(engine, action):
+        if _pm_page_offers(engine, action, transport=codex_transport):
             _set_late_toast(ctx, _TOAST_LABELS["pm"][action])
         else:
             _set_late_toast(ctx, _STALE_TOAST)
@@ -887,8 +984,11 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             [{"text": "← Back", "callback_data": "config:home"}],
         ]
 
+    elif engine == "codex" and codex_transport == "app-server":
+        lines, buttons = _codex_app_server_pm_page(_codex_pm_label(pm, "app-server"))
+
     elif engine == "codex":
-        current_label = "safe" if pm == "safe" else "full auto"
+        current_label = _codex_pm_label(pm, "exec")
 
         lines = [
             "<b>📋 Approval policy</b>",
@@ -2235,12 +2335,17 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
-    # Claude Code, or Antigravity with Untether's agy plugin (#1090)
+    # Claude Code, Antigravity with Untether's agy plugin (#1090), Codex on
+    # the app-server transport (#963)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if not diff_preview_supported(current_engine):
+    if not diff_preview_supported(
+        current_engine,
+        transport=_codex_transport(ctx) if current_engine == "codex" else None,
+    ):
         await _respond(
             ctx,
-            "<b>📝 Diff preview</b>\n\nAvailable for Claude Code, and for"
+            "<b>📝 Diff preview</b>\n\nAvailable for Claude Code, for Codex"
+            ' with <code>transport = "app-server"</code>, and for'
             " Antigravity once Untether's agy plugin is installed on the host"
             " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
@@ -2302,6 +2407,13 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     if engine == "claude":
         on_text = _DP_ON_CLAUDE_TEXT
         on_note = _claude_dp_on_note(_claude_resolved_mode(override, ctx.runtime))
+    elif engine == "codex":
+        # #963: Codex decides when to ask; nothing is held for a preview.
+        on_text = "approval cards show the diff"
+        on_note = (
+            "Codex: file-change cards in Ask me and Ask before writes. To see"
+            " every write, pick <b>Ask before writes</b>."
+        )
 
     lines = [
         "<b>📝 Diff preview</b>",
@@ -3025,6 +3137,9 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "ae": "Approval mode: edit files",
         "ro": "Approval mode: read-only",
         "safe": "Approval policy: safe",
+        "ask": "Approval policy: ask me",  # #421
+        "aw": "Approval policy: ask before writes",
+        "rev": "Approval policy: auto-review",
         "cxc": "Approval policy: cleared",  # #1155
         # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
         # conversation keeps the agent it started with, so a switch
@@ -3119,7 +3234,9 @@ _PM_PAGE_ACTIONS: dict[str, frozenset[str]] = {
 }
 
 
-def _pm_page_offers(engine: str, action: str) -> bool:
+def _pm_page_offers(engine: str, action: str, *, transport: str | None = None) -> bool:
+    if engine == "codex" and transport != "app-server":
+        return action in _CODEX_EXEC_PM_ACTIONS  # #421: exec's page has two
     return action in _PM_PAGE_ACTIONS.get(engine, frozenset())
 
 

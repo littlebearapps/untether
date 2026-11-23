@@ -236,9 +236,8 @@ _TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = (
 
 # #1118: the mode a webhook with no own `permission_mode` runs in under
 # `[triggers] webhook_defaults = "strict"`, instead of the chat's /planmode or
-# engine config. Engines not listed are left alone.
-# shortcut: Codex `safe` is the exec runner's name; add the app-server mode
-# name here when #962/#963 change it.
+# engine config. Engines not listed are left alone. Codex `safe` is read-only
+# on both transports (#421).
 STRICT_WEBHOOK_DEFAULT_MODES: dict[str, str] = {
     "claude": "default",
     "codex": "safe",

@@ -143,7 +143,11 @@ def test_opt_in_without_unsafe_mode_is_invalid(extra: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     ("engine", "mode", "error"),
     [
-        ("codex", "plan", "allowed values: ['auto', 'safe']"),
+        (
+            "codex",
+            "plan",
+            "allowed values: ['ask', 'ask-writes', 'auto', 'review', 'safe']",
+        ),
         ("opencode", "plan", "has no permission_mode a webhook can set"),
         ("claude", "yolo", "unknown permission_mode 'yolo'"),
     ],
