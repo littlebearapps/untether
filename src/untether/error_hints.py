@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 # (pattern_substring, hint_text) — first match wins.
 # Order: end-of-life/unsupported-client → CLI argv/config drift (#830) → the
 # generic "no longer supported" fallback → auth → subscription/billing
@@ -530,11 +532,29 @@ def codex_error_info_hint(code: object) -> str | None:
     return CODEX_ERROR_INFO_HINTS.get(code) if isinstance(code, str) else None
 
 
+# #1380: Claude Code's logged-out result, ``Not logged in · Please run /login``
+# (CLI 2.1.330). The user is on Telegram, so the hint names the host. A token
+# refresh by another Claude process on the host can cause it briefly.
+_CLAUDE_LOGGED_OUT_PATTERN = "please run /login"
+
+
+def _claude_logged_out_hint() -> str:
+    host = socket.gethostname() or "the host"
+    return (
+        f"Claude Code on `{host}` isn't logged in. If this happened mid-session,"
+        " send your message again \N{EM DASH} another Claude process on the"
+        " host may have been refreshing its login. If it keeps happening, run"
+        f" `claude auth login` (or `claude`, then `/login`) on `{host}`."
+    )
+
+
 def get_error_hint(error_message: str) -> str | None:
     """Return an actionable hint for a known error pattern, or None."""
     lower = error_message.lower()
     if _NEEDS_EFFORT_PATTERN in lower:
         return _needs_effort_hint(error_message)
+    if _CLAUDE_LOGGED_OUT_PATTERN in lower:
+        return _claude_logged_out_hint()
     for pattern, hint in _HINT_PATTERNS:
         if pattern in lower:
             return hint
