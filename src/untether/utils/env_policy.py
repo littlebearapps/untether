@@ -377,7 +377,7 @@ def apply_run_env(
     overrides (#1219).
 
     ``env`` is a runner's ``env()`` result; ``None`` means "inherit the
-    service env" (Gemini, AMP). Inherited ``UNTETHER_RUN_ID`` /
+    service env" (no shipped runner returns it since #1354). Inherited ``UNTETHER_RUN_ID`` /
     ``UNTETHER_TRIGGER`` are always dropped (``UNTETHER_*`` passes the
     filter), then assigned only for an unattended cron/webhook run, so a
     human turn or ``/at`` fire never carries a stale or borrowed identity.
