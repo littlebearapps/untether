@@ -427,9 +427,9 @@ async def _page_home(ctx: CommandContext) -> None:
                 )
         elif current_engine == "codex":
             lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
-            lines.append(
-                f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
-            )
+            codex_hint = _CODEX_HOME_HINTS.get(pm_label)
+            pm_hint = f"  · {codex_hint}" if codex_hint else _home_hint("pm", pm_label)
+            lines.append(f"Approval policy: <b>{pm_label}</b>{pm_hint}")
             if show_diff_preview:
                 lines.append(f"Diff preview: <b>{dp_display}</b>")  # #963
         elif current_engine == "antigravity":
@@ -712,6 +712,14 @@ _CODEX_PM_LABELS: dict[str, str] = {
     "ask": "ask me",
     "ask-writes": "ask before writes",
     "review": "auto-review",
+}
+
+
+# #421: Codex tier labels share "ask me" with Antigravity, whose hint is wrong here.
+_CODEX_HOME_HINTS: dict[str, str] = {
+    "ask me": "asks before network or outside files",
+    "ask before writes": "asks before every write",
+    "auto-review": "Codex's reviewer decides",
 }
 
 

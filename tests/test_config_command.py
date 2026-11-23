@@ -829,7 +829,12 @@ class TestCodexTiers421:
         if transport == "app-server":
             _app_server(ctx)
         await ConfigCommand().handle(ctx)
-        assert label in _last_send_msg(ctx).text
+        text = _last_send_msg(ctx).text
+        assert label in text
+        # Codex's own hint, never Antigravity's "asks before shell, web, MCP".
+        assert "shell, web, MCP" not in text
+        if transport == "app-server":
+            assert "asks before network or outside files" in text
 
     @pytest.mark.anyio
     async def test_diff_preview_shown_on_app_server_only(self, tmp_path):
