@@ -267,6 +267,19 @@ Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex w
 | CX-8 | **Unattended cron** | A `run_once = true`, `* * * * *` cron on `codex-test` (as R1/R4); wait ≤ 60 s | `codex.app_server.permissions` shows `approvalPolicy: never` requested and effective; the run finishes without waiting; any server request is declined with a ⚠️ row. Remove the cron |
 | CX-9 | **Safe on app-server** | `/config` → Approval policy → safe; R15-CS2 prompt | `thread/start` sends `sandbox: "read-only"` and the echo is `readOnly`; the `touch` fails inside Codex's sandbox |
 | CX-10 | **Flag guard** | `extra_args` with an exec-only flag (e.g. `--skip-git-repo-check`) on app-server; then `--trust` on exec | Both refused at load with the flag named; nothing spawned. Restore `extra_args` |
+| CX-11 | **Ask me: approve** | Ask me in a trusted `codex-test`; `run curl -sI https://example.com` | Card "Permission Request [codex] - Run command" (or "Network access to `example.com`") showing the exact command, with Approve / Deny / Stop (+ Always allow if offered); push arrives; Approve → command runs; card closes "✅ Approved: …"; push deleted |
+| CX-12 | **Deny vs Stop** | Same, tap ❌ Deny; repeat, tap 🛑 Stop | Deny: `approval.answered decision=decline`, item `declined`, Codex carries on. Stop: `decision=cancel`, turn `interrupted`, final "🛑 Stopped: tell Codex what to do differently…"; next message resumes |
+| CX-13 | **Always allow** | Ask before writes; `run curl -sI https://example.com` (back up `~/.codex/rules/` first; `git status` runs in the read-only sandbox without asking); tap 📌 Always allow (saved on this host); repeat with another URL | Second run doesn't prompt; `~/.codex/rules/default.rules` gained the rule; restore |
+| CX-14 | **Diff preview** | Ask before writes, Diff preview on; `create notes.txt containing hello` (ask Codex to use apply_patch) | Card shows a fenced `+ hello` diff; Approve → file exists. Diff preview off → card lists `notes.txt` without the diff |
+| CX-15 | **Withdrawal** | Trigger a card, then `/cancel` | `turn/interrupt` logged; keyboard gone in the final render; a late tap says the session ended; no stray push; no row left running |
+| CX-16 | **Auto-review** | Auto-review; `delete /tmp/cx16-dir` (outside the project) | 🛡️ "Auto-review: …" then allowed / denied with the rationale; no buttons, no push |
+| CX-17 | **Unattended + Ask me** | `run_once` cron in an Ask me chat that needs network | `approvalPolicy: never` requested and echoed; no card; run finishes; any request gives one 🔒 row + footer line |
+| CX-18 | **Originator + push** | Group chat, `approval_originator_only = true`; a second account taps | Refused before the early answer; the originator's tap works; push deleted after the answer |
+| CX-21c | **`--remote` refused** | Add `extra_args = ["--remote", "ws://127.0.0.1:1"]` to the dev config | Reload fails naming `--remote` (not the value), the previous config stays in effect; remove it |
+| CX-38 | **Session approval** | Ask before writes; `create a.txt, then append to a.txt`; tap 🔁 Allow for session on the first | Second write doesn't prompt (same run) |
+| CX-39 | **Sub-agent** | Ask before writes; `use a sub-agent to create child.txt` | Card says "(sub-agent)" and shows the diff; Approve → file exists |
+| CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 5 tiers, then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
+| CX-41 | **Untrusted project** | Ask me in a project with no `[projects]` entry | `sandbox: read-only` sent, ⚠️ row; `~/.codex/config.toml` sha unchanged |
 
 Untrusted project (P1): CX-1 in a project with no `[projects]` entry in `~/.codex/config.toml` and a writable
 `sandbox_mode` shows the ⚠️ read-only row, and `~/.codex/config.toml` is unchanged afterwards (`cmp` against a
@@ -568,7 +581,8 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
 | Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, and the drift row above |
-| `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
+| Codex approvals and tiers (`runners/codex_approvals.py`, the tiers in `runners/codex_app_server.py`, Codex rows of `runners/run_options.py` and `commands/config.py`) | CX-11…CX-18, CX-38…CX-41, CX-21c, plus Tier 4 O2 on Codex |
+| `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, CX-10, CX-21c, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
 
 ---
 
