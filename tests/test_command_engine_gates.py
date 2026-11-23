@@ -118,16 +118,18 @@ class TestResolveEffectiveEngine:
 
 class TestUsageEngineGate:
     @pytest.mark.anyio
-    async def test_usage_blocked_for_codex(self):
+    async def test_usage_for_codex_without_a_codex_runner(self):
+        """#966: Codex has its own /usage reply now; with no Codex runner on
+        the host it says so (no quota read, never Claude's fetch)."""
         ctx = FakeCommandContext(
             runtime=FakeTransportRuntime(default_engine="codex"),
         )
         cmd = UsageCommand()
         result = await cmd.handle(ctx)  # type: ignore[arg-type]
         assert result is not None
-        assert "not available" in result.text.lower()
-        assert "codex" in result.text.lower()
-        assert "/export" in result.text
+        assert result.text.startswith("📊 <b>Codex usage</b>")
+        assert "Codex CLI isn't available on this host" in result.text
+        assert "No completed codex run in this chat" in result.text
 
     @pytest.mark.anyio
     async def test_usage_blocked_for_pi(self):
@@ -239,7 +241,8 @@ class TestUsageNonClaudeTokens:
             resumed=True,
         )
         text = await _usage_reply("codex")
-        assert text.startswith("📊 <b>codex</b> · last session in this chat")
+        assert text.startswith("📊 <b>Codex usage</b>")
+        assert "<b>Last session in this chat</b>" in text
         assert "Session total:" in text
         assert "168k in" in text
         assert "2 runs" in text
@@ -325,9 +328,11 @@ class TestUsageNonClaudeTokens:
     @pytest.mark.anyio
     async def test_usage_ignores_other_engine_sessions(self, export_history):
         _seed_session("claude-sess", "claude", {"total_cost_usd": 1.0})
-        text = await _usage_reply("codex")
+        text = await _usage_reply("pi")
         assert "not available" in text
-        assert "no completed codex run" in text
+        assert "no completed pi run" in text
+        # Codex's own reply (#966) ignores them too.
+        assert "No completed codex run" in await _usage_reply("codex")
 
     @pytest.mark.anyio
     async def test_usage_html_escapes_session_id(self, export_history):
@@ -412,7 +417,8 @@ class TestUsageNonClaudeTokens:
         assert "outside Untether" not in text
         assert "includes an earlier run that ended before reporting usage" in text
         assert "its exec mode" not in text
-        assert "doesn't read app-server's yet" in text
+        # #966 replaced the #1370 "doesn't read app-server's yet" line.
+        assert "doesn't read app-server's yet" not in text
 
 
 # ---------------------------------------------------------------------------
