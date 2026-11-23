@@ -2227,6 +2227,140 @@ class TestModel:
 # ---------------------------------------------------------------------------
 
 
+def _seed_codex_catalogue() -> None:
+    from tests.test_codex_reads import seed_catalogue
+
+    seed_catalogue()
+
+
+def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
+    """A Reasoning page open on Codex whose catalogue read returns the
+    0.171.0 Pro fixture (or fails)."""
+    from tests.test_codex_reads import fixture_catalogue
+    from untether.runners import codex_reads
+    from untether.runners.codex import CodexRunner
+
+    calls: list[str | None] = []
+
+    async def get_catalogue(runner, cwd):
+        calls.append(cwd)
+        if fail:
+            raise codex_reads.CodexReadError("timeout")
+        return fixture_catalogue()
+
+    monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+    ctx = _make_ctx(
+        args_text="rs",
+        text="config:rs",
+        config_path=tmp_path / "prefs.json",
+        default_engine="codex",
+    )
+    ctx.runtime.resolve_runner.return_value.runner = CodexRunner(
+        codex_cmd="codex", extra_args=[]
+    )
+    ctx.runtime.resolve_run_cwd.return_value = None
+    ctx.catalogue_calls = calls
+    return ctx
+
+
+class TestCodexReasoningCatalogue:
+    """#846: the Codex Reasoning page from Codex's own model/list + config."""
+
+    @pytest.mark.anyio
+    async def test_config_model_lists_six_levels_with_codex_descriptions(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert ctx.catalogue_calls  # read on page open
+        assert "Model: <b>gpt-6.1-sol</b> (from your Codex config)" in msg.text
+        assert "Current: <b>default (low)</b>" in msg.text
+        assert "• <b>low</b> — Fast responses with lighter reasoning" in msg.text
+        assert (
+            "• <b>ultra</b> — Maximum reasoning with automatic task delegation"
+            " (Codex may start sub-agents)" in msg.text
+        )
+        buttons = [
+            d
+            for d in _buttons_data(msg)
+            if d.startswith("config:rs:") and d != "config:rs:clr"
+        ]
+        assert buttons == [
+            "config:rs:low",
+            "config:rs:med",
+            "config:rs:hi",
+            "config:rs:xhi",
+            "config:rs:max",
+            "config:rs:ult",
+        ]
+        assert all(len(d.encode()) <= 64 for d in buttons)
+
+    @pytest.mark.anyio
+    async def test_model_without_ultra_has_five_and_ignores_a_saved_ultra(
+        self, tmp_path, monkeypatch
+    ):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6-luna", reasoning="ultra")
+        )
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Model: <b>gpt-6-luna</b> (this chat)" in msg.text
+        assert "ultra isn't available for this model" in msg.text
+        assert "config:rs:ult" not in _buttons_data(msg)
+        assert "config:rs:max" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_read_failure_falls_back_to_the_usual_four(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _codex_page_ctx(tmp_path, monkeypatch, fail=True)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Couldn't ask Codex which levels this model supports" in msg.text
+        assert "config:rs:max" not in _buttons_data(msg)
+        assert "config:rs:xhi" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_codex_default_when_config_sets_no_model(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue
+        from untether.runners import codex_reads
+
+        catalogue = dataclasses.replace(
+            fixture_catalogue(), config=codex_reads.ConfigInfo(None, None, None)
+        )
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+
+        async def get_catalogue(runner, cwd):
+            return catalogue
+
+        monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Model: <b>gpt-6.2-sol</b> (Codex default)" in msg.text
+        assert "Current: <b>default (low)</b>" in msg.text
+
+    @pytest.mark.anyio
+    async def test_button_tap_never_reads(self, tmp_path, monkeypatch):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        ctx.args_text = "rs:max"
+        ctx.text = "config:rs:max"
+        await ConfigCommand().handle(ctx)
+        assert ctx.catalogue_calls == []
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.reasoning == "max"
+
+
 class TestReasoning:
     @pytest.mark.anyio
     async def test_reasoning_page_renders(self, tmp_path):
@@ -2365,25 +2499,35 @@ class TestReasoning:
                 )
 
     @pytest.mark.anyio
-    async def test_reasoning_set_max_rejected_for_codex(self, tmp_path):
-        """#309 regression: codex does not support `max`; manual callback_data
-        attempting `rs:max` against codex must be rejected, not silently
-        persisted."""
+    async def test_reasoning_set_ultra_rejected_for_a_model_without_it(self, tmp_path):
+        """#309 regression, per model since #846: crafted `rs:ult` for a Codex
+        model whose catalogue entry has no `ultra` is rejected, not persisted."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
 
+        _seed_codex_catalogue()
         state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6-luna")
+        )
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="rs:max",
-            text="config:rs:max",
+            args_text="rs:ult",
+            text="config:rs:ult",
             config_path=state_path,
             default_engine="codex",
         )
         await cmd.handle(ctx)
-        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         override = await prefs.get_engine_override(123, "codex")
-        # Either no override at all, or reasoning is None — but never `max`.
-        assert override is None or override.reasoning != "max"
+        assert override is not None and override.reasoning is None
+        # The same tap on a model that lists it is saved.
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6.1-sol")
+        )
+        await cmd.handle(ctx)
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.reasoning == "ultra"
 
     @pytest.mark.anyio
     async def test_reasoning_set_min_rejected_for_codex(self, tmp_path):
@@ -2472,7 +2616,13 @@ class TestReasoning:
             for d in _buttons_data(_last_edit_msg(ctx))
             if d.startswith("config:rs:") and d != "config:rs:clr"
         ]
-        assert len(level_buttons) == len(allowed_reasoning_levels(engine))
+        if engine == "codex":
+            # #846: no Codex catalogue here, so the usual four.
+            from untether.telegram.engine_overrides import CODEX_FALLBACK_LEVELS
+
+            assert len(level_buttons) == len(CODEX_FALLBACK_LEVELS)
+        else:
+            assert len(level_buttons) == len(allowed_reasoning_levels(engine))
 
     def test_reasoning_supported_engines_all_parametrised(self):
         from untether.telegram.engine_overrides import REASONING_SUPPORTED_ENGINES

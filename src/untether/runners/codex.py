@@ -1037,6 +1037,13 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
 
+    def on_spawned(self, *, state: Any, pid: int) -> None:
+        # DEC-27 (#966/#846): fill the quota and catalogue caches in the
+        # background once the run's own process exists; never awaited.
+        from . import codex_reads
+
+        codex_reads.maybe_warm_up(self, str(get_run_base_dir() or Path.cwd()))
+
     def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
         # #1240: Untether never grants trust (no `--trust`); it only reports it.
         if state.untrusted_project_config or not line.startswith(

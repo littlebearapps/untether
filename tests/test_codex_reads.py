@@ -462,3 +462,43 @@ def test_warm_up_off_does_nothing(tmp_path: Path) -> None:
     fake = Fake(tmp_path)
     reads.maybe_warm_up(fake.runner(), "/proj")  # WARMUP_ENABLED is off in tests
     assert reads._LAST_WARM == {}
+
+
+def fixture_results(path: Path = READS) -> dict[str, Any]:
+    """The probe transcript's answers by method (``model/list`` with hidden
+    models), as ``app_server_read`` returns them."""
+    methods: dict[int, tuple[str, dict]] = {}
+    out: dict[str, Any] = {}
+    for line in path.read_text().splitlines():
+        rec = json.loads(line)
+        msg = rec["msg"]
+        if rec["dir"] == "c2s" and "id" in msg:
+            methods[msg["id"]] = (msg["method"], msg.get("params") or {})
+        elif rec["dir"] == "s2c" and "id" in msg and "method" not in msg:
+            method, params = methods[msg["id"]]
+            if method == "model/list" and not params.get("includeHidden"):
+                continue
+            err = msg.get("error")
+            out[method] = (
+                reads.RpcError(err["code"], err["message"]) if err else msg["result"]
+            )
+    return out
+
+
+def fixture_catalogue() -> reads.CodexCatalogue:
+    return reads.parse_catalogue(fixture_results())
+
+
+def seed_catalogue(cwd: str | None = "/proj") -> reads.CodexCatalogue:
+    """Put the 0.171.0 Pro catalogue in the cache, as a page open would."""
+    import time
+
+    catalogue = fixture_catalogue()
+    reads._CATALOGUE.values[("codex", "0.171.0", cwd)] = (time.monotonic(), catalogue)
+    return catalogue
+
+
+def test_fixture_catalogue_matches_a_live_read() -> None:
+    catalogue = fixture_catalogue()
+    assert catalogue.default_model == "gpt-6.2-sol"
+    assert len([m for m in catalogue.models.values() if not m.hidden]) == 10

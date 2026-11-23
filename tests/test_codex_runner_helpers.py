@@ -855,3 +855,25 @@ def test_1240_no_footer_flag_without_warning() -> None:
         runner, state, [{"type": "turn.failed", "error": {"message": "boom"}}]
     )[-1]
     assert not failed.usage
+
+
+# --- DEC-27 (#966/#846): background warm-up after the spawn -----------------
+
+
+def test_on_spawned_starts_the_warm_up_with_the_run_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from untether.runners import codex_reads
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    seen: list[tuple[object, str | None]] = []
+    monkeypatch.setattr(
+        codex_reads, "maybe_warm_up", lambda runner, cwd: seen.append((runner, cwd))
+    )
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    token = set_run_base_dir(tmp_path)
+    try:
+        runner.on_spawned(state=runner.new_state("hi", None), pid=1)
+    finally:
+        reset_run_base_dir(token)
+    assert seen == [(runner, str(tmp_path))]

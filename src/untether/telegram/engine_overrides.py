@@ -5,6 +5,7 @@ from typing import Literal
 
 import msgspec
 
+from ..runners.codex_reads import CODEX_REASONING_VOCAB
 from ..runners.run_options import EngineRunOptions
 
 OverrideSource = Literal["topic_override", "chat_default", "default"]
@@ -17,11 +18,12 @@ REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex", "antigravity"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
-    # #416: no model in Codex 0.157.1's catalogue lists `minimal`, and the
-    # server rejects it alongside the default web_search tool. Pinned by
-    # test_codex_cli_schema_drift.py::test_bundled_catalogue_has_no_minimal
-    # (and ::test_listed_models_support_untether_codex_levels).
-    "codex": ("low", "medium", "high", "xhigh"),
+    # #846: Codex's whole vocabulary (low … ultra, no retired `minimal`,
+    # #416); each model's own levels come from `model/list` via
+    # runners/codex_reads (``codex_reasoning_levels``). Pinned by
+    # test_codex_cli_schema_drift.py (::test_bundled_catalogue_has_no_minimal,
+    # ::test_bundled_levels_are_in_untether_vocabulary).
+    "codex": CODEX_REASONING_VOCAB,
     # #558 (D29): the ceiling for agy's buttons. Its CLI also names `xhigh`
     # and `max`, but no model accepts them (Pro takes low/high only, gpt-oss
     # a fixed medium), so /config narrows this per model from a cached
@@ -29,6 +31,20 @@ _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     # (::test_effort_values_superset, ::test_default_model_efforts).
     "antigravity": ("low", "medium", "high"),
 }
+
+
+# #846: what the Codex page offers when the catalogue can't be read; every
+# listed model supports these (test_listed_models_support_untether_codex_levels).
+CODEX_FALLBACK_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+_CODEX_CMD = "codex"  # build_runner's command; the read caches key on it
+
+
+def codex_reasoning_levels(model: str | None) -> tuple[str, ...]:
+    """The levels *model* (None: Codex's effective model) lists in the
+    cached catalogue, else the whole vocabulary. Peek only: never spawns."""
+    from ..runners.codex_reads import peek_levels
+
+    return peek_levels(_CODEX_CMD, model) or CODEX_REASONING_VOCAB
 
 
 # Engines whose question buttons need nothing on the host. Antigravity's
@@ -343,7 +359,12 @@ def drop_unsupported_reasoning(
         return options
     if not supports_reasoning(engine):
         return options
-    if options.reasoning in allowed_reasoning_levels(engine):
+    allowed = (
+        codex_reasoning_levels(options.model)
+        if engine == "codex"
+        else allowed_reasoning_levels(engine)
+    )
+    if options.reasoning in allowed:
         return options
     return replace(options, reasoning=None, ignored_reasoning=options.reasoning)
 
@@ -395,7 +416,13 @@ def get_engine_default_model(engine: str) -> str | None:
         except (OSError, json.JSONDecodeError, TypeError):
             return None
         return None
-    # claude/codex/gemini auto-route; amp derives from mode — no stable
+    if engine == "codex":
+        # #846/#1360: Codex's own config/read + model/list, if a read is
+        # cached (page open, /usage, warm-up). Never spawns on a label.
+        from ..runners.codex_reads import peek_effective_model
+
+        return peek_effective_model(_CODEX_CMD, None)
+    # claude/gemini auto-route; amp derives from mode — no stable
     # settings-file source, keep the static hint. antigravity: agy's own
     # settings file is never read (D33), so the static hint too.
     return None
@@ -418,4 +445,24 @@ def get_engine_default_reasoning(engine: str) -> str | None:
                 return level
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return None
+    if engine == "codex":
+        from ..runners.codex_reads import peek_catalogue
+
+        catalogue = peek_catalogue(_CODEX_CMD)
+        return codex_default_level(catalogue, None) if catalogue else None
     return None
+
+
+def codex_default_level(catalogue: object, model: str | None) -> str | None:
+    """#846: Codex's default for *model* (None: the effective model) — the
+    config's ``model_reasoning_effort`` when the model lists it, else the
+    model's ``defaultReasoningEffort``."""
+    from ..runners.codex_reads import CodexCatalogue, effective_model
+
+    if not isinstance(catalogue, CodexCatalogue):
+        return None
+    info = catalogue.models.get(model or effective_model(catalogue) or "")
+    if info is None:
+        return None
+    effort = catalogue.config.effort if catalogue.config else None
+    return effort if effort in info.levels else info.default_level

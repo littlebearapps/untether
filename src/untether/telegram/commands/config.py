@@ -1745,6 +1745,8 @@ _RS_ACTIONS: dict[str, str] = {
     "hi": "high",
     "xhi": "xhigh",
     "max": "max",
+    # #846 (DEC-26): Codex only, where the model's catalogue lists it.
+    "ult": "ultra",
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
@@ -1798,6 +1800,42 @@ def _effective_reasoning(
     return stored, None
 
 
+async def _codex_catalogue(
+    ctx: CommandContext, override_model: str | None
+) -> tuple[Any, str | None, str]:
+    """#846: Codex's catalogue (cached 1 h, a zero-token app-server read
+    bounded at 10 s), the model a plain message here would run and where
+    that model comes from. ``(None, override, "")`` when it can't be read."""
+    from pathlib import Path
+
+    from ...runners import codex_reads
+    from ...runners.codex import CodexRunner
+
+    source = " (this chat)" if override_model else ""
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="codex"
+        ).runner
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None, override_model, source
+    if not isinstance(runner, CodexRunner):
+        return None, override_model, source
+    cwd = str(_chat_project_cwd(ctx) or Path.cwd())
+    catalogue = None
+    with anyio.move_on_after(codex_reads.READ_TIMEOUT_S + 1.0):
+        try:
+            catalogue = await codex_reads.get_catalogue(runner, cwd)
+        except codex_reads.CodexReadError:
+            catalogue = None  # logged by the cache
+    if catalogue is None:
+        return None, override_model, source
+    if override_model:
+        return catalogue, override_model, source
+    if catalogue.config is not None and catalogue.config.model:
+        return catalogue, catalogue.config.model, " (from your Codex config)"
+    return catalogue, catalogue.default_model, " (Codex default)"
+
+
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
@@ -1835,6 +1873,12 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         # crafted callback_data could try to persist e.g. `max` on Codex.
         # Reject anything outside the engine's allow list. #309 CodeRabbit.
         allowed = allowed_reasoning_levels(current_engine)
+        if current_engine == "codex":
+            # #846: the model's own levels when the catalogue is cached.
+            from ..engine_overrides import codex_reasoning_levels
+
+            tapped = await prefs.get_engine_override(chat_id, current_engine)
+            allowed = codex_reasoning_levels(tapped.model if tapped else None)
         if level not in allowed:
             logger.warning(
                 "config.reasoning.unsupported_level",
@@ -1918,8 +1962,50 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
                 )
                 reasoning = None
 
+    codex_descriptions: dict[str, str] | None = None
+    codex_lines: list[str] = []
+    if current_engine == "codex":
+        # #846: the model's levels, descriptions and default from Codex's own
+        # model/list + config/read. On a page open only (taps return above).
+        from ..engine_overrides import CODEX_FALLBACK_LEVELS, codex_default_level
+
+        catalogue, model, source = await _codex_catalogue(
+            ctx, override.model if override else None
+        )
+        info = catalogue.models.get(model or "") if catalogue else None
+        if catalogue is None or info is None:
+            levels = CODEX_FALLBACK_LEVELS
+            if model:
+                codex_lines.append(f"Model: <b>{_shown_model(model[:80])}</b>{source}")
+            codex_lines.append(
+                "<i>Couldn't ask Codex which levels this model supports"
+                " — showing the usual four.</i>"
+            )
+        else:
+            levels = info.levels
+            codex_descriptions = info.descriptions
+            codex_lines.append(
+                f"Model: <b>{_shown_model((model or '')[:80])}</b>{source}"
+            )
+            default = codex_default_level(catalogue, model)
+            if reasoning and reasoning not in levels:
+                current_label = (
+                    f"default ({reasoning} isn't available for this model — ignored)"
+                )
+                reasoning = None
+            elif not reasoning and not ignored and default:
+                current_label = f"default ({default})"
+
     level_descriptions: list[str] = []
-    if "low" in levels or "medium" in levels or "high" in levels:
+    if codex_descriptions is not None:
+        for lv in levels:
+            note = codex_descriptions.get(lv) or ""
+            if lv == "ultra":
+                # Untether's one addition: ultra delegates, so it spends fastest.
+                note += " (Codex may start sub-agents)"
+            text = f" — {html.escape(note.strip())}" if note.strip() else ""
+            level_descriptions.append(f"• <b>{lv}</b>{text}")
+    elif "low" in levels or "medium" in levels or "high" in levels:
         present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
         level_descriptions.append(f"• {' · '.join(present)} — balanced options")
     if "xhigh" in levels:
@@ -1944,6 +2030,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "",
         f"Engine: <b>{current_engine}</b>",
         *agy_lines,
+        *codex_lines,
         f"Current: <b>{current_label}</b>",
         "",
         _learn_more("model-reasoning", "set-reasoning-level"),
@@ -1956,6 +2043,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "high": ("High", "hi"),
         "xhigh": ("Xhigh", "xhi"),
         "max": ("Max", "max"),
+        "ultra": ("Ultra", "ult"),
     }
     level_buttons: list[dict[str, str]] = []
     for level in levels:

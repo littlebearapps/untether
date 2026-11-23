@@ -344,10 +344,11 @@ def test_bundled_catalogue_has_no_minimal(tmp_path: Path) -> None:
 
 
 def test_listed_models_support_untether_codex_levels(tmp_path: Path) -> None:
-    """D13: every user-visible model accepts every level /config offers."""
-    from untether.telegram.engine_overrides import allowed_reasoning_levels
+    """D13: every user-visible model accepts the levels /config falls back to
+    when Codex's catalogue can't be read (#846; with it, each model's own)."""
+    from untether.telegram.engine_overrides import CODEX_FALLBACK_LEVELS
 
-    wanted = set(allowed_reasoning_levels("codex"))
+    wanted = set(CODEX_FALLBACK_LEVELS)
     listed = [m for m in _bundled_models(tmp_path) if m.get("visibility") == "list"]
     assert listed, "no `visibility == list` models in the bundled catalogue"
     missing = {
@@ -358,6 +359,22 @@ def test_listed_models_support_untether_codex_levels(tmp_path: Path) -> None:
     assert not missing, (
         f"listed Codex model(s) lack a level /config offers: {missing} — a "
         "button would fail like #416; derive levels per model (follow-up)"
+    )
+
+
+def test_bundled_levels_are_in_untether_vocabulary(tmp_path: Path) -> None:
+    """#846: Codex's levels Untether has buttons for (low … ultra). A new
+    level would be silently ignored on the Reasoning page: add a button."""
+    from untether.runners.codex_reads import CODEX_REASONING_VOCAB
+
+    unknown = {
+        str(m["slug"]): sorted(set(_levels(m)) - set(CODEX_REASONING_VOCAB))
+        for m in _bundled_models(tmp_path)
+        if not set(_levels(m)) <= set(CODEX_REASONING_VOCAB)
+    }
+    assert not unknown, (
+        f"Codex model(s) list a level Untether has no button for: {unknown} — "
+        f"extend CODEX_REASONING_VOCAB (last green on codex-cli {PROBED_CLI_VERSION})"
     )
 
 
