@@ -673,7 +673,12 @@ class TestUsageAntigravity:
         # #979: the /config subscription-footer toggle shows for agy now
         # that the footer dispatch has an entry for it — one never without
         # the other.
-        assert {"claude", "antigravity"} == SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
+        # #966: Codex too (both transports).
+        assert {
+            "claude",
+            "antigravity",
+            "codex",
+        } == SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
         assert set(SUBSCRIPTION_FOOTERS) == SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
 
 

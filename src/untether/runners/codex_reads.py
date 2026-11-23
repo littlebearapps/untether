@@ -768,3 +768,63 @@ def maybe_warm_up(runner: CodexRunner, cwd: str | None) -> None:
 
 
 _WARM_TASKS: set[asyncio.Task[None]] = set()
+
+
+# --- run footer and cap-hit reset (#966) ------------------------------------
+
+_FOOTER_WARN_PCT = 70  # Claude's footer thresholds (runner_bridge)
+_FOOTER_CRITICAL_PCT = 90
+_FOOTER_NAME_CHARS = 40
+
+
+def limit_resets_at(usage: CodexUsage) -> int | None:
+    """When the limit that stops Codex resets: the earliest reset of a window
+    at 100 % or more, else the reset of the fullest window."""
+    windows = [w for b in usage.buckets for w in b.windows if w.resets_at]
+    full = [w.resets_at for w in windows if w.pct >= 100 and w.resets_at]
+    if full:
+        return min(full)
+    if not windows:
+        return None
+    return max(windows, key=lambda w: w.pct).resets_at
+
+
+def _window_text(window: Window, now: float | None) -> str:
+    reset = (
+        f" ({time_until(window.resets_at, now)})"
+        if window.resets_at and window.pct >= 50
+        else ""
+    )
+    return f"{window.label}: {window.pct}%{reset}"
+
+
+def format_usage_footer(
+    usage: CodexUsage, *, always_show: bool, now: float | None = None
+) -> list[str]:
+    """Plain-text footer lines from a cached read (never a fetch).
+
+    Blocked (``ordinaryUsageAllowed`` false) → one 🛑 line with the reset.
+    *always_show* → a compact ``⚡ 7d: 8%`` line per bucket. Otherwise only
+    buckets with a window at 70 % or more (⚠️ from 90 %)."""
+    if usage.auth_kind not in (None, "chatgpt"):
+        return []
+    if usage.allowed is False:
+        resets = limit_resets_at(usage)
+        reset = f" — resets in {time_until(resets, now)}" if resets else ""
+        return [f"\U0001f6d1 Codex usage limit reached{reset}"]
+    many = len(usage.buckets) > 1
+    lines: list[str] = []
+    for bucket in usage.buckets:
+        if not bucket.windows:
+            continue
+        worst = max(w.pct for w in bucket.windows)
+        if not always_show and worst < _FOOTER_WARN_PCT:
+            continue
+        icon = "⚡"
+        if not always_show and worst >= _FOOTER_CRITICAL_PCT:
+            icon = "⚠️"
+        name = " ".join(bucket.name.replace("`", "").split())[:_FOOTER_NAME_CHARS]
+        prefix = f"{name} " if many else ""
+        parts = " | ".join(_window_text(w, now) for w in bucket.windows)
+        lines.append(f"{icon} {prefix}{parts}")
+    return lines

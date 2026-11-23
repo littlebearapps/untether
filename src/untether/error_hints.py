@@ -535,9 +535,15 @@ CODEX_ERROR_INFO_HINTS: dict[str, str] = {
 }
 
 
-def codex_error_info_hint(code: object) -> str | None:
-    """The hint for a Codex ``codexErrorInfo`` name, or None."""
-    return CODEX_ERROR_INFO_HINTS.get(code) if isinstance(code, str) else None
+def codex_error_info_hint(code: object, resets_at: object = None) -> str | None:
+    """The hint for a Codex ``codexErrorInfo`` name, or None. A cap hit
+    names when the limit resets (*resets_at*, epoch seconds, #966)."""
+    hint = CODEX_ERROR_INFO_HINTS.get(code) if isinstance(code, str) else None
+    if hint and code == "usageLimitExceeded" and isinstance(resets_at, int):
+        from .runners.codex_reads import time_until
+
+        hint += f" It resets in {time_until(resets_at)}."
+    return hint
 
 
 # #1380: Claude Code's logged-out result, ``Not logged in · Please run /login``

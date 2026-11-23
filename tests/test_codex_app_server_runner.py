@@ -819,6 +819,59 @@ async def test_failed_turn_is_an_error_with_codex_text(
 
 
 @pytest.mark.anyio
+async def test_rate_limit_push_is_merged_and_names_the_cap_hit_reset(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#966: account/rateLimits/updated feeds the footer cache; a
+    usageLimitExceeded final carries the reset time for its hint."""
+    from untether.runners import codex_reads
+
+    push = {
+        "method": "account/rateLimits/updated",
+        "params": {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 100,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1_900_000_000,
+                },
+                "secondary": None,
+                "planType": None,
+            }
+        },
+    }
+    fake = Fake(
+        tmp_path,
+        status="failed",
+        notifications=[push],
+        turn_error={"message": "limit", "codexErrorInfo": "usageLimitExceeded"},
+    )
+    runner = _runner(fake)
+    done = _completed(await _run(runner))
+    assert (done.usage or {})["codex_resets_at"] == 1_900_000_000
+    cached = codex_reads.peek_usage(runner.command())
+    assert cached is not None
+    assert cached.buckets[0].windows[0] == codex_reads.Window("5h", 100, 1_900_000_000)
+    hint = _run_error_hint("limit", usage=done.usage, close_reason=None) or ""
+    assert hint.startswith(CODEX_ERROR_INFO_HINTS["usageLimitExceeded"])
+    assert "It resets in " in hint
+
+
+@pytest.mark.anyio
+async def test_cap_hit_without_quota_data_has_no_reset(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        status="failed",
+        turn_error={"message": "limit", "codexErrorInfo": "usageLimitExceeded"},
+    )
+    done = _completed(await _run(_runner(fake)))
+    assert "codex_resets_at" not in (done.usage or {})
+
+
+@pytest.mark.anyio
 async def test_process_death_mid_turn_is_an_app_server_error(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

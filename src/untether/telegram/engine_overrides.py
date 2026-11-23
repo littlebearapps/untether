@@ -78,7 +78,7 @@ def diff_preview_supported(
 # Engines with a subscription-usage footer. Each needs an entry in
 # ``runner_bridge.SUBSCRIPTION_FOOTERS`` (#979): this set also shows the
 # /config → Cost & usage toggle, which does nothing without one.
-SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude", "antigravity"})
+SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude", "antigravity", "codex"})
 
 API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "amp"})
 

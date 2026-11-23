@@ -1319,6 +1319,32 @@ async def _maybe_append_antigravity_quota_footer(
         return msg
 
 
+async def _maybe_append_codex_quota_footer(
+    msg: RenderedMessage,
+    *,
+    always_show: bool = False,
+    runner: Any = None,
+) -> RenderedMessage:
+    """Codex's quota footer (#966), both transports: peeks what ``/usage``,
+    an app-server ``account/rateLimits/updated`` push or the DEC-27 warm-up
+    cached (≤ 15 min). Never spawns: exec has no rate-limit event and no
+    process after the run (Codex register gap row)."""
+    try:
+        from .runners import codex_reads
+
+        command = getattr(runner, "command", None)
+        cmd = command() if callable(command) else None
+        usage = codex_reads.peek_usage(cmd if isinstance(cmd, str) else "codex")
+        if usage is None:
+            return msg
+        for line in codex_reads.format_usage_footer(usage, always_show=always_show):
+            msg = _insert_footer_line(msg, f"\n{line}")
+        return msg
+    except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
+        logger.debug("usage_footer.failed", exc_info=True)
+        return msg
+
+
 # #979: engine → its subscription-usage footer. The keys are
 # ``SUBSCRIPTION_USAGE_SUPPORTED_ENGINES`` (which also shows the /config
 # toggle). Each entry looks its function up when called. ``engine_state`` is
@@ -1334,6 +1360,9 @@ SUBSCRIPTION_FOOTERS: dict[str, Callable[..., Awaitable[RenderedMessage]]] = {
         _maybe_append_antigravity_quota_footer(
             msg, always_show=always_show, runner=runner
         )
+    ),
+    "codex": lambda msg, *, always_show, runner, engine_state=None: (
+        _maybe_append_codex_quota_footer(msg, always_show=always_show, runner=runner)
     ),
 }
 
@@ -6442,7 +6471,7 @@ def _run_error_hint(
         return _ABS_CAP_HINT
     # #962: Codex app-server's typed error outranks the text patterns.
     hint = _codex_error_info_hint(
-        (usage or {}).get("codex_error_info")
+        (usage or {}).get("codex_error_info"), (usage or {}).get("codex_resets_at")
     ) or _get_error_hint(raw_error)
     if hint == _SESSION_NOT_LOADED_HINT:
         turns = (usage or {}).get("num_turns")

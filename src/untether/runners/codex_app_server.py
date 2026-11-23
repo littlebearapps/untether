@@ -57,6 +57,7 @@ from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
 from . import codex_approvals as approvals
+from . import codex_reads
 from .codex import (
     ENGINE,
     CodexRunner,
@@ -1595,6 +1596,9 @@ class CodexAppServerRunner(CodexRunner):
                 return self._warning_rows(state, msg.method, params.message)
             case "thread/tokenUsage/updated":
                 return self._on_token_usage(params.token_usage, state=state)
+            case "account/rateLimits/updated":
+                # #966: feeds the quota footer (sparse; merged, never cleared).
+                codex_reads.merge_push(self.codex_cmd, msg.params)
             case "turn/completed":
                 return self._on_turn_completed(
                     params.turn, state=state, resume=resume, found_session=found_session
@@ -1689,7 +1693,13 @@ class CodexAppServerRunner(CodexRunner):
         if state.card_stop and turn.status == "interrupted":
             error = _STOPPED_BY_CARD
         code = codex_error_code(turn.error.codex_error_info) if turn.error else None
-        usage = {"codex_error_info": code} if code else None
+        usage: dict[str, Any] | None = {"codex_error_info": code} if code else None
+        if usage is not None and code == "usageLimitExceeded":
+            # #966: the hint names the reset, from this run's pushes or the cache.
+            cached = codex_reads.peek_usage(self.codex_cmd)
+            resets_at = codex_reads.limit_resets_at(cached) if cached else None
+            if resets_at:
+                usage["codex_resets_at"] = resets_at
         return [*rows, self._error(state, resume, error, usage)]
 
     # --- process end -----------------------------------------------------------

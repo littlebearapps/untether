@@ -4052,14 +4052,15 @@ class TestCostUsage:
 
     @pytest.mark.anyio
     async def test_cost_usage_guard_unsupported_engine(self, tmp_path):
-        """Codex/Pi show guard message — no cost data available."""
+        """Pi shows the guard message — no cost data available (Codex has
+        subscription usage since #966)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
             args_text="cu",
             text="config:cu",
             config_path=state_path,
-            default_engine="codex",
+            default_engine="pi",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -4241,15 +4242,27 @@ class TestCostUsage:
         assert "config:cu" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_cost_usage_hidden_on_home_for_codex(self, tmp_path):
-        """Cost & usage button should NOT appear on home for Codex."""
+    async def test_cost_usage_shown_on_home_for_codex(self, tmp_path):
+        """#966: Codex has a subscription-usage footer, so Cost & usage shows
+        with the subscription toggle only (no API cost for Codex)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="codex")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Cost & usage:" not in msg.text
-        assert "config:cu" not in _buttons_data(msg)
+        assert "Cost & usage:" in msg.text
+        assert "config:cu" in _buttons_data(msg)
+        ctx = _make_ctx(
+            args_text="cu",
+            text="config:cu",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "Subscription usage" in page.text
+        assert "config:cu:su_on" in _buttons_data(page)
+        assert "config:cu:ac_off" not in _buttons_data(page)
 
     @pytest.mark.anyio
     async def test_cost_usage_hidden_on_home_for_pi(self, tmp_path):

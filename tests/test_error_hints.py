@@ -652,6 +652,7 @@ class TestCodexErrorInfoHints:
             "modelNotFound",
             "unauthorized",
             "cyberPolicy",
+            "bioPolicy",
             "inferenceHookDenied",
         ],
     )
@@ -666,6 +667,25 @@ class TestCodexErrorInfoHints:
         assert "/new" in (codex_error_info_hint("modelNotFound") or "")
         assert "codex login" in (codex_error_info_hint("unauthorized") or "")
         assert "/new" in (codex_error_info_hint("contextWindowExceeded") or "")
+
+    def test_cap_hit_names_the_reset(self) -> None:
+        """#966: the reset comes from Codex's own rate-limit data."""
+        import time
+
+        resets = int(time.time()) + 2 * 86400 + 4 * 3600 + 30
+        hint = codex_error_info_hint("usageLimitExceeded", resets) or ""
+        assert hint == (
+            CODEX_ERROR_INFO_HINTS["usageLimitExceeded"] + " It resets in 2d 4h."
+        )
+        # Only the cap hit, and only with an epoch-seconds int.
+        assert (
+            codex_error_info_hint("rateLimitExceeded", resets)
+            == (CODEX_ERROR_INFO_HINTS["rateLimitExceeded"])
+        )
+        assert (
+            codex_error_info_hint("usageLimitExceeded", "soon")
+            == (CODEX_ERROR_INFO_HINTS["usageLimitExceeded"])
+        )
 
     @pytest.mark.parametrize("code", [None, "", "other", 3, {"x": 1}])
     def test_unknown_or_missing_code_has_none(self, code: object) -> None:
