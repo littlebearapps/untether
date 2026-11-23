@@ -471,6 +471,8 @@ def decode_request(method: str, params: Any) -> Any | None:
         return msgspec.convert(params, cls)
     except msgspec.ValidationError:
         return None
+
+
 class RateLimitsUpdatedParams(_Wire):
     """Sparse: merge non-null fields into the last read (#966)."""
 

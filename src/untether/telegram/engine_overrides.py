@@ -96,6 +96,9 @@ def diff_preview_supported(
 # /config → Cost & usage toggle, which does nothing without one.
 SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude", "antigravity", "codex"})
 
+# #423: the per-chat Web search setting (Codex's `web_search` key).
+WEB_SEARCH_SUPPORTED_ENGINES = frozenset({"codex"})
+
 API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "amp"})
 
 # /loop and ScheduleWakeup observation (#289) is Claude-only — other engines
@@ -115,6 +118,7 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     budget_enabled: bool | None = None
     budget_auto_cancel: bool | None = None
     loop_enabled: bool | None = None
+    web_search: bool | None = None
 
 
 def with_override(
@@ -191,6 +195,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     budget_enabled = overrides.budget_enabled
     budget_auto_cancel = overrides.budget_auto_cancel
     loop_enabled = overrides.loop_enabled
+    web_search = overrides.web_search
     if (
         model is None
         and reasoning is None
@@ -203,6 +208,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         and budget_enabled is None
         and budget_auto_cancel is None
         and loop_enabled is None
+        and web_search is None
     ):
         return None
     return EngineOverrides(
@@ -217,6 +223,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         budget_enabled=budget_enabled,
         budget_auto_cancel=budget_auto_cancel,
         loop_enabled=loop_enabled,
+        web_search=web_search,
     )
 
 
@@ -283,6 +290,11 @@ def merge_overrides(
         loop_enabled = topic.loop_enabled
     elif chat is not None:
         loop_enabled = chat.loop_enabled
+    web_search = None
+    if topic is not None and topic.web_search is not None:
+        web_search = topic.web_search
+    elif chat is not None:
+        web_search = chat.web_search
     return normalize_overrides(
         EngineOverrides(
             model=model,
@@ -296,6 +308,7 @@ def merge_overrides(
             budget_enabled=budget_enabled,
             budget_auto_cancel=budget_auto_cancel,
             loop_enabled=loop_enabled,
+            web_search=web_search,
         )
     )
 

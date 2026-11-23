@@ -1422,6 +1422,12 @@ class CodexAppServerRunner(CodexRunner):
         model = _run_model() or state.config_model
         if model:
             params["model"] = model
+        # #423: validated by Codex; on resume too, or the thread keeps its own.
+        run_options = get_run_options()
+        if run_options is not None and run_options.web_search is not None:
+            params["config"] = {
+                "web_search": "live" if run_options.web_search else "disabled"
+            }
         return params
 
     def _resume_params(

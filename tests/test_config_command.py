@@ -5803,3 +5803,128 @@ class TestStaleButtons1281:
 def test_ultra_tap_has_a_toast() -> None:
     """#846: every Reasoning button confirms what it set."""
     assert ConfigCommand.early_answer_toast("rs:ult") == "Reasoning: ultra"
+
+
+# --- #423: Web search page (Codex) -----------------------------------------
+
+
+def _ws_ctx(tmp_path, monkeypatch, args: str = "ws", catalogue=None) -> MagicMock:
+    from tests.test_codex_reads import fixture_catalogue
+    from untether.runners import codex_reads
+    from untether.runners.codex import CodexRunner
+
+    reads_seen: list[object] = []
+
+    async def get_catalogue(runner, cwd):
+        reads_seen.append(cwd)
+        return catalogue or fixture_catalogue()
+
+    monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+    ctx = _make_ctx(
+        args_text=args,
+        text=f"config:{args}",
+        config_path=tmp_path / "prefs.json",
+        default_engine="codex",
+    )
+    ctx.runtime.resolve_runner.return_value.runner = CodexRunner(
+        codex_cmd="codex", extra_args=[]
+    )
+    ctx.runtime.resolve_run_cwd.return_value = None
+    ctx.reads_seen = reads_seen
+    return ctx
+
+
+class TestWebSearch:
+    @pytest.mark.anyio
+    async def test_page_states_and_buttons(self, tmp_path, monkeypatch):
+        ctx = _ws_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "<b>🌐 Web search</b>" in msg.text
+        assert "Current: <b>Codex default</b>" in msg.text
+        assert [d for d in _buttons_data(msg) if d.startswith("config:ws:")] == [
+            "config:ws:def",
+            "config:ws:live",
+            "config:ws:off",
+        ]
+        assert ctx.reads_seen  # read on page open
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("action", "stored", "label"),
+        [("live", True, "live"), ("off", False, "off"), ("def", None, "Codex default")],
+    )
+    async def test_taps_store_and_never_read(
+        self, tmp_path, monkeypatch, action, stored, label
+    ):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(web_search=True, model="m")
+        )
+        ctx = _ws_ctx(tmp_path, monkeypatch, args=f"ws:{action}")
+        await ConfigCommand().handle(ctx)
+        assert ctx.reads_seen == []
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.web_search is stored
+        home = _last_edit_msg(ctx) if ctx.executor.edit.called else _last_send_msg(ctx)
+        assert f"Web search: <b>{label}</b>" in home.text
+        assert ConfigCommand.early_answer_toast(f"ws:{action}") is not None
+
+    @pytest.mark.anyio
+    async def test_hidden_when_the_provider_cannot_search(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue, seed_catalogue
+
+        no_search = dataclasses.replace(fixture_catalogue(), web_search_supported=False)
+        ctx = _ws_ctx(tmp_path, monkeypatch, catalogue=no_search)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "has no web search" in msg.text
+        assert not [d for d in _buttons_data(msg) if d.startswith("config:ws:")]
+        # Home: shown with no cached read, hidden once a read says no search.
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        await ConfigCommand().handle(home)
+        assert "config:ws" in _buttons_data(_last_send_msg(home))
+        from untether.runners import codex_reads
+
+        seed_catalogue()
+        key = next(iter(codex_reads._CATALOGUE.values))
+        at, _ = codex_reads._CATALOGUE.values[key]
+        codex_reads._CATALOGUE.values[key] = (at, no_search)
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        await ConfigCommand().handle(home)
+        assert "config:ws" not in _buttons_data(_last_send_msg(home))
+        assert "Web search:" not in _last_send_msg(home).text
+
+    @pytest.mark.anyio
+    async def test_managed_policy_limits_the_choices(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue
+
+        managed = dataclasses.replace(
+            fixture_catalogue(), web_search_allowed=("disabled", "cached")
+        )
+        ctx = _ws_ctx(tmp_path, monkeypatch, catalogue=managed)
+        await ConfigCommand().handle(ctx)
+        assert [
+            d for d in _buttons_data(_last_edit_msg(ctx)) if d.startswith("config:ws:")
+        ] == ["config:ws:def", "config:ws:off"]
+
+    @pytest.mark.anyio
+    async def test_other_engines_get_the_guard(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="ws",
+            text="config:ws",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        assert "Available for Codex." in _last_edit_msg(ctx).text
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="claude")
+        await ConfigCommand().handle(home)
+        assert "config:ws" not in _buttons_data(_last_send_msg(home))

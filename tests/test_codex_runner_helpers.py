@@ -973,3 +973,27 @@ def test_codex_mini_latest_is_gone() -> None:
 
     assert "codex-mini-latest" not in Path(codex_mod.__file__).read_text()
     assert _ENGINE_MODEL_HINTS["codex"] == "from Codex config"
+
+
+# --- #423: Web search on exec ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "flag"),
+    [(True, 'web_search="live"'), (False, 'web_search="disabled"'), (None, None)],
+)
+def test_exec_web_search_flag_position(value: bool | None, flag: str | None) -> None:
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=["-c", 'web_search="cached"'])
+    with apply_run_options(EngineRunOptions(web_search=value, reasoning="high")):
+        args = runner.build_args("hi", None, state=runner.new_state("hi", None))
+    exec_at = args.index("exec")
+    if flag is None:
+        assert args.count("-c") == 2  # the operator's -c and reasoning only
+        assert 'web_search="cached"' in args
+        return
+    at = args.index(flag)
+    assert args[at - 1] == "-c"
+    # After the operator's extra_args (a later -c wins), before `exec`.
+    assert args.index('web_search="cached"') < at < exec_at

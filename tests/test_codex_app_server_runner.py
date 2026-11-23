@@ -698,6 +698,36 @@ async def test_matching_echo_object_gives_no_warning(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("value", "mode"), [(True, "live"), (False, "disabled")])
+async def test_web_search_goes_in_thread_start_and_resume_config(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    value: bool,
+    mode: str,
+) -> None:
+    """#423: thread/start and thread/resume both carry it (a resumed thread
+    otherwise keeps its own setting)."""
+    fake = Fake(tmp_path)
+    options = EngineRunOptions(permission_mode="safe", web_search=value)
+    assert _completed(await _run(_runner(fake), options=options)).ok
+    assert fake.requests("thread/start")[0]["config"] == {"web_search": mode}
+    resume = ResumeToken(engine="codex", value=THREAD)
+    assert _completed(await _run(_runner(fake), resume=resume, options=options)).ok
+    assert fake.requests("thread/resume")[0]["config"] == {"web_search": mode}
+
+
+@pytest.mark.anyio
+async def test_web_search_unset_sends_no_config(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path)
+    options = EngineRunOptions(permission_mode="safe")
+    assert _completed(await _run(_runner(fake), options=options)).ok
+    assert "config" not in fake.requests("thread/start")[0]
+
+
+@pytest.mark.anyio
 async def test_resume_uses_thread_resume_with_the_same_overrides(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

@@ -372,6 +372,15 @@ async def _page_home(ctx: CommandContext) -> None:
         current_engine,
         transport=_codex_transport(ctx) if current_engine == "codex" else None,
     )
+    # #423: Codex's per-chat Web search; hidden when a cached read says the
+    # provider can't search (the home page never reads).
+    show_web_search = False
+    ws_label = "Codex default"
+    if current_engine == "codex":
+        from ...runners.codex_reads import peek_catalogue
+
+        show_web_search = _ws_offered(peek_catalogue("codex"))[0]
+        ws_label = _ws_label(engine_override.web_search if engine_override else None)
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -434,6 +443,8 @@ async def _page_home(ctx: CommandContext) -> None:
             lines.append(f"Approval policy: <b>{pm_label}</b>{pm_hint}")
             if show_diff_preview:
                 lines.append(f"Diff preview: <b>{dp_display}</b>")  # #963
+            if show_web_search:
+                lines.append(f"Web search: <b>{ws_label}</b>")
         elif current_engine == "antigravity":
             lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
             lines.append(
@@ -602,6 +613,8 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
+        if show_web_search:
+            buttons.append([{"text": "🌐 Web search", "callback_data": "config:ws"}])
     elif current_engine == "gemini":
         # Gemini layout
         buttons.append(
@@ -2556,6 +2569,134 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
 
 # ---------------------------------------------------------------------------
+# Web search (#423, Codex only)
+# ---------------------------------------------------------------------------
+
+# action -> stored value (None = Codex's own config) and Codex's mode name.
+_WS_ACTIONS: dict[str, tuple[bool | None, str | None]] = {
+    "def": (None, None),
+    "live": (True, "live"),
+    "off": (False, "disabled"),
+}
+
+
+def _ws_label(value: bool | None) -> str:
+    return "Codex default" if value is None else ("live" if value else "off")
+
+
+def _ws_offered(catalogue: Any) -> tuple[bool, frozenset[str]]:
+    """(provider can search, actions offered) from Codex's own
+    modelProvider/capabilities + configRequirements reads (None: unknown,
+    so everything is offered and Codex validates)."""
+    if catalogue is None:
+        return True, frozenset(_WS_ACTIONS)
+    if catalogue.web_search_supported is False:
+        return False, frozenset()
+    allowed = catalogue.web_search_allowed
+    return True, frozenset(
+        key
+        for key, (_value, mode) in _WS_ACTIONS.items()
+        if mode is None or allowed is None or mode in allowed
+    )
+
+
+async def _page_web_search(ctx: CommandContext, action: str | None = None) -> None:
+    from pathlib import Path
+
+    from ...runners import codex_reads
+    from ..chat_prefs import shared_prefs_store
+    from ..engine_overrides import WEB_SEARCH_SUPPORTED_ENGINES, with_override
+
+    back = [[{"text": "← Back", "callback_data": "config:home"}]]
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx, "<b>🌐 Web search</b>\n\nUnavailable (no config path).", back
+        )
+        return
+    current_engine, _ = await _resolve_effective_engine(ctx)
+    if current_engine not in WEB_SEARCH_SUPPORTED_ENGINES:
+        await _respond(ctx, "<b>🌐 Web search</b>\n\nAvailable for Codex.", back)
+        return
+    prefs = shared_prefs_store(config_path)
+    chat_id = ctx.message.channel_id
+
+    if action in _WS_ACTIONS:
+        # A tap never reads: check against the cached catalogue only.
+        _ok, offered = _ws_offered(codex_reads.peek_catalogue("codex"))
+        tapped = action
+        if tapped not in offered:
+            logger.warning(
+                "config.web_search.not_offered",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                action=tapped,
+            )
+            await _page_home(ctx)
+            return
+        value = _WS_ACTIONS[action][0]
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        await prefs.set_engine_override(
+            chat_id, current_engine, with_override(current, web_search=value)
+        )
+        logger.info(
+            "config.web_search.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=_ws_label(value),
+        )
+        await _page_home(ctx)
+        return
+
+    catalogue = None
+    runner = None
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="codex"
+        ).runner
+    except Exception:  # noqa: BLE001 — the page still renders
+        runner = None
+    from ...runners.codex import CodexRunner
+
+    if isinstance(runner, CodexRunner):
+        cwd = str(_chat_project_cwd(ctx) or Path.cwd())
+        with anyio.move_on_after(codex_reads.READ_TIMEOUT_S + 1.0):
+            try:
+                catalogue = await codex_reads.get_catalogue(runner, cwd)
+            except codex_reads.CodexReadError:
+                catalogue = None  # logged by the cache
+    can_search, offered = _ws_offered(catalogue)
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    value = override.web_search if override else None
+    lines = [
+        "<b>🌐 Web search</b>",
+        "",
+        "<b>Codex default</b>: whatever your Codex config says (normally cached"
+        " search from an OpenAI index, no live browsing).",
+        "<b>Live</b>: Codex can search the live web.",
+        "<b>Off</b>: no web search tool.",
+        "",
+        "<i>A resumed session may keep the search tool it already used.</i>",
+        "",
+    ]
+    if not can_search:
+        lines.append("This Codex model provider has no web search.")
+        await _respond(ctx, "\n".join(lines), back)
+        return
+    lines.append(f"Current: <b>{_ws_label(value)}</b>")
+    labels = {"def": "Codex default", "live": "Live", "off": "Off"}
+    row = [
+        {
+            "text": _check(labels[key], active=_WS_ACTIONS[key][0] == value),
+            "callback_data": f"config:ws:{key}",
+        }
+        for key in _WS_ACTIONS
+        if key in offered
+    ]
+    await _respond(ctx, "\n".join(lines), [row, *back])
+
+
+# ---------------------------------------------------------------------------
 # Cost & usage (merged API cost + subscription usage)
 # ---------------------------------------------------------------------------
 
@@ -3147,6 +3288,7 @@ _PAGES: dict[str, object] = {
     "ab": _page_about,
     "loop": _page_loop,
     "gt": _page_agy_gate,
+    "ws": _page_web_search,
 }
 
 # ---------------------------------------------------------------------------
@@ -3208,6 +3350,7 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
     # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS.
     "gt": frozenset(),
     "loop": _ON_OFF_CLR,
+    "ws": frozenset({"def", "live", "off"}),  # #423
 }
 
 # Pages whose action is a runtime value (Engine & model: an engine id, plus
@@ -3312,6 +3455,11 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "on": "🔁 Loop mode: on",
         "off": "🔁 Loop mode: off",
         "clr": "🔁 Loop mode: cleared",
+    },
+    "ws": {
+        "def": "Web search: Codex default",
+        "live": "Web search: live",
+        "off": "Web search: off",
     },
 }
 

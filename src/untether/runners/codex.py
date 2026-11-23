@@ -994,6 +994,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         f"model_reasoning_effort={run_options.reasoning}",
                     ]
                 )
+        # #423: after extra_args (a later -c wins), before `exec`.
+        web_search = run_options.web_search if run_options is not None else None
+        if web_search is not None:
+            args.extend(["-c", f'web_search="{"live" if web_search else "disabled"}"'])
         # No --ask-for-approval: `codex exec` never reads the root -a and forces
         # approval=never itself; `untrusted` is rejected from 0.149.0 (#830).
         args.extend(

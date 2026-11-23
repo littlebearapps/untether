@@ -555,3 +555,32 @@ def test_codex_default_level_prefers_config_effort_the_model_lists() -> None:
     odd = dataclasses.replace(catalogue, config=ConfigInfo(None, "ultra", None))
     assert codex_default_level(odd, "gpt-6-luna") == "medium"  # model default
     assert codex_default_level(catalogue, "no-such-model") is None
+
+
+# --- #423: Web search override ------------------------------------------------
+
+
+def test_web_search_normalise_and_merge() -> None:
+    from untether.telegram.engine_overrides import (
+        EngineOverrides,
+        merge_overrides,
+        normalize_overrides,
+    )
+
+    only = normalize_overrides(EngineOverrides(web_search=False))
+    assert only is not None and only.web_search is False
+    assert normalize_overrides(EngineOverrides()) is None
+    topic = EngineOverrides(web_search=True)
+    chat = EngineOverrides(web_search=False, model="m")
+    merged = merge_overrides(topic, chat)
+    assert merged is not None and merged.web_search is True
+    merged = merge_overrides(EngineOverrides(model="t"), chat)
+    assert merged is not None and merged.web_search is False
+    merged = merge_overrides(EngineOverrides(model="t"), EngineOverrides(model="c"))
+    assert merged is not None and merged.web_search is None
+
+
+def test_web_search_is_codex_only() -> None:
+    from untether.telegram.engine_overrides import WEB_SEARCH_SUPPORTED_ENGINES
+
+    assert frozenset({"codex"}) == WEB_SEARCH_SUPPORTED_ENGINES
