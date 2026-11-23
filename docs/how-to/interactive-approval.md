@@ -153,18 +153,49 @@ To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.
 
 ## Engine-specific approval policies
 
-Claude Code has the fullest set of mid-run approval buttons. Antigravity CLI has them in **Ask me** mode (with Untether's agy plugin on the host) and a plan card in **Plan first**. The other engines offer only pre-run policies that control what the agent is allowed to do before it starts:
+Claude Code has the fullest set of mid-run approval buttons. Antigravity CLI has them in **Ask me** mode (with Untether's agy plugin on the host) and a plan card in **Plan first**. Codex CLI has them on the app-server transport in **Ask me** and **Ask before writes**. The other engines offer only pre-run policies that control what the agent is allowed to do before it starts:
 
 ### Codex CLI — Approval policy
 
-Toggle via `/config` → **Approval policy**:
+Toggle via `/config` → **Approval policy**. Which policies you get depends on the transport set under `[engines.codex]`:
 
-| Policy | CLI flag | Behaviour |
-|--------|----------|-----------|
-| **Full auto** (default) | (none) | Codex uses your own Codex sandbox setting (`sandbox_mode` in `~/.codex/config.toml`, or the project's trust level). For a trusted project that is usually `workspace-write`, so Codex can edit files there |
-| **Safe** | `codex exec --sandbox read-only` | Reads and read-only commands only. Edits and writes fail and are reported back to the model; shell network access is blocked |
+| Policy | Transport | What Codex gets | Behaviour |
+|--------|-----------|-----------------|-----------|
+| **Full auto** (default) | both | exec: no flag; app-server: `approvalPolicy: never`, no `sandbox` | Codex uses your own Codex sandbox setting (`sandbox_mode` in `~/.codex/config.toml`, or the project's trust level). For a trusted project that is usually `workspace-write`, so Codex can edit files there. No prompts |
+| **Safe** | both | exec: `--sandbox read-only`; app-server: `sandbox: read-only` | Reads and read-only commands only. Edits and writes fail and are reported back to the model; shell network access is blocked. No prompts |
+| **Ask me** | app-server | `on-request` + `workspace-write` | Edits files in this project on its own; asks you here before network access, files outside the project, or commands its rules flag |
+| **Ask before writes** | app-server | `on-request` + `read-only` | Read-only; asks you before every file change and every command that needs more |
+| **Auto-review** | app-server | `on-request` + `workspace-write` + Codex's reviewer | Like Ask me, but Codex's own reviewer decides instead of you (extra Codex usage). Each review shows as a 🛡️ row; nothing waits for you |
 
-This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. `codex exec` never asks for approval, so the policy picks Codex's sandbox before the run starts.
+Codex asks when an action needs more than its sandbox allows, not before every tool as Claude Code does. To see every
+write, pick **Ask before writes**. On the exec transport `codex exec` never asks, so Ask me, Ask before writes and
+Auto-review need `transport = "app-server"`: an exec run in one of them stops before it starts and says so (your
+session is kept).
+
+**The buttons on a Codex card** (each sends Codex's own answer):
+
+- **✅ Approve**: this once.
+- **🔁 Allow for session**: this command (or these files, or this host) without asking again for the rest of this run.
+- **📌 Always allow `<command prefix>` / `<host>`**: saved to Codex's rules on this host
+  (`~/.codex/rules/default.rules`), so it applies to every later Codex session there, including your own terminal.
+  Shown only when Codex offers it.
+- **❌ Deny**: Codex skips it and carries on.
+- **🛑 Stop**: Codex stops the turn. Tell it what to do differently in your next message.
+
+A command card shows the exact command that runs (and Codex's reading of it); a file-change card shows the diff when
+**Diff preview** is on or unset. A card Codex no longer needs (the turn ended, or you sent `/cancel`) closes as
+"Withdrawn by Codex", and a late tap changes nothing. In group chats, `approval_originator_only` applies as for
+Claude.
+
+**Projects Codex doesn't trust yet.** Ask me and Auto-review need to write in the project. In a project with no
+`[projects."<path>"]` entry in `~/.codex/config.toml`, a writable sandbox would make Codex trust it for this and
+future chats, so Untether runs these read-only and says so. Add the entry yourself to allow writes; Untether never
+trusts a project for you.
+
+**Cron and webhook runs never ask:** every policy runs with Codex's `never` approval policy, so actions that need
+approval fail inside the sandbox and the model is told. If a request still arrives, it is declined and the final
+message says so.
+
 
 !!! warning "Safe blocks every sandboxed write"
     The read-only sandbox blocks **all** filesystem writes from Codex's commands, not just edits inside the project: caches (`.pytest_cache`, `__pycache__`, `npm`/`uv` caches), build output and `/tmp` too. Tests, builds and package installs fail in Safe. Switch the chat to **Full auto** when you want Codex to run them. MCP tools run outside Codex's command sandbox, so Safe does not restrict what an MCP server does.

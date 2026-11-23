@@ -721,6 +721,148 @@ class TestLoopMode:
         assert "config:loop" not in _buttons_data(msg)
 
 
+def _app_server(ctx: MagicMock) -> MagicMock:
+    """#421: the Codex runner this ctx resolves runs the app-server transport."""
+    ctx.runtime.resolve_runner.return_value.runner.transport = "app-server"
+    return ctx
+
+
+class TestCodexTiers421:
+    """#421: five tiers on app-server, two on exec, the stale-tap rule, the
+    home label and Diff preview."""
+
+    @pytest.mark.anyio
+    async def test_app_server_page_offers_five_tiers(self, tmp_path):
+        ctx = _app_server(
+            _make_ctx(
+                args_text="pm",
+                text="config:pm",
+                config_path=tmp_path / "prefs.json",
+                default_engine="codex",
+            )
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        data = _buttons_data(msg)
+        for action in ("fa", "safe", "ask", "aw", "rev", "cxc"):
+            assert f"config:pm:{action}" in data
+        assert "Ask before writes" in msg.text
+        assert "Cron and webhook runs never ask" in msg.text
+
+    @pytest.mark.anyio
+    async def test_exec_page_offers_two_tiers(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=tmp_path / "prefs.json",
+            default_engine="codex",
+        )
+        await ConfigCommand().handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert [d for d in data if d.startswith("config:pm:")] == [
+            "config:pm:fa",
+            "config:pm:safe",
+            "config:pm:cxc",
+        ]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("action", "stored", "toast"),
+        [
+            ("ask", "ask", "Approval policy: ask me"),
+            ("aw", "ask-writes", "Approval policy: ask before writes"),
+            ("rev", "review", "Approval policy: auto-review"),
+        ],
+    )
+    async def test_each_tier_tap_stores_its_mode(self, tmp_path, action, stored, toast):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        ctx = _app_server(
+            _make_ctx(
+                args_text=f"pm:{action}",
+                text=f"config:pm:{action}",
+                config_path=state_path,
+                default_engine="codex",
+                callback_query_id="cb-t",
+            )
+        )
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.permission_mode == stored
+        assert ConfigCommand.pop_late_toast("cb-t") == toast
+
+    @pytest.mark.anyio
+    async def test_app_server_tier_tap_on_exec_is_stale(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.commands.config import _STALE_TOAST
+
+        state_path = tmp_path / "prefs.json"
+        ctx = _make_ctx(
+            args_text="pm:ask",
+            text="config:pm:ask",
+            config_path=state_path,
+            default_engine="codex",
+            callback_query_id="cb-s",
+        )
+        await ConfigCommand().handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        assert await prefs.get_engine_override(123, "codex") is None
+        assert ConfigCommand.pop_late_toast("cb-s") == _STALE_TOAST
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("transport", "label"),
+        [("app-server", "ask me"), ("exec", "ask me (needs app-server)")],
+    )
+    async def test_home_label_per_transport(self, tmp_path, transport, label):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(permission_mode="ask")
+        )
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        if transport == "app-server":
+            _app_server(ctx)
+        await ConfigCommand().handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert label in text
+        # Codex's own hint, never Antigravity's "asks before shell, web, MCP".
+        assert "shell, web, MCP" not in text
+        if transport == "app-server":
+            assert "asks before network or outside files" in text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_shown_on_app_server_only(self, tmp_path):
+        ctx = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        await ConfigCommand().handle(ctx)
+        assert "config:dp" not in _buttons_data(_last_send_msg(ctx))
+        ctx = _app_server(
+            _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        )
+        await ConfigCommand().handle(ctx)
+        assert "config:dp" in _buttons_data(_last_send_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_diff_preview_page_codex_note(self, tmp_path):
+        ctx = _app_server(
+            _make_ctx(
+                args_text="dp",
+                text="config:dp",
+                config_path=tmp_path / "prefs.json",
+                default_engine="codex",
+            )
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "Ask before writes" in text
+        assert "config:dp:on" in _buttons_data(_last_edit_msg(ctx))
+
+
 class TestCodexApprovalPolicy:
     @pytest.mark.anyio
     async def test_approval_policy_page_renders(self, tmp_path):

@@ -363,6 +363,29 @@ for line in sys.stdin:
             out({"method": "brand/new", "params": {"x": 1}})
         for n in SC.get("notifications", []):
             out(n)
+        # #963: each approval waits for the client's answer (logged), then
+        # Codex's serverRequest/resolved; "withdraw" resolves it unanswered.
+        for step in SC.get("approvals", []):
+            for n in step.get("before", []):
+                out(n)
+            req = step["request"]
+            out(req)
+            if step.get("exit"):
+                sys.exit(1)
+            if not step.get("withdraw"):
+                while True:
+                    ans = sys.stdin.readline()
+                    if not ans:
+                        sys.exit(0)
+                    log.write(ans)
+                    log.flush()
+                    a = json.loads(ans)
+                    if a.get("id") == req["id"] and "method" not in a:
+                        break
+            out({"method": "serverRequest/resolved", "params": {
+                "threadId": req["params"]["threadId"], "requestId": req["id"]}})
+            for n in step.get("after", []):
+                out(n)
         if SC.get("hold_turn"):
             if SC.get("partial"):
                 sys.stdout.write(SC["partial"][:20])
@@ -1402,10 +1425,13 @@ async def test_server_requests_mid_turn_add_one_row_each_and_one_reply(
             {"id": 8, "method": "item/tool/requestUserInput", "params": {}},
         ],
     )
-    events = await _run(_runner(fake), options=_SAFE)
+    # #963: attended approvals become cards (test_codex_app_server_approvals);
+    # an unattended run's are declined by the peer with the #835 🔒 row.
+    options = EngineRunOptions(permission_mode="safe", unattended_trigger="cron:c")
+    events = await _run(_runner(fake), options=options)
     titles = [e.action.title for e in events if isinstance(e, ActionEvent)]
     assert titles == [
-        gate._APPROVAL_DECLINED_NOTE,
+        "\N{LOCK} Unattended run — declined a command request: nobody to approve it",
         "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex sent a request Untether"
         " doesn't support yet (`item/tool/requestUserInput`); declined",
     ]

@@ -224,8 +224,9 @@ CODEX_FLAGS_CLASSIFIED_0_169_0: dict[str, str] = {
     "--version": "allowed",
     "--ephemeral": "d16",
     "--thread-source": "d16",
-    "--remote": "root-only",
-    "--remote-auth-token-env": "root-only",
+    # 0.171.0: exec accepts them too (another app server runs the turn, #1394)
+    "--remote": "blocked",
+    "--remote-auth-token-env": "blocked",
     "--no-alt-screen": "root-only",
     "--no-daemon": "root-only",
 }

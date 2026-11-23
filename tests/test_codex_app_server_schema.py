@@ -1,4 +1,4 @@
-"""Codex app-server contract vs the committed 0.169.0 schema fixture (#961).
+"""Codex app-server contract vs the committed schema fixture (#961, #963).
 
 Runs in CI (no ``codex`` needed). The fixture is the subset of
 ``codex app-server generate-json-schema [--experimental]`` Untether depends
@@ -185,6 +185,10 @@ _STRUCT_KEYS: list[tuple[type, str, str]] = [
         (cls, f"server_notification {method}", "params.")
         for method, cls in cas.NOTIFICATION_TYPES.items()
     ),
+    *(
+        (cls, f"server_request {method}", "params.")
+        for method, cls in cas.REQUEST_PARAM_TYPES.items()
+    ),
 ]
 
 
@@ -195,13 +199,17 @@ def test_every_struct_field_exists_in_the_fixture(
     names = fixture[key]["names"]
     missing = {n for n in _wire_names(cls) if f"{prefix}{n}" not in names}
     assert missing == set(), (cls.__name__, key)
-    # Stable connection only: never read an experimental-only field.
-    assert all(names[f"{prefix}{n}"] == "S" for n in _wire_names(cls))
+    # Stable connection only: never read an experimental-only field, bar the
+    # recorded exception (#963 availableDecisions, with a stable fallback).
+    stable = _wire_names(cls) - cas.EXPERIMENTAL_FIELDS_READ
+    assert all(names[f"{prefix}{n}"] == "S" for n in stable)
 
 
 def test_every_used_notification_and_item_has_a_struct() -> None:
     used = {m for (k, m) in CODEX_APP_SERVER_USED if k == "server_notification"}
-    assert used == set(cas.NOTIFICATION_TYPES)
+    assert used == set(cas.NOTIFICATION_TYPES) | cas.DICT_NOTIFICATIONS
+    requests = {m for (k, m) in CODEX_APP_SERVER_USED if k == "server_request"}
+    assert set(cas.REQUEST_PARAM_TYPES) <= requests
     assert set(cas.THREAD_ITEM_TYPES) == set(CODEX_APP_SERVER_TYPES["ThreadItem"])
 
 

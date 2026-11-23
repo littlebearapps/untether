@@ -32,6 +32,7 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 
 from .. import __version__
 from ..events import EventFactory
+from ..interactive.registry import drop_session, register, withdraw
 from ..logging import get_logger
 from ..model import (
     ActionEvent,
@@ -55,9 +56,8 @@ from ..utils.error_display import redact_url_secrets
 from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
+from . import codex_approvals as approvals
 from .codex import (
-    _CODEX_FULL_AUTO_MODES,
-    CODEX_SAFE_PERMISSION_MODE,
     ENGINE,
     CodexRunner,
     CodexRunState,
@@ -70,12 +70,15 @@ from .codex import (
     _webhook_safe_trigger,
 )
 from .codex_rpc import (
+    DECLINE_HANDLERS,
+    DEFER,
     WRITE_TIMEOUT_S,
     CodexRpcClosed,
     CodexRpcPeer,
     CodexRpcWriteTimeout,
     Notification,
     Response,
+    ServerRequest,
 )
 from .run_options import get_run_options
 
@@ -126,6 +129,11 @@ def _string_values(defn: dict[str, Any] | None) -> set[str]:
     values = {v for v in defn.get("enum", ()) if isinstance(v, str)}
     for variant in defn.get("oneOf", ()):
         values |= {v for v in variant.get("enum", ()) if isinstance(v, str)}
+        # #963: an object variant (``{"acceptWithExecpolicyAmendment": …}``)
+        # counts by its only required key.
+        required = variant.get("required", ())
+        if variant.get("type") == "object" and len(required) == 1:
+            values.add(required[0])
     return values
 
 
@@ -371,17 +379,16 @@ _WARNING = "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
 _UNTRUSTED_CONFIG_WARNING_PREFIX = (
     "Project-local config, hooks, and exec policies are disabled"
 )
-_APPROVAL_REQUESTS = frozenset(
-    {
-        "item/commandExecution/requestApproval",
-        "item/fileChange/requestApproval",
-        "mcpServer/elicitation/request",
-    }
-)
+# Before the run has a thread nobody can be shown a card (never seen: Codex
+# asks only mid-turn), so the peer's fail-closed decline stands.
 _APPROVAL_DECLINED_NOTE = (
-    f"{_WARNING} Codex asked for approval; declined: this transport doesn't"
-    " support approvals yet"
+    f"{_WARNING} Codex asked for approval before the run started; declined"
 )
+_STOPPED_BY_CARD = (
+    "\N{OCTAGONAL SIGN} Stopped: tell Codex what to do differently in your"
+    " next message."
+)
+_WITHDRAWN = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16} Withdrawn by Codex"
 # Items with no row: the prompt echo and hook text, plus plan (#965).
 _SILENT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt", "plan"})
 # #832: Claude's 🗜️ wording (#819), so both engines read the same.
@@ -492,6 +499,41 @@ def has_trust_entry(projects: Any, cwd: str) -> bool:
     return any(isinstance(projects.get(str(p)), dict) for p in paths)
 
 
+@dataclass(frozen=True, slots=True)
+class Tier:
+    """One Codex permission tier (#421) as ``thread/start`` fields.
+    ``sandbox`` None = Codex's own setting (Full auto). A writable sandbox
+    (or None) is sent only where ``config/read`` lists the project (DEC-7, D1)."""
+
+    approval_policy: str
+    sandbox: str | None
+    reviewer: str = "user"
+    # Footer label; None for Full auto (the default shows none).
+    label: str | None = None
+
+
+# #421 / #963 (DEC-5 labels): mode → tier. Unknown modes run as Safe (DEC-5).
+TIERS: dict[str, Tier] = {
+    "auto": Tier("never", None),
+    "safe": Tier("never", "read-only", label="safe"),
+    "ask": Tier("on-request", "workspace-write", label="ask me"),
+    "ask-writes": Tier("on-request", "read-only", label="ask before writes"),
+    "review": Tier("on-request", "workspace-write", "auto_review", "auto-review"),
+}
+
+
+def _tier(mode: str | None, *, unattended: bool) -> Tier:
+    tier = TIERS.get("auto" if mode is None else mode)
+    if tier is None:
+        _warn_unknown_mode_safe(str(mode))  # DEC-5: fail closed
+        tier = TIERS["safe"]
+    if unattended and tier.approval_policy != "never":
+        # #835 / D4: nobody can answer; Codex asks nothing and actions that
+        # need approval fail inside the sandbox.
+        tier = Tier("never", tier.sandbox, "user", tier.label)
+    return tier
+
+
 def _warn_unknown_mode_safe(mode: str) -> None:
     if mode in _UNKNOWN_MODE_SAFE_WARNED:
         return
@@ -526,9 +568,11 @@ def _config_model(result: Any) -> str | None:
 class AppServerRunState(CodexRunState):
     prompt: str = ""
     cwd: str = ""
-    # Sandbox sent on thread/start|resume; None = Codex's own setting.
+    # #421: the run's tier; ``sandbox`` is what thread/start|resume sends
+    # (None = Codex's own setting), read-only where trust would be saved.
+    tier: Tier = field(default_factory=lambda: TIERS["safe"])
     sandbox: str | None = None
-    # Full auto: config/read decides whether omitting the sandbox is safe.
+    # Writable tiers: config/read decides whether that sandbox is safe to send.
     check_trust: bool = False
     # #1369: Codex's configured model (config/read), sent on a resume with no
     # /model override, since a resumed thread otherwise keeps its saved model.
@@ -559,6 +603,17 @@ class AppServerRunState(CodexRunState):
     context: tuple[int, int, int] | None = None
     ctx_emitted: tuple[int, int] | None = None
     compactions: int = 0
+    # #963: open approval cards (set once the thread is known; attended runs
+    # only), fileChange items by id for their diff (cached before the
+    # sub-agent filter), the chat's Diff preview, and an unattended run's
+    # trigger + declined request kinds (#835 posture).
+    cards: approvals.CodexApprovals | None = None
+    file_changes: dict[str, list[Any]] = field(default_factory=dict)
+    diff_preview: bool | None = None
+    unattended: str | None = None
+    unattended_denied: list[str] = field(default_factory=list)
+    # A card's Stop (``cancel``) interrupted the turn on purpose.
+    card_stop: bool = False
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -567,6 +622,7 @@ class CodexAppServerRunner(CodexRunner):
     seams so the process stays open for JSON-RPC."""
 
     process_label = "codex app-server"
+    transport = "app-server"
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
@@ -597,13 +653,11 @@ class CodexAppServerRunner(CodexRunner):
         webhook = _webhook_safe_trigger(run_options)
         if webhook is not None and raw_mode is not None:
             _warn_webhook_unknown_mode(webhook, raw_mode)
-        mode = self._permission_mode()
-        if mode is None or mode in _CODEX_FULL_AUTO_MODES:
-            state.check_trust = True
-        else:
-            if mode != CODEX_SAFE_PERMISSION_MODE:
-                _warn_unknown_mode_safe(mode)  # DEC-5: fail closed
-            state.sandbox = "read-only"
+        state.unattended = run_options.unattended_trigger if run_options else None
+        state.diff_preview = run_options.diff_preview if run_options else None
+        state.tier = _tier(self._permission_mode(), unattended=bool(state.unattended))
+        state.sandbox = state.tier.sandbox
+        state.check_trust = state.sandbox != "read-only"
         state.cwd = str(get_run_base_dir() or Path.cwd())
         args = [*self.extra_args, "app-server", "--listen", "stdio://"]
         state.argv = list(args)
@@ -703,6 +757,8 @@ class CodexAppServerRunner(CodexRunner):
                         kind, method, params = state.outbox.pop(0)
                         if kind == "notify":
                             await peer.notify(method, params)
+                        elif kind == "reply":  # #963: an unreadable request
+                            await peer.reply(method, params)
                         else:
                             await peer.submit(method, params)
                 except (CodexRpcClosed, CodexRpcWriteTimeout) as exc:
@@ -712,8 +768,22 @@ class CodexAppServerRunner(CodexRunner):
             # generator (at a yield). Stop the turn natively, then re-raise.
             await self._interrupt(state, stream)
             raise
+        finally:
+            self._end_cards(state)
         peer.close("done" if stream.did_emit_completed else "eof")
         await self._close_process(state.proc)
+
+    @staticmethod
+    def _end_cards(state: AppServerRunState) -> None:
+        """#963: the run is over; a later tap on one of its cards reads
+        "session ended" and writes nothing."""
+        cards = state.cards
+        if cards is None:
+            return
+        approvals._RUNS.pop(cards.session_key, None)
+        dropped = drop_session(cards.session_key)
+        if dropped:
+            logger.info("codex.app_server.approvals_dropped", cleaned=dropped)
 
     async def _interrupt(
         self, state: AppServerRunState, stream: JsonlStreamState
@@ -817,6 +887,8 @@ class CodexAppServerRunner(CodexRunner):
             events = self._on_notification(
                 msg, state=state, resume=resume, found_session=found_session
             )
+        elif isinstance(msg, ServerRequest):
+            events = self._approval_card(msg, state)
         return self._flush_rows(state, events)
 
     @staticmethod
@@ -883,15 +955,33 @@ class CodexAppServerRunner(CodexRunner):
         if state.compactions:
             # Untether never starts one itself (manual /compact is #964).
             out["compaction"] = {"count": state.compactions, "trigger": "auto"}
+        if state.unattended_denied:
+            # #835: the bridge's footer line for an unattended run's denials.
+            denied: dict[str, int] = {}
+            for kind in state.unattended_denied:
+                denied[kind] = denied.get(kind, 0) + 1
+            out["unattended"] = {
+                "trigger": state.unattended,
+                "mode": self._permission_mode(),
+                "denied": denied,
+            }
         out.update(usage or {})
         return self._untrusted_usage(state, out or None)
 
-    def _on_server_request(self, state: AppServerRunState, method: str) -> None:
-        """The peer already declined it; this only adds the row."""
+    def _on_server_request(self, state: AppServerRunState, method: str) -> Any:
+        """The peer's observer: an approval in an attended run is deferred to
+        a card (#963); anything else the peer declines, and this adds the
+        row (🔒 once per run when unattended, #835)."""
+        if method in approvals.APPROVAL_METHODS:
+            if state.cards is not None:
+                return DEFER
+            if state.unattended is not None:
+                self._unattended_decline(state, method)
+                return None
         state.server_requests += 1
         title = (
             _APPROVAL_DECLINED_NOTE
-            if method in _APPROVAL_REQUESTS
+            if method in approvals.APPROVAL_METHODS
             else f"{_WARNING} Codex sent a request Untether doesn't support yet"
             f" (`{method}`); declined"
         )
@@ -904,6 +994,188 @@ class CodexAppServerRunner(CodexRunner):
             level="warning",
         )
         state.pending_rows.append(row)
+        return None
+
+    # --- #963 approval cards ---------------------------------------------------
+
+    def _unattended_decline(self, state: AppServerRunState, method: str) -> None:
+        """A request in a cron/webhook run (none expected under ``never``):
+        the peer declines it; Claude's #835 row, log and footer count."""
+        kind = approvals.kind_name(method)
+        state.unattended_denied.append(kind)
+        logger.warning(
+            "permission.unattended_deny",
+            tool_name=kind,
+            trigger_source=state.unattended,
+            session_id=state.thread_id,
+            permission_mode=self._permission_mode(),
+            turn_denials=len(state.unattended_denied),
+        )
+        if len(state.unattended_denied) > 1:
+            return
+        state.pending_rows.append(
+            state.factory.action_completed(
+                action_id="codex.unattended_deny",
+                kind="note",
+                title=f"\N{LOCK} Unattended run — declined a {kind} request:"
+                " nobody to approve it",
+                ok=False,
+                level="warning",
+            )
+        )
+
+    def _approval_card(
+        self, msg: ServerRequest, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """A deferred request → its card, registered for a tap."""
+        cards = state.cards
+        params = cas.decode_request(msg.method, msg.params)
+        if cards is None or params is None:
+            # Shape Untether can't read: decline it, as the peer would have.
+            logger.warning("codex.app_server.approval_unreadable", method=msg.method)
+            decline = DECLINE_HANDLERS[msg.method](msg.params)
+            state.outbox.append(("reply", msg.id, decline))  # type: ignore[arg-type]
+            return []
+        request_id = approvals.new_request_id()
+        file_changes = (
+            state.file_changes.get(params.item_id)
+            if isinstance(params, cas.FileChangeApprovalParams)
+            else None
+        )
+        card = approvals.build_card(
+            request_id,
+            msg.method,
+            params,
+            subagent=params.thread_id != state.thread_id,
+            file_changes=file_changes,
+            diff_preview=state.diff_preview,
+        )
+        action_id = f"codex.approval.{request_id}"
+        register(
+            request_id,
+            session_key=cards.session_key,
+            responder=approvals.RESPONDER,
+            tool_name=approvals.kind_name(msg.method),
+            tool_input={"decisions": card.decisions},
+            kind="tool",
+        )
+        cards.pending[request_id] = approvals.Pending(
+            rpc_id=msg.id,
+            method=msg.method,
+            action_id=action_id,
+            label=card.label,
+            decisions=card.decisions,
+        )
+        cards.by_rpc[msg.id] = request_id
+        logger.info(
+            "codex.app_server.approval",
+            request_id=request_id,
+            method=msg.method,
+            subagent=params.thread_id != state.thread_id,
+            decisions=sorted(card.decisions),
+        )
+        return [
+            state.factory.action_started(
+                action_id=action_id,
+                kind="warning",
+                title=card.title,
+                detail={
+                    "request_id": request_id,
+                    "request_type": msg.method,
+                    "inline_keyboard": {"buttons": card.buttons},
+                    "line_breaks": True,
+                },
+            )
+        ]
+
+    def _on_request_resolved(
+        self, params: cas.ServerRequestResolvedParams, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """Codex is done with a request: after our answer (close the card with
+        it) or on its own, e.g. the turn ended (withdraw, #684)."""
+        cards = state.cards
+        request_id = cards.by_rpc.pop(params.request_id, None) if cards else None
+        pending = cards.pending.pop(request_id, None) if cards and request_id else None
+        if pending is None or request_id is None:
+            return []
+        return [self._close_card(state, request_id, pending)]
+
+    def _close_card(
+        self, state: AppServerRunState, request_id: str, pending: approvals.Pending
+    ) -> UntetherEvent:
+        if pending.answer is None:
+            withdraw(request_id)
+            logger.info("codex.app_server.approval.withdrawn", request_id=request_id)
+            title, ok = f"{_WITHDRAWN}: {pending.label}", False
+        else:
+            title = f"{approvals.ANSWER_TITLES[pending.answer]}: {pending.label}"
+            ok = pending.answer in {"approve", "session", "always"}
+            state.card_stop = state.card_stop or pending.answer == "stop"
+        return state.factory.action_completed(
+            action_id=pending.action_id,
+            kind="warning",
+            title=title,
+            ok=ok,
+            detail={"request_id": request_id},
+        )
+
+    def _retire_cards(self, state: AppServerRunState) -> list[UntetherEvent]:
+        """Cards still open when the turn ends: Codex has cleared them."""
+        cards = state.cards
+        if cards is None or not cards.pending:
+            return []
+        rows = [self._close_card(state, rid, p) for rid, p in cards.pending.items()]
+        cards.pending.clear()
+        cards.by_rpc.clear()
+        return rows
+
+    def _review_rows(
+        self, msg: Notification, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """🛡️ rows for Codex's auto-review: no card, no push (the reviewer
+        decides). The payload is ``[UNSTABLE]``: read loosely, never fail."""
+        phase = "started" if msg.method.endswith("/started") else "completed"
+        row_id, title, ok, warn = approvals.review_row(phase, msg.params)
+        review = msg.params.get("review")
+        logger.info(
+            "codex.app_server.auto_review",
+            phase=phase,
+            status=review.get("status") if isinstance(review, dict) else None,
+            row=row_id,
+        )
+        if phase == "started":
+            state.open_items[row_id] = ("note", title)
+            row = state.factory.action_started(
+                action_id=row_id, kind="note", title=title
+            )
+        else:
+            state.open_items.pop(row_id, None)
+            row = state.factory.action_completed(
+                action_id=row_id,
+                kind="note",
+                title=title,
+                ok=ok,
+                level="warning" if warn else "info",
+            )
+        return self._rows(state, [row])
+
+    @staticmethod
+    def _cache_file_change(state: AppServerRunState, method: str, params: Any) -> None:
+        """Keep each fileChange item's changes for its card's diff, from any
+        thread (a sub-agent's request arrives on this connection too). P-B
+        (0.171.0): ``item/started`` comes ~5 ms before the request."""
+        if isinstance(params, cas.PatchUpdatedParams):
+            state.file_changes[params.item_id] = list(params.changes)
+            return
+        item = params.item if isinstance(params, cas.ItemParams) else {}
+        item_id = item.get("id")
+        if item.get("type") != "fileChange" or not isinstance(item_id, str):
+            return
+        if method == "item/completed":
+            state.file_changes.pop(item_id, None)
+        else:
+            changes = item.get("changes")
+            state.file_changes[item_id] = changes if isinstance(changes, list) else []
 
     def _warning_rows(
         self, state: AppServerRunState, method: str, text: str
@@ -1108,21 +1380,24 @@ class CodexAppServerRunner(CodexRunner):
         return []
 
     def _decide_sandbox(self, state: AppServerRunState, result: Any) -> None:
-        """Full auto omits ``sandbox`` (Codex's own setting) only where that
-        can't make Codex trust the project (DEC-7, P1): a writable sandbox in
-        a project with no ``[projects]`` entry saves it as trusted."""
+        """Full auto omits ``sandbox`` (Codex's own setting), and Ask me /
+        Auto-review send ``workspace-write``, only where that can't make Codex
+        trust the project (DEC-7, P1, D1): a writable sandbox in a project
+        with no ``[projects]`` entry saves it as trusted."""
         config = result.get("config") if isinstance(result, dict) else None
         config = config if isinstance(config, dict) else {}
         if has_trust_entry(config.get("projects"), state.cwd):
             return
-        state.sandbox = "read-only"
         sandbox_mode = config.get("sandbox_mode")
+        wanted = state.sandbox or sandbox_mode
+        state.sandbox = "read-only"
         logger.info(
             "codex.app_server.untrusted_read_only",
             cwd=state.cwd,
             sandbox_mode=sandbox_mode,
+            mode_sandbox=wanted,
         )
-        if sandbox_mode in _WRITABLE_SANDBOX_MODES:
+        if wanted in _WRITABLE_SANDBOX_MODES:
             state.pending_rows.append(
                 state.factory.action_completed(
                     action_id="codex.untrusted_read_only",
@@ -1138,8 +1413,8 @@ class CodexAppServerRunner(CodexRunner):
         thread's saved settings, so anything omitted is inherited."""
         params: dict[str, Any] = {
             "cwd": state.cwd,
-            "approvalPolicy": "never",
-            "approvalsReviewer": "user",
+            "approvalPolicy": state.tier.approval_policy,
+            "approvalsReviewer": state.tier.reviewer,
         }
         if state.sandbox is not None:
             params["sandbox"] = state.sandbox
@@ -1184,13 +1459,19 @@ class CodexAppServerRunner(CodexRunner):
         self, result: cas.ThreadOpenResult, *, state: AppServerRunState
     ) -> list[UntetherEvent]:
         state.thread_id = result.thread.id
+        if state.unattended is None and state.peer is not None:
+            # #963: from here an approval request becomes a card.
+            state.cards = approvals.CodexApprovals(
+                session_key=f"{ENGINE}:{result.thread.id}", peer=state.peer
+            )
+            approvals._RUNS[state.cards.session_key] = state.cards
         run_options = get_run_options()
         meta: dict[str, Any] = {"model": result.model or result.thread.model or "codex"}
         state.model = meta["model"]
         if run_options is not None and run_options.reasoning:
             meta["effort"] = run_options.reasoning
-        if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
-            meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
+        if state.tier.label is not None:
+            meta["permissionMode"] = state.tier.label
         token = ResumeToken(engine=ENGINE, value=result.thread.id)
         events: list[UntetherEvent] = [
             state.factory.started(token, title=self.session_title, meta=meta)
@@ -1213,8 +1494,8 @@ class CodexAppServerRunner(CodexRunner):
     ) -> list[UntetherEvent]:
         """Requested vs effective, on the stable echo fields only."""
         requested: dict[str, Any] = {
-            "approvalPolicy": "never",
-            "approvalsReviewer": "user",
+            "approvalPolicy": state.tier.approval_policy,
+            "approvalsReviewer": state.tier.reviewer,
         }
         if state.sandbox is not None:
             requested["sandbox"] = state.sandbox
@@ -1259,6 +1540,8 @@ class CodexAppServerRunner(CodexRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        if msg.method in cas.DICT_NOTIFICATIONS:
+            return self._review_rows(msg, state)  # #963 Auto-review
         if msg.method not in cas.NOTIFICATION_TYPES:
             if msg.method not in state.seen_unknown:
                 state.seen_unknown.add(msg.method)
@@ -1279,6 +1562,8 @@ class CodexAppServerRunner(CodexRunner):
                     )
                 ]
             return []
+        if isinstance(params, cas.ItemParams | cas.PatchUpdatedParams):
+            self._cache_file_change(state, msg.method, params)  # #963, any thread
         if (
             isinstance(params, cas.TurnParams | cas.TokenUsageUpdatedParams)
             and params.thread_id != state.thread_id
@@ -1304,6 +1589,10 @@ class CodexAppServerRunner(CodexRunner):
                 return self._warning_rows(state, msg.method, params.message)
             case "configWarning" | "deprecationNotice":
                 return self._warning_rows(state, msg.method, params.summary)
+            case "serverRequest/resolved":
+                return self._on_request_resolved(params, state)
+            case "guardianWarning":
+                return self._warning_rows(state, msg.method, params.message)
             case "thread/tokenUsage/updated":
                 return self._on_token_usage(params.token_usage, state=state)
             case "turn/completed":
@@ -1381,20 +1670,24 @@ class CodexAppServerRunner(CodexRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        cards = self._retire_cards(state)  # #963: none may keep its buttons
         if turn.status == "completed":
             return [
+                *cards,
                 state.factory.completed_ok(
                     answer=self._answer(state),
                     resume=found_session or resume,
                     usage=self._run_usage(state, None),
-                )
+                ),
             ]
-        rows = self._close_open_items(
+        rows = cards + self._close_open_items(
             state, "cancelled" if turn.status == "interrupted" else "failed"
         )
         error = (turn.error.message if turn.error else "") or (
             f"Codex turn {turn.status}"
         )
+        if state.card_stop and turn.status == "interrupted":
+            error = _STOPPED_BY_CARD
         code = codex_error_code(turn.error.codex_error_info) if turn.error else None
         usage = {"codex_error_info": code} if code else None
         return [*rows, self._error(state, resume, error, usage)]

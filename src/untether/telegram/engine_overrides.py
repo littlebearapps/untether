@@ -63,10 +63,15 @@ PERMISSION_MODE_SUPPORTED_ENGINES = frozenset(
 )
 
 
-def diff_preview_supported(engine: str | None, cwd: object = None) -> bool:
+def diff_preview_supported(
+    engine: str | None, cwd: object = None, *, transport: str | None = None
+) -> bool:
     """Claude always; Antigravity wherever Ask me can run (#1090): the toggle
     only changes Ask me's approval cards, and Ask me needs the same agy
-    plugin as Ask mode."""
+    plugin as Ask mode. Codex on the app-server transport only (#963): exec
+    never asks, so it has no card to show a diff on."""
+    if engine == "codex":
+        return transport == "app-server"
     return ask_questions_supported(engine, cwd)
 
 

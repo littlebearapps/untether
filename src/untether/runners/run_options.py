@@ -127,9 +127,21 @@ ANTIGRAVITY_PERMISSION_MODES: frozenset[str] = frozenset(
     {"workspace", "ask", "plan", "full"}
 )
 
+# Codex tiers (#421, #963): exec runs Full auto (``auto``, stored as None by
+# /config) or Safe; app-server adds three that prompt (Ask me, Ask before
+# writes, Auto-review). An app-server-only mode on exec is refused before
+# spawn (``runners/codex.py``); an unknown stored mode fails closed to
+# read-only on app-server and open on exec (webhooks: safe, #1142).
+CODEX_PERMISSION_MODES_EXEC: frozenset[str] = frozenset({"auto", "safe"})
+CODEX_APP_SERVER_ONLY_MODES: frozenset[str] = frozenset({"ask", "ask-writes", "review"})
+CODEX_PERMISSION_MODES_APP_SERVER: frozenset[str] = (
+    CODEX_PERMISSION_MODES_EXEC | CODEX_APP_SERVER_ONLY_MODES
+)
+
 VALID_PERMISSION_MODES_BY_ENGINE: dict[str, frozenset[str]] = {
     "claude": CLAUDE_CLI_PERMISSION_MODES | {CLAUDE_PLAN_AUTO_MODE},
     "antigravity": ANTIGRAVITY_PERMISSION_MODES,
+    "codex": CODEX_PERMISSION_MODES_APP_SERVER,
 }
 
 
