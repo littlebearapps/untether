@@ -7134,6 +7134,89 @@ def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
     return reason if reason in _PLAIN_PRESPAWN_BLOCKS else None
 
 
+# #1388: a prompt the RAM guard would refuse is held, not dropped.
+_RAM_HOLD_POLL_S = 15.0
+_RAM_HOLD_MAX_S = 300.0
+_RAM_HOLD_QUOTE_MAX = 1500
+_RAM_HOLD_TEXT = (
+    "⏳ Not enough free RAM to start this run yet, so it's on hold. It starts"
+    " by itself when memory frees up (checked every 15 s, for up to 5 min)."
+    " /cancel drops it."
+)
+
+
+async def _hold_for_ram(
+    cfg: ExecBridgeConfig,
+    runner: Runner,
+    *,
+    resume_token: ResumeToken | None,
+    running_task: RunningTask | None,
+    incoming: IncomingMessage,
+    user_ref: MessageRef,
+) -> None:
+    """#1388: while the pre-spawn RAM guard would refuse this run, wait
+    (bounded, /cancel-able) instead of refusing at once. The run stays the
+    chat's running task, so queued follow-ups keep their order and /cancel
+    works as usual. Returns when RAM frees, on /cancel or at the time limit;
+    the runner's own guard then decides as before. Never raises."""
+    check = getattr(runner, "_check_prespawn_ram_guard", None)
+    if check is None:
+        return
+    notice_ref: MessageRef | None = None
+    try:
+        block = check(resume_token)
+        if block is None or prespawn_blocked_reason(block.usage) != "ram":
+            return
+        started = anyio.current_time()
+        logger.info("prespawn.ram_hold.started", engine=runner.engine)
+        notice_ref = await cfg.transport.send(
+            channel_id=incoming.channel_id,
+            message=RenderedMessage(text=_RAM_HOLD_TEXT, extra={}),
+            options=SendOptions(
+                reply_to=user_ref, notify=True, thread_id=incoming.thread_id
+            ),
+        )
+        cancel = running_task.cancel_requested if running_task else anyio.Event()
+        outcome = "timeout"
+        while anyio.current_time() - started < _RAM_HOLD_MAX_S:
+            with anyio.move_on_after(_RAM_HOLD_POLL_S):
+                await cancel.wait()
+            if cancel.is_set():
+                outcome = "cancelled"
+                break
+            block = check(resume_token)
+            if block is None or prespawn_blocked_reason(block.usage) != "ram":
+                outcome = "freed"
+                break
+        logger.info(
+            "prespawn.ram_hold.ended",
+            engine=runner.engine,
+            outcome=outcome,
+            waited_s=round(anyio.current_time() - started, 1),
+        )
+        if notice_ref is None:
+            return
+        if outcome != "timeout":
+            await cfg.transport.delete(ref=notice_ref)
+            return
+        # Never lose the prompt (a voice transcript exists nowhere else).
+        quote = incoming.text.strip()
+        if len(quote) > _RAM_HOLD_QUOTE_MAX:
+            quote = quote[:_RAM_HOLD_QUOTE_MAX] + "…"
+        await cfg.transport.edit(
+            ref=notice_ref,
+            message=RenderedMessage(
+                text=(
+                    "⌛ Still not enough free RAM after 5 min, so this run wasn't"
+                    " started. Your message, to send again:\n\n" + quote
+                ),
+                extra={},
+            ),
+        )
+    except Exception:  # noqa: BLE001 — the hold must never break the run
+        logger.warning("prespawn.ram_hold.failed", exc_info=True)
+
+
 def _resume_failure_clears_session(
     engine: str, usage: Mapping[str, Any] | None, error: object
 ) -> bool:
@@ -9279,6 +9362,14 @@ async def handle_message(
         turn_router.bind_task_group(tg)
 
         try:
+            await _hold_for_ram(
+                cfg,
+                runner,
+                resume_token=resume_token,
+                running_task=running_task,
+                incoming=incoming,
+                user_ref=user_ref,
+            )
             outcome = await run_runner_with_cancel(
                 runner,
                 prompt=runner_text,

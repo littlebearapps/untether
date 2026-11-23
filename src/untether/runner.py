@@ -1711,7 +1711,9 @@ class JsonlSubprocessRunner(BaseRunner):
         effective_block_mb = block_mb + per_run_reserve * live_runs
 
         if block_mb > 0 and avail_mb < effective_block_mb:
-            logger.error(
+            # #1388: WARN — an expected guard decision, and the bridge's
+            # RAM hold re-checks it every 15 s.
+            logger.warning(
                 "subprocess.prespawn.ram_blocked",
                 engine=self.engine,
                 avail_mb=avail_mb,

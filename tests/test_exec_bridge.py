@@ -1892,6 +1892,140 @@ async def test_on_resume_failed_not_called_with_turns() -> None:
     assert len(cleared_tokens) == 0
 
 
+_RAM_BLOCK = CompletedEvent(
+    engine=CODEX_ENGINE,
+    ok=False,
+    answer="",
+    error="🛑 Insufficient RAM to start engine",
+    usage={"prespawn_blocked": "ram"},
+)
+
+
+class _RamGatedRunner(ScriptRunner):
+    """#1388: a runner whose RAM guard blocks the first ``blocks`` checks."""
+
+    def __init__(self, blocks: int) -> None:
+        super().__init__([Return(answer="ran ok")], engine=CODEX_ENGINE)
+        self.blocks = blocks
+        self.checks = 0
+
+    def _check_prespawn_ram_guard(self, resume):
+        self.checks += 1
+        return _RAM_BLOCK if self.checks <= self.blocks else None
+
+
+def _fast_ram_hold(monkeypatch, *, max_s: float = 5.0) -> None:
+    from untether import runner_bridge
+
+    monkeypatch.setattr(runner_bridge, "_RAM_HOLD_POLL_S", 0.01)
+    monkeypatch.setattr(runner_bridge, "_RAM_HOLD_MAX_S", max_s)
+
+
+@pytest.mark.anyio
+async def test_1388_ram_blocked_prompt_is_held_then_runs(monkeypatch) -> None:
+    _fast_ram_hold(monkeypatch)
+    transport = FakeTransport()
+    runner = _RamGatedRunner(blocks=3)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    hold = [c for c in transport.send_calls if "on hold" in c["message"].text]
+    assert len(hold) == 1
+    assert hold[0]["ref"] in transport.delete_calls
+    ended = [r for r in logs if r["event"] == "prespawn.ram_hold.ended"]
+    assert ended and ended[0]["outcome"] == "freed"
+    texts = [c["message"].text for c in transport.send_calls + transport.edit_calls]
+    assert any("ran ok" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_1388_ram_hold_timeout_keeps_the_prompt(monkeypatch) -> None:
+    _fast_ram_hold(monkeypatch, max_s=0.05)
+    transport = FakeTransport()
+    runner = _RamGatedRunner(blocks=10_000)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    text = "(voice transcribed) please email the client"
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text=text),
+        resume_token=None,
+    )
+
+    hold = [c for c in transport.send_calls if "on hold" in c["message"].text]
+    assert len(hold) == 1
+    edits = [c for c in transport.edit_calls if c["ref"] == hold[0]["ref"]]
+    assert edits and text in edits[-1]["message"].text
+    assert hold[0]["ref"] not in transport.delete_calls
+
+
+@pytest.mark.anyio
+async def test_1388_ram_hold_ends_on_cancel(monkeypatch) -> None:
+    from untether.runner_bridge import RunningTask, _hold_for_ram
+
+    _fast_ram_hold(monkeypatch)
+    transport = FakeTransport()
+    runner = _RamGatedRunner(blocks=10_000)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    task = RunningTask()
+
+    async def cancel_soon() -> None:
+        await anyio.sleep(0.03)
+        task.cancel_requested.set()
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(cancel_soon)
+            await _hold_for_ram(
+                cfg,
+                runner,
+                resume_token=None,
+                running_task=task,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                user_ref=MessageRef(channel_id=123, message_id=10),
+            )
+    assert transport.delete_calls == [transport.send_calls[0]["ref"]]
+
+
+@pytest.mark.anyio
+async def test_1388_other_blocks_are_not_held(monkeypatch) -> None:
+    from untether.runner_bridge import _hold_for_ram
+
+    transport = FakeTransport()
+    runner = _RamGatedRunner(blocks=0)
+    runner._check_prespawn_ram_guard = lambda resume: CompletedEvent(  # type: ignore[method-assign]
+        engine=CODEX_ENGINE,
+        ok=False,
+        answer="",
+        error="too many",
+        usage={"prespawn_blocked": "concurrency"},
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await _hold_for_ram(
+        cfg,
+        runner,
+        resume_token=None,
+        running_task=None,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        user_ref=MessageRef(channel_id=123, message_id=10),
+    )
+    assert transport.send_calls == []
+
+
 @pytest.mark.anyio
 async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
     """#838: a pre-spawn guard block (marked on usage) never ran the engine —
