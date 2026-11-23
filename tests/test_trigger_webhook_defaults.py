@@ -278,6 +278,8 @@ _PARITY_VALUES: dict[str, Any] = {
     "max_turns": 3,  # #1125
     "max_budget_usd": 0.5,
     "max_elapsed_s": 60,
+    "quiet_unless_output": True,  # #1220
+    "quiet_sentinel": "[none]",
 }
 
 
@@ -287,6 +289,8 @@ def test_build_run_context_parity(name: str) -> None:
     run_option_fields = set(TriggerRunOptions.model_fields) - {"engine"}
     assert run_option_fields == set(_PARITY_VALUES)
     opts = {"engine": "claude", "project": "app", name: _PARITY_VALUES[name]}
+    if name == "quiet_sentinel":
+        opts["quiet_unless_output"] = True  # a sentinel alone is an error
     cron = CronConfig.model_validate(
         {"id": "x", "schedule": "0 3 * * *", "prompt": "hi", **opts}
     )

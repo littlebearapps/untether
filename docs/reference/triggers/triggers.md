@@ -153,12 +153,14 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `max_turns` | int\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Model turns this webhook's run may use. See [Run budgets](#run-budgets) ([#1125](https://github.com/littlebearapps/untether/issues/1125)). |
 | `max_budget_usd` | float\|null | `null` | (`agent_run` only, needs `engine = "claude"`) Spend cap in US dollars for this webhook's run. See [Run budgets](#run-budgets). |
 | `max_elapsed_s` | int\|null | `null` | (`agent_run` only) Wall-clock limit in seconds (at least 30), every engine. See [Run budgets](#run-budgets). |
+| `quiet_unless_output` | bool\|null | `null` | (`agent_run` only) Post nothing when the answer starts with `quiet_sentinel`. See [Quiet end](#quiet-end) ([#1220](https://github.com/littlebearapps/untether/issues/1220)). |
+| `quiet_sentinel` | string\|null | `"[quiet]"` when quiet is on | (`agent_run` only, needs `quiet_unless_output = true`) Up to 32 characters, one line. |
 | `allow_unsafe_permission_mode` | bool | `false` | Lets this webhook's own `permission_mode` be one that skips approvals. Needs `engine` and such a mode; anything else is an error ([#1118](https://github.com/littlebearapps/untether/issues/1118)). |
 
 Webhook IDs and paths must each be unique across all configured webhooks. Run
 options (`permission_mode`, `model`, `reasoning`, `allowed_tools`, `env`,
-`agent`, `max_turns`, `max_budget_usd`, `max_elapsed_s`,
-`allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
+`agent`, `max_turns`, `max_budget_usd`, `max_elapsed_s`, `quiet_unless_output`,
+`quiet_sentinel`, `allow_unsafe_permission_mode`) on a `file_write`, `http_forward` or
 `notify_only` webhook make that entry invalid, since nothing would use them.
 
 ### `[[triggers.crons]]`
@@ -194,6 +196,8 @@ options (`permission_mode`, `model`, `reasoning`, `allowed_tools`, `env`,
 | `max_turns` | int\|null | `null` | (needs `engine = "claude"`) Model turns this cron's run may use. See [Run budgets](#run-budgets) ([#1125](https://github.com/littlebearapps/untether/issues/1125)). |
 | `max_budget_usd` | float\|null | `null` | (needs `engine = "claude"`) Spend cap in US dollars for this cron's run. See [Run budgets](#run-budgets). |
 | `max_elapsed_s` | int\|null | `null` | Wall-clock limit in seconds (at least 30), every engine. See [Run budgets](#run-budgets). |
+| `quiet_unless_output` | bool\|null | `null` | Post nothing when the answer starts with `quiet_sentinel`. See [Quiet end](#quiet-end) ([#1220](https://github.com/littlebearapps/untether/issues/1220)). |
+| `quiet_sentinel` | string\|null | `"[quiet]"` when quiet is on | (needs `quiet_unless_output = true`) Up to 32 characters, one line. |
 | `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only. With `engine` set it must be one of that engine's levels (Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low`…`xhigh`; Antigravity `low`, `medium`, `high`; an engine without reasoning support is an error); without `engine`, one of `low`…`max`, and a level the resolved engine doesn't allow is ignored with a note in the run. Normalised to lower case. |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
@@ -255,6 +259,41 @@ prompt = "Check the inbox and draft replies."
 - The journal records `max_turns`, `max_budget` or `max_elapsed` as the
   run's `outcome`. A reply to the run uses the chat's own settings, without
   these limits.
+
+### Quiet end
+
+A watch-style trigger can stay silent when there is nothing to report
+([#1220](https://github.com/littlebearapps/untether/issues/1220)):
+
+```toml
+[[triggers.crons]]
+id = "pr-watch"
+schedule = "*/15 * * * *"
+project = "myapp"
+chat_id = -1001234567890
+quiet_unless_output = true
+prompt = "Check for new PR review comments. If there are none, reply with exactly: [quiet] nothing new"
+```
+
+When the run's answer starts (first non-blank line) with the sentinel
+(`[quiet]` unless `quiet_sentinel` says otherwise), Untether deletes the run's
+progress message and its `⏰ Scheduled:` / `⚡ Trigger:` label instead of
+posting a final, and logs `trigger.quiet_end`. The sentinel is a prompt
+convention: tell the agent when to use it.
+
+- The label is still sent when the run starts (the run replies to it), so it
+  shows in the chat while the run works, then disappears.
+- Never quiet: a failed or cancelled run, a stop at a [run budget](#run-budgets),
+  an unattended run that had a tool denied, a cost alert or budget stop line,
+  a safeguard stop, or any file in the project's outbox. Those post as usual,
+  sentinel or not.
+- Only the run's own answer can be quiet. Background work it starts in a live
+  session still reports when it finishes, so don't start background work in a
+  quiet trigger.
+- If the progress message can't be deleted, the final is posted as usual
+  (WARNING `trigger.quiet_end.delete_failed`).
+- The journal line has `"quiet": true` and `quiet_line` (the sentinel line, at
+  most 200 characters); it is the only answer text the journal keeps.
 
 ### Cron permission modes
 
@@ -434,6 +473,7 @@ Logs for a webhook's own options are `trigger.webhook.<field>_override`
 | `store_as` | string | `"fetch_result"` | Template variable name for the fetched data. |
 | `on_failure` | string | `"abort"` | Failure handling: `"abort"` (notify + skip run) or `"run_with_error"` (inject error into prompt). |
 | `max_bytes` | int | `10485760` | Maximum response size (1 KB--100 MB). |
+| `skip_if_empty` | bool | `false` | Skip the run when the fetch succeeds but returns nothing: blank text, `[]`, `{}`, or an empty body such as HTTP 204. Nothing is posted; the journal records `skipped_empty` and DEBUG `triggers.cron.fetch_empty_skip` is logged. A `run_once` cron counts as fired ([#1220](https://github.com/littlebearapps/untether/issues/1220)). |
 
 !!! note "No environment-variable substitution"
     `{{…}}` placeholders in a fetch's `url`, `headers` and `body` are rendered
@@ -1021,7 +1061,7 @@ the prompt or the answer:
  "project":"myapp","engine":"claude","model":"claude-opus-…","started_at":1795000000.0,
  "finished_at":1795000042.5,"outcome":"ok","ok":true,"error":null,"num_turns":4,
  "cost_usd":0.21,"rate_limit_count":1,"rate_limit_total_s":60.0,"api_retry_count":0,
- "api_retry_total_s":0.0,"rejected":true}
+ "api_retry_total_s":0.0,"rejected":true,"quiet":false,"quiet_line":null}
 ```
 
 | `outcome` | Meaning |
@@ -1033,6 +1073,7 @@ the prompt or the answer:
 | `refused` | the daily cost budget's **Stop at limit** refused it; nothing ran |
 | `announce_failed` | the `⏰ Scheduled:` / `⚡ Trigger:` message couldn't be posted, so nothing ran (a `run_once` cron's retries each add a line) |
 | `fetch_aborted` | the cron's fetch step failed with `on_failure = "abort"` |
+| `skipped_empty` | the fetch returned nothing and `skip_if_empty` is on; nothing ran |
 
 The throttle fields count Claude's rate-limit waits (`rejected` is true when
 Anthropic refused a request outright) and API retries during that run, so a

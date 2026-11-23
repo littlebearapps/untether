@@ -33,6 +33,8 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 
 #: #1125: the shortest per-trigger ``max_elapsed_s``.
 MIN_MAX_ELAPSED_S = 30
+#: #1220: what a quiet trigger's answer starts with when it has nothing to say.
+DEFAULT_QUIET_SENTINEL = "[quiet]"
 
 
 # #1121: a trigger's `env` names and `agent` value.
@@ -115,6 +117,37 @@ class TriggerRunOptions(BaseModel):
     max_turns: StrictInt | None = Field(default=None, ge=1)
     max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_elapsed_s: StrictInt | None = Field(default=None, ge=MIN_MAX_ELAPSED_S)
+    # #1220: a run whose answer opens with `quiet_sentinel` (default
+    # `DEFAULT_QUIET_SENTINEL`) ends with no message (its progress and label
+    # are deleted); failures always post. None = unset, so existing entries
+    # dump unchanged.
+    quiet_unless_output: StrictBool | None = None
+    quiet_sentinel: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
+        ]
+        | None
+    ) = None
+
+    @field_validator("quiet_sentinel")
+    @classmethod
+    def _validate_quiet_sentinel(cls, v: str | None) -> str | None:
+        if v is not None and not v.isprintable():
+            raise ValueError("quiet_sentinel must be one line of printable text")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_quiet(self) -> Self:
+        # A sentinel with quiet off would be ignored silently.
+        if self.quiet_sentinel is not None and not self.quiet_unless_output:
+            raise ValueError("quiet_sentinel needs quiet_unless_output = true")
+        return self
+
+    def effective_quiet_sentinel(self) -> str | None:
+        """#1220: the sentinel when quiet end is on, else None."""
+        if not self.quiet_unless_output:
+            return None
+        return self.quiet_sentinel or DEFAULT_QUIET_SENTINEL
 
     @field_validator("max_budget_usd", mode="before")
     @classmethod
@@ -378,6 +411,8 @@ class WebhookConfig(TriggerRunOptions):
         ]
         if self.env:
             set_options.append("env")  # #1121
+        if self.quiet_unless_output:
+            set_options.append("quiet_unless_output")  # #1220
         if self.allow_unsafe_permission_mode:
             set_options.append("allow_unsafe_permission_mode")
         if self.action != "agent_run":
@@ -486,6 +521,9 @@ class CronFetchConfig(BaseModel):
     store_as: NonEmptyStr = "fetch_result"
     on_failure: Literal["abort", "run_with_error"] = "abort"
     max_bytes: StrictInt = Field(default=10_485_760, ge=1024, le=104_857_600)
+    # #1220: an empty result (blank text, `[]`, `{}`, an HTTP 204) skips the
+    # run: nothing is posted, the journal records `skipped_empty`.
+    skip_if_empty: StrictBool = False
 
     @model_validator(mode="after")
     def _validate_fetch_fields(self) -> CronFetchConfig:

@@ -38,6 +38,18 @@ type DispatchResult = bool | Literal["refused"]
 # ~35s of the trigger firing.
 SEND_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0)
 
+# #1220: ``_fetch_and_render`` result for an empty fetch with ``skip_if_empty``.
+_SKIPPED_EMPTY: Final = object()
+
+
+def fetch_is_empty(data: Any) -> bool:
+    """#1220: blank text, ``[]``, ``{}`` or nothing (an HTTP 204 body)."""
+    if data is None:
+        return True
+    if isinstance(data, str):
+        return not data.strip()
+    return isinstance(data, (list, dict)) and not data
+
 
 def build_run_context(
     trigger: CronConfig | WebhookConfig, *, strict: bool = False
@@ -67,6 +79,7 @@ def build_run_context(
         max_turns=trigger.max_turns,  # #1125
         max_budget_usd=trigger.max_budget_usd,
         max_elapsed_s=trigger.max_elapsed_s,
+        quiet_sentinel=trigger.effective_quiet_sentinel(),  # #1220
     )
 
 
@@ -153,6 +166,13 @@ class TriggerDispatcher:
         # If cron has a fetch step, execute it before rendering the prompt.
         if cron.fetch is not None:
             prompt = await self._fetch_and_render(cron)
+            if prompt is _SKIPPED_EMPTY:
+                # #1220: nothing to look at — no announce, no run. Counts as
+                # fired (a run_once cron is consumed).
+                journal.record_run(
+                    context, outcome="skipped_empty", ok=True, engine=engine_override
+                )
+                return True
             if prompt is None:
                 # fetch failed with on_failure=abort (handled)
                 journal.record_run(
@@ -176,11 +196,11 @@ class TriggerDispatcher:
             retry_delays=retry_delays,
         )
 
-    async def _fetch_and_render(self, cron: CronConfig) -> str | None:
+    async def _fetch_and_render(self, cron: CronConfig) -> Any:
         """Execute cron fetch step and build the prompt.
 
-        Returns the rendered prompt, or ``None`` if fetch failed and
-        ``on_failure`` is ``"abort"``.
+        Returns the rendered prompt, ``None`` if fetch failed and
+        ``on_failure`` is ``"abort"``, or ``_SKIPPED_EMPTY`` (#1220).
         """
         from .fetch import build_fetch_prompt, execute_fetch
 
@@ -213,6 +233,9 @@ class TriggerDispatcher:
                 return None
             # on_failure=run_with_error — inject error into prompt.
             data = f"[FETCH ERROR: {error_msg}]"
+        elif cron.fetch.skip_if_empty and fetch_is_empty(data):
+            logger.debug("triggers.cron.fetch_empty_skip", cron_id=cron.id)
+            return _SKIPPED_EMPTY
 
         return build_fetch_prompt(
             cron.prompt,

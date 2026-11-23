@@ -1865,6 +1865,9 @@ class _CompletionAccounting:
     outlier_text: str | None
     # #896: "Stop at limit" footer line when this result ends the session.
     budget_stop_text: str | None = None
+    # #1220: the run's journal line, when the caller writes it itself (a
+    # quiet-end candidate, decided only after the accounting).
+    journal_fields: dict[str, Any] | None = None
 
 
 def _add_budget_run_cost(
@@ -5649,6 +5652,37 @@ _NATIVE_ELAPSED_ENGINES: frozenset[str] = frozenset({"antigravity"})
 _NATIVE_ELAPSED_BACKSTOP_S = 30.0
 
 
+def outbox_has_files(cfg: ExecBridgeConfig) -> bool:
+    """#1220: anything in the run's outbox keeps a quiet run posting (a
+    stale file too: posting is the safe side)."""
+    oc = _load_outbox_settings(cfg)
+    if cfg.send_file is None or oc is None:
+        return False
+    from .utils.paths import get_run_base_dir
+
+    run_root = get_run_base_dir()
+    if run_root is None:
+        return False
+    try:
+        return any((run_root / oc.outbox_dir).iterdir())
+    except OSError:
+        return False
+
+
+#: #1220: the journal keeps at most this much of a quiet run's sentinel line.
+_QUIET_LINE_MAX = 200
+
+
+def quiet_end_line(answer: str | None, sentinel: str) -> str | None:
+    """#1220: the answer's first non-blank line (stripped, at most 200
+    characters) when it starts with *sentinel*, else None."""
+    for line in (answer or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:_QUIET_LINE_MAX] if stripped.startswith(sentinel) else None
+    return None
+
+
 def trigger_journal_outcome(
     usage: Mapping[str, Any] | None, *, ok: bool | None, stop_reason: str | None
 ) -> str:
@@ -7904,6 +7938,7 @@ async def handle_message(
         turn: _TurnCtx | None,
         elapsed_s: float,
         answer_len: int,
+        defer_journal: bool = False,
     ) -> _CompletionAccounting:
         """#806: the accounting every delivered result owes, whatever it
         renders as — the #778 session-cost delta (and its ledger write), the
@@ -7977,25 +8012,28 @@ async def handle_message(
             # previously logged with no record of which model produced it.
             **_model_log_fields(t_tracker.meta),
         )
+        journal_fields: dict[str, Any] | None = None
         if turn is None:
             # #1123: the run's first result is its journal line; a live
             # session's later turns are human follow-ups or wake turns.
-            _journal(
-                trigger_journal_outcome(
+            journal_fields = {
+                "outcome": trigger_journal_outcome(
                     completed.usage,
                     ok=completed.ok,
                     stop_reason=running_task.stop_reason if running_task else None,
                 ),
-                ok=bool(completed.ok),
-                error=completed.error,
-                session_id=resume_value,
-                model=_model_log_fields(t_tracker.meta).get("model"),
-                elapsed_s=elapsed_s,
-                usage={
+                "ok": bool(completed.ok),
+                "error": completed.error,
+                "session_id": resume_value,
+                "model": _model_log_fields(t_tracker.meta).get("model"),
+                "elapsed_s": elapsed_s,
+                "usage": {
                     **(completed.usage or {}),
                     "total_cost_usd": (cost_usage or {}).get("total_cost_usd"),
                 },
-            )
+            }
+            if not defer_journal:
+                _journal(**journal_fields)
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
 
@@ -8019,6 +8057,7 @@ async def handle_message(
             budget_stop_text=_note_budget_run_cost(
                 budget_stop, engine=runner.engine, session_id=resume_value
             ),
+            journal_fields=journal_fields,
         )
         if turn is not None:
             turn.accounting = acct
@@ -8376,13 +8415,53 @@ async def handle_message(
             )
         )
         final_resume = completed.resume or run_outcome.resume
+        # #1220: a trigger's opt-in quiet end — only a clean, successful
+        # first result whose answer opens with the sentinel, with nothing
+        # else to show (no denial, safeguard, time limit or outbox file).
+        quiet_line = (
+            quiet_end_line(completed.answer, context.quiet_sentinel)
+            if turn is None
+            and context is not None
+            and context.quiet_sentinel
+            and run_ok is True
+            and status == "done"
+            and not run_outcome.cancelled
+            and not empty_result_anomaly
+            and safeguard is None
+            and unattended is None
+            and not plain_refusal
+            and (running_task is None or running_task.stop_reason is None)
+            else None
+        )
+        if quiet_line is not None and outbox_has_files(cfg):
+            quiet_line = None
         acct = _account_completion(
             completed,
             final_resume,
             turn=turn,
             elapsed_s=elapsed_final,
             answer_len=len(final_answer or ""),
+            defer_journal=quiet_line is not None,
         )
+        if quiet_line is not None:
+            quiet = (
+                acct.cost_alert is None
+                and not acct.outlier_text
+                and not acct.budget_stop_text
+                and await _quiet_end(t_edits, t_progress_ref)
+            )
+            if acct.journal_fields is not None:
+                _journal(
+                    **acct.journal_fields,
+                    quiet=quiet,
+                    quiet_line=quiet_line if quiet else None,
+                )
+            if quiet:
+                delivery["sent"] = True
+                if running_task is not None:
+                    running_task.final_sent = True
+                _release_progress(t_progress_ref, reason="quiet")
+                return
         resume_value = acct.resume_value
         run_usage = acct.run_usage
         sync_resume_token(t_tracker, final_resume)
@@ -8700,6 +8779,35 @@ async def handle_message(
             - _OUTBOX_FRESH_GRACE_S
         )
         return send_after, archive_before
+
+    async def _quiet_end(
+        t_edits: ProgressEdits | None, t_progress_ref: MessageRef | None
+    ) -> bool:
+        """#1220: delete the run's progress message and its trigger label
+        instead of sending a final. False (send the final as usual) when the
+        progress message couldn't be deleted."""
+        if t_edits is not None:
+            await t_edits.stop_repaints()
+        if t_progress_ref is not None:
+            try:
+                with message_kind("progress"):
+                    deleted = await cfg.transport.delete(ref=t_progress_ref)
+            except Exception:  # noqa: BLE001 — fall back to a normal final
+                deleted = False
+            if not deleted:
+                logger.warning(
+                    "trigger.quiet_end.delete_failed",
+                    trigger=context.trigger_source if context else None,
+                )
+                return False
+        with contextlib.suppress(Exception):
+            await cfg.transport.delete(ref=user_ref)  # the trigger's label
+        logger.info(
+            "trigger.quiet_end",
+            trigger=context.trigger_source if context else None,
+            run_id=context.run_id if context else None,
+        )
+        return True
 
     async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
         """Deliver ``.untether-outbox/`` right after a live turn's final —
