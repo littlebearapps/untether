@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -564,6 +565,22 @@ async def _notify_trigger_config_problem(
         "triggers.config_notice.sent",
         targets=[list(target) for target in targets],
         sent_count=sent_count,
+    )
+
+
+def format_state_quarantined_notice(path: Path, backup: Path) -> str:
+    """#1381: admin notice for a state file moved aside by #1277."""
+    restore = f"mv {shlex.quote(str(backup))} {shlex.quote(str(path))}"
+    return (
+        "⚠️ **Saved settings were reset**\n\n"
+        f"Untether couldn't read `{path.name}` (damaged, or written by a newer"
+        " Untether version), so it moved the file aside and started fresh."
+        " Every setting saved in it is back to its default until you restore it."
+        " For chat settings that includes each chat's **permission mode**,"
+        " engine and `/ctx` binding.\n\n"
+        f"Backup: `{backup}`\n"
+        f"Restore: `{restore}`\n"
+        "If a newer Untether wrote it, upgrade before restoring."
     )
 
 
@@ -2351,6 +2368,21 @@ async def run_main_loop(
     _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
     _prev_sigint = _signal.getsignal(_signal.SIGINT)
 
+    # #1381: a quarantined state file DMs the admins; held until the task
+    # group below exists (a store can be read during startup).
+    notice_tg: TaskGroup | None = None
+    pending_quarantines: list[tuple[Path, Path]] = []
+
+    def _on_state_quarantined(path: Path, backup: Path) -> None:
+        if notice_tg is None:
+            pending_quarantines.append((path, backup))
+            return
+        notice_tg.start_soon(
+            _notify_trigger_config_problem,
+            cfg,
+            format_state_quarantined_notice(path, backup),
+        )
+
     try:
         config_path = cfg.runtime.config_path
         if config_path is not None:
@@ -2364,6 +2396,7 @@ async def run_main_loop(
                 pending_finals.attach(resolve_pending_finals_path(config_path))
 
             state.chat_prefs = shared_prefs_store(config_path)
+            state.chat_prefs.on_quarantine = _on_state_quarantined
             logger.info(
                 "chat_prefs.enabled",
                 state_path=str(resolve_prefs_path(config_path)),
@@ -2385,6 +2418,7 @@ async def run_main_loop(
             state.chat_session_store = ChatSessionStore(
                 resolve_sessions_path(config_path)
             )
+            state.chat_session_store.on_quarantine = _on_state_quarantined
             cleared = await state.chat_session_store.sync_startup_cwd(Path.cwd())
             if cleared:
                 logger.info(
@@ -2403,6 +2437,7 @@ async def run_main_loop(
                     "topics enabled but config path is not set; cannot locate state file."
                 )
             state.topic_store = TopicStateStore(resolve_state_path(config_path))
+            state.topic_store.on_quarantine = _on_state_quarantined
             await _validate_topics_setup(cfg)
             refresh_topics_scope()
             logger.info(
@@ -2441,6 +2476,10 @@ async def run_main_loop(
         reset_uptime()
 
         async with anyio.create_task_group() as tg:
+            notice_tg = tg
+            for path, backup in pending_quarantines:
+                _on_state_quarantined(path, backup)
+            pending_quarantines.clear()
             poller_fn: Callable[
                 [TelegramBridgeConfig], AsyncIterator[TelegramIncomingUpdate]
             ]

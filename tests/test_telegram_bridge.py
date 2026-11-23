@@ -3542,6 +3542,53 @@ async def test_run_main_loop_ignores_duplicate_update_id() -> None:
 
 
 @pytest.mark.anyio
+async def test_1381_quarantined_prefs_file_notifies_admin(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    resolve_prefs_path(config_path).write_bytes(b'{"version": 99, "chats": {}}')
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=TransportRuntime(
+            router=_make_router(runner),
+            projects=_empty_projects(),
+            config_path=config_path,
+        ),
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="hello",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            chat_type="private",
+        )
+
+    with anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    notices = [
+        c
+        for c in transport.send_calls
+        if "Saved settings were reset" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert notices[0]["channel_id"] == 123
+    assert list(tmp_path.glob("telegram_chat_prefs_state.json.corrupt-*"))
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_persists_topic_sessions_in_project_scope(
     tmp_path: Path,
 ) -> None:
