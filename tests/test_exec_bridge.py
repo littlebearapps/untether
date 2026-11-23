@@ -15013,6 +15013,13 @@ class TestAntigravityEnvelopeClassifier:
         assert _event_type({"type": 3, "event": "result"}) == "result"
         assert _event_type({"event": None}) == "unknown"
         assert _event_type({}) == "unknown"
+        # #1386: Codex app-server JSON-RPC frames
+        assert _event_type({"method": "turn/completed", "params": {}}) == (
+            "turn/completed"
+        )
+        assert _event_type({"id": 2, "result": {}}) == "response"
+        assert _event_type({"id": 2, "error": {"code": -1}}) == "response"
+        assert _event_type({"id": 2}) == "unknown"
 
     def test_line_handler_labels_agy_steps_and_latches_result(self) -> None:
         import json
