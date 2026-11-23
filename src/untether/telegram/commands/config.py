@@ -205,7 +205,9 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
 # resolved default (get_engine_default_model) and only falls back to these.
 _ENGINE_MODEL_HINTS: dict[str, str] = {
     "claude": "from CLI settings",
-    "codex": "codex-mini-latest",
+    # #1360: never a guessed model name; the real one comes from Codex's own
+    # config/catalogue read (get_engine_default_model) once it is cached.
+    "codex": "from Codex config",
     "gemini": "auto (routes Flash ↔ Pro)",
     "amp": "smart mode (Opus 4.6)",
     "opencode": "provider/model (e.g. openai/gpt-4o)",

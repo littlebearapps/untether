@@ -859,6 +859,36 @@ async def test_rate_limit_push_is_merged_and_names_the_cap_hit_reset(
 
 
 @pytest.mark.anyio
+async def test_model_rerouted_updates_the_footer_model(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#846: model/rerouted names the model that actually ran; a sub-agent
+    thread's reroute is ignored."""
+
+    def reroute(thread: str, to: str) -> dict:
+        return {
+            "method": "model/rerouted",
+            "params": {
+                "threadId": thread,
+                "turnId": "turn-1",
+                "fromModel": "gpt-fake",
+                "toModel": to,
+                "reason": "highRiskCyberActivity",
+            },
+        }
+
+    fake = Fake(
+        tmp_path,
+        notifications=[reroute(OTHER_THREAD, "gpt-other"), reroute(THREAD, "gpt-safe")],
+    )
+    events = await _run(_runner(fake))
+    started = [e for e in events if isinstance(e, StartedEvent)]
+    assert [e.meta.get("model") for e in started if e.meta] == ["gpt-fake", "gpt-safe"]
+    assert all(e.resume.value == THREAD for e in started)
+    _completed(events)
+
+
+@pytest.mark.anyio
 async def test_cap_hit_without_quota_data_has_no_reset(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

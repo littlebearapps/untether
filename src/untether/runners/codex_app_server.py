@@ -1599,11 +1599,33 @@ class CodexAppServerRunner(CodexRunner):
             case "account/rateLimits/updated":
                 # #966: feeds the quota footer (sparse; merged, never cleared).
                 codex_reads.merge_push(self.codex_cmd, msg.params)
+            case "model/rerouted":
+                return self._on_rerouted(params, state=state)
             case "turn/completed":
                 return self._on_turn_completed(
                     params.turn, state=state, resume=resume, found_session=found_session
                 )
         return []
+
+    def _on_rerouted(
+        self, params: cas.ModelReroutedParams, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#846: Codex ran another model than it echoed on thread/start; the
+        footer shows the one that actually ran (supplementary started meta)."""
+        if params.thread_id != state.thread_id or not params.to_model:
+            return []
+        logger.info(
+            "codex.app_server.model_rerouted",
+            from_model=params.from_model,
+            to_model=params.to_model,
+            reason=params.reason,
+        )
+        state.model = params.to_model
+        token = ResumeToken(engine=ENGINE, value=params.thread_id)
+        row = state.factory.started(
+            token, title=self.session_title, meta={"model": params.to_model}
+        )
+        return self._rows(state, [row])
 
     def _on_token_usage(
         self, usage: cas.ThreadTokenUsage, *, state: AppServerRunState

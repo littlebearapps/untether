@@ -877,3 +877,99 @@ def test_on_spawned_starts_the_warm_up_with_the_run_cwd(
     finally:
         reset_run_base_dir(token)
     assert seen == [(runner, str(tmp_path))]
+
+
+# --- #1360: the exec footer model is Codex's own, or none ------------------
+
+
+def _usage() -> codex_schema.Usage:
+    return codex_schema.Usage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+
+
+def _started_meta(
+    runner: CodexRunner, options: object = None, cwd: Path | None = None
+) -> dict | None:
+    from untether.runners.run_options import apply_run_options
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    token = set_run_base_dir(cwd)
+    try:
+        with apply_run_options(options):  # type: ignore[arg-type]
+            (started,) = runner.translate(
+                codex_schema.ThreadStarted(thread_id="sess-m"),
+                state=runner.new_state("hi", None),
+                resume=None,
+                found_session=None,
+            )
+    finally:
+        reset_run_base_dir(token)
+    assert isinstance(started, StartedEvent)
+    return started.meta
+
+
+def test_exec_footer_has_no_model_when_unknown() -> None:
+    meta = _started_meta(CodexRunner(codex_cmd="codex", extra_args=[]))
+    assert meta is None or "model" not in meta
+
+
+def test_exec_footer_uses_the_cached_config_model_and_override_wins() -> None:
+    from tests.test_codex_reads import seed_catalogue
+    from untether.runners.run_options import EngineRunOptions
+
+    seed_catalogue("/proj")
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    meta = _started_meta(runner, cwd=Path("/proj"))
+    assert meta == {"model": "gpt-6.1-sol"}
+    meta = _started_meta(runner, EngineRunOptions(model="gpt-6-luna"), Path("/proj"))
+    assert meta == {"model": "gpt-6-luna"}
+    # Another project's config wasn't read: no model, never a guess.
+    meta = _started_meta(runner, cwd=Path("/elsewhere"))
+    assert meta is None or "model" not in meta
+
+
+def test_exec_footer_with_a_profile_shows_no_model() -> None:
+    from tests.test_codex_reads import seed_catalogue
+
+    seed_catalogue("/proj")
+    runner = CodexRunner(codex_cmd="codex", extra_args=["--profile", "work"])
+    meta = _started_meta(runner, cwd=Path("/proj"))
+    assert meta is None or "model" not in meta
+
+
+def test_late_model_meta_once_the_warm_up_landed() -> None:
+    from tests.test_codex_reads import seed_catalogue
+    from untether.model import ResumeToken
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", None)
+    found = ResumeToken(engine="codex", value="sess-late")
+    token = set_run_base_dir(Path("/proj"))
+    try:
+        runner.translate(
+            codex_schema.ThreadStarted(thread_id="sess-late"),
+            state=state,
+            resume=None,
+            found_session=None,
+        )
+        seed_catalogue("/proj")  # the warm-up read finishes mid-run
+        out = runner.translate(
+            codex_schema.TurnCompleted(usage=_usage()),
+            state=state,
+            resume=None,
+            found_session=found,
+        )
+    finally:
+        reset_run_base_dir(token)
+    assert isinstance(out[0], StartedEvent)
+    assert out[0].meta == {"model": "gpt-6.1-sol"} and out[0].resume == found
+    assert isinstance(out[-1], CompletedEvent)
+    assert sum(isinstance(e, CompletedEvent) for e in out) == 1
+
+
+def test_codex_mini_latest_is_gone() -> None:
+    import untether.runners.codex as codex_mod
+    from untether.telegram.commands.config import _ENGINE_MODEL_HINTS
+
+    assert "codex-mini-latest" not in Path(codex_mod.__file__).read_text()
+    assert _ENGINE_MODEL_HINTS["codex"] == "from Codex config"
