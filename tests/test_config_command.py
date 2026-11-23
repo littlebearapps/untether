@@ -1009,7 +1009,7 @@ class TestCodexApprovalPolicy:
 
     @pytest.mark.anyio
     async def test_codex_home_hint_safe_read_only(self, tmp_path):
-        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.chat_prefs import shared_prefs_store
         from untether.telegram.engine_overrides import EngineOverrides
 
         state_path = tmp_path / "prefs.json"
@@ -1018,7 +1018,8 @@ class TestCodexApprovalPolicy:
         await cmd.handle(ctx)
         assert "Codex's own sandbox" in _last_send_msg(ctx).text
 
-        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        # The command's own store: a second store can miss a write in the same mtime tick.
+        prefs = shared_prefs_store(state_path)
         await prefs.set_engine_override(
             123, "codex", EngineOverrides(permission_mode="safe")
         )
@@ -2281,6 +2282,10 @@ class TestCodexReasoningCatalogue:
             "• <b>ultra</b> — Maximum reasoning with automatic task delegation"
             " (Codex may start sub-agents)" in msg.text
         )
+        # Codex's descriptions replace the fixed ones; no level is listed twice.
+        assert "most thorough (slowest)" not in msg.text
+        assert "deepest thinking" not in msg.text
+        assert msg.text.count("• <b>max</b>") == 1
         buttons = [
             d
             for d in _buttons_data(msg)
@@ -2502,12 +2507,13 @@ class TestReasoning:
     async def test_reasoning_set_ultra_rejected_for_a_model_without_it(self, tmp_path):
         """#309 regression, per model since #846: crafted `rs:ult` for a Codex
         model whose catalogue entry has no `ultra` is rejected, not persisted."""
-        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.chat_prefs import shared_prefs_store
         from untether.telegram.engine_overrides import EngineOverrides
 
         _seed_codex_catalogue()
         state_path = tmp_path / "prefs.json"
-        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        # The command's own store: a second store can miss a write in the same mtime tick.
+        prefs = shared_prefs_store(state_path)
         await prefs.set_engine_override(
             123, "codex", EngineOverrides(model="gpt-6-luna")
         )
@@ -5842,6 +5848,8 @@ class TestWebSearch:
         msg = _last_edit_msg(ctx)
         assert "<b>🌐 Web search</b>" in msg.text
         assert "Current: <b>Codex default</b>" in msg.text
+        # Off can't stop ChatGPT app connectors from browsing; the page says so.
+        assert "ChatGPT apps" in msg.text
         assert [d for d in _buttons_data(msg) if d.startswith("config:ws:")] == [
             "config:ws:def",
             "config:ws:live",

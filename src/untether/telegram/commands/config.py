@@ -2020,15 +2020,19 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
                 note += " (Codex may start sub-agents)"
             text = f" — {html.escape(note.strip())}" if note.strip() else ""
             level_descriptions.append(f"• <b>{lv}</b>{text}")
-    elif "low" in levels or "medium" in levels or "high" in levels:
-        present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
-        level_descriptions.append(f"• {' · '.join(present)} — balanced options")
-    if "xhigh" in levels:
-        level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
-    if "max" in levels:
-        level_descriptions.append(
-            "• <b>max</b> — deepest thinking (slowest, costliest)"
-        )
+    else:
+        # Fixed wording only when Codex's own descriptions aren't shown.
+        if "low" in levels or "medium" in levels or "high" in levels:
+            present = [
+                f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels
+            ]
+            level_descriptions.append(f"• {' · '.join(present)} — balanced options")
+        if "xhigh" in levels:
+            level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
+        if "max" in levels:
+            level_descriptions.append(
+                "• <b>max</b> — deepest thinking (slowest, costliest)"
+            )
 
     rs_label = get_reasoning_label(current_engine)
     rs_label_lower = rs_label.lower()
@@ -2674,7 +2678,8 @@ async def _page_web_search(ctx: CommandContext, action: str | None = None) -> No
         "<b>Codex default</b>: whatever your Codex config says (normally cached"
         " search from an OpenAI index, no live browsing).",
         "<b>Live</b>: Codex can search the live web.",
-        "<b>Off</b>: no web search tool.",
+        "<b>Off</b>: turns off Codex's built-in web search. ChatGPT apps"
+        " connected to your account can still reach the web.",
         "",
         "<i>A resumed session may keep the search tool it already used.</i>",
         "",
