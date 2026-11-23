@@ -2679,11 +2679,12 @@ async def _page_web_search(ctx: CommandContext, action: str | None = None) -> No
         "<i>A resumed session may keep the search tool it already used.</i>",
         "",
     ]
+    learn = _learn_more("inline-settings", "engine-aware-visibility")
     if not can_search:
-        lines.append("This Codex model provider has no web search.")
+        lines += ["This Codex model provider has no web search.", "", learn]
         await _respond(ctx, "\n".join(lines), back)
         return
-    lines.append(f"Current: <b>{_ws_label(value)}</b>")
+    lines += [f"Current: <b>{_ws_label(value)}</b>", "", learn]
     labels = {"def": "Codex default", "live": "Live", "off": "Off"}
     row = [
         {

@@ -254,6 +254,7 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
         table[("rs", engine)] = _NONE
         table[("cu", engine)] = _NONE
         table[("pm", engine)] = _NONE
+        table[("ws", engine)] = _NONE  # #423: Codex only
         # #980: the read-only 🔐 page (Antigravity's, reachable by its key).
         table[("gt", engine)] = frozenset(
             {_u("antigravity", "telegram-questions-and-steer")}
@@ -278,8 +279,12 @@ def _expected() -> dict[tuple[str, str], frozenset[str]]:
         table[("rs", engine)] = frozenset(
             {_u("model-reasoning", "set-reasoning-level")}
         )
-    # antigravity: its subscription-usage footer toggle ships with #979.
-    for engine in ("claude", "opencode", "gemini", "antigravity"):
+    table[("ws", "codex")] = frozenset(
+        {_u("inline-settings", "engine-aware-visibility")}
+    )
+    # antigravity: its subscription-usage footer toggle ships with #979;
+    # codex: with #966.
+    for engine in ("claude", "opencode", "gemini", "antigravity", "codex"):
         table[("cu", engine)] = frozenset({_u("cost-budgets")})
     return table
 
