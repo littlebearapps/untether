@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from untether.config import ProjectConfig, ProjectsConfig
@@ -120,13 +121,46 @@ def test_resolve_message_branch_directive_merges_with_ambient_project() -> None:
     ambient = RunContext(project="proj", branch="feat/ambient")
 
     resolved = runtime.resolve_message(
-        text="@hotfix do it",
+        text="@fix/hotfix do it",
         reply_text=None,
         ambient_context=ambient,
     )
 
-    assert resolved.context == RunContext(project="proj", branch="hotfix")
+    assert resolved.context == RunContext(project="proj", branch="fix/hotfix")
     assert resolved.context_source == "directives"
+
+
+def test_1383_person_mention_is_not_a_branch(tmp_path: Path) -> None:
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+    subprocess.run([*git, "branch", "develop"], check=True)
+    codex = ScriptRunner([Return(answer="ok")], engine="codex")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=codex.engine, runner=codex)],
+        default_engine=codex.engine,
+    )
+    project = ProjectConfig(
+        alias="proj", path=tmp_path, worktrees_dir=Path(".worktrees"), chat_id=-42
+    )
+    runtime = TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(
+            projects={"proj": project}, default_project=None, chat_map={-42: "proj"}
+        ),
+    )
+
+    def resolve(text: str):
+        return runtime.resolve_message(text=text, reply_text=None, chat_id=-42)
+
+    alice = resolve("@alice can you fix the failing tests")
+    assert alice.context == RunContext(project="proj", branch=None)
+    assert alice.prompt == "can you fix the failing tests"
+    # An existing branch, an explicit `/proj @name` and a name a Telegram
+    # username can't have still work as `@branch`.
+    assert resolve("@develop go").context == RunContext("proj", "develop")
+    assert resolve("/proj @alice go").context == RunContext("proj", "alice")
+    assert resolve("@feat/new go").context == RunContext("proj", "feat/new")
 
 
 def test_resolve_message_project_directive_clears_ambient_branch() -> None:

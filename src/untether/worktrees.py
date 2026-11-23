@@ -35,6 +35,18 @@ def resolve_run_cwd(
     return ensure_worktree(project, branch)
 
 
+def branch_exists(project: ProjectConfig | None, branch: str) -> bool:
+    """True when `branch` has a worktree, a local branch or an origin branch."""
+    if project is None:
+        return False
+    if (project.worktrees_root / branch).is_dir():
+        return True
+    return any(
+        git_ok(["show-ref", "--verify", "--quiet", ref], cwd=project.path)
+        for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}")
+    )
+
+
 def ensure_worktree(project: ProjectConfig, branch: str) -> Path:
     root = project.path
     if not root.exists():

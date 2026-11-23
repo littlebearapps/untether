@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import ProjectsConfig
@@ -20,8 +21,9 @@ class DirectiveError(RuntimeError):
     pass
 
 
-# A Telegram bot username: 5-32 letters, digits or `_`, ending in "bot".
-_BOT_MENTION = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,28}bot", re.IGNORECASE)
+# A Telegram username: 4-32 letters, digits or `_`. Telegram turns a leading
+# `@name` of this shape into a mention; `@feat/x`, `@fix-1` or `@v1.2` can't be.
+_MENTION = re.compile(r"[A-Za-z][A-Za-z0-9_]{3,31}")
 
 
 def parse_directives(
@@ -29,6 +31,7 @@ def parse_directives(
     *,
     engine_ids: tuple[EngineId, ...],
     projects: ProjectsConfig,
+    branch_exists: Callable[[str], bool] | None = None,
 ) -> ParsedDirectives:
     if not text:
         return ParsedDirectives(prompt="", engine=None, project=None, branch=None)
@@ -78,9 +81,15 @@ def parse_directives(
             value = token[1:]
             if not value:
                 break
-            if _BOT_MENTION.fullmatch(value):
-                # #1278: `@untether_bot fix it` (how a `/listen mentions`
-                # group talks to the bot) addresses a bot; it isn't a branch.
+            if (
+                project is None
+                and _MENTION.fullmatch(value)
+                and not (branch_exists is not None and branch_exists(value))
+            ):
+                # #1278/#1383: `@untether_bot fix it` or `@alice can you…`
+                # mentions someone; it isn't a branch. A username-shaped
+                # `@name` is a branch only after `/<project>` or when that
+                # branch already exists, so a mention never creates one.
                 consumed += 1
                 continue
             if branch is not None:

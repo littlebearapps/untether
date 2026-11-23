@@ -17,7 +17,7 @@ from .model import EngineId, ResumeToken
 from .plugins import normalize_allowlist
 from .router import AutoRouter, EngineStatus
 from .runner import Runner
-from .worktrees import WorktreeError, resolve_run_cwd
+from .worktrees import WorktreeError, branch_exists, resolve_run_cwd
 
 type ContextSource = Literal[
     "reply_ctx",
@@ -208,15 +208,21 @@ class TransportRuntime:
         ambient_context: RunContext | None = None,
         chat_id: int | None = None,
     ) -> ResolvedMessage:
+        chat_project = self._projects.project_for_chat(chat_id)
+        default_project = chat_project or self._projects.default_project
+        # #1383: the project a bare `@name` would branch in (see _resolve_context).
+        ambient_project = ambient_context.project if ambient_context else None
+        branch_project = self._projects.projects.get(
+            ambient_project or default_project or ""
+        )
         directives = parse_directives(
             text,
             engine_ids=self._router.engine_ids,
             projects=self._projects,
+            branch_exists=lambda name: branch_exists(branch_project, name),
         )
         reply_ctx = parse_context_line(reply_text, projects=self._projects)
         resume_token = self._router.resolve_resume(directives.prompt, reply_text)
-        chat_project = self._projects.project_for_chat(chat_id)
-        default_project = chat_project or self._projects.default_project
 
         context, context_source = self._resolve_context(
             directives=directives,

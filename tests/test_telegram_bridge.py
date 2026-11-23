@@ -120,7 +120,11 @@ def test_parse_directives_bot_suffix() -> None:
         ("@untether_dev_bot fix the failing tests", None, "fix the failing tests"),
         ("@TetrisBot @feat/api go", "feat/api", "go"),
         ("@feat/robot go", "feat/robot", "go"),
-        ("@develop go", "develop", "go"),
+        ("@fix-1 go", "fix-1", "go"),
+        ("@dev go", "dev", "go"),
+        # #1383: a person mention isn't a branch either.
+        ("@alice can you fix the tests", None, "can you fix the tests"),
+        ("@develop go", None, "go"),
     ],
 )
 def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
@@ -129,6 +133,26 @@ def test_1278_bot_mention_is_not_a_branch(text, branch, prompt) -> None:
     )
     assert directives.branch == branch
     assert directives.prompt == prompt
+
+
+@pytest.mark.parametrize(
+    ("text", "existing", "branch"),
+    [
+        ("@chatbot rename the file", {"chatbot"}, "chatbot"),
+        ("@develop go", {"develop"}, "develop"),
+        ("@alice go", {"develop"}, None),
+    ],
+)
+def test_1383_username_shaped_branch_only_when_it_exists(
+    text, existing, branch
+) -> None:
+    directives = parse_directives(
+        text,
+        engine_ids=("claude",),
+        projects=_empty_projects(),
+        branch_exists=existing.__contains__,
+    )
+    assert directives.branch == branch
 
 
 def test_parse_directives_only_first_non_empty_line() -> None:

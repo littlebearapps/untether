@@ -68,7 +68,7 @@ Quick definitions for terms used throughout the Untether documentation.
 :   A second checkout of the same repository in a different directory. Instead of switching branches (which changes files in your main directory), a worktree lets the agent work on a branch in a separate folder. Your main checkout stays untouched.
 
 **Branch directive**
-:   The `@branch-name` prefix in a Telegram message (e.g. `@feat/login`). It tells Untether to run the agent in a worktree for that branch, creating the branch and worktree if they don't exist.
+:   The `@branch-name` prefix in a Telegram message (e.g. `@feat/login`). It tells Untether to run the agent in a worktree for that branch, creating the branch and worktree if they don't exist. A name that could be a Telegram username (only letters, digits and `_`, such as `@develop` or `@alice`) is read as a mention unless the branch already exists or you put `/<project>` first (`/myproj @develop`).
 
 ## Messaging
 

@@ -4,7 +4,7 @@ Run tasks on multiple branches in parallel without touching your main checkout. 
 
 ## Configure worktree-based runs for a project
 
-Every registered project can run `@branch` tasks out of the box: `worktrees_dir` defaults to `.worktrees` inside the project. An existing local branch is checked out as is, a branch that only exists on `origin` is tracked from there, and a new branch is cut from `worktree_base` (default: the repo's default branch, from `origin/HEAD` or the current branch). Set these keys only to change the location or the base branch:
+Every registered project can run `@branch` tasks out of the box: `worktrees_dir` defaults to `.worktrees` inside the project. An existing local branch is checked out as is, a branch that only exists on `origin` is tracked from there, and a new branch is cut from `worktree_base` (default: the repo's default branch, from `origin/HEAD` or the current branch). A leading `@name` that could be a Telegram username (only letters, digits and `_`) is a mention, not a branch, unless that branch already exists; to create a new branch with such a name, put the project first (`/<project-alias> @develop`). Set these keys only to change the location or the base branch:
 
 === "untether config"
 
