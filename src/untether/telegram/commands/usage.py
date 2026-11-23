@@ -2,7 +2,9 @@
 
 Claude: subscription quota from Anthropic's OAuth usage API. Antigravity:
 agy's own quota groups from the zero-token ``agy -p /usage`` (#558), plus
-the last session's tokens. Other engines: the last session's tokens (#417).
+the last session's tokens. Codex: plan quota from a zero-token app-server
+read (#966), plus the last session's tokens. Other engines: the last
+session's tokens (#417).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from ...logging import get_logger
 
 if TYPE_CHECKING:
     from ...runners.antigravity import AntigravityRunner
+    from ...runners.codex_reads import CodexUsage
 
 logger = get_logger(__name__)
 
@@ -414,18 +417,10 @@ def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
             notify=True,
             parse_mode="HTML",
         )
-    if engine == "codex":
-        # #1370: app-server has account/rateLimits/read; Untether doesn't
-        # call it yet (gap recorded in the Codex register).
-        limits = (
-            "Quota and plan limits are not shown for codex — `codex exec`"
-            " doesn't report them, and Untether doesn't read app-server's yet."
-        )
-    else:
-        limits = (
-            f"Quota and plan limits are not available for {esc_engine} — its"
-            " CLI doesn't report them."
-        )
+    limits = (
+        f"Quota and plan limits are not available for {esc_engine} — its"
+        " CLI doesn't report them."
+    )
     lines.append(f"{limits} Transcript: /export")
     return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
 
@@ -558,6 +553,166 @@ async def _antigravity_usage_reply(
     return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
 
 
+_CODEX_ENGINE = "codex"
+_CODEX_REACHED = {
+    "rate_limit_reached": "usage limit reached",
+    "workspace_owner_credits_depleted": "workspace credits used up",
+    "workspace_member_credits_depleted": "workspace credits used up",
+    "workspace_owner_usage_limit_reached": "workspace usage limit reached",
+    "workspace_member_usage_limit_reached": "workspace usage limit reached",
+}
+_CODEX_OTHER_AUTH = {
+    "apiKey": "an API key",
+    "amazonBedrock": "Amazon Bedrock",
+    "gcp": "Google Cloud",
+}
+
+
+def _codex_number(value: str) -> str:
+    """Codex's decimal-string credit balance, readable (``62,500``)."""
+    try:
+        number = float(value)
+    except ValueError:
+        return html.escape(value[:40])
+    return f"{number:,.0f}" if number == int(number) else f"{number:,.2f}"
+
+
+def _codex_quota_lines(usage: CodexUsage) -> list[str]:
+    """The quota part of Codex's ``/usage`` (#966). Every Codex string is
+    escaped; buckets and windows are whatever Codex sent."""
+    from ...runners.codex_reads import time_until
+
+    if usage.auth_kind in _CODEX_OTHER_AUTH:
+        return [
+            f"Codex is using {_CODEX_OTHER_AUTH[usage.auth_kind]}, so there's no"
+            " ChatGPT plan quota to show."
+        ]
+    lines: list[str] = []
+    if usage.allowed is False:
+        reached = _CODEX_REACHED.get(usage.reached_type or "")
+        why = f" ({reached})" if reached else ""
+        lines.append(f"🛑 Codex is blocking new turns until the limit resets{why}.")
+    many = len(usage.buckets) > 1
+    for bucket in usage.buckets:
+        if many:
+            lines.append(f"<b>{html.escape(bucket.name[:80])}</b>")
+        for window in bucket.windows:
+            reset = (
+                f" · resets in {time_until(window.resets_at)}"
+                if window.resets_at
+                else ""
+            )
+            lines.append(
+                f"{html.escape(window.label)}: {_progress_bar(window.pct)}"
+                f" {window.pct}%{reset}"
+            )
+    if not usage.buckets:
+        lines.append("Codex reported no usage windows for this plan.")
+    extras: list[str] = []
+    if usage.unlimited:
+        extras.append("Credits: unlimited")
+    elif usage.has_credits and usage.credits_balance:
+        extras.append(f"Credits: {_codex_number(usage.credits_balance)}")
+    if usage.reset_credits is not None:
+        # DEC-29: a count only; Untether never consumes a reset.
+        extras.append(f"Rate-limit resets available: {usage.reset_credits}")
+    if extras:
+        lines.append(" · ".join(extras))
+    lines.append("<i>From Codex's own account/rateLimits (no quota spent).</i>")
+    return lines
+
+
+def _codex_error_line(exc: Exception) -> str:
+    from ...runners import codex_reads
+
+    if isinstance(exc, codex_reads.CodexNotSignedIn):
+        return "Codex isn't signed in on this host. Run /auth codex, then try again."
+    if isinstance(exc, codex_reads.CodexReadUnavailable):
+        return "This Codex CLI can't report quota (needs codex-cli 0.169.0 or later)."
+    if isinstance(exc, codex_reads.CodexReadError):
+        if exc.kind == "timeout":
+            return (
+                f"Codex didn't answer within {codex_reads.READ_TIMEOUT_S:.0f} s"
+                " — try again shortly."
+            )
+        return f"Couldn't read Codex's quota ({_slash_error_reason(exc.kind)})."
+    return f"Couldn't read Codex's quota ({html.escape(type(exc).__name__)})."
+
+
+def _codex_debug_lines() -> list[str]:
+    from ...runners.codex_reads import usage_stats
+
+    stats = usage_stats()
+    lines = ["", "<b>🔧 debug</b>"]
+    if stats.last_success_wall is None:
+        lines.append("• cache: no successful read yet")
+    else:
+        wall = datetime.fromtimestamp(stats.last_success_wall, tz=UTC).isoformat(
+            timespec="seconds"
+        )
+        age = f" ({stats.age_s:.0f}s ago)" if stats.age_s is not None else ""
+        lines.append(f"• cache: last success {wall}{age}")
+    kind = stats.last_error_kind
+    lines.append(
+        f"• last error: <code>{html.escape(kind)}</code>"
+        if kind
+        else "• last error: none"
+    )
+    lines.append(f"• codex version: {html.escape(stats.version or 'unknown')}")
+    lines.append(f"• auth: {html.escape(stats.auth_kind or 'unknown')}")
+    return lines
+
+
+async def _codex_usage_reply(ctx: CommandContext, debug_mode: bool) -> CommandResult:
+    """``/usage`` for Codex on either transport (#966, DEC-11): plan quota from
+    a zero-token ``codex app-server`` read (cached 60 s), then the #417
+    last-session token block."""
+    from ...runners import codex_reads
+    from ...runners.codex import CodexRunner
+
+    header = "📊 <b>Codex usage</b>"
+    body: list[str] = []
+    runner: CodexRunner | None = None
+    try:
+        resolved = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override=_CODEX_ENGINE
+        )
+    except Exception:  # noqa: BLE001 — fall through to the "not available" line
+        resolved = None
+    if (
+        resolved is not None
+        and resolved.available
+        and isinstance(resolved.runner, CodexRunner)
+    ):
+        runner = resolved.runner
+    if runner is None:
+        issue = getattr(resolved, "issue", None) if resolved is not None else None
+        detail = f" ({html.escape(str(issue)[:200])})" if issue else ""
+        body.append(f"Codex CLI isn't available on this host{detail}.")
+    else:
+        try:
+            usage, _age = await codex_reads.get_usage(runner)
+        except Exception as exc:  # noqa: BLE001 — the cache logs it
+            body.append(_codex_error_line(exc))
+        else:
+            if usage.plan:
+                header += f" · {html.escape(usage.plan[:40].capitalize())} plan"
+            body.extend(_codex_quota_lines(usage))
+
+    lines = [header, *body, ""]
+    channel_id = getattr(ctx.message, "channel_id", None)
+    session = _session_token_lines(channel_id, _CODEX_ENGINE)
+    if session is None:
+        lines.append("No completed codex run in this chat since Untether last started.")
+    else:
+        lines.append("<b>Last session in this chat</b>")
+        lines.extend(session[1:])
+        lines.append("Transcript: /export")
+    if debug_mode:
+        lines.extend(_codex_debug_lines())
+    return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
+
+
 class UsageCommand:
     """Command backend for usage reporting: Claude Code subscription quota,
     Antigravity quota (#558), or the last session's token totals for other
@@ -565,7 +720,7 @@ class UsageCommand:
 
     id = "usage"
     description = (
-        "Show usage (Claude, Antigravity: quota; other engines: session tokens)"
+        "Show usage (Claude, Codex, Antigravity: quota; other engines: session tokens)"
     )
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
@@ -581,6 +736,9 @@ class UsageCommand:
             # #558: agy's own quota, on demand — never Claude's usage cache
             # or lock.
             return await _antigravity_usage_reply(ctx, debug_mode)
+        if current_engine == _CODEX_ENGINE:
+            # #966: Codex's own quota over a short-lived app-server read.
+            return await _codex_usage_reply(ctx, debug_mode)
         if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
             # #417: token totals for the chat's last session instead of a
             # flat "not available" (``/usage debug`` too — the debug block

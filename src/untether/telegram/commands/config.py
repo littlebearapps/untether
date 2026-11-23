@@ -205,7 +205,9 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
 # resolved default (get_engine_default_model) and only falls back to these.
 _ENGINE_MODEL_HINTS: dict[str, str] = {
     "claude": "from CLI settings",
-    "codex": "codex-mini-latest",
+    # #1360: never a guessed model name; the real one comes from Codex's own
+    # config/catalogue read (get_engine_default_model) once it is cached.
+    "codex": "from Codex config",
     "gemini": "auto (routes Flash ↔ Pro)",
     "amp": "smart mode (Opus 4.6)",
     "opencode": "provider/model (e.g. openai/gpt-4o)",
@@ -370,6 +372,15 @@ async def _page_home(ctx: CommandContext) -> None:
         current_engine,
         transport=_codex_transport(ctx) if current_engine == "codex" else None,
     )
+    # #423: Codex's per-chat Web search; hidden when a cached read says the
+    # provider can't search (the home page never reads).
+    show_web_search = False
+    ws_label = "Codex default"
+    if current_engine == "codex":
+        from ...runners.codex_reads import peek_catalogue
+
+        show_web_search = _ws_offered(peek_catalogue("codex"))[0]
+        ws_label = _ws_label(engine_override.web_search if engine_override else None)
     show_cost_usage = (
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -432,6 +443,8 @@ async def _page_home(ctx: CommandContext) -> None:
             lines.append(f"Approval policy: <b>{pm_label}</b>{pm_hint}")
             if show_diff_preview:
                 lines.append(f"Diff preview: <b>{dp_display}</b>")  # #963
+            if show_web_search:
+                lines.append(f"Web search: <b>{ws_label}</b>")
         elif current_engine == "antigravity":
             lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
             lines.append(
@@ -600,6 +613,8 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
+        if show_web_search:
+            buttons.append([{"text": "🌐 Web search", "callback_data": "config:ws"}])
     elif current_engine == "gemini":
         # Gemini layout
         buttons.append(
@@ -1745,6 +1760,8 @@ _RS_ACTIONS: dict[str, str] = {
     "hi": "high",
     "xhi": "xhigh",
     "max": "max",
+    # #846 (DEC-26): Codex only, where the model's catalogue lists it.
+    "ult": "ultra",
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
@@ -1798,6 +1815,42 @@ def _effective_reasoning(
     return stored, None
 
 
+async def _codex_catalogue(
+    ctx: CommandContext, override_model: str | None
+) -> tuple[Any, str | None, str]:
+    """#846: Codex's catalogue (cached 1 h, a zero-token app-server read
+    bounded at 10 s), the model a plain message here would run and where
+    that model comes from. ``(None, override, "")`` when it can't be read."""
+    from pathlib import Path
+
+    from ...runners import codex_reads
+    from ...runners.codex import CodexRunner
+
+    source = " (this chat)" if override_model else ""
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="codex"
+        ).runner
+    except Exception:  # noqa: BLE001 — a label must never break /config
+        return None, override_model, source
+    if not isinstance(runner, CodexRunner):
+        return None, override_model, source
+    cwd = str(_chat_project_cwd(ctx) or Path.cwd())
+    catalogue = None
+    with anyio.move_on_after(codex_reads.READ_TIMEOUT_S + 1.0):
+        try:
+            catalogue = await codex_reads.get_catalogue(runner, cwd)
+        except codex_reads.CodexReadError:
+            catalogue = None  # logged by the cache
+    if catalogue is None:
+        return None, override_model, source
+    if override_model:
+        return catalogue, override_model, source
+    if catalogue.config is not None and catalogue.config.model:
+        return catalogue, catalogue.config.model, " (from your Codex config)"
+    return catalogue, catalogue.default_model, " (Codex default)"
+
+
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import shared_prefs_store
     from ..engine_overrides import (
@@ -1835,6 +1888,12 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         # crafted callback_data could try to persist e.g. `max` on Codex.
         # Reject anything outside the engine's allow list. #309 CodeRabbit.
         allowed = allowed_reasoning_levels(current_engine)
+        if current_engine == "codex":
+            # #846: the model's own levels when the catalogue is cached.
+            from ..engine_overrides import codex_reasoning_levels
+
+            tapped = await prefs.get_engine_override(chat_id, current_engine)
+            allowed = codex_reasoning_levels(tapped.model if tapped else None)
         if level not in allowed:
             logger.warning(
                 "config.reasoning.unsupported_level",
@@ -1918,16 +1977,62 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
                 )
                 reasoning = None
 
-    level_descriptions: list[str] = []
-    if "low" in levels or "medium" in levels or "high" in levels:
-        present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
-        level_descriptions.append(f"• {' · '.join(present)} — balanced options")
-    if "xhigh" in levels:
-        level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
-    if "max" in levels:
-        level_descriptions.append(
-            "• <b>max</b> — deepest thinking (slowest, costliest)"
+    codex_descriptions: dict[str, str] | None = None
+    codex_lines: list[str] = []
+    if current_engine == "codex":
+        # #846: the model's levels, descriptions and default from Codex's own
+        # model/list + config/read. On a page open only (taps return above).
+        from ..engine_overrides import CODEX_FALLBACK_LEVELS, codex_default_level
+
+        catalogue, model, source = await _codex_catalogue(
+            ctx, override.model if override else None
         )
+        info = catalogue.models.get(model or "") if catalogue else None
+        if catalogue is None or info is None:
+            levels = CODEX_FALLBACK_LEVELS
+            if model:
+                codex_lines.append(f"Model: <b>{_shown_model(model[:80])}</b>{source}")
+            codex_lines.append(
+                "<i>Couldn't ask Codex which levels this model supports"
+                " — showing the usual four.</i>"
+            )
+        else:
+            levels = info.levels
+            codex_descriptions = info.descriptions
+            codex_lines.append(
+                f"Model: <b>{_shown_model((model or '')[:80])}</b>{source}"
+            )
+            default = codex_default_level(catalogue, model)
+            if reasoning and reasoning not in levels:
+                current_label = (
+                    f"default ({reasoning} isn't available for this model — ignored)"
+                )
+                reasoning = None
+            elif not reasoning and not ignored and default:
+                current_label = f"default ({default})"
+
+    level_descriptions: list[str] = []
+    if codex_descriptions is not None:
+        for lv in levels:
+            note = codex_descriptions.get(lv) or ""
+            if lv == "ultra":
+                # Untether's one addition: ultra delegates, so it spends fastest.
+                note += " (Codex may start sub-agents)"
+            text = f" — {html.escape(note.strip())}" if note.strip() else ""
+            level_descriptions.append(f"• <b>{lv}</b>{text}")
+    else:
+        # Fixed wording only when Codex's own descriptions aren't shown.
+        if "low" in levels or "medium" in levels or "high" in levels:
+            present = [
+                f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels
+            ]
+            level_descriptions.append(f"• {' · '.join(present)} — balanced options")
+        if "xhigh" in levels:
+            level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
+        if "max" in levels:
+            level_descriptions.append(
+                "• <b>max</b> — deepest thinking (slowest, costliest)"
+            )
 
     rs_label = get_reasoning_label(current_engine)
     rs_label_lower = rs_label.lower()
@@ -1944,6 +2049,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "",
         f"Engine: <b>{current_engine}</b>",
         *agy_lines,
+        *codex_lines,
         f"Current: <b>{current_label}</b>",
         "",
         _learn_more("model-reasoning", "set-reasoning-level"),
@@ -1956,6 +2062,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "high": ("High", "hi"),
         "xhigh": ("Xhigh", "xhi"),
         "max": ("Max", "max"),
+        "ultra": ("Ultra", "ult"),
     }
     level_buttons: list[dict[str, str]] = []
     for level in levels:
@@ -2463,6 +2570,136 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     ]
 
     await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Web search (#423, Codex only)
+# ---------------------------------------------------------------------------
+
+# action -> stored value (None = Codex's own config) and Codex's mode name.
+_WS_ACTIONS: dict[str, tuple[bool | None, str | None]] = {
+    "def": (None, None),
+    "live": (True, "live"),
+    "off": (False, "disabled"),
+}
+
+
+def _ws_label(value: bool | None) -> str:
+    return "Codex default" if value is None else ("live" if value else "off")
+
+
+def _ws_offered(catalogue: Any) -> tuple[bool, frozenset[str]]:
+    """(provider can search, actions offered) from Codex's own
+    modelProvider/capabilities + configRequirements reads (None: unknown,
+    so everything is offered and Codex validates)."""
+    if catalogue is None:
+        return True, frozenset(_WS_ACTIONS)
+    if catalogue.web_search_supported is False:
+        return False, frozenset()
+    allowed = catalogue.web_search_allowed
+    return True, frozenset(
+        key
+        for key, (_value, mode) in _WS_ACTIONS.items()
+        if mode is None or allowed is None or mode in allowed
+    )
+
+
+async def _page_web_search(ctx: CommandContext, action: str | None = None) -> None:
+    from pathlib import Path
+
+    from ...runners import codex_reads
+    from ..chat_prefs import shared_prefs_store
+    from ..engine_overrides import WEB_SEARCH_SUPPORTED_ENGINES, with_override
+
+    back = [[{"text": "← Back", "callback_data": "config:home"}]]
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx, "<b>🌐 Web search</b>\n\nUnavailable (no config path).", back
+        )
+        return
+    current_engine, _ = await _resolve_effective_engine(ctx)
+    if current_engine not in WEB_SEARCH_SUPPORTED_ENGINES:
+        await _respond(ctx, "<b>🌐 Web search</b>\n\nAvailable for Codex.", back)
+        return
+    prefs = shared_prefs_store(config_path)
+    chat_id = ctx.message.channel_id
+
+    if action in _WS_ACTIONS:
+        # A tap never reads: check against the cached catalogue only.
+        _ok, offered = _ws_offered(codex_reads.peek_catalogue("codex"))
+        tapped = action
+        if tapped not in offered:
+            logger.warning(
+                "config.web_search.not_offered",
+                chat_id=chat_id,
+                sender_id=ctx.message.sender_id,
+                action=tapped,
+            )
+            await _page_home(ctx)
+            return
+        value = _WS_ACTIONS[action][0]
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        await prefs.set_engine_override(
+            chat_id, current_engine, with_override(current, web_search=value)
+        )
+        logger.info(
+            "config.web_search.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            value=_ws_label(value),
+        )
+        await _page_home(ctx)
+        return
+
+    catalogue = None
+    runner = None
+    try:
+        runner = ctx.runtime.resolve_runner(
+            resume_token=None, engine_override="codex"
+        ).runner
+    except Exception:  # noqa: BLE001 — the page still renders
+        runner = None
+    from ...runners.codex import CodexRunner
+
+    if isinstance(runner, CodexRunner):
+        cwd = str(_chat_project_cwd(ctx) or Path.cwd())
+        with anyio.move_on_after(codex_reads.READ_TIMEOUT_S + 1.0):
+            try:
+                catalogue = await codex_reads.get_catalogue(runner, cwd)
+            except codex_reads.CodexReadError:
+                catalogue = None  # logged by the cache
+    can_search, offered = _ws_offered(catalogue)
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    value = override.web_search if override else None
+    lines = [
+        "<b>🌐 Web search</b>",
+        "",
+        "<b>Codex default</b>: whatever your Codex config says (normally cached"
+        " search from an OpenAI index, no live browsing).",
+        "<b>Live</b>: Codex can search the live web.",
+        "<b>Off</b>: turns off Codex's built-in web search. ChatGPT apps"
+        " connected to your account can still reach the web.",
+        "",
+        "<i>A resumed session may keep the search tool it already used.</i>",
+        "",
+    ]
+    learn = _learn_more("inline-settings", "engine-aware-visibility")
+    if not can_search:
+        lines += ["This Codex model provider has no web search.", "", learn]
+        await _respond(ctx, "\n".join(lines), back)
+        return
+    lines += [f"Current: <b>{_ws_label(value)}</b>", "", learn]
+    labels = {"def": "Codex default", "live": "Live", "off": "Off"}
+    row = [
+        {
+            "text": _check(labels[key], active=_WS_ACTIONS[key][0] == value),
+            "callback_data": f"config:ws:{key}",
+        }
+        for key in _WS_ACTIONS
+        if key in offered
+    ]
+    await _respond(ctx, "\n".join(lines), [row, *back])
 
 
 # ---------------------------------------------------------------------------
@@ -3057,6 +3294,7 @@ _PAGES: dict[str, object] = {
     "ab": _page_about,
     "loop": _page_loop,
     "gt": _page_agy_gate,
+    "ws": _page_web_search,
 }
 
 # ---------------------------------------------------------------------------
@@ -3118,6 +3356,7 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
     # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS.
     "gt": frozenset(),
     "loop": _ON_OFF_CLR,
+    "ws": frozenset({"def", "live", "off"}),  # #423
 }
 
 # Pages whose action is a runtime value (Engine & model: an engine id, plus
@@ -3186,6 +3425,7 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "hi": "Reasoning: high",
         "xhi": "Reasoning: xhigh",
         "max": "Reasoning: max",
+        "ult": "Reasoning: ultra",
         "clr": "Reasoning: cleared",
     },
     "aq": {
@@ -3221,6 +3461,11 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "on": "🔁 Loop mode: on",
         "off": "🔁 Loop mode: off",
         "clr": "🔁 Loop mode: cleared",
+    },
+    "ws": {
+        "def": "Web search: Codex default",
+        "live": "Web search: live",
+        "off": "Web search: off",
     },
 }
 

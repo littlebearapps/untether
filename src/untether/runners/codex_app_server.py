@@ -57,6 +57,7 @@ from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
 from . import codex_approvals as approvals
+from . import codex_reads
 from .codex import (
     ENGINE,
     CodexRunner,
@@ -1421,6 +1422,12 @@ class CodexAppServerRunner(CodexRunner):
         model = _run_model() or state.config_model
         if model:
             params["model"] = model
+        # #423: validated by Codex; on resume too, or the thread keeps its own.
+        run_options = get_run_options()
+        if run_options is not None and run_options.web_search is not None:
+            params["config"] = {
+                "web_search": "live" if run_options.web_search else "disabled"
+            }
         return params
 
     def _resume_params(
@@ -1595,11 +1602,36 @@ class CodexAppServerRunner(CodexRunner):
                 return self._warning_rows(state, msg.method, params.message)
             case "thread/tokenUsage/updated":
                 return self._on_token_usage(params.token_usage, state=state)
+            case "account/rateLimits/updated":
+                # #966: feeds the quota footer (sparse; merged, never cleared).
+                codex_reads.merge_push(self.codex_cmd, msg.params)
+            case "model/rerouted":
+                return self._on_rerouted(params, state=state)
             case "turn/completed":
                 return self._on_turn_completed(
                     params.turn, state=state, resume=resume, found_session=found_session
                 )
         return []
+
+    def _on_rerouted(
+        self, params: cas.ModelReroutedParams, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#846: Codex ran another model than it echoed on thread/start; the
+        footer shows the one that actually ran (supplementary started meta)."""
+        if params.thread_id != state.thread_id or not params.to_model:
+            return []
+        logger.info(
+            "codex.app_server.model_rerouted",
+            from_model=params.from_model,
+            to_model=params.to_model,
+            reason=params.reason,
+        )
+        state.model = params.to_model
+        token = ResumeToken(engine=ENGINE, value=params.thread_id)
+        row = state.factory.started(
+            token, title=self.session_title, meta={"model": params.to_model}
+        )
+        return self._rows(state, [row])
 
     def _on_token_usage(
         self, usage: cas.ThreadTokenUsage, *, state: AppServerRunState
@@ -1689,7 +1721,13 @@ class CodexAppServerRunner(CodexRunner):
         if state.card_stop and turn.status == "interrupted":
             error = _STOPPED_BY_CARD
         code = codex_error_code(turn.error.codex_error_info) if turn.error else None
-        usage = {"codex_error_info": code} if code else None
+        usage: dict[str, Any] | None = {"codex_error_info": code} if code else None
+        if usage is not None and code == "usageLimitExceeded":
+            # #966: the hint names the reset, from this run's pushes or the cache.
+            cached = codex_reads.peek_usage(self.codex_cmd)
+            resets_at = codex_reads.limit_resets_at(cached) if cached else None
+            if resets_at:
+                usage["codex_resets_at"] = resets_at
         return [*rows, self._error(state, resume, error, usage)]
 
     # --- process end -----------------------------------------------------------

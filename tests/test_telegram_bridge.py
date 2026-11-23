@@ -3270,6 +3270,22 @@ def test_resolve_reasoning_override_presanitised_input_same_note() -> None:
     )
 
 
+def test_resolve_reasoning_override_level_this_model_lacks() -> None:
+    """#846: a real Codex level the model's catalogue entry doesn't list."""
+    from tests.test_codex_reads import seed_catalogue
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    seed_catalogue()
+    opts, note = _resolve_reasoning_override(
+        engine="codex",
+        run_options=EngineRunOptions(model="gpt-6-luna", reasoning="ultra"),
+    )
+    assert opts is not None and opts.reasoning is None
+    assert note is not None
+    assert "`ultra` isn't available for this model" in note.action.title
+
+
 def test_resolve_reasoning_override_allowed_level_untouched() -> None:
     from untether.runners.run_options import EngineRunOptions
     from untether.telegram.commands.executor import _resolve_reasoning_override

@@ -317,7 +317,16 @@ def test_codex_reasoning_levels_exclude_minimal() -> None:
     from untether.telegram.engine_overrides import allowed_reasoning_levels
 
     assert "minimal" not in allowed_reasoning_levels("codex")
-    assert allowed_reasoning_levels("codex") == ("low", "medium", "high", "xhigh")
+    # #846: Codex's whole vocabulary; each model's own levels come from the
+    # cached catalogue (codex_reasoning_levels).
+    assert allowed_reasoning_levels("codex") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    )
 
 
 def test_no_engine_offers_minimal() -> None:
@@ -478,3 +487,100 @@ def test_plan_exit_tool_engines_is_claude_only() -> None:
     from untether.telegram.engine_overrides import PLAN_EXIT_TOOL_ENGINES
 
     assert frozenset({"claude"}) == PLAN_EXIT_TOOL_ENGINES
+
+
+# --- #846: Codex levels from the cached catalogue ----------------------------
+
+
+def test_codex_drop_uses_the_cached_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    from tests.test_codex_reads import seed_catalogue
+    from untether.runners import codex_reads
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    luna = EngineRunOptions(model="gpt-6-luna", reasoning="ultra")
+    sol = EngineRunOptions(model="gpt-6.1-sol", reasoning="ultra")
+    # No catalogue cached: the vocabulary (a level was checked when saved).
+    assert drop_unsupported_reasoning("codex", luna) == luna
+    seed_catalogue()
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("the drop must never read")
+
+    monkeypatch.setattr(codex_reads, "app_server_read", boom)
+    with capture_logs() as logs:
+        dropped = drop_unsupported_reasoning("codex", luna)
+        kept = drop_unsupported_reasoning("codex", sol)
+        # No chat model: Codex's config model (gpt-6.1-sol) lists ultra.
+        default = drop_unsupported_reasoning(
+            "codex", EngineRunOptions(reasoning="ultra")
+        )
+    assert logs == []  # pure: no log, no spawn
+    assert dropped is not None
+    assert dropped.reasoning is None and dropped.ignored_reasoning == "ultra"
+    assert kept == sol
+    assert default is not None and default.reasoning == "ultra"
+    # Unknown model: vocabulary.
+    other = EngineRunOptions(model="gpt-future", reasoning="max")
+    assert drop_unsupported_reasoning("codex", other) == other
+
+
+def test_codex_engine_defaults_peek_the_catalogue() -> None:
+    from tests.test_codex_reads import seed_catalogue
+    from untether.telegram.engine_overrides import (
+        get_engine_default_model,
+        get_engine_default_reasoning,
+    )
+
+    assert get_engine_default_model("codex") is None
+    assert get_engine_default_reasoning("codex") is None
+    seed_catalogue()
+    assert get_engine_default_model("codex") == "gpt-6.1-sol"
+    assert get_engine_default_reasoning("codex") == "low"
+
+
+def test_codex_default_level_prefers_config_effort_the_model_lists() -> None:
+    import dataclasses
+
+    from tests.test_codex_reads import fixture_catalogue
+    from untether.runners.codex_reads import ConfigInfo
+    from untether.telegram.engine_overrides import codex_default_level
+
+    catalogue = fixture_catalogue()
+    assert codex_default_level(catalogue, "gpt-6-luna") == "low"  # config effort
+    odd = dataclasses.replace(catalogue, config=ConfigInfo(None, "ultra", None))
+    assert codex_default_level(odd, "gpt-6-luna") == "medium"  # model default
+    assert codex_default_level(catalogue, "no-such-model") is None
+
+
+# --- #423: Web search override ------------------------------------------------
+
+
+def test_web_search_normalise_and_merge() -> None:
+    from untether.telegram.engine_overrides import (
+        EngineOverrides,
+        merge_overrides,
+        normalize_overrides,
+    )
+
+    only = normalize_overrides(EngineOverrides(web_search=False))
+    assert only is not None and only.web_search is False
+    assert normalize_overrides(EngineOverrides()) is None
+    topic = EngineOverrides(web_search=True)
+    chat = EngineOverrides(web_search=False, model="m")
+    merged = merge_overrides(topic, chat)
+    assert merged is not None and merged.web_search is True
+    merged = merge_overrides(EngineOverrides(model="t"), chat)
+    assert merged is not None and merged.web_search is False
+    merged = merge_overrides(EngineOverrides(model="t"), EngineOverrides(model="c"))
+    assert merged is not None and merged.web_search is None
+
+
+def test_web_search_is_codex_only() -> None:
+    from untether.telegram.engine_overrides import WEB_SEARCH_SUPPORTED_ENGINES
+
+    assert frozenset({"codex"}) == WEB_SEARCH_SUPPORTED_ENGINES

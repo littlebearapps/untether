@@ -7,6 +7,7 @@ from ...logging import get_logger
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import (
     allowed_reasoning_levels,
+    codex_reasoning_levels,
     resolve_override_value,
     with_override,
 )
@@ -94,7 +95,17 @@ async def _handle_reasoning_command(
             "unavailable" if chat_prefs is None else resolution.chat_value or "none"
         )
         defaults_line = f"defaults: topic: {topic_label}, chat: {chat_label}"
-        available_levels = ", ".join(allowed_reasoning_levels(engine))
+        if engine == "codex":
+            # #846: the model's own levels when Codex's catalogue is cached.
+            model = resolve_override_value(
+                topic_override=topic_override,
+                chat_override=chat_override,
+                field="model",
+            ).value
+            levels = codex_reasoning_levels(model)
+        else:
+            levels = allowed_reasoning_levels(engine)
+        available_levels = ", ".join(levels)
         available_line = f"available levels: {available_levels}"
         await reply(
             text="\n\n".join(

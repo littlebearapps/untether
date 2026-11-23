@@ -45,6 +45,10 @@ class EngineRunOptions:
     # #1121: a trigger's own Claude Code agent (``--agent=<name>``) for that
     # run only. Only ClaudeRunner reads it.
     agent: str | None = None
+    # #423: Codex's `web_search` per chat — True = "live", False = "disabled",
+    # None = Codex's own config (default "cached"). Only the Codex runners
+    # read it.
+    web_search: bool | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.

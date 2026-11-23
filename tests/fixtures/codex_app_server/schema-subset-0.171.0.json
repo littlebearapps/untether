@@ -5,6 +5,34 @@
    "names": {},
    "tier": "S"
   },
+  "client_request account/rateLimits/read": {
+   "names": {},
+   "tier": "S"
+  },
+  "client_request account/read": {
+   "names": {
+    "params.refreshToken": "S",
+    "result.account": "S",
+    "result.requiresOpenaiAuth": "S",
+    "result.userId": "S",
+    "result.workspaceRouting": "E"
+   },
+   "tier": "S"
+  },
+  "client_request config/read": {
+   "names": {
+    "params.cwd": "S",
+    "params.includeLayers": "S",
+    "result.config": "S",
+    "result.layers": "S",
+    "result.origins": "S"
+   },
+   "tier": "S"
+  },
+  "client_request configRequirements/read": {
+   "names": {},
+   "tier": "S"
+  },
   "client_request initialize": {
    "names": {
     "params.capabilities": "S",
@@ -13,6 +41,24 @@
     "result.platformFamily": "S",
     "result.platformOs": "S",
     "result.userAgent": "S"
+   },
+   "tier": "S"
+  },
+  "client_request model/list": {
+   "names": {
+    "params.cursor": "S",
+    "params.includeHidden": "S",
+    "params.limit": "S",
+    "params.modelProvider": "S",
+    "result.data": "S",
+    "result.nextCursor": "S"
+   },
+   "tier": "S"
+  },
+  "client_request modelProvider/capabilities/read": {
+   "names": {
+    "result.imageGeneration": "S",
+    "result.webSearch": "S"
    },
    "tier": "S"
   },
@@ -240,6 +286,12 @@
    },
    "tier": "S"
   },
+  "server_notification account/rateLimits/updated": {
+   "names": {
+    "params.rateLimits": "S"
+   },
+   "tier": "S"
+  },
   "server_notification configWarning": {
    "names": {
     "params.details": "S",
@@ -322,6 +374,16 @@
     "params.item": "S",
     "params.startedAtMs": "S",
     "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification model/rerouted": {
+   "names": {
+    "params.fromModel": "S",
+    "params.reason": "S",
+    "params.threadId": "S",
+    "params.toModel": "S",
     "params.turnId": "S"
    },
    "tier": "S"

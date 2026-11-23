@@ -10,7 +10,7 @@ Untether runs Codex non-interactively; it never stops to ask for approval, and a
 
 ```text
 codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<level>] \
-  exec --json --skip-git-repo-check --color=never [--sandbox read-only] \
+  [-c web_search="live"|"disabled"] exec --json --skip-git-repo-check --color=never [--sandbox read-only] \
   [resume <thread_id> | resume --last] -
 ```
 
@@ -18,7 +18,8 @@ codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<lev
 * **Approval policy** (`/config` → Approval policy): **full auto** (default) adds no sandbox flag, so Codex uses its own sandbox setting. **safe** adds `--sandbox read-only` at the `exec` level (before `resume`, which has no `--sandbox`), so it outranks root-level sandbox flags and `config.toml`. Untether never passes `--ask-for-approval`: `codex exec` ignores it and forces approval to `never` ([#830](https://github.com/littlebearapps/untether/issues/830)). Any other `permission_mode` value logs `codex.permission_mode.unknown` once per value and runs full auto, except on a webhook run, which runs safe instead and logs `codex.webhook_unknown_mode_safe` ([#1142](https://github.com/littlebearapps/untether/issues/1142)).
 * **Model and resume id** are validated before spawn (no leading dash, no control characters; `runner.argv.invalid_value`). The model is joined to its flag; the thread id is positional in `exec resume`, where clap (0.160.1) reads a dash-leading token as an option, so validation is the whole defence there ([#1034](https://github.com/littlebearapps/untether/issues/1034)).
 * **Resume value = thread UUID only** ([#1065](https://github.com/littlebearapps/untether/issues/1065), checked on codex-cli 0.162.1, 2026-10-13). `codex exec resume [SESSION_ID]` natively takes a thread id **or a thread name**, but an unknown name (or any other non-UUID value, such as a URL) silently starts a **new** thread instead of failing, while an unknown UUID fails cleanly (`no rollout found for thread id …`). Untether keys sessions on the `thread.started` UUID, so a name never resumed under Untether anyway (the run failed the "emitted session id … but expected …" check after the new thread was created). `CodexRunner.check_resume_value` therefore refuses anything but a UUID before spawning. Native gap recorded here: thread names are not available on Untether's surface; revisit if Codex adds a strict lookup (fail when the name is unknown) or reports the name with the thread id.
-* **Reasoning** (`/config` → Reasoning): `low`, `medium`, `high` or `xhigh`, passed as `-c model_reasoning_effort=<level>`. `minimal` is not offered ([#416](https://github.com/littlebearapps/untether/issues/416)).
+* **Reasoning** (`/config` → Reasoning): the levels the model lists in Codex's `model/list` (`low` … `max`, and `ultra` where listed, [#846](https://github.com/littlebearapps/untether/issues/846)), passed as `-c model_reasoning_effort=<level>`; the usual four when the catalogue can't be read. `minimal` is not offered ([#416](https://github.com/littlebearapps/untether/issues/416)).
+* **Web search** (`/config` → Web search, [#423](https://github.com/littlebearapps/untether/issues/423)): Live adds `-c web_search="live"`, Off `-c web_search="disabled"`, after `extra_args` so it wins over an operator's own `-c web_search`; Codex default adds nothing.
 * **Exit code 2** with a clap argv error on stderr (`error: unexpected argument …` and similar) also logs `codex.argv.rejected` with the argv, to flag upstream flag drift.
 
 ## The 3-event Untether schema
@@ -39,7 +40,7 @@ Emitted once **as soon as you know the resume token** (Codex: `thread.started.th
 }
 ```
 
-Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from the `/config` model override (falling back to `codex-mini-latest` for display), `meta.effort` when a reasoning level is set, and `meta.permissionMode` only when the approval policy is `safe` (non-default). See [Invocation](#invocation) for what each setting does to argv.
+Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from the `/config` model override, else the model Codex's own config resolves to from a cached zero-token app-server read (`runners/codex_reads.py`; a later supplementary `started` carries it when that read lands mid-run), else leaves it out — never a guessed name ([#1360](https://github.com/littlebearapps/untether/issues/1360)). `meta.effort` is set when a reasoning level is set, and `meta.permissionMode` only when the approval policy is `safe` (non-default). See [Invocation](#invocation) for what each setting does to argv.
 
 ### 2) `action`
 
@@ -496,6 +497,8 @@ turnTrigger: "untether"}`. Stdin closes after `turn/completed` and Codex exits b
 | `guardianWarning` | a ⚠️ row like `warning` |
 | approval request in a cron or webhook run | declined by the peer; one 🔒 row per run, `permission.unattended_deny` per request, `usage.unattended {trigger, mode, denied}` for the footer |
 | any other server request (user input, MCP elicitation, …) | declined by the peer, plus one ⚠️ row per request |
+| `account/rateLimits/updated` | merged into the quota cache (`runners/codex_reads.merge_push`; sparse, null never clears): the final's quota footer and a cap-hit's `usage.codex_resets_at` ("It resets in …" on the `usageLimitExceeded` hint) ([#966](https://github.com/littlebearapps/untether/issues/966)) |
+| `model/rerouted` (this thread) | a supplementary `started` with `meta.model = toModel`, so the footer names the model that ran; logs `codex.app_server.model_rerouted` ([#846](https://github.com/littlebearapps/untether/issues/846)) |
 
 Rows raised before the thread exists (a `configWarning` right after `initialize`) wait until `started` has gone out.
 Items, errors, usage updates and turns of another thread (a sub-agent's) are ignored, except that a sub-agent's

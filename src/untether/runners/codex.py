@@ -920,6 +920,8 @@ class CodexRunState:
     # #1240: Codex said on stderr that it disabled the project's .codex/ layer.
     untrusted_project_config: bool = False
     untrusted_note_sent: bool = False
+    # #1360: the started event named a model (else one may follow later).
+    model_shown: bool = False
 
 
 class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
@@ -992,6 +994,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         f"model_reasoning_effort={run_options.reasoning}",
                     ]
                 )
+        # #423: after extra_args (a later -c wins), before `exec`.
+        web_search = run_options.web_search if run_options is not None else None
+        if web_search is not None:
+            args.extend(["-c", f'web_search="{"live" if web_search else "disabled"}"'])
         # No --ask-for-approval: `codex exec` never reads the root -a and forces
         # approval=never itself; `untrusted` is rejected from 0.149.0 (#830).
         args.extend(
@@ -1036,6 +1042,44 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
         return CodexRunState(factory=EventFactory(ENGINE))
+
+    def _late_model_meta(
+        self, state: CodexRunState, found_session: ResumeToken | None
+    ) -> list[UntetherEvent]:
+        """#1360: the first run's warm-up read usually lands after
+        ``thread.started``; a supplementary started event carries the model
+        once it is known (3-event contract allows meta-only repeats)."""
+        if state.model_shown or found_session is None:
+            return []
+        model = self._codex_config_model()
+        if not model:
+            return []
+        state.model_shown = True
+        return [
+            state.factory.started(
+                found_session, title=self.session_title, meta={"model": model}
+            )
+        ]
+
+    def _codex_config_model(self) -> str | None:
+        """#1360: the model Codex runs with no chat override, from the cached
+        config/read + model/list for this run's cwd. Peek only."""
+        if "--profile" in self.extra_args:
+            # shortcut: a profile can name its own model, and the read has no
+            # --profile (DEC-19); show no model rather than a wrong one.
+            return None
+        from . import codex_reads
+
+        return codex_reads.peek_effective_model(
+            self.codex_cmd, str(get_run_base_dir() or Path.cwd())
+        )
+
+    def on_spawned(self, *, state: Any, pid: int) -> None:
+        # DEC-27 (#966/#846): fill the quota and catalogue caches in the
+        # background once the run's own process exists; never awaited.
+        from . import codex_reads
+
+        codex_reads.maybe_warm_up(self, str(get_run_base_dir() or Path.cwd()))
 
     def on_stderr_line(self, line: str, *, state: Any, proc: Any) -> None:
         # #1240: Untether never grants trust (no `--trust`); it only reports it.
@@ -1151,6 +1195,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 resume_for_completed = found_session or resume
                 return [
                     *self._untrusted_note(state),
+                    *self._late_model_meta(state, found_session),
                     factory.completed_error(
                         error=error.message,
                         answer=state.final_answer or "",
@@ -1174,6 +1219,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 resume_for_completed = found_session or resume
                 return [
                     *self._untrusted_note(state),
+                    *self._late_model_meta(state, found_session),
                     factory.completed_ok(
                         answer=state.final_answer or "",
                         resume=resume_for_completed,
@@ -1200,30 +1246,29 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case _:
                 pass
 
-        # Build meta from runner config + run options.
-        # Always include a model name — use override, runner config, or CLI default.
-        meta: dict[str, Any] | None = None
-        model = self.model
+        # Build meta from run options. #1360: exec JSON never names the model,
+        # so the footer shows the chat's override, else the model Codex's own
+        # config/catalogue resolves to (cached read), else no model at all —
+        # never a guess.
+        meta: dict[str, Any] = {}
         run_options = get_run_options()
-        if run_options is not None and run_options.model:
-            model = run_options.model
-        if model is None:
-            model = "codex-mini-latest"
-        meta = {"model": str(model)}
+        model = (run_options.model if run_options is not None else None) or self.model
+        if model is None and isinstance(data, codex_schema.ThreadStarted):
+            model = self._codex_config_model()
+        if model:
+            meta["model"] = str(model)
+            if isinstance(data, codex_schema.ThreadStarted):
+                state.model_shown = True
         if run_options is not None and run_options.reasoning:
-            if meta is None:
-                meta = {}
             meta["effort"] = run_options.reasoning
         if self._permission_mode() == CODEX_SAFE_PERMISSION_MODE:
-            if meta is None:
-                meta = {}
             meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
 
         events = translate_codex_event(
             data,
             title=self.session_title,
             factory=factory,
-            meta=meta,
+            meta=meta or None,
         )
         if isinstance(data, codex_schema.ThreadStarted):
             # #1240: the row goes right after StartedEvent (3-event contract).

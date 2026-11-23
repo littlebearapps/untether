@@ -87,6 +87,19 @@ def _isolated_daily_cost() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_codex_reads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """#966/#846: the Codex read caches are module state, and the DEC-27
+    warm-up would spawn an unexpected ``app-server`` from a fake ``codex``.
+    Off and empty per test; ``tests/test_codex_reads.py`` turns it on."""
+    from untether.runners import codex_reads
+
+    monkeypatch.setattr(codex_reads, "WARMUP_ENABLED", False)
+    codex_reads.reset_caches()
+    yield
+    codex_reads.reset_caches()
+
+
+@pytest.fixture(autouse=True)
 def _clear_cancel_dedup() -> None:
     """#525: ``_RECENT_CANCELS`` is module-level state that persists across
     tests. Without an explicit clear, two tests using the same

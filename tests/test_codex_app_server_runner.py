@@ -698,6 +698,36 @@ async def test_matching_echo_object_gives_no_warning(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("value", "mode"), [(True, "live"), (False, "disabled")])
+async def test_web_search_goes_in_thread_start_and_resume_config(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    value: bool,
+    mode: str,
+) -> None:
+    """#423: thread/start and thread/resume both carry it (a resumed thread
+    otherwise keeps its own setting)."""
+    fake = Fake(tmp_path)
+    options = EngineRunOptions(permission_mode="safe", web_search=value)
+    assert _completed(await _run(_runner(fake), options=options)).ok
+    assert fake.requests("thread/start")[0]["config"] == {"web_search": mode}
+    resume = ResumeToken(engine="codex", value=THREAD)
+    assert _completed(await _run(_runner(fake), resume=resume, options=options)).ok
+    assert fake.requests("thread/resume")[0]["config"] == {"web_search": mode}
+
+
+@pytest.mark.anyio
+async def test_web_search_unset_sends_no_config(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path)
+    options = EngineRunOptions(permission_mode="safe")
+    assert _completed(await _run(_runner(fake), options=options)).ok
+    assert "config" not in fake.requests("thread/start")[0]
+
+
+@pytest.mark.anyio
 async def test_resume_uses_thread_resume_with_the_same_overrides(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:
@@ -816,6 +846,89 @@ async def test_failed_turn_is_an_error_with_codex_text(
     done = _completed(await _run(_runner(fake)))
     assert not done.ok and done.error == "usage limit reached"
     assert done.answer == "partial"
+
+
+@pytest.mark.anyio
+async def test_rate_limit_push_is_merged_and_names_the_cap_hit_reset(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#966: account/rateLimits/updated feeds the footer cache; a
+    usageLimitExceeded final carries the reset time for its hint."""
+    from untether.runners import codex_reads
+
+    push = {
+        "method": "account/rateLimits/updated",
+        "params": {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 100,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1_900_000_000,
+                },
+                "secondary": None,
+                "planType": None,
+            }
+        },
+    }
+    fake = Fake(
+        tmp_path,
+        status="failed",
+        notifications=[push],
+        turn_error={"message": "limit", "codexErrorInfo": "usageLimitExceeded"},
+    )
+    runner = _runner(fake)
+    done = _completed(await _run(runner))
+    assert (done.usage or {})["codex_resets_at"] == 1_900_000_000
+    cached = codex_reads.peek_usage(runner.command())
+    assert cached is not None
+    assert cached.buckets[0].windows[0] == codex_reads.Window("5h", 100, 1_900_000_000)
+    hint = _run_error_hint("limit", usage=done.usage, close_reason=None) or ""
+    assert hint.startswith(CODEX_ERROR_INFO_HINTS["usageLimitExceeded"])
+    assert "It resets in " in hint
+
+
+@pytest.mark.anyio
+async def test_model_rerouted_updates_the_footer_model(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#846: model/rerouted names the model that actually ran; a sub-agent
+    thread's reroute is ignored."""
+
+    def reroute(thread: str, to: str) -> dict:
+        return {
+            "method": "model/rerouted",
+            "params": {
+                "threadId": thread,
+                "turnId": "turn-1",
+                "fromModel": "gpt-fake",
+                "toModel": to,
+                "reason": "highRiskCyberActivity",
+            },
+        }
+
+    fake = Fake(
+        tmp_path,
+        notifications=[reroute(OTHER_THREAD, "gpt-other"), reroute(THREAD, "gpt-safe")],
+    )
+    events = await _run(_runner(fake))
+    started = [e for e in events if isinstance(e, StartedEvent)]
+    assert [e.meta.get("model") for e in started if e.meta] == ["gpt-fake", "gpt-safe"]
+    assert all(e.resume.value == THREAD for e in started)
+    _completed(events)
+
+
+@pytest.mark.anyio
+async def test_cap_hit_without_quota_data_has_no_reset(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path,
+        status="failed",
+        turn_error={"message": "limit", "codexErrorInfo": "usageLimitExceeded"},
+    )
+    done = _completed(await _run(_runner(fake)))
+    assert "codex_resets_at" not in (done.usage or {})
 
 
 @pytest.mark.anyio

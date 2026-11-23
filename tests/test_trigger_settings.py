@@ -336,7 +336,7 @@ class TestCronModelReasoning:
 
     @pytest.mark.parametrize(
         ("engine", "level"),
-        [("codex", "max"), ("claude", "minimal"), ("claude", "ultracode")],
+        [("codex", "minimal"), ("claude", "minimal"), ("claude", "ultracode")],
     )
     def test_743_reasoning_rejected_for_explicit_engine(self, engine: str, level: str):
         with pytest.raises(ValidationError, match="allowed values"):

@@ -1009,7 +1009,7 @@ class TestCodexApprovalPolicy:
 
     @pytest.mark.anyio
     async def test_codex_home_hint_safe_read_only(self, tmp_path):
-        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.chat_prefs import shared_prefs_store
         from untether.telegram.engine_overrides import EngineOverrides
 
         state_path = tmp_path / "prefs.json"
@@ -1018,7 +1018,8 @@ class TestCodexApprovalPolicy:
         await cmd.handle(ctx)
         assert "Codex's own sandbox" in _last_send_msg(ctx).text
 
-        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        # The command's own store: a second store can miss a write in the same mtime tick.
+        prefs = shared_prefs_store(state_path)
         await prefs.set_engine_override(
             123, "codex", EngineOverrides(permission_mode="safe")
         )
@@ -2227,6 +2228,144 @@ class TestModel:
 # ---------------------------------------------------------------------------
 
 
+def _seed_codex_catalogue() -> None:
+    from tests.test_codex_reads import seed_catalogue
+
+    seed_catalogue()
+
+
+def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
+    """A Reasoning page open on Codex whose catalogue read returns the
+    0.171.0 Pro fixture (or fails)."""
+    from tests.test_codex_reads import fixture_catalogue
+    from untether.runners import codex_reads
+    from untether.runners.codex import CodexRunner
+
+    calls: list[str | None] = []
+
+    async def get_catalogue(runner, cwd):
+        calls.append(cwd)
+        if fail:
+            raise codex_reads.CodexReadError("timeout")
+        return fixture_catalogue()
+
+    monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+    ctx = _make_ctx(
+        args_text="rs",
+        text="config:rs",
+        config_path=tmp_path / "prefs.json",
+        default_engine="codex",
+    )
+    ctx.runtime.resolve_runner.return_value.runner = CodexRunner(
+        codex_cmd="codex", extra_args=[]
+    )
+    ctx.runtime.resolve_run_cwd.return_value = None
+    ctx.catalogue_calls = calls
+    return ctx
+
+
+class TestCodexReasoningCatalogue:
+    """#846: the Codex Reasoning page from Codex's own model/list + config."""
+
+    @pytest.mark.anyio
+    async def test_config_model_lists_six_levels_with_codex_descriptions(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert ctx.catalogue_calls  # read on page open
+        assert "Model: <b>gpt-6.1-sol</b> (from your Codex config)" in msg.text
+        assert "Current: <b>default (low)</b>" in msg.text
+        assert "• <b>low</b> — Fast responses with lighter reasoning" in msg.text
+        assert (
+            "• <b>ultra</b> — Maximum reasoning with automatic task delegation"
+            " (Codex may start sub-agents)" in msg.text
+        )
+        # Codex's descriptions replace the fixed ones; no level is listed twice.
+        assert "most thorough (slowest)" not in msg.text
+        assert "deepest thinking" not in msg.text
+        assert msg.text.count("• <b>max</b>") == 1
+        buttons = [
+            d
+            for d in _buttons_data(msg)
+            if d.startswith("config:rs:") and d != "config:rs:clr"
+        ]
+        assert buttons == [
+            "config:rs:low",
+            "config:rs:med",
+            "config:rs:hi",
+            "config:rs:xhi",
+            "config:rs:max",
+            "config:rs:ult",
+        ]
+        assert all(len(d.encode()) <= 64 for d in buttons)
+
+    @pytest.mark.anyio
+    async def test_model_without_ultra_has_five_and_ignores_a_saved_ultra(
+        self, tmp_path, monkeypatch
+    ):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6-luna", reasoning="ultra")
+        )
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Model: <b>gpt-6-luna</b> (this chat)" in msg.text
+        assert "ultra isn't available for this model" in msg.text
+        assert "config:rs:ult" not in _buttons_data(msg)
+        assert "config:rs:max" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_read_failure_falls_back_to_the_usual_four(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _codex_page_ctx(tmp_path, monkeypatch, fail=True)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Couldn't ask Codex which levels this model supports" in msg.text
+        assert "config:rs:max" not in _buttons_data(msg)
+        assert "config:rs:xhi" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_codex_default_when_config_sets_no_model(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue
+        from untether.runners import codex_reads
+
+        catalogue = dataclasses.replace(
+            fixture_catalogue(), config=codex_reads.ConfigInfo(None, None, None)
+        )
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+
+        async def get_catalogue(runner, cwd):
+            return catalogue
+
+        monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Model: <b>gpt-6.2-sol</b> (Codex default)" in msg.text
+        assert "Current: <b>default (low)</b>" in msg.text
+
+    @pytest.mark.anyio
+    async def test_button_tap_never_reads(self, tmp_path, monkeypatch):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        ctx = _codex_page_ctx(tmp_path, monkeypatch)
+        ctx.args_text = "rs:max"
+        ctx.text = "config:rs:max"
+        await ConfigCommand().handle(ctx)
+        assert ctx.catalogue_calls == []
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.reasoning == "max"
+
+
 class TestReasoning:
     @pytest.mark.anyio
     async def test_reasoning_page_renders(self, tmp_path):
@@ -2365,25 +2504,36 @@ class TestReasoning:
                 )
 
     @pytest.mark.anyio
-    async def test_reasoning_set_max_rejected_for_codex(self, tmp_path):
-        """#309 regression: codex does not support `max`; manual callback_data
-        attempting `rs:max` against codex must be rejected, not silently
-        persisted."""
-        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+    async def test_reasoning_set_ultra_rejected_for_a_model_without_it(self, tmp_path):
+        """#309 regression, per model since #846: crafted `rs:ult` for a Codex
+        model whose catalogue entry has no `ultra` is rejected, not persisted."""
+        from untether.telegram.chat_prefs import shared_prefs_store
+        from untether.telegram.engine_overrides import EngineOverrides
 
+        _seed_codex_catalogue()
         state_path = tmp_path / "prefs.json"
+        # The command's own store: a second store can miss a write in the same mtime tick.
+        prefs = shared_prefs_store(state_path)
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6-luna")
+        )
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="rs:max",
-            text="config:rs:max",
+            args_text="rs:ult",
+            text="config:rs:ult",
             config_path=state_path,
             default_engine="codex",
         )
         await cmd.handle(ctx)
-        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         override = await prefs.get_engine_override(123, "codex")
-        # Either no override at all, or reasoning is None — but never `max`.
-        assert override is None or override.reasoning != "max"
+        assert override is not None and override.reasoning is None
+        # The same tap on a model that lists it is saved.
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-6.1-sol")
+        )
+        await cmd.handle(ctx)
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.reasoning == "ultra"
 
     @pytest.mark.anyio
     async def test_reasoning_set_min_rejected_for_codex(self, tmp_path):
@@ -2472,7 +2622,13 @@ class TestReasoning:
             for d in _buttons_data(_last_edit_msg(ctx))
             if d.startswith("config:rs:") and d != "config:rs:clr"
         ]
-        assert len(level_buttons) == len(allowed_reasoning_levels(engine))
+        if engine == "codex":
+            # #846: no Codex catalogue here, so the usual four.
+            from untether.telegram.engine_overrides import CODEX_FALLBACK_LEVELS
+
+            assert len(level_buttons) == len(CODEX_FALLBACK_LEVELS)
+        else:
+            assert len(level_buttons) == len(allowed_reasoning_levels(engine))
 
     def test_reasoning_supported_engines_all_parametrised(self):
         from untether.telegram.engine_overrides import REASONING_SUPPORTED_ENGINES
@@ -4052,14 +4208,15 @@ class TestCostUsage:
 
     @pytest.mark.anyio
     async def test_cost_usage_guard_unsupported_engine(self, tmp_path):
-        """Codex/Pi show guard message — no cost data available."""
+        """Pi shows the guard message — no cost data available (Codex has
+        subscription usage since #966)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
             args_text="cu",
             text="config:cu",
             config_path=state_path,
-            default_engine="codex",
+            default_engine="pi",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -4241,15 +4398,27 @@ class TestCostUsage:
         assert "config:cu" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_cost_usage_hidden_on_home_for_codex(self, tmp_path):
-        """Cost & usage button should NOT appear on home for Codex."""
+    async def test_cost_usage_shown_on_home_for_codex(self, tmp_path):
+        """#966: Codex has a subscription-usage footer, so Cost & usage shows
+        with the subscription toggle only (no API cost for Codex)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="codex")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Cost & usage:" not in msg.text
-        assert "config:cu" not in _buttons_data(msg)
+        assert "Cost & usage:" in msg.text
+        assert "config:cu" in _buttons_data(msg)
+        ctx = _make_ctx(
+            args_text="cu",
+            text="config:cu",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        page = _last_edit_msg(ctx)
+        assert "Subscription usage" in page.text
+        assert "config:cu:su_on" in _buttons_data(page)
+        assert "config:cu:ac_off" not in _buttons_data(page)
 
     @pytest.mark.anyio
     async def test_cost_usage_hidden_on_home_for_pi(self, tmp_path):
@@ -5635,3 +5804,135 @@ class TestStaleButtons1281:
         assert ConfigCommand.defers_answer("tg:pause")
         assert not ConfigCommand.defers_answer("pm")
         assert not ConfigCommand.defers_answer("vb:on")
+
+
+def test_ultra_tap_has_a_toast() -> None:
+    """#846: every Reasoning button confirms what it set."""
+    assert ConfigCommand.early_answer_toast("rs:ult") == "Reasoning: ultra"
+
+
+# --- #423: Web search page (Codex) -----------------------------------------
+
+
+def _ws_ctx(tmp_path, monkeypatch, args: str = "ws", catalogue=None) -> MagicMock:
+    from tests.test_codex_reads import fixture_catalogue
+    from untether.runners import codex_reads
+    from untether.runners.codex import CodexRunner
+
+    reads_seen: list[object] = []
+
+    async def get_catalogue(runner, cwd):
+        reads_seen.append(cwd)
+        return catalogue or fixture_catalogue()
+
+    monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
+    ctx = _make_ctx(
+        args_text=args,
+        text=f"config:{args}",
+        config_path=tmp_path / "prefs.json",
+        default_engine="codex",
+    )
+    ctx.runtime.resolve_runner.return_value.runner = CodexRunner(
+        codex_cmd="codex", extra_args=[]
+    )
+    ctx.runtime.resolve_run_cwd.return_value = None
+    ctx.reads_seen = reads_seen
+    return ctx
+
+
+class TestWebSearch:
+    @pytest.mark.anyio
+    async def test_page_states_and_buttons(self, tmp_path, monkeypatch):
+        ctx = _ws_ctx(tmp_path, monkeypatch)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "<b>🌐 Web search</b>" in msg.text
+        assert "Current: <b>Codex default</b>" in msg.text
+        # Off can't stop ChatGPT app connectors from browsing; the page says so.
+        assert "ChatGPT apps" in msg.text
+        assert [d for d in _buttons_data(msg) if d.startswith("config:ws:")] == [
+            "config:ws:def",
+            "config:ws:live",
+            "config:ws:off",
+        ]
+        assert ctx.reads_seen  # read on page open
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("action", "stored", "label"),
+        [("live", True, "live"), ("off", False, "off"), ("def", None, "Codex default")],
+    )
+    async def test_taps_store_and_never_read(
+        self, tmp_path, monkeypatch, action, stored, label
+    ):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        prefs = ChatPrefsStore(resolve_prefs_path(tmp_path / "prefs.json"))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(web_search=True, model="m")
+        )
+        ctx = _ws_ctx(tmp_path, monkeypatch, args=f"ws:{action}")
+        await ConfigCommand().handle(ctx)
+        assert ctx.reads_seen == []
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None and override.web_search is stored
+        home = _last_edit_msg(ctx) if ctx.executor.edit.called else _last_send_msg(ctx)
+        assert f"Web search: <b>{label}</b>" in home.text
+        assert ConfigCommand.early_answer_toast(f"ws:{action}") is not None
+
+    @pytest.mark.anyio
+    async def test_hidden_when_the_provider_cannot_search(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue, seed_catalogue
+
+        no_search = dataclasses.replace(fixture_catalogue(), web_search_supported=False)
+        ctx = _ws_ctx(tmp_path, monkeypatch, catalogue=no_search)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "has no web search" in msg.text
+        assert not [d for d in _buttons_data(msg) if d.startswith("config:ws:")]
+        # Home: shown with no cached read, hidden once a read says no search.
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        await ConfigCommand().handle(home)
+        assert "config:ws" in _buttons_data(_last_send_msg(home))
+        from untether.runners import codex_reads
+
+        seed_catalogue()
+        key = next(iter(codex_reads._CATALOGUE.values))
+        at, _ = codex_reads._CATALOGUE.values[key]
+        codex_reads._CATALOGUE.values[key] = (at, no_search)
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="codex")
+        await ConfigCommand().handle(home)
+        assert "config:ws" not in _buttons_data(_last_send_msg(home))
+        assert "Web search:" not in _last_send_msg(home).text
+
+    @pytest.mark.anyio
+    async def test_managed_policy_limits_the_choices(self, tmp_path, monkeypatch):
+        import dataclasses
+
+        from tests.test_codex_reads import fixture_catalogue
+
+        managed = dataclasses.replace(
+            fixture_catalogue(), web_search_allowed=("disabled", "cached")
+        )
+        ctx = _ws_ctx(tmp_path, monkeypatch, catalogue=managed)
+        await ConfigCommand().handle(ctx)
+        assert [
+            d for d in _buttons_data(_last_edit_msg(ctx)) if d.startswith("config:ws:")
+        ] == ["config:ws:def", "config:ws:off"]
+
+    @pytest.mark.anyio
+    async def test_other_engines_get_the_guard(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="ws",
+            text="config:ws",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        assert "Available for Codex." in _last_edit_msg(ctx).text
+        home = _make_ctx(config_path=tmp_path / "prefs.json", default_engine="claude")
+        await ConfigCommand().handle(home)
+        assert "config:ws" not in _buttons_data(_last_send_msg(home))

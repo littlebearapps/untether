@@ -34,6 +34,16 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("client_request", "turn/start"): "S",
     ("client_request", "turn/interrupt"): "S",
     ("client_notification", "initialized"): "S",
+    # Zero-token reads (runners/codex_reads.py: #966, #846, #423). config/read
+    # is also the runner's trust and model check (#1369).
+    ("client_request", "account/read"): "S",
+    ("client_request", "account/rateLimits/read"): "S",
+    ("client_request", "model/list"): "S",
+    ("client_request", "config/read"): "S",
+    ("client_request", "configRequirements/read"): "S",
+    ("client_request", "modelProvider/capabilities/read"): "S",
+    ("server_notification", "account/rateLimits/updated"): "S",
+    ("server_notification", "model/rerouted"): "S",
     ("server_notification", "thread/started"): "S",
     ("server_notification", "turn/started"): "S",
     ("server_notification", "turn/completed"): "S",
@@ -463,6 +473,20 @@ def decode_request(method: str, params: Any) -> Any | None:
         return None
 
 
+class RateLimitsUpdatedParams(_Wire):
+    """Sparse: merge non-null fields into the last read (#966)."""
+
+    rate_limits: dict[str, Any] | None = None
+
+
+class ModelReroutedParams(_Wire):
+    thread_id: str = ""
+    turn_id: str = ""
+    from_model: str = ""
+    to_model: str = ""
+    reason: Any = None
+
+
 NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "thread/started": ThreadStartedParams,
     "turn/started": TurnParams,
@@ -477,6 +501,8 @@ NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "serverRequest/resolved": ServerRequestResolvedParams,
     "item/fileChange/patchUpdated": PatchUpdatedParams,
     "guardianWarning": GuardianWarningParams,
+    "account/rateLimits/updated": RateLimitsUpdatedParams,
+    "model/rerouted": ModelReroutedParams,
 }
 
 

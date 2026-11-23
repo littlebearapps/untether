@@ -166,6 +166,21 @@ class TestResolveEngineRunOptions:
         assert result.model == "opus-4"
 
     @pytest.mark.anyio
+    async def test_web_search_reaches_the_run_options(self) -> None:
+        """#423: the chat's Web search setting is a run option."""
+        prefs = FakeChatPrefs(
+            overrides={(100, "codex"): EngineOverrides(web_search=False)}
+        )
+        result = await _resolve_engine_run_options(
+            chat_id=100,
+            thread_id=None,
+            engine="codex",
+            chat_prefs=prefs,
+            topic_store=None,
+        )
+        assert result is not None and result.web_search is False
+
+    @pytest.mark.anyio
     async def test_topic_override_only(self) -> None:
         topic = FakeTopicStore(
             overrides={(100, 5, "claude"): EngineOverrides(model="sonnet-4")}

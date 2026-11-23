@@ -144,11 +144,19 @@ def _resolve_reasoning_override(
             reasoning_level=level,
             allowed=list(allowed_reasoning_levels(engine)),
         )
-        message = (
-            f"reasoning level `{level}` isn't supported for `{engine}` any more;"
-            " using the engine default. Pick a level in /config \N{RIGHTWARDS ARROW}"
-            " Reasoning."
-        )
+        if level in allowed_reasoning_levels(engine):
+            # #846: a real level this model doesn't list (Codex catalogue).
+            message = (
+                f"reasoning level `{level}` isn't available for this model;"
+                " using the engine default. Pick a level in /config"
+                " \N{RIGHTWARDS ARROW} Reasoning."
+            )
+        else:
+            message = (
+                f"reasoning level `{level}` isn't supported for `{engine}` any"
+                " more; using the engine default. Pick a level in /config"
+                " \N{RIGHTWARDS ARROW} Reasoning."
+            )
         return run_options, _reasoning_note(engine, message)
     if run_options.reasoning and not supports_reasoning(engine):
         message = f"reasoning override is not supported for `{engine}`; ignoring."

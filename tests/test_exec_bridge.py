@@ -1,6 +1,7 @@
 import contextlib
 import os
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -3049,6 +3050,7 @@ async def test_subscription_footer_other_engines_get_none(monkeypatch) -> None:
 
     monkeypatch.setattr(rb, "_maybe_append_usage_footer", boom)
     monkeypatch.setattr(rb, "_maybe_append_antigravity_quota_footer", boom)
+    monkeypatch.setattr(rb, "_maybe_append_codex_quota_footer", boom)
     _force_subscription_footer(monkeypatch, show=True)
     transport = FakeTransport()
     await handle_message(
@@ -3056,7 +3058,7 @@ async def test_subscription_footer_other_engines_get_none(monkeypatch) -> None:
             transport=transport, presenter=MarkdownPresenter(), final_notify=True
         ),
         runner=ScriptRunner(
-            [Return(answer="done")], engine=CODEX_ENGINE, resume_value="sid-979c"
+            [Return(answer="done")], engine="pi", resume_value="sid-979c"
         ),
         incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
         resume_token=None,
@@ -3128,6 +3130,126 @@ async def test_antigravity_footer_warns_at_claudes_thresholds(
         assert "Gemini Models" not in text
     else:
         assert expected in text
+
+
+# ===========================================================================
+# #966: Codex quota footer — peeks codex_reads' cache, never spawns
+# ===========================================================================
+
+
+def _seed_codex_usage(
+    *windows: tuple[str, int, int | None], allowed: bool | None = True
+) -> None:
+    from untether.runners import codex_reads
+
+    raw = codex_reads._UsageRaw(
+        auth_kind="chatgpt",
+        plan="pro",
+        allowed=allowed,
+        snapshots={
+            "codex": {
+                "limitId": "codex",
+                **{
+                    slot: {
+                        "usedPercent": pct,
+                        "windowDurationMins": mins,
+                        "resetsAt": resets,
+                    }
+                    for slot, (mins, pct, resets) in zip(
+                        ("primary", "secondary"),
+                        (
+                            ({"5h": 300, "7d": 10080}[label], pct, resets)
+                            for label, pct, resets in windows
+                        ),
+                        strict=False,
+                    )
+                },
+            }
+        },
+        reset_credits=None,
+    )
+    codex_reads._USAGE.values[("codex", "0.171.0")] = (time.monotonic(), raw)
+
+
+async def _codex_final_text(monkeypatch, *, show: bool) -> str:
+    from untether.runners import codex_reads
+
+    async def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a final must never start a Codex read")
+
+    monkeypatch.setattr(codex_reads, "app_server_read", boom)
+    _force_subscription_footer(monkeypatch, show=show)
+    transport = FakeTransport()
+    await handle_message(
+        ExecBridgeConfig(
+            transport=transport, presenter=MarkdownPresenter(), final_notify=True
+        ),
+        runner=ScriptRunner(
+            [Return(answer="done")], engine=CODEX_ENGINE, resume_value="sid-966"
+        ),
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+    return transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_always_show_line(monkeypatch) -> None:
+    _seed_codex_usage(("7d", 8, None))
+    text = await _codex_final_text(monkeypatch, show=True)
+    assert "⚡ 7d: 8%" in text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_adds_reset_from_fifty_percent(monkeypatch) -> None:
+    resets = int(time.time()) + 3600 + 14 * 60 + 30
+    _seed_codex_usage(("5h", 72, resets), ("7d", 30, resets))
+    text = await _codex_final_text(monkeypatch, show=True)
+    assert "⚡ 5h: 72% (1h 14m) | 7d: 30%" in text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("pct", "expected"),
+    [(50, None), (72, "⚡ 5h: 72%"), (95, "⚠️ 5h: 95%")],
+)
+async def test_codex_footer_warns_at_claudes_thresholds(
+    monkeypatch, pct: int, expected: str | None
+) -> None:
+    _seed_codex_usage(("5h", pct, None))
+    text = await _codex_final_text(monkeypatch, show=False)
+    if expected is None:
+        assert "5h:" not in text
+    else:
+        assert expected in text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_blocked_line(monkeypatch) -> None:
+    resets = int(time.time()) + 2 * 86400 + 4 * 3600 + 30
+    _seed_codex_usage(("7d", 100, resets), allowed=False)
+    text = await _codex_final_text(monkeypatch, show=False)
+    assert "🛑 Codex usage limit reached — resets in 2d 4h" in text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_nothing_cached_leaves_the_final_alone(
+    monkeypatch,
+) -> None:
+    text = await _codex_final_text(monkeypatch, show=True)
+    assert "⚡" not in text and "7d:" not in text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_ignores_a_stale_cache(monkeypatch) -> None:
+    from untether.runners import codex_reads
+
+    _seed_codex_usage(("7d", 8, None))
+    key = ("codex", "0.171.0")
+    at, raw = codex_reads._USAGE.values[key]
+    codex_reads._USAGE.values[key] = (at - codex_reads.FOOTER_MAX_AGE_S - 1, raw)
+    text = await _codex_final_text(monkeypatch, show=True)
+    assert "7d:" not in text
 
 
 # ===========================================================================
