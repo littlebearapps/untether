@@ -9,6 +9,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from untether.runners.codex_rpc import (
+    DEFER,
     INTERNAL_ERROR,
     METHOD_NOT_FOUND,
     CodexRpcClosed,
@@ -16,6 +17,7 @@ from untether.runners.codex_rpc import (
     CodexRpcWriteTimeout,
     Notification,
     Response,
+    ServerRequest,
     retry_delay,
 )
 
@@ -145,6 +147,72 @@ async def test_observer_exception_never_breaks_the_reply() -> None:
         _line({"id": 5, "method": "item/fileChange/requestApproval", "params": {}})
     )
     assert sink.messages == [{"id": 5, "result": {"decision": "decline"}}]
+
+
+async def test_permissions_request_default_grants_nothing() -> None:
+    sink = Sink()
+    peer = CodexRpcPeer(sink.send)
+    await peer.feed(
+        _line({"id": 9, "method": "item/permissions/requestApproval", "params": {}})
+    )
+    assert sink.messages == [{"id": 9, "result": {"permissions": {}, "scope": "turn"}}]
+
+
+# --- deferred server requests (#963) -----------------------------------------
+
+
+def _deferring(methods: set[str]):
+    return lambda m, _p: DEFER if m in methods else None
+
+
+async def test_deferred_request_answered_later() -> None:
+    sink = Sink()
+    method = "item/commandExecution/requestApproval"
+    peer = CodexRpcPeer(sink.send, on_server_request=_deferring({method}))
+    params = {"threadId": "t", "itemId": "c"}
+    out = await peer.feed(_line({"id": 4, "method": method, "params": params}))
+    assert out == ServerRequest(4, method, params)
+    assert sink.messages == []  # nothing written by feed
+    assert peer.deferred == {4: method}
+    assert await peer.reply(4, {"decision": "accept"}) is True
+    assert sink.messages == [{"id": 4, "result": {"decision": "accept"}}]
+    assert peer.deferred == {}
+
+
+async def test_reply_twice_is_noop() -> None:
+    sink = Sink()
+    method = "item/fileChange/requestApproval"
+    peer = CodexRpcPeer(sink.send, on_server_request=_deferring({method}))
+    await peer.feed(_line({"id": "r1", "method": method, "params": {}}))
+    assert await peer.reply("r1", {"decision": "decline"}) is True
+    with capture_logs() as logs:
+        assert await peer.reply("r1", {"decision": "accept"}) is False
+    assert sink.messages == [{"id": "r1", "result": {"decision": "decline"}}]
+    assert any(e["event"] == "codex.rpc.reply_not_open" for e in logs)
+
+
+async def test_reply_after_close_raises() -> None:
+    method = "item/fileChange/requestApproval"
+    peer = CodexRpcPeer(Sink().send, on_server_request=_deferring({method}))
+    await peer.feed(_line({"id": 1, "method": method, "params": {}}))
+    peer.close("eof")
+    assert peer.deferred == {}
+    with pytest.raises(CodexRpcClosed):
+        await peer.reply(1, {"decision": "accept"})
+
+
+async def test_non_deferred_requests_still_declined_beside_a_deferred_one() -> None:
+    sink = Sink()
+    peer = CodexRpcPeer(
+        sink.send,
+        on_server_request=_deferring({"item/commandExecution/requestApproval"}),
+    )
+    await peer.feed(
+        _line({"id": 1, "method": "item/fileChange/requestApproval", "params": {}})
+    )
+    await peer.feed(_line({"id": 2, "method": "item/tool/requestUserInput"}))
+    assert sink.messages[0] == {"id": 1, "result": {"decision": "decline"}}
+    assert sink.messages[1]["error"]["code"] == METHOD_NOT_FOUND
 
 
 @pytest.mark.parametrize("rid", [0, 7, "req-abc"])

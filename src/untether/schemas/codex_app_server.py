@@ -18,7 +18,7 @@ type MessageKind = Literal[
 ]
 
 # Last CLI the committed schema fixture was derived from.
-PROBED_APP_SERVER_VERSION = "0.169.0"
+PROBED_APP_SERVER_VERSION = "0.171.0"
 # Oldest CLI the app-server transport was tested with; named in the gate's
 # refusal only. The gate itself detects support from the schema, never by
 # comparing versions.
@@ -44,9 +44,18 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("server_notification", "warning"): "S",
     ("server_notification", "configWarning"): "S",
     ("server_notification", "deprecationNotice"): "S",
-    # Never expected with approvalPolicy=never, but always answered (decline).
+    # #963: approval cards, withdrawal, diff refresh, auto-review rows. The
+    # two review notifications are stable methods with an [UNSTABLE] payload
+    # (decoded as plain dicts).
+    ("server_notification", "serverRequest/resolved"): "S",
+    ("server_notification", "item/fileChange/patchUpdated"): "S",
+    ("server_notification", "item/autoApprovalReview/started"): "S",
+    ("server_notification", "item/autoApprovalReview/completed"): "S",
+    ("server_notification", "guardianWarning"): "S",
+    # Answered from a Telegram card (#963), or declined when unattended.
     ("server_request", "item/commandExecution/requestApproval"): "S",
     ("server_request", "item/fileChange/requestApproval"): "S",
+    ("server_request", "item/permissions/requestApproval"): "S",
     ("server_request", "mcpServer/elicitation/request"): "S",
 }
 
@@ -68,15 +77,36 @@ CODEX_APP_SERVER_TYPES: dict[str, tuple[str, ...]] = {
     "TurnError": (),
     "ThreadTokenUsage": (),
     "TokenUsageBreakdown": (),
+    # #963 cards: the diff, the network prompt, the permission request.
+    "FileUpdateChange": (),
+    "PatchChangeKind": ("add", "delete", "update"),
+    "NetworkApprovalContext": (),
+    "NetworkPolicyAmendment": (),
+    "AdditionalNetworkPermissions": (),
+    "AdditionalFileSystemPermissions": (),
 }
 
-# Enum values Untether sends (permission modes DEC-5, declines, plan mode).
+# Values Untether sends (permission tiers DEC-5/#421, approval answers #963,
+# plan mode). An object decision counts by its only key
+# (``acceptWithExecpolicyAmendment``).
 CODEX_APP_SERVER_SENDS: dict[str, frozenset[str]] = {
     "AskForApproval": frozenset({"never", "on-request"}),
     "SandboxMode": frozenset({"read-only", "workspace-write"}),
     "ApprovalsReviewer": frozenset({"user", "auto_review"}),
-    "CommandExecutionApprovalDecision": frozenset({"decline"}),
-    "FileChangeApprovalDecision": frozenset({"decline"}),
+    "CommandExecutionApprovalDecision": frozenset(
+        {
+            "accept",
+            "acceptForSession",
+            "acceptWithExecpolicyAmendment",
+            "applyNetworkPolicyAmendment",
+            "decline",
+            "cancel",
+        }
+    ),
+    "FileChangeApprovalDecision": frozenset(
+        {"accept", "acceptForSession", "decline", "cancel"}
+    ),
+    "PermissionGrantScope": frozenset({"turn", "session"}),
     "McpServerElicitationAction": frozenset({"decline"}),
     "ModeKind": frozenset({"plan", "default"}),
 }
@@ -351,6 +381,87 @@ class DeprecationNoticeParams(_Wire):
     details: str | None = None
 
 
+class ServerRequestResolvedParams(_Wire):
+    thread_id: str
+    # RequestId: a number or a string on the wire.
+    request_id: int | str
+
+
+class PatchUpdatedParams(_Wire):
+    item_id: str
+    changes: list[Any] = msgspec.field(default_factory=list)
+    thread_id: str = ""
+    turn_id: str = ""
+
+
+class GuardianWarningParams(_Wire):
+    message: str
+    thread_id: str = ""
+
+
+# Server request params (#963). Lenient: nested shapes stay untyped, and
+# ``availableDecisions`` (experimental field, sent on stable connections
+# anyway, findings H2) is optional.
+class CommandApprovalParams(_Wire):
+    thread_id: str
+    item_id: str
+    turn_id: str = ""
+    kind: str = "command"
+    command: str | None = None
+    cwd: str | None = None
+    reason: str | None = None
+    approval_id: str | None = None
+    network_approval_context: dict[str, Any] | None = None
+    proposed_execpolicy_amendment: list[str] | None = None
+    proposed_network_policy_amendments: list[Any] | None = None
+    available_decisions: list[Any] | None = None
+
+
+class FileChangeApprovalParams(_Wire):
+    thread_id: str
+    item_id: str
+    turn_id: str = ""
+    reason: str | None = None
+    grant_root: str | None = None
+
+
+class PermissionsApprovalParams(_Wire):
+    thread_id: str
+    item_id: str
+    turn_id: str = ""
+    cwd: str | None = None
+    reason: str | None = None
+    permissions: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+# Notifications whose payload the schema marks [UNSTABLE] (auto-review, Δ D47):
+# read as plain dicts, a missing key gives a generic row, never an error.
+DICT_NOTIFICATIONS = frozenset(
+    {"item/autoApprovalReview/started", "item/autoApprovalReview/completed"}
+)
+# The one experimental-tier field read on a stable connection (register row:
+# the server sends it unasked; a stable fallback mirrors Codex's default set).
+EXPERIMENTAL_FIELDS_READ = frozenset({"availableDecisions"})
+
+REQUEST_PARAM_TYPES: dict[str, type[_Wire]] = {
+    "item/commandExecution/requestApproval": CommandApprovalParams,
+    "item/fileChange/requestApproval": FileChangeApprovalParams,
+    "item/permissions/requestApproval": PermissionsApprovalParams,
+}
+
+
+def decode_request(method: str, params: Any) -> Any | None:
+    """Approval request params → their struct; None for another method or a
+    shape that no longer fits (the caller then declines it). Never raises."""
+    cls = REQUEST_PARAM_TYPES.get(method)
+    if cls is None:
+        return None
+    try:
+        return msgspec.convert(params, cls)
+    except msgspec.ValidationError:
+        return None
+
+
 NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "thread/started": ThreadStartedParams,
     "turn/started": TurnParams,
@@ -362,6 +473,9 @@ NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "warning": WarningParams,
     "configWarning": ConfigWarningParams,
     "deprecationNotice": DeprecationNoticeParams,
+    "serverRequest/resolved": ServerRequestResolvedParams,
+    "item/fileChange/patchUpdated": PatchUpdatedParams,
+    "guardianWarning": GuardianWarningParams,
 }
 
 

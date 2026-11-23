@@ -1,5 +1,5 @@
 {
- "codex_version": "0.169.0",
+ "codex_version": "0.171.0",
  "subset": {
   "client_notification initialized": {
    "names": {},
@@ -26,6 +26,7 @@
     "params.cwd": "S",
     "params.excludedThreadIds": "S",
     "params.includeAttachedThreads": "E",
+    "params.includedThreadIds": "S",
     "params.limit": "S",
     "params.modelProviders": "S",
     "params.originators": "S",
@@ -182,6 +183,7 @@
   },
   "enum AskForApproval": {
    "names": {
+    "granular": "S",
     "never": "S",
     "on-request": "S",
     "untrusted": "S"
@@ -192,6 +194,8 @@
    "names": {
     "accept": "S",
     "acceptForSession": "S",
+    "acceptWithExecpolicyAmendment": "S",
+    "applyNetworkPolicyAmendment": "S",
     "cancel": "S",
     "decline": "S"
    },
@@ -218,6 +222,13 @@
    "names": {
     "default": "S",
     "plan": "S"
+   },
+   "tier": "S"
+  },
+  "enum PermissionGrantScope": {
+   "names": {
+    "session": "S",
+    "turn": "S"
    },
    "tier": "S"
   },
@@ -254,11 +265,53 @@
    },
    "tier": "S"
   },
+  "server_notification guardianWarning": {
+   "names": {
+    "params.message": "S",
+    "params.threadId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification item/autoApprovalReview/completed": {
+   "names": {
+    "params.action": "S",
+    "params.completedAtMs": "S",
+    "params.decisionSource": "S",
+    "params.review": "S",
+    "params.reviewId": "S",
+    "params.startedAtMs": "S",
+    "params.targetItemId": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification item/autoApprovalReview/started": {
+   "names": {
+    "params.action": "S",
+    "params.review": "S",
+    "params.reviewId": "S",
+    "params.startedAtMs": "S",
+    "params.targetItemId": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
   "server_notification item/completed": {
    "names": {
     "params.completedAtMs": "S",
     "params.contentTokenCount": "S",
     "params.item": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification item/fileChange/patchUpdated": {
+   "names": {
+    "params.changes": "S",
+    "params.itemId": "S",
     "params.threadId": "S",
     "params.turnId": "S"
    },
@@ -270,6 +323,13 @@
     "params.startedAtMs": "S",
     "params.threadId": "S",
     "params.turnId": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification serverRequest/resolved": {
+   "names": {
+    "params.requestId": "S",
+    "params.threadId": "S"
    },
    "tier": "S"
   },
@@ -342,14 +402,87 @@
    },
    "tier": "S"
   },
+  "server_request item/permissions/requestApproval": {
+   "names": {
+    "params.cwd": "S",
+    "params.environmentId": "S",
+    "params.itemId": "S",
+    "params.permissions": "S",
+    "params.reason": "S",
+    "params.startedAtMs": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "result.permissions": "S",
+    "result.scope": "S",
+    "result.strictAutoReview": "S"
+   },
+   "tier": "S"
+  },
   "server_request mcpServer/elicitation/request": {
    "names": {
+    "params.environmentId": "S",
     "params.serverName": "S",
     "params.threadId": "S",
     "params.turnId": "S",
     "result._meta": "S",
     "result.action": "S",
     "result.content": "S"
+   },
+   "tier": "S"
+  },
+  "type AdditionalFileSystemPermissions": {
+   "names": {
+    "entries": "S",
+    "globScanMaxDepth": "S",
+    "read": "S",
+    "write": "S"
+   },
+   "tier": "S"
+  },
+  "type AdditionalNetworkPermissions": {
+   "names": {
+    "enabled": "S"
+   },
+   "tier": "S"
+  },
+  "type FileUpdateChange": {
+   "names": {
+    "diff": "S",
+    "kind": "S",
+    "path": "S"
+   },
+   "tier": "S"
+  },
+  "type NetworkApprovalContext": {
+   "names": {
+    "host": "S",
+    "protocol": "S"
+   },
+   "tier": "S"
+  },
+  "type NetworkPolicyAmendment": {
+   "names": {
+    "action": "S",
+    "host": "S"
+   },
+   "tier": "S"
+  },
+  "type PatchChangeKind.add": {
+   "names": {
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type PatchChangeKind.delete": {
+   "names": {
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type PatchChangeKind.update": {
+   "names": {
+    "move_path": "S",
+    "type": "S"
    },
    "tier": "S"
   },
@@ -428,6 +561,7 @@
     "appContext": "S",
     "arguments": "S",
     "durationMs": "S",
+    "environmentId": "S",
     "error": "S",
     "id": "S",
     "mcpAppResourceUri": "S",

@@ -126,6 +126,11 @@ def _string_values(defn: dict[str, Any] | None) -> set[str]:
     values = {v for v in defn.get("enum", ()) if isinstance(v, str)}
     for variant in defn.get("oneOf", ()):
         values |= {v for v in variant.get("enum", ()) if isinstance(v, str)}
+        # #963: an object variant (``{"acceptWithExecpolicyAmendment": …}``)
+        # counts by its only required key.
+        required = variant.get("required", ())
+        if variant.get("type") == "object" and len(required) == 1:
+            values.add(required[0])
     return values
 
 

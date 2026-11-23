@@ -8,10 +8,12 @@ peer never awaits a response. ``submit`` writes a request and returns its id;
 ``feed`` classifies each line and hands responses back to the runner's state
 machine. An awaited ``request()`` called from that loop would deadlock.
 
-Server requests are answered here, fail-closed, before the runner sees
-anything: the three Untether knows get the schema's decline shape, anything
-else a JSON-RPC error (Codex treats an error as a denial). Never leave one
-unanswered, or the turn blocks.
+Server requests are answered here, fail-closed, unless the observer asks to
+answer later (``DEFER``, #963 approval cards): the ones Untether knows get the
+schema's decline shape, anything else a JSON-RPC error (Codex treats an error
+as a denial). A deferred request comes back from ``feed`` as a
+``ServerRequest`` and is answered with ``reply`` (from any task: writes are
+locked). Never leave one unanswered while the turn runs, or it blocks.
 """
 
 from __future__ import annotations
@@ -38,13 +40,21 @@ SERVER_OVERLOADED = -32001
 MAX_OVERLOAD_RETRIES = 3
 WRITE_TIMEOUT_S = 10.0
 
-# Schema-shaped declines (schema-subset-0.169.0.json, identical on 0.170.0).
-# Untether runs approvalPolicy=never until #963, so none should arrive.
+# Schema-shaped declines (schema-subset-0.171.0.json): the fail-closed
+# answer for anything the runner doesn't defer (unattended runs, elicitation).
 DECLINE_HANDLERS: dict[str, Handler] = {
     "item/commandExecution/requestApproval": lambda _p: {"decision": "decline"},
     "item/fileChange/requestApproval": lambda _p: {"decision": "decline"},
+    # Deny = grant nothing (PermissionsRequestApprovalResponse).
+    "item/permissions/requestApproval": lambda _p: {
+        "permissions": {},
+        "scope": "turn",
+    },
     "mcpServer/elicitation/request": lambda _p: {"action": "decline", "content": None},
 }
+
+# Returned by ``on_server_request`` to keep a request open for ``reply``.
+DEFER = object()
 
 
 class CodexRpcClosed(Exception):
@@ -76,6 +86,15 @@ class Notification:
     params: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class ServerRequest:
+    """A server request the observer deferred; answer it with ``reply``."""
+
+    id: RequestId
+    method: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
 def retry_delay(
     attempt: int,
     *,
@@ -94,17 +113,20 @@ class CodexRpcPeer:
         send: Callable[[bytes], Awaitable[None]],
         *,
         handlers: dict[str, Handler] | None = None,
-        on_server_request: Callable[[str, dict[str, Any]], None] | None = None,
+        on_server_request: Callable[[str, dict[str, Any]], Any] | None = None,
         write_timeout: float = WRITE_TIMEOUT_S,
     ) -> None:
         self._send = send
         self._handlers = DECLINE_HANDLERS if handlers is None else handlers
-        # 962-3 hooks a progress row here; it never changes the reply.
+        # Sees every server request first; returning DEFER keeps it open for
+        # ``reply`` (#963). Anything else: the handler answers it now.
         self.on_server_request = on_server_request
         self._write_timeout = write_timeout
         self._lock = anyio.Lock()
         self._next_id = 1
         self.pending: dict[RequestId, str] = {}
+        # Server requests left open for ``reply``: id -> method.
+        self.deferred: dict[RequestId, str] = {}
         self.closed_reason: str | None = None
 
     async def _write(self, message: dict[str, Any]) -> None:
@@ -152,13 +174,28 @@ class CodexRpcPeer:
         self.pending.pop(rid, None)
 
     def close(self, reason: str) -> None:
+        # Deferred requests stay unanswered: the process is going away and
+        # Codex clears its own side.
         self.pending.clear()
+        self.deferred.clear()
         self.closed_reason = reason
 
-    async def feed(self, line: bytes) -> Response | Notification | None:
-        """One stdout line → a ``Response`` or ``Notification`` for the
-        runner, or ``None`` (blank, bad, unmatched, or a server request the
-        peer already answered)."""
+    async def reply(self, rid: RequestId, result: Any) -> bool:
+        """Answer a deferred server request, once. False (logged) for an id
+        that isn't open, e.g. a second tap. Raises ``CodexRpcClosed`` after
+        ``close``."""
+        if self.closed_reason is not None:
+            raise CodexRpcClosed(self.closed_reason)
+        if self.deferred.pop(rid, None) is None:
+            logger.info("codex.rpc.reply_not_open", id=rid)
+            return False
+        await self._write({"id": rid, "result": result})
+        return True
+
+    async def feed(self, line: bytes) -> Response | Notification | ServerRequest | None:
+        """One stdout line → a ``Response``, ``Notification`` or deferred
+        ``ServerRequest`` for the runner, or ``None`` (blank, bad, unmatched,
+        or a server request the peer already answered)."""
         if not line.strip():
             return None
         try:
@@ -172,8 +209,7 @@ class CodexRpcPeer:
         method = message.get("method")
         has_id = "id" in message
         if isinstance(method, str) and has_id:
-            await self._answer(message["id"], method, message.get("params"))
-            return None
+            return await self._answer(message["id"], method, message.get("params"))
         if has_id:
             return self._response(message)
         if isinstance(method, str):
@@ -202,8 +238,19 @@ class CodexRpcPeer:
             )
         return Response(rid, method, result=message.get("result"))
 
-    async def _answer(self, rid: Any, method: str, params: Any) -> None:
+    async def _answer(self, rid: Any, method: str, params: Any) -> ServerRequest | None:
         params = params if isinstance(params, dict) else {}
+        if self.on_server_request is not None:
+            try:
+                verdict = self.on_server_request(method, params)
+            except Exception as exc:  # noqa: BLE001 — an observer never breaks the stream
+                logger.error(
+                    "codex.rpc.observer_error", method=method, error=type(exc).__name__
+                )
+                verdict = None
+            if verdict is DEFER and isinstance(rid, int | str):
+                self.deferred[rid] = method
+                return ServerRequest(rid, method, params)
         logger.warning("codex.app_server.unexpected_request", method=method)
         handler = self._handlers.get(method)
         reply: dict[str, Any]
@@ -224,10 +271,4 @@ class CodexRpcPeer:
                     "error": {"code": INTERNAL_ERROR, "message": "internal error"},
                 }
         await self._write(reply)
-        if self.on_server_request is not None:
-            try:
-                self.on_server_request(method, params)
-            except Exception as exc:  # noqa: BLE001 — an observer never breaks the stream
-                logger.error(
-                    "codex.rpc.observer_error", method=method, error=type(exc).__name__
-                )
+        return None
