@@ -20,6 +20,7 @@ from ...interactive.registry import (
     release_control_claims,
     respond,
     respond_to_control_request,
+    responder_for,
     session_alive,
 )
 from ...logging import get_logger
@@ -122,6 +123,9 @@ _PRIOR_LABELS: dict[str, str] = {
     # #980: Antigravity's gate has its own deadline.
     "gate_timeout": "timed out (denied)",
     "always": "approved (always for this command)",
+    # #963: Codex's acceptForSession / cancel.
+    "session": "allowed for the session",
+    "stop": "stopped",
     "superseded": "replaced by the outlined plan",
 }
 
@@ -668,19 +672,47 @@ class ClaudeControlCommand:
 BACKEND: CommandBackend = ClaudeControlCommand()
 
 
-_IA_TOASTS: dict[str, str] = {**_EARLY_TOASTS, "always": "Always allowed"}
+_IA_TOASTS: dict[str, str] = {
+    **_EARLY_TOASTS,
+    "always": "Always allowed",
+    # #963: Codex's acceptForSession / cancel.
+    "session": "Allowed for session",
+    "stop": "Stopped",
+}
 _ALWAYS_TEXT = (
     "✅ Approved — this exact command runs without asking for the rest of "
     "this conversation"
 )
+# ia actions answered here, not by Claude's approve/deny path:
+# action -> (approved, reply text by responder engine, with a default).
+_IA_EXTRA_ACTIONS: dict[str, tuple[bool, dict[str, str]]] = {
+    "always": (
+        True,
+        {
+            "": _ALWAYS_TEXT,
+            "codex": "✅ Approved — saved to Codex's rules on this host, so"
+            " matching requests run without asking",
+        },
+    ),
+    "session": (
+        True,
+        {"": "✅ Approved — Codex won't ask again for this during this run"},
+    ),
+    "stop": (
+        False,
+        {"": "🛑 Stopped — tell Codex what to do differently in your next message"},
+    ),
+}
 
 
 class IaControlCommand(ClaudeControlCommand):
     """``ia:<action>:<request_id>`` — the engine-neutral approval buttons of
     a request registered with its own responder (#960; Antigravity's gate,
-    #980). Same claim / toast / registry path as Claude's: the request's
-    responder delivers the decision. ``always`` (Antigravity's "Always allow
-    this command here") approves and tells the responder to remember it."""
+    #980; Codex app-server, #963). Same claim / toast / registry path as
+    Claude's: the request's responder delivers the decision. ``always``
+    approves and tells the responder to remember it (Antigravity: this
+    command here; Codex: its host rule). ``session`` / ``stop`` are Codex's
+    ``acceptForSession`` / ``cancel``."""
 
     id = "ia"
     description = "Handle engine-neutral approval buttons"
@@ -700,25 +732,30 @@ class IaControlCommand(ClaudeControlCommand):
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         action, _, request_id = ctx.args_text.partition(":")
-        if action.lower() != "always" or not request_id:
+        action = action.lower()
+        extra = _IA_EXTRA_ACTIONS.get(action)
+        if extra is None or not request_id:
             return await super().handle(ctx)
+        approved, texts = extra
+        responder = responder_for(request_id)
+        engine = responder.engine if responder is not None else ""
         channel_id = ctx.message.channel_id
         sent = await respond(
             request_id,
-            Decision(approved=True, action="always"),
+            Decision(approved=approved, action=action),
             channel_id=channel_id,
             claim_owner=ctx.callback_query_id,
         )
         if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
-            return _unsent_result(sent, request_id, "always", channel_id=channel_id)
+            return _unsent_result(sent, request_id, action, channel_id=channel_id)
         logger.info(
             "claude_control.sent",
             request_id=request_id,
-            approved=True,
-            action="always",
+            approved=approved,
+            action=action,
             tool_name=sent.tool_name,
         )
-        return CommandResult(text=_ALWAYS_TEXT, notify=True)
+        return CommandResult(text=texts.get(engine, texts[""]), notify=True)
 
 
 IA_BACKEND: CommandBackend = IaControlCommand()

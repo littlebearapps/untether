@@ -13,7 +13,7 @@ from .buttons import (
     CONTROL_CALLBACK_PREFIXES,
     approval_keyboard,
 )
-from .preview import format_diff_preview
+from .preview import format_diff_preview, format_unified_diff_preview
 from .questions import (
     AskQuestionState,
     answer_ask_question,
@@ -87,6 +87,7 @@ __all__ = [
     "expire",
     "format_diff_preview",
     "format_question_message",
+    "format_unified_diff_preview",
     "get_ask_question_flow",
     "get_ask_question_flow_by_id",
     "get_pending_ask_request",

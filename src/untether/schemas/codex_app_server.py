@@ -410,6 +410,7 @@ class CommandApprovalParams(_Wire):
     command: str | None = None
     cwd: str | None = None
     reason: str | None = None
+    command_actions: list[Any] | None = None
     approval_id: str | None = None
     network_approval_context: dict[str, Any] | None = None
     proposed_execpolicy_amendment: list[str] | None = None

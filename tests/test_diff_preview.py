@@ -207,3 +207,40 @@ class TestBashPreview871:
         result = _format_diff_preview("Bash", {"command": cmd})
         assert result.startswith("$\n````sh\n")
         assert result.endswith("\n````")
+
+
+class TestUnifiedDiffPreview963:
+    """#963: Codex's ``fileChange`` update diff on an approval card."""
+
+    def test_hunks_dropped_lines_kept(self):
+        from untether.interactive.preview import format_unified_diff_preview
+
+        out = format_unified_diff_preview(
+            "/tmp/repo/notes.txt", "@@ -1 +1,2 @@\n hello\n+world\n"
+        )
+        assert out.startswith("```diff\n")
+        assert "notes.txt" in out
+        assert "+world" in out and " hello" in out and "@@" not in out
+
+    def test_truncated_to_eight_lines_of_sixty_columns(self):
+        from untether.interactive.preview import format_unified_diff_preview
+
+        diff = "\n".join(f"+line {i} " + "x" * 80 for i in range(12))
+        out = format_unified_diff_preview("a.txt", diff)
+        body = out.splitlines()[2:-1]  # fence, path … fence
+        assert len(body) == 9  # 8 lines + the "more" note
+        assert "…(4 more lines)" in body[-1]
+        assert all(len(line) <= 60 for line in body[:8])
+
+    def test_fence_outruns_backticks_in_the_diff(self):
+        from untether.interactive.preview import format_unified_diff_preview
+
+        out = format_unified_diff_preview("a.md", "+```python\n+x\n+```\n")
+        fence = out.splitlines()[0].removesuffix("diff")
+        assert len(fence) >= 4 and out.rstrip().endswith(fence)
+
+    def test_empty_diff_gives_nothing(self):
+        from untether.interactive.preview import format_unified_diff_preview
+
+        assert format_unified_diff_preview("a.txt", "") == ""
+        assert format_unified_diff_preview("a.txt", "@@ -0,0 +0,0 @@\n") == ""

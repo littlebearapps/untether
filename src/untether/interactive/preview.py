@@ -11,25 +11,49 @@ from typing import Any
 
 from ..markdown import backtick_fence, inline_code
 
+_MAX_PREVIEW_LINES = 8
+_MAX_LINE_LEN = 60
+
+
+def _truncate(text: str, max_len: int) -> str:
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
+
+def _fenced(lines: list[str], info: str = "diff") -> str:
+    # The approval text is rendered as Markdown: bare ``+ x`` lines became
+    # ``- x`` list items (an added line shown as removed) and the lines ran
+    # together. A fenced block keeps them verbatim; the fence outruns any
+    # backtick run in the content so it can't close early.
+    body = "\n".join(lines)
+    fence = backtick_fence(body, minimum=3)
+    return f"{fence}{info}\n{body}\n{fence}"
+
+
+def format_unified_diff_preview(path: str, diff: str) -> str:
+    """A unified diff (Codex's ``fileChange`` update, #963) as the same
+    compact fenced preview: hunk headers dropped, 8 lines of 60 columns."""
+    lines = [
+        line
+        for line in diff.splitlines()
+        if line and not line.startswith(("@@", "--- ", "+++ "))
+    ]
+    if not lines:
+        return ""
+    from ..utils.paths import relativize_path
+
+    out = [f"📝 {relativize_path(path)}"] if path else []
+    out.extend(_truncate(line, _MAX_LINE_LEN) for line in lines[:_MAX_PREVIEW_LINES])
+    if len(lines) > _MAX_PREVIEW_LINES:
+        out.append(f"  …({len(lines) - _MAX_PREVIEW_LINES} more lines)")
+    return _fenced(out)
+
 
 def format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a compact diff preview for Edit/Write tool approval messages."""
-    max_preview_lines = 8
-    max_line_len = 60
-
-    def _truncate(text: str, max_len: int) -> str:
-        if len(text) > max_len:
-            return text[: max_len - 1] + "…"
-        return text
-
-    def _fenced(lines: list[str], info: str = "diff") -> str:
-        # The approval text is rendered as Markdown: bare ``+ x`` lines
-        # became ``- x`` list items (an added line shown as removed) and the
-        # lines ran together. A fenced block keeps them verbatim; the fence
-        # outruns any backtick run in the content so it can't close early.
-        body = "\n".join(lines)
-        fence = backtick_fence(body, minimum=3)
-        return f"{fence}{info}\n{body}\n{fence}"
+    max_preview_lines = _MAX_PREVIEW_LINES
+    max_line_len = _MAX_LINE_LEN
 
     if tool_name == "Edit":
         file_path = tool_input.get("file_path", "")
