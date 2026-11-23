@@ -589,7 +589,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Voice (`voice.py`) | T1, R15-11 (vocabulary; supersedes RC12-10), R15-10 (endpoint), R17-19a…c (URL userinfo masked) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8, R17-14 (dev-ws forum) |
 | Directives (`directives.py`) | T9, T10 |
-| Triggers (`triggers/*.py`, trigger run options in `telegram/loop.py`) | R1–R5, R11–R14, TR-* (0.36.2rc1), R17-11a–g, R17-20a–i |
+| Triggers (`triggers/*.py`, trigger run options in `telegram/loop.py`, `budget_gate.py`, `--print-timeout` in `runners/antigravity.py`) | R1–R5, R11–R14, TR-* (0.36.2rc1, rc5), R17-11a–g, R17-20a–i |
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
@@ -1921,7 +1921,7 @@ AG-1 (`agy_version=<v>` on every run, including the first after an agy self-upda
 |---|---|---|
 | R362-1180 gate CLI uses the instance's agy | `UNTETHER_CONFIG_PATH=~/.untether-dev/untether.toml .venv/bin/untether agy-gate status --project <test project>` (read-only); repeat with `--config-path` | Prints the agy from the dev config's `[engines.antigravity]` (or `[antigravity]`) `cmd`, not the one on PATH; `--config-path` beats the env var |
 
-### Triggers (#1120, #1118, #1122, #1123, #1219)
+### Triggers (#1120, #1118, #1122, #1123, #1219; rc5: #1125, #1220)
 
 Preconditions: dev bot only; `[triggers] enabled = true` (turning it on needs a dev restart); the dev port from "0.36.1rc3 → Before the run"; every trigger sets `chat_id` **and** `project`; secrets of 32+ characters (`openssl rand -hex 32`). Settings hot-reload.
 
@@ -1943,6 +1943,18 @@ Preconditions: dev bot only; `[triggers] enabled = true` (turning it on needs a 
 | TR-1219c config mode | `chmod 664 ~/.untether-dev/untether.toml`, change one key | One WARN and one `⚠️ Config file permissions` notice with the `chmod` fix; 0600 after Untether next writes the file (a hand edit keeps the mode); not posted twice on reload |
 | TR-1219d leak check | `journalctl --user -u untether-dev -o cat --since <start> \| grep -c <secret>` over TR-1219a–c | `0` |
 | R13 (regression) | Re-run R13 (#1142); set `engine = "claude"` on the cron and webhook, or they run on the global default engine | As written; a webhook never inherits bypass |
+| TR-1125a budget cap | Cron `engine = "claude"`, `permission_mode = "auto"`, `max_budget_usd = 0.05`, R19-900 prompt | Error card from `error_max_budget_usd`; journal outcome `max_budget`; `runner.start` args contain `--max-budget-usd=0.05` |
+| TR-1125b turn cap | Claude cron, `max_turns = 1`, a prompt that needs 3 Bash calls | `error_max_turns` card; journal `max_turns`; args `--max-turns=1` |
+| TR-1125c time limit (Claude) | Claude cron, `max_elapsed_s = 45`, ``run `sleep 120` in Bash`` | Interrupted at about 45 s; `stopped: time limit` / ⏱️ footer; journal `max_elapsed`; WARN `trigger.max_elapsed.reached`, INFO `claude.interrupt.sent` |
+| TR-1125d time limit (Antigravity) | agy cron, `max_elapsed_s = 60`, a long prompt | Args `--print-timeout=60s`; error card "Stopped: the trigger's time limit"; journal `max_elapsed`; WARN `antigravity.print_timeout` |
+| TR-1125e clamp | Claude cron, `max_elapsed_s = 90000` | WARN `trigger.max_elapsed.clamped` naming `live_session_max_s` |
+| TR-1125f time limit (Codex) | Codex cron, `max_elapsed_s = 30`, a slow prompt | Cancelled at about 30 s, `stopped: time limit`; journal `max_elapsed`; `trigger.max_elapsed.reached` |
+| TR-1220a quiet end | Cron `quiet_unless_output = true`, `Reply exactly: [quiet] nothing to draft` | Label and progress message deleted, nothing left in the chat; INFO `trigger.quiet_end`; journal `quiet:true` |
+| TR-1220b no sentinel | Same cron, a prompt whose answer doesn't start with `[quiet]` | A normal final; journal `quiet:false` |
+| TR-1220c limit is never quiet | Same, plus `engine = "claude"`, `max_budget_usd = 0.0001` | Error card, never quiet; journal `max_budget` |
+| TR-1220d `skip_if_empty` | Cron with a `file_read` fetch of an empty file, `fetch.skip_if_empty = true` | No message; DEBUG `triggers.cron.fetch_empty_skip`; journal `skipped_empty` |
+
+Rows TR-1125a–f and TR-1220a–d (0.36.2rc5) use the same preconditions. Check them with `journalctl --user -u untether-dev -o cat --since <start> | grep -E 'trigger.max_elapsed|claude.interrupt|trigger.quiet_end|cost_budget.run_stopped|runner.start'` and `tail -3 ~/.untether-dev/triggers_runs.jsonl | jq -c '{trigger_id,outcome,quiet,quiet_line}'`. Run TR-1125f only on a build that has the Codex approvals branch (#963), because it uses the Codex cancel path.
 
 ### rc1 remaining (#882, #1238, #1239, #1240, #1248, #1249, #1250, #1251, #1255)
 
