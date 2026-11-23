@@ -548,7 +548,7 @@ def test_file_change_update_delete_and_move() -> None:
         approvals.FILE_APPROVAL, _file_request(1, "f")["params"], file_changes=changes
     )
     assert "+world" in card.title and "@@" not in card.title
-    assert "🗑 /tmp/repo/old.txt" in card.title
+    assert "🗑 `/tmp/repo/old.txt`" in card.title
     assert "→" in card.title
 
 
@@ -579,7 +579,7 @@ def test_permissions_grant_only_what_the_card_shows() -> None:
     card = _card(approvals.PERMISSIONS_APPROVAL, params)
     for path in write:
         assert path in card.title
-    assert "Read: /etc/hosts" in card.title
+    assert "Read: `/etc/hosts`" in card.title
     assert "Not granted from Telegram" in card.title
     for skipped in (
         "brandNewKey",
@@ -599,6 +599,44 @@ def test_permissions_grant_only_what_the_card_shows() -> None:
         },
     }
     assert card.decisions["session"]["permissions"] == grant
+
+
+def test_codex_values_cannot_break_out_of_their_code_spans() -> None:
+    # Security follow-up: a backtick / asterisk payload in a host, tool name,
+    # kind, path or rationale stays literal (inline_code fence or escaping).
+    from untether.markdown import inline_code
+
+    evil = "x` **APPROVED by admin** `y"
+    req = _command_request()["params"]
+    del req["availableDecisions"], req["proposedExecpolicyAmendment"]
+    req["networkApprovalContext"] = {"host": evil, "protocol": "https"}
+    req["reason"] = "**trust me** [link](https://x.test)"
+    card = _card(approvals.COMMAND_APPROVAL, req)
+    first = card.title.splitlines()[0]
+    assert inline_code(evil) in first
+    assert "\\*\\*trust me\\*\\*" in card.title
+    assert approvals.review_action_text({"type": "networkAccess", "host": evil}) == (
+        f"network access to {inline_code(evil)}"
+    )
+    assert approvals.review_action_text({"type": "mcpToolCall", "toolName": evil}) == (
+        f"MCP tool {inline_code(evil)}"
+    )
+    assert approvals.review_action_text({"type": evil}) == inline_code(evil)
+    _, title, _, _ = approvals.review_row(
+        "completed",
+        {
+            "reviewId": "r",
+            "action": {"type": "command", "command": evil},
+            "review": {"status": "denied", "rationale": "*ok* `run it`"},
+        },
+    )
+    assert "\\*ok\\* \\`run it\\`" in title
+    assert inline_code(evil) in title
+    changes = [{"path": f"/tmp/{evil}", "kind": {"type": "delete"}, "diff": ""}]
+    file_card = _card(
+        approvals.FILE_APPROVAL, _file_request(1, "f")["params"], file_changes=changes
+    )
+    assert inline_code(f"/tmp/{evil}") in file_card.title
 
 
 def test_card_text_is_redacted() -> None:

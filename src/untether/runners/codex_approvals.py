@@ -26,6 +26,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..background_status import escape_markdown
 from ..interactive.preview import (
     format_command_preview,
     format_diff_preview,
@@ -124,6 +125,12 @@ def _short(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _code(text: str, limit: int = 60) -> str:
+    """A value from Codex on a card (command, host, path, tool, kind) as a
+    code span its own backticks or markdown can't break out of."""
+    return inline_code(_short(text, limit)) or '""'
+
+
 def _command_decisions(params: cas.CommandApprovalParams) -> list[Any]:
     """Codex's decision list: ``availableDecisions`` when the server sends it
     (an experimental field it sends on stable connections, findings H2),
@@ -168,7 +175,7 @@ def _always_label(decision: dict[str, Any]) -> str | None:
         text = " ".join(str(p) for p in prefix)
         if "\n" in text:
             return None  # the TUI never offers a multi-line prefix either
-        return f"📌 Always allow `{_short(redact_url_secrets(text), _PREFIX_MAX)}` (saved on this host)"
+        return f'📌 Always allow "{_short(redact_url_secrets(text), _PREFIX_MAX)}" (saved on this host)'
     if "applyNetworkPolicyAmendment" in decision:
         inner = decision["applyNetworkPolicyAmendment"]
         rule = (
@@ -179,7 +186,7 @@ def _always_label(decision: dict[str, Any]) -> str | None:
         host = rule.get("host")
         if not isinstance(host, str) or not host:
             return None
-        return f"📌 Always allow `{_short(host, _PREFIX_MAX)}` (saved on this host)"
+        return f'📌 Always allow "{_short(host, _PREFIX_MAX)}" (saved on this host)'
     return None
 
 
@@ -226,7 +233,7 @@ def _file_change_lines(changes: list[Any], *, diff: bool) -> list[str]:
         kind = change.get("kind") if isinstance(change.get("kind"), dict) else {}
         kind_type = kind.get("type")
         text = redact_url_secrets(str(change.get("diff") or ""))
-        shown = relativize_path(path)
+        shown = _code(relativize_path(path), 200)
         if kind_type == "delete":
             lines.append(f"🗑 {shown}")
         elif kind_type == "add":
@@ -235,7 +242,7 @@ def _file_change_lines(changes: list[Any], *, diff: bool) -> list[str]:
         else:
             move = kind.get("move_path")
             if isinstance(move, str) and move:
-                lines.append(f"📝 {shown} → {relativize_path(move)}")
+                lines.append(f"📝 {shown} → {_code(relativize_path(move), 200)}")
                 path = move
             preview = format_unified_diff_preview(path, text) if diff else ""
             lines.append(preview or f"📝 {shown}")
@@ -255,11 +262,11 @@ def _entry_text(entry: Any) -> str | None:
     if not isinstance(path, dict):
         return None
     if path.get("type") == "path" and isinstance(path.get("path"), str):
-        where = relativize_path(path["path"])
+        where = _code(relativize_path(path["path"]), 4000)
     elif path.get("type") == "glob_pattern" and isinstance(path.get("pattern"), str):
-        where = f"pattern {path['pattern']}"
+        where = f"pattern {_code(path['pattern'], 4000)}"
     elif path.get("type") == "special" and isinstance(path.get("value"), str):
-        where = f"special {path['value']}"
+        where = f"special {_code(path['value'], 4000)}"
     else:
         return None
     return f"{entry['access'].title()}: {where}"
@@ -299,7 +306,7 @@ def permission_view(permissions: dict[str, Any]) -> tuple[list[str], dict[str, A
                     and all(isinstance(p, str) for p in item)
                 ):
                     if item:
-                        shown = ", ".join(relativize_path(p) for p in item)
+                        shown = ", ".join(_code(relativize_path(p), 4000) for p in item)
                         lines.append(f"{name.title()}: {shown}")
                         fs[name] = list(item)
                 elif name == "entries" and isinstance(item, list):
@@ -325,7 +332,7 @@ def permission_view(permissions: dict[str, Any]) -> tuple[list[str], dict[str, A
     if skipped:
         lines.append(
             "Not granted from Telegram (Untether can't show it): "
-            + ", ".join(sorted(set(skipped)))
+            + escape_markdown(", ".join(sorted(set(skipped))))
         )
     return lines, grant
 
@@ -349,14 +356,14 @@ def build_card(
         command = redact_url_secrets(params.command or "")
         summary = redact_url_secrets(_command_actions(params))
         net = params.network_approval_context or {}
-        label = _short(summary or command)
+        label = _code(summary or command)
         if params.network_approval_context is not None:
             host = str(net.get("host") or "?")
             protocol = net.get("protocol")
-            what = f"Network access to `{host}`" + (
-                f" ({protocol})" if protocol else ""
+            what = f"Network access to {_code(host)}" + (
+                f" ({escape_markdown(str(protocol))})" if protocol else ""
             )
-            label = host
+            label = _code(host)
         elif params.kind == "writeStdin":
             what = "Send input to a running command"
         elif params.kind == "humanCommand":
@@ -367,7 +374,7 @@ def build_card(
         if summary and summary != command:
             body.append(f"Codex reads it as: {inline_code(_short(summary, 200))}")
         if params.cwd and params.network_approval_context is None:
-            body.append(f"in {relativize_path(params.cwd)}")
+            body.append(f"in {_code(relativize_path(params.cwd), 200)}")
         decisions = {"deny": "decline"}  # D2: always offered
         for raw in _command_decisions(params):
             if raw == "accept":
@@ -389,14 +396,16 @@ def build_card(
         body.extend(lines)
         label = next(
             (
-                relativize_path(str(c.get("path")))
+                _code(relativize_path(str(c.get("path"))))
                 for c in file_changes or ()
                 if isinstance(c, dict) and c.get("path")
             ),
             "files",
         )
         if params.grant_root:
-            body.append(f"Asks to write under {relativize_path(params.grant_root)}")
+            body.append(
+                f"Asks to write under {_code(relativize_path(params.grant_root), 4000)}"
+            )
         decisions = {
             "approve": "accept",
             "session": "acceptForSession",
@@ -418,7 +427,7 @@ def build_card(
         decisions = {k: {"decision": v} for k, v in decisions.items()}
     reason = getattr(params, "reason", None)
     if reason:
-        body.append(f"Reason: {redact_url_secrets(reason)}")
+        body.append(f"Reason: {escape_markdown(redact_url_secrets(reason))}")
     title = f"Permission Request [codex] - {what}" + (
         " (sub-agent)" if subagent else ""
     )
@@ -448,21 +457,21 @@ def review_action_text(action: Any) -> str:
         return "an action"
     kind = action.get("type")
     if kind == "command" and isinstance(action.get("command"), str):
-        return f"`{_short(redact_url_secrets(action['command']))}`"
+        return _code(redact_url_secrets(action["command"]))
     if kind == "execve" and isinstance(action.get("argv"), list):
-        return f"`{_short(redact_url_secrets(' '.join(map(str, action['argv']))))}`"
+        return _code(redact_url_secrets(" ".join(map(str, action["argv"]))))
     if kind == "applyPatch" and isinstance(action.get("files"), list):
         count = len(action["files"])
         return f"an edit to {count} file{'s' if count != 1 else ''}"
     if kind == "networkAccess" and isinstance(action.get("host"), str):
-        return f"network access to `{action['host']}`"
+        return f"network access to {_code(action['host'])}"
     if kind == "mcpToolCall" and isinstance(action.get("toolName"), str):
-        return f"MCP tool `{action['toolName']}`"
+        return f"MCP tool {_code(action['toolName'])}"
     if kind == "requestPermissions":
         return "extra permissions"
     if kind == "writeStdin":
         return "input to a running command"
-    return f"`{kind}`" if isinstance(kind, str) and kind else "an action"
+    return _code(kind) if isinstance(kind, str) and kind else "an action"
 
 
 def review_row(phase: str, params: dict[str, Any]) -> tuple[str, str, bool, bool]:
@@ -479,7 +488,7 @@ def review_row(phase: str, params: dict[str, Any]) -> tuple[str, str, bool, bool
     title = f"{_SHIELD} {verb} {what}"
     rationale = review.get("rationale")
     if not ok and isinstance(rationale, str) and rationale:
-        title += f": {_short(redact_url_secrets(rationale), 200)}"
+        title += f": {escape_markdown(_short(redact_url_secrets(rationale), 200))}"
     return row_id, title, ok, warn
 
 
