@@ -125,6 +125,10 @@ class SessionLockMixin:
 # (value ``"concurrency"`` / ``"ram"``). The bridge reads it so a blocked
 # resume never auto-clears the chat's saved session.
 PRESPAWN_BLOCKED_KEY = "prespawn_blocked"
+# #1032: inline-keyboard rows (``[[{"text", "callback_data"}, …], …]``) for a
+# plain pre-spawn refusal (Antigravity's "Trust current config…"). The
+# bridge renders only an allow-listed callback prefix and drops the rest.
+PRESPAWN_BUTTONS_KEY = "prespawn_buttons"
 
 
 # #981: ``CompletedEvent.usage`` key for a decision card an engine wants

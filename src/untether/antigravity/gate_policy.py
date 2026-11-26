@@ -600,6 +600,11 @@ class _Scope:
     outside: tuple[str, ...]
     config_path: Path | str | None
     artifact_path: Any
+    # #1032: the run uses "Trust current config". A trusted foreign hook can
+    # run any project file (a script behind ``npm run``, an imported module,
+    # a test), so every in-project edit asks (Codex review, Nathan's
+    # decision 2026-11-26).
+    trusted_config: bool = False
 
 
 def _scope(
@@ -610,6 +615,7 @@ def _scope(
     outside: tuple[Path | str, ...],
     config_path: Path | str | None,
     artifact_path: Any,
+    trusted_config: bool = False,
 ) -> _Scope:
     return _Scope(
         root=root,
@@ -619,6 +625,7 @@ def _scope(
         outside=tuple(_real(p) for p in outside),
         config_path=config_path,
         artifact_path=artifact_path,
+        trusted_config=trusted_config,
     )
 
 
@@ -648,6 +655,7 @@ def classify_edit(
     outside: tuple[Path | str, ...] = (),
     config_path: Path | str | None = None,
     artifact_path: Any = None,
+    trusted_config: bool = False,
 ) -> Verdict:
     """An edit tool's targets: every path it names inside the project (or
     the conversation's artifact folder), not protected, not hard-linked →
@@ -665,6 +673,7 @@ def classify_edit(
         outside,
         config_path,
         artifact_path,
+        trusted_config,
     )
     return _classify_paths(paths, scope, write=True)
 
@@ -715,6 +724,8 @@ def _classify_paths(paths: list[Any], scope: _Scope, *, write: bool) -> Verdict:
         rel = PurePosixPath(*Path(os.path.relpath(real, base)).parts).as_posix()
         if rel == "." or _protected_rel(rel, scope.outbox_dir):
             return Verdict(False, "protected")
+        if scope.trusted_config:
+            return Verdict(False, "trusted")
     return ALLOW
 
 
@@ -730,14 +741,16 @@ def classify(
     outside: tuple[Path | str, ...] = (),
     config_path: Path | str | None = None,
     artifact_path: Any = None,
+    trusted_config: bool = False,
 ) -> Verdict:
     """Ask me's safe list: exact tool names, fully resolved paths. Anything
     it can't prove safe — including an error while checking — asks.
     ``diff_preview`` (the chat's Diff preview toggle switched on) asks before
     in-project edits too, with the diff (Claude's C5). ``outbox_dir`` is the
     instance's ``files.outbox_dir``, ``outside`` the ``@branch`` worktree
-    roots, ``config_path`` the instance's config file and ``artifact_path``
-    the payload's ``artifactDirectoryPath``."""
+    roots, ``config_path`` the instance's config file, ``artifact_path``
+    the payload's ``artifactDirectoryPath``; ``trusted_config`` (#1032): the
+    run uses a trust record, so every in-project edit asks."""
     try:
         scope = (
             _scope(
@@ -748,6 +761,7 @@ def classify(
                 outside,
                 config_path,
                 artifact_path,
+                trusted_config,
             )
             if root is not None
             else None
@@ -1330,6 +1344,7 @@ def _subagents_preview(args: dict[str, Any]) -> str:
 _WHY_NOTE = {
     "outside": "outside this project",
     "protected": "a protected file in this project",
+    "trusted": "this run uses trusted agy config, so every edit asks",
     "self": "Untether's own files — approving lets agy change Telegram approvals",
     "mismatch": "agy's workspace isn't this chat's project",
     "unclear": "arguments Untether can't check",

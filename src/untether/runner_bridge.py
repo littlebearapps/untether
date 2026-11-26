@@ -59,6 +59,7 @@ from .progress import (
 )
 from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
+    PRESPAWN_BUTTONS_KEY,
     Runner,
     RunStreamHandle,
     _sanitise_stderr,
@@ -7486,6 +7487,38 @@ def _plain_prespawn_refusal(usage: dict[str, Any] | None) -> str | None:
     return reason if reason in _PLAIN_PRESPAWN_BLOCKS else None
 
 
+# #1032: the only callback prefix a pre-spawn refusal may carry.
+_PRESPAWN_BUTTON_PREFIXES = ("agy_trust:",)
+
+
+def _prespawn_buttons(usage: dict[str, Any] | None) -> list[list[dict[str, str]]]:
+    """A plain refusal's keyboard (``usage[PRESPAWN_BUTTONS_KEY]``): rows of
+    ``{text, callback_data}`` with an allow-listed prefix within Telegram's
+    64 bytes. Anything else is dropped (and logged), never half-rendered."""
+    raw = (usage or {}).get(PRESPAWN_BUTTONS_KEY)
+    if raw is None:
+        return []
+    ok = isinstance(raw, list) and all(
+        isinstance(row, list)
+        and row
+        and all(
+            isinstance(b, dict)
+            and set(b) == {"text", "callback_data"}
+            and isinstance(b["text"], str)
+            and b["text"]
+            and isinstance(b["callback_data"], str)
+            and b["callback_data"].startswith(_PRESPAWN_BUTTON_PREFIXES)
+            and len(b["callback_data"].encode("utf-8")) <= 64
+            for b in row
+        )
+        for row in raw
+    )
+    if not ok:
+        logger.warning("handle.prespawn_buttons_dropped", kind=type(raw).__name__)
+        return []
+    return raw
+
+
 # #1388: a prompt the RAM guard would refuse is held, not dropped.
 _RAM_HOLD_POLL_S = 15.0
 _RAM_HOLD_MAX_S = 300.0
@@ -8809,7 +8842,9 @@ async def handle_message(
             # #1047: the refusal's own text replaces the card — no header,
             # resume line or footers (nothing ran), and no Cancel button.
             refusal_text, refusal_entities = _code_span_entities(final_answer)
-            refusal_extra: dict[str, Any] = {"reply_markup": {"inline_keyboard": []}}
+            refusal_extra: dict[str, Any] = {
+                "reply_markup": {"inline_keyboard": _prespawn_buttons(completed.usage)}
+            }
             if refusal_entities:
                 refusal_extra["entities"] = refusal_entities
             final_rendered = RenderedMessage(text=refusal_text, extra=refusal_extra)

@@ -824,3 +824,436 @@ async def test_edited_plugin_cron_hold_says_only_a_reinstall_releases_it(
         assert "runs again after that" not in text
     install_plugin()
     assert (await cron()).ok
+
+
+# ── #1032 Trust current config (phase 1: the record can only be written by
+# a test; phase 2 adds the button that writes it) ──────────────────────────
+
+_LINT_ACTIONS = [{"event": "Stop", "type": "command", "command": "echo hi"}]
+
+
+@pytest.fixture
+def foreign_stop(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """AG-61's setup: one project ``Stop`` hook group, in the scan and in
+    agy's listing."""
+    from untether.antigravity import gate_trust
+
+    gate_trust._reset_for_tests()
+    # The fingerprint needs agy's version (unknown → untrustable).
+    monkeypatch.setattr(agy, "_probe_agy_version", agy._run_agy_version)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_VERSION", "1.5.18")
+    hooks = project / ".agents" / "hooks.json"
+    hooks.parent.mkdir()
+    hooks.write_text(json.dumps({"lint": {"Stop": [{"command": "echo hi"}]}}))
+    (project / "README.md").write_text("hello\n")
+
+    async def listing(runner: Any, cwd: Path) -> dict[str, Any]:
+        extra = {
+            "name": "lint",
+            "enabled": True,
+            "source": str(hooks),
+            "actions": _LINT_ACTIONS,
+        }
+        return hooks_listing(extra_groups=[extra])
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+    return hooks
+
+
+async def _ask_run(
+    runner: AntigravityRunner,
+    *,
+    options: EngineRunOptions | None = None,
+    on_card: Any = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """One Ask me run; every approval card is approved (after ``on_card``)."""
+    from untether.interactive import Decision, respond
+    from untether.runners.run_options import reset_run_options
+
+    async def approve(request_id: str) -> None:
+        if on_card is not None:
+            on_card()
+        await respond(request_id, Decision(approved=True, action="approve"))
+
+    events: list[Any] = []
+    token = set_run_options(options or EngineRunOptions(permission_mode="ask"))
+    try:
+        with structlog.testing.capture_logs() as logs:
+            async with anyio.create_task_group() as tg:
+                async for evt in runner.run("do the four steps", None):
+                    events.append(evt)
+                    if (
+                        isinstance(evt, ActionEvent)
+                        and evt.phase == "started"
+                        and evt.action.detail.get("request_type") == "PreToolUse"
+                    ):
+                        tg.start_soon(approve, evt.action.detail["request_id"])
+    finally:
+        reset_run_options(token)
+    return events, logs
+
+
+def _trust_latest_offer(runner: AntigravityRunner) -> Any:
+    """What phase 2's ✅ Trust will do: claim the refusal's offer and store
+    the offer's fingerprint (never a recomputation)."""
+    from untether.antigravity import gate_trust
+    from untether.utils.antigravity_state import TrustRecord
+
+    token = next(reversed(gate_trust._OFFERS))
+    offer = gate_trust.claim_offer(token, chat_id=CHAT)
+    assert offer is not None
+    fp = offer.fingerprint
+    record = TrustRecord(
+        fp=fp.digest,
+        paths=fp.paths,
+        groups=fp.groups,
+        agy=fp.agy_version,
+        at=1.0,
+        by=None,
+    )
+    assert runner._trust().set(CHAT, offer.root, record)
+    return offer
+
+
+def _events(logs: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    return [log for log in logs if log["event"] == name]
+
+
+def _assert_offer_button(done: Any) -> None:
+    """A foreign-config refusal with exactly one Trust button whose token is
+    a live offer."""
+    from untether.antigravity import gate_trust
+    from untether.runner import PRESPAWN_BUTTONS_KEY
+
+    assert done.usage[agy.PRESPAWN_BLOCKED_KEY] == agy.GATE_FOREIGN_BLOCK
+    ((button,),) = done.usage[PRESPAWN_BUTTONS_KEY]
+    assert button["text"] == gate_trust.OFFER_BUTTON_TEXT
+    prefix = gate_trust.callback_data("ask", "")
+    assert button["callback_data"].startswith(prefix)
+    assert button["callback_data"][len(prefix) :] in gate_trust._OFFERS
+
+
+@pytest.mark.anyio
+async def test_ask_me_trusted_record_runs_with_bypass(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AG-61 (unit): refused with an offer; once the offer's fingerprint is
+    recorded, the next Ask me run goes ahead from the real ``_ask_facts``
+    path — bypass flag, required gate, ``config_trust_used`` logged and the
+    ``· trusted agy config`` footer label."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    events, logs = await _ask_run(runner)
+    (done,) = events
+    _assert_offer_button(done)
+    assert "tap Trust current config…" in (done.error or "")
+    assert not gate_env["record"].exists()
+    (offered,) = _events(logs, "antigravity.config_trust_offered")
+    assert offered["chat_id"] == CHAT and len(offered["fp"]) == 12
+    assert offered["groups"] == [f"lint ({foreign_stop})"]
+    assert "token" not in offered
+    offer = _trust_latest_offer(runner)
+
+    events, logs = await _ask_run(runner)
+    done = _contract(events)
+    assert done.ok
+    argv = json.loads(gate_env["record"].read_text())["argv"]
+    assert agy.BYPASS_FLAG in argv
+    (used,) = _events(logs, "antigravity.config_trust_used")
+    assert used["fp"] == offer.fingerprint.short
+    names = [log["event"] for log in logs]
+    assert names.index("antigravity.config_trust_used") < names.index("runner.start")
+    (listening,) = _events(logs, "antigravity.gate.listening")
+    assert listening["required"] is True
+    assert events[0].meta["permissionMode"].endswith(" · trusted agy config")
+    assert "antigravity.permission_mode.gate_refused" not in names
+
+
+@pytest.mark.anyio
+async def test_ask_me_trust_ignored_for_trigger_ask_cron(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AG-61e (unit): a cron with its own ``ask`` never uses a record and
+    never gets an offer."""
+    from untether.antigravity import gate_trust
+    from untether.utils import antigravity_scan
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    _trust_latest_offer(runner)
+    # An attended run has shown this config (else the cron is held earlier).
+    scan = antigravity_scan.scan_workspace_config(project)
+    runner._seen().set(scan.root, scan.agy_digest)
+    cron = EngineRunOptions(
+        permission_mode="ask",
+        unattended_trigger="cron:nightly",
+        trigger_permission_mode="ask",
+    )
+    events, logs = await _ask_run(runner, options=cron)
+    (done,) = events
+    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    assert not _events(logs, "antigravity.config_trust_used")
+    assert not _events(logs, "antigravity.config_trust_offered")
+    assert gate_trust._OFFERS == {}
+    assert not gate_env["record"].exists()
+
+
+@pytest.mark.anyio
+async def test_ask_me_stale_record_refuses_with_new_offer(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AG-61b (unit): the config changed since it was trusted → refused,
+    ``config_trust_stale``, and a fresh offer for the new fingerprint."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    old = _trust_latest_offer(runner)
+    foreign_stop.write_text(
+        json.dumps({"lint": {"Stop": [{"command": "echo hi"}, {"command": "x"}]}})
+    )
+    events, logs = await _ask_run(runner)
+    (done,) = events
+    _assert_offer_button(done)
+    assert (done.error or "").startswith(
+        "The agy config here changed since it was trusted on 1970-01-0"
+    )
+    (stale,) = _events(logs, "antigravity.config_trust_stale")
+    assert stale["was"] == old.fingerprint.short and stale["now"] != stale["was"]
+    (offered,) = _events(logs, "antigravity.config_trust_offered")
+    assert offered["fp"] == stale["now"]
+    assert not gate_env["record"].exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hole", ["pretooluse", "mcp_unknown"])
+async def test_ask_me_offer_only_when_fingerprint_complete(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hole: str,
+) -> None:
+    """No offer (and a stored record isn't honoured) when the set can't be
+    fingerprinted completely; the reason is in the precheck log."""
+    from untether.antigravity import gate_trust
+    from untether.utils import antigravity_scan
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    _trust_latest_offer(runner)
+    if hole == "pretooluse":
+        actions = [{"event": "PreToolUse", "matcher": "*", "command": "echo hi"}]
+        expected = gate_trust.FOREIGN_PRETOOLUSE
+
+        async def listing(runner: Any, cwd: Path) -> dict[str, Any]:
+            extra = {
+                "name": "lint",
+                "enabled": False,
+                "source": str(foreign_stop),
+                "actions": actions,
+            }
+            return hooks_listing(extra_groups=[extra])
+
+        monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+        gate_precheck.clear_cache()
+    else:
+        expected = gate_trust.MCP_UNKNOWN
+        mcp = antigravity_scan.user_config_dir() / "mcp_config.json"
+        mcp.write_text('{"mcpServers": {"fs": {"command": "npx"}}}')
+
+        async def failed(runner: Any) -> None:
+            return None
+
+        monkeypatch.setattr(gate_precheck, "_probe_mcp", failed)
+    events, logs = await _ask_run(runner)
+    (done,) = events
+    # No button (test_ask_me_foreign_pretooluse_refusal_text_has_no_button);
+    # the text says why the config can't be trusted.
+    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    assert "can't be trusted for Ask me" in (done.error or "")
+    assert "Trust current config" not in (done.error or "")
+    assert not _events(logs, "antigravity.config_trust_used")
+    assert not _events(logs, "antigravity.config_trust_offered")
+    assert gate_trust._OFFERS == {}
+    (failed_log,) = [
+        log
+        for log in _events(logs, "antigravity.gate.precheck_failed")
+        if log.get("reason") == "foreign_config"
+    ]
+    assert failed_log["trust"] == expected
+    (stale,) = _events(logs, "antigravity.config_trust_stale")
+    assert stale["now"] is None and stale["untrustable"] == expected
+    assert not gate_env["record"].exists()
+
+
+@pytest.mark.anyio
+async def test_post_run_config_change_revokes_trust(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AG-61g (unit, D11): the trusted set changes during a trusted run →
+    the record is removed and the ⚠️ row says so; the next run refuses."""
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    offer = _trust_latest_offer(runner)
+
+    def plant() -> None:
+        foreign_stop.write_text(json.dumps({"lint": {"Stop": [{"command": "x"}]}}))
+
+    events, logs = await _ask_run(runner, on_card=plant)
+    assert _events(logs, "antigravity.config_trust_used")
+    (revoked,) = _events(logs, "antigravity.config_trust_revoked")
+    assert revoked["reason"] == "changed_during_run"
+    assert revoked["fp"] == offer.fingerprint.short
+    assert runner._trust().get(CHAT, offer.root) is None
+    rows = [
+        e.action.title
+        for e in events
+        if isinstance(e, ActionEvent) and "Antigravity changed" in e.action.title
+    ]
+    assert rows and "Trust for Ask me was removed" in rows[0]
+    events, _ = await _ask_run(runner)
+    (done,) = events
+    _assert_offer_button(done)
+
+
+@pytest.mark.anyio
+async def test_trust_buttons_end_to_end_through_the_trust_file(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AG-61 (unit, phase 2): the refusal's button → disclosure → ✅ Trust
+    writes ``antigravity_trust.json`` beside the config, and the runner (its
+    own store instance) runs the next Ask me message trusted. A ✅ Trust
+    tapped without the disclosure first writes nothing."""
+    from types import SimpleNamespace
+
+    from untether.runner import PRESPAWN_BUTTONS_KEY
+    from untether.telegram.commands.antigravity_trust import BACKEND
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    config = tmp_path / "untether.toml"
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY), config_path=config)
+    events, _ = await _ask_run(runner)
+    data = events[-1].usage[PRESPAWN_BUTTONS_KEY][0][0]["callback_data"]
+    token = data.rsplit(":", 1)[1]
+
+    async def tap(action: str) -> list[Any]:
+        edits: list[Any] = []
+
+        async def edit(ref: Any, message: Any) -> Any:
+            edits.append(message)
+            return ref
+
+        await BACKEND.handle(
+            SimpleNamespace(
+                args_text=f"{action}:{token}",
+                message=SimpleNamespace(
+                    channel_id=CHAT, message_id=9, thread_id=None, sender_id=11
+                ),
+                callback_query_id="q",
+                executor=SimpleNamespace(edit=edit),
+                config_path=config,
+            )
+        )
+        return edits
+
+    await tap("yes")  # one tap: refused
+    assert not (tmp_path / "antigravity_trust.json").exists()
+    await tap("ask")
+    (msg,) = await tap("yes")
+    assert "Trusted for Ask me" in msg.text
+    assert (tmp_path / "antigravity_trust.json").exists()
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    assert _events(logs, "antigravity.config_trust_used")
+    assert agy.BYPASS_FLAG in json.loads(gate_env["record"].read_text())["argv"]
+
+
+def _pkg_decisions(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [
+        (log["decision"], log["source"])
+        for log in _events(logs, "antigravity.gate.decision")
+        if log.get("tool") == "write_to_file"
+    ]
+
+
+@pytest.mark.anyio
+async def test_trusted_run_every_edit_asks(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1032, Codex reviews (AG-61h): a trusted hook can run any project file
+    (a script behind `npm run`, an imported module, a test), so in a run that
+    uses a trust record every in-project edit gets a card, never the safe
+    list: package.json here, README.md in the second run. Reads don't ask."""
+    (project / "package.json").write_text('{"scripts": {"check": "eslint ."}}')
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    _trust_latest_offer(runner)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_pkg")
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    assert _events(logs, "antigravity.config_trust_used")
+    cards = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "started"
+        and e.action.detail.get("request_type") == "PreToolUse"
+    ]
+    assert len(cards) == 1
+    assert "this run uses trusted agy config, so every edit asks" in (
+        cards[0].action.title
+    )
+    assert _pkg_decisions(logs) == [("allow", "user")]
+    (card_log,) = _events(logs, "antigravity.gate.card")
+    assert card_log["why"] == "trusted"
+    (listening,) = _events(logs, "antigravity.gate.listening")
+    assert listening["required"] is True
+    # gate_askme's in-project README.md write: a card too (untrusted: none).
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    whys = [log["why"] for log in _events(logs, "antigravity.gate.card")]
+    assert whys.count("trusted") == 1 and len(whys) == 4
+
+
+@pytest.mark.anyio
+async def test_untrusted_run_edit_to_package_json_is_safe_listed(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No foreign config, no trust: package.json is an ordinary in-project
+    edit on the safe list, exactly as before #1032."""
+    (project / "package.json").write_text('{"scripts": {"check": "eslint ."}}')
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_pkg")
+    events, logs = await _ask_run(_runner())
+    assert _contract(events).ok
+    assert not [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.detail.get("request_type")
+    ]
+    assert _pkg_decisions(logs) == [("allow", "policy")]

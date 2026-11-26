@@ -21,6 +21,7 @@ the first model step) proves they *run*.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -98,6 +99,12 @@ class GatePrecheck:
     # REVIEW-2 B3: the project holds Untether's own code (that path). Only a
     # mode whose safety rests on the gate refuses on it (phase 14).
     self_protect: str | None = None
+    # #1032: those groups' definitions as agy lists them (the trust
+    # fingerprint hashes them), and the sources of any with a PreToolUse
+    # action, enabled or not (never trustable: it can approve or rewrite a
+    # call after Untether's gate, D1).
+    foreign_groups: tuple[HookGroup, ...] = ()
+    foreign_pretooluse: tuple[str, ...] = ()
 
 
 def parse_hooks(data: dict[str, Any]) -> list[HookGroup]:
@@ -144,7 +151,22 @@ def _is_our_source(source: str) -> bool:
 
 
 def evaluate_hooks(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
-    """Pure: does agy's own listing carry our gate exactly?"""
+    """Pure: does agy's own listing carry our gate exactly? Also keeps the
+    other groups (#1032), whatever the answer."""
+    others = tuple(g for g in groups if g.name != gate_plugin.PLUGIN_NAME)
+    pretooluse = {
+        g.source or g.name
+        for g in others
+        if any(a.get("event") == "PreToolUse" for a in g.actions)
+    }
+    return replace(
+        _evaluate_ours(groups, wait_s=wait_s),
+        foreign_groups=others,
+        foreign_pretooluse=tuple(sorted(pretooluse)),
+    )
+
+
+def _evaluate_ours(groups: list[HookGroup], *, wait_s: int) -> GatePrecheck:
     ours = [g for g in groups if g.name == gate_plugin.PLUGIN_NAME]
     foreign = tuple(
         sorted(
@@ -343,7 +365,8 @@ USER_MCP_KEY = f"{antigravity_scan.USER_DISPLAY_PREFIX}mcp_config.json"
 USER_HOOKS_KEY = f"{antigravity_scan.USER_DISPLAY_PREFIX}hooks.json"
 MCP_LIST_TIMEOUT_S = 15.0
 _NO_MCP_SERVERS = "No MCP servers configured."
-_MCP_CACHE: dict[tuple[Any, ...], bool] = {}
+MCP_NONE = "none"
+_MCP_CACHE: dict[tuple[Any, ...], str] = {}
 
 
 async def _run_mcp_list(runner: AntigravityRunner) -> str | None:
@@ -393,6 +416,13 @@ async def user_mcp_configured(runner: AntigravityRunner) -> bool:
     ``~/.gemini/config/mcp_config.json`` (D33: never read), and an existing
     file says nothing about servers (lba-1 has an empty one), so agy's own
     ``agy mcp list`` decides. Fails closed: an error counts as "has some"."""
+    return await user_mcp_digest(runner) != MCP_NONE
+
+
+async def user_mcp_digest(runner: AntigravityRunner) -> str | None:
+    """``agy mcp list``: :data:`MCP_NONE` when agy says there are no servers,
+    else the sha256 of its stdout (#1032: the trust fingerprint); None when
+    the listing failed (never cached)."""
     from ..runners import antigravity as agy_runner
 
     cmd = runner.command()
@@ -405,13 +435,20 @@ async def user_mcp_configured(runner: AntigravityRunner) -> bool:
     if hit is not None:
         return hit
     out = await _probe_mcp(runner)
-    configured = out is None or out.strip() != _NO_MCP_SERVERS
+    digest: str | None = None
     if out is not None:
-        _MCP_CACHE[key] = configured
+        digest = (
+            MCP_NONE
+            if out.strip() == _NO_MCP_SERVERS
+            else hashlib.sha256(out.encode("utf-8")).hexdigest()
+        )
+        _MCP_CACHE[key] = digest
     logger.info(
-        "antigravity.gate.user_mcp", configured=configured, checked=out is not None
+        "antigravity.gate.user_mcp",
+        configured=digest != MCP_NONE,
+        checked=out is not None,
     )
-    return configured
+    return digest
 
 
 async def foreign_config(
@@ -521,6 +558,8 @@ async def check(
                 reason=evaluated.reason,
                 detail=evaluated.detail,
                 foreign_sources=evaluated.foreign_sources,
+                foreign_groups=evaluated.foreign_groups,
+                foreign_pretooluse=evaluated.foreign_pretooluse,
                 wait_s=wait_s,
                 cwd=str(cwd),
             )

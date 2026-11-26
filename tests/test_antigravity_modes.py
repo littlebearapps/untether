@@ -8,6 +8,7 @@ user-level MCP check that replaces "the file exists".
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,107 @@ def test_decide_mode_truth_table(
     # A refusal never carries the bypass flag.
     if decision.refusal is not None:
         assert not decision.bypass
+
+
+_FOREIGN = (".agents/hooks.json",)
+
+
+def test_decide_foreign_trusted_bypasses_gated() -> None:
+    """#1032: a matching trust record lifts only the foreign refusal; the
+    gate is still required."""
+    gate = GateFacts(
+        installed=True, foreign=_FOREIGN, foreign_trusted=True, listening=True
+    )
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.bypass and decision.gated and decision.refusal is None
+
+
+def test_decide_untrusted_foreign_still_refuses() -> None:
+    gate = GateFacts(installed=True, foreign=_FOREIGN, listening=True)
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.block == agy.GATE_FOREIGN_BLOCK and not decision.bypass
+
+
+@pytest.mark.parametrize(
+    ("facts", "block"),
+    [
+        (
+            {"self_protect": "/u", "listening": True},
+            agy.GATE_SELF_PROTECT_BLOCK,
+        ),
+        ({"problem": "x", "listening": True}, agy.GATE_NOT_READY_BLOCK),
+        ({"listening": False}, agy.GATE_NOT_READY_BLOCK),
+    ],
+    ids=["self_protect", "problem", "not_listening"],
+)
+def test_decide_trust_never_beats_other_refusals(
+    facts: dict[str, Any], block: str
+) -> None:
+    """test_decide_self_protect_beats_trust / _problem_beats_trust /
+    _not_listening_beats_trust."""
+    gate = GateFacts(installed=True, foreign=_FOREIGN, foreign_trusted=True, **facts)
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.block == block and not decision.bypass
+    # Trust is never consulted outside Ask me either.
+    for mode in ("workspace", "plan"):
+        assert not decide_antigravity_mode(mode, gate).bypass
+
+
+def test_foreign_refusal_with_offer_names_the_trust_button() -> None:
+    gate = GateFacts(
+        installed=True, foreign=_FOREIGN, trust_offer="ab12cd34", listening=True
+    )
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.trust_offer == "ab12cd34" and not decision.bypass
+    assert "tap Trust current config… if you set them up yourself" in (
+        decision.refusal or ""
+    )
+    plain = decide_antigravity_mode("ask", replace(gate, trust_offer=None))
+    assert plain.trust_offer is None
+    assert "Trust current config" not in (plain.refusal or "")
+
+
+def test_foreign_refusal_says_when_trusted_config_changed() -> None:
+    import time
+
+    at = time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))
+    gate = GateFacts(
+        installed=True,
+        foreign=_FOREIGN,
+        trust_offer="ab12cd34",
+        trust_stale_at=at,
+        listening=True,
+    )
+    text = decide_antigravity_mode("ask", gate).refusal or ""
+    assert text.startswith(
+        "The agy config here changed since it was trusted on 2026-11-20."
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "words"),
+    [
+        ("foreign_pretooluse", "can approve or change a tool call"),
+        ("agent_hooks", "declares its own hooks"),
+        ("agent_unreadable", "can't read"),
+        ("mcp_unknown", "`agy mcp list`"),
+        ("version_unknown", "agy's version"),
+        ("scan_incomplete", "couldn't check all"),
+    ],
+)
+def test_foreign_refusal_says_why_it_cant_be_trusted(reason: str, words: str) -> None:
+    gate = GateFacts(
+        installed=True,
+        foreign=_FOREIGN,
+        trust_untrustable=(reason, "/p/.agents/hooks.json"),
+        listening=True,
+    )
+    decision = decide_antigravity_mode("ask", gate)
+    text = decision.refusal or ""
+    assert words in text and "can't be trusted for Ask me" in text
+    assert decision.trust_offer is None
+    if reason == "foreign_pretooluse":
+        assert "`/p/.agents/hooks.json`" in text
 
 
 def test_bypass_only_for_full_or_ready_attended_ask() -> None:

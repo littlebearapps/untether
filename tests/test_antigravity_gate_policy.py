@@ -1429,3 +1429,58 @@ def test_always_allow_refused_for_unusual_characters(command: str) -> None:
         {"CommandLine": "ls", "Cwd": f"/p{command}"}
     )
     assert gate_policy.always_allowable({"CommandLine": "npm test\n\tx"})
+
+
+# ── #1032: in a trusted run every in-project edit asks ───────────────────
+
+
+def _trusted_edit(target: Path, root: Path, trusted: bool):
+    return classify(
+        "write_to_file",
+        _edit(target),
+        root=root,
+        conversation_id=CID,
+        trusted_config=trusted,
+    )
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["README.md", "src/x.py", "scripts/check.js", "package.json", "tests/test_x.py"],
+)
+def test_trusted_run_every_edit_asks(root: Path, rel: str) -> None:
+    """A trusted hook can run any project file (Codex review: a protected
+    list can't name them all), so in a run that uses a trust record every
+    in-project write asks; the same write in an untrusted Ask me run is on
+    the safe list exactly as before."""
+    target = root / rel
+    verdict = _trusted_edit(target, root, True)
+    assert not verdict.allow and verdict.why == "trusted"
+    assert _trusted_edit(target, root, False).allow
+    # agy 1.5.x's write tool too.
+    args = {"Path": str(target), "Content": "x"}
+    for trusted in (True, False):
+        verdict_15 = classify(
+            "write_file", args, root=root, conversation_id=CID, trusted_config=trusted
+        )
+        assert verdict_15.allow is (not trusted)
+    title = gate_policy.card_title("write_to_file", _edit(target), verdict, root=root)
+    assert "this run uses trusted agy config, so every edit asks" in title
+
+
+def test_trusted_run_reads_unchanged(root: Path) -> None:
+    for trusted in (True, False):
+        assert classify(
+            "view_file",
+            {"AbsolutePath": str(root / "README.md")},
+            root=root,
+            conversation_id=CID,
+            trusted_config=trusted,
+        ).allow
+
+
+def test_trusted_run_keeps_stronger_reasons(root: Path) -> None:
+    """Outside, protected and self verdicts keep their own reason."""
+    assert _trusted_edit(root / ".agents" / "x.json", root, True).why == "protected"
+    outside = root.parent / "elsewhere.txt"
+    assert _trusted_edit(outside, root, True).why == "outside"
