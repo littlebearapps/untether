@@ -1818,9 +1818,10 @@ def _effective_reasoning(
 async def _codex_catalogue(
     ctx: CommandContext, override_model: str | None
 ) -> tuple[Any, str | None, str]:
-    """#846: Codex's catalogue (cached 1 h, a zero-token app-server read
-    bounded at 10 s), the model a plain message here would run and where
-    that model comes from. ``(None, override, "")`` when it can't be read."""
+    """#846: Codex's catalogue (re-read once older than 60 s, #1412; a
+    zero-token app-server read bounded at 10 s), the model a plain message
+    here would run and where that model comes from. ``(None, override, "")``
+    when it can't be read."""
     from pathlib import Path
 
     from ...runners import codex_reads
@@ -1839,7 +1840,9 @@ async def _codex_catalogue(
     catalogue = None
     with anyio.move_on_after(codex_reads.READ_TIMEOUT_S + 1.0):
         try:
-            catalogue = await codex_reads.get_catalogue(runner, cwd)
+            catalogue = await codex_reads.get_catalogue(
+                runner, cwd, max_age_s=codex_reads.REASONING_PAGE_MAX_AGE_S
+            )
         except codex_reads.CodexReadError:
             catalogue = None  # logged by the cache
     if catalogue is None:

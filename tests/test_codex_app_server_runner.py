@@ -530,6 +530,42 @@ async def test_session_summary_names_the_last_jsonrpc_method(
     assert stream.last_event_type == "turn/completed"
     labels = [label for _, label in stream.recent_events]
     assert "unknown" not in labels
+    # #1412 item 2: the main thread's turn/completed latches saw_result.
+    assert stream.saw_result is True
+
+
+@pytest.mark.anyio
+async def test_failed_turn_latches_saw_result(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(tmp_path, status="failed", turn_error={"message": "boom"})
+    runner = _runner(fake)
+    assert not _completed(await _run(runner)).ok
+    assert runner.current_stream is not None
+    assert runner.current_stream.saw_result is True
+
+
+def test_subagent_turn_completed_does_not_latch() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    method, params = _turn_completed()
+    _translate(runner, state, method, {**params, "threadId": "subagent"})
+    assert state.saw_result is False
+    _translate(runner, state, method, params)
+    assert state.saw_result is True
+
+
+@pytest.mark.anyio
+async def test_clean_exit_without_turn_completed_keeps_saw_result_false(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    fake = Fake(
+        tmp_path, exit_before_complete=True, messages=[["kept", "final_answer"]]
+    )
+    runner = _runner(fake)
+    assert not _completed(await _run(runner)).ok
+    assert runner.current_stream is not None
+    assert runner.current_stream.saw_result is False
 
 
 @pytest.mark.anyio
@@ -886,6 +922,22 @@ async def test_matching_echo_object_gives_no_warning(
     fake = Fake(tmp_path)  # echoes {"type": "readOnly"} for read-only
     with capture_logs() as logs:
         await _run(_runner(fake), options=EngineRunOptions(permission_mode="safe"))
+    assert not any(e["event"] == "codex.permission_mode.mismatch" for e in logs)
+
+
+@pytest.mark.anyio
+async def test_permissions_log_includes_web_search(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#1412 item 6: the INFO line names the config.web_search sent; it is
+    not an echo field, so it never counts as a mismatch."""
+    fake = Fake(tmp_path)
+    options = EngineRunOptions(permission_mode="safe", web_search=False)
+    with capture_logs() as logs:
+        await _run(_runner(fake), options=options)
+    perms = [e for e in logs if e["event"] == "codex.app_server.permissions"]
+    assert perms[0]["requested"]["web_search"] == "disabled"
+    assert "web_search" not in perms[0]["effective"]
     assert not any(e["event"] == "codex.permission_mode.mismatch" for e in logs)
 
 

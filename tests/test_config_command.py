@@ -2242,9 +2242,11 @@ def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
     from untether.runners.codex import CodexRunner
 
     calls: list[str | None] = []
+    max_ages: list[float | None] = []
 
-    async def get_catalogue(runner, cwd):
+    async def get_catalogue(runner, cwd, *, max_age_s=None):
         calls.append(cwd)
+        max_ages.append(max_age_s)
         if fail:
             raise codex_reads.CodexReadError("timeout")
         return fixture_catalogue()
@@ -2261,6 +2263,7 @@ def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
     )
     ctx.runtime.resolve_run_cwd.return_value = None
     ctx.catalogue_calls = calls
+    ctx.catalogue_max_ages = max_ages
     return ctx
 
 
@@ -2275,6 +2278,8 @@ class TestCodexReasoningCatalogue:
         await ConfigCommand().handle(ctx)
         msg = _last_edit_msg(ctx)
         assert ctx.catalogue_calls  # read on page open
+        # #1412 item 3: the page re-reads a catalogue older than 60 s.
+        assert ctx.catalogue_max_ages == [60.0]
         assert "Model: <b>gpt-6.1-sol</b> (from your Codex config)" in msg.text
         assert "Current: <b>default (low)</b>" in msg.text
         assert "• <b>low</b> — Fast responses with lighter reasoning" in msg.text
@@ -2343,7 +2348,7 @@ class TestCodexReasoningCatalogue:
         )
         ctx = _codex_page_ctx(tmp_path, monkeypatch)
 
-        async def get_catalogue(runner, cwd):
+        async def get_catalogue(runner, cwd, **_kw):
             return catalogue
 
         monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)

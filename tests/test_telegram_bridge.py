@@ -3286,6 +3286,26 @@ def test_resolve_reasoning_override_level_this_model_lacks() -> None:
     assert "`ultra` isn't available for this model" in note.action.title
 
 
+def test_unsupported_level_log_lists_model_levels() -> None:
+    """#1412 item 5: for Codex the log lists the model's own levels (the
+    list the level was checked against), so the ignored level isn't in it."""
+    from tests.test_codex_reads import seed_catalogue
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    seed_catalogue()
+    with capture_logs() as logs:
+        _resolve_reasoning_override(
+            engine="codex",
+            run_options=EngineRunOptions(model="gpt-6-luna", reasoning="ultra"),
+        )
+    events = [
+        e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"
+    ]
+    assert len(events) == 1
+    assert events[0]["allowed"] == ["low", "medium", "high", "xhigh", "max"]
+
+
 def test_resolve_reasoning_override_allowed_level_untouched() -> None:
     from untether.runners.run_options import EngineRunOptions
     from untether.telegram.commands.executor import _resolve_reasoning_override
