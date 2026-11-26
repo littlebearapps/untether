@@ -633,6 +633,22 @@ class GateRun:
         """agy's result arrived: nothing more can be injected."""
         self.steer_open = False
 
+    def note_turn_start(self) -> None:
+        """#977: a warm agy started its next turn. Steers left from the last
+        turn never ran (logged, never carried into this one); the window
+        reopens unless the gate is closed or dead."""
+        for item in (*self.injected, *self.steer_queue):
+            logger.warning(
+                "antigravity.steer.not_run",
+                run=self.key,
+                session_id=self.conversation_id,
+                command_uuid=item.command_uuid,
+            )
+        self.injected.clear()
+        self.steer_queue.clear()
+        self.stop_not_idle = None
+        self.steer_open = not (self.closed or self.dead)
+
     def awaiting_answer(self, step: int) -> bool:
         """#1106: in Ask me agy runs no parent tool call before the gate's
         answer, and its ACTIVE line comes ~0.1 s before the hook does

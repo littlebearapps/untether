@@ -43,6 +43,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -65,6 +66,7 @@ from ..model import (
     CompletedEvent,
     EngineId,
     ResumeToken,
+    TurnEvent,
     UntetherEvent,
 )
 from ..runner import (
@@ -128,6 +130,11 @@ PRINT_TIMEOUT_TEXT = "Stopped: the trigger's time limit (max_elapsed_s) was reac
 INTERRUPTED_TEXT = (
     "Antigravity was interrupted — the conversation can be resumed by "
     "replying to its resume line."
+)
+# #977: a warm agy ended during a later turn without its result.
+WARM_TURN_EXITED_TEXT = (
+    "Antigravity stopped before it finished this message — send it again to "
+    "resume the conversation."
 )
 # The published help page with agy's install, sign-in routes and terms note
 # (GitHub-slugger anchor; pinned by ``tests/test_config_help_links.py``).
@@ -1216,6 +1223,11 @@ _PROBED_VERSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _DECISION: contextvars.ContextVar[ModeDecision | None] = contextvars.ContextVar(
     "untether_agy_decision", default=None
 )
+# #977: same hand-off — whether this run keeps agy warm; ``new_state`` puts
+# the run's state in it for ``run_impl`` (the config re-check closes it).
+_WARM: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "untether_agy_warm", default=None
+)
 
 
 def _unmanaged_paths(pre: _RunPrecheck, scan: antigravity_scan.ScanResult) -> list[str]:
@@ -1513,6 +1525,21 @@ class AntigravityStreamState:
     # wait each held command had before it counts as background.
     approval_steps: set[int] = field(default_factory=set)
     approval_held: dict[str, float | None] = field(default_factory=dict)
+    # #977: a warm process (``[antigravity] live_sessions``): stdin stays
+    # open and each later stdin line is a turn of its own (probe P1). Named
+    # ``warm_*`` so the bridge's Claude live-session probes don't see it.
+    # ``warm_turns`` counts finished turns (the run's own is 1);
+    # ``warm_turn_open`` is true from a written line to its ``result``;
+    # ``warm_uuids`` holds the command uuid of each written follow-up, in
+    # order (agy runs queued lines one by one, P3).
+    warm: bool = False
+    warm_turns: int = 0
+    warm_turn_open: bool = False
+    warm_turn_uuid: str | None = None
+    warm_uuids: deque[str | None] = field(default_factory=deque)
+    warm_proc: Any = None
+    warm_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    warm_closing: str | None = None
 
     def note_approval_wait(self, step: int, waiting: bool) -> None:
         """#1080: a step waiting on an approval card isn't background work —
@@ -1673,6 +1700,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # ``[antigravity] approval_timeout_s`` (#980): Ask me's approval wait,
     # capped by the gate plugin's own (set at ``untether agy-gate install``).
     approval_timeout_s: int | None = None
+    # ``[antigravity] live_sessions`` (#977): keep agy warm between messages
+    # (Workspace and Full access chat runs only). Default off.
+    live_sessions: bool = False
     # untether.toml; the small state files live beside chat_prefs.json.
     config_path: Path | None = None
     logger = logger
@@ -1751,13 +1781,20 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             from ..antigravity import gate_policy
 
             gate_policy.forget_grants(resume.value)
+        warm: dict[str, Any] | None = None
+        if self.live_sessions:
+            eligible, why = self._warm_eligibility(prompt, decision, precheck)
+            logger.info("antigravity.live_session.eligible", warm=eligible, reason=why)
+            warm = {"warm": eligible, "state": None}
         # Consumed by ``new_state`` inside the base run_impl (same task).
         _PRECHECK.set(precheck)
         _FROM_CONTINUE.set(from_continue)
         _GATE.set(gate)
         _DECISION.set(decision)
+        _WARM.set(warm)
         _log_tos_notice_once()
-        # #1045: the ⚠️ rows shown on the progress message, for the final.
+        # #1045: the ⚠️ rows shown on the progress message, for the final
+        # (a warm process: for the turn's own end, #977).
         warnings: list[str] = []
         try:
             # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True).
@@ -1765,11 +1802,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 JsonlSubprocessRunner.run_impl(self, prompt, resume)
             ) as events:
                 async for evt in events:
-                    if (
-                        isinstance(evt, CompletedEvent)
-                        and precheck is not None
-                        and precheck.scan is not None
-                    ):
+                    turn_end = isinstance(evt, CompletedEvent) or (
+                        isinstance(evt, TurnEvent) and evt.phase == "completed"
+                    )
+                    if isinstance(evt, TurnEvent) and evt.phase == "started":
+                        warnings = []
+                    if turn_end and precheck is not None and precheck.scan is not None:
                         # Off the event loop: the re-scan is bounded but blocking.
                         rows: list[UntetherEvent] | None = None
                         with anyio.move_on_after(antigravity_scan.SCAN_TIMEOUT_S):
@@ -1784,17 +1822,55 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         for row in rows:
                             _note_warning(warnings, row)
                             yield row
-                    if isinstance(evt, CompletedEvent):
+                        state = warm["state"] if warm is not None else None
+                        if rows and state is not None and state.warm:
+                            # R3: agy loaded its config at spawn; the next
+                            # message respawns and runs every check again.
+                            await self.close_warm(state, "config_changed")
+                    if turn_end:
                         evt = _with_warning_block(evt, warnings)
-                    else:
+                    elif not isinstance(evt, TurnEvent):
                         _note_warning(warnings, evt)
                     yield evt
         finally:
             _GATE.set(None)
             _DECISION.set(None)
+            _WARM.set(None)
             if gate is not None:
                 with anyio.CancelScope(shield=True):
                     await gate.aclose()
+
+    def _warm_eligibility(
+        self, prompt: str, decision: ModeDecision, pre: _RunPrecheck | None
+    ) -> tuple[bool, str]:
+        """#977 §5.1: whether this run keeps agy warm, and the first check
+        that failed. Workspace and Full access chat runs only (D4): Ask me's
+        safety rests on per-run liveness, the tripwire and the approval
+        timers; Plan first respawns under another ``--mode``; nothing is
+        kept warm for an unattended run; agy's own ``/compact`` needs a
+        process without ``--disable-slash-commands``."""
+        from .. import live_sessions
+
+        if not self.live_sessions:
+            return False, "switch_off"
+        if live_sessions.live_backend(ENGINE) is None:
+            # Nothing would route the next message to the warm process: it
+            # would spawn a second agy on the same conversation (a silent
+            # fork). 977-3 registers the backend.
+            return False, "no_backend"
+        options = get_run_options()
+        if (
+            options is not None and options.unattended_trigger is not None
+        ) or get_run_trigger_source() is not None:
+            return False, "unattended"
+        if decision.mode not in {"workspace", "full"}:
+            return False, f"mode_{decision.mode}"
+        if native_compact_prompt(prompt) is not None:
+            return False, "compact"
+        if pre is not None and pre.trusted is not None:
+            # #1032: trust is per run and the post-run re-scan revokes it.
+            return False, "trusted_config"
+        return True, "ok"
 
     def _no_project_refusal(self, resume: ResumeToken | None) -> UntetherEvent | None:
         """REVIEW B1 / D16: agy edits files in its cwd, so never run it in the
@@ -2691,6 +2767,93 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         line = {"event": "user", "message": {"content": prompt}}
         return (json.dumps(line, ensure_ascii=False) + "\n").encode()
 
+    async def _send_payload(
+        self,
+        proc: Any,
+        payload: bytes | None,
+        *,
+        logger: Any,
+        resume: ResumeToken | None,
+        state: Any = None,
+    ) -> None:
+        if not (isinstance(state, AntigravityStreamState) and state.warm):
+            await JsonlSubprocessRunner._send_payload(
+                self, proc, payload, logger=logger, resume=resume, state=state
+            )
+            return
+        # #977: write the first line and keep stdin open (probe P1); later
+        # lines come from ``send_followup``, EOF from ``close_warm``.
+        assert proc.stdin is not None and payload is not None
+        state.warm_proc = proc
+        state.warm_turn_open = True
+        async with state.warm_lock:
+            await proc.stdin.send(payload)
+        logger.info(
+            "subprocess.stdin.send",
+            pid=proc.pid,
+            resume=resume.value if resume else None,
+            bytes=len(payload),
+            keep_open=True,
+        )
+
+    async def send_followup(
+        self,
+        state: AntigravityStreamState,
+        prompt: str,
+        *,
+        command_uuid: str | None = None,
+    ) -> str:
+        """#977: write one more ``user`` line into a warm agy. agy runs it as
+        its own turn, after the current one if a turn is running (P3: queued,
+        never merged), so nothing waits here. Outcomes: ``written``,
+        ``closed`` (not warm, closing or gone; nothing written), ``refused``
+        (agy's own ``/compact``: the warm process runs with
+        ``--disable-slash-commands``, §5.4)."""
+        proc = state.warm_proc
+        if not state.warm or state.warm_closing or proc is None or proc.stdin is None:
+            return "closed"
+        if native_compact_prompt(prompt) is not None:
+            return "refused"
+        # Built like the first line, so the prompt never reaches argv.
+        payload = self.stdin_payload(prompt, None, state=state)
+        assert payload is not None
+        async with state.warm_lock:
+            if state.warm_closing:
+                return "closed"
+            # Before the write: agy's ``user_input`` step may come back first.
+            state.warm_uuids.append(command_uuid)
+            try:
+                await proc.stdin.send(payload)
+            except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
+                state.warm_uuids.pop()
+                state.warm_closing = "stdin_closed"
+                return "closed"
+        logger.info(
+            "antigravity.live_session.written",
+            session_id=state.session_id,
+            command_uuid=command_uuid,
+            bytes=len(payload),
+            queued=state.warm_turn_open,
+        )
+        return "written"
+
+    async def close_warm(self, state: AntigravityStreamState, reason: str) -> None:
+        """#977: close a warm agy's stdin; agy finishes any turn it is in and
+        exits rc 0 (P6), which ends the run. Idempotent."""
+        proc = state.warm_proc
+        async with state.warm_lock:
+            if state.warm_closing or proc is None or proc.stdin is None:
+                return
+            state.warm_closing = reason
+            logger.info(
+                "antigravity.live_session.closing",
+                session_id=state.session_id,
+                reason=reason,
+                turn_open=state.warm_turn_open,
+            )
+            with contextlib.suppress(Exception):
+                await proc.stdin.aclose()
+
     def env(self, *, state: Any) -> dict[str, str] | None:
         from ..utils.env_policy import (
             filtered_env,
@@ -2728,16 +2891,28 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> AsyncIterator[UntetherEvent]:
         """#980: with a gate, merge the events its socket raises (question
         cards and their answers) into agy's own stream, and serve the socket
-        and the tripwire for as long as agy's stdout is read."""
-        base = JsonlSubprocessRunner._iter_jsonl_events(
-            self,
-            stdout=stdout,
-            stream=stream,
-            state=state,
-            resume=resume,
-            logger=logger,
-            pid=pid,
-        )
+        and the tripwire for as long as agy's stdout is read (a warm
+        process's whole life, #977)."""
+        if getattr(state, "warm", False):
+            stream.followup_turns = True
+            base = self._iter_warm_events(
+                stdout=stdout,
+                stream=stream,
+                state=state,
+                resume=resume,
+                logger=logger,
+                pid=pid,
+            )
+        else:
+            base = JsonlSubprocessRunner._iter_jsonl_events(
+                self,
+                stdout=stdout,
+                stream=stream,
+                state=state,
+                resume=resume,
+                logger=logger,
+                pid=pid,
+            )
         gate = getattr(state, "gate", None)
         if gate is None:
             async with contextlib.aclosing(base) as events:
@@ -2765,6 +2940,41 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 async for evt in receive:
                     yield evt
             tg.cancel_scope.cancel()
+
+    async def _iter_warm_events(
+        self,
+        *,
+        stdout: Any,
+        stream: Any,
+        state: AntigravityStreamState,
+        resume: ResumeToken | None,
+        logger: Any,
+        pid: int,
+    ) -> AsyncIterator[UntetherEvent]:
+        """#977: read past the first result until agy exits. The #505 guard
+        (a grandchild holding stdout) is the base watchdog's post-exit drain,
+        armed by ``stream.followup_turns``."""
+        async for raw_line in self.iter_json_lines(stdout):
+            for evt in self._handle_jsonl_line(
+                raw_line=raw_line,
+                stream=stream,
+                state=state,
+                resume=resume,
+                logger=logger,
+                pid=pid,
+            ):
+                yield evt
+        if state.warm_turn_open and state.warm_turns:
+            # A later turn agy never finished (exit, a stop on stderr).
+            yield state.factory.turn_completed(
+                turn=state.warm_turns + 1,
+                ok=False,
+                answer=self._answer(state, None),
+                reason="followup",
+                error=WARM_TURN_EXITED_TEXT,
+                command_uuid=state.warm_turn_uuid,
+            )
+            state.warm_turn_open = False
 
     def new_state(
         self, prompt: str, resume: ResumeToken | None
@@ -2805,10 +3015,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # ``run_impl``: decide without gate facts (Ask me then never
             # gets the bypass flag).
             decision = decide_antigravity_mode(mode)
-        return AntigravityStreamState(
+        warm = _WARM.get()
+        state = AntigravityStreamState(
             factory=factory,
             gate=gate,
             decision=decision,
+            warm=bool(warm and warm["warm"]),
             expected_resume=expected or None,
             from_continue=from_continue,
             resumed=resume is not None,
@@ -2834,6 +3046,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             superseded_cards=superseded,
             compact=compact,
         )
+        if warm is not None:
+            warm["state"] = state
+        return state
 
     @staticmethod
     def _plan_bookkeeping(
@@ -3132,13 +3347,16 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     out.extend(self._adopt_session(state, su.conversation_id))
                     if state.conversation_missing:
                         return out
+                out.extend(self._warm_turn_start(su, state))
                 out.extend(self._translate_step(su, state))
                 out.extend(self._background_title_updates(state))
                 return out
             case agy_schema.AntigravityResult(result=res):
                 if res is None:
                     return []
-                return self._translate_result(res, state, resume)
+                return self._warm_turn_end(
+                    state, self._translate_result(res, state, resume)
+                )
             case _:
                 # command_result (slash probes, 04/05) and the decode-only
                 # ``error`` event carry nothing for a run.
@@ -3146,6 +3364,85 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     "antigravity.event.ignored", event_type=type(data).__name__
                 )
                 return []
+
+    # -- warm process (#977) ----------------------------------------------------
+
+    @staticmethod
+    def _warm_turn_start(
+        su: agy_schema.StepUpdatePayload, state: AntigravityStreamState
+    ) -> list[UntetherEvent]:
+        """A later turn of a warm agy opens with its ``user_input`` step after
+        the previous ``result`` (P2; agy prints no other ready signal and
+        keeps counting ``step_index``, P1). A ``user_input`` inside a turn is
+        a steer the gate injected, not a turn."""
+        if (
+            not state.warm
+            or state.warm_turn_open
+            or state.warm_turns == 0
+            or su.step_type != "user_input"
+            or su.state not in {"DONE", "ERROR"}
+        ):
+            return []
+        state.warm_turn_open = True
+        state.warm_turn_uuid = state.warm_uuids.popleft() if state.warm_uuids else None
+        # Per-turn state (§5.2): answer text, the run's own token sum, rows
+        # and verdicts (settled at the result), background bookkeeping.
+        state.text_by_step.clear()
+        state.run_tokens.clear()
+        state.bg_retitled.clear()
+        for key in [k for k, t in state.tasks.items() if t.status != "running"]:
+            del state.tasks[key]  # ended at the last result (``_end_tasks``)
+        state.approval_steps.clear()
+        state.approval_held.clear()
+        state.result_seen = False
+        state.checkpoint_seen = False
+        state.t_spawn = time.monotonic()  # the footer's duration is the turn's
+        state.t_init = None
+        if state.gate is not None:
+            state.gate.note_turn_start()
+        turn = state.warm_turns + 1
+        logger.info(
+            "antigravity.live_session.turn_started",
+            session_id=state.session_id,
+            turn=turn,
+            command_uuid=state.warm_turn_uuid,
+        )
+        return [
+            state.factory.turn_started(
+                turn=turn, reason="followup", command_uuid=state.warm_turn_uuid
+            )
+        ]
+
+    @staticmethod
+    def _warm_turn_end(
+        state: AntigravityStreamState, out: list[UntetherEvent]
+    ) -> list[UntetherEvent]:
+        """The first result stays the run's one ``CompletedEvent``; a later
+        turn's becomes its ``TurnEvent(completed)`` (3-event contract)."""
+        if not state.warm or not any(isinstance(e, CompletedEvent) for e in out):
+            return out
+        state.warm_turn_open = False
+        state.warm_turns += 1
+        if state.warm_turns == 1:
+            # Run-level, once: the plan header and the retired plan cards.
+            state.approved_plan = None
+            state.superseded_cards = []
+            return out
+        converted: list[UntetherEvent] = []
+        for evt in out:
+            if isinstance(evt, CompletedEvent):
+                evt = state.factory.turn_completed(
+                    turn=state.warm_turns,
+                    ok=evt.ok,
+                    answer=evt.answer,
+                    reason="followup",
+                    error=evt.error,
+                    usage=evt.usage,
+                    command_uuid=state.warm_turn_uuid,
+                )
+            converted.append(evt)
+        state.warm_turn_uuid = None
+        return converted
 
     def _adopt_session(
         self, state: AntigravityStreamState, cid: str
@@ -4882,7 +5179,7 @@ def final_warning_block(titles: list[str]) -> str | None:
     return HARD_BREAK.join(_escape_keeping_commands(line) for line in lines)
 
 
-def _with_warning_block(evt: CompletedEvent, titles: list[str]) -> CompletedEvent:
+def _with_warning_block[E: (CompletedEvent, TurnEvent)](evt: E, titles: list[str]) -> E:
     """The progress message carrying the rows is replaced by the final, so
     the final repeats them after the answer, like the denial paragraph and
     the OAuth notice (#1045). A person's run records new config as seen, so
@@ -4890,7 +5187,7 @@ def _with_warning_block(evt: CompletedEvent, titles: list[str]) -> CompletedEven
     block = final_warning_block(titles)
     if block is None:
         return evt
-    return replace(evt, answer=_append_paragraph(evt.answer, block))
+    return replace(evt, answer=_append_paragraph(evt.answer or "", block))
 
 
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
@@ -4898,9 +5195,9 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     Keys: ``model`` (str), ``cmd`` (str, ``~`` expanded),
     ``permission_mode`` (``workspace`` / ``ask`` / ``plan`` / ``full``,
-    validated here; ``full`` warns once) and ``approval_timeout_s`` (#980:
+    validated here; ``full`` warns once), ``approval_timeout_s`` (#980:
     Ask me's approval wait, 60-3000 s, capped by the gate plugin's own
-    wait). Unknown keys — including PR #766's
+    wait) and ``live_sessions`` (#977: bool, default off). Unknown keys — including PR #766's
     ``dangerously_skip_permissions`` / ``antigravity_cmd`` — are ignored.
     """
     model = config.get("model")
@@ -4975,12 +5272,24 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
                 f"expected whole seconds from {gate_plugin.MIN_WAIT_S} to "
                 f"{gate_plugin.MAX_WAIT_S}."
             )
+    live = config.get("live_sessions", False)
+    if not isinstance(live, bool):
+        logger.warning(
+            "antigravity.config.invalid",
+            error="live_sessions must be true or false",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `antigravity.live_sessions` in {config_path}; expected "
+            "true or false."
+        )
     return AntigravityRunner(
         antigravity_cmd=resolve_antigravity_cmd(config),
         model=model or None,
         default_permission_mode=mode,
         config_path=config_path,
         approval_timeout_s=timeout,
+        live_sessions=live,
     )
 
 

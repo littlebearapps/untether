@@ -47,6 +47,9 @@ Environment (the ``UNTETHER_`` prefix survives the runner's env filter):
 - ``UNTETHER_FAKE_AGY_RECORD``     write ``{"argv","stdin","env_keys","cwd"}`` here
 - ``UNTETHER_FAKE_AGY_TIME_SCALE`` multiply ``sleep:`` lines (default 0)
 - ``UNTETHER_FAKE_AGY_HOLD_S``     sleep after the last line before exiting
+- ``UNTETHER_FAKE_AGY_WARM``       #977 warm mode: read stdin line by line and
+  play one script segment (segments split by ``turn:`` lines) per line, as agy
+  answers each ``{"event":"user"}`` line with one turn; exit 0 at stdin EOF
 - ``UNTETHER_FAKE_AGY_IGNORE_TERM`` ignore SIGTERM (a Go binary blocked on an
   OAuth paste may; phase 03's kill escalation must SIGKILL it)
 
@@ -246,15 +249,47 @@ def main(argv: list[str]) -> int:
     else:
         signal.signal(signal.SIGTERM, _interrupted)
     signal.signal(signal.SIGINT, _interrupted)
-    stdin = sys.stdin.read()
-    _record(argv, stdin)
     script_path = os.environ.get("UNTETHER_FAKE_AGY_SCRIPT")
     if not script_path:
         name = os.environ.get("UNTETHER_FAKE_AGY_SCENARIO", "ok")
         script_path = str(_FIXTURES / f"{name}.script")
+    lines = Path(script_path).read_text(encoding="utf-8").splitlines()
+    if os.environ.get("UNTETHER_FAKE_AGY_WARM"):
+        return _warm(argv, lines)
+    _record(argv, sys.stdin.read())
+    rc = _play(lines)
+    hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)
+    if hold > 0:
+        time.sleep(hold)
+    return rc
+
+
+def _warm(argv: list[str], lines: list[str]) -> int:
+    """#977 (probes P1, P6): one segment per stdin line, rc 0 at EOF."""
+    segments: list[list[str]] = [[]]
+    for raw in lines:
+        if raw == "turn:":
+            segments.append([])
+        else:
+            segments[-1].append(raw)
+    received = ""
+    for segment in segments:
+        line = sys.stdin.readline()
+        if not line:
+            return 0
+        received += line
+        _record(argv, received)
+        _play(segment)
+    while line := sys.stdin.readline():  # unscripted turns: recorded only
+        received += line
+        _record(argv, received)
+    return 0
+
+
+def _play(lines: list[str]) -> int:
     scale = float(os.environ.get("UNTETHER_FAKE_AGY_TIME_SCALE", "0") or 0)
     rc = 0
-    for raw in Path(script_path).read_text(encoding="utf-8").splitlines():
+    for raw in lines:
         kind, _, payload = raw.partition(":")
         if kind == "out":
             # ``__CWD__``: the project folder (Ask me fixtures, phase 14).
@@ -299,9 +334,6 @@ def main(argv: list[str]) -> int:
                 time.sleep(0.02)
         elif kind == "rc":
             rc = int(payload)
-    hold = float(os.environ.get("UNTETHER_FAKE_AGY_HOLD_S", "0") or 0)
-    if hold > 0:
-        time.sleep(hold)
     return rc
 
 
