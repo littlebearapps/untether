@@ -10,7 +10,10 @@ stays an ordinary prompt (D6), and the exec transport is unchanged.
 
 Shapes follow the 964-0 probe P-C (codex-cli 0.171.0): ``{}``, then
 ``turn/started`` → ``contextCompaction`` item → ``thread/tokenUsage/updated``
-→ ``turn/completed``; the resume's own usage update arrives first.
+→ ``turn/completed``. Untether resumes with ``excludeTurns: true``, and then
+Codex replays no usage before the compact turn (probe 2026-11-26), so there
+is no "before" figure; the compact turn's own ``last`` is the compaction
+request, not the context left. The final names no token counts.
 """
 
 from __future__ import annotations
@@ -77,9 +80,8 @@ def _compaction(method: str) -> dict:
     }
 
 
-# The P-C sequence: the resume's usage, then the compact turn.
+# The real order on Untether's resume (excludeTurns): the compact turn only.
 P_C = {
-    "after_thread": [_usage("turn-0", 23667)],
     "compact_notifications": [
         _compaction("item/started"),
         _compaction("item/completed"),
@@ -98,6 +100,8 @@ async def test_compact_sends_thread_compact_start_and_marks_manual_success(
     fake = Fake(tmp_path, **P_C)
     with capture_logs() as logs:
         events = await _run(_runner(fake), resume=RESUME, prompt=prompt)
+    [resume] = fake.requests("thread/resume")
+    assert resume["excludeTurns"] is True
     assert fake.requests("thread/compact/start") == [{"threadId": THREAD}]
     assert fake.requests("turn/start") == []
     assert [
@@ -113,32 +117,12 @@ async def test_compact_sends_thread_compact_start_and_marks_manual_success(
     assert done.ok and done.resume == RESUME
     usage = done.usage or {}
     compaction = usage["compaction"]
-    assert compaction == {
-        "count": 1,
-        "trigger": "manual",
-        "manual_success": True,
-        "pre_tokens": 23667,
-        "post_tokens": 16282,
-    }
+    # No token figures: no "before" on an excludeTurns resume (dev-bot CX-26).
+    assert compaction == {"count": 1, "trigger": "manual", "manual_success": True}
     assert _compaction_manual_success(usage)
     assert _compaction_empty_body(compaction) == (
-        "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
-        " · 24k → 16k tokens (manual)"
+        "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted (manual)"
     )
-
-
-@pytest.mark.anyio
-async def test_compact_without_usage_omits_token_counts(
-    tmp_path: Path, project: Path, gate_calls: list[str]
-) -> None:
-    fake = Fake(tmp_path, compact_notifications=P_C["compact_notifications"][:2])
-    done = _completed(await _run(_runner(fake), resume=RESUME, prompt="/compact"))
-    assert done.ok
-    assert (done.usage or {})["compaction"] == {
-        "count": 1,
-        "trigger": "manual",
-        "manual_success": True,
-    }
 
 
 @pytest.mark.anyio

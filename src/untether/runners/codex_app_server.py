@@ -648,10 +648,8 @@ class AppServerRunState(CodexRunState):
     context: tuple[int, int, int] | None = None
     ctx_emitted: tuple[int, int] | None = None
     compactions: int = 0
-    # #964: a bare /compact run (thread/compact/start in place of turn/start)
-    # and its context tokens before/after (``pre_tokens`` / ``post_tokens``).
+    # #964: a bare /compact run (thread/compact/start in place of turn/start).
     manual_compact: bool = False
-    compact_tokens: dict[str, int] = field(default_factory=dict)
     # #963: open approval cards (set once the thread is known; attended runs
     # only), fileChange items by id for their diff (cached before the
     # sub-agent filter), the chat's Diff preview, and an unattended run's
@@ -1731,11 +1729,6 @@ class CodexAppServerRunner(CodexRunner):
         and kept for the footer. The telemetry action goes out only when
         (pct, window) changes."""
         state.tokens = usage.total
-        if state.manual_compact:
-            # The resume's update (before the compact turn) and the compact
-            # turn's own (964-0 P-C, 0.171.0).
-            key = "post_tokens" if state.turn_id else "pre_tokens"
-            state.compact_tokens[key] = usage.last.total_tokens
         window = usage.model_context_window
         if not window or window <= 0:
             return []
@@ -1803,12 +1796,13 @@ class CodexAppServerRunner(CodexRunner):
             usage = None
             if state.manual_compact:
                 # #964: the bridge answers "🗜️ Context compacted" for this.
+                # No token figures: an excludeTurns resume replays no usage,
+                # and the compact turn's ``last`` is the compaction request.
                 usage = {
                     "compaction": {
                         "count": state.compactions,
                         "trigger": "manual",
                         "manual_success": True,
-                        **state.compact_tokens,
                     }
                 }
             return [

@@ -349,8 +349,6 @@ for line in sys.stdin:
             "cwd": p.get("cwd"), "approvalPolicy": p.get("approvalPolicy"),
             "approvalsReviewer": p.get("approvalsReviewer"), "sandbox": sandbox}})
         out({"method": "thread/started", "params": {"thread": thread(tid)}})
-        for n in SC.get("after_thread", []):
-            out(n)
         if SC.get("stop_reading_after_thread"):
             time.sleep(30)
     elif method == "thread/compact/start":  # #964 (P-C shape, 0.171.0)
